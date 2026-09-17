@@ -67,7 +67,8 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
-import { formatContextUsageDetail } from '../utils/formatTokenCount';
+import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import { ContextUsagePopover } from './ContextUsagePopover';
 import { VoiceButton } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
@@ -197,6 +198,10 @@ interface ChatEditorProps {
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -243,6 +248,8 @@ interface ChatEditorProps {
   contextUsageAlwaysVisible?: boolean;
   /** Show the context-usage breakdown, exactly like typing /context. */
   onShowContextUsage?: () => void;
+  onOpenContextUsage?: () => void;
+  contextUsageControls?: ContextUsageControls;
   availableModels?: Array<{ id: string; label?: string }>;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
@@ -1172,6 +1179,8 @@ function ModelReasoningControls({
 
 function SlashCommandPanel({
   menu,
+  loading,
+  loadError,
   anchorRef,
   panelRef,
   detailRef,
@@ -1181,6 +1190,8 @@ function SlashCommandPanel({
   onAccept,
 }: {
   menu: SlashMenuState;
+  loading?: boolean;
+  loadError?: boolean;
   anchorRef: RefObject<HTMLElement | null>;
   panelRef: RefObject<HTMLDivElement | null>;
   detailRef: RefObject<HTMLDivElement | null>;
@@ -1189,6 +1200,7 @@ function SlashCommandPanel({
   onSelect: (index: number) => boolean;
   onAccept: (index?: number) => boolean;
 }) {
+  const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const hoverAnchorRef = useRef<HTMLButtonElement>(null);
   const [collisionBoundary, setCollisionBoundary] =
@@ -1268,7 +1280,7 @@ function SlashCommandPanel({
           collisionPadding={compact ? 8 : 12}
           collisionBoundary={collisionBoundary ?? undefined}
           className="duration-0 data-open:animate-none data-closed:animate-none"
-          role="listbox"
+          role={menu.items.length > 0 ? 'listbox' : undefined}
           data-web-shell-slash-menu
           data-web-shell-compact-overlay={compact ? '' : undefined}
           onOpenAutoFocus={(event) => event.preventDefault()}
@@ -1296,6 +1308,14 @@ function SlashCommandPanel({
           }}
         >
           <div className={styles.slashPanel}>
+            {menu.items.length === 0 && (loading || loadError) && (
+              <div
+                role="status"
+                className="px-3 py-2 text-xs text-muted-foreground"
+              >
+                {t(loading ? 'common.loading' : 'composerAdd.loadError')}
+              </div>
+            )}
             <div className={styles.slashPanelBody}>
               <div
                 className={styles.slashList}
@@ -1548,6 +1568,10 @@ export const ChatEditor = memo(
       placeholderText = 'Type a message...',
       commands,
       skills = [],
+      onSkillsOpenChange,
+      skillsLoading = false,
+      skillsLoadError = false,
+      skillsLoaded = false,
       slashCommandCategoryOrder,
       autoSubmitSlashCommands = false,
       queuedMessages = [],
@@ -1576,6 +1600,8 @@ export const ChatEditor = memo(
       contextWindow = 0,
       contextUsageAlwaysVisible = false,
       onShowContextUsage,
+      onOpenContextUsage,
+      contextUsageControls,
       availableModels = [],
       onSelectMode,
       onSelectModel,
@@ -1757,6 +1783,9 @@ export const ChatEditor = memo(
       placeholderText,
       commands,
       skills,
+      allowEmptySlashMenu:
+        Boolean(onSkillsOpenChange) &&
+        (!skillsLoaded || skillsLoading || skillsLoadError),
       slashCommandCategoryOrder,
       autoSubmitSlashCommands,
       queuedMessages,
@@ -2130,6 +2159,12 @@ export const ChatEditor = memo(
     const atMenu = core.atMenu;
     const closeAtMenu = core.closeAtMenu;
     const hasSlashMenu = Boolean(slashMenu);
+    const [skillSubmenuOpen, setSkillSubmenuOpen] = useState(false);
+    const skillsOpen = hasSlashMenu || skillSubmenuOpen;
+    useEffect(() => {
+      onSkillsOpenChange?.(skillsOpen);
+      return () => onSkillsOpenChange?.(false);
+    }, [onSkillsOpenChange, skillsOpen]);
     const hasAtMenu = Boolean(atMenu);
     const editorViewRef = core.viewRef;
 
@@ -2880,6 +2915,7 @@ export const ChatEditor = memo(
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
+          data-at-panel-open={hasAtMenu || undefined}
           data-upload-drag-active={uploadDragActive || undefined}
           data-image-drag-active={
             (core.imageDragActive && !uploadDragActive) || undefined
@@ -3152,6 +3188,8 @@ export const ChatEditor = memo(
             {core.slashMenu && (
               <SlashCommandPanel
                 menu={core.slashMenu}
+                loading={skillsLoading}
+                loadError={skillsLoadError}
                 anchorRef={containerRef}
                 panelRef={slashPanelRef}
                 detailRef={slashDetailRef}
@@ -3255,7 +3293,7 @@ export const ChatEditor = memo(
                         Boolean(
                           core.workspaceActionsRef.current?.loadMcpStatus,
                         ),
-                        Boolean(skills?.length),
+                        Boolean(onSkillsOpenChange) || Boolean(skills?.length),
                       ])}
                       addFileAvailable={attachmentsEnabled}
                       uploadAvailable={uploadEnabled}
@@ -3265,6 +3303,12 @@ export const ChatEditor = memo(
                       onPrependSkill={handleAddMenuPrependSkill}
                       getWorkspaceActions={getAddMenuWorkspaceActions}
                       skills={skills ?? []}
+                      onSkillsOpenChange={
+                        onSkillsOpenChange ? setSkillSubmenuOpen : undefined
+                      }
+                      skillsLoading={skillsLoading}
+                      skillsLoadError={skillsLoadError}
+                      skillsLoaded={skillsLoaded}
                     />
                   )}
                   {workspaceSelectVisible &&
@@ -3592,50 +3636,56 @@ export const ChatEditor = memo(
                 {showToolbarAction('contextUsage') &&
                   (contextUsageAlwaysVisible ||
                     (contextWindow > 0 && tokenCount > 0)) && (
-                    <TooltipProvider delayDuration={300}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
-                            data-hide-during-mobile-voice
-                            data-web-shell-context-usage
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onShowContextUsage?.();
-                            }}
-                            disabled={!onShowContextUsage}
-                            aria-label={
-                              contextWindow > 0 && tokenCount > 0
-                                ? t('status.contextUsed', {
-                                    pct: (
-                                      (tokenCount / contextWindow) *
-                                      100
-                                    ).toFixed(1),
-                                  })
-                                : t('contextUsage.title')
+                    <ContextUsagePopover
+                      key={sessionId}
+                      tokenCount={tokenCount}
+                      contextWindow={contextWindow}
+                      controls={contextUsageControls}
+                      onOpenDetails={onOpenContextUsage}
+                      showSnapshotHint={Boolean(onShowContextUsage)}
+                    >
+                      <button
+                        className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
+                        data-hide-during-mobile-voice
+                        data-web-shell-context-usage
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onShowContextUsage?.();
+                        }}
+                        disabled={!onShowContextUsage}
+                        aria-label={
+                          contextWindow > 0 && tokenCount > 0
+                            ? t('status.contextUsed', {
+                                pct: (
+                                  (tokenCount / contextWindow) *
+                                  100
+                                ).toFixed(1),
+                              })
+                            : t('contextUsage.title')
+                        }
+                      >
+                        <span className={styles.toolBtnIcon}>
+                          <ContextUsageRing
+                            pct={
+                              contextWindow > 0
+                                ? (tokenCount / contextWindow) * 100
+                                : 0
                             }
+                          />
+                        </span>
+                        {contextWindow > 0 && tokenCount > 0 && (
+                          <span
+                            className={styles.contextUsagePercentage}
+                            data-level={getContextUsageLevel(
+                              (tokenCount / contextWindow) * 100,
+                            )}
+                            aria-hidden="true"
                           >
-                            <span className={styles.toolBtnIcon}>
-                              <ContextUsageRing
-                                pct={
-                                  contextWindow > 0
-                                    ? (tokenCount / contextWindow) * 100
-                                    : 0
-                                }
-                              />
-                            </span>
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent side="top">
-                          {contextWindow > 0 && tokenCount > 0
-                            ? formatContextUsageDetail(
-                                tokenCount,
-                                contextWindow,
-                              )
-                            : t('contextUsage.title')}
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                            {((tokenCount / contextWindow) * 100).toFixed(1)}%
+                          </span>
+                        )}
+                      </button>
+                    </ContextUsagePopover>
                   )}
                 {showCommandAction && (
                   <button

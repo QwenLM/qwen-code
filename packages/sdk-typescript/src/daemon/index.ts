@@ -246,6 +246,7 @@ export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
+  GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_PAUSE_REASON_COMMAND,
   isDaemonContentHash,
   requireWorkspaceCwd,
@@ -489,6 +490,8 @@ export type {
   DaemonWorkspacePermissionsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonModelProviderRuntimeSyncResult,
@@ -604,15 +607,19 @@ export type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonLspServerStatus,
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonWorkflowApprovalStatusEntry,
+  DaemonWorkflowSizeWarning,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,
+  DaemonWorkflowCallTrace,
   DaemonWorkflowEvent,
   DaemonWorkflowPhaseVisit,
   DaemonSessionProcessTaskLifecycleStatus,
@@ -841,3 +848,6 @@ export type {
   DaemonSessionArtifactStorage,
   SessionMetadataResult,
 } from './types.js';
+
+export { parseDaemonBackgroundTurn } from './types.js';
+export type { DaemonBackgroundTurn } from './types.js';

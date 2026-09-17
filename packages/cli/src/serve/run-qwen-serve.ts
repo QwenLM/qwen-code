@@ -47,12 +47,14 @@ import {
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { MAX_CHANNEL_CONTROL_WORKSPACES } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { assertChannelControlWorkspaceCapacity } from './channel-control-capacity.js';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 import type {
   NdJsonMessageObservation,
   NdJsonQueueSaturationInfo,
 } from '@qwen-code/acp-bridge/ndJsonStream';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
+import { getEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
@@ -83,6 +85,8 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+// Named subpath: the core barrel pulls shell/glob/chokidar into the serve
+// pre-listen static closure.
 import {
   PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
   PRIVATE_CONVERSATIONS_RUNTIME_ENV,
@@ -273,6 +277,18 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
 const DEFAULT_LIVE_DISCOVERY_RETRY_MS = 5_000;
+// Must match workspace-runtime-coordinator ENSURE_KEEP_ALIVE_MS. Defined
+// here so the serve pre-listen graph does not statically import that module.
+const ENSURE_KEEP_ALIVE_MS = 10 * 60_000;
+
+function deepestErrorMessage(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  let deepest: Error = err;
+  while (deepest.cause instanceof Error) {
+    deepest = deepest.cause;
+  }
+  return deepest.message;
+}
 
 function channelDeliveryPublicError(
   code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
@@ -456,6 +472,8 @@ type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type ServeWorkspaceSkillStatus =
+  import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
   loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
   parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
@@ -2040,6 +2058,7 @@ function buildProviderSetupInputs(
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
+    ...(req.wireApi ? { wireApi: req.wireApi } : {}),
     baseUrl,
     apiKey: req.apiKey.trim(),
     modelIds: normalizeInstallModelIds(
@@ -3803,14 +3822,23 @@ async function runQwenServeImpl(
       `At most ${opts.maxRegisteredWorkspaces} --workspace values may be registered.`,
     );
   }
-  // Resolve the daemon's memory figures once. Nothing downstream consumes
-  // them to size a child: dividing a pool by a workspace count is unsound
-  // while registration does not spawn a child, and bounding the aggregate
-  // needs admission at spawn time keyed on live children. The one consumer
-  // today is the adaptive live-journal growth pool below.
+  // Resolve one budget for journal growth and optional child-count admission.
+  // Child heap arguments continue to use the legacy policy.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
+  if (opts.childHeapMode === 'admit' && deps.bridge) {
+    throw new TypeError(
+      'ACP admission cannot be combined with an injected bridge.',
+    );
+  }
+  const admissionPolicy =
+    opts.childHeapMode === 'admit'
+      ? createChildHeapPolicy({
+          budget: opts.daemonMemoryBudget,
+          mode: 'admit',
+        })
+      : undefined;
   if (
     opts.daemonMemoryBudget.budgetSource === 'flag' ||
     opts.daemonMemoryBudget.insufficientMemory
@@ -5207,6 +5235,7 @@ async function runQwenServeImpl(
     const workspaceTrustOperationGate = new PathMutexRegistry();
     const runWorkspaceTrustOperation = <T>(operation: () => Promise<T>) =>
       workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
+    const idleReclaimerRef: { current?: IdleAcpReclaimer } = {};
     const processRegistry = new runtime.ProcessRegistry();
     managedProcessRegistry = processRegistry;
     // One policy for the whole daemon, beside the one registry it reads. Both
@@ -5218,10 +5247,11 @@ async function runQwenServeImpl(
     // otherwise — a status field asserting enforcement that is not happening.
     const childHeapPolicy: ChildHeapPolicy | undefined =
       opts.daemonMemoryBudget && !deps.bridge
-        ? createChildHeapPolicy({
+        ? (admissionPolicy ??
+          createChildHeapPolicy({
             budget: opts.daemonMemoryBudget,
             mode: opts.childHeapMode ?? 'observe',
-          })
+          }))
         : undefined;
     managedChildHeapPolicy = childHeapPolicy;
     const fsFactory = runtime.resolveBridgeFsFactory({
@@ -5248,6 +5278,9 @@ async function runQwenServeImpl(
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
       childHeapPolicy,
+      reclaimIdleChild: async (signal) => {
+        await idleReclaimerRef.current?.(daemonWorkspaceHash, signal);
+      },
       pipeLimits: runtime.daemonAcpNdJsonLimits,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
@@ -5345,6 +5378,46 @@ async function runQwenServeImpl(
         workspaceTrusted: trusted,
       });
     };
+    const resolveSkillToggleIdentities = async (
+      workspace: string,
+      skillNames: readonly string[],
+    ) => {
+      let skills: ServeWorkspaceSkillStatus[] | undefined;
+      try {
+        const workspaceRuntime =
+          workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
+        const status =
+          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus({
+            route: 'skill settings persistence',
+            workspaceCwd: workspace,
+          });
+        if (status?.initialized) skills = status.skills;
+      } catch {
+        // Preserve the legacy name heuristic when the catalog is unavailable.
+      }
+      const skillsByName = new Map(
+        skills?.map((skill) => [skill.name.trim().toLowerCase(), skill]),
+      );
+      return skillNames.map((skillName) => {
+        const skill = skillsByName.get(skillName.trim().toLowerCase());
+        if (!skill) {
+          const prefixEnd = skillName.indexOf(':');
+          return {
+            name: skillName,
+            ...(prefixEnd > 0
+              ? { authoredName: skillName.slice(prefixEnd + 1) }
+              : {}),
+          };
+        }
+        if (skill.level !== 'extension' || !skill.extensionName) {
+          return { name: skillName };
+        }
+        return {
+          name: skillName,
+          authoredName: skillName.slice(skill.extensionName.length + 1),
+        };
+      });
+    };
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -5378,8 +5451,11 @@ async function runQwenServeImpl(
     ) =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
-          await import('../config/skill-settings.js');
+        const {
+          skillSettingStrings,
+          skillToggleBlockForName,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
         const workspaceDisabled = skillSettingStrings(
           fresh,
@@ -5391,6 +5467,19 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'enabled',
         );
+        // A grant a standing entry still forbids is not a write: the picker
+        // locks such rows, and a route that persists anyway reports an
+        // enable the merged config still denies.
+        if (enabled) {
+          const [skillIdentity] = await resolveSkillToggleIdentities(
+            workspace,
+            [skillName],
+          );
+          const block = skillToggleBlockForName(fresh, skillIdentity);
+          if (block) {
+            return { changed: false, disabled: workspaceDisabled, block };
+          }
+        }
         const next = updateWorkspaceSkillSettingLists(
           { disabled: workspaceDisabled, enabled: workspaceEnabled },
           skillName,
@@ -5441,8 +5530,11 @@ async function runQwenServeImpl(
     ): Promise<PersistDisabledSkillsBatchResult> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
-        const { skillSettingStrings, updateWorkspaceSkillSettingLists } =
-          await import('../config/skill-settings.js');
+        const {
+          skillSettingStrings,
+          skillToggleBlockForName,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
         const fresh = loadSettingsForPersistence(workspace);
         const initialDisabled = skillSettingStrings(
           fresh,
@@ -5454,21 +5546,53 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'enabled',
         );
+        const skillIdentities = enabled
+          ? await resolveSkillToggleIdentities(workspace, skillNames)
+          : skillNames.map((name) => ({ name }));
         let next = { disabled: initialDisabled, enabled: initialEnabled };
-        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
+        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
+          skillNames.map((skillName) => ({ skillName, changed: false }));
+        let pending = skillNames.map((_, index) => index);
 
-        for (const skillName of skillNames) {
-          const updated = updateWorkspaceSkillSettingLists(
-            next,
-            skillName,
-            enabled,
-          );
-          const changed =
-            JSON.stringify(updated.disabled) !==
-              JSON.stringify(next.disabled) ||
-            JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
-          next = updated;
-          outcomes.push({ skillName, changed });
+        for (let pass = 0; pass < skillNames.length; pass += 1) {
+          const refused: number[] = [];
+          let listChanged = false;
+          for (const index of pending) {
+            const skillName = skillNames[index];
+            if (enabled) {
+              const block = skillToggleBlockForName(
+                fresh,
+                skillIdentities[index],
+              );
+              if (
+                block &&
+                !(
+                  block.scope === 'Workspace' &&
+                  block.list === 'disabled' &&
+                  !next.disabled.some(
+                    (name) => name.trim().toLowerCase() === block.entry,
+                  )
+                )
+              ) {
+                refused.push(index);
+                continue;
+              }
+            }
+            const updated = updateWorkspaceSkillSettingLists(
+              next,
+              skillName,
+              enabled,
+            );
+            const changed =
+              JSON.stringify(updated.disabled) !==
+                JSON.stringify(next.disabled) ||
+              JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
+            next = updated;
+            outcomes[index] = { skillName, changed };
+            listChanged ||= changed;
+          }
+          pending = refused;
+          if (pending.length === 0 || !listChanged) break;
         }
 
         const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
@@ -5621,6 +5745,7 @@ async function runQwenServeImpl(
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
       boundWorkspace,
+      runtimeBaseDir: primarySessionRuntimeBaseDir,
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
@@ -5632,6 +5757,7 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: primarySessionRuntimeBaseDir,
         sessionAttachmentsRoot: attachmentsRoots.root,
         sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
@@ -6167,6 +6293,9 @@ async function runQwenServeImpl(
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        reclaimIdleChild: async (signal) => {
+          await idleReclaimerRef.current?.(secondaryWorkspaceHash, signal);
+        },
         pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
@@ -6196,6 +6325,7 @@ async function runQwenServeImpl(
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
         boundWorkspace: workspaceInput.cwd,
+        runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...subSessionConcurrencyCapsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
@@ -6205,6 +6335,7 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        artifactSnapshotRuntimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         sessionAttachmentsRoot: secondaryAttachmentsRoots.root,
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
@@ -6825,6 +6956,9 @@ async function runQwenServeImpl(
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        reclaimIdleChild: async (signal) => {
+          await idleReclaimerRef.current?.(wsHash, signal);
+        },
         pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
@@ -6851,6 +6985,7 @@ async function runQwenServeImpl(
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
         boundWorkspace: cwd,
+        runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(provenance === 'live-conversation'
           ? {
               notifySentCompletion: true,
@@ -6881,6 +7016,7 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          artifactSnapshotRuntimeBaseDir: wsEnv.sessionRuntimeBaseDir,
           sessionAttachmentsRoot: wsAttachmentsRoots.root,
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
@@ -7680,6 +7816,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      modelSelectionBaseEnv: getEnvironmentBeforeLoad() ?? daemonRuntimeBaseEnv,
       runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
@@ -7738,6 +7875,16 @@ async function runQwenServeImpl(
       getMetricsSeries: () => metricsRing.snapshot(),
       getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
       getChildHeapPolicySnapshot: () => managedChildHeapPolicy?.snapshot(),
+      ...(childHeapPolicy
+        ? {
+            managedChildProcesses: {
+              registry: processRegistry,
+              policy: childHeapPolicy,
+              ownsBridge: (candidate: AcpSessionBridge) =>
+                runtimeBridges.includes(candidate),
+            },
+          }
+        : {}),
       recordDaemonRequest: (durationMs, statusCode) =>
         metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,
@@ -7753,6 +7900,19 @@ async function runQwenServeImpl(
         sessionArtifactsPersistenceAvailableFromSettings(
           runtimeBootSettings?.merged,
         ),
+      updateModelContextWindow: (workspace, key, size, assertGenerationOpen) =>
+        withSettingsLock(workspace, async () => {
+          assertGenerationOpen();
+          const { updateModelContextWindow } = await import(
+            './model-configuration.js'
+          );
+          return updateModelContextWindow(
+            loadSettingsForPersistence(workspace),
+            key,
+            size,
+            assertGenerationOpen,
+          );
+        }),
       installAuthProvider: (req, assertGenerationOpen) =>
         withSettingsLock(
           boundWorkspace,
@@ -7766,12 +7926,31 @@ async function runQwenServeImpl(
               getDefaultModelIds: core.getDefaultModelIds,
               resolveBaseUrl: core.resolveBaseUrl,
             });
-            const plan = core.buildInstallPlan(provider, inputs);
             const fresh = loadSettingsForPersistence(boundWorkspace);
+            const plan = core.buildInstallPlan(
+              provider,
+              inputs,
+              core.getModelsForProviderProtocol(
+                fresh.merged.modelProviders,
+                inputs.protocol ?? provider.protocol,
+                fresh.merged.providerProtocol,
+              ),
+              {
+                authType: fresh.merged.security?.auth?.selectedType,
+                id: fresh.merged.model?.name,
+                baseUrl: fresh.merged.model?.baseUrl,
+              },
+            );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
                 fresh,
               );
+            const { getAuthTypeFromEnv } = await import(
+              '../utils/modelConfigUtils.js'
+            );
+            const hasConversationAuth =
+              adapter.getValue('security.auth.selectedType') ||
+              getAuthTypeFromEnv(primaryRuntimeEnv.effectiveEnv);
             await core.applyProviderInstallPlan(plan, {
               settings: adapter,
               doRefreshAuth: false,
@@ -7795,11 +7974,18 @@ async function runQwenServeImpl(
               authType: plan.authType,
               ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
               ...(effectiveBaseUrl ? { baseUrl: effectiveBaseUrl } : {}),
-              message: `Successfully configured ${provider.label}. Use /model to switch models.`,
+              message: !plan.modelSelection
+                ? hasConversationAuth
+                  ? 'Service models saved.'
+                  : 'Service models saved. Configure a conversation model to start chatting.'
+                : `Successfully configured ${provider.label}. Use /model to switch models.`,
             };
           },
         ),
     });
+    idleReclaimerRef.current = app.locals['reclaimIdleAcp'] as
+      | IdleAcpReclaimer
+      | undefined;
     serveAppForRuntimeLifecycle.current = app;
     invalidatePrimaryServeFeaturesCache =
       (
@@ -9098,7 +9284,59 @@ async function runQwenServeImpl(
         clearRuntimeStartupTimer();
         markRuntimeReady();
       };
-      const startBridgePreheat = (bridge: AcpSessionBridge): void => {
+      const scheduleWorkspaceMcpDiscoveryAfterPreheat = (
+        app: Application,
+      ): void => {
+        if (runtimeStartupError !== undefined) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: runtime startup failed',
+          );
+          return;
+        }
+        if (shuttingDown) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: shutting down',
+          );
+          return;
+        }
+        const registry = app.locals?.['workspaceRegistry'] as
+          | WorkspaceRegistry
+          | undefined;
+        const primaryEntry = registry?.primaryEntry;
+        const runtime =
+          primaryEntry?.state === 'active'
+            ? primaryEntry.current?.runtime
+            : undefined;
+        if (!runtime) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: no primary runtime',
+          );
+          return;
+        }
+        const coordinator =
+          getWorkspaceRuntimeCoordinatorIfSupported?.(runtime);
+        if (!coordinator) {
+          daemonLog.info(
+            'workspace runtime ensure after preheat skipped: ' +
+              'workspace runtime lifecycle is not supported',
+          );
+          return;
+        }
+        void coordinator
+          .ensure({ keepAliveMs: ENSURE_KEEP_ALIVE_MS })
+          .catch((err) => {
+            if (shuttingDown || runtimeStartupError !== undefined) {
+              return;
+            }
+            daemonLog.warn(
+              `workspace runtime ensure after preheat failed: ${deepestErrorMessage(err)}`,
+            );
+          });
+      };
+      const startBridgePreheat = (
+        bridge: AcpSessionBridge,
+        app: Application,
+      ): void => {
         startup.preheat.status = 'running';
         const preheatStartedAt = performance.now();
         bridge
@@ -9108,6 +9346,7 @@ async function runQwenServeImpl(
             startup.preheat.durationMs = Math.round(
               performance.now() - preheatStartedAt,
             );
+            scheduleWorkspaceMcpDiscoveryAfterPreheat(app);
           })
           .catch((err) => {
             const message = err instanceof Error ? err.message : String(err);
@@ -9143,7 +9382,7 @@ async function runQwenServeImpl(
               return;
             }
             if (shouldPreheat && runtime.bridge) {
-              startBridgePreheat(runtime.bridge);
+              startBridgePreheat(runtime.bridge, runtime.app);
             }
             await completeRuntimeStartup(runtime.app);
           })
@@ -9706,7 +9945,7 @@ async function runQwenServeImpl(
         runtimeApp ??= preparedRuntimeApp;
         attachLiveDiscoveryControl(preparedRuntimeApp);
         if (shouldPreheat) {
-          startBridgePreheat(bridgeRef);
+          startBridgePreheat(bridgeRef, preparedRuntimeApp);
         }
         if (opts.channelSelection && !runtimeStartupSettled) {
           armRuntimeStartupTimer();

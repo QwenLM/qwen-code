@@ -95,7 +95,17 @@ const TRACKED_ENV = [
   'QWEN_SERVE_MAX_WORKSPACES',
   'QWEN_SERVER_TOKEN',
   'qwen_server_token',
-  'tmpdir',
+  'ld_library_path',
+  // Every key a rejection test writes must be tracked, or a failing rejection
+  // leaks into process.env and the afterEach restore misses it.
+  'XDG_CACHE_HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'QWEN_SANDBOX',
+  'QWEN_SANDBOX_IMAGE',
+  'QWEN_SANDBOX_PROXY_COMMAND',
+  'QWEN_SANDBOX_NET',
 ] as const;
 
 let tmpDirs: string[] = [];
@@ -277,6 +287,42 @@ describe('daemon registration capacity environment', () => {
 });
 
 describe('buildRuntimeEnvironment', () => {
+  it.each([false, true])(
+    'stops at a symlinked home (home env: %s)',
+    (hasHomeEnv) => {
+      const root = makeWorkspace();
+      const home = path.join(root, 'home');
+      const linkedHome = path.join(root, 'linked-home');
+      fs.mkdirSync(home);
+      fs.symlinkSync(home, linkedHome, 'junction');
+      process.env['HOME'] = linkedHome;
+      process.env['USERPROFILE'] = linkedHome;
+      fs.writeFileSync(
+        path.join(root, '.env'),
+        'RUNTIME_PARENT=workspace-only',
+      );
+      const homeEnvFile = path.join(linkedHome, '.env');
+      if (hasHomeEnv) {
+        fs.writeFileSync(homeEnvFile, 'RUNTIME_DOTENV=home-only');
+      }
+      const settings = testSettings({
+        security: { folderTrust: { enabled: false } },
+      });
+
+      const snapshot = buildRuntimeEnvironment(
+        settings,
+        os.homedir(),
+        {},
+        false,
+      );
+      expect(snapshot.envFilePaths).toEqual(hasHomeEnv ? [homeEnvFile] : []);
+      expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe(
+        hasHomeEnv ? 'home-only' : undefined,
+      );
+      expect(snapshot.effectiveEnv['RUNTIME_PARENT']).toBeUndefined();
+    },
+  );
+
   it('computes a runtime overlay without mutating process.env or base env', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(
@@ -1169,6 +1215,30 @@ describe('loadEnvironment', () => {
     }
   });
 
+  // The automatic-review marker is the same operator-decision class as the
+  // prebuild opt-in above: it selects the reduced docs-nav review profile,
+  // so a project .env must not opt its own review into the one-reviewer
+  // path. The read-time check (automaticReviewRequested) is the other tier.
+  it('never applies the review automatic marker from a project .env', () => {
+    const saved = process.env['QWEN_REVIEW_AUTOMATIC'];
+    delete process.env['QWEN_REVIEW_AUTOMATIC'];
+    try {
+      const workspace = makeWorkspace();
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'QWEN_REVIEW_AUTOMATIC=true\n',
+      );
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env['QWEN_REVIEW_AUTOMATIC']).toBeUndefined();
+    } finally {
+      if (saved === undefined) {
+        delete process.env['QWEN_REVIEW_AUTOMATIC'];
+      } else {
+        process.env['QWEN_REVIEW_AUTOMATIC'] = saved;
+      }
+    }
+  });
+
   // Windows env lookup is case-insensitive, so exact-case membership would
   // let case variants through every application gate on that platform.
   it('rejects entrypoint and trust-anchor keys regardless of case', () => {
@@ -1201,15 +1271,15 @@ describe('loadEnvironment', () => {
     expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
   });
 
-  // The reload-only tier (QWEN_SERVER_TOKEN, PATH, HOME, TMPDIR, …) must
-  // match case-folded for the same reason: on Windows a lowercase twin
+  // The reload-only tier (QWEN_SERVER_TOKEN, PATH, HOME, LD_LIBRARY_PATH, …)
+  // must match case-folded for the same reason: on Windows a lowercase twin
   // names the same OS variable, so an exact-case gate would let a
   // mid-session settings.env/.env edit rotate the daemon token or rewrite
   // PATH.
   it('rejects case variants of reload-only excluded keys', () => {
     const workspace = makeWorkspace();
     const envPath = path.join(workspace, '.env');
-    fs.writeFileSync(envPath, 'tmpdir=/workspace-a/first\n');
+    fs.writeFileSync(envPath, 'ld_library_path=/workspace-a/first\n');
 
     loadEnvironment(
       testSettings({ env: { qwen_server_token: 'spoofed-token' } }),
@@ -1222,15 +1292,75 @@ describe('loadEnvironment', () => {
     // applies as a distinct POSIX variable; the reload tier is what must
     // keep a mid-session edit from moving it (on Windows the twin IS the
     // uppercase variable).
-    expect(process.env['tmpdir']).toBe('/workspace-a/first');
+    expect(process.env['ld_library_path']).toBe('/workspace-a/first');
 
-    fs.writeFileSync(envPath, 'tmpdir=/workspace-a/second\n');
+    fs.writeFileSync(envPath, 'ld_library_path=/workspace-a/second\n');
     reloadEnvironment(
       testSettings({ env: { qwen_server_token: 'spoofed-token' } }),
       workspace,
     );
     expect(process.env['qwen_server_token']).toBeUndefined();
-    expect(process.env['tmpdir']).toBe('/workspace-a/first');
+    expect(process.env['ld_library_path']).toBe('/workspace-a/first');
+  });
+
+  // The bwrap backend derives its writable roots from XDG_CACHE_HOME and
+  // os.tmpdir() (TMPDIR/TMP/TEMP), and resolveSandboxNetworkMode flips to
+  // proxied — spawning QWEN_SANDBOX_PROXY_COMMAND through `bash -c` on the
+  // host — purely on that variable's presence. None of them may arrive from
+  // repository content: the project .env/settings.env application and reload
+  // paths must reject them like the other hardcoded exclusions.
+  it('never applies the sandbox confinement keys from project .env or settings.env, including reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'XDG_CACHE_HOME=/workspace-a/.ssh-cache',
+        'TMPDIR=/workspace-a/tmp',
+        'TMP=/workspace-a/tmp',
+        'TEMP=/workspace-a/tmp',
+        'QWEN_SANDBOX=false',
+        'QWEN_SANDBOX_IMAGE=registry.example/attacker:latest',
+        'QWEN_SANDBOX_PROXY_COMMAND=/workspace-a/proxy.sh',
+        'RUNTIME_DOTENV=allowed',
+        '',
+      ].join('\n'),
+    );
+    const settings = testSettings({
+      env: {
+        QWEN_SANDBOX_NET: 'closed',
+        RUNTIME_SETTINGS_ONLY: 'from-settings',
+      },
+    });
+
+    const expectSandboxKeysRejected = (env: Readonly<NodeJS.ProcessEnv>) => {
+      expect(env['XDG_CACHE_HOME']).not.toBe('/workspace-a/.ssh-cache');
+      expect(env['TMPDIR']).not.toBe('/workspace-a/tmp');
+      expect(env['TMP']).not.toBe('/workspace-a/tmp');
+      expect(env['TEMP']).not.toBe('/workspace-a/tmp');
+      expect(env['QWEN_SANDBOX']).not.toBe('false');
+      expect(env['QWEN_SANDBOX_IMAGE']).not.toBe(
+        'registry.example/attacker:latest',
+      );
+      expect(env['QWEN_SANDBOX_PROXY_COMMAND']).not.toBe(
+        '/workspace-a/proxy.sh',
+      );
+      expect(env['QWEN_SANDBOX_NET']).not.toBe('closed');
+    };
+
+    loadEnvironment(settings, workspace);
+    expectSandboxKeysRejected(process.env);
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+    expect(process.env['RUNTIME_SETTINGS_ONLY']).toBe('from-settings');
+
+    reloadEnvironment(settings, workspace);
+    expectSandboxKeysRejected(process.env);
+
+    const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+    expectSandboxKeysRejected(snapshot.effectiveEnv);
+    expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe(
+      'from-settings',
+    );
   });
 
   // The numbered GIT_CONFIG_KEY_/VALUE_ pairs are hardcoded exclusions via

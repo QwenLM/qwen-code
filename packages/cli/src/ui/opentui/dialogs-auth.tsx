@@ -20,7 +20,7 @@
  *  - documentation/TOS links render as plain text (no OSC 8 in dialogs).
  */
 
-import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useKeyboard, usePaste, useRenderer } from '@opentui/react';
 import type { PasteEvent } from '@opentui/core';
 import { decodePasteBytes } from '@opentui/core';
@@ -29,6 +29,7 @@ import type {
   Config,
   ProviderConfig,
   ProviderSetupInputs,
+  ModelWireApi,
 } from '@qwen-code/qwen-code-core';
 import {
   ALIBABA_PROVIDERS,
@@ -37,6 +38,7 @@ import {
   AuthType,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   customProvider,
   findExistingProviderModels,
   findProviderByCredentials,
@@ -46,16 +48,23 @@ import {
   logAuth,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
+import {
+  createLoadedSettingsAdapter,
+  getRawModelProviders,
+} from '../../config/loadedSettingsAdapter.js';
 import { t } from '../../i18n/index.js';
+import { ICON } from '../constants.js';
 import {
   useProviderSetupFlow,
   type ProviderSetupFlow,
+  type SetupStep,
 } from '../auth/useProviderSetupFlow.js';
 import { normalizeModelIds } from '../auth/useAuth.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { normalizePastedText } from './input-prompt-model.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
+import { caretSpans, useLineEdit } from './line-edit.js';
 import { Shell } from './dialogs-misc.js';
 import { C } from './theme.js';
 
@@ -114,12 +123,6 @@ const PROTOCOL_ITEMS: RadioItem[] = [
     value: AuthType.USE_OPENAI,
   },
   {
-    key: AuthType.USE_OPENAI_RESPONSES,
-    label: t('OpenAI Responses'),
-    description: t('OpenAI Responses API — streaming reasoning + tool use'),
-    value: AuthType.USE_OPENAI_RESPONSES,
-  },
-  {
     key: AuthType.USE_ANTHROPIC,
     label: t('Anthropic-compatible'),
     description: t('Anthropic Messages API format'),
@@ -150,6 +153,7 @@ function providerToItem(config: ProviderConfig): RadioItem {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -191,7 +195,7 @@ function RadioList({ items, cursor }: { items: RadioItem[]; cursor: number }) {
           >
             <box flexDirection="row">
               <text fg={selected ? C.accent : C.dim}>
-                {selected ? '● ' : '○ '}
+                {selected ? '› ' : '  '}
               </text>
               <text
                 fg={selected ? C.text : C.dim}
@@ -212,44 +216,95 @@ function RadioList({ items, cursor }: { items: RadioItem[]; cursor: number }) {
   );
 }
 
-function InputLine({
+/**
+ * A dialog field's text with ink's software cursor: the cell under the caret
+ * drawn on a background, and an empty field putting that cell on its
+ * placeholder's first character so it still shows where text will start.
+ */
+function FieldText({
   value,
+  caret,
   placeholder,
   active,
 }: {
   value: string;
+  caret: number;
   placeholder?: string;
   active?: boolean;
 }) {
-  const empty = value.length === 0;
+  if (value.length === 0 && placeholder) {
+    if (!active) return <text fg={C.dim}>{placeholder}</text>;
+    return (
+      <>
+        <text bg={C.accent}>{placeholder.slice(0, 1)}</text>
+        <text fg={C.dim}>{placeholder.slice(1)}</text>
+      </>
+    );
+  }
+  const spans = caretSpans({ text: value, cursor: caret });
+  return (
+    <>
+      <text fg={C.text}>{sanitizeTerminalText(spans.before)}</text>
+      {/* The character belongs to the value whatever owns the focus; only the
+          highlight says which field the caret is in. Dropping it while inactive
+          would print a value one character shorter than the one held. */}
+      {active ? (
+        <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
+      ) : (
+        <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
+      )}
+      <text fg={C.text}>{sanitizeTerminalText(spans.after)}</text>
+    </>
+  );
+}
+
+function InputLine({
+  value,
+  caret,
+  placeholder,
+  active,
+}: {
+  value: string;
+  caret: number;
+  placeholder?: string;
+  active?: boolean;
+}) {
   return (
     <box flexDirection="row" marginTop={1} paddingLeft={1}>
-      <text fg={empty ? C.dim : C.text}>
-        {empty ? (placeholder ?? '') : value}
-      </text>
-      {active && <text fg={C.accent}>{'█'}</text>}
+      <FieldText
+        value={value}
+        caret={caret}
+        placeholder={placeholder}
+        active={active}
+      />
     </box>
   );
 }
 
-/** Shared single-line text-input key handling (backend ask-user parity). */
+/**
+ * Shared single-line text-input key handling (backend ask-user parity). Returns
+ * the caret offset so the row can put its cursor cell where ink's would be. The
+ * submit's own verdict is what settles the field, so a step that reports nothing
+ * cannot leave the latch unarmed. `retrySeq` re-arms it: on the last step a
+ * `true` only means the install was fired, and when that install fails the same
+ * step stays mounted for the rest of the dialog's life.
+ */
 function useLineInputKeys(
   value: string,
   onChange: (next: string) => void,
-  onSubmit: () => void,
-) {
+  onSubmit: (text: string) => boolean,
+  retrySeq: number,
+): number {
+  const line = useLineEdit(value, onChange, retrySeq);
   useKeyboard((key) => {
+    if (line.settled) return;
     const o = toOriginalKey(key);
     if (o.name === 'return' || o.name === 'enter') {
-      onSubmit();
+      if (onSubmit(line.text)) line.settle();
       return;
     }
-    if (o.name === 'backspace' || o.name === 'delete') {
-      onChange(value.slice(0, -1));
-      return;
-    }
-    if (isPrintableKeyInput(key)) {
-      onChange(value + key.sequence);
+    if (!line.handleKey(o) && isPrintableKeyInput(key)) {
+      line.insert(key.sequence);
     }
   });
   // Bracketed pastes arrive as one PasteEvent with no keypress per character
@@ -261,8 +316,9 @@ function useLineInputKeys(
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    onChange(value + text);
+    line.insert(text);
   });
+  return line.caret;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +333,12 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       protocolOpts.includes(p.value as AuthType),
     );
   }, [provider]);
-  const [cursor, setCursor] = useState(0);
+  const [cursor, setCursor] = useState(
+    Math.max(
+      0,
+      items.findIndex((item) => item.value === flow.state.protocol),
+    ),
+  );
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'up') {
@@ -288,6 +349,35 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       const item = items[cursor];
       if (item) flow.selectProtocol(item.value as AuthType);
     }
+  });
+  return (
+    <>
+      <RadioList items={items} cursor={cursor} />
+      <box marginTop={1}>
+        <text fg={C.dim}>{NAV_HINT_SELECT}</text>
+      </box>
+    </>
+  );
+}
+
+function ApiStep({ flow }: { flow: ProviderSetupFlow }) {
+  const items: RadioItem[] = [
+    {
+      key: 'chat-completions',
+      label: t('Chat Completions'),
+      value: 'chat-completions',
+    },
+    { key: 'responses', label: t('Responses'), value: 'responses' },
+  ];
+  const [cursor, setCursor] = useState(
+    flow.state.wireApi === 'responses' ? 1 : 0,
+  );
+  useKeyboard((key) => {
+    const o = toOriginalKey(key);
+    if (o.name === 'up') setCursor(0);
+    else if (o.name === 'down') setCursor(1);
+    else if (o.name === 'return')
+      flow.selectWireApi(items[cursor]!.value as ModelWireApi);
   });
   return (
     <>
@@ -344,18 +434,24 @@ function BaseUrlSelectStep({
 function BaseUrlInputStep({
   flow,
   documentationUrl,
+  retrySeq,
 }: {
   flow: ProviderSetupFlow;
   documentationUrl?: string;
+  retrySeq: number;
 }) {
-  useLineInputKeys(flow.state.baseUrl, flow.changeBaseUrl, () =>
-    flow.submitBaseUrl(),
+  const caret = useLineInputKeys(
+    flow.state.baseUrl,
+    flow.changeBaseUrl,
+    (text) => flow.submitBaseUrl(text),
+    retrySeq,
   );
   return (
     <box flexDirection="column" marginTop={1}>
       <text fg={C.text}>{t('Enter the API endpoint for this protocol.')}</text>
       <InputLine
         value={flow.state.baseUrl}
+        caret={caret}
         placeholder={
           flow.state.baseUrlPlaceholder || 'https://api.openai.com/v1'
         }
@@ -383,13 +479,18 @@ function BaseUrlInputStep({
 function ApiKeyStep({
   provider,
   flow,
+  retrySeq,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
+  retrySeq: number;
 }) {
   const docUrl = resolveDocumentationUrl(provider, flow.state.baseUrl);
-  useLineInputKeys(flow.state.apiKey, flow.changeApiKey, () =>
-    flow.submitApiKey(flow.state.apiKey),
+  const caret = useLineInputKeys(
+    flow.state.apiKey,
+    flow.changeApiKey,
+    (text) => flow.submitApiKey(text),
+    retrySeq,
   );
   return (
     <box flexDirection="column" marginTop={1}>
@@ -400,6 +501,7 @@ function ApiKeyStep({
       )}
       <InputLine
         value={flow.state.apiKey}
+        caret={caret}
         placeholder={provider.apiKeyPlaceholder ?? 'sk-...'}
         active
       />
@@ -429,9 +531,11 @@ function uniqueIds(ids: string[]): string[] {
 function ModelsStep({
   provider,
   flow,
+  retrySeq,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
+  retrySeq: number;
 }) {
   const modelOptions = useMemo(
     () => provider.models?.map((m) => m.id) ?? [],
@@ -451,6 +555,11 @@ function ModelsStep({
     () => new Set(selectedModelIds.filter((id) => recommendedIds.has(id))),
   );
 
+  // Keystrokes of one burst are handled against the render that registered the
+  // handler, whose `checked` set is already stale by the second Space. The
+  // mirror is written synchronously so each tick sees the previous one.
+  const checkedRef = useRef<ReadonlySet<string>>(checked);
+
   const syncModelIds = useCallback(
     (custom: string, keys: ReadonlySet<string>) => {
       flow.changeModelIds(
@@ -463,29 +572,45 @@ function ModelsStep({
   const updateCustom = useCallback(
     (next: string) => {
       setCustomText(next);
-      syncModelIds(next, checked);
+      syncModelIds(next, checkedRef.current);
     },
-    [checked, syncModelIds],
+    [syncModelIds],
   );
+
+  // ink keeps this field in a TextInput whose buffer survives the list taking
+  // focus, so the caret is still where it was left when Tab comes back. The
+  // retry counter is the mount key: models is the last step of every preset
+  // flow, so its Enter only fires the install, and a rejected install leaves
+  // this very step mounted with the latch that Enter armed.
+  const custom = useLineEdit(customText, updateCustom, retrySeq);
 
   const toggleRecommended = useCallback(
     (id: string) => {
-      const next = new Set(checked);
+      const next = new Set(checkedRef.current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      checkedRef.current = next;
       setChecked(next);
-      syncModelIds(customText, next);
+      syncModelIds(custom.text, next);
     },
-    [checked, customText, syncModelIds],
+    [custom, syncModelIds],
   );
 
   const submit = useCallback(() => {
-    flow.submitModelIds({
-      modelIds: uniqueIds([...normalizeModelIds(customText), ...checked]),
-    });
-  }, [customText, checked, flow]);
+    if (
+      flow.submitModelIds({
+        modelIds: uniqueIds([
+          ...normalizeModelIds(custom.text),
+          ...checkedRef.current,
+        ]),
+      })
+    ) {
+      custom.settle();
+    }
+  }, [custom, flow]);
 
   useKeyboard((key) => {
+    if (custom.settled) return;
     const o = toOriginalKey(key);
     if (focus >= 0) {
       if (o.name === 'tab') {
@@ -511,12 +636,8 @@ function ModelsStep({
       submit();
       return;
     }
-    if (o.name === 'backspace' || o.name === 'delete') {
-      updateCustom(customText.slice(0, -1));
-      return;
-    }
-    if (isPrintableKeyInput(key)) {
-      updateCustom(customText + key.sequence);
+    if (!custom.handleKey(o) && isPrintableKeyInput(key)) {
+      custom.insert(key.sequence);
     }
   });
   // Pastes land in the custom-ID input only when it owns focus; while the
@@ -526,7 +647,7 @@ function ModelsStep({
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    updateCustom(customText + text);
+    custom.insert(text);
   });
 
   return (
@@ -536,7 +657,12 @@ function ModelsStep({
           'Enter model IDs directly. Use commas to configure multiple models.',
         )}
       </text>
-      <InputLine value={customText} placeholder="model-id" active={focus < 0} />
+      <InputLine
+        value={customText}
+        caret={custom.caret}
+        placeholder="model-id"
+        active={focus < 0}
+      />
       {flow.state.modelIdsError && (
         <box marginTop={1}>
           <text fg={C.red}>{flow.state.modelIdsError}</text>
@@ -557,7 +683,9 @@ function ModelsStep({
                     {focused ? '› ' : '  '}
                   </text>
                   <text fg={focused ? C.accent : C.dim}>
-                    {isChecked ? '◉ ' : '○ '}
+                    {isChecked
+                      ? `${ICON.RADIO_FILLED} `
+                      : `${ICON.CIRCLE_EMPTY} `}
                   </text>
                   <text fg={focused ? C.text : C.dim}>{id}</text>
                 </box>
@@ -594,7 +722,9 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
   } = flow.state;
   const ctxIdx = modalityEnabled ? 6 : 2;
   const onCtxRow = focusedConfigIndex === ctxIdx;
+  const ctxField = useLineEdit(contextWindowSize, flow.changeContextWindowSize);
   useKeyboard((key) => {
+    if (ctxField.settled) return;
     const o = toOriginalKey(key);
     // Focus-row navigation restricted to unambiguous shortcuts (ink parity:
     // a letter typed into the context-window field must not move the row).
@@ -609,22 +739,17 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     if (o.name === 'space') {
       // On the context row Space inserts a space into the field; the flow's
       // toggleFocusedAdvancedOption has no case for ctxIdx (ink parity).
-      if (onCtxRow) flow.changeContextWindowSize(contextWindowSize + ' ');
+      if (onCtxRow) ctxField.insert(' ');
       else flow.toggleFocusedAdvancedOption();
       return;
     }
     if (o.name === 'return') {
       flow.submitAdvancedConfig();
+      ctxField.settle();
       return;
     }
-    if (onCtxRow) {
-      if (o.name === 'backspace' || o.name === 'delete') {
-        flow.changeContextWindowSize(contextWindowSize.slice(0, -1));
-        return;
-      }
-      if (isPrintableKeyInput(key)) {
-        flow.changeContextWindowSize(contextWindowSize + key.sequence);
-      }
+    if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {
+      ctxField.insert(key.sequence);
     }
   });
   // Only the context-window field accepts text; a paste while another row is
@@ -634,9 +759,9 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    flow.changeContextWindowSize(contextWindowSize + text);
+    ctxField.insert(text);
   });
-  const checkmark = (v: boolean) => (v ? '◉' : '○');
+  const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
   const rowFg = (index: number) =>
     focusedConfigIndex === index ? C.green : undefined;
@@ -687,10 +812,12 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         <text
           fg={rowFg(ctxIdx)}
         >{`${cursor(ctxIdx)} ${t('Context window')}: `}</text>
-        <text fg={onCtxRow ? C.text : C.dim}>
-          {contextWindowSize || 'auto'}
-        </text>
-        {onCtxRow && <text fg={C.accent}>{'█'}</text>}
+        <FieldText
+          value={contextWindowSize}
+          caret={ctxField.caret}
+          placeholder="auto"
+          active={onCtxRow}
+        />
       </box>
       <box paddingLeft={4}>
         <text fg={C.dim}>
@@ -719,7 +846,11 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }) {
         {t('The following JSON will be saved to settings.json:')}
       </text>
       <box marginTop={1}>
-        <text fg={C.text}>{flow.state.previewJson}</text>
+        {flow.state.previewError ? (
+          <text fg={C.red}>{flow.state.previewError}</text>
+        ) : (
+          <text fg={C.text}>{flow.state.previewJson}</text>
+        )}
       </box>
       <box marginTop={1}>
         <text fg={C.dim}>{t('Enter to save, Esc to go back')}</text>
@@ -728,12 +859,20 @@ function ReviewStep({ flow }: { flow: ProviderSetupFlow }) {
   );
 }
 
-function SetupSteps({ flow }: { flow: ProviderSetupFlow }) {
+function SetupSteps({
+  flow,
+  retrySeq,
+}: {
+  flow: ProviderSetupFlow;
+  retrySeq: number;
+}) {
   const { provider, step } = flow.state;
   if (!provider || !step) return null;
   switch (step) {
     case 'protocol':
       return <ProtocolStep flow={flow} />;
+    case 'wireApi':
+      return <ApiStep flow={flow} />;
     case 'baseUrl':
       return Array.isArray(provider.baseUrl) ? (
         <BaseUrlSelectStep provider={provider} flow={flow} />
@@ -744,12 +883,13 @@ function SetupSteps({ flow }: { flow: ProviderSetupFlow }) {
             provider,
             flow.state.baseUrl,
           )}
+          retrySeq={retrySeq}
         />
       );
     case 'apiKey':
-      return <ApiKeyStep provider={provider} flow={flow} />;
+      return <ApiKeyStep provider={provider} flow={flow} retrySeq={retrySeq} />;
     case 'models':
-      return <ModelsStep provider={provider} flow={flow} />;
+      return <ModelsStep provider={provider} flow={flow} retrySeq={retrySeq} />;
     case 'advancedConfig':
       return <AdvancedConfigStep flow={flow} />;
     case 'review':
@@ -801,6 +941,17 @@ function AuthDialogFlow({
   const [errorMessage, setErrorMessage] = useState<string | null>(
     initialError ?? null,
   );
+  // Every text field latches itself shut on the Enter that submits it, and only
+  // a mount-key change clears that latch. On the last step the submit is async,
+  // so a rejected install — or one that saved service models without a
+  // conversation model — leaves the very same step on screen with every key
+  // dead. Bumping this hands the field back.
+  const [retrySeq, setRetrySeq] = useState(0);
+  // The verdict lands whenever the install finishes, which can be after the user
+  // has Esc'd back to an earlier field. Re-arming there would re-seed a field
+  // that never submitted and discard the caret parked in it, so only the step
+  // that fired the install may bump.
+  const stepRef = useRef<SetupStep | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
   const [mainIndex, setMainIndex] = useState<number | null>(null);
@@ -811,40 +962,80 @@ function AuthDialogFlow({
 
   const handleProviderSubmit = useCallback(
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
-      const protocol = inputs.protocol ?? providerConfig.protocol;
+      let protocol = inputs.protocol ?? providerConfig.protocol;
+      const stepAtSubmit = stepRef.current;
+      const reArmField = () => {
+        if (stepRef.current === stepAtSubmit) setRetrySeq((n) => n + 1);
+      };
       try {
-        const plan = buildInstallPlan(providerConfig, inputs);
+        const plan = buildInstallPlan(
+          providerConfig,
+          inputs,
+          getModelsForProviderProtocol(
+            settings.merged.modelProviders,
+            inputs.protocol ?? providerConfig.protocol,
+            settings.merged.providerProtocol,
+          ),
+          {
+            authType: settings.merged.security?.auth?.selectedType,
+            id: settings.merged.model?.name,
+            baseUrl: settings.merged.model?.baseUrl,
+          },
+        );
+        protocol = plan.authType;
         await applyProviderInstallPlan(plan, {
           settings: createLoadedSettingsAdapter(settings),
           reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
           syncAuthState: (authType, modelId, baseUrl) =>
-            config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+            config.syncModelSelection(authType, modelId, baseUrl),
           refreshAuth: (authType) => config.refreshAuth(authType),
         });
+        if (!plan.modelSelection && !config.getAuthType()) {
+          setErrorMessage(
+            t(
+              'Service models saved. Configure a conversation model to start chatting.',
+            ),
+          );
+          reArmField();
+          return;
+        }
         notify?.(
-          t(
-            'Successfully configured {{provider}}. Use /model to switch models.',
-            {
-              provider: providerConfig.label,
-            },
-          ),
+          !plan.modelSelection
+            ? t('Service models saved.')
+            : t(
+                'Successfully configured {{provider}}. Use /model to switch models.',
+                {
+                  provider: providerConfig.label,
+                },
+              ),
         );
-        logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
+        if (plan.modelSelection)
+          logAuth(config, new AuthEvent(protocol, 'manual', 'success'));
         onClose();
       } catch (error) {
         const msg = t('Failed to authenticate. Message: {{message}}', {
           message: getErrorMessage(error),
         });
         setErrorMessage(msg);
+        reArmField();
         logAuth(config, new AuthEvent(protocol, 'manual', 'error', msg));
       }
     },
     [settings, config, notify, onClose],
   );
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
+    getRawModelProviders(settings),
+  );
+  stepRef.current = setupFlow.state.step;
 
   // -- Navigation (AuthDialog parity) ---------------------------------------
 
@@ -881,11 +1072,23 @@ function AuthDialogFlow({
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
+  // The saved route and ids the wizard reopens with. Both must come from the
+  // same lookup: seeding the ids of a Responses install while the API step
+  // defaults to Chat Completions would restamp them onto the other wire.
+  const findSavedModels = (providerConfig: ProviderConfig) =>
+    findExistingProviderModels(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.modelProviders,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
+
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findSavedModels(providerConfig);
     if (!saved) return [];
     const builtinIds = new Set(getDefaultModelIds(providerConfig));
     return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
@@ -898,7 +1101,7 @@ function AuthDialogFlow({
       if (!providerConfig) return;
       setupFlow.start(
         providerConfig,
-        undefined,
+        findSavedModels(providerConfig)?.protocol,
         existingEnv,
         getExistingModelIds(providerConfig),
       );
@@ -943,7 +1146,7 @@ function AuthDialogFlow({
         case 'CUSTOM_PROVIDER':
           setupFlow.start(
             customProvider,
-            undefined,
+            findSavedModels(customProvider)?.protocol,
             existingEnv,
             getExistingModelIds(customProvider),
           );
@@ -1090,7 +1293,9 @@ function AuthDialogFlow({
         </>
       )}
 
-      {viewLevel === 'provider-setup' && <SetupSteps flow={setupFlow} />}
+      {viewLevel === 'provider-setup' && (
+        <SetupSteps flow={setupFlow} retrySeq={retrySeq} />
+      )}
 
       {errorMessage && (
         <box marginTop={1}>

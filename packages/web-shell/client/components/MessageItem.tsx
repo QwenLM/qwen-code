@@ -1,4 +1,11 @@
-import { memo, useContext, useMemo, type ReactElement } from 'react';
+import {
+  memo,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactElement,
+} from 'react';
 import type {
   ACPToolCall,
   Message,
@@ -6,7 +13,10 @@ import type {
   TodoItem,
 } from '../adapters/types';
 import { CompactModeContext } from '../WebShellContexts';
-import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
+import type {
+  WebShellAssistantTurnFooterRenderInfo,
+  WebShellSource,
+} from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -24,6 +34,7 @@ import {
 } from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
+import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
 import { isSummaryRunId } from './summaryRunId';
 import { PlanMessage } from './messages/PlanMessage';
 import { BtwMessage } from './messages/BtwMessage';
@@ -37,22 +48,37 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
   onInsightReportOpen?: (path: string) => void;
   workspaceCwd?: string;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onEditUserMessage?: () => void;
+  /**
+   * Open the in-place editor for this user message. Return `true` when a host
+   * owns the edit lifecycle — then the inline editor stays closed.
+   */
+  onEditUserMessage?: () => boolean | void;
+  /**
+   * Send the text the user confirmed in the inline editor. Resolves `false`
+   * when the resend was refused or failed; the editor stays open then.
+   */
+  onSubmitUserMessageEdit?: (
+    content: string,
+  ) => boolean | void | Promise<boolean | void>;
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
   assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
   generateContent?: SessionContentGenerator;
 }
 
@@ -60,8 +86,10 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
+  onTurnOutputOpen,
   onInsightReportOpen,
   workspaceCwd,
   showRetryHint = false,
@@ -69,15 +97,45 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onEditUserMessage,
+  onSubmitUserMessageEdit,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
   assistantTurnFooterInfo,
+  turnSources,
+  onSourceOpen,
   generateContent,
 }: MessageItemProps) {
   const { t } = useI18n();
+  // The inline editor is owned here because the toggle (in the timestamp row)
+  // and the edited bubble are siblings under this row.
+  const [editingUserMessage, setEditingUserMessage] = useState(false);
+  // Held while the resend is in flight so the editor can show progress and
+  // survive a refusal instead of dropping the user's text.
+  const [submittingUserMessageEdit, setSubmittingUserMessageEdit] =
+    useState(false);
+  const openUserMessageEditor = useCallback(() => {
+    if (onEditUserMessage?.() === true) return;
+    setEditingUserMessage(true);
+  }, [onEditUserMessage]);
+  const closeUserMessageEditor = useCallback(() => {
+    setEditingUserMessage(false);
+  }, []);
+  const submitUserMessageEdit = useCallback(
+    (content: string) => {
+      if (!onSubmitUserMessageEdit) return;
+      setSubmittingUserMessageEdit(true);
+      void Promise.resolve(onSubmitUserMessageEdit(content))
+        .catch(() => false)
+        .then((accepted) => {
+          setSubmittingUserMessageEdit(false);
+          if (accepted !== false) setEditingUserMessage(false);
+        });
+    },
+    [onSubmitUserMessageEdit],
+  );
   const boundBranchSession = useMemo(
     () =>
       onBranchSession && branchRecordId
@@ -112,7 +170,10 @@ export const MessageItem = memo(function MessageItem({
             isLocateFlashing={isLocateFlashing}
             sendFailed={sendFailed}
             onRetrySend={onRetrySend}
-            onEdit={onEditUserMessage}
+            editing={editingUserMessage}
+            submittingEdit={submittingUserMessageEdit}
+            onEditSubmit={submitUserMessageEdit}
+            onEditCancel={closeUserMessageEditor}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
           />
@@ -128,6 +189,8 @@ export const MessageItem = memo(function MessageItem({
             showBranchAction={showAssistantBranch}
             isLocateFlashing={isLocateFlashing}
             customFooterInfo={assistantTurnFooterInfo}
+            turnSources={turnSources}
+            onSourceOpen={onSourceOpen}
           />
         );
       case 'thinking':
@@ -162,6 +225,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <ToolGroup
             tools={message.tools}
+            onTurnOutputOpen={onTurnOutputOpen}
             thoughts={message.thoughts}
             compactSummary={compactMode && isSummaryRunId(message.id)}
             pendingApproval={pendingApproval}
@@ -188,6 +252,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             showRetryHint={showRetryHint && message.retryable === true}
@@ -292,12 +357,23 @@ export const MessageItem = memo(function MessageItem({
   return (
     <MessageTimestamp
       timestamp={message.timestamp}
+      hideTimestamp={
+        message.role === 'system' &&
+        (message.source === 'background_task_completed' ||
+          message.source === 'background_notification_turn_started')
+      }
       chatMode={isUserStyled}
       toolGroupSpacing={message.role === 'tool_group' && compactMode}
       copyText={
         isUserStyled && 'content' in message ? message.content : undefined
       }
       copyTitle={t('common.copy')}
+      onEdit={
+        onEditUserMessage && !editingUserMessage
+          ? openUserMessageEditor
+          : undefined
+      }
+      editTitle={t('userMessage.edit')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -337,14 +413,19 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
+    return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
   if (prev.onAttachmentPreview !== next.onAttachmentPreview) return false;
+  if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.showRetryHint !== next.showRetryHint) return false;
   if (prev.onRetryClick !== next.onRetryClick) return false;
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
+    return false;
   if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
@@ -352,6 +433,11 @@ function areMessageItemPropsEqual(
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   if (prev.generateContent !== next.generateContent) return false;
+  if (
+    prev.turnSources !== next.turnSources ||
+    prev.onSourceOpen !== next.onSourceOpen
+  )
+    return false;
   if (
     !areAssistantTurnFooterInfosEqual(
       prev.assistantTurnFooterInfo,

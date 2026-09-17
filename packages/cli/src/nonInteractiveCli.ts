@@ -21,7 +21,9 @@ import type {
   RuntimeContentGeneratorView,
   ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
+import { formatDuration } from './ui/utils/formatters.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
+import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -80,6 +82,7 @@ import {
   getErrorType,
   getActiveInteractionSpan,
   buildGoalContinuationParts,
+  goalCheckpointHealthLine,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -277,7 +280,15 @@ export function formatGoalState(
   // scrollback and piped into scripts, neither of which is helped by `1.2k`.
   const usage: string[] = [];
   if (goal.turnCount > 0) {
-    usage.push(`${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`);
+    const turns = goal.turnBudget ?? goal.turnCount;
+    usage.push(
+      `${goal.turnCount}${goal.turnBudget === undefined ? '' : ` of ${goal.turnBudget}`} ${turns === 1 ? 'turn' : 'turns'}`,
+    );
+  }
+  if (goal.activeTimeMs > 0 && goal.activeTimeBudgetMs !== undefined) {
+    usage.push(
+      `${formatDuration(goal.activeTimeMs, { hideTrailingZeros: true })} of ${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })} active`,
+    );
   }
   if (goal.tokensUsed > 0) {
     const used = goal.tokensUsed.toLocaleString('en-US');
@@ -287,14 +298,21 @@ export function formatGoalState(
         : `${used} of ${goal.tokenBudget.toLocaleString('en-US')} tokens`,
     );
   }
-  const withUsage =
-    usage.length > 0 ? `${summary}\nUsage: ${usage.join(' · ')}` : summary;
+  const lines = [summary];
+  if (usage.length > 0) lines.push(`Usage: ${usage.join(' · ')}`);
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
-  return goal.status !== 'active' && goal.lastReason
-    ? `${withUsage}\nReason: ${goal.lastReason}`
-    : withUsage;
+  // Both lines are written to stdout as they are, so both are sanitized: a
+  // pause reason can embed a raw provider error.
+  if (goal.status !== 'active' && goal.lastReason) {
+    lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
+  }
+  // The checkpoint line the interactive cards show, in the same words: a
+  // checkpoint stop reason names the kind of failure, only this says which.
+  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
+  if (checkpoint !== undefined) lines.push(`Checkpoint: ${checkpoint}`);
+  return lines.join('\n');
 }
 
 async function claimUserGoalTurn(
@@ -1092,6 +1110,7 @@ export async function runNonInteractive(
         config,
         sessionId,
         permissionMode,
+        settings,
       );
       adapter.emitMessage(systemMessage);
 
@@ -1132,6 +1151,7 @@ export async function runNonInteractive(
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
           apiHistory: llmClient.getChat().getHistory(),
+          completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -2106,6 +2126,7 @@ export async function runNonInteractive(
               typeof toolResponse.resultDisplay === 'string'
                 ? toolResponse.resultDisplay
                 : undefined,
+              { approvalRequired: toolResponse.approvalRequired === true },
             );
           }
 
@@ -2532,6 +2553,12 @@ export async function runNonInteractive(
           // Process fallback metadata only after the abandoned attempt has
           // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
+          if (
+            event.type === LlmEventType.HookSystemMessage &&
+            outputFormat === OutputFormat.TEXT
+          ) {
+            process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
+          }
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
@@ -2552,19 +2579,17 @@ export async function runNonInteractive(
             }
             loopDetected = true;
           }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === LlmEventType.Error
-          ) {
+          if (event.type === LlmEventType.Error) {
             const errorText = parseAndFormatApiError(
               event.value.error,
               config.getContentGeneratorConfig()?.authType,
             );
-            process.stderr.write(`${errorText}\n`);
-            // We have already formatted and written the message; mark the
-            // throw so the top-level handleError doesn't reformat (which
-            // would yield "[API Error: [API Error: ...]]") or print it a
-            // second time. Exit code stays 1 — same as before.
+            if (outputFormat === OutputFormat.TEXT) {
+              process.stderr.write(`${errorText}\n`);
+            }
+            // The adapter has already captured the formatted error in JSON
+            // modes, while text mode wrote it above. Mark the throw so the
+            // terminal error result is emitted without formatting it again.
             throw new AlreadyReportedError(errorText);
           }
         }
@@ -2857,6 +2882,14 @@ export async function runNonInteractive(
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
+                if (
+                  event.type === LlmEventType.HookSystemMessage &&
+                  outputFormat === OutputFormat.TEXT
+                ) {
+                  process.stderr.write(
+                    `${sanitizeTerminalText(event.value)}\n`,
+                  );
+                }
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
@@ -2869,18 +2902,15 @@ export async function runNonInteractive(
                   }
                   loopDetected = true;
                 }
-                if (
-                  outputFormat === OutputFormat.TEXT &&
-                  event.type === LlmEventType.Error
-                ) {
+                if (event.type === LlmEventType.Error) {
                   const errorText = parseAndFormatApiError(
                     event.value.error,
                     config.getContentGeneratorConfig()?.authType,
                   );
-                  process.stderr.write(`${errorText}\n`);
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError doesn't reformat or
-                  // reprint downstream.
+                  if (outputFormat === OutputFormat.TEXT) {
+                    process.stderr.write(`${errorText}\n`);
+                  }
+                  // See the matching main-stream branch above.
                   throw new AlreadyReportedError(errorText);
                 }
               }

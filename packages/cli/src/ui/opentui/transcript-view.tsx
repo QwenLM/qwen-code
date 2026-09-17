@@ -21,7 +21,6 @@ import { AgentStatus } from '@qwen-code/qwen-code-core';
 import { C, SYNTAX } from './theme.js';
 import {
   AnsiRows,
-  MESSAGE_ICON,
   TOOL_CARD_DESCRIPTION_ROWS,
   TodoRows,
   assistantMessageMeta,
@@ -48,11 +47,13 @@ import {
   type GoalCardColor,
   type LiveGoalLegacyData,
   type LiveHistoryItem,
+  type LiveThinkingItem,
   type LiveToolItem,
   type LiveArenaSessionItem,
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
 import {
   getCachedStringWidth,
   sanitizeTerminalText,
@@ -77,24 +78,72 @@ export interface TranscriptViewProps {
   availableWidth?: number;
   /** Terminal height; per-item row caps follow ink staticAreaMaxItemHeight. */
   availableTerminalHeight?: number;
+  /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
+  thoughtsExpanded?: boolean;
+  /** `ui.showToolCallArgs`: ink draws each call's raw arguments on their own
+   * line under the card header. */
+  showToolCallArgs?: boolean;
+  /** The call whose confirmation is on screen. ink's trailing marker points at
+   * the call the user can answer, and only the waiting queue knows which that
+   * is: a PreToolUse `ask` hook re-arms an already approved call by appending it
+   * *behind* another waiting call, while its card goes back to pending in place,
+   * so transcript order and queue order disagree. */
+  awaitingCallId?: string;
+}
+
+/** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
+ * arena cards get a blank row above them, while status, tool and goal rows stay
+ * flush against whatever precedes them. `user` reaches the same total in ink by
+ * declaring the margin inside its own message component. `task` and `image`
+ * have no ink counterpart; both follow the tool rows they render beside. */
+function itemMarginTop(kind: LiveHistoryItem['kind']): number {
+  switch (kind) {
+    case 'user':
+    case 'assistant':
+    case 'thinking':
+    case 'user-shell':
+    case 'arena-agent':
+    case 'arena-session':
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
+  thoughtsExpanded = false,
+  showToolCallArgs = false,
+  awaitingCallId,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  const awaitingId = items.find(
+    (item) =>
+      item.kind === 'tool' &&
+      item.confirm === 'pending' &&
+      !item.done &&
+      item.id === awaitingCallId,
+  )?.id;
   return (
-    <box flexDirection="column">
+    <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
-        <TranscriptItem
+        <box
           key={item.id}
-          item={item}
-          maxRows={maxRows}
-          terminalHeight={availableTerminalHeight}
-          width={availableWidth}
-        />
+          flexDirection="column"
+          marginTop={itemMarginTop(item.kind)}
+        >
+          <TranscriptItem
+            item={item}
+            maxRows={maxRows}
+            terminalHeight={availableTerminalHeight}
+            width={availableWidth}
+            thoughtsExpanded={thoughtsExpanded}
+            showToolCallArgs={showToolCallArgs}
+            awaitingApproval={item.id === awaitingId}
+          />
+        </box>
       ))}
     </box>
   );
@@ -105,11 +154,17 @@ function TranscriptItem({
   maxRows,
   terminalHeight,
   width,
+  thoughtsExpanded,
+  showToolCallArgs,
+  awaitingApproval,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  thoughtsExpanded: boolean;
+  showToolCallArgs: boolean;
+  awaitingApproval: boolean;
 }) {
   switch (item.kind) {
     case 'user':
@@ -117,7 +172,7 @@ function TranscriptItem({
     case 'assistant':
       return <AssistantRow text={item.text} streaming={item.streaming} />;
     case 'thinking':
-      return <ThinkingRow text={item.text} done={item.done} />;
+      return <ThinkingRow item={item} allExpanded={thoughtsExpanded} />;
     case 'tool':
       return (
         <ToolCard
@@ -125,6 +180,9 @@ function TranscriptItem({
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
+          fullDetail={thoughtsExpanded}
+          showToolCallArgs={showToolCallArgs}
+          awaitingApproval={awaitingApproval}
         />
       );
     case 'task':
@@ -140,7 +198,9 @@ function TranscriptItem({
     case 'info':
       return (
         <box flexDirection="row">
-          <text fg={C.dim}>{`${MESSAGE_ICON.CIRCLE_FILLED} `}</text>
+          {/* A wrapped message would otherwise shrink the prefix and drop its
+              trailing space. */}
+          <text fg={C.dim} flexShrink={0}>{`${ICON.CIRCLE_FILLED} `}</text>
           <text fg={C.dim} {...selectionProps()}>
             {sanitizeTerminalText(item.text)}
           </text>
@@ -150,9 +210,12 @@ function TranscriptItem({
       return <ErrorRow text={item.text} hint={item.hint} />;
     case 'warning':
       return (
-        <text fg={C.yellow} {...selectionProps()}>
-          {sanitizeTerminalText(item.text)}
-        </text>
+        <box flexDirection="row">
+          <text fg={C.yellow} flexShrink={0}>{`${ICON.TRIANGLE} `}</text>
+          <text fg={C.yellow} {...selectionProps()}>
+            {sanitizeTerminalText(item.text)}
+          </text>
+        </box>
       );
     case 'retry':
       return (
@@ -222,14 +285,23 @@ function AssistantRow({
   );
 }
 
-function ThinkingRow({ text, done }: { text: string; done: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const meta = thinkingMeta(done, expanded, false);
+function ThinkingRow({
+  item,
+  allExpanded,
+}: {
+  item: LiveThinkingItem;
+  allExpanded: boolean;
+}) {
+  const [clickedOpen, setClickedOpen] = useState(false);
+  // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
+  // head id, so switching the global back off leaves a hand-opened thought open.
+  const expanded = allExpanded || clickedOpen;
+  const meta = thinkingMeta(item.done, expanded, false, item.durationMs);
   return (
     <box
       flexDirection="column"
       onMouseUp={() => {
-        if (done) setExpanded((v) => !v);
+        if (item.done) setClickedOpen((v) => !v);
       }}
     >
       <box flexDirection="row">
@@ -238,9 +310,9 @@ function ThinkingRow({ text, done }: { text: string; done: boolean }) {
           {meta.hint ? ` ${meta.hint}` : ''}
         </text>
       </box>
-      {!meta.collapsed && text ? (
+      {!meta.collapsed && item.text ? (
         <text fg={C.dim} attributes={4} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
+          {sanitizeTerminalText(item.text)}
         </text>
       ) : null}
     </box>
@@ -252,11 +324,17 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  fullDetail,
+  showToolCallArgs,
+  awaitingApproval,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  fullDetail: boolean;
+  showToolCallArgs: boolean;
+  awaitingApproval: boolean;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -268,13 +346,13 @@ function ToolCard({
   // fallback path does (R6-2).
   const text = toolCardText(description);
   // The description stays visible while a call awaits approval: an MCP
-  // confirmation dialog shows only the server and tool names, so the card
-  // is the only surface carrying the arguments (R5-9) — the settled 5-row
-  // cap would hide the tail of exactly the payload being approved. The
-  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and a hook-forced
+  // confirmation body shows only the server and tool names, so the card is
+  // the only surface carrying the arguments (R5-9) — the settled 5-row cap
+  // would hide the tail of exactly the payload being approved. The pending
+  // budget stays viewport- and payload-aware (pendingCardMaxRows): the
+  // confirmation renders in flow below the transcript, and a hook-forced
   // confirmation renders this same payload in its body, so the card must
-  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
+  // yield rows for it or ctrl-s expansion pushes the options off screen.
   const cap = capToolCardDescription(
     text,
     name,
@@ -284,6 +362,19 @@ function ToolCard({
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
+  // ink measures the args row against the header's own inner width (the status
+  // glyph's columns are not available to it), so the wrapped-row cap bounds
+  // what actually reaches the screen.
+  const innerWidth = width - STATUS_INDICATOR_WIDTH;
+  const argsRow =
+    showToolCallArgs && item.args
+      ? formatInlineToolArgsJson(
+          item.args,
+          description,
+          fullDetail,
+          innerWidth > 0 ? innerWidth : undefined,
+        )
+      : undefined;
   return (
     <box flexDirection="column">
       <box flexDirection="row">
@@ -304,12 +395,21 @@ function ToolCard({
           </text>
         ) : null}
         {suffix ? <text fg={C.dim}>{sanitizeTerminalText(suffix)}</text> : null}
+        {awaitingApproval ? (
+          // ink's TrailingIndicator: a primary-coloured arrow at the end of the
+          // awaiting call's own row, not a row of its own.
+          <text fg={C.text}>{' ←'}</text>
+        ) : null}
       </box>
       {cap.hiddenRows > 0 && (
         <text fg={C.dim}>{hiddenTailLinesLabel(cap.hiddenRows)}</text>
       )}
-      {item.confirm === 'pending' && !item.done ? (
-        <text fg={C.yellow}> (awaiting approval)</text>
+      {argsRow ? (
+        <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <text fg={C.dim} {...selectionProps()}>
+            {argsRow}
+          </text>
+        </box>
       ) : null}
       <ToolCardBody item={item} maxRows={maxRows} width={width} />
     </box>
@@ -444,18 +544,17 @@ function CompactionRow({
 
 function ErrorRow({ text, hint }: { text: string; hint?: string }) {
   return (
-    <box flexDirection="column">
-      <box flexDirection="row">
-        <text fg={C.red}>{`${ICON.CROSS} `}</text>
-        <text fg={C.red} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
-        </text>
-      </box>
-      {hint ? (
-        <text fg={C.accent} {...selectionProps()}>
-          {sanitizeTerminalText(hint)}
-        </text>
-      ) : null}
+    <box flexDirection="row">
+      {/* ink's error prefix is a literal ✕, not the shared ICON.CROSS. */}
+      <text fg={C.red} flexShrink={0}>
+        {'✕ '}
+      </text>
+      <text fg={C.red} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+        {hint ? (
+          <span fg={C.dim}>{` (${sanitizeTerminalText(hint)})`}</span>
+        ) : null}
+      </text>
     </box>
   );
 }
@@ -537,6 +636,11 @@ function GoalCard({
           {`  ${sanitizeTerminalText(view.reason)}`}
         </text>
       ) : null}
+      {view.checkpoint ? (
+        <text fg={C.yellow} {...selectionProps()}>
+          {`  ${sanitizeTerminalText(view.checkpoint)}`}
+        </text>
+      ) : null}
     </box>
   );
 }
@@ -579,8 +683,8 @@ function LegacyGoalCard({ legacy }: { legacy: LiveGoalLegacyData }) {
 function AwayRecapRow({ text }: { text: string }) {
   return (
     <box flexDirection="row">
-      <text fg={C.dim}>{`${ICON.REFERENCE} `}</text>
-      <text fg={C.dim} attributes={1}>
+      <text fg={C.dim} flexShrink={0}>{`${ICON.REFERENCE} `}</text>
+      <text fg={C.dim} attributes={1} flexShrink={0}>
         {'recap: '}
       </text>
       <text fg={C.dim} attributes={4} {...selectionProps()}>

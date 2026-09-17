@@ -143,6 +143,7 @@ export default {
   'from {{marketplace}}': '来自 {{marketplace}}',
   installed: '已安装',
   '{{count}} Agents': '{{count}} 个智能体',
+  '{{count}} Workflows': '{{count}} 个工作流',
   '{{count}} Commands': '{{count}} 个命令',
   '{{count}} MCP': '{{count}} 个 MCP',
   '{{count}} Skills': '{{count}} 个技能',
@@ -169,6 +170,7 @@ export default {
   // acronyms are kept in English (Agent, Grep, Glob, LSP), as is a product name
   // inside an otherwise-translated label (e.g. `Notebook`).
   // ============================================================================
+  'toolDisplayName.Exec': '执行代码',
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
@@ -220,6 +222,23 @@ export default {
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
   'toolDisplayName.ImageGen': '图像生成',
+  'toolDisplayName.DownsampleImage': '降采样图像',
+  'toolDisplayName.DownscaleVideo': '降采样视频',
+  'toolDisplayName.DownsampleAudio': '降采样音频',
+  'toolDisplayName.ExtractKeyframes': '提取关键帧',
+  'toolDisplayName.ExtractAudio': '提取音轨',
+  'toolDisplayName.ClipVideo': '剪辑视频',
+  'toolDisplayName.ClipImage': '裁剪图像',
+  'toolDisplayName.ClipAudio': '剪辑音频',
+  'toolDisplayName.CaptionImage': '描述图像',
+  'toolDisplayName.CaptionAudio': '描述音频',
+  'toolDisplayName.OcrImage': '识别图像文字',
+  'toolDisplayName.UnderstandVideoSegments': '分段理解视频',
+  'toolDisplayName.ConvertImage': '转换图像',
+  'toolDisplayName.TranscribeAudio': '转写音频',
+  'toolDisplayName.RecallMediaMemory': '召回媒体记忆',
+  '[fixed-only: runs via media policies, not the model]':
+    '［仅固定策略：由媒体策略调用，不开放给模型］',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -350,11 +369,10 @@ export default {
   'Search:': '搜索：',
   'type to filter…': '输入以过滤…',
   'No skills are currently available.': '当前没有可用的技能。',
-  'All available skills are locked at a higher scope (see below).':
-    '所有可用技能都被更高范围锁定（详见下方）。',
   'No skills match the search.': '没有匹配搜索的技能。',
-  'Locked by higher-scope settings (cannot toggle here):':
-    '被更高范围设置锁定（此处无法切换）：',
+  'Locked by settings entries you cannot toggle here:':
+    '被无法在此切换的设置条目锁定：',
+  '{{count}} locked not shown': '{{count}} 个已锁定技能未显示',
   'higher scope': '更高范围',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已锁定：{{scope}}]',
@@ -724,6 +742,7 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Code Mode Only (Experimental)': '仅代码模式（实验性）',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',
@@ -894,6 +913,10 @@ export default {
   'This extension will install the following skills:': '此扩展将安装以下技能：',
   'This extension will install the following subagents:':
     '此扩展将安装以下子智能体：',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    '此扩展将安装以下工作流（可启动子智能体的 JavaScript 脚本）：',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    '以下工作流脚本与已安装版本相比有改动：{{names}}。',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
@@ -965,6 +988,7 @@ export default {
   'Context files:': '上下文文件：',
   'Skills:': '技能：',
   'Agents:': '智能体：',
+  'Workflows:': '工作流：',
   'MCP servers:': 'MCP servers：',
   'Link extension failed to install.': '链接扩展安装失败。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1059,6 +1083,12 @@ export default {
   '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Reopen this menu to reload hook definitions.':
+    '重新打开此菜单可重新加载 Hook 定义。',
+  'Hook controls and HTTP security settings require a restart.':
+    'Hook 控制项和 HTTP 安全设置需要重启后生效。',
+  'Failed to reload hook definitions: {{error}}':
+    '重新加载 Hook 定义失败：{{error}}',
   'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
   // Hooks - Detail Step
   'Exit codes:': '退出码：',
@@ -1075,6 +1105,20 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Safe mode is on, so no hooks run in this session.':
+    '安全模式已开启，本会话不会运行任何 Hook。',
+  'Bare mode is on, so no hooks run in this session.':
+    '精简模式已开启，本会话不会运行任何 Hook。',
+  'All hooks are disabled by the disableAllHooks setting.':
+    '所有 Hook 已被 disableAllHooks 设置禁用。',
+  'Timeout:': '超时：',
+  'Status message:': '状态消息：',
+  'Condition:': '条件：',
+  'Options:': '选项：',
+  'Skill:': '技能：',
+  'runs in background': '后台运行',
+  'runs once': '只运行一次',
+  sequential: '顺序执行',
   // Hooks - Disabled Step
   'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
   'All hooks are currently disabled. You have {{count}} that are not running.':
@@ -2239,8 +2283,6 @@ export default {
     '选择用于塑造回答表达方式的输出风格（{{styles}}，或自定义风格名称）。',
   'It is saved but does not apply while this workspace is untrusted.':
     '已保存，但此工作区不受信任时不会生效。',
-  'Set a goal — keep working until the condition is met':
-    '设定目标 — 持续工作直到条件满足',
   'Set or control a session goal': '设定或控制会话目标',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',
@@ -2336,6 +2378,11 @@ export default {
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',
   'needs approval': '待审批',
+  'Large workflow': '大型工作流',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    '大型工作流：已排定 {{agents}} 个 agent（告警阈值 {{cap}}）。',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    '大型工作流：预计输出 ~{{tokens}} 个 token（告警阈值 {{cap}}）。',
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
@@ -2550,6 +2597,8 @@ export default {
   '{{count}} skills': '{{count}} 个技能',
   '{{count}} agent': '{{count}} 个代理',
   '{{count}} agents': '{{count}} 个代理',
+  '{{count}} workflow': '{{count}} 个工作流',
+  '{{count}} workflows': '{{count}} 个工作流',
   '{{count}} hook': '{{count}} 个钩子',
   '{{count}} hooks': '{{count}} 个钩子',
   '{{count}} extension MCP server': '{{count}} 个扩展 MCP 服务器',

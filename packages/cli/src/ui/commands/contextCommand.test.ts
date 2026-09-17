@@ -57,6 +57,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getUserMemory: vi.fn().mockReturnValue(''),
     getSystemPrompt: vi.fn().mockReturnValue(undefined),
     getOutputStyle: vi.fn().mockReturnValue(undefined),
+    getCodeModeOnly: vi.fn().mockReturnValue(false),
     isTodoWriteEnabled: vi.fn().mockReturnValue(false),
     getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
@@ -96,6 +97,7 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
@@ -226,6 +228,7 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
@@ -276,6 +279,7 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
       isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
@@ -293,6 +297,62 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(data.builtinTools).toHaveLength(1);
     expect(data.builtinTools[0].name).toBe('web_fetch');
+  });
+
+  it('excludes fixed-only media-policy tools from the per-tool breakdown (D6)', async () => {
+    // A media-policy tool without modelAccess.enabled is stripped from
+    // getFunctionDeclarations() (zero prompt tokens), so listing it in the
+    // breakdown would make the per-tool sum exceed allToolsTokens. One with
+    // modelAccess.enabled IS declared to the model and must stay listed.
+    const descriptor = {
+      kind: 'media_policy',
+      inputMediaTypes: ['image'],
+      outputs: [],
+    };
+    const hiddenPolicyTool = {
+      name: 'omni_downsample_image',
+      schema: { name: 'omni_downsample_image', description: 'policy schema' },
+      mediaPolicyDescriptor: descriptor,
+    };
+    const exposedPolicyTool = {
+      name: 'omni_probe_media',
+      schema: { name: 'omni_probe_media', description: 'probe schema' },
+      mediaPolicyDescriptor: descriptor,
+    };
+    const config = {
+      ...mockConfig,
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        contextWindowSize: 32_000,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi
+          .fn()
+          .mockReturnValue([hiddenPolicyTool, exposedPolicyTool]),
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([exposedPolicyTool.schema]),
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
+      }),
+      getOmniPolicyToolsSettings: vi.fn().mockReturnValue({
+        omni_probe_media: { modelAccess: { enabled: true } },
+      }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+      getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0].name).toBe('omni_probe_media');
   });
 
   it('lists the auto-memory section as a separate memory entry (#7651)', async () => {

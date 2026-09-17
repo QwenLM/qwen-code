@@ -95,6 +95,7 @@ describe('Session review-worktree lease sweep', () => {
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
       finishManagedAutoMemoryRecall: vi.fn(),
+      captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };
 
@@ -108,7 +109,9 @@ describe('Session review-worktree lease sweep', () => {
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      getActiveTodoPlanWriterOwner: vi.fn().mockReturnValue(undefined),
       setActiveTodoReminder: vi.fn(),
       startActiveTodoWorkChain: vi.fn(),
       startAutomaticActiveTodoWorkChain: vi.fn(),

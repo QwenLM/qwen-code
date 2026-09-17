@@ -164,6 +164,7 @@ export function getAllSettingKeys(): string[] {
 const SETTINGS_DIALOG_ORDER: readonly string[] = [
   // Workflow Control - most impactful setting
   'tools.approvalMode',
+  'tools.codeModeOnly',
 
   // Localization - users often set this first
   'general.language',
@@ -181,6 +182,7 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'ide.enabled',
   'ui.showLineNumbers',
   'ui.hideTips',
+  'ui.showToolCallDetails',
   'general.terminalBell',
   'ui.enableWelcomeBack',
 
@@ -245,6 +247,14 @@ export function validateSettingValue(
     default:
       return `Settings of type '${def.type}' cannot be modified via this API`;
   }
+  if (
+    (typeof value === 'string' || typeof value === 'number') &&
+    // `includes` is SameValueZero, so a `[0]` exclusion also catches the `-0`
+    // that `Number('-0')` produces and `JSON.stringify` would persist as `0`.
+    def.excludedValues?.includes(value as string | number)
+  ) {
+    return `Value must not be ${String(value)}`;
+  }
   return undefined;
 }
 
@@ -300,7 +310,10 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
   {
     section: 'agents',
     key: 'crossSessionMessaging',
-    strictness: (value: unknown): number => (value === true ? 0 : 1),
+    // Unset means on — the default — so it ranks with `true`. Anything the
+    // reader does not recognize keeps the socket closed, like `false`.
+    strictness: (value: unknown): number =>
+      value === true || value === undefined ? 0 : 1,
   },
   {
     section: 'agents',

@@ -73,6 +73,10 @@ import {
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import { parseWebShellGoalCommand } from '../utils/goalCondition';
 import { buildGoalControlRequest } from '../utils/goalControlRequest';
+import {
+  useContextUsageControls,
+  type RegisterContextUsageControls,
+} from '../hooks/useContextUsageControls';
 import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -100,6 +104,7 @@ import type { MessageListHandle } from './MessageList';
 import { TranscriptViewport } from './TranscriptViewport';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { SessionRecoveryBanner } from './SessionRecoveryBanner';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
@@ -222,6 +227,12 @@ export interface ChatPaneProps {
     sessionId: string,
     sessionActions: DaemonSessionActions,
   ) => void;
+  registerContextUsageControls?: RegisterContextUsageControls;
+  onBeforeContextCompress?: (sessionId: string) => void;
+  onOpenContextUsage?: (
+    sessionId: string,
+    sessionActions: DaemonSessionActions,
+  ) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
@@ -265,6 +276,9 @@ export function ChatPane({
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
+  registerContextUsageControls,
+  onBeforeContextCompress,
+  onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
   onFirstPromptAdmitted,
@@ -291,11 +305,13 @@ export function ChatPane({
   );
   // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
   // live prompt state into its own provider (#9487).
-  const sessionHasActivePrompt = useDaemonActivePromptBridge(
+  const daemonHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePrompt =
+    daemonHasActivePrompt || !!connection.backgroundTurn;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
@@ -680,13 +696,14 @@ export function ChatPane({
   // timestamp) rather than letting StreamingStatus fall back to "now" — so a
   // pane opened mid-turn shows the real elapsed time, not a reset-to-zero clock.
   const activeTurnStartedAt = useMemo(() => {
+    if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
       if (message?.role === 'user') return message.timestamp;
     }
     return undefined;
-  }, [messages, isResponding]);
+  }, [messages, isResponding, connection.backgroundTurn]);
 
   const controlGoal = useCallback(
     async (
@@ -1341,13 +1358,12 @@ export function ChatPane({
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [commands, connection.skills]);
+  const contextUsageAvailable = !shouldBlockComposerSubmit({
+    connectionStatus: connection.status,
+    hasSession: Boolean(connection.sessionId),
+  });
   const handleShowContextUsage = useCallback(() => {
-    if (
-      shouldBlockComposerSubmit({
-        connectionStatus: connection.status,
-        hasSession: Boolean(connection.sessionId),
-      })
-    ) {
+    if (!contextUsageAvailable) {
       return;
     }
     const owner = sessionOwnerGuard.capture();
@@ -1370,14 +1386,7 @@ export function ChatPane({
         if (!owner.isCurrent()) return;
         reportError(error, 'Failed to load context usage');
       });
-  }, [
-    actions,
-    connection.sessionId,
-    connection.status,
-    reportError,
-    sessionOwnerGuard,
-    store,
-  ]);
+  }, [actions, contextUsageAvailable, reportError, sessionOwnerGuard, store]);
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((model) => ({
@@ -1427,6 +1436,31 @@ export function ChatPane({
   // workspace provider (the pane's own session connection may not carry it).
   const showWorkspaceChip =
     hasMultipleWorkspaces(workspace.capabilities) && !!paneWorkspaceCwd;
+  const prepareContextCompression = useCallback(() => {
+    clearFollowup();
+    if (connection.sessionId) onBeforeContextCompress?.(connection.sessionId);
+  }, [clearFollowup, connection.sessionId, onBeforeContextCompress]);
+  const handleOpenContextUsage = useCallback(() => {
+    if (connection.sessionId)
+      onOpenContextUsage?.(connection.sessionId, actions);
+  }, [actions, connection.sessionId, onOpenContextUsage]);
+  const contextUsageControls = useContextUsageControls({
+    connection,
+    actions,
+    ownerGuard: sessionOwnerGuard,
+    onBeforeCompress: prepareContextCompression,
+    busy: streamingState !== 'idle' || sessionHasActivePrompt,
+    writeBlocked:
+      Boolean(connection.loadingTranscript) ||
+      admissionPayloadLocked ||
+      approvalActive ||
+      modeControlsBusy,
+  });
+  useEffect(() => {
+    if (contextUsageControls)
+      return registerContextUsageControls?.(contextUsageControls);
+  }, [contextUsageControls, registerContextUsageControls]);
+
   // Memoized so the array identity is stable across renders — `ChatEditor` is
   // `React.memo`, and a fresh `[...]` each render would defeat it.
   const paneToolbarActions = useMemo(
@@ -1600,7 +1634,25 @@ export function ChatPane({
           enabled={monitorDetailsSupported}
           onOpen={openMonitorDetails}
         >
-          <SubagentDetailsProvider onOpen={openSubagentDetails}>
+          <SubagentDetailsProvider
+            onOpen={openSubagentDetails}
+            onOpenBackground={
+              onRightPanelOpen && connection.sessionId
+                ? (turn) => {
+                    if (!connection.sessionId) return;
+                    onRightPanelOpen({
+                      id: `background:${connection.sessionId}:${turn.taskId}`,
+                      kind: 'background_task',
+                      title: turn.label ?? turn.kind,
+                      turnId: turn.turnId,
+                      backgroundTurn: turn,
+                      sourceSessionId: connection.sessionId,
+                      workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
+                    });
+                  }
+                : undefined
+            }
+          >
             <WorkflowDetailsProvider tasks={sessionTasks}>
               <TranscriptViewport
                 ref={transcriptViewportRef}
@@ -1696,6 +1748,10 @@ export function ChatPane({
             startedAt={activeTurnStartedAt}
             showPhrase={false}
             hasActivePrompt={sessionHasActivePrompt}
+            backgroundLabel={
+              connection.backgroundTurn?.label ??
+              connection.backgroundTurn?.kind
+            }
           />
           {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
             <div
@@ -1749,6 +1805,11 @@ export function ChatPane({
               )}
             </div>
           )}
+          <SessionRecoveryBanner
+            blocked={
+              approvalActive || admissionPayloadLocked || sessionHasActivePrompt
+            }
+          />
           <ChatEditor
             ref={editorRef}
             onSubmit={handleSubmit}
@@ -1760,9 +1821,23 @@ export function ChatPane({
             onPopQueuedMessages={editLastQueuedPrompt}
             onClearQueuedMessages={clearQueuedPrompts}
             visibleToolbarActions={paneToolbarActions}
-            tokenCount={connection.tokenCount ?? 0}
-            contextWindow={connection.contextWindow ?? 0}
-            onShowContextUsage={handleShowContextUsage}
+            tokenCount={
+              contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+            }
+            contextWindow={
+              contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+            }
+            onShowContextUsage={
+              contextUsageAvailable ? handleShowContextUsage : undefined
+            }
+            contextUsageControls={
+              onOpenContextUsage ? contextUsageControls : undefined
+            }
+            onOpenContextUsage={
+              contextUsageAvailable && onOpenContextUsage
+                ? handleOpenContextUsage
+                : undefined
+            }
             workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}

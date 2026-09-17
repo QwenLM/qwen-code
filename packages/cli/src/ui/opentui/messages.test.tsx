@@ -168,22 +168,28 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(maxHistoryItemRows(50)).toBe(200);
   });
 
-  it('budgets a pending card below the confirmation dialog footprint', () => {
+  it('budgets a pending card below the inline confirmation footprint', () => {
     // At 80 rows the ink-parity cap is 320 — 4x past the viewport. The
-    // pending budget is bounded by the collapsed dialog footprint, and by
-    // the payload the dialog renders expanded: a hook-forced confirmation
+    // pending budget is bounded by the collapsed confirmation footprint, and
+    // by the payload it renders expanded: a hook-forced confirmation
     // duplicates the card's description in its body, so a wide payload
-    // shrinks the card or ctrl-s expansion pushes the dialog off screen
+    // shrinks the card or ctrl-s expansion pushes the options off screen
     // (mem0 e2e regression).
     expect(maxHistoryItemRows(80)).toBe(320);
-    expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
-    expect(pendingCardMaxRows(100, 0, 110)).toBe(54);
-    // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns.
-    expect(pendingCardMaxRows(80, 3900, 110)).toBe(20);
+    // No payload: the collapsed-confirmation bound (80 - 43) is the tight one.
+    expect(pendingCardMaxRows(80, 0, 110)).toBe(37);
+    expect(pendingCardMaxRows(100, 0, 110)).toBe(57);
+    // A ~3.9k-char payload wraps to ~37 confirmation rows at 110 columns; the
+    // expanded bound leaves (80 - 18 - 37) * 0.7 = 17 card rows.
+    expect(pendingCardMaxRows(80, 3900, 110)).toBe(17);
   });
 
   it('falls back to the settled cap on short terminals', () => {
     expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    // At 48 the viewport reserve and the floor are the same 5 rows, so this
+    // probe also passes with the floor deleted. At 46 the inner bound is 3 and
+    // only the floor lifts it, which is what this one pins.
+    expect(pendingCardMaxRows(48, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
     expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
   });
 
@@ -346,18 +352,36 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
 });
 
 describe('message meta (ink glyph/color parity)', () => {
+  // ink's ICON table appends U+FE0E to force the text presentation; the
+  // selector is invisible in source, so it must not be stripped as a typo.
   it('keeps the user/assistant prefixes', () => {
     expect(userMessageMeta().glyph).toBe('>');
-    expect(assistantMessageMeta().glyph).toBe('◆');
+    expect(assistantMessageMeta().glyph).toBe('◆\uFE0E');
   });
 
   it('keeps the thinking collapse hint semantics', () => {
     const live = thinkingMeta(false, false, true);
-    expect(live.icon).toBe('∵');
+    expect(live.icon).toBe('∵\uFE0E');
     expect(live.collapsed).toBe(false);
     const collapsed = thinkingMeta(true, false, true);
-    expect(collapsed.icon).toBe('∴');
+    expect(collapsed.icon).toBe('∴\uFE0E');
     expect(collapsed.hint).toContain('ctrl+o');
+  });
+
+  it('labels a committed thought with ink’s duration wording', () => {
+    expect(thinkingMeta(true, false, false, 400).label).toBe('Thought briefly');
+    expect(thinkingMeta(true, false, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    expect(thinkingMeta(true, true, false, 12_000).label).toBe(
+      'Thought for 12s',
+    );
+    // No duration stamped: ink falls back to the pending wording rather than
+    // naming a time it never measured.
+    expect(thinkingMeta(true, false, false).label).toBe('Thinking');
+    // The duration is only stamped when the thought ends, so a live row never
+    // carries one.
+    expect(thinkingMeta(false, false, false, 12_000).label).toBe('Thinking…');
   });
 
   it('marks canceled tools for strikethrough', () => {
@@ -392,6 +416,27 @@ describe('message meta (ink glyph/color parity)', () => {
     expect(meta.strikethrough).toBe(true);
     expect(meta.glyph).toBe(TOOL_STATUS.CANCELED);
     expect(meta.color).not.toBe(C.red);
+  });
+
+  it("shows an approved call that has not started with ink's pending glyph", () => {
+    // The scheduler holds an approved call in 'scheduled' while a sibling
+    // still awaits its own approval; ink draws that as pending, not running.
+    const item = {
+      kind: 'tool',
+      id: 't',
+      tool: 'run_shell_command',
+      title: 'Shell touch a',
+      output: '',
+      done: false,
+      confirm: 'approved',
+      queued: true,
+    } as unknown as LiveToolItem;
+    const queued = toolStatusMeta(item);
+    expect(queued.glyph).toBe(TOOL_STATUS.PENDING);
+    expect(queued.color).toBe(C.green);
+    expect(toolStatusMeta({ ...item, queued: false }).glyph).toBe(
+      TOOL_STATUS.EXECUTING,
+    );
   });
 });
 

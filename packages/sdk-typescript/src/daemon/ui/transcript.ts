@@ -412,6 +412,7 @@ function applyDaemonTranscriptEvent(
       }
       break;
     case 'assistant.usage':
+      if (isSubagentUsageDuplicate(next, event)) break;
       if (event.parentToolCallId && !next.retainSubagentBlocks) {
         applySubagentUsageToParentTool(next, event);
       } else {
@@ -651,7 +652,6 @@ function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  if (isLegacySubagentUsageDuplicate(state, event)) return;
   const activeBlockId =
     state.activeAssistantBlockId ??
     (event.parentToolCallId
@@ -668,11 +668,11 @@ function applyAssistantUsage(
   block.updatedAt = state.now;
 }
 
-function isLegacySubagentUsageDuplicate(
+function isSubagentUsageDuplicate(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): boolean {
-  if (event.parentToolCallId || !event.sourceRecordIds?.length) return false;
+  if (!event.sourceRecordIds?.length) return false;
   const sourceRecordIds = new Set(event.sourceRecordIds);
   for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
     const block = state.blocks[i]!;
@@ -688,6 +688,9 @@ function isLegacySubagentUsageDuplicate(
       rawOutput && isRecord(rawOutput['executionSummary'])
         ? rawOutput['executionSummary']
         : undefined;
+    // The same record and parent identify an aggregate already on the card,
+    // even when merging live usage retained larger counts than this snapshot.
+    if (summary && event.parentToolCallId === block.toolCallId) return true;
     return (
       summary?.['inputTokens'] === event.usage.inputTokens &&
       summary['outputTokens'] === event.usage.outputTokens &&
@@ -1160,6 +1163,12 @@ function upsertToolBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1377,6 +1386,12 @@ function appendShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1423,6 +1438,12 @@ function appendUserShellBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1470,6 +1491,12 @@ function upsertPermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1526,6 +1553,12 @@ function resolvePermissionBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1594,6 +1627,12 @@ function appendUnrecognizedDiagnostic(
       ? { originatorClientId: event.originatorClientId }
       : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1621,6 +1660,12 @@ function appendStatusBlock(
     createdAt: state.now,
     updatedAt: state.now,
     ...(event?.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event?.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event?.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -1669,14 +1714,46 @@ function appendPromptCancelledBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'prompt.cancelled' }>,
 ): void {
+  const existing = event.promptId
+    ? state.blocks.find(
+        (block) =>
+          block.kind === 'prompt_cancelled' &&
+          block.promptId === event.promptId,
+      )
+    : undefined;
+  if (existing) {
+    if (event.elapsedMs === undefined) return;
+    const block = getWritableBlockById(state, existing.id);
+    if (block?.kind !== 'prompt_cancelled') return;
+    const bytesBefore = estimateBlockBytes(block);
+    block.elapsedMs = event.elapsedMs;
+    if (event.serverTimestamp !== undefined) {
+      block.serverTimestamp = event.serverTimestamp;
+    }
+    if (event.sourceRecordIds) block.sourceRecordIds = event.sourceRecordIds;
+    block.updatedAt = state.now;
+    state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+    return;
+  }
   const block: DaemonPromptCancelledTranscriptBlock = {
     id: allocateBlockId(state, 'prompt_cancelled'),
     kind: 'prompt_cancelled',
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
+    ...(event.promptId ? { promptId: event.promptId } : {}),
+    ...(event.elapsedMs !== undefined ? { elapsedMs: event.elapsedMs } : {}),
+    ...(event.sourceRecordIds
+      ? { sourceRecordIds: event.sourceRecordIds }
+      : {}),
     ...(event.reason ? { reason: event.reason } : {}),
     ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.backgroundTurn
+      ? {
+          backgroundTurn: event.backgroundTurn,
+          promptId: event.backgroundTurn.turnId,
+        }
+      : {}),
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
@@ -2026,7 +2103,13 @@ function rewindTranscriptToUserTurn(
   let lastUserIndex = -1;
 
   for (let index = 0; index < state.blocks.length; index += 1) {
-    if (state.blocks[index]?.kind !== 'user') continue;
+    const block = state.blocks[index];
+    if (
+      block?.kind !== 'user' ||
+      block.meta?.['source'] === 'background_notification'
+    ) {
+      continue;
+    }
     lastUserIndex = index;
     if (userTurnIndex === targetTurnIndex) {
       truncateTranscriptBeforeBlock(state, index);

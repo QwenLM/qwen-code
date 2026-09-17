@@ -514,6 +514,7 @@ describe('CLI entry import boundary', () => {
       '@qwen-code/acp-bridge/spawnChannel',
       '@qwen-code/acp-bridge/bridgeClient',
       '@qwen-code/acp-bridge/bridgeErrors',
+      '@qwen-code/qwen-code-core',
     ];
     const forbiddenImports = [...graph.externalValueImports].filter(
       (specifier) => forbiddenExternalImports.includes(specifier),
@@ -806,6 +807,18 @@ describe('serve fast path argument parsing', () => {
     expect(
       parseServeFastPathArgs(['serve', '--memory-pressure-mode', 'enforce']),
     ).toEqual({ kind: 'fallback' });
+  });
+
+  it('parses opt-in child count admission in both flag forms', () => {
+    for (const args of [
+      ['--child-heap-mode', 'admit'],
+      ['--child-heap-mode=admit'],
+    ]) {
+      expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+        kind: 'serve',
+        options: { childHeapMode: 'admit' },
+      });
+    }
   });
 
   it('parses --child-heap-mode and falls back on an unknown value', () => {

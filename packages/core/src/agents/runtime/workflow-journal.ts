@@ -30,9 +30,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
- * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
- * don't bust the cache.
+ * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
+ * `disallowedTools`, `tools`) with object keys sorted, so cosmetic opt
+ * differences (a re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -47,6 +47,10 @@ import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../workflow-correlation.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
 
@@ -85,10 +89,13 @@ export interface JournalFailedEntry {
 export type JournalEntry =
   | JournalStartedEntry
   | JournalResultEntry
-  | JournalFailedEntry;
+  | JournalFailedEntry
+  | { type: 'source'; version: 1; sourceRef: WorkflowSourceRef };
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
+  sourceRef?: WorkflowSourceRef;
+  sourceError?: string;
   /** key → the completed result entry (last write wins). */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
@@ -98,11 +105,38 @@ export interface JournalReplay {
 }
 
 /**
+ * The `agent()` options that change what a dispatch does, as one list: the
+ * resume key projects exactly these, and the orchestrator's fast path, which
+ * hands the session config to the agent untouched, is taken only when every
+ * one of them is absent. `label` / `phase` / `stallMs` are deliberately not
+ * here: they are cosmetic or operational.
+ */
+export const DISPATCH_AFFECTING_AGENT_OPTS = [
+  'schema',
+  'model',
+  'effort',
+  'isolation',
+  'agentType',
+  'workingDir',
+  'disallowedTools',
+  'tools',
+] as const;
+
+/**
  * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
- * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
- * operational and must NOT bust the cache. Object keys are sorted recursively
- * so a re-serialized schema with reordered keys hashes the same.
+ * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
+ * `disallowedTools` / `tools` change what the dispatch does; `label` / `phase` /
+ * `stallMs` are cosmetic or operational and must NOT bust the cache. Object
+ * keys are sorted recursively so a re-serialized schema with reordered keys
+ * hashes the same.
+ *
+ * `effort`, `disallowedTools` and `tools` change how hard the agent thinks and
+ * what it may do, so a resume that changed any of them has to run live. The
+ * sandbox normalizes them before they get here — an effort alias to its tier, a
+ * tool list to a sorted, de-duplicated array with built-in display names mapped
+ * to tool names — so `'med'` and `'medium'`, `Edit` and `edit`, or the same
+ * tools in another order, are one key. Any other name is kept as written, so
+ * two spellings that reach the same MCP tool are two keys.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
@@ -111,13 +145,7 @@ export interface JournalReplay {
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of [
-    'schema',
-    'model',
-    'isolation',
-    'agentType',
-    'workingDir',
-  ] as const) {
+  for (const k of DISPATCH_AFFECTING_AGENT_OPTS) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;
@@ -196,6 +224,8 @@ export function deriveArgsSeed(args: unknown): string {
  * one understands.
  */
 export function buildReplay(entries: JournalEntry[]): JournalReplay {
+  let sourceRef: WorkflowSourceRef | undefined;
+  let sourceError: string | undefined;
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
   const failed = new Set<string>();
@@ -212,9 +242,30 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
       else started.set(e.key, [e]);
     } else if (e.type === 'failed') {
       failed.add(e.key);
+    } else if (e.type === 'source') {
+      try {
+        const ref = readWorkflowSourceRef(e.sourceRef);
+        if (
+          e.version !== 1 ||
+          !ref ||
+          (sourceRef &&
+            (sourceRef.id !== ref.id || sourceRef.revision !== ref.revision))
+        ) {
+          throw new Error('Conflicting or unsupported workflow source record.');
+        }
+        sourceRef = ref;
+      } catch {
+        sourceError = 'Workflow journal contains invalid source metadata.';
+      }
     }
   }
-  return { results, started, failed };
+  return {
+    results,
+    started,
+    failed,
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(sourceError ? { sourceError } : {}),
+  };
 }
 
 /**

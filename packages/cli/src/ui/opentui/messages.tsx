@@ -27,34 +27,17 @@
 
 import { C } from './theme.js';
 import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
-import { ICON } from '../constants.js';
+import { ICON, TOOL_STATUS } from '../constants.js';
 import {
   getCachedStringWidth,
   sanitizeMultilineForDisplay,
   toCodePoints,
 } from '../utils/textUtils.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
+import { formatDuration } from '../utils/displayUtils.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-
-/** The original TOOL_STATUS glyphs (ui/constants.ts). */
-export const TOOL_STATUS = {
-  SUCCESS: '✓',
-  PENDING: 'o',
-  EXECUTING: '⊷',
-  CONFIRMING: '?',
-  CANCELED: '-',
-  ERROR: 'x',
-} as const;
-
-/** The original narrow-presentation icons (ui/constants.ts). */
-export const MESSAGE_ICON = {
-  DIAMOND: '◆',
-  THEREFORE: '∴',
-  BECAUSE: '∵',
-  CIRCLE_FILLED: '●',
-} as const;
 
 /** Width the ink ToolStatusIndicator reserves for the glyph column. */
 export const STATUS_INDICATOR_WIDTH = 2;
@@ -239,21 +222,27 @@ export function tailWindowPhysical(
 export const TOOL_CARD_DESCRIPTION_ROWS = 5;
 
 /**
- * Rows reserved below a pending tool card so the confirmation dialog's
- * COLLAPSED body (frame + title/question + 20-row body + outcome list +
- * footer ≈ 36 rows) still ends inside the viewport. Excludes any payload
- * the dialog only reveals on ctrl-s expansion — that bound lives in
- * pendingCardMaxRows.
+ * Rows reserved below a pending tool card so the inline confirmation's
+ * COLLAPSED body (padding + body margins + question + 20-row body +
+ * hidden-tail and ctrl-s labels + outcome list + waiting row ≈ 33 rows)
+ * still ends inside the viewport. Excludes any payload the confirmation only
+ * reveals on ctrl-s expansion — that bound lives in pendingCardMaxRows.
  */
-export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 46;
+export const PENDING_CARD_VIEWPORT_RESERVE_ROWS = 43;
 
 /**
- * Rows above a pending card's expanded confirmation dialog: the transcript
- * rows that stay on screen above it (prompt echo plus the card's own
- * hidden-tail and awaiting rows ≈ 3) plus the dialog's chrome (frame,
- * title, body margins, outcome list, footer ≈ 11).
+ * Rows a pending card's expanded confirmation does not own. Above the card's
+ * description rows: the banner (6), the startup notices a fresh session shows
+ * (≈ 3), the prompt echo with its turn margin (2), and the card's own
+ * hidden-tail row (1) — the awaiting marker is inline on the card row. In the
+ * confirmation itself, around the body: the question row (1), the outcome list
+ * (2), and the waiting row the loading indicator takes (1). The sum (≈ 16) is
+ * padded to 18 against notice timing; the frame border, title and footer hint
+ * an earlier revision reserved are gone with the bordered dialog. 80 rows is
+ * the viewport that bounds this: the expanded tail plus the outcome list must
+ * end above the bottom edge (mem0 e2e regression).
  */
-export const DIALOG_EXPANDED_RESERVE_ROWS = 14;
+export const DIALOG_EXPANDED_RESERVE_ROWS = 18;
 
 /**
  * Measured at a 110-column terminal the card's flex row gives the
@@ -414,8 +403,11 @@ export function userMessageMeta(): { glyph: string; color: string } {
 
 export function assistantMessageMeta(): { glyph: string; color: string } {
   // AssistantMessage → ICON.DIAMOND prefix, theme.text.accent.
-  return { glyph: MESSAGE_ICON.DIAMOND, color: C.purple };
+  return { glyph: ICON.DIAMOND, color: C.purple };
 }
+
+/** ink ConversationMessages: under this a committed thought reads "briefly". */
+const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
 
 export interface ThinkingMeta {
   icon: string;
@@ -435,13 +427,20 @@ export function thinkingMeta(
   done: boolean,
   expanded: boolean,
   clickable: boolean,
+  durationMs?: number,
 ): ThinkingMeta {
   const expandHint = clickable
     ? '(click or ctrl+o to expand)'
     : '(ctrl+o to expand)';
+  const completedLabel =
+    durationMs === undefined
+      ? null
+      : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
+        ? 'Thought briefly'
+        : `Thought for ${formatDuration(durationMs)}`;
   if (!done) {
     return {
-      icon: MESSAGE_ICON.BECAUSE,
+      icon: ICON.BECAUSE,
       label: 'Thinking…',
       hint: '',
       color: C.dim,
@@ -450,16 +449,16 @@ export function thinkingMeta(
   }
   if (!expanded) {
     return {
-      icon: MESSAGE_ICON.THEREFORE,
-      label: 'Thought',
+      icon: ICON.THEREFORE,
+      label: completedLabel ?? 'Thinking',
       hint: expandHint,
       color: C.dim,
       collapsed: true,
     };
   }
   return {
-    icon: MESSAGE_ICON.THEREFORE,
-    label: 'Thought',
+    icon: ICON.THEREFORE,
+    label: completedLabel ?? 'Thinking…',
     hint: '(ctrl+o to collapse)',
     color: C.dim,
     collapsed: false,
@@ -487,6 +486,13 @@ export function toolStatusMeta(item: LiveToolItem): ToolStatusMeta {
     };
   }
   if (!item.done) {
+    if (item.queued) {
+      return {
+        glyph: TOOL_STATUS.PENDING,
+        color: C.green,
+        strikethrough: false,
+      };
+    }
     return {
       glyph: TOOL_STATUS.EXECUTING,
       color: C.text,

@@ -305,3 +305,73 @@ describe('deriveArgsSeed', () => {
     expect(k1).not.toBe(k2); // same prompt+opts, different args → different key
   });
 });
+
+// A resume that changed how hard an agent thinks, or what it may call, has to
+// run that agent live. The sandbox normalizes spellings before the key is
+// derived; that half is pinned end to end in workflow-orchestrator.test.ts.
+describe('resume key for effort and disallowedTools', () => {
+  it('projects both into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        effort: 'high',
+        disallowedTools: ['run_shell_command', 'write_file'],
+      }),
+    ).toBe(
+      JSON.stringify({
+        disallowedTools: ['run_shell_command', 'write_file'],
+        effort: 'high',
+      }),
+    );
+  });
+
+  it('gives a different effort a different key', () => {
+    const low = deriveAgentKey('', 'review it', { effort: 'low' });
+    expect(low).not.toBe(deriveAgentKey('', 'review it', { effort: 'high' }));
+    expect(low).not.toBe(deriveAgentKey('', 'review it', {}));
+    expect(low).toBe(deriveAgentKey('', 'review it', { effort: 'low' }));
+  });
+
+  it('gives a different deny set a different key', () => {
+    expect(
+      deriveAgentKey('', 'scan', { disallowedTools: ['write_file'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { disallowedTools: ['edit', 'write_file'] }),
+    );
+  });
+});
+
+// An allowlist changes what the agent may call. The sandbox folds built-in
+// spellings, order and duplicates before the key is derived (pinned in
+// workflow-sandbox.test.ts); what it leaves alone reaches the key as written.
+describe('resume key for tools', () => {
+  it('projects the allowlist into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    ).toBe(JSON.stringify({ tools: ['read_file', 'run_shell_command'] }));
+  });
+
+  it('gives a different allowlist a different key', () => {
+    const narrow = deriveAgentKey('', 'scan', { tools: ['read_file'] });
+    expect(narrow).not.toBe(
+      deriveAgentKey('', 'scan', {
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    );
+    expect(narrow).not.toBe(deriveAgentKey('', 'scan', {}));
+    expect(narrow).toBe(deriveAgentKey('', 'scan', { tools: ['read_file'] }));
+  });
+
+  // Two names that reach one MCP tool are not folded, so they are two keys.
+  // The skill says so; this keeps the sentence honest.
+  it('keys two spellings of one MCP tool apart', () => {
+    expect(
+      deriveAgentKey('', 'scan', { tools: ['mcp__warehouse__query'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { tools: ['query (warehouse MCP Server)'] }),
+    );
+  });
+});

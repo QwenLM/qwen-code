@@ -18,7 +18,9 @@ import {
   type SubscribeOptions,
   type WorktreeResetSessionRequest,
 } from './DaemonClient.js';
+import { parseDaemonBackgroundTurn } from './types.js';
 import type {
+  DaemonBackgroundTurn,
   DaemonForkSessionResult,
   DaemonEvent,
   DaemonRewindResult,
@@ -39,6 +41,7 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
@@ -61,6 +64,7 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
@@ -253,6 +257,8 @@ export class DaemonSessionClient {
   readonly replayPartial: boolean;
   readonly replayError: string | undefined;
   readonly hasActivePrompt: boolean;
+  readonly backgroundTurn?: DaemonBackgroundTurn;
+  readonly hasRunningBackgroundTasks?: boolean;
   readonly historyHasMore: boolean;
   /**
    * Fallback pagination anchor from the daemon load response (see
@@ -305,6 +311,10 @@ export class DaemonSessionClient {
         : { kind: 'workspace', workspaceCwd: opts.session.workspaceCwd };
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
+    this.backgroundTurn = parseDaemonBackgroundTurn(
+      opts.session.backgroundTurn,
+    );
+    this.hasRunningBackgroundTasks = opts.session.hasRunningBackgroundTasks;
     this.historyHasMore = opts.historyHasMore ?? false;
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
     this.replayDegraded = opts.replayDegraded ?? false;
@@ -686,6 +696,19 @@ export class DaemonSessionClient {
     return accepted;
   }
 
+  /** Return continuation admission; terminal results arrive on the event stream. */
+  async continueSession(
+    signal?: AbortSignal,
+  ): Promise<DaemonContinueSessionResult> {
+    signal?.throwIfAborted();
+    return await this.withClientIdSelfHeal(() =>
+      this.client.continueSession(this.sessionId, {
+        clientId: this.clientId,
+        signal,
+      }),
+    );
+  }
+
   async uploadAttachment(
     data: Blob,
     name: string,
@@ -983,12 +1006,16 @@ export class DaemonSessionClient {
     message: string,
     opts?: {
       signal?: AbortSignal;
+      eventDetailMode?: 'full' | 'summary';
       messageId?: string;
       content?: PromptContentBlock[];
     },
   ): Promise<DaemonMidTurnMessageResult> {
     return this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.eventDetailMode !== undefined
+        ? { eventDetailMode: opts.eventDetailMode }
+        : {}),
       ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(opts?.content && opts.content.length > 0
         ? { content: opts.content }
@@ -1165,7 +1192,15 @@ export class DaemonSessionClient {
 
   controlWorkflowTask(
     taskId: string,
-    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved'
+      | 'run-script',
+    input?: DaemonWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: DaemonSessionWorkflowTaskStatus['status'];
@@ -1176,6 +1211,7 @@ export class DaemonSessionClient {
       taskId,
       action,
       this.clientId,
+      input,
     );
   }
 

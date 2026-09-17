@@ -6,10 +6,15 @@
 
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import {
+  backgroundTurnContext,
+  type BackgroundNotificationTurn,
+} from '../utils/background-turn-context.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   ChatRecordingService,
   isTurnResultRecordPayload,
@@ -142,7 +147,7 @@ describe('ChatRecordingService', () => {
       parts.pop();
       return parts.join('/');
     });
-    vi.mocked(execSync).mockReturnValue('main\n');
+    vi.mocked(execFileSync).mockReturnValue('main\n');
     vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
@@ -185,6 +190,95 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('background execution recording ownership', () => {
+    const turn: BackgroundNotificationTurn = {
+      turnId: 'automatic-turn',
+      taskId: 'completed-agent',
+      kind: 'agent',
+      sourceTurnId: 'original-user-turn',
+      toolUseId: 'launch-tool',
+      startedAt: 1234,
+    };
+
+    it.each([
+      ['ordinary execution', undefined, null, false],
+      ['active parent execution', 'test-session-id', null, true],
+      ['different session', 'other-session-id', null, false],
+      ['nested subagent', 'test-session-id', 'nested-agent', false],
+    ] as const)(
+      'records ownership for %s',
+      async (_, sessionId, agentId, tagged) => {
+        const record = async () =>
+          chatRecordingService.recordUserMessage([{ text: 'message' }]);
+        const inAgent = () =>
+          agentId ? runWithAgentContext(agentId, record) : record();
+        if (sessionId) {
+          await backgroundTurnContext.run(
+            { sessionId, turn, active: true },
+            async () => {
+              await Promise.resolve();
+              await inAgent();
+            },
+          );
+        } else {
+          await inAgent();
+        }
+        await chatRecordingService.flush();
+
+        const persisted = vi.mocked(jsonl.writeLine).mock
+          .calls[0][1] as ChatRecord;
+        expect(persisted.backgroundTurn).toEqual(tagged ? turn : undefined);
+      },
+    );
+
+    it('records task completion as session metadata without model content', async () => {
+      const payload = {
+        displayText: 'A separate background task completed',
+        backgroundTask: {
+          taskId: 'other-agent',
+          status: 'completed',
+          kind: 'agent' as const,
+          sourceTurnId: 'earlier-turn',
+        },
+      };
+      backgroundTurnContext.run(
+        { sessionId: 'test-session-id', turn, active: true },
+        () => chatRecordingService.recordBackgroundTaskCompleted(payload),
+      );
+      await chatRecordingService.flush();
+
+      const persisted = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      expect(persisted).toMatchObject({
+        type: 'system',
+        subtype: 'background_task_completed',
+        systemPayload: payload,
+      });
+      expect(persisted.message).toBeUndefined();
+      expect(persisted.backgroundTurn).toBeUndefined();
+    });
+
+    it('does not tag a callback inherited from a completed automatic execution', async () => {
+      const context = { sessionId: 'test-session-id', turn, active: true };
+      let resume!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const delayed = backgroundTurnContext.run(context, async () => {
+        await gate;
+        chatRecordingService.recordUserMessage([{ text: 'late callback' }]);
+      });
+      context.active = false;
+      resume();
+      await delayed;
+      await chatRecordingService.flush();
+
+      const persisted = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      expect(persisted.backgroundTurn).toBeUndefined();
+    });
   });
 
   describe('recordUserMessage', () => {
@@ -1463,6 +1557,48 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordGoalTurnEnd', () => {
+    it('waits for the durable system record and copies the Goal permit', async () => {
+      let resolveWrite!: () => void;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveWrite = resolve;
+          }),
+      );
+      const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+      const pending = chatRecordingService.recordGoalTurnEnd('finish', permit);
+      permit.turnId = 'changed';
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      resolveWrite();
+      await pending;
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0]![1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'goal_turn_end',
+        goalContext: { goalId: 'goal', revision: 1, turnId: 'turn' },
+        systemPayload: { toolCallId: 'finish' },
+      });
+      expect(record.message).toBeUndefined();
+    });
+
+    it('rejects a failed append instead of reporting a persisted boundary', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+      await expect(
+        chatRecordingService.recordGoalTurnEnd('finish', {
+          goalId: 'goal',
+          revision: 1,
+          turnId: 'turn',
+        }),
+      ).rejects.toThrow('disk full');
+    });
+  });
+
   describe('recordTurnResult', () => {
     it('normalizes hostile and oversized error fields without throwing', () => {
       const hostile = Object.create(null, {
@@ -1521,6 +1657,24 @@ describe('ChatRecordingService', () => {
           resultCode: 'RESULT_TEXT_TRUNCATED',
         }),
       ).toBe(false);
+    });
+
+    it.each([
+      [undefined, true],
+      [1_500, true],
+      [NaN, false],
+      [Infinity, false],
+      ['1500', false],
+    ])('validates cancellation timestamp %s', (cancelledAt, valid) => {
+      expect(
+        isTurnResultRecordPayload({
+          promptId: 'prompt-1',
+          state: 'cancelled',
+          startedAt: 1_000,
+          cancelledAt,
+          endedAt: 2_000,
+        }),
+      ).toBe(valid);
     });
 
     it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
@@ -3162,7 +3316,7 @@ describe('ChatRecordingService', () => {
     });
 
     it('refreshes the cached git branch at the attribution turn boundary', async () => {
-      vi.mocked(execSync)
+      vi.mocked(execFileSync)
         .mockReturnValueOnce('main\n')
         .mockReturnValueOnce('feature\n');
 
@@ -3485,6 +3639,32 @@ describe('ChatRecordingService', () => {
 });
 
 describe('Goal turn token ledger', () => {
+  it('shares external spend with assistant usage and consumes each turn once', () => {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'assistant' }),
+      appendRecord: () => {},
+      maybeTriggerAutoTitle: () => {},
+    });
+    service.billGoalTurnTokens('turn-1', 30);
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 70 },
+      goalContext: { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
+    });
+    for (const tokens of [NaN, Infinity, -1, 0])
+      service.billGoalTurnTokens('turn-2', tokens);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(100);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    service.billGoalTurnTokens('turn-1', 10);
+    service.billGoalTurnTokens('turn-2', 20);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(20);
+  });
+
   it('bills a Goal turn from the assistant records it produced', () => {
     // The wiring that matters: recordAssistantTurn must feed the ledger. A
     // ledger that is never fed reports every Goal turn as free.
