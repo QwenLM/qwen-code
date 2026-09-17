@@ -30,6 +30,7 @@ import {
   pushBounded,
   record,
   staleTabError,
+  withTimeout,
 } from './runtime-helpers.js';
 import type { DiscoveredTab, ProviderTab, TabState } from './runtime-state.js';
 
@@ -65,6 +66,9 @@ export class PlaywrightSession {
       if (event.method === 'Page.javascriptDialogClosed') {
         for (const tab of this.tabs.values()) {
           if (tab.providerTabId !== event.tabId) continue;
+          // While the attach-time block stands no new dialog can have
+          // opened behind it, so this close belongs to the blocking one.
+          tab.dialogBlocked = false;
           traceDialogClosed(tab);
           // Playwright hands a dialog over on a later turn than the bridge
           // reports its CDP events: the microtask keeps this clear behind an
@@ -356,6 +360,25 @@ export class PlaywrightSession {
       };
       this.installPageObservers(tab, transport);
       this.tabs.set(tab.id, tab);
+      // Chrome does not replay Page.javascriptDialogOpening for a dialog
+      // that was already open when the tab attached, and Playwright never
+      // delivers one either — but the modal still blocks the renderer.
+      // Probe the fresh target; an unanswered probe gates the tab as
+      // DIALOG_OPEN so page operations fail fast instead of hanging.
+      const blocked = await withTimeout(
+        this.bridge.request('cdp.send', {
+          tabId: provider.providerTabId,
+          method: 'Runtime.evaluate',
+          params: { expression: '0', returnByValue: true },
+        }),
+        ATTACH_PROBE_TIMEOUT_MS,
+      ).then(
+        () => false,
+        (error: unknown) =>
+          error instanceof BrowserRuntimeError &&
+          error.code === 'OPERATION_TIMEOUT',
+      );
+      if (blocked) tab.dialogBlocked = true;
       const info = await this.tabInfo(tab);
       this.assertRunning();
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
@@ -409,8 +432,13 @@ export class PlaywrightSession {
     });
     page.on('framenavigated', (frame) => {
       // Chrome resolves any open dialog when the main frame navigates away;
-      // Playwright also emits framenavigated for subframes.
-      if (frame === page.mainFrame()) tab.dialog = undefined;
+      // Playwright also emits framenavigated for subframes. A main-frame
+      // navigation also replaces the document, so the refs a snapshot issued
+      // for it die with it.
+      if (frame !== page.mainFrame()) return;
+      tab.dialog = undefined;
+      tab.dialogBlocked = false;
+      tab.snapshotRefs = undefined;
     });
     page.on('console', (message) => {
       const location = message.location();
@@ -466,7 +494,7 @@ export class PlaywrightSession {
     return {
       id: tab.id,
       title:
-        tab.dialog === undefined
+        tab.dialog === undefined && tab.dialogBlocked !== true
           ? await pageTitle(tab.page).catch(() => null)
           : null,
       url: tab.page.url() || null,
@@ -508,6 +536,10 @@ export class PlaywrightSession {
   }
 }
 
+// A healthy renderer answers a trivial Runtime.evaluate in milliseconds even
+// through the extension relay; a modal dialog blocks it indefinitely.
+const ATTACH_PROBE_TIMEOUT_MS = 1_000;
+
 function newTabIdPrefix(): string {
   return `tab-${randomUUID()}-`;
 }
@@ -545,7 +577,21 @@ function traceDialogOpening(tab: TabState): void {
 // when the tab was attached; it must not be charged to a later dialog.
 function traceDialogClosed(tab: TabState): void {
   const entry = tab.dialogTrace.find((item) => !item.closed);
-  if (entry !== undefined) entry.closed = true;
+  if (entry !== undefined) {
+    entry.closed = true;
+    // Playwright delivers a dialog from this same drain one setImmediate
+    // turn later, so the entry must stay chargeable through that turn.
+    // Retire it once the turn has passed without a delivery: an opening
+    // Playwright never delivers would otherwise sit in the trace forever
+    // and swallow the charge of every later dialog on this tab.
+    setImmediate(() => {
+      setImmediate(() => {
+        if (entry.delivered) return;
+        const index = tab.dialogTrace.indexOf(entry);
+        if (index !== -1) tab.dialogTrace.splice(index, 1);
+      });
+    });
+  }
   pruneDialogTrace(tab);
 }
 

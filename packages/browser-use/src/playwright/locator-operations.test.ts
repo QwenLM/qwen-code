@@ -608,7 +608,7 @@ describe('locator.evaluateAll', () => {
     });
   });
 
-  it('still evaluates when nothing attaches in time', async () => {
+  it('resolves an empty evaluation when nothing attaches in time', async () => {
     const f = evaluateAllFixture();
     const timeout = new Error('Timeout 50ms exceeded');
     timeout.name = 'TimeoutError';
@@ -617,6 +617,37 @@ describe('locator.evaluateAll', () => {
     await expect(
       executeLocatorOperation('locator.evaluateAll', f.args, f.tab),
     ).resolves.toEqual([]);
+  });
+
+  it('shares one deadline between the attach wait and the evaluation', async () => {
+    const f = evaluateAllFixture();
+    vi.useFakeTimers();
+    try {
+      // The wait consumes the whole caller budget; the read never settles.
+      // The single documented deadline must settle the call as [] instead
+      // of opening a second full window for the read.
+      f.handle.waitFor.mockImplementation(
+        () =>
+          new Promise<undefined>((_resolve, reject) =>
+            setTimeout(() => {
+              const timeout = new Error('Timeout 50ms exceeded');
+              timeout.name = 'TimeoutError';
+              reject(timeout);
+            }, 50),
+          ),
+      );
+      f.locator.evaluateAll.mockReturnValue(new Promise<string>(() => {}));
+      const result = executeLocatorOperation(
+        'locator.evaluateAll',
+        f.args,
+        f.tab,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(result).resolves.toEqual([]);
+      expect(f.locator.evaluateAll).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('propagates a wait failure that is not a timeout', async () => {

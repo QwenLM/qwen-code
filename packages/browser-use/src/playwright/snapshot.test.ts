@@ -97,19 +97,52 @@ describe('Playwright AI snapshots', () => {
   });
 
   it('uses only current Playwright aria refs', async () => {
-    const fixture = fakePage('- button "Save" [ref=e1]', {
-      missing: new Set(['e9']),
-    });
+    const fixture = fakePage(
+      [
+        '- button "Save" [ref=e1]',
+        '- iframe [ref=e2]:',
+        '  - button "Inside" [ref=f1e2]',
+        '- button "Gone" [ref=e9]',
+      ].join('\n'),
+      {
+        missing: new Set(['e9']),
+      },
+    );
+    const state = tab(fixture.page);
+    await snapshotTab(state);
 
-    await expect(snapshotRefLocator(fixture.page, 'f1e2')).resolves.toBe(
+    await expect(snapshotRefLocator(state, 'f1e2')).resolves.toBe(
       fixture.locators.get('f1e2')?.value,
     );
-    await expect(snapshotRefLocator(fixture.page, 'e9')).rejects.toMatchObject({
+    // Emitted by the snapshot but matching no element right now.
+    await expect(snapshotRefLocator(state, 'e9')).rejects.toMatchObject({
       code: 'INVALID_LOCATOR',
     });
-    await expect(snapshotRefLocator(fixture.page, 'n1')).rejects.toMatchObject({
+    await expect(snapshotRefLocator(state, 'n1')).rejects.toMatchObject({
       code: 'INVALID_LOCATOR',
     });
+  });
+
+  it('rejects a ref that only an earlier snapshot emitted', async () => {
+    const fixture = fakePage('- button "Save" [ref=e1]');
+    const state = tab(fixture.page);
+    await snapshotTab(state);
+    await expect(snapshotRefLocator(state, 'e1')).resolves.toBe(
+      fixture.locators.get('e1')?.value,
+    );
+
+    // A cross-document navigation restarts Playwright's ref numbering, so
+    // the same ref string can now belong to a different element; the old
+    // snapshot's refs must stop resolving.
+    fixture.ariaSnapshot.mockResolvedValue('- link "Docs" [ref=e2]');
+    await snapshotTab(state);
+
+    await expect(snapshotRefLocator(state, 'e1')).rejects.toMatchObject({
+      code: 'INVALID_LOCATOR',
+    });
+    await expect(snapshotRefLocator(state, 'e2')).resolves.toBe(
+      fixture.locators.get('e2')?.value,
+    );
   });
 });
 

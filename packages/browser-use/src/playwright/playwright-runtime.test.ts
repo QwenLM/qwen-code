@@ -291,6 +291,21 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.page.reload).toHaveBeenCalledWith();
   });
 
+  it.each(['file:///etc/passwd', 'chrome://settings', 'about:blank'])(
+    'rejects a non-http(s) tab.goto URL: %s',
+    async (url) => {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+
+      // Navigating the user's real Chrome to file:// would hand local file
+      // contents to this tab's evaluate/domSnapshot reads.
+      await expect(
+        fixture.runtime.dispatch('tab.goto', { tabId: tab.id, url }),
+      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+      expect(fixture.page.goto).not.toHaveBeenCalled();
+    },
+  );
+
   it('enables tab-scoped focus emulation once without activating the window', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -730,7 +745,11 @@ describe('PlaywrightRuntime command contracts', () => {
   it('delegates snapshot ref actions to Playwright aria-ref locators', async () => {
     const fixture = await runtimeFixture();
     fixture.locator.count.mockResolvedValue(1);
-    const raw = '- heading "Settings" [level=1]\n- button "Save" [ref=e1]';
+    const raw = [
+      '- heading "Settings" [level=1]',
+      '- iframe [ref=e2]:',
+      '  - button "Save" [ref=f1e2]',
+    ].join('\n');
     fixture.page.ariaSnapshot.mockResolvedValueOnce(raw);
     const tab = await createTab(fixture.runtime);
 
@@ -772,6 +791,35 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.locator.pressSequentially).not.toHaveBeenCalled();
     expect(fixture.locator.press).not.toHaveBeenCalled();
     expect(fixture.page.bringToFront).not.toHaveBeenCalled();
+  });
+
+  it('invalidates snapshot refs when the main frame navigates', async () => {
+    const fixture = await runtimeFixture();
+    fixture.locator.count.mockResolvedValue(1);
+    const tab = await createTab(fixture.runtime);
+    await fixture.runtime.dispatch('playwright.domSnapshot', {
+      tabId: tab.id,
+    });
+    await fixture.runtime.dispatch('dom_cua.click', {
+      tabId: tab.id,
+      node_id: 'e1',
+    });
+    expect(fixture.locator.click).toHaveBeenCalledOnce();
+
+    // Playwright restarts ref numbering on the new document, so the old
+    // snapshot's refs must stop resolving instead of hitting a stranger.
+    const navigated = fixture.page.on.mock.calls.find(
+      ([event]) => event === 'framenavigated',
+    )?.[1] as ((frame: Frame) => void) | undefined;
+    expect(navigated).toBeDefined();
+    navigated!(fixture.page.mainFrame() as Frame);
+
+    await expect(
+      fixture.runtime.dispatch('dom_cua.click', {
+        tabId: tab.id,
+        node_id: 'e1',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_LOCATOR' });
   });
 
   it('rejects unsupported DOM CUA options through the public SDK before input', async () => {
@@ -834,6 +882,10 @@ describe('PlaywrightRuntime command contracts', () => {
       'chrome',
       info,
     );
+    fixture.page.ariaSnapshot.mockResolvedValue(
+      '- iframe [ref=e1]:\n  - button "Save" [ref=f1e2]',
+    );
+    await tab.dom_cua.get_visible_dom();
 
     await tab.dom_cua.click({ node_id: ' f1e2 ' });
     await tab.dom_cua.type({ text: 'hello' });
@@ -1588,6 +1640,24 @@ describe('PlaywrightRuntime command contracts', () => {
     ).resolves.toBeNull();
   });
 
+  it('retires a traced opening Playwright never delivered', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    // The bridge reports an opening and a close that Playwright never hands
+    // over (its dispatcher can auto-close without dispatching). Once the
+    // delivery turn has passed, the entry must stop charging later dialogs.
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogOpening'));
+    openDialog(fixture, 'confirm', 'Live');
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toMatchObject({ message: 'Live' });
+  });
+
   it('fails page operations immediately while a JavaScript dialog is open', async () => {
     const fixture = await runtimeFixture();
     const tab = await createTab(fixture.runtime);
@@ -1637,6 +1707,84 @@ describe('PlaywrightRuntime command contracts', () => {
       url: 'https://example.com/',
     });
     expect(fixture.page.goto).toHaveBeenCalledOnce();
+  });
+
+  it('gates a tab that a dialog already blocked when it was attached', async () => {
+    const fixture = await runtimeFixture();
+    // Chrome does not replay Page.javascriptDialogOpening for a dialog that
+    // opened before attach and Playwright never delivers one, so the
+    // attach-time renderer probe is the only signal; here it never settles.
+    blockAttachProbe(fixture);
+    vi.useFakeTimers();
+    let tab: TabInfo;
+    try {
+      const created = createTab(fixture.runtime);
+      await vi.advanceTimersByTimeAsync(1_000);
+      tab = await created;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await expect(
+      fixture.runtime.dispatch('playwright.domSnapshot', { tabId: tab.id }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+    await expect(
+      fixture.runtime.dispatch('tab.goto', {
+        tabId: tab.id,
+        url: 'https://example.com/',
+      }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+    expect(fixture.page.goto).not.toHaveBeenCalled();
+    // The blocked tab stays listable without waiting on its renderer.
+    await expect(
+      fixture.runtime.dispatch('tabs.get', {
+        browserId: 'chrome',
+        tabId: tab.id,
+      }),
+    ).resolves.toMatchObject({ id: tab.id, title: null });
+
+    const descriptor = (await fixture.runtime.dispatch('tab.getJsDialog', {
+      tabId: tab.id,
+    })) as { dialogId: string };
+    expect(descriptor.dialogId).toBe('dialog-open-at-attach');
+    await fixture.runtime.dispatch('tab.dialog.dismiss', {
+      tabId: tab.id,
+      dialogId: descriptor.dialogId,
+    });
+    expect(fixture.request).toHaveBeenCalledWith('cdp.send', {
+      tabId: 17,
+      method: 'Page.handleJavaScriptDialog',
+      params: { accept: false },
+    });
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).resolves.toBe('Fixture');
+  });
+
+  it('unblocks the tab when Chrome closes a pre-attach dialog', async () => {
+    const fixture = await runtimeFixture();
+    blockAttachProbe(fixture);
+    vi.useFakeTimers();
+    let tab: TabInfo;
+    try {
+      const created = createTab(fixture.runtime);
+      await vi.advanceTimersByTimeAsync(1_000);
+      tab = await created;
+    } finally {
+      vi.useRealTimers();
+    }
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).rejects.toMatchObject({ code: 'DIALOG_OPEN' });
+
+    fixture.emitEvent(dialogEvent('Page.javascriptDialogClosed'));
+
+    await expect(
+      fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
+    ).resolves.toBe('Fixture');
+    await expect(
+      fixture.runtime.dispatch('tab.getJsDialog', { tabId: tab.id }),
+    ).resolves.toBeNull();
   });
 
   it('times out tab.title when the page never yields a title', async () => {
@@ -2340,6 +2488,19 @@ function dialogEvent(
   tabId = 17,
 ): BridgeEvent {
   return { type: 'event', tabId, method, params: {} };
+}
+
+function blockAttachProbe(fixture: RuntimeFixture): void {
+  // A dialog already open when the tab attaches is replayed by neither
+  // Chrome nor Playwright, but the modal blocks the renderer — so the
+  // attach probe's Runtime.evaluate never answers.
+  const request = fixture.request.getMockImplementation()!;
+  fixture.request.mockImplementation(
+    (method: string, params: Record<string, unknown> = {}) =>
+      method === 'cdp.send' && params.method === 'Runtime.evaluate'
+        ? new Promise<never>(() => {})
+        : request(method, params),
+  );
 }
 
 function openDialog(

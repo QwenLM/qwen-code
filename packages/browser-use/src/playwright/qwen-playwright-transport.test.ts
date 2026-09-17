@@ -362,10 +362,14 @@ describe('QwenPlaywrightTransport', () => {
       method: 'Browser.getWindowForTarget',
       params: {},
     });
+    // Playwright swallows an orphan error response only when it carries
+    // code -32001; an untagged one trips its internal assert and the
+    // rejection would tear down the whole transport.
     await vi.waitFor(() =>
       expect(messages).toContainEqual({
         id: 1,
         error: {
+          code: -32001,
           message:
             'Unsupported browser-level CDP command: Browser.getWindowForTarget',
         },
@@ -373,6 +377,38 @@ describe('QwenPlaywrightTransport', () => {
     );
     expect(bridge.calls).toEqual([]);
     expect(onclose).not.toHaveBeenCalled();
+  });
+
+  it('tags an in-flight command failure with the orphan-swallow code', async () => {
+    const bridge = new FakeBridge();
+    const transport = new QwenPlaywrightTransport(bridge);
+    const messages: object[] = [];
+    const onclose = vi.fn();
+    transport.onmessage = (message) => messages.push(message);
+    transport.onclose = onclose;
+    await transport.registerTab(7);
+
+    vi.spyOn(bridge, 'request').mockRejectedValueOnce(
+      new Error('Target crashed'),
+    );
+    transport.send({
+      id: 9,
+      sessionId: 'pw-tab-1',
+      method: 'Runtime.evaluate',
+      params: { expression: '1' },
+    });
+    // A tab crash clears Playwright's callback for the in-flight id, so the
+    // reply arrives orphaned; the code is what keeps that reply from being
+    // asserted into a transport teardown.
+    await vi.waitFor(() =>
+      expect(messages).toContainEqual({
+        id: 9,
+        sessionId: 'pw-tab-1',
+        error: { code: -32001, message: 'Target crashed' },
+      }),
+    );
+    expect(onclose).not.toHaveBeenCalled();
+    await transport.close();
   });
 
   it('provides explicit target sessions for Playwright CDP sessions', async () => {

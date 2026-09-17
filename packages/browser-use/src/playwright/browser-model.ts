@@ -15,7 +15,7 @@ export interface CdpMessage {
   method?: string;
   params?: Record<string, unknown>;
   result?: unknown;
-  error?: { message: string };
+  error?: { code?: number; message: string };
 }
 
 interface TargetInfo {

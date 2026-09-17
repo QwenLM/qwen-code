@@ -79,6 +79,11 @@ export class QwenPlaywrightTransport implements ConnectOverCDPTransport {
         this.emit({
           ...response,
           error: {
+            // Playwright swallows an orphan error response (its callback is
+            // gone, e.g. after a target crash) only when it carries this
+            // code; without it the response trips an internal assert whose
+            // rejection would tear down the whole transport.
+            code: -32001,
             message:
               error instanceof Error
                 ? error.message

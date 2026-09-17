@@ -511,14 +511,21 @@ async function evaluateLocator(
   if (all) {
     // evaluateAll takes no options and never waits, so honor the caller's
     // budget with an attach wait on the first match, mirroring
-    // allTextContents; a locator that never attaches still evaluates [].
-    await locator
+    // allTextContents. The wait and the read share one deadline: a second
+    // full window would double the documented evaluation budget. A wait
+    // that consumed the budget settled the outcome already: [] without
+    // evaluating.
+    const deadline = Date.now() + timeout;
+    const attached = await locator
       .first()
       .waitFor({ state: 'attached', timeout })
+      .then(() => true)
       .catch((error: unknown) => {
-        if (error instanceof Error && error.name === 'TimeoutError') return;
+        if (error instanceof Error && error.name === 'TimeoutError')
+          return false;
         throw error;
       });
+    if (!attached) return [];
     return JSON.parse(
       await withTimeout(
         locator.evaluateAll(async (elements, source) => {
@@ -529,7 +536,7 @@ async function evaluateLocator(
           ) => (elements: Element[]) => Promise<string>;
           return await new AsyncFunction('elements', source)(elements);
         }, jsonEvaluationScript(script)),
-        timeout,
+        deadline - Date.now(),
       ),
     );
   }
