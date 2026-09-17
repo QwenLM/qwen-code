@@ -64,7 +64,8 @@ runtime refresh failed. If both a pre-commit operation and its rollback fail, th
 caller receives both errors and the journal remains; a lock-defeated rollback is
 retried on a later operation instead of stopping every one - once a deferred
 retry window has elapsed, and only while a retry can still leave a loadable
-artifact behind.
+artifact behind; a rollback that could not is refused rather than retried, so
+reads never report an installed extension with no artifact.
 
 Store files use owner-only permissions and atomic no-follow writes. Extension
 ids, direct-child artifact paths, transaction paths, and names are validated.

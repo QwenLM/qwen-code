@@ -136,8 +136,8 @@ swapStrategy?: 'rename' | 'copy';
 
 `ExtensionTransactionJournal` gains that optional field plus three more:
 `rollbackBlocked` (a rollback could not complete, with `rollbackRetryAt` saying
-when recovery may try it again) and `cleanupPending` (a rollback restored the
-destination but left its own cleanup behind). `rollbackBlocked` marks a
+when recovery may retry the owed step) and `cleanupPending` (only the
+transaction's teardown is owed). `rollbackBlocked` marks a
 transaction that is not settled and therefore still refuses that destination;
 `cleanupPending` marks one that is settled and refuses nothing. Absent fields mean
 `rename`, false and no window, so journals written by older builds recover unchanged
@@ -161,8 +161,13 @@ force: true })` with `preserveTimestamps` and `verbatimSymlinks` on and
    `dereference` left false. The copy retries the store's lock-classified error, a
    different pair from the `EPERM`/`EACCES` set `renameWithRetry` retries: it adds
    `EBUSY`, because a child process whose working directory is the destination
-   reports that code, and drops `EACCES`, which on Windows arrives as `EPERM`
-   anyway (see B). It retries because a scanner or an indexer can hold one file
+   reports that code, and drops `EACCES`: every held-directory denial measured in
+   section B arrived as `EPERM` or `EBUSY`, and keeping `EACCES` out means an
+   ordinary permission problem stays a plain error rather than a retried lock.
+   The residual is honest: if a Windows lock ever surfaced as `EACCES`, these
+   steps would get no retry and no copy fallback, unlike the `renameWithRetry`
+   calls in the same transaction, which do retry that code. It retries because a
+   scanner or an indexer can hold one file
    transiently, which is the case the rename-only code used to absorb around that
    call. The retries come out
    of one allowance per store operation (`LOCK_RETRY_BUDGET_MS`, one second of
@@ -211,40 +216,48 @@ leave different states:
 
 - **A rollback** is absorbed - marked `rollbackBlocked` and kept, so the operation
   proceeds and a later recovery retries it - only when retrying can still produce
-  a loadable artifact: a backup is there to restore from, and the destination
-  still carries a root manifest the loader accepts - `qwen-extension.json`, or
-  `plugin.json` for unconverted Agent Plugins installs. Existence is not
-  integrity, and the rename path
-  deletes the destination before it renames the backup back, so the states that
-  fail that test - a destination emptied by a wipe that could not be restored, a
-  crashed install with no backup at all - stop the caller. The marker is written
-  before that refusal, so even it gets a window and the reads that wait on it
-  reject without touching the tree. On Windows that refusal is the locked-directory error with the raw
-  errno as its cause; off Windows the errno is kept, because a permission denial
-  there is not a held handle.
+  a loadable artifact: the destination already carries exactly the backup's
+  top-level entries, so the owed restore is effectively complete. Existence is
+  not integrity, and neither is one surviving filename: a manifest standing in a
+  half-wiped tree is not an artifact, while a plugin.json root or a link
+  install's metadata-only root is one even though neither carries the manifest
+  `qwen-extension.json` names. The states that fail the comparison - a
+  destination emptied by a wipe that could not be restored, a crashed install
+  with no backup at all - stop the caller. Absorbing also requires the marker
+  itself to have landed: a journal that cannot record its own window must never
+  be read as settled by a later pass, so an unrecordable refusal stays loud. The
+  marker is written before that refusal, so even it gets a window and the reads
+  that wait on it reject without touching the tree. On Windows that refusal is
+  the locked-directory error with the raw errno as its cause; off Windows the
+  errno is kept, because a permission denial there is not a held handle.
 - **A cleanup** that fails after a rollback already restored the destination is
-  marked `cleanupPending` instead, whatever the error code was: the retry repeats
-  the removal, not the restore, so a settled rollback is never copied over the
-  live tree again. That step owns the staging tree, the backup a copy-mode
-  rollback restored from, an unpublished `.partial` tree and the journal file
-  itself. It is not reported to the caller and sets no marker that refuses
-  mutations - the journal stays and the next operation retries the removal.
-  These removal retries are deliberately unwindowed: they re-walk nothing, and
-  their cost is capped by the one allowance a store operation spends.
+  marked `cleanupPending` instead: the retry repeats the removal, not the
+  restore, so a settled rollback is never copied over the live tree again. That
+  step owns the staging tree, the backup a copy-mode rollback restored from and
+  the journal file itself; it demotes the backup to the unpublished `.partial`
+  name before deleting it, so a removal that dies half-way can never be
+  restored from by mistake. A lock error here is not reported to the caller: the
+  journal stays, and the mark gives the owed step the same retry window the
+  rollback uses, so a held removal does not tax every later read; a non-lock
+  error is rethrown after the marker, as below.
 
 `rollbackBlocked` keeps the journal out of the generation comparison, so a
-transaction that still owes a rollback can never be read as a commit, and the
-guard refuses that destination until the retry succeeds. Because the holder may be
-a session that outlives this one, the marker also carries a retry window
-(`ROLLBACK_RETRY_DELAY_MS`): a store operation inside it skips the rollback
-instead of repeating it - or, for a journal whose retry still cannot produce a
-loadable artifact, refuses without touching the tree - so the refusal and its
-message stay as they are while a
-plain read stops re-copying the tree behind it, and the retry resumes on its own
-once the window passes - the destination heals instead of being wedged. A failure
-that is not a lock error stops the caller from either step - rethrown unmarked from
-the rollback, rethrown after the marker from the cleanup, so a retry never repeats
-a restore.
+transaction that still owes a rollback can never be read as a commit. Because
+the holder may be a session that outlives this one, the mark also carries a
+retry deadline (`ROLLBACK_RETRY_DELAY_MS`, shared with a cleanup that a lock
+held): a read inside it skips the owed step instead of repeating it - or, for a
+journal whose retry still cannot produce a loadable artifact, refuses without
+touching the tree, with the held-handle text on Windows and an
+unresolved-transaction error elsewhere. A deadline further out than the delay
+is a clock that moved, not a live window, so it reads as due and the retry
+resumes on its own - the destination heals instead of being wedged. A mutation
+of the very destination a window waits on does not wait: the guard gives it one
+owed-step retry immediately, and refuses with the diagnosis that attempt just
+produced if it failed again. A failure that is not a lock error stops the
+caller from either step - rethrown unmarked from the rollback, rethrown after
+the marker from the cleanup - and so does a marker that cannot be written,
+because an unmarked journal must never be absorbed and a retry never repeats a
+restore from a half-deleted backup.
 
 **B - actionable failure text.** Alongside the existing store errors:
 
@@ -325,7 +338,9 @@ Rejected:
   that a lock error defeats also leaves the backup and any unpublished `.partial`
   on disk, but keeps the journal that owns them, so a later operation removes
   them. While the holder holds, that is one full tree copy per affected
-  destination in `rollback/`, uncapped, and only a debug-level warning says so.
+  destination in `rollback/`, uncapped. The rollback and the post-rollback
+  cleanup log that at debug level; a cleanup the committed state no longer
+  reports is silent by design, since the journal's windowed retries own it.
 - **Concurrent out-of-band edits** to the destination during the copy window can be
   pruned or overwritten. The rename path has the same class of race with different
   timing; nothing here makes it safe.
@@ -365,10 +380,10 @@ Rejected:
   fails, so a copy-mode rollback the same holder defeats can leave that entry
   missing while the journal is marked and retried. Nothing reconciles the tree on
   disk with the generation the snapshot committed, so a read in that window serves
-  what the directory holds - possibly new bytes, possibly one fewer path - not the
-  committed old version. The states where the destination has no accepted root
-  manifest at all,
-  or no backup to restore from, are refused rather than served - marked first,
+  what the directory holds - possibly new bytes where a same-named file was
+  overwritten halfway - not the committed old version. A destination that
+  differs from its backup at the top level, or has no backup to match,
+  is refused rather than served - marked first,
   so the refusal itself keeps a window;
   exposing an unresolved transaction on the read path is left to a follow-up.
 
@@ -388,21 +403,30 @@ surviving a copy swap; a lock-defeated rollback keeping its journal and its back
 once the generation moves; a destination's stacked transactions replayed newest
 first; a second transaction for one destination refused, and refused with the
 locked-directory message naming the directory the user can act on when the holder
-is what blocked the first one; an unmarked journal refused with the conflict text
+is what blocked the first one; a journal whose marker could not be written
+refusing every later operation with its raw errno, backup and tree left intact,
 while another extension's commit still goes through; a committed journal awaiting
 cleanup not refusing the next commit; a rollback whose retry could not produce a
 loadable artifact - a crashed install with no backup, or a destination wiped to
 nothing - stopping the caller, marked first so even the refusal keeps its window
 and no later read re-attempts the doomed restore, with the extension not
-reported as installed; a destination whose only root manifest is plugin.json -
-an unconverted Agent Plugins install - absorbed with a window instead of refused; a settled rollback whose backup removal was held being
-retried, leaving no journal and no re-copied backup, and a cleanup that failed for
-another reason marked before it reached the caller; a held journal file retried
+reported as installed, each platform with its own honest error class; the retry
+gate comparing the destination's top level against the backup's, so an
+unconverted plugin.json root and a link install's metadata-only root are absorbed
+with a window while a half-wiped uninstall whose manifest survived and an entry
+whose kind the restore did not finish are refused; a settled rollback whose
+backup removal was held retried only once its window expired, re-marking while
+the holder keeps it, and leaving no journal and no re-copied backup once
+released; a cleanup that failed for another reason marked before it reached the
+caller; a held journal file retried
 rather than reported as a failed rollback; a copy, a destination removal and a
 staged rename the holder released or refused being retried, or ending in the
 actionable text; the `.partial` pre-clean and the backup publish naming the
 extension directory rather than an internal path; a blocked rollback deferred by a
-retry window that then resumes on its own, and a backup removal the holder released
+retry window that then resumes on its own, heals completely once the holder
+releases, reads a deadline further out than the delay as a moved clock, and lets
+a mutation of the blocked destination force its owed retry instead of waiting;
+and a backup removal the holder released
 absorbed inside the teardown; the shared allowance bounding the
 retries one swap spends on held entries, and one recovery pass spending a single
 allowance across stacked journals; a nested junction unlinked by the prune with

@@ -16,9 +16,7 @@ import { atomicWriteJSON, renameWithRetry } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isNodeError } from '../utils/errors.js';
 import { realPathWithin } from './gemini-converter.js';
-import { AGENT_PLUGIN_MANIFEST } from './agent-plugins-v1/manifest.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
-import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 
 const debugLogger = createDebugLogger('EXTENSION_STORE');
 
@@ -97,9 +95,9 @@ interface ExtensionTransactionJournal {
   swapStrategy?: 'rename' | 'copy';
   /** Absent means false. Set when a rollback could not complete. */
   rollbackBlocked?: boolean;
-  /** Absent means false. Set when a rollback restored but its backup survived. */
+  /** Absent means false. Set when only the transaction's teardown is owed. */
   cleanupPending?: boolean;
-  /** Absent means now. Epoch ms before recovery retries a blocked rollback. */
+  /** Absent means now. Epoch ms before recovery retries the owed step. */
   rollbackRetryAt?: number;
   previousGeneration: number;
   targetGeneration: number;
@@ -182,9 +180,10 @@ function isTransactionResolved(
 const LOCK_RETRY_BUDGET_MS = 1000;
 
 /**
- * A blocked rollback's next retry waits this long: far longer than a transient
- * hold, so reads stop re-copying a held tree while the directory heals on its
- * own once the holder lets go.
+ * The owed step of a transaction blocked by a lock waits this long before a
+ * retry: far longer than a transient hold, so reads stop re-copying a held
+ * tree while the directory heals on its own once the holder lets go. A
+ * deadline further out than this reads as a moved clock, not a live window.
  */
 const ROLLBACK_RETRY_DELAY_MS = 5000;
 
@@ -955,15 +954,15 @@ export class ExtensionStore {
             // A half-copied backup would be restored over an intact destination.
             // The failure names the extension directory; rollback paths are internal.
             const partialBackup = partialBackupPath(backupDirectory);
-            await this.withLockHint(destinationDirectory, () =>
-              this.removeWithRetry(partialBackup, swapBudget),
-            );
-            await this.withLockHint(destinationDirectory, () =>
-              this.copyTree(destinationDirectory, partialBackup, swapBudget),
-            );
-            await this.withLockHint(destinationDirectory, () =>
-              renameWithRetry(partialBackup, backupDirectory, 3, 50),
-            );
+            await this.withLockHint(destinationDirectory, async () => {
+              await this.removeWithRetry(partialBackup, swapBudget);
+              await this.copyTree(
+                destinationDirectory,
+                partialBackup,
+                swapBudget,
+              );
+              await renameWithRetry(partialBackup, backupDirectory, 3, 50);
+            });
           }
         }
         if (journal.swapStrategy === 'copy') {
@@ -1729,89 +1728,129 @@ export class ExtensionStore {
       const journal = await this.readRecoverableJournalUnlocked(journalPath);
       if (!journal) continue;
       if (isTransactionResolved(journal, snapshot)) {
-        try {
-          await this.removeTransactionTeardown(journal, journalPath, budget);
-        } catch {
-          // The destination is already settled. Keep the journal so a later
-          // store operation can retry cleanup without blocking reads or
-          // unrelated mutations.
+        if (this.retryDue(journal)) {
+          try {
+            await this.removeTransactionTeardown(journal, journalPath, budget);
+          } catch (error: unknown) {
+            // The destination is already settled. Keep the journal so a later
+            // operation can retry cleanup, and hand a held removal its window
+            // back so the retry does not tax every operation in the meantime.
+            if (isDirectoryLockError(error)) {
+              await this.recordPendingStep(
+                journal,
+                journalPath,
+                'cleanup',
+                error,
+              );
+            }
+          }
         }
         continue;
       }
-      if (journal.rollbackBlocked) {
-        if ((journal.rollbackRetryAt ?? 0) > Date.now()) {
-          // Not its turn to retry - unless retrying could not produce a
-          // loadable artifact, which still refuses without touching the tree.
-          if (!(await this.canRetryRollback(journal))) {
-            throw new ExtensionDirectoryLockedError(
-              journal.destinationDirectory,
-            );
-          }
-          continue;
-        }
-      }
-      try {
-        await this.rollbackJournal(journal, budget);
-        await this.finishRollback(journal, journalPath, budget);
-      } catch (error: unknown) {
-        if (!isDirectoryLockError(error)) throw error;
-        // Marked first, so even a rollback that ends in refusal gets its retry
-        // window and later passes reject from the window check instead of
-        // re-attempting the restore every time.
-        debugLogger.warn('extension transaction rollback blocked:', error);
-        await this.recordPendingStep(journal, journalPath, 'rollback');
-        // Existence is not integrity: a rollback that cannot be retried to a
-        // loadable artifact stops the caller, errno kept off Windows.
+      if (journal.rollbackBlocked && !this.retryDue(journal)) {
+        // Not its turn to retry - unless retrying could not produce a
+        // loadable artifact, which still refuses without touching the tree.
         if (!(await this.canRetryRollback(journal))) {
-          throw process.platform === 'win32'
-            ? new ExtensionDirectoryLockedError(journal.destinationDirectory, {
-                cause: error,
-              })
-            : error;
+          throw this.windowRefusal(journal);
         }
+        continue;
       }
+      await this.attemptRollback(journal, journalPath, budget);
     }
   }
 
-  /** Whether retrying this rollback can still produce a loadable artifact. */
-  private async canRetryRollback(
+  /** The refusal for a blocked rollback whose retry could not leave a loadable
+   *  artifact: the held-handle diagnosis only where that errno is honest. */
+  private windowRefusal(journal: ExtensionTransactionJournal): Error {
+    return process.platform === 'win32'
+      ? new ExtensionDirectoryLockedError(journal.destinationDirectory)
+      : new ExtensionConflictError(
+          `Extension transaction ${journal.transactionId} for ${journal.destinationDirectory} is still unresolved.`,
+        );
+  }
+
+  /** Rolls a journal back and tears it down, reporting whether the transaction
+   *  is now gone. A lock-defeated restore that got its mark and can still
+   *  recover returns false - deferred, not resolved. A non-lock failure, an
+   *  un-landable marker, and a restore that cannot leave a loadable artifact
+   *  all throw. */
+  private async attemptRollback(
     journal: ExtensionTransactionJournal,
+    journalPath: string,
+    budget: LockRetryBudget,
   ): Promise<boolean> {
-    return (
-      (await this.existsForRetryGate(journal.backupDirectory)) &&
-      (await this.hasRootManifest(journal.destinationDirectory))
-    );
-  }
-
-  /** Whether the directory carries a root manifest the loader accepts:
-   *  qwen-extension.json, or plugin.json for unconverted Agent Plugins v1. */
-  private async hasRootManifest(directory: string): Promise<boolean> {
-    return (
-      (await this.existsForRetryGate(
-        path.join(directory, EXTENSIONS_CONFIG_FILENAME),
-      )) ||
-      (await this.existsForRetryGate(
-        path.join(directory, AGENT_PLUGIN_MANIFEST),
-      ))
-    );
-  }
-
-  /** Existence for the retry gate: any probe error answers "not there". */
-  private async existsForRetryGate(filePath: string): Promise<boolean> {
     try {
-      await fsp.access(filePath);
+      await this.rollbackJournal(journal, budget);
+      await this.finishRollback(journal, journalPath, budget);
       return true;
-    } catch {
+    } catch (error: unknown) {
+      if (!isDirectoryLockError(error)) throw error;
+      debugLogger.warn('extension transaction rollback blocked:', error);
+      // Marked before anything decides, so even a rollback that ends in
+      // refusal has its window and later passes reject from the window check.
+      if (
+        !(await this.recordPendingStep(journal, journalPath, 'rollback', error))
+      ) {
+        throw error;
+      }
+      if (!(await this.canRetryRollback(journal))) {
+        // The raw errno stays honest off Windows, where it may not be a hold.
+        throw process.platform === 'win32'
+          ? new ExtensionDirectoryLockedError(journal.destinationDirectory, {
+              cause: error,
+            })
+          : error;
+      }
       return false;
     }
   }
 
-  /** Persists the step a later operation must retry, so recovery repeats it. */
+  /** Whether retrying this rollback can still leave a loadable artifact: the
+   *  destination already carries exactly the backup's top-level entries, so
+   *  the owed restore is effectively complete. An unreadable side or an empty
+   *  artifact answers "no" - existence is not integrity. */
+  private async canRetryRollback(
+    journal: ExtensionTransactionJournal,
+  ): Promise<boolean> {
+    const [backup, destination] = await Promise.all([
+      this.topLevelEntries(journal.backupDirectory),
+      this.topLevelEntries(journal.destinationDirectory),
+    ]);
+    if (!backup || !destination) return false;
+    if (backup.size === 0 || destination.size !== backup.size) return false;
+    for (const [name, kind] of backup) {
+      if (destination.get(name) !== kind) return false;
+    }
+    return true;
+  }
+
+  /** The directory's top-level name to kind map, or undefined if unreadable. */
+  private async topLevelEntries(
+    directory: string,
+  ): Promise<Map<string, 'link' | 'dir' | 'file'> | undefined> {
+    try {
+      const entries = await fsp.readdir(directory, { withFileTypes: true });
+      return new Map(entries.map((entry) => [entry.name, entryKind(entry)]));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Whether the persisted retry deadline on the owed step has come due. */
+  private retryDue(journal: ExtensionTransactionJournal): boolean {
+    const remainingMs = (journal.rollbackRetryAt ?? 0) - Date.now();
+    return remainingMs <= 0 || remainingMs > ROLLBACK_RETRY_DELAY_MS;
+  }
+
+  /** Persists the step a later operation must retry, so recovery repeats it.
+   *  Returns whether the marker landed: absorbing instead of reporting is
+   *  allowed only on a journal whose own record says so. */
   private async recordPendingStep(
     journal: ExtensionTransactionJournal,
     journalPath: string,
     pendingStep: 'rollback' | 'cleanup',
-  ): Promise<void> {
+    error: unknown,
+  ): Promise<boolean> {
     try {
       await atomicWriteJSON(
         journalPath,
@@ -1819,15 +1858,21 @@ export class ExtensionStore {
           ...journal,
           rollbackBlocked: pendingStep === 'rollback' ? true : undefined,
           cleanupPending: pendingStep === 'cleanup' ? true : undefined,
-          rollbackRetryAt:
-            pendingStep === 'rollback'
-              ? Date.now() + ROLLBACK_RETRY_DELAY_MS
-              : undefined,
+          // Only a lock names a holder that may let go; any other errno is
+          // not a hold, so the next operation retries the owed step at once.
+          rollbackRetryAt: isDirectoryLockError(error)
+            ? Date.now() + ROLLBACK_RETRY_DELAY_MS
+            : undefined,
         },
         { mode: 0o600, forceMode: true, noFollow: true },
       );
-    } catch (error) {
-      debugLogger.warn('extension transaction marker not persisted:', error);
+      return true;
+    } catch (writeError) {
+      debugLogger.warn(
+        'extension transaction marker not persisted:',
+        writeError,
+      );
+      return false;
     }
   }
 
@@ -1841,9 +1886,8 @@ export class ExtensionStore {
     const resolvedDestination = path.resolve(destinationDirectory);
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
-      const journal = await this.readRecoverableJournalUnlocked(
-        path.join(transactionsDir, name),
-      );
+      const journalPath = path.join(transactionsDir, name);
+      const journal = await this.readRecoverableJournalUnlocked(journalPath);
       if (
         !journal ||
         path.resolve(journal.destinationDirectory) !== resolvedDestination ||
@@ -1851,13 +1895,20 @@ export class ExtensionStore {
       ) {
         continue;
       }
-      if (journal.rollbackBlocked) {
-        // The retry carries the diagnosis the attempt that blocked it gave.
-        throw new ExtensionDirectoryLockedError(journal.destinationDirectory);
+      // The retry window defers reads, not a mutation of the very directory
+      // it waits on: this destination gets its owed rollback right now.
+      if (
+        !(await this.attemptRollback(journal, journalPath, {
+          remainingMs: LOCK_RETRY_BUDGET_MS,
+        }))
+      ) {
+        // Still blocked after a fresh attempt, so the diagnosis is current.
+        throw process.platform === 'win32'
+          ? new ExtensionDirectoryLockedError(journal.destinationDirectory)
+          : new ExtensionConflictError(
+              `Extension transaction ${journal.transactionId} for ${destinationDirectory} is still unresolved.`,
+            );
       }
-      throw new ExtensionConflictError(
-        `Extension transaction ${journal.transactionId} for ${destinationDirectory} is still unresolved.`,
-      );
     }
   }
 
@@ -2195,11 +2246,14 @@ export class ExtensionStore {
     journal: ExtensionTransactionJournal,
     budget: LockRetryBudget,
   ): Promise<void> {
-    await this.removeWithRetry(journal.backupDirectory, budget);
-    await this.removeWithRetry(
-      partialBackupPath(journal.backupDirectory),
-      budget,
-    );
+    // Demoting the backup to the `.partial` name first means a removal that
+    // dies half-way can never be restored from: the next pass sees no backup.
+    const partial = partialBackupPath(journal.backupDirectory);
+    await this.removeWithRetry(partial, budget);
+    if (await this.pathExists(journal.backupDirectory)) {
+      await renameWithRetry(journal.backupDirectory, partial, 3, 50);
+      await this.removeWithRetry(partial, budget);
+    }
   }
 
   /**
@@ -2218,8 +2272,13 @@ export class ExtensionStore {
       debugLogger.warn('extension transaction cleanup blocked:', error);
       // The rollback is done, so the step owed is the cleanup even when the
       // error is not a lock: marking first stops a later pass restoring again
-      // from a backup this call already half-deleted.
-      await this.recordPendingStep(journal, journalPath, 'cleanup');
+      // from a backup this call already half-deleted. A marker that cannot
+      // land reports instead of leaving the journal unrecorded.
+      if (
+        !(await this.recordPendingStep(journal, journalPath, 'cleanup', error))
+      ) {
+        throw error;
+      }
       if (!isDirectoryLockError(error)) throw error;
     }
   }

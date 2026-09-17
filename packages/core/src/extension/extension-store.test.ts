@@ -17,7 +17,10 @@ import {
   ExtensionStore,
   ExtensionStoreCorruptError,
 } from './extension-store.js';
-import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import {
+  EXTENSIONS_CONFIG_FILENAME,
+  INSTALL_METADATA_FILENAME,
+} from './variables.js';
 import { AGENT_PLUGIN_MANIFEST } from './agent-plugins-v1/manifest.js';
 import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
 
@@ -32,11 +35,29 @@ const renameFault = vi.hoisted(() => ({
     | undefined,
 }));
 
+/**
+ * Seam for tests that need an atomic JSON write to fail - the journal marker
+ * is the load-bearing one. Inspecting the target path intercepts that write
+ * only; everything else keeps the real implementation.
+ */
+const atomicWriteFault = vi.hoisted(() => ({
+  inspect: undefined as ((target: string) => Error | undefined) | undefined,
+}));
+
 vi.mock('../utils/atomicFileWrite.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/atomicFileWrite.js')>();
   return {
     ...actual,
+    atomicWriteJSON: async (
+      target: string,
+      data: unknown,
+      options?: Parameters<typeof actual.atomicWriteJSON>[2],
+    ) => {
+      const injected = atomicWriteFault.inspect?.(String(target));
+      if (injected) throw injected;
+      await actual.atomicWriteJSON(target, data, options);
+    },
     renameWithRetry: async (
       src: string,
       dest: string,
@@ -2627,7 +2648,11 @@ describe('ExtensionStore', () => {
     const rmSpy = vi
       .spyOn(fsp, 'rm')
       .mockImplementation(async (target, opts) => {
-        if (target === backup) throw new Error('cleanup denied');
+        // The fault covers both names the backup can be removed under: the
+        // teardown demotes it to `.partial` before deleting.
+        if (target === backup || String(target) === `${backup}.partial`) {
+          throw new Error('cleanup denied');
+        }
         return await rm(target, opts);
       });
 
@@ -2904,6 +2929,7 @@ describe('ExtensionStore', () => {
 
     afterEach(() => {
       renameFault.inspect = undefined;
+      atomicWriteFault.inspect = undefined;
       Object.defineProperty(process, 'platform', { value: originalPlatform });
     });
 
@@ -3786,19 +3812,23 @@ describe('ExtensionStore', () => {
           return await copyTree(source, target, budget);
         },
       );
-      // The backup the restore left behind is held for the rest of the commit.
+      // The backup the restore left behind is held for the rest of the
+      // commit: every removal under the rollback root after the swap's own
+      // pre-clean passes through - the demoted `.partial` name included.
       const rm = fsp.rm.bind(fsp);
       let holdBackup = true;
+      let rollbackRemovals = 0;
+      let rollbackRmCalls = 0;
       const rmSpy = vi
         .spyOn(fsp, 'rm')
         .mockImplementation(async (target, opts) => {
           const targetPath = String(target);
-          if (
-            holdBackup &&
-            targetPath.startsWith(rollbackRoot) &&
-            !targetPath.endsWith('.partial')
-          ) {
-            throw lockError(targetPath);
+          if (targetPath.startsWith(rollbackRoot)) {
+            rollbackRemovals += 1;
+            rollbackRmCalls += 1;
+            if (holdBackup && rollbackRmCalls > 1) {
+              throw lockError(targetPath);
+            }
           }
           return await rm(target, opts);
         });
@@ -3835,13 +3865,46 @@ describe('ExtensionStore', () => {
         ).toBe(true);
 
         const restoresBefore = restored.length;
+        const removalsBefore = rollbackRemovals;
         await store.readSnapshot();
-        // The settled rollback is not copied over the live tree again.
+        await store.readSnapshot();
+        // The settled rollback is neither copied again nor re-walked: the
+        // cleanup mark wrote the same window, so a held teardown costs reads
+        // nothing inside it.
         expect(restored).toHaveLength(restoresBefore);
+        expect(rollbackRemovals).toBe(removalsBefore);
+
+        const expireWindow = async () => {
+          const [journalName] = await leftoverJournals();
+          const journalPath = path.join(storeDir, 'transactions', journalName!);
+          const due = JSON.parse(
+            await fsp.readFile(journalPath, 'utf8'),
+          ) as Record<string, unknown>;
+          await fsp.writeFile(
+            journalPath,
+            JSON.stringify({ ...due, rollbackRetryAt: 1 }),
+          );
+        };
+        // An expired window admits one retry; still held, it re-marks, so
+        // later reads pay nothing again until the next expiry.
+        await expireWindow();
+        await store.readSnapshot();
+        expect(rollbackRemovals).toBeGreaterThan(removalsBefore);
+        const reMarked = JSON.parse(
+          await fsp.readFile(
+            path.join(storeDir, 'transactions', (await leftoverJournals())[0]!),
+            'utf8',
+          ),
+        ) as { rollbackRetryAt?: number };
+        expect(reMarked.rollbackRetryAt!).toBeGreaterThan(Date.now());
 
         // Once the holder lets go, the backup is removed and the next update is
         // not refused for a transaction that is already settled.
         holdBackup = false;
+        await expireWindow();
+        await store.readSnapshot();
+        expect(await leftoverJournals()).toEqual([]);
+        expect(await fsp.readdir(rollbackRoot)).toEqual([]);
         const staging2 = await store.createStagingDirectory();
         await fsp.writeFile(path.join(staging2, 'version'), 'two');
         await store.commitArtifact({
@@ -4046,70 +4109,104 @@ describe('ExtensionStore', () => {
       }
     });
 
-    it('stops the caller on an install rollback with no backup to retry from', async () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      const store = makeStore();
-      const identity = { id: 'c1'.repeat(32), name: 'demo' };
-      const targetSnapshot = await targetSnapshotFor(store, identity);
-      const transactionId = 'install-blocked';
-      const destination = path.join(extensionsDir, 'demo');
-      // A crashed install leaves the half-written tree and its journal behind,
-      // with no backup to restore from and the staging directory already gone.
-      await fsp.mkdir(destination, { recursive: true });
-      await fsp.writeFile(path.join(destination, 'version'), 'two');
-      await plantJournal({
-        transactionId,
-        operation: 'install',
-        phase: 'prepared',
-        destinationDirectory: destination,
-        stagingDirectory: path.join(storeDir, 'staging', transactionId),
-        backupDirectory: path.join(storeDir, 'rollback', transactionId),
-        previousGeneration: 0,
-        targetGeneration: 1,
-        targetSnapshot,
-      });
-      const rm = fsp.rm.bind(fsp);
-      let destinationRemovals = 0;
-      const rmSpy = vi
-        .spyOn(fsp, 'rm')
-        .mockImplementation(async (target, opts) => {
-          if (String(target) === destination) {
-            destinationRemovals += 1;
-            throw lockError(destination);
-          }
-          return await rm(target, opts);
-        });
-
-      try {
-        // Nothing can restore this destination, so the store must not adopt
-        // the leftover tree as an installed extension and carry on.
-        await expect(store.readSnapshot()).rejects.toMatchObject({
-          code: 'EPERM',
-        });
-        expect(await leftoverJournals()).toHaveLength(1);
-        // The refusal still got its mark and window: the next read rejects
-        // from the window check without re-attempting the doomed restore.
-        const attempted = destinationRemovals;
-        expect(attempted).toBeGreaterThan(0);
-        await expect(store.readSnapshot()).rejects.toBeInstanceOf(
-          ExtensionDirectoryLockedError,
+    // Nothing to restore from is the one refusal both platforms must report,
+    // each with its own honest text: the held-handle diagnosis only where a
+    // lock error means a holder, never invented from inside the window.
+    for (const { platform, id, firstRead, secondRead } of [
+      {
+        platform: 'linux',
+        id: 'c1',
+        firstRead: (failure: unknown) =>
+          expect(failure).toMatchObject({ code: 'EPERM' }),
+        secondRead: (failure: unknown) =>
+          expect(failure).toBeInstanceOf(ExtensionConflictError),
+      },
+      {
+        platform: 'win32',
+        id: 'ca',
+        firstRead: (failure: unknown) => {
+          expect(failure).toBeInstanceOf(ExtensionDirectoryLockedError);
+          expect(
+            (failure as { cause?: NodeJS.ErrnoException }).cause?.code,
+          ).toBe('EPERM');
+        },
+        secondRead: (failure: unknown) =>
+          expect(failure).toBeInstanceOf(ExtensionDirectoryLockedError),
+      },
+    ]) {
+      it(`stops the caller on an install rollback with no backup to retry from on ${platform}`, async () => {
+        Object.defineProperty(process, 'platform', { value: platform });
+        const store = makeStore();
+        const identity = { id: id.repeat(32), name: 'demo' };
+        const targetSnapshot = await targetSnapshotFor(store, identity);
+        const transactionId = `install-blocked-${platform}`;
+        const destination = path.join(extensionsDir, 'demo');
+        // A crashed install leaves the half-written tree and its journal
+        // behind, with no backup and no staging directory left. The manifest
+        // makes the destination look loadable, so refusal can only come from
+        // the missing backup.
+        await fsp.mkdir(destination, { recursive: true });
+        await fsp.writeFile(path.join(destination, 'version'), 'two');
+        await fsp.writeFile(
+          path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+          '{"name":"demo"}',
         );
-        expect(destinationRemovals).toBe(attempted);
-        const [name] = await leftoverJournals();
-        const journal = JSON.parse(
-          await fsp.readFile(
-            path.join(storeDir, 'transactions', name!),
-            'utf8',
-          ),
-        ) as { rollbackBlocked?: boolean; rollbackRetryAt?: number };
-        expect(journal).toMatchObject({
-          rollbackBlocked: true,
-          rollbackRetryAt: expect.any(Number),
+        await plantJournal({
+          transactionId,
+          operation: 'install',
+          phase: 'prepared',
+          destinationDirectory: destination,
+          stagingDirectory: path.join(storeDir, 'staging', transactionId),
+          backupDirectory: path.join(storeDir, 'rollback', transactionId),
+          previousGeneration: 0,
+          targetGeneration: 1,
+          targetSnapshot,
         });
-      } finally {
-        rmSpy.mockRestore();
-      }
-    });
+        const rm = fsp.rm.bind(fsp);
+        let destinationRemovals = 0;
+        const rmSpy = vi
+          .spyOn(fsp, 'rm')
+          .mockImplementation(async (target, opts) => {
+            if (String(target) === destination) {
+              destinationRemovals += 1;
+              throw lockError(destination);
+            }
+            return await rm(target, opts);
+          });
+
+        try {
+          // Nothing can restore this destination, so the store must not adopt
+          // the leftover tree as an installed extension and carry on.
+          const first: unknown = await store
+            .readSnapshot()
+            .catch((error: unknown) => error);
+          firstRead(first);
+          expect(await leftoverJournals()).toHaveLength(1);
+          // The refusal still got its mark and window: the next read rejects
+          // from the window check without re-attempting the doomed restore.
+          const attempted = destinationRemovals;
+          expect(attempted).toBeGreaterThan(0);
+          const second: unknown = await store
+            .readSnapshot()
+            .catch((error: unknown) => error);
+          secondRead(second);
+          expect(destinationRemovals).toBe(attempted);
+          const [name] = await leftoverJournals();
+          const journal = JSON.parse(
+            await fsp.readFile(
+              path.join(storeDir, 'transactions', name!),
+              'utf8',
+            ),
+          ) as { rollbackBlocked?: boolean; rollbackRetryAt?: number };
+          expect(journal).toMatchObject({
+            rollbackBlocked: true,
+            rollbackRetryAt: expect.any(Number),
+          });
+        } finally {
+          rmSpy.mockRestore();
+        }
+      });
+    }
 
     it('stops the caller when a copy-mode uninstall leaves no manifest behind', async () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
@@ -4201,8 +4298,8 @@ describe('ExtensionStore', () => {
           return await copyTree(source, target, budget);
         },
       );
-      // The backup removal dies mid-way on a non-lock error, leaving the backup
-      // half deleted for anyone who restores from it again.
+      // The backup removal dies mid-way on a non-lock error once the demote
+      // has renamed the backup, leaving a half-deleted one behind.
       const rm = fsp.rm.bind(fsp);
       let faulted = false;
       const rmSpy = vi
@@ -4211,8 +4308,8 @@ describe('ExtensionStore', () => {
           const targetPath = String(target);
           if (
             !faulted &&
-            targetPath.startsWith(rollbackRoot) &&
-            !targetPath.endsWith('.partial')
+            targetPath.endsWith('.partial') &&
+            fs.existsSync(targetPath)
           ) {
             faulted = true;
             const [first] = await fsp.readdir(targetPath);
@@ -4504,18 +4601,15 @@ describe('ExtensionStore', () => {
       await store.ensureInitialized([identity]);
       await installDemo(store, identity, destination);
       const rollbackRoot = path.join(storeDir, 'rollback');
-      // An indexer holds the old tree in the rollback area for one attempt.
+      // An indexer holds one removal under the rollback area for one attempt
+      // - whichever runs first, the teardown absorbs it inside the commit.
       const rm = fsp.rm.bind(fsp);
       let held = false;
       const rmSpy = vi
         .spyOn(fsp, 'rm')
         .mockImplementation(async (target, opts) => {
           const targetPath = String(target);
-          if (
-            !held &&
-            targetPath.startsWith(rollbackRoot) &&
-            !targetPath.endsWith('.partial')
-          ) {
+          if (!held && targetPath.startsWith(rollbackRoot)) {
             held = true;
             throw lockError(targetPath);
           }
@@ -4538,6 +4632,72 @@ describe('ExtensionStore', () => {
       // journal that owes a removal.
       expect(await leftoverJournals()).toEqual([]);
       expect(await fsp.readdir(rollbackRoot)).toEqual([]);
+    });
+
+    // Without the restore's own kind-conflict pass, `fsp.cp` refuses to put
+    // a file back where the defeated apply left a directory, and the journal
+    // re-fails on every later read with an errno nobody can act on.
+    it('restores an entry whose kind the defeated apply copy changed', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'e7'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      // v1 ships docs as a file; the update would make it a directory.
+      await fsp.writeFile(path.join(destination, 'docs'), 'one');
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'version'), 'two');
+      await fsp.writeFile(
+        path.join(staging, EXTENSIONS_CONFIG_FILENAME),
+        '{"name":"demo"}',
+      );
+      await fsp.mkdir(path.join(staging, 'docs'), { recursive: true });
+      await fsp.writeFile(path.join(staging, 'docs', 'page.md'), 'two');
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+      const internals = store as unknown as {
+        copyTree: (
+          source: string,
+          target: string,
+          budget: unknown,
+        ) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string, budget: unknown) => {
+          if (source === staging) {
+            // The apply dies right where the kind conflict now stands: the
+            // file is gone and its directory replacement is half there.
+            await fsp.rm(path.join(target, 'docs'), { force: true });
+            await fsp.mkdir(path.join(target, 'docs'), { recursive: true });
+            throw lockError(source);
+          }
+          return await copyTree(source, target, budget);
+        },
+      );
+
+      try {
+        await expect(
+          store.commitArtifact({
+            operation: 'update',
+            identity,
+            stagingDirectory: staging,
+            destinationDirectory: destination,
+          }),
+        ).rejects.toBeInstanceOf(ExtensionDirectoryLockedError);
+      } finally {
+        vi.restoreAllMocks();
+      }
+      // The rollback put the file back over the half-made directory.
+      expect((await fsp.stat(path.join(destination, 'docs'))).isFile()).toBe(
+        true,
+      );
+      expect(await fsp.readFile(path.join(destination, 'docs'), 'utf8')).toBe(
+        'one',
+      );
+      expect(await fsp.readdir(path.join(storeDir, 'rollback'))).toEqual([]);
+      expect(await leftoverJournals()).toEqual([]);
     });
 
     it('waits a window before retrying a blocked rollback', async () => {
@@ -4575,11 +4735,16 @@ describe('ExtensionStore', () => {
       };
       const copyTree = internals.copyTree.bind(store);
       const restored: string[] = [];
-      // The restore is held for good, so the rollback can never complete.
+      // The restore is held while the flag says so, so the case can also
+      // watch the journal heal once the holder lets go.
+      let holdRestore = true;
       vi.spyOn(internals, 'copyTree').mockImplementation(
         async (source: string, target: string, budget: unknown) => {
           if (source.startsWith(rollbackRoot)) restored.push(source);
-          if (source.startsWith(rollbackRoot) || source === staging) {
+          if (
+            holdRestore &&
+            (source.startsWith(rollbackRoot) || source === staging)
+          ) {
             throw lockError(source);
           }
           return await copyTree(source, target, budget);
@@ -4647,6 +4812,24 @@ describe('ExtensionStore', () => {
           Date.now(),
         );
 
+        // A deadline further out than any window this code writes is a moved
+        // clock, not a live window: the retry must come due, not wedge.
+        const skewed = await readJournal();
+        await fsp.writeFile(
+          skewed.journalPath,
+          JSON.stringify({
+            ...skewed.journal,
+            rollbackRetryAt: Date.now() + 10 * 60 * 1000,
+          }),
+        );
+        const beforeSkew = restored.length;
+        await store.readSnapshot();
+        expect(restored.length).toBeGreaterThan(beforeSkew);
+        const reMarkedAfterClamp = await readJournal();
+        expect(
+          reMarkedAfterClamp.journal.rollbackRetryAt! - Date.now(),
+        ).toBeLessThanOrEqual(6000);
+
         // The destination still refuses a new transaction with the actionable
         // text, and only that destination: another extension is unaffected.
         await expect(
@@ -4672,75 +4855,206 @@ describe('ExtensionStore', () => {
         expect(await fsp.readFile(path.join(otherDir, 'version'), 'utf8')).toBe(
           'two',
         );
-      } finally {
-        vi.restoreAllMocks();
-      }
-    });
 
-    it('absorbs a blocked rollback for an unconverted plugin.json root', async () => {
-      Object.defineProperty(process, 'platform', { value: 'win32' });
-      const store = makeStore();
-      const identity = { id: 'd6'.repeat(32), name: 'demo' };
-      const destination = path.join(extensionsDir, 'demo');
-      const targetSnapshot = await targetSnapshotFor(store, identity);
-      // Agent Plugins v1 installs are stored unconverted: the root manifest is
-      // plugin.json and qwen-extension.json never exists in the destination.
-      await fsp.mkdir(destination, { recursive: true });
-      await fsp.writeFile(
-        path.join(destination, AGENT_PLUGIN_MANIFEST),
-        '{"name":"demo"}',
-      );
-      const transactionId = 'plugin-rollback';
-      await plantJournal(
-        {
-          transactionId,
-          operation: 'update',
-          phase: 'prepared',
-          destinationDirectory: destination,
-          stagingDirectory: path.join(storeDir, 'staging', transactionId),
-          backupDirectory: path.join(storeDir, 'rollback', transactionId),
-          swapStrategy: 'copy',
-          previousGeneration: 0,
-          targetGeneration: 1,
-          targetSnapshot,
-        },
-        { [AGENT_PLUGIN_MANIFEST]: '{"name":"demo"}', version: 'one' },
-      );
-      const rollbackRoot = path.join(storeDir, 'rollback');
-      const internals = store as unknown as {
-        copyTree: (
-          source: string,
-          target: string,
-          budget: unknown,
-        ) => Promise<void>;
-      };
-      const copyTree = internals.copyTree.bind(store);
-      // Only the restore is held; the destination itself is intact.
-      vi.spyOn(internals, 'copyTree').mockImplementation(
-        async (source: string, target: string, budget: unknown) => {
-          if (source.startsWith(rollbackRoot)) throw lockError(source);
-          return await copyTree(source, target, budget);
-        },
-      );
-
-      try {
-        // The gate must not call this destination unloadable: the blocked
-        // rollback is absorbed, marked with a window, and reads carry on.
+        // With the holder gone, a plain read still defers inside the window,
+        // but a mutation of this destination forces its own retry: the
+        // restore lands, the journal and backup clear, and commits resume -
+        // self-heal, not a wedge until expiry.
+        holdRestore = false;
         await store.readSnapshot();
+        expect(await leftoverJournals()).toHaveLength(1);
+        await store.commitArtifact({
+          operation: 'update',
+          identity,
+          stagingDirectory: await stageUpdate(store),
+          destinationDirectory: destination,
+        });
+        expect(await leftoverJournals()).toEqual([]);
+        expect(await fsp.readdir(rollbackRoot)).toEqual([]);
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('two');
       } finally {
         vi.restoreAllMocks();
       }
-      const [name] = await leftoverJournals();
-      expect(name).toBe(`${transactionId}.json`);
-      const journal = JSON.parse(
-        await fsp.readFile(path.join(storeDir, 'transactions', name!), 'utf8'),
-      ) as { rollbackBlocked?: boolean; rollbackRetryAt?: number };
-      expect(journal.rollbackBlocked).toBe(true);
-      expect(journal.rollbackRetryAt!).toBeGreaterThan(Date.now());
-      expect(fs.existsSync(path.join(destination, AGENT_PLUGIN_MANIFEST))).toBe(
-        true,
-      );
     });
+
+    // The gate's question is the backup comparison, not the manifest name:
+    // a half-wiped uninstall keeps a manifest standing beside a deleted
+    // payload, and a plugin or link root loads fine carrying neither name.
+    const gateStates: Array<{
+      label: string;
+      id: string;
+      operation: 'update' | 'uninstall';
+      destinationFiles: Record<string, string>;
+      destinationDirs?: string[];
+      backupFiles: Record<string, string>;
+      absorbs: boolean;
+      /** A journal already marked inside its window is judged without
+       *  touching the tree - the only route that sees the state as it is. */
+      premarkedWithinWindow?: boolean;
+    }> = [
+      {
+        label: 'a tree the held restore already made identical',
+        id: 'e1',
+        operation: 'update',
+        destinationFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+          version: 'one',
+        },
+        backupFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+          version: 'one',
+        },
+        absorbs: true,
+      },
+      {
+        label: 'an unconverted plugin.json root',
+        id: 'e2',
+        operation: 'update',
+        destinationFiles: { [AGENT_PLUGIN_MANIFEST]: '{"name":"demo"}' },
+        backupFiles: { [AGENT_PLUGIN_MANIFEST]: '{"name":"demo"}' },
+        absorbs: true,
+      },
+      {
+        label: "a link install's metadata-only root",
+        id: 'e3',
+        operation: 'uninstall',
+        destinationFiles: {
+          [INSTALL_METADATA_FILENAME]: '{"type":"link","source":"../src"}',
+        },
+        backupFiles: {
+          [INSTALL_METADATA_FILENAME]: '{"type":"link","source":"../src"}',
+        },
+        absorbs: true,
+      },
+      {
+        label: 'a half-wiped uninstall whose manifest survived',
+        id: 'e4',
+        operation: 'uninstall',
+        destinationFiles: { [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}' },
+        backupFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+          'readme.md': 'one',
+        },
+        absorbs: false,
+      },
+      {
+        label: 'an entry whose kind the restore did not finish',
+        id: 'e5',
+        operation: 'update',
+        destinationFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+        },
+        destinationDirs: ['docs'],
+        backupFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+          docs: 'file, not directory',
+        },
+        absorbs: false,
+      },
+      {
+        label: 'a marked journal whose entry changed kind inside the window',
+        id: 'e6',
+        operation: 'update',
+        destinationFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+        },
+        destinationDirs: ['docs'],
+        backupFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+          docs: 'file, not directory',
+        },
+        absorbs: false,
+        premarkedWithinWindow: true,
+      },
+    ];
+
+    for (const state of gateStates) {
+      it(`decides the blocked-rollback retry on ${state.label}`, async () => {
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        const store = makeStore();
+        const identity = { id: state.id.repeat(32), name: 'demo' };
+        const targetSnapshot = await targetSnapshotFor(store, identity);
+        const destination = path.join(extensionsDir, 'demo');
+        const transactionId = `gate-${state.id}`;
+        const backupDirectory = path.join(storeDir, 'rollback', transactionId);
+        await fsp.mkdir(destination, { recursive: true });
+        for (const [name, content] of Object.entries(state.destinationFiles)) {
+          await fsp.writeFile(path.join(destination, name), content);
+        }
+        for (const name of state.destinationDirs ?? []) {
+          await fsp.mkdir(path.join(destination, name), { recursive: true });
+        }
+        await plantJournal(
+          {
+            transactionId,
+            operation: state.operation,
+            phase: 'prepared',
+            destinationDirectory: destination,
+            ...(state.operation === 'uninstall'
+              ? {}
+              : {
+                  stagingDirectory: path.join(
+                    storeDir,
+                    'staging',
+                    transactionId,
+                  ),
+                }),
+            backupDirectory,
+            swapStrategy: 'copy',
+            ...(state.premarkedWithinWindow
+              ? {
+                  rollbackBlocked: true,
+                  rollbackRetryAt: Date.now() + 3000,
+                }
+              : {}),
+            previousGeneration: 0,
+            targetGeneration: 1,
+            targetSnapshot,
+          },
+          state.backupFiles,
+        );
+        const rollbackRoot = path.join(storeDir, 'rollback');
+        const internals = store as unknown as {
+          copyTree: (
+            source: string,
+            target: string,
+            budget: unknown,
+          ) => Promise<void>;
+        };
+        const copyTree = internals.copyTree.bind(store);
+        // The restore is held either way, so only the gate can tell an
+        // artifact that is already whole from one still missing content.
+        vi.spyOn(internals, 'copyTree').mockImplementation(
+          async (source: string, target: string, budget: unknown) => {
+            if (source.startsWith(rollbackRoot)) throw lockError(source);
+            return await copyTree(source, target, budget);
+          },
+        );
+
+        const read: unknown = await store
+          .readSnapshot()
+          .catch((error: unknown) => error);
+        vi.restoreAllMocks();
+        if (state.absorbs) {
+          expect(read).toBeDefined();
+        } else {
+          expect(read).toBeInstanceOf(ExtensionDirectoryLockedError);
+        }
+        // Either way the attempt got its mark and window, and the journal
+        // keeps owning the backup until a retry can finish the restore.
+        expect(await leftoverJournals()).toEqual([`${transactionId}.json`]);
+        const journal = JSON.parse(
+          await fsp.readFile(
+            path.join(storeDir, 'transactions', `${transactionId}.json`),
+            'utf8',
+          ),
+        ) as { rollbackBlocked?: boolean; rollbackRetryAt?: number };
+        expect(journal.rollbackBlocked).toBe(true);
+        expect(journal.rollbackRetryAt!).toBeGreaterThan(Date.now());
+      });
+    }
 
     it('spends one retry allowance per recovery pass', async () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
@@ -4848,11 +5162,12 @@ describe('ExtensionStore', () => {
           journal: unknown,
           journalPath: string,
           step: string,
-        ) => Promise<void>;
+          error: unknown,
+        ) => Promise<boolean>;
       };
-      // A marker that cannot be persisted leaves the journal unmarked, which is
-      // what the plain "still unresolved" refusal is for.
-      vi.spyOn(internals, 'recordPendingStep').mockResolvedValue(undefined);
+      // A marker that cannot land must never read as absorbed: a later pass
+      // would treat the unmarked journal as settled once generation advanced.
+      vi.spyOn(internals, 'recordPendingStep').mockResolvedValue(false);
       const copyTree = internals.copyTree.bind(store);
       const staging = await stageUpdate(store);
       const rollbackRoot = path.join(storeDir, 'rollback');
@@ -4876,6 +5191,8 @@ describe('ExtensionStore', () => {
           })
           .catch(() => undefined);
         expect(await leftoverJournals()).toHaveLength(1);
+        // Recovery runs first and refuses to give up on the unmarkable
+        // journal: staying loud is what keeps the backup alive.
         await expect(
           store.commitArtifact({
             operation: 'update',
@@ -4883,10 +5200,136 @@ describe('ExtensionStore', () => {
             stagingDirectory: await stageUpdate(store),
             destinationDirectory: destination,
           }),
-        ).rejects.toThrow(/still unresolved/);
+        ).rejects.toMatchObject({ code: 'EPERM' });
+        await expect(
+          store.setWorkspaceActivations(
+            [{ id: 'd4'.repeat(32), name: 'demo' }],
+            root,
+            'disabled',
+          ),
+        ).rejects.toMatchObject({ code: 'EPERM' });
+        await expect(store.readSnapshot()).rejects.toMatchObject({
+          code: 'EPERM',
+        });
+        // The backup survives precisely because no pass may absorb what it
+        // cannot mark.
+        expect((await fsp.readdir(rollbackRoot)).length).toBeGreaterThan(0);
+        const [name] = await leftoverJournals();
+        const journal = JSON.parse(
+          await fsp.readFile(
+            path.join(storeDir, 'transactions', name!),
+            'utf8',
+          ),
+        ) as Record<string, unknown>;
+        expect(journal['rollbackBlocked']).toBeUndefined();
+        expect(journal['cleanupPending']).toBeUndefined();
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('one');
       } finally {
         vi.restoreAllMocks();
       }
+    });
+
+    // Demote-before-delete is what makes an unmarkable cleanup safe to
+    // replay: a later pass finds no backup under its own name and leaves the
+    // live tree alone instead of pruning it against the gutted one.
+    it('never restores from a backup its cleanup already half-deleted', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const identity = { id: 'cb'.repeat(32), name: 'demo' };
+      const destination = path.join(extensionsDir, 'demo');
+      await store.ensureInitialized([identity]);
+      await installDemo(store, identity, destination);
+      const staging = await stageUpdate(store);
+      const rollbackRoot = path.join(storeDir, 'rollback');
+      const transactionsRoot = path.join(storeDir, 'transactions');
+      // Once the rollback is underway the marker write fails too: nothing can
+      // record the journal as deferred, so every pass must stay loud.
+      let markerFault = false;
+      renameFault.inspect = (src) =>
+        src === destination ? lockError(src) : undefined;
+      atomicWriteFault.inspect = (target) =>
+        markerFault && target.startsWith(transactionsRoot)
+          ? lockError(target)
+          : undefined;
+      const internals = store as unknown as {
+        copyTree: (
+          source: string,
+          target: string,
+          budget: unknown,
+        ) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string, budget: unknown) => {
+          if (source === staging) {
+            markerFault = true;
+            throw lockError(source);
+          }
+          return await copyTree(source, target, budget);
+        },
+      );
+      // The backup's removal - under whichever name the teardown reaches it
+      // - dies after taking one child with it, and every later removal of a
+      // rollback or journal path is held for good.
+      const rm = fsp.rm.bind(fsp);
+      let maimed = false;
+      const rmSpy = vi
+        .spyOn(fsp, 'rm')
+        .mockImplementation(async (target, opts) => {
+          const targetPath = String(target);
+          if (
+            !maimed &&
+            targetPath.startsWith(rollbackRoot) &&
+            fs.existsSync(targetPath)
+          ) {
+            maimed = true;
+            await rm(path.join(targetPath, 'skills'), {
+              recursive: true,
+              force: true,
+            });
+            throw lockError(targetPath);
+          }
+          if (
+            maimed &&
+            (targetPath.startsWith(rollbackRoot) ||
+              targetPath.startsWith(transactionsRoot))
+          ) {
+            throw lockError(targetPath);
+          }
+          return await rm(target, opts);
+        });
+
+      try {
+        const failure: unknown = await store
+          .commitArtifact({
+            operation: 'update',
+            identity,
+            stagingDirectory: staging,
+            destinationDirectory: destination,
+          })
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(AggregateError);
+        const replay: unknown = await store
+          .readSnapshot()
+          .catch((error: unknown) => error);
+        expect(replay).toMatchObject({ code: 'EPERM' });
+        // The replayed pass found no backup to restore from, so it never
+        // pruned the live tree against the gutted one.
+        expect(
+          await fsp.readFile(
+            path.join(destination, 'skills', 'keep.md'),
+            'utf8',
+          ),
+        ).toBe('one');
+      } finally {
+        rmSpy.mockRestore();
+        vi.restoreAllMocks();
+      }
+      await expect(store.readSnapshot()).resolves.toBeDefined();
+      expect(await leftoverJournals()).toEqual([]);
+      expect(await fsp.readdir(rollbackRoot)).toEqual([]);
     });
 
     it('unlinks a nested junction the new version does not carry', async () => {
