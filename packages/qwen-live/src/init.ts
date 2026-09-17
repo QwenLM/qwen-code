@@ -51,6 +51,7 @@ interface RawBackend {
 }
 
 interface RawConfig {
+  themeColor?: string;
   language?: LiveLanguage;
   realtimeApiKey?: string;
   realtimeEndpoint?: string;
@@ -365,6 +366,7 @@ export async function runInit(): Promise<void> {
 
   // 9. Write config
   const config: RawConfig = {
+    themeColor: 'iris',
     language,
     realtimeApiKey: apiKey,
     realtimeModel,

@@ -1,4 +1,6 @@
 import type { HostPublicState, LiveHostApi } from '../shared/host-api.ts';
+import { OVERLAY_GEOMETRY } from '../shared/overlay-geometry.ts';
+import { uiIcon, setIcon } from './ui-icons.ts';
 import { MemoryPanel } from './memory-panel.ts';
 import {
   liveText,
@@ -20,7 +22,7 @@ function field(label: LiveMessageKey, ...controls: HTMLElement[]): HTMLElement {
   const row = document.createElement('div');
   row.className = 'settings-field';
   const title = document.createElement('strong');
-  uiText(title, label);
+  title.append(uiText(document.createElement('span'), label));
   const group = document.createElement('div');
   group.className = 'settings-options';
   group.setAttribute('role', 'group');
@@ -69,24 +71,17 @@ export class SettingsPanel {
   private readonly configStatus = document.createElement('p');
   private openingConfig = false;
   private configError = '';
-  private readonly english = button(
-    'language.english',
-    () => void this.run(() => this.api.setLanguage('en')),
-  );
-  private readonly chinese = button(
-    'language.chinese',
-    () => void this.run(() => this.api.setLanguage('zh-CN')),
-  );
+  private readonly language = document.createElement('select');
   private readonly systemTheme = button(
     'theme.system',
     () => void this.run(() => this.api.setTheme('system')),
   );
   private readonly lightTheme = button(
-    'theme.light',
+    'ui.light',
     () => void this.run(() => this.api.setTheme('light')),
   );
   private readonly darkTheme = button(
-    'theme.dark',
+    'ui.dark',
     () => void this.run(() => this.api.setTheme('dark')),
   );
   private state?: HostPublicState;
@@ -102,10 +97,21 @@ export class SettingsPanel {
   private openingGeneration = 0;
   private disposed = false;
   private readonly dismissPending = (event: KeyboardEvent) => {
-    if (this.opening && event.key === 'Escape') {
+    if (this.isOpen && event.key === 'Escape') {
       event.preventDefault();
       this.hide();
     }
+  };
+
+  private readonly outsideClick = (event: MouseEvent) => {
+    const target = event.target as Node | null;
+    if (
+      this.isOpen &&
+      target &&
+      !this.panel.contains(target) &&
+      !this.returnFocus?.contains(target)
+    )
+      this.hide();
   };
 
   constructor(
@@ -115,23 +121,38 @@ export class SettingsPanel {
   ) {
     this.element.className = 'settings-layer';
     this.element.hidden = true;
-    this.element.dataset.liveInteractive = '';
+    this.panel.dataset.liveInteractive = '';
+    const { x, y, width, height } = OVERLAY_GEOMETRY.settings;
+    Object.assign(this.panel.style, {
+      left: `${x}px`,
+      top: `${y}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+    });
     this.panel.className = 'settings-panel';
     this.panel.setAttribute('role', 'dialog');
-    this.panel.setAttribute('aria-modal', 'true');
     this.panel.setAttribute('aria-labelledby', 'settings-title');
     const header = document.createElement('header');
     const title = document.createElement('strong');
     title.id = 'settings-title';
     uiText(title, 'ui.settings');
     uiLabel(this.close, 'ui.closeSettings');
-    header.append(title, this.close);
+    delete this.close.dataset.liveText;
+    setIcon(this.close, 'x');
+    this.close.className = 'settings-close';
+    header.append(uiIcon('settings'), title, this.close);
     makeOverlayDraggable(header, api);
     const body = document.createElement('div');
     body.className = 'settings-body';
-    const config = document.createElement('div');
+    const config = document.createElement('footer');
     config.className = 'settings-config';
     uiLabel(this.openConfig, 'ui.openConfig');
+    delete this.openConfig.dataset.liveText;
+    this.openConfig.replaceChildren(
+      uiIcon('code'),
+      uiText(document.createElement('span'), 'ui.configFile'),
+      uiIcon('external'),
+    );
     this.configStatus.className = 'settings-hint settings-config-status';
     this.configStatus.id = 'settings-config-status';
     this.configStatus.setAttribute('role', 'status');
@@ -147,6 +168,9 @@ export class SettingsPanel {
       });
     });
     uiLabel(this.refresh, 'ui.refreshAudio');
+    delete this.refresh.dataset.liveText;
+    setIcon(this.refresh, 'refresh');
+    this.refresh.className = 'settings-refresh';
     uiLabel(this.display, 'ui.display');
     this.displayHint.className = 'settings-hint';
     this.displayHint.id = 'display-capture-hint';
@@ -165,52 +189,68 @@ export class SettingsPanel {
     this.status.className = 'settings-status';
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
-    body.append(
-      config,
-      field('ui.audioSource', this.device, this.refresh),
-      field('ui.videoSource', this.sourceScreen, this.sourceCamera),
-      this.displayField,
-      this.displayHint,
-      field('ui.captureMode', this.modeDemand, this.modeFeed),
-      this.modeDescription,
-      this.memory.element,
-      field('language.label', this.chinese, this.english),
-      field('theme.label', this.systemTheme, this.lightTheme, this.darkTheme),
-      this.status,
+    const audio = field('ui.microphone', this.device, this.refresh);
+    audio.classList.add('settings-row');
+    audio.querySelector('strong')!.prepend(uiIcon('mic'));
+    const source = field(
+      'ui.videoSource',
+      this.sourceScreen,
+      this.sourceCamera,
     );
-    this.chinese.dataset.language = 'zh-CN';
-    this.english.dataset.language = 'en';
+    source.querySelector('strong')!.prepend(uiIcon('camera'));
+    this.displayField.classList.add('settings-row');
+    this.displayField.querySelector('strong')!.prepend(uiIcon('screen'));
+    const capture = field('ui.captureMode', this.modeDemand, this.modeFeed);
+    capture.querySelector('strong')!.prepend(uiIcon('eye'));
+    capture.append(this.modeDescription);
+    this.displayField.append(this.displayHint);
+    const languageField = field('language.label', this.language);
+    languageField.classList.add('settings-row');
+    const chinese = uiText(
+      document.createElement('option'),
+      'language.chinese',
+    );
+    chinese.value = 'zh-CN';
+    const english = uiText(
+      document.createElement('option'),
+      'language.english',
+    );
+    english.value = 'en';
+    this.language.append(chinese, english);
+    uiLabel(this.language, 'language.label');
+    this.language.addEventListener('change', () => {
+      const next = this.language.value;
+      this.language.value = this.state?.language ?? 'en';
+      if (next === 'en' || next === 'zh-CN')
+        void this.run(() => this.api.setLanguage(next));
+    });
+    const appearance = field(
+      'ui.appearance',
+      this.systemTheme,
+      this.lightTheme,
+      this.darkTheme,
+    );
+    appearance.classList.add('settings-appearance');
+    for (const [name, children] of [
+      ['ui.sound', [audio]],
+      ['ui.visual', [source, this.displayField, capture]],
+      ['ui.personalization', [this.memory.element, languageField, appearance]],
+    ] as const) {
+      const group = document.createElement('div');
+      group.className = 'settings-group';
+      group.append(...children);
+      const heading = uiText(document.createElement('p'), name);
+      heading.className = 'settings-group-label';
+      body.append(heading, group);
+    }
+    body.append(this.status);
     this.systemTheme.dataset.theme = 'system';
     this.lightTheme.dataset.theme = 'light';
     this.darkTheme.dataset.theme = 'dark';
-    this.panel.append(header, body);
+    this.panel.append(header, body, config);
     this.element.append(this.panel);
     this.element.ownerDocument.addEventListener('keydown', this.dismissPending);
-    this.element.addEventListener('pointerdown', (event) => {
-      if (event.target === this.element) this.hide();
-    });
-    this.element.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.hide();
-      } else if (event.key === 'Tab') {
-        const controls = Array.from(
-          this.panel.querySelectorAll<
-            HTMLInputElement | HTMLButtonElement | HTMLSelectElement
-          >('button, input, select'),
-        ).filter((item) => !item.disabled && !item.closest('[hidden]'));
-        const first = controls[0];
-        const last = controls.at(-1);
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last?.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first?.focus();
-        }
-      }
-    });
+    this.element.ownerDocument.addEventListener('click', this.outsideClick);
   }
 
   get isOpen(): boolean {
@@ -267,6 +307,7 @@ export class SettingsPanel {
     this.disposed = true;
     this.openingGeneration++;
     this.deviceGeneration++;
+    this.element.ownerDocument.removeEventListener('click', this.outsideClick);
     this.element.ownerDocument.removeEventListener(
       'keydown',
       this.dismissPending,
@@ -311,6 +352,9 @@ export class SettingsPanel {
             : 'host.config.unavailable',
       );
     this.configStatus.classList.toggle('error', Boolean(this.configError));
+    this.openConfig.title = this.configStatus.textContent;
+    this.configStatus.hidden =
+      !this.configError && !this.openingConfig && Boolean(state.canOpenConfig);
     for (const [option, value] of this.deviceLabels) {
       option.textContent = displayLiveMessage(language, value);
     }
@@ -384,12 +428,8 @@ export class SettingsPanel {
       this.loadingDevices ||
       unavailable ||
       state.permissions.microphone !== 'granted';
-    for (const control of [this.chinese, this.english]) {
-      const selected = control.dataset.language === language;
-      control.classList.toggle('selected', selected);
-      control.setAttribute('aria-pressed', String(selected));
-      control.disabled = this.busy || unavailable;
-    }
+    this.language.value = language;
+    this.language.disabled = this.busy || unavailable;
     for (const control of [this.systemTheme, this.lightTheme, this.darkTheme]) {
       const selected = control.dataset.theme === (state.theme ?? 'system');
       control.classList.toggle('selected', selected);

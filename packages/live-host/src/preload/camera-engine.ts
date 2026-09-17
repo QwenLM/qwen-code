@@ -187,14 +187,14 @@ function fitSnapshotDimensions(
   };
 }
 
-function matchesNativeDimensions(
+function meetsNativeDimensions(
   image: ImageBitmap,
   width: number,
   height: number,
 ): boolean {
   return (
-    (image.width === width && image.height === height) ||
-    (image.width === height && image.height === width)
+    (image.width >= width && image.height >= height) ||
+    (image.width >= height && image.height >= width)
   );
 }
 
@@ -503,7 +503,7 @@ export class HostCameraEngine {
         if (
           options.snapshotWidth === undefined &&
           options.snapshotHeight === undefined &&
-          !matchesNativeDimensions(photo, width, height)
+          !meetsNativeDimensions(photo, width, height)
         ) {
           throw new Error('camera_snapshot_resolution_unavailable');
         }
@@ -554,7 +554,7 @@ export class HostCameraEngine {
       if (
         options.snapshotWidth === undefined &&
         options.snapshotHeight === undefined &&
-        !matchesNativeDimensions(photo, width, height)
+        !meetsNativeDimensions(photo, width, height)
       ) {
         throw new Error('camera_snapshot_resolution_unavailable');
       }

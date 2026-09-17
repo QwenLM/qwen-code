@@ -78,25 +78,23 @@ intention; reconnects, renderer reloads and failed starts never loop into a
 new call. Press `Command+E` to start or end a call manually (an explicitly
 configured shortcut still takes precedence).
 
-The setup panel and orb first appear at the bottom-right. Drag the setup
-header or orb to move them; Host remembers the shared position across restarts
-and clamps it to a visible display if monitors change. Hover the orb to reveal
-microphone, voice output, Start/End call, Settings and Quit controls. They fade
-one second after the pointer leaves, unless settings or keyboard focus need
-them. Ending a call leaves a gray orb in place; it does not quit the app.
+The setup panel and Pebble card first appear at the bottom-right. Drag either
+header to move them; Host remembers their shared position and clamps it to a
+visible display when monitors change. The 234 × 194 card keeps microphone,
+voice output, Start/End call, Settings and Quit controls visible. Ending a call
+leaves the idle card in place. The waveform reflects microphone input, with
+separate thinking and speaking states and support for reduced motion.
 
-Settings presents Audio Source, Video Source and Capture Mode as peer groups,
-followed by Memory. The selected mode shows its own explanation. It preserves focus,
-drafts and camera preview while state changes, and closes on Escape or outside
-interaction. Setup asks only for the selected source's permissions, so Camera
-does not require screen recording or accessibility permission. The orb uses
-compact visible bounds when dragged to an edge; opening Settings temporarily
-fits the whole panel on screen, without replacing the saved resting position.
-Camera selection shows a nearby preview by default. Its floating eye button
-only hides/shows the preview; it does not stop camera input or frame delivery.
-Selecting Screen or quitting retains the existing camera shutdown behavior.
+Settings opens beside the card and groups Sound, Visual and Personalization.
+Memory is collapsed initially; expand it to edit libraries and model settings.
+The selected capture mode shows its explanation. Call controls remain operable,
+and Escape or outside interaction closes Settings. Form drafts and the camera
+preview stay mounted across updates. Setup asks only for the selected source's
+permissions. Opening Settings temporarily fits both surfaces onto the display,
+without replacing the saved resting position. Camera selection shows a preview
+by default; the eye button hides/shows it without stopping camera input.
 
-**Open config.json ↗** at the top of Settings opens the connected standalone
+**Open configuration** in the Settings footer opens the connected standalone
 daemon's actual configuration in the OS-associated JSON editor or IDE. This
 respects the daemon's `QWEN_LIVE_DATA_DIR`, even when Host starts separately.
 Save the file and restart Qwen Live to apply manual edits. Older daemons and
@@ -104,7 +102,7 @@ built-in `qwen serve` do not advertise this action. Missing, non-regular (includ
 symlink) files or editor failures show an error; the action never creates or
 overwrites configuration.
 
-**Language** is followed by Theme at the end of Settings. It switches the fixed Live interface
+**Language** is followed by Appearance in Personalization. It switches the fixed Live interface
 between English and Simplified Chinese and saves the selection in the top-level
 `language` config field (`"en"` or `"zh-CN"`). Existing configs without the field
 remain English. Language changes apply during a call without restarting media;
@@ -112,7 +110,7 @@ model prompts, responses, transcripts and user/device/library names are not
 translated. A connected standalone daemon owns the saved preference. With a
 legacy Host connection, the selection is saved only in Host's local preference.
 
-Drag the Settings title bar to move the panel; it shares the orb's remembered
+Drag the Settings title bar to move the panel; it shares the card's remembered
 position. Opening Settings first fits the whole panel into the display work
 area and waits for native positioning before showing it. Microphone animation
 now amplifies small input peaks visually, with a bounded envelope and smooth
@@ -149,19 +147,16 @@ use voice features until a Host is available on their platform.
 
 ## Subagents
 
-Hover or keyboard-focus the orb to reveal a side summary explicitly labelled
-**Subagents** / **子智能体**. Click it for a compact list, then select a task for
+The summary below the card is labelled **Subagents** / **子智能体**.
+Click it for a compact list, then select a task for
 details within that same frameless panel, with **Back** to the list. The view covers
 Proactive monitors/reminders and tasks delegated by Live to a coding harness.
 It shows the original request, actual status, latest activity, public
 intermediate text, available plan/tool updates and final result. It does not
 invent a completion percentage or expose thought chunks/raw tool payloads.
 
-The compact summary shows dot/running and check/completed counts. The running
-dot gently pulses only while connected with active tasks, and stays static with
-system reduced motion. A waiting marker appears only when input is needed;
-tooltips and accessible labels retain exact counts, including when large counts
-are displayed as `999+`.
+The compact summary shows running and check/completed counts. A waiting marker
+appears when input is needed; tooltips and accessible labels retain exact counts.
 
 `Running` counts active tasks, including queued and waiting tasks. `Completed`
 counts successful outcomes plus cancelled Proactive monitors, whose details
@@ -198,18 +193,23 @@ uses separate sessions; adding instructions to an existing session retains its
 steering/queue semantics. Backend quotas, per-session queue bounds and available
 machine/API resources still apply.
 
-The orb is never resized or moved to fit task windows. The side summary has a
-roughly one-second hover grace period. Expanded lists and details stay open until
-Close or Escape, including through blur, Settings, orb dragging and disconnection.
-Only the collapsed summary hides during dragging; a subsequent hover reanchors
-it inside the new display work area. Drag either expanded header to move the
-panel; Back preserves its location, clamping the new size to the display.
-Task updates do not move windows or task rows, and output follows the tail only
-when you were already at the bottom. Closing the panel does not stop its task.
+The card is never resized or moved to fit task windows. Its task summary stays
+below the card while a snapshot is available, showing running/completed counts
+and an attention indicator for pending input. Click it to open the 280 px-wide
+task panel. Lists and details stay open until Close or Escape, including through
+blur, Settings, dragging and disconnection. Drag the expanded header to move the
+panel; Back preserves its location. Updates do not move windows or task rows,
+and output follows the tail only when you were already at the bottom.
 
-The final Host Settings option, **Theme**, follows **Language** and offers
-System (default), Light mode and Dark mode. This Host-local preference applies
-to all its surfaces without restarting media or changing daemon settings.
+The final Settings option, **Appearance**, follows **Language** and offers
+System (default), Light and Dark. This Host-local preference applies to every
+surface without restarting media. The palette defaults to **Iris** and can be
+changed with the top-level `themeColor` configuration key, independently of
+appearance. Supported values are `iris`, `clay`, `sage`, `tide`, `graphite`,
+`rose`, and `berry`. Host reads this cosmetic preference from the connected
+daemon's advertised configuration file when connecting. Save and restart Host
+(or reconnect) to apply edits; unknown or missing values use Iris. Legacy
+connections without an advertised configuration path use Iris.
 
 History belongs to the current daemon run, not a cross-restart task archive.
 All active tasks retain bounded details, alongside the latest 32 ended tasks.
@@ -228,6 +228,7 @@ with environment variables (`DASHSCOPE_API_KEY`, `QWEN_LIVE_*`) as overrides.
 ```jsonc
 {
   "language": "en",
+  "themeColor": "iris",
   "realtimeApiKey": "sk-...",
   "realtimeModel": "qwen3.5-omni-plus-realtime",
   "memory": {

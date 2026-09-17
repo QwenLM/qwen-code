@@ -91,6 +91,7 @@ function host(overrides: Partial<LiveHostApi> = {}) {
       themes.push(theme);
     },
     setSettingsOpen: async () => {},
+    openSubagents: async () => {},
     openConfig: async () => {},
     setOverlayLayout: () => {},
     onSettingsDismiss: () => () => {},
@@ -186,12 +187,15 @@ describe('Live Host theme settings', () => {
     const h = host();
     h.get<HTMLButtonElement>('.settings-control').click();
     await settled();
-    const fields = h.app.querySelectorAll('.settings-body > .settings-field');
+    const fields = h.app.querySelectorAll('.settings-group > .settings-field');
     assert.equal(
       fields[fields.length - 2]?.firstChild?.textContent,
       'Language',
     );
-    assert.equal(fields[fields.length - 1]?.firstChild?.textContent, 'Theme');
+    assert.equal(
+      fields[fields.length - 1]?.firstChild?.textContent,
+      'Appearance',
+    );
     assert.equal(
       h.get('[data-theme="system"]').getAttribute('aria-pressed'),
       'true',
@@ -208,14 +212,22 @@ describe('Live Host theme settings', () => {
     assert.equal(h.dom.window.document.documentElement.dataset.theme, 'dark');
     h.update({ theme: 'system', resolvedTheme: 'light', language: 'zh-CN' });
     assert.equal(h.get('[data-theme="system"]').textContent, '跟随系统');
-    assert.equal(h.get('[data-theme="light"]').textContent, '白天模式');
-    assert.equal(h.get('[data-theme="dark"]').textContent, '黑暗模式');
+    assert.equal(h.get('[data-theme="light"]').textContent, '浅色');
+    assert.equal(h.get('[data-theme="dark"]').textContent, '深色');
     assert.equal(
       h.get('[data-theme="system"]').getAttribute('aria-pressed'),
       'true',
     );
-    assert.equal(h.get('[data-language="en"]').textContent, 'English');
-    assert.equal(h.get('[data-language="zh-CN"]').textContent, '简体中文');
+    assert.equal(
+      h.get('select[data-live-label="language.label"] option[value="en"]')
+        .textContent,
+      'English',
+    );
+    assert.equal(
+      h.get('select[data-live-label="language.label"] option[value="zh-CN"]')
+        .textContent,
+      '简体中文',
+    );
   });
 
   it('keeps the saved preference selected when saving fails and restores controls', async () => {
@@ -348,36 +360,41 @@ describe('shared theme palette', () => {
   const read = (file: string) =>
     readFileSync(new URL(`../../renderer/${file}`, import.meta.url), 'utf8');
   const theme = read('theme.css');
-  const tokens = (body: string) =>
-    Object.fromEntries(
+  const tokens = (body: string) => {
+    const values: Record<string, string> = Object.fromEntries(
       Array.from(body.matchAll(/(--live-[\w-]+):\s*([^;]+);/g), (match) => [
         match[1]!,
         match[2]!,
       ]),
     );
+    const resolve = (value: string): string =>
+      value.replace(/var\((--live-[\w-]+)\)/g, (_, key: string) =>
+        resolve(values[key]!),
+      );
+    return Object.fromEntries(
+      Object.entries(values).map(([key, value]) => [key, resolve(value)]),
+    );
+  };
   const dark = tokens(theme.match(/:root\s*\{([^}]+)\}/)![1]!);
   const light = tokens(
     theme.match(/:root\[data-theme='light'\]\s*\{([^}]+)\}/)![1]!,
   );
 
-  it('defines both appearances for every semantic token and leaves literal colors only in the brand orb', () => {
+  it('defines both appearances for every semantic token and keeps every palette color centralized', () => {
     assert.deepEqual(Object.keys(dark).sort(), Object.keys(light).sort());
     for (const name of ['style.css', 'subagents.css']) {
       const css = read(name);
       assert.match(css, /@import '\.\/theme\.css'/);
       for (const match of css.matchAll(/var\((--live-[\w-]+)/g))
         assert(match[1]! in dark, `Undefined ${match[1]}`);
-      const surfaceRules = css.replace(/[^{}]+\{[^{}]+\}/g, (rule) =>
-        rule.split('{')[0]!.includes('orb-core') ? '' : rule,
-      );
-      assert.doesNotMatch(surfaceRules, /#[\da-f]{3,8}\b|rgba?\(/i);
+      assert.doesNotMatch(css, /#[\da-f]{3,8}\b|rgba?\(/i);
     }
-    assert.match(
-      read('style.css'),
-      /linear-gradient\(145deg, #8bd7ed, #8671ce 72%, #b982d4\)/,
-    );
-    assert.match(dark['--live-status-bg']!, /\/ 68%\)/);
-    assert.match(light['--live-status-bg']!, /\/ 96%\)/);
+    for (const name of ['clay', 'sage', 'tide', 'graphite', 'rose', 'berry']) {
+      for (const mode of ['light', 'dark'])
+        assert(
+          theme.includes(`[data-theme-color='${name}'][data-theme='${mode}']`),
+        );
+    }
   });
 
   it('keeps light text, errors, statuses and primary buttons readable', () => {
@@ -415,10 +432,19 @@ describe('shared theme palette', () => {
       );
     }
     for (const desktop of [0, 255]) {
-      const background = [249, 250, 255].map((v) => v * 0.96 + desktop * 0.04);
+      const surface = light['--live-panel-bg']!.match(/[\d.]+/g)!.map(Number);
+      const alpha = surface[3]!;
+      const background = surface
+        .slice(0, 3)
+        .map((v) => v * alpha + desktop * (1 - alpha));
       assert(contrast(rgb(light['--live-text']!), background) >= 4.5);
       assert(contrast(rgb(light['--live-error']!), background) >= 4.5);
     }
-    assert(contrast([255, 255, 255], rgb(light['--live-primary-bg']!)) >= 4.5);
+    assert(
+      contrast(
+        rgb(light['--live-primary-text']!),
+        rgb(light['--live-primary-bg']!),
+      ) >= 4.5,
+    );
   });
 });

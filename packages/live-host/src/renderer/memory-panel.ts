@@ -1,3 +1,4 @@
+import { uiIcon } from './ui-icons.ts';
 import type { HostPublicState, LiveHostApi } from '../shared/host-api.ts';
 import type { MemoryAction, MemoryState } from '../shared/protocol.ts';
 import { parseMemoryAction } from '../shared/protocol.ts';
@@ -26,7 +27,8 @@ function field(label: LiveMessageKey, input: HTMLElement): HTMLLabelElement {
 }
 
 export class MemoryPanel {
-  readonly element = document.createElement('section');
+  readonly element = document.createElement('details');
+  private readonly summaryState = document.createElement('span');
   private readonly enabled = document.createElement('input');
   private readonly visualEnabled = document.createElement('input');
   private readonly library = document.createElement('select');
@@ -69,11 +71,13 @@ export class MemoryPanel {
     this.element.setAttribute('role', 'group');
     this.element.setAttribute('aria-labelledby', 'memory-panel-title');
 
-    const header = document.createElement('header');
+    const header = document.createElement('summary');
     const title = document.createElement('strong');
     title.id = 'memory-panel-title';
     uiText(title, 'ui.memory');
-    header.append(title);
+    const chevron = uiIcon('chevron');
+    chevron.classList.add('memory-chevron');
+    header.append(uiIcon('memory'), title, this.summaryState, chevron);
 
     const body = document.createElement('div');
     body.className = 'memory-panel-body';
@@ -177,6 +181,10 @@ export class MemoryPanel {
     const unavailable =
       this.state?.connection !== 'ready' || !this.state.memory;
     const disabled = this.busy || unavailable;
+    this.summaryState.textContent = liveText(
+      language,
+      memory.enabled ? 'ui.memoryOn' : 'ui.memoryOff',
+    );
     this.enabled.checked = memory.enabled;
     this.enabled.disabled = disabled;
     this.visualEnabled.checked = memory.visualEnabled;

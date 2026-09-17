@@ -11,7 +11,7 @@ import type {
 import type { OverlayLayout } from './overlay-geometry.ts';
 import type { LiveLanguage } from '@qwen-code/qwen-live/i18n';
 import type { SubagentsSnapshot } from '@qwen-code/qwen-live/subagents';
-import type { LiveTheme, ResolvedTheme } from './theme.ts';
+import type { LiveTheme, LiveThemeColor, ResolvedTheme } from './theme.ts';
 
 export type HostPublicPermissions = HostPermissions;
 
@@ -33,6 +33,7 @@ export type OverlayOffset = { x: number; y: number };
 
 export type HostPublicState = {
   theme?: LiveTheme;
+  themeColor?: LiveThemeColor;
   resolvedTheme?: ResolvedTheme;
   language?: LiveLanguage;
   connection:
@@ -74,6 +75,7 @@ export type LiveHostApi = {
   setTheme: (theme: LiveTheme) => Promise<void>;
   setSettingsOpen: (open: boolean) => Promise<void>;
   openConfig: () => Promise<void>;
+  openSubagents: () => Promise<void>;
   setOverlayLayout: (layout: OverlayLayout) => void;
   onSettingsDismiss: (listener: () => void) => () => void;
   onOverlayOffset: (listener: (offset: OverlayOffset) => void) => () => void;

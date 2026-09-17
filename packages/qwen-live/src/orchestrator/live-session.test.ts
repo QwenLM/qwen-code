@@ -2546,6 +2546,69 @@ describe('LiveSession', () => {
     session.dispose();
   });
 
+  it.each(['opening', 'active'] as const)(
+    'shows actionable quota guidance without blocking later retries (%s)',
+    async (phase) => {
+      const host = createFakeHost({
+        source: 'screen',
+        image: TEST_JPEG,
+        width: 1280,
+        height: 720,
+      });
+      const setProviderReachability = vi.fn();
+      const error = new QwenRealtimeError(
+        'Allocated quota exceeded, please increase your quota limit.',
+        'connection_closed',
+        true,
+        { closeCode: 1007 },
+      );
+      let callbacks: QwenRealtimeCallbacks = {};
+      const session = new LiveSession({
+        host: { ...host, setProviderReachability },
+        registry: new BackendRegistry([
+          { adaptor: new FakeAdaptor(), isDefault: true },
+        ]),
+        realtime: {
+          endpoint: 'https://dashscope.example.com',
+          model: 'qwen3.5-omni-plus-realtime',
+        },
+        log: { write: vi.fn(), close: async () => {} } as unknown as SessionLog,
+        openRealtime: async (_config, handlers) => {
+          callbacks = handlers ?? {};
+          if (phase === 'opening') {
+            callbacks.onClose?.({ reason: 'remote', error });
+            throw error;
+          }
+          return createFakeRealtime() as unknown as QwenRealtimeSession;
+        },
+      });
+      try {
+        const starting = session.start({
+          epoch: 1,
+          callId: 'call-1',
+          mode: 'new',
+          visualInput: DEFAULT_VISUAL_INPUT,
+        });
+        if (phase === 'opening') await expect(starting).rejects.toBe(error);
+        else {
+          await starting;
+          callbacks.onError?.(error);
+        }
+        expect(host.failCall).toHaveBeenCalledOnce();
+        const message = host.failCall.mock.calls[0]![1]!;
+        expect(displayLiveMessage('en', message)).toContain(
+          'Realtime quota limit reached.',
+        );
+        expect(displayLiveMessage('en', message)).toContain(error.message);
+        expect(displayLiveMessage('zh-CN', message)).toContain('配额');
+        expect(displayLiveMessage('zh-CN', message)).toContain('重试');
+        expect(setProviderReachability).not.toHaveBeenCalled();
+      } finally {
+        session.dispose();
+      }
+    },
+  );
+
   it('surfaces an actionable Realtime authentication failure', async () => {
     const host = createFakeHost({
       source: 'screen',

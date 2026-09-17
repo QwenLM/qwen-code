@@ -7,110 +7,72 @@ const css = readFileSync(
   new URL('../../renderer/style.css', import.meta.url),
   'utf8',
 );
-const rule = (selector: string): string => {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]+)\\}`));
-  assert(match, `Missing style rule: ${selector}`);
-  return match[1]!;
-};
+type Rect = { x: number; y: number; width: number; height: number };
+function contains(outer: Rect, inner: Rect): boolean {
+  return (
+    inner.x >= outer.x &&
+    inner.y >= outer.y &&
+    inner.x + inner.width <= outer.x + outer.width &&
+    inner.y + inner.height <= outer.y + outer.height
+  );
+}
 
-describe('orb presentation geometry', () => {
-  it('keeps hover controls above the animation and status below, with both inside edge bounds', () => {
-    const { toolbar, orbMotion, status, bounds, caption, previewWithCaption } =
-      OVERLAY_GEOMETRY;
-    assert(toolbar.y + toolbar.height <= orbMotion.y);
-    assert(status.y >= orbMotion.y + orbMotion.height + 4);
-    assert(previewWithCaption.y + previewWithCaption.height < caption.y);
-    for (const envelope of [bounds.orb, bounds['orb-preview']]) {
-      for (const rect of [toolbar, orbMotion, status]) {
-        assert(rect.x >= envelope.x && rect.y >= envelope.y);
-        assert(rect.x + rect.width <= envelope.x + envelope.width);
-        assert(rect.y + rect.height <= envelope.y + envelope.height);
-      }
-    }
+describe('Pebble presentation geometry', () => {
+  it('matches the selected card, disc, preview and settings dimensions', () => {
+    const { card, orb, settings, preview } = OVERLAY_GEOMETRY;
+    assert.deepEqual([card.width, card.height], [234, 194]);
+    assert.deepEqual([orb.width, orb.height], [51, 51]);
+    assert.deepEqual([preview.width, preview.height], [161, 107]);
+    assert.deepEqual([settings.width, settings.height], [306, 532]);
   });
-
-  it('uses a translucent status surface and a round settings button', () => {
-    assert.match(
-      rule('.voice-status'),
-      /background:\s*var\(--live-status-bg\)/,
+  it('keeps controls inside the card and reserves separate space for captions, preview, summary and settings', () => {
+    const {
+      card,
+      toolbar,
+      orb,
+      status,
+      header,
+      summary,
+      caption,
+      previewWithCaption,
+      settings,
+      settingsBounds,
+      bounds,
+    } = OVERLAY_GEOMETRY;
+    for (const rect of [toolbar, orb, status, header])
+      assert(contains(card, rect));
+    assert.equal(toolbar.y - card.y, 116);
+    assert.equal(orb.x - card.x, 18);
+    assert.equal(orb.y - card.y, 47);
+    assert.equal(summary.y - card.y - card.height, 13);
+    assert.equal(
+      caption.y - previewWithCaption.y - previewWithCaption.height,
+      10,
     );
-    assert.match(
-      rule('.voice-controls .settings-control'),
-      /border-radius:\s*50%/,
-    );
+    assert.equal(card.y - caption.y - caption.height, 7);
+    assert(settings.x > card.x + card.width);
+    for (const rect of [card, summary, caption, settings, previewWithCaption])
+      assert(contains(settingsBounds, rect));
+    for (const rect of [card, summary, caption])
+      assert(contains(bounds.orb, rect));
+    assert(contains(bounds['orb-preview'], previewWithCaption));
   });
-
-  it('lets the full status receive hover and keeps stopping visually idle', () => {
-    assert.match(rule('.voice-status-primary'), /pointer-events:\s*auto/);
-    assert.match(
+  it('uses tokenized materials, persistent controls and bounded scrollable settings', () => {
+    assert.match(css, /border-radius: 26px/);
+    assert.match(css, /backdrop-filter: blur\(16px\)/);
+    assert.doesNotMatch(
       css,
-      /\.voice-orb\.idle \.orb-core,\s*\.voice-orb\.stopping \.orb-core,/,
+      /controls-visible|visibility: hidden|--input-scale/,
     );
+    assert.match(css, /\.settings-body\s*\{[^}]*overflow-y: auto/);
+    assert.match(css, /\.settings-panel\s*\{[^}]*pointer-events: auto/);
+    assert.match(css, /\.settings-layer\s*\{[^}]*pointer-events: none/);
   });
-
-  it('overrides state-specific orb animations and input scaling under reduced motion', () => {
+  it('disables animation and bar transforms under reduced motion', () => {
     const reduced = css.slice(
       css.indexOf('@media (prefers-reduced-motion: reduce)'),
     );
-    assert.match(
-      reduced,
-      /\.voice-surface \.voice-orb \.orb-core,\s*\.voice-surface \.voice-orb \.orb-core::after\s*\{\s*animation:\s*none;\s*transform:\s*none;/,
-    );
-  });
-
-  it('fits persistent mute indicators below the primary status without increasing the orb bounds', () => {
-    assert.match(rule('.voice-status'), /flex-direction:\s*column/);
-    assert.match(rule('.voice-status-audio'), /line-height:\s*11px/);
-    assert.match(rule('.voice-status-audio'), /flex-shrink:\s*0/);
-    assert.match(
-      rule('.voice-status.has-audio-status .voice-status-primary'),
-      /max-height:\s*14px/,
-    );
-    assert.match(
-      rule('.voice-status.has-audio-status .voice-status-primary'),
-      /text-overflow:\s*ellipsis/,
-    );
-    assert.doesNotMatch(rule('.permission-link'), /position:\s*absolute/);
-    assert(14 + 11 + 4 <= OVERLAY_GEOMETRY.status.height);
-  });
-
-  it('reserves and paints the Settings scrollbar without waiting for hover', () => {
-    assert.match(rule('.settings-body'), /overflow-y:\s*scroll/);
-    assert.match(rule('.settings-body'), /scrollbar-gutter:\s*stable/);
-    assert.match(rule('.settings-body::-webkit-scrollbar'), /width:\s*8px/);
-    assert.match(
-      rule('.settings-body::-webkit-scrollbar-track'),
-      /background:/,
-    );
-    assert.match(
-      rule('.settings-body::-webkit-scrollbar-thumb'),
-      /background:/,
-    );
-  });
-
-  it('constrains translated or long Settings content without widening the panel', () => {
-    assert.match(
-      rule('.settings-layer'),
-      /grid-template-columns:\s*minmax\(0, 1fr\)/,
-    );
-    assert.match(
-      rule('.settings-layer'),
-      /grid-template-rows:\s*minmax\(0, 1fr\)/,
-    );
-    assert.match(rule('.settings-panel'), /min-width:\s*0/);
-    assert.match(rule('.settings-body'), /min-width:\s*0/);
-    assert.match(rule('.settings-panel > header'), /flex-shrink:\s*0/);
-  });
-
-  it('fits the listening gain and animated outline into the reserved motion envelope', () => {
-    assert.match(
-      rule('.voice-orb.listening .orb-core::after'),
-      /inset:\s*-1px/,
-    );
-    assert(
-      (OVERLAY_GEOMETRY.orb.width + 2) * 1.3 * 1.04 <
-        OVERLAY_GEOMETRY.orbMotion.width,
-    );
+    assert.match(reduced, /animation: none !important/);
+    assert.match(reduced, /\.voice-wave i\s*\{[^}]*transform: none !important/);
   });
 });

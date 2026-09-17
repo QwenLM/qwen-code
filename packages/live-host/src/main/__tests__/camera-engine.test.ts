@@ -17,6 +17,7 @@ function cameraEnvironment(
     restoreFailure?: boolean;
     negotiatedVideoSize?: { width: number; height: number };
     actualPhotoSize?: { width: number; height: number };
+    advertisedPhotoSize?: { width: number; height: number };
   } = {},
 ) {
   const original = new Map<string, PropertyDescriptor | undefined>();
@@ -149,8 +150,8 @@ function cameraEnvironment(
       : class {
           getPhotoCapabilities() {
             return Promise.resolve({
-              imageWidth: { max: 4032 },
-              imageHeight: { max: 3024 },
+              imageWidth: { max: options.advertisedPhotoSize?.width ?? 4032 },
+              imageHeight: { max: options.advertisedPhotoSize?.height ?? 3024 },
             });
           }
           takePhoto(settings: PhotoSettings) {
@@ -217,6 +218,26 @@ async function flushCameraCallbacks(): Promise<void> {
 }
 
 describe('HostCameraEngine', () => {
+  it('keeps a native photo larger than the advertised size without falling back to video', async () => {
+    const environment = cameraEnvironment({
+      advertisedPhotoSize: { width: 1280, height: 720 },
+      actualPhotoSize: { width: 1552, height: 1552 },
+      negotiatedVideoSize: { width: 1552, height: 1552 },
+    });
+    try {
+      await environment.start();
+      const snapshot = await environment.camera.captureSnapshot();
+      assert.ok(snapshot.assetImage);
+      assert.deepEqual(environment.encodes[0], { width: 1552, height: 1552 });
+      assert.deepEqual(environment.appliedConstraints, []);
+      assert.equal(environment.bitmapCloses(), 1);
+      assert.ok(isValidInputImageFrame(snapshot.image));
+      assert.ok(isValidCameraSnapshotAsset(snapshot.assetImage));
+    } finally {
+      environment.restore();
+    }
+  });
+
   it('rejects a native video snapshot negotiated below the advertised size and restores preview', async () => {
     const environment = cameraEnvironment({
       photoAvailable: false,

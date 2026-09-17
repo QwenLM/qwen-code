@@ -95,6 +95,9 @@ function setup(overrides: Partial<LiveHostApi> = {}) {
     setSettingsOpen: async (value) => {
       calls.push(['settings', value]);
     },
+    openSubagents: async () => {
+      calls.push(['openSubagents']);
+    },
     openConfig: async () => {
       calls.push(['openConfig']);
     },
@@ -201,9 +204,9 @@ describe('persistent Live orb and Settings', () => {
     const h = setup();
     h.click('Settings');
     await settled();
-    const open = h.get<HTMLButtonElement>('[data-live-text="ui.openConfig"]');
-    assert.equal(h.get('.settings-body').firstElementChild, open.parentElement);
-    assert.equal(open.textContent, 'Open config.json ↗');
+    const open = h.get<HTMLButtonElement>('[data-live-label="ui.openConfig"]');
+    assert.equal(h.get('.settings-panel').lastElementChild, open.parentElement);
+    assert.equal(open.textContent, 'Open configuration');
     assert.equal(open.disabled, false);
     assert.match(
       h.get('.settings-config-status').textContent ?? '',
@@ -219,7 +222,7 @@ describe('persistent Live orb and Settings', () => {
     assert.deepEqual(h.calls, [['openConfig']]);
     assert.equal(h.get('.settings-layer').hidden, false);
     h.update({ ...h.state(), language: 'zh-CN' });
-    assert.equal(open.textContent, '打开 config.json ↗');
+    assert.equal(open.textContent, '打开配置文件');
     assert.equal(open.getAttribute('aria-label'), '打开 config.json ↗');
     assert.match(
       h.get('.settings-config-status').textContent ?? '',
@@ -230,7 +233,7 @@ describe('persistent Live orb and Settings', () => {
     );
     assert.deepEqual(
       groups.slice(-2).map((group) => group.textContent),
-      ['语言', '主题'],
+      ['语言', '外观'],
     );
   });
 
@@ -247,7 +250,7 @@ describe('persistent Live orb and Settings', () => {
     });
     h.click('Settings');
     await settled();
-    const open = h.get<HTMLButtonElement>('[data-live-text="ui.openConfig"]');
+    const open = h.get<HTMLButtonElement>('[data-live-label="ui.openConfig"]');
     open.click();
     open.click();
     assert.equal(calls, 1);
@@ -290,7 +293,7 @@ describe('persistent Live orb and Settings', () => {
     const h = setup();
     h.click('Settings');
     await settled();
-    const open = h.get<HTMLButtonElement>('[data-live-text="ui.openConfig"]');
+    const open = h.get<HTMLButtonElement>('[data-live-label="ui.openConfig"]');
     h.calls.length = 0;
     for (const state of [
       { ...baseline, canOpenConfig: undefined },
@@ -313,7 +316,11 @@ describe('persistent Live orb and Settings', () => {
     const h = setup();
     for (const language of ['en', 'zh-CN'] as const) {
       for (const [inputMuted, outputMuted, expected] of [
-        [false, false, ''],
+        [
+          false,
+          false,
+          language === 'en' ? 'Screen · On Demand' : '屏幕 · 按需截图',
+        ],
         [true, false, language === 'en' ? 'Mic off' : '麦克风已关闭'],
         [false, true, language === 'en' ? 'Speaker muted' : '播报已静音'],
         [
@@ -343,7 +350,7 @@ describe('persistent Live orb and Settings', () => {
         assert.equal(h.get('.voice-status-audio').hidden, !expected);
         assert.equal(
           h.get('.voice-controls').getAttribute('aria-hidden'),
-          'true',
+          null,
         );
       }
     }
@@ -410,24 +417,26 @@ describe('persistent Live orb and Settings', () => {
     assert.equal(status.classList.contains('error'), true);
     assert.equal(h.get('.voice-status-audio').hidden, false);
     h.update({ ...h.state(), live: baseline.live });
-    assert.equal(h.get('.voice-status-audio').hidden, true);
+    assert.equal(
+      h.get('.voice-status-audio').textContent,
+      'Screen · On Demand',
+    );
     assert.equal(status.classList.contains('has-audio-status'), false);
   });
 
-  it('sends optional subagent hover intent only for supporting ready state without changing orb layout', async () => {
+  it('opens the embedded task summary without a hover window, and handles attention and disconnect', async () => {
     const hover: boolean[] = [];
     const h = setup({ setSubagentsHover: (value) => hover.push(value) });
-    const orb = h.get('.voice-orb');
-    h.pointer(orb, 'pointerenter');
-    assert.deepEqual(hover, []);
+    const summary = h.get<HTMLButtonElement>('.task-summary');
+    assert.equal(summary.hidden, true);
     const layouts = [...h.layouts];
     h.update({
       ...h.state(),
       subagentsV1: {
         revision: 1,
         counts: {
-          running: 0,
-          completed: 0,
+          running: 2,
+          completed: 3,
           needsAttention: 0,
           failed: 0,
           cancelled: 0,
@@ -435,22 +444,25 @@ describe('persistent Live orb and Settings', () => {
         },
         tasks: [],
         omitted: 0,
+        pendingUnassignedPermissions: 1,
       },
     });
-    assert.deepEqual(hover, [true]);
+    assert.equal(summary.hidden, false);
+    assert.equal(h.get('.task-summary-running').textContent, '2');
+    assert.equal(h.get('.task-summary-completed').textContent, '✓ 3');
+    assert.equal(h.get('.task-summary-attention').hidden, false);
+    h.pointer(h.get('.voice-card'), 'pointerenter');
+    summary.focus();
+    assert.deepEqual(hover, []);
     assert.deepEqual(h.layouts, layouts);
-    h.pointer(orb, 'pointerenter');
-    assert.deepEqual(hover, [true, true]);
-    h.click('Settings');
+    summary.click();
     await settled();
-    assert.deepEqual(hover, [true, true, false]);
-    h.click('Close settings');
-    h.pointer(h.get('.orb-dock'), 'pointerleave');
-    h.pointer(orb, 'pointerenter');
-    assert.equal(hover.at(-1), true);
+    assert.deepEqual(h.calls.at(-1), ['openSubagents']);
     h.update({ ...h.state(), connection: 'disconnected' });
-    assert.equal(hover.at(-1), false);
-    assert.equal(h.get('.voice-orb'), orb);
+    assert.equal(summary.disabled, true);
+    assert.equal(summary.hidden, false);
+    h.update({ ...h.state(), subagentsV1: undefined });
+    assert.equal(summary.hidden, true);
   });
 
   it('localizes device fallback labels and rejected language saves without translating real names', async () => {
@@ -478,12 +490,13 @@ describe('persistent Live orb and Settings', () => {
       fallback.textContent,
       liveText('en', 'host.device.fallback', { index: 1 }),
     );
-    h.get<HTMLButtonElement>('[data-language="zh-CN"]').click();
-    await settled();
-    assert.equal(
-      h.get('[data-language="zh-CN"]').getAttribute('aria-pressed'),
-      'false',
+    const language = h.get<HTMLSelectElement>(
+      'select[data-live-label="language.label"]',
     );
+    language.value = 'zh-CN';
+    language.dispatchEvent(new h.dom.window.Event('change', { bubbles: true }));
+    await settled();
+    assert.equal(language.value, 'en');
     assert.match(h.get('.settings-status').textContent ?? '', /unavailable/);
     h.update({ ...h.state(), language: 'zh-CN' });
     assert.equal(select.querySelector('option[value="unnamed"]'), fallback);
@@ -509,7 +522,7 @@ describe('persistent Live orb and Settings', () => {
     const trigger = h.get('[aria-label="Settings"]');
     h.click('Settings');
     assert.equal(h.get('.settings-layer').hidden, true);
-    assert.equal(h.get('.voice-surface').inert, true);
+    assert.equal(Boolean(h.get('.voice-surface').inert), false);
     pending.shift()?.();
     await settled();
     assert.equal(h.get('.settings-layer').hidden, false);
@@ -528,7 +541,7 @@ describe('persistent Live orb and Settings', () => {
     pending.shift()?.();
     await settled();
     assert.equal(h.get('.settings-layer').hidden, true);
-    assert.equal(h.get('.voice-surface').inert, false);
+    assert.equal(Boolean(h.get('.voice-surface').inert), false);
     assert.equal(document.activeElement, trigger);
     h.click('Settings');
     h.update({ ...h.state(), connection: 'disconnected' });
@@ -546,28 +559,30 @@ describe('persistent Live orb and Settings', () => {
     h.click('Settings');
     await settled();
     assert.equal(h.get('.settings-layer').hidden, true);
-    assert.equal(h.get('.voice-surface').inert, false);
+    assert.equal(Boolean(h.get('.voice-surface').inert), false);
     assert.match(h.get('.voice-status').textContent ?? '', /Placement failed/);
   });
 
-  it('animates ordinary microphone peaks visibly, releases smoothly, and resets on mute', (context) => {
+  it('reflects real microphone peaks in bars, releases smoothly and resets on mute without scaling the disc', (context) => {
     context.mock.timers.enable({ apis: ['setTimeout'] });
     const h = setup();
     h.update({ ...h.state(), live: { ...baseline.live, state: 'listening' } });
-    const orb = h.get('.voice-orb');
+    const bar = h.get('.voice-wave i:nth-child(4)');
+    const scale = () =>
+      Number(bar.style.transform.match(/scaleY\(([^)]+)\)/)?.[1]);
     h.view.setInputLevel(0.05);
-    const scale = Number(orb.style.getPropertyValue('--input-scale'));
-    assert((scale - 1) * 112 >= 20);
-    assert(scale <= 1.3);
+    const peak = scale();
+    assert(peak > 0.8 && peak <= 1);
+    assert.equal(h.get('.orb-core').style.transform, '');
     h.view.setInputLevel(0);
-    assert(Number(orb.style.getPropertyValue('--input-scale')) > 1);
+    assert(scale() > 0.3 && scale() < peak);
     for (let frame = 0; frame < 24; frame++) context.mock.timers.tick(32);
-    assert.equal(orb.style.getPropertyValue('--input-scale'), '1');
+    assert.equal(scale(), 0.3);
     h.view.setInputLevel(0.1);
     h.update({ ...h.state(), live: { ...h.state().live, inputMuted: true } });
-    assert.equal(orb.style.getPropertyValue('--input-scale'), '1');
+    assert.equal(bar.style.transform, '');
     h.view.setInputLevel(1);
-    assert.equal(orb.style.getPropertyValue('--input-scale'), '1');
+    assert.equal(bar.style.transform, '');
   });
 
   it('drags the Settings title while excluding its Close button', async () => {
@@ -600,24 +615,28 @@ describe('persistent Live orb and Settings', () => {
     const panel = h.get('.settings-panel');
     const orb = h.get('.voice-orb');
     const groups = Array.from(
-      panel.querySelectorAll('.settings-body > .settings-field > strong'),
+      panel.querySelectorAll('.settings-group > .settings-field > strong'),
     );
     assert.equal(groups.at(-2)?.textContent, 'Language');
-    const chinese = h.get<HTMLButtonElement>('[data-language="zh-CN"]');
-    chinese.click();
+    const chinese = h.get<HTMLSelectElement>(
+      'select[data-live-label="language.label"]',
+    );
+    chinese.value = 'zh-CN';
+    chinese.dispatchEvent(new h.dom.window.Event('change', { bubbles: true }));
     await settled();
     assert.deepEqual(h.calls.at(-1), ['language', 'zh-CN']);
-    assert.equal(chinese.getAttribute('aria-pressed'), 'false');
+    assert.equal(chinese.value, 'en');
     const rename = Array.from(panel.querySelectorAll('button')).find(
       (button) => button.textContent === 'Rename',
     )!;
+    h.get<HTMLDetailsElement>('.memory-settings').open = true;
     rename.click();
     const name = h.get<HTMLInputElement>('#memory-library-name');
     name.value = 'My Draft 原名';
     name.dispatchEvent(new h.dom.window.Event('input', { bubbles: true }));
     name.focus();
     h.update({ ...h.state(), language: 'zh-CN' });
-    assert.equal(chinese.getAttribute('aria-pressed'), 'true');
+    assert.equal(chinese.value, 'zh-CN');
     assert.equal(h.get('.settings-panel'), panel);
     assert.equal(h.get('.voice-orb'), orb);
     assert.equal(name.value, 'My Draft 原名');
@@ -630,7 +649,7 @@ describe('persistent Live orb and Settings', () => {
     );
   });
 
-  it('compensates native frame offsets without moving settings or losing stable nodes', () => {
+  it('compensates native frame offsets for the card, settings and setup without replacing nodes', () => {
     const h = setup();
     const orb = h.get('.voice-orb');
     const slot = h.get('[data-live-camera-preview]');
@@ -646,9 +665,15 @@ describe('persistent Live orb and Settings', () => {
       'translate(0px, -130px)',
     );
     h.click('Settings');
-    assert.equal(h.get('.settings-layer').style.transform, '');
+    assert.equal(
+      h.get('.settings-layer').style.transform,
+      'translate(0px, -130px)',
+    );
     assert.equal(h.app.style.transform, '');
-    assert.equal(h.get('.setup-panel').style.transform, '');
+    assert.equal(
+      h.get('.setup-panel').style.transform,
+      'translate(0px, -130px)',
+    );
     h.offset({ x: 0, y: 0 });
     assert.equal(
       h.get('.voice-surface').style.transform,
@@ -664,15 +689,15 @@ describe('persistent Live orb and Settings', () => {
     await settled();
     assert.deepEqual(
       Array.from(
-        h.app.querySelectorAll('.settings-body > .settings-field > strong'),
+        h.app.querySelectorAll('.settings-group > .settings-field > strong'),
       ).map((element) => element.textContent),
       [
-        'Audio Source',
+        'Microphone',
         'Video Source',
         'Display',
         'Capture Mode',
         'Language',
-        'Theme',
+        'Appearance',
       ],
     );
     const description = h.get('.capture-mode-description');
@@ -770,7 +795,6 @@ describe('persistent Live orb and Settings', () => {
     const orb = h.get('.voice-orb');
     const slot = h.get('[data-live-camera-preview]');
     const settings = h.get<HTMLButtonElement>('[aria-label="Settings"]');
-    h.click('Qwen Live controls');
     settings.focus();
     h.view.setInputLevel(1);
     h.update({ ...state, live: { ...state.live, caption: 'changed caption' } });
@@ -779,48 +803,43 @@ describe('persistent Live orb and Settings', () => {
     assert.equal(h.get('[data-live-camera-preview]'), slot);
     assert.equal(h.get('[aria-label="Settings"]'), settings);
     assert.equal(document.activeElement, settings);
-    assert.equal(orb.style.getPropertyValue('--input-scale'), '1.3');
+    assert.equal(
+      h.get('.voice-wave i:nth-child(4)').style.transform,
+      'scaleY(1)',
+    );
     assert.deepEqual(
       h.calls.filter(([name]) => name === 'preview'),
       [['preview']],
     );
   });
 
-  it('reveals on orb hover, waits one second, and cancels fading on reentry', (context) => {
+  it('keeps controls visible after pointer leave and permits call controls beside non-modal settings', async (context) => {
     context.mock.timers.enable({ apis: ['setTimeout'] });
     const h = setup();
     const toolbar = h.get('.voice-controls');
-    const dock = h.get('.orb-dock');
-    assert.equal(toolbar.getAttribute('aria-hidden'), 'true');
-    h.pointer(h.get('.voice-orb'), 'pointerenter');
-    assert.equal(toolbar.getAttribute('aria-hidden'), 'false');
-    h.pointer(dock, 'pointerleave');
-    context.mock.timers.tick(999);
-    assert.equal(toolbar.getAttribute('aria-hidden'), 'false');
-    h.pointer(dock, 'pointerenter');
-    context.mock.timers.tick(100);
-    assert.equal(toolbar.getAttribute('aria-hidden'), 'false');
-    h.pointer(dock, 'pointerleave');
-    context.mock.timers.tick(1000);
-    assert.equal(toolbar.getAttribute('aria-hidden'), 'true');
-    assert.equal(toolbar.inert, true);
-  });
-
-  it('keeps controls accessible for keyboard focus and open settings', async (context) => {
-    context.mock.timers.enable({ apis: ['setTimeout'] });
-    const h = setup();
-    document.dispatchEvent(
-      new h.dom.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
-    );
-    h.get('.voice-orb').focus();
     h.pointer(h.get('.orb-dock'), 'pointerleave');
-    context.mock.timers.tick(1000);
-    assert.equal(h.get('.voice-controls').getAttribute('aria-hidden'), 'false');
+    context.mock.timers.tick(1500);
+    assert.equal(toolbar.getAttribute('aria-hidden'), null);
+    assert.equal(Boolean(toolbar.inert), false);
     h.click('Settings');
     await settled();
-    context.mock.timers.tick(1000);
-    assert.equal(h.get('.voice-controls').getAttribute('aria-hidden'), 'false');
     assert.equal(h.get('.settings-layer').hidden, false);
+    assert.equal(h.get('.settings-panel').getAttribute('aria-modal'), null);
+    assert.equal(
+      h.get('.settings-layer').hasAttribute('data-live-interactive'),
+      false,
+    );
+    assert.equal(Boolean(h.get('.voice-surface').inert), false);
+    const mic = h.get<HTMLButtonElement>('[aria-label="Mute microphone"]');
+    h.pointer(mic, 'pointerdown');
+    assert.equal(h.get('.settings-layer').hidden, false);
+    mic.click();
+    await settled();
+    assert.equal(h.get('.settings-layer').hidden, true);
+    assert.deepEqual(h.calls.slice(-2), [
+      ['input', true],
+      ['settings', false],
+    ]);
   });
 
   it('retains memory drafts through updates and Esc/outside/native dismissal without replacing controls', async () => {
@@ -831,6 +850,7 @@ describe('persistent Live orb and Settings', () => {
     const rename = Array.from(h.app.querySelectorAll('button')).find(
       (item) => item.textContent === 'Rename',
     )!;
+    h.get<HTMLDetailsElement>('.memory-settings').open = true;
     rename.click();
     const name = h.get<HTMLInputElement>('#memory-library-name');
     name.value = 'A draft';
@@ -855,7 +875,7 @@ describe('persistent Live orb and Settings', () => {
     h.click('Settings');
     assert.equal(name.value, 'A draft');
     await settled();
-    h.pointer(h.get('.settings-layer'), 'pointerdown');
+    h.get('.voice-card').click();
     assert.equal(h.get('.settings-layer').hidden, true);
     h.click('Settings');
     await settled();
@@ -867,7 +887,6 @@ describe('persistent Live orb and Settings', () => {
   it('separates End call and Quit while leaving the stopped orb mounted', async () => {
     const h = setup();
     const orb = h.get('.voice-orb');
-    h.click('Qwen Live controls');
     h.click('Start call');
     await settled();
     h.update({ ...h.state(), live: { ...baseline.live, state: 'listening' } });
@@ -902,7 +921,7 @@ describe('persistent Live orb and Settings', () => {
 
   it('drags both setup and orb using a threshold without starting a call', () => {
     const h = setup();
-    for (const selector of ['.voice-orb', '.setup-header']) {
+    for (const selector of ['.voice-header', '.setup-header']) {
       const element = h.get(selector);
       h.pointer(element, 'pointerdown', 100, 100);
       h.pointer(element, 'pointermove', 102, 102);
@@ -984,7 +1003,7 @@ describe('persistent Live orb and Settings', () => {
 
   it('uses the last valid drag position when pointer capture is cancelled', () => {
     const h = setup();
-    const orb = h.get('.voice-orb');
+    const orb = h.get('.voice-header');
     h.pointer(orb, 'pointerdown', 200, 200);
     h.pointer(orb, 'pointermove', 225, 240);
     h.pointer(orb, 'lostpointercapture');

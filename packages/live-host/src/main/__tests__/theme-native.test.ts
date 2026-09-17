@@ -26,6 +26,7 @@ const names = new Set([
   'resolvedTheme',
   'publicState',
   'publishState',
+  'publishOverlayState',
   'registerIpc',
   'isTrustedSender',
 ]);
@@ -184,6 +185,7 @@ function fixture(saved?: LiveTheme, systemDark = false) {
       shortcut: 'Command+E',
       callId: 'call-1',
     }),
+    themeColor: 'iris',
     subagents: {
       setTheme: (theme: LiveTheme, appearance: ResolvedTheme) =>
         subagentThemes.push([theme, appearance]),

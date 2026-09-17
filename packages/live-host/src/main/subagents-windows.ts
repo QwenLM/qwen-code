@@ -9,7 +9,11 @@ import {
   type SubagentsSnapshot,
 } from '@qwen-code/qwen-live/subagents';
 import type { SubagentsWindowState } from '../shared/subagents-api.ts';
-import type { LiveTheme, ResolvedTheme } from '../shared/theme.ts';
+import type {
+  LiveTheme,
+  LiveThemeColor,
+  ResolvedTheme,
+} from '../shared/theme.ts';
 import {
   fitSubagentsBounds,
   subagentsSidecarBounds,
@@ -32,6 +36,7 @@ export class SubagentsWindows {
   private snapshot?: SubagentsSnapshot;
   private language: LiveLanguage = 'en';
   private theme: LiveTheme = 'system';
+  private themeColor: LiveThemeColor = 'iris';
   private appearance: ResolvedTheme = 'dark';
   private connected = false;
   private selectedId?: string;
@@ -46,6 +51,7 @@ export class SubagentsWindows {
   private cursorTimer?: ReturnType<typeof setTimeout>;
   private outsideSince?: number;
   private disposed = false;
+  private openOnLoad = false;
   private instanceId?: string;
   private controlsAvailable = false;
   private page?: SubagentsPage;
@@ -145,21 +151,42 @@ export class SubagentsWindows {
     if (!connected || !this.controlsAvailable) this.invalidatePageRequest();
     if (snapshot) this.snapshot = snapshot;
     else if (connected) this.snapshot = undefined;
-    if (!this.isPinned() && (!connected || !snapshot)) this.closePanel();
+    if ((!this.isPinned() || this.openOnLoad) && (!connected || !snapshot))
+      this.closePanel();
     this.publish();
     if (this.isPinned() || this.orbHovered) this.show();
     if (refresh) void this.refreshPage();
   }
 
-  setTheme(theme: LiveTheme, appearance: ResolvedTheme): void {
-    if (this.theme === theme && this.appearance === appearance) return;
+  setTheme(
+    theme: LiveTheme,
+    appearance: ResolvedTheme,
+    themeColor: LiveThemeColor = 'iris',
+  ): void {
+    if (
+      this.theme === theme &&
+      this.appearance === appearance &&
+      this.themeColor === themeColor
+    )
+      return;
     this.theme = theme;
+    this.themeColor = themeColor;
     this.appearance = appearance;
-    if (this.window && !this.window.isDestroyed())
-      this.window.setBackgroundColor(
-        appearance === 'dark' ? '#1b1b29' : '#f7f7fc',
-      );
     this.publish();
+  }
+
+  openList(): void {
+    if (
+      this.disposed ||
+      !this.connected ||
+      !this.snapshot ||
+      !this.options.anchor()
+    )
+      return;
+    if (!this.window || this.window.isDestroyed())
+      this.window = this.createWindow();
+    this.selectedId = undefined;
+    this.openMode('list');
   }
 
   setOrbHovered(hovered: boolean): void {
@@ -183,7 +210,7 @@ export class SubagentsWindows {
     if (dragging && !this.isPinned()) this.closePanel();
   }
   dismissPeek(): void {
-    if (!this.isPinned()) this.closePanel();
+    if (!this.isPinned() || this.openOnLoad) this.closePanel();
   }
 
   displaysChanged(): void {
@@ -238,6 +265,7 @@ export class SubagentsWindows {
     return {
       language: this.language,
       theme: this.theme,
+      themeColor: this.themeColor,
       resolvedTheme: this.appearance,
       connected: this.connected,
       mode: this.mode,
@@ -257,8 +285,11 @@ export class SubagentsWindows {
     this.stopCursorWatch();
     this.place(preservePosition);
     this.publish();
-    this.window.show();
-    this.window.focus();
+    this.openOnLoad = this.window.webContents.isLoadingMainFrame();
+    if (!this.openOnLoad) {
+      this.window.show();
+      this.window.focus();
+    }
     this.invalidatePageRequest();
     void this.refreshPage();
   }
@@ -364,7 +395,8 @@ export class SubagentsWindows {
       fullscreenable: false,
       skipTaskbar: true,
       hasShadow: false,
-      backgroundColor: this.appearance === 'dark' ? '#1b1b29' : '#f7f7fc',
+      transparent: true,
+      backgroundColor: '#00000000',
       title: 'Subagents',
       webPreferences: {
         preload: join(this.options.baseDirectory, 'subagents-preload.cjs'),
@@ -395,7 +427,8 @@ export class SubagentsWindows {
       if (this.window === window) this.window = undefined;
     });
     window.webContents.on('did-finish-load', () => {
-      if (this.disposed || window.isDestroyed()) return;
+      if (this.disposed || window.isDestroyed() || this.window !== window)
+        return;
       if (
         this.isPinned() ||
         ((this.orbHovered || this.sideHovered || this.isKeyboardHeld()) &&
@@ -405,7 +438,11 @@ export class SubagentsWindows {
       ) {
         this.place();
         this.publish();
-        window.showInactive();
+        if (this.openOnLoad) {
+          this.openOnLoad = false;
+          window.show();
+          window.focus();
+        } else window.showInactive();
         this.watchCursor();
       }
     });
@@ -441,7 +478,7 @@ export class SubagentsWindows {
     const size =
       this.mode === 'summary'
         ? { width: 132, height: 62 }
-        : { width: 330, height: 430 };
+        : { width: 320, height: 460 };
     if (preservePosition) {
       const bounds = this.window.getBounds();
       this.window.setBounds(
@@ -464,6 +501,7 @@ export class SubagentsWindows {
     this.window.setBounds(result.bounds, false);
   }
   private closePanel(): void {
+    this.openOnLoad = false;
     this.invalidatePageRequest();
     this.pageOffset = 0;
     this.page = undefined;

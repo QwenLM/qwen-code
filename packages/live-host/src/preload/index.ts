@@ -65,6 +65,7 @@ const api: LiveHostApi = {
   setTheme: (theme) => invoke('live:set-theme', theme),
   setSettingsOpen: (open) => invoke('live:settings-open', open),
   openConfig: () => invoke('live:open-config'),
+  openSubagents: () => invoke('live:subagents:open'),
   setOverlayLayout: (layout) => ipcRenderer.send('live:overlay-layout', layout),
   onSettingsDismiss: (listener) => {
     const handler = () => listener();

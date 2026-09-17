@@ -6,10 +6,11 @@ import type {
   SubagentsPage,
   SubagentsSnapshot,
 } from '@qwen-code/qwen-live/subagents';
-import type { LiveTheme, ResolvedTheme } from './theme.ts';
+import type { LiveTheme, LiveThemeColor, ResolvedTheme } from './theme.ts';
 
 export type SubagentsWindowState = {
   theme?: LiveTheme;
+  themeColor?: LiveThemeColor;
   resolvedTheme?: ResolvedTheme;
   language: LiveLanguage;
   connected: boolean;

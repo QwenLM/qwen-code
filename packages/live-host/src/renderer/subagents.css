@@ -183,22 +183,28 @@ button:focus-visible,
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  border: 0;
+  border-radius: 13px;
+  background: var(--live-panel-bg);
+  box-shadow: var(--live-shadow);
 }
 .subagents-header {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 48px;
-  padding: 10px 12px;
+  justify-content: flex-start;
+  gap: 9px;
+  height: 48px;
+  padding: 0 17px;
   border-bottom: 1px solid var(--live-divider);
 }
 .subagents-header {
   -webkit-app-region: drag;
 }
 .subagents-heading {
-  font-size: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
 }
 .subagents-close,
 .subagents-back,
@@ -220,10 +226,12 @@ button:focus-visible,
   background: var(--live-control-hover);
 }
 .subagents-panel > .subagents-counts {
-  padding: 12px 14px 8px;
+  padding: 13px 16px 10px;
 }
 .subagents-panel > .subagents-counts .subagents-count {
-  font-size: 11px;
+  flex-direction: row;
+  gap: 4px;
+  font-size: 9px;
 }
 .subagents-notice,
 .subagents-other-counts,
@@ -270,10 +278,16 @@ button:focus-visible,
 }
 .subagent-row {
   display: grid;
+  position: relative;
 }
 .subagent-row > .subagents-stop {
-  justify-self: end;
-  margin: 4px 2px 0;
+  position: absolute;
+  right: 0;
+  bottom: 9px;
+  margin: 0;
+  font-size: 9px;
+  line-height: 13px;
+  padding: 3px 6px;
 }
 .subagent-identity > .subagents-stop {
   margin-left: 8px;
@@ -325,6 +339,8 @@ button:focus-visible,
 .subagents-footer {
   margin-top: auto;
   border-top: 1px solid var(--live-divider);
+  padding: 10px 16px;
+  font-size: 9px;
 }
 .subagents-empty {
   flex: 1 1 auto;
@@ -342,53 +358,56 @@ button:focus-visible,
   flex: 1 1 auto;
   overflow-y: auto;
   margin: 0;
-  padding: 4px 8px 8px;
+  padding: 0 16px;
   list-style: none;
-  scrollbar-gutter: stable;
 }
 .subagent-row + .subagent-row {
-  margin-top: 6px;
+  margin-top: 0;
+  border-top: 1px dashed var(--live-divider);
 }
 .subagent-task {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 104px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 5px 8px;
   width: 100%;
-  padding: 11px 10px;
-  border: 1px solid var(--live-border);
-  border-radius: 9px;
+  padding: 12px 0;
+  border: 0;
+  border-radius: 0;
   text-align: left;
-  background: var(--live-surface);
+  background: transparent;
 }
 .subagent-task:hover:not(:disabled) {
-  border-color: var(--live-selected-border);
-  background: var(--live-surface-hover);
+  background: var(--live-well);
 }
 .subagent-task-title {
-  font-size: 12px;
-  line-height: 18px;
-  height: 36px;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow-wrap: anywhere;
+  grid-column: 1 / -1;
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 16px;
+  height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   overflow: hidden;
 }
 .subagent-task-activity {
   grid-column: 1 / -1;
   color: var(--live-muted);
-  font-size: 11px;
-  line-height: 17px;
-  height: 34px;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  font-size: 10px;
+  line-height: 15px;
+  height: 15px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   overflow: hidden;
-  overflow-wrap: anywhere;
+}
+.subagent-row:has(> .subagents-stop:not([hidden])) .subagent-task-activity {
+  padding-right: 72px;
 }
 .subagent-task > .subagent-status {
   justify-self: end;
-  max-height: 36px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  white-space: nowrap;
   overflow: hidden;
 }
 .subagent-status {
@@ -396,12 +415,13 @@ button:focus-visible,
   align-self: start;
   width: fit-content;
   max-width: 100%;
-  border: 1px solid var(--live-border);
-  border-radius: 5px;
+  border: 0;
+  border-radius: 4px;
   padding: 1px 5px;
+  background: var(--live-selected-bg);
   color: var(--live-accent-text);
-  font-size: 10px;
-  line-height: 16px;
+  font-size: 9px;
+  line-height: 14px;
   overflow-wrap: anywhere;
 }
 .subagent-status[data-status='completed'] {
@@ -425,15 +445,14 @@ button:focus-visible,
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 18px;
+  padding: 14px 16px;
   user-select: text;
-  scrollbar-gutter: stable;
 }
 .subagent-title {
   margin: 0 0 10px;
   color: var(--live-text-strong);
-  font-size: 20px;
-  line-height: 28px;
+  font-size: 14px;
+  line-height: 20px;
   overflow-wrap: anywhere;
 }
 .subagent-updated,
@@ -538,4 +557,77 @@ button:focus-visible,
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--live-scroll-thumb-hover);
+}
+
+.subagents-app:not([data-mode='summary']) {
+  padding: 20px;
+}
+.subagents-close,
+.subagents-back {
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--live-muted);
+  flex-shrink: 0;
+}
+.subagents-close {
+  margin-left: auto;
+}
+.subagents-back {
+  margin-left: -6px;
+}
+.subagents-close svg,
+.subagents-back svg {
+  width: 13px;
+  height: 13px;
+}
+.subagents-panel > .subagents-counts .subagents-count-value {
+  font-size: 10px;
+  font-weight: 550;
+  line-height: 14px;
+}
+.subagent-task-backend {
+  min-width: 0;
+  color: var(--live-muted);
+  font-size: 9px;
+  line-height: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-status[data-status='completed'] {
+  background: var(--live-success-bg);
+}
+.subagent-status[data-status='waiting'] {
+  background: var(--live-warning-bg);
+}
+button {
+  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+button:active:not(:disabled):not(:focus-visible) {
+  transform: scale(0.98);
+  transition-duration: 100ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
+  button:active:not(:disabled):not(:focus-visible) {
+    transform: none;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .subagents-panel {
+    background: var(--live-surface);
+  }
+}
+@media (prefers-contrast: more) {
+  .subagents-panel {
+    outline: 1px solid var(--live-muted);
+  }
 }

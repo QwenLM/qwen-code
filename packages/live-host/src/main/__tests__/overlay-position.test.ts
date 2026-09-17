@@ -62,7 +62,7 @@ describe('overlayPosition', () => {
         area,
         OVERLAY_GEOMETRY.bounds.orb,
       ),
-      { x: 956, y: 326 },
+      { x: 951, y: 209 },
     );
     assert.deepEqual(
       clampOverlayPosition(
@@ -70,7 +70,7 @@ describe('overlayPosition', () => {
         area,
         OVERLAY_GEOMETRY.bounds.orb,
       ),
-      { x: -60, y: -107 },
+      { x: -25, y: -204 },
     );
     assert.deepEqual(
       clampOverlayPosition(
@@ -78,7 +78,7 @@ describe('overlayPosition', () => {
         area,
         OVERLAY_GEOMETRY.bounds['orb-preview'],
       ),
-      { x: -60, y: 1 },
+      { x: -25, y: -87 },
     );
   });
 });

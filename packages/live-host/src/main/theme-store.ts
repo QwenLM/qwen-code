@@ -7,7 +7,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
-import { isLiveTheme, type LiveTheme } from '../shared/theme.ts';
+import {
+  isLiveTheme,
+  isLiveThemeColor,
+  type LiveTheme,
+  type LiveThemeColor,
+} from '../shared/theme.ts';
 
 export function readHostTheme(path: string): LiveTheme {
   try {
@@ -42,4 +47,23 @@ export function saveHostTheme(path: string, theme: LiveTheme): void {
       /* Rename consumed the temporary file. */
     }
   }
+}
+
+export function readHostThemeColor(configPath?: string): LiveThemeColor {
+  if (!configPath) return 'iris';
+  try {
+    const value: unknown = JSON.parse(
+      readFileSync(configPath, 'utf8').replace(/^\uFEFF/, ''),
+    );
+    if (
+      value &&
+      typeof value === 'object' &&
+      'themeColor' in value &&
+      isLiveThemeColor(value.themeColor)
+    )
+      return value.themeColor;
+  } catch {
+    // A missing or invalid cosmetic preference must not prevent a call.
+  }
+  return 'iris';
 }

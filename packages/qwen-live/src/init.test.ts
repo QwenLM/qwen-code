@@ -160,6 +160,7 @@ describe('runInit', () => {
     expect(typeof serialized).toBe('string');
     expect(JSON.parse(String(serialized))).toMatchObject({
       language: 'en',
+      themeColor: 'iris',
       realtimeApiKey: 'sk-test',
       realtimeModel: 'qwen3.5-omni-plus-realtime',
       memory: {

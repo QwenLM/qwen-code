@@ -197,7 +197,8 @@ function fixture(
     setOrbKeyboardHeld: (value: boolean) => void;
     setDragging: (value: boolean) => void;
     setBlocked: (value: boolean) => void;
-    setTheme: (theme: string, appearance: string) => void;
+    openList: () => void;
+    setTheme: (theme: string, appearance: string, themeColor?: string) => void;
     dispose: () => void;
     displaysChanged: () => void;
     dismissPeek: () => void;
@@ -444,7 +445,7 @@ describe('Subagents native lifecycle', () => {
     const start = f.events.length;
     f.invoke('live:subagents:expand', window);
     assert.equal(f.state(window).mode, 'list');
-    assert.equal(window.bounds.width, 330);
+    assert.equal(window.bounds.width, 320);
     assert.deepEqual(
       f.events.slice(start).map((event) => event.action),
       ['place', 'publish', 'show', 'focus'],
@@ -453,8 +454,8 @@ describe('Subagents native lifecycle', () => {
     assert.equal(f.windows.length, 1);
     assert.equal(f.state(window).mode, 'detail');
     assert.equal(f.state(window).selectedId, 'harness:1');
-    assert.equal(window.bounds.width, 330);
-    assert.equal(window.bounds.height, 430);
+    assert.equal(window.bounds.width, 320);
+    assert.equal(window.bounds.height, 460);
     assert(window.bounds.x + window.bounds.width < f.anchor.x);
     window.setBounds({ x: 240, y: 150, width: 330, height: 430 });
     const moves = window.moves.length;
@@ -463,7 +464,7 @@ describe('Subagents native lifecycle', () => {
     f.invoke('live:subagents:back', window);
     assert.equal(f.state(window).mode, 'list');
     assert.equal(f.state(window).selectedId, undefined);
-    assert.equal(window.bounds.width, 330);
+    assert.equal(window.bounds.width, 320);
     assert.equal(window.bounds.x, 240);
     assert.equal(window.bounds.y, 150);
     assert.equal(f.windows.length, 1);
@@ -557,6 +558,46 @@ describe('Subagents native lifecycle', () => {
     assert.equal(f.state(summary).mode, 'summary');
     f.controller.dispose();
   });
+  it('opens the list directly only after load, reuses the window, and cancels stale pending opens', () => {
+    for (const interrupted of [
+      undefined,
+      'disconnect',
+      'instance',
+      'close',
+      'dispose',
+      'quit',
+    ] as const) {
+      const f = fixture();
+      f.controller.openList();
+      assert.equal(f.windows.length, 0);
+      f.controller.update('en', true, snapshot, 'one');
+      f.controller.openList();
+      f.controller.openList();
+      const window = f.windows[0]!;
+      assert.equal(f.windows.length, 1);
+      assert.equal(window.visible, false);
+      assert.equal(window.focused, 0);
+      if (interrupted === 'disconnect') f.controller.update('en', false);
+      if (interrupted === 'instance')
+        f.controller.update('en', true, snapshot, 'two');
+      if (interrupted === 'close') f.invoke('live:subagents:close', window);
+      if (interrupted === 'dispose') f.controller.dispose();
+      if (interrupted === 'quit') f.controller.dismissPeek();
+      window.ready();
+      assert.equal(window.visible, !interrupted);
+      assert.equal(window.focused, interrupted ? 0 : 1);
+      if (!interrupted) {
+        assert.equal(f.state(window).mode, 'list');
+        assert.deepEqual(
+          [window.bounds.width, window.bounds.height],
+          [320, 460],
+        );
+        f.controller.setTheme('dark', 'dark', 'rose');
+        assert.equal(f.state(window).themeColor, 'rose');
+      }
+      f.controller.dispose();
+    }
+  });
   it('updates theme in every mode without moving, resizing or focusing the surface', () => {
     const f = fixture();
     f.controller.update('en', true, snapshot, 'one');
@@ -571,11 +612,12 @@ describe('Subagents native lifecycle', () => {
       const start = f.events.length;
       f.controller.setTheme('system', 'light');
       assert.equal(f.state(window).resolvedTheme, 'light');
-      assert.equal(window.backgrounds.at(-1), '#f7f7fc');
+      assert.equal(window.options.transparent, true);
+      assert.equal(window.options.backgroundColor, '#00000000');
       f.controller.setTheme('dark', 'dark');
       assert.equal(f.state(window).theme, 'dark');
       assert.equal(f.state(window).resolvedTheme, 'dark');
-      assert.equal(window.backgrounds.at(-1), '#1b1b29');
+      assert.deepEqual(window.backgrounds, []);
       assert.deepEqual(
         f.events.slice(start).map((event) => event.action),
         ['publish', 'publish'],

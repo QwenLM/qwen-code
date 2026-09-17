@@ -40,6 +40,15 @@ export const LIVE_MESSAGES = {
   'ui.audioSource': { en: 'Audio Source', 'zh-CN': '音频来源' },
   'ui.videoSource': { en: 'Video Source', 'zh-CN': '视频来源' },
   'ui.captureMode': { en: 'Capture Mode', 'zh-CN': '获取模式' },
+  'ui.sound': { en: 'Sound', 'zh-CN': '声音' },
+  'ui.visual': { en: 'Visual', 'zh-CN': '视觉' },
+  'ui.personalization': { en: 'Personalization', 'zh-CN': '个性化' },
+  'ui.memoryOn': { en: 'On', 'zh-CN': '已开启' },
+  'ui.memoryOff': { en: 'Off', 'zh-CN': '已关闭' },
+  'ui.appearance': { en: 'Appearance', 'zh-CN': '外观' },
+  'ui.light': { en: 'Light', 'zh-CN': '浅色' },
+  'ui.dark': { en: 'Dark', 'zh-CN': '深色' },
+  'ui.configFile': { en: 'Open configuration', 'zh-CN': '打开配置文件' },
   'ui.settings': { en: 'Settings', 'zh-CN': '设置' },
   'ui.openConfig': {
     en: 'Open config.json ↗',
@@ -56,8 +65,8 @@ export const LIVE_MESSAGES = {
   'ui.controls': { en: 'Qwen Live controls', 'zh-CN': 'Qwen Live 控制' },
   'ui.toolbar': { en: 'Live controls', 'zh-CN': '语音控制' },
   'ui.dragHint': {
-    en: 'Drag to move · Hover for controls',
-    'zh-CN': '拖动以移动 · 悬停显示控制',
+    en: 'Drag to move',
+    'zh-CN': '拖动以移动',
   },
   'ui.muteInput': { en: 'Mute microphone', 'zh-CN': '麦克风静音' },
   'ui.unmuteInput': { en: 'Unmute microphone', 'zh-CN': '取消麦克风静音' },
@@ -126,8 +135,8 @@ export const LIVE_MESSAGES = {
     'zh-CN': '未能完成退出，请再次点击退出。',
   },
   'ui.ready': {
-    en: 'Ready · Hover for controls',
-    'zh-CN': '已就绪 · 悬停显示控制',
+    en: 'Ready',
+    'zh-CN': '已就绪',
   },
   'ui.starting': { en: 'Starting…', 'zh-CN': '正在开始…' },
   'ui.listening': { en: 'Listening', 'zh-CN': '聆听中' },
@@ -511,6 +520,11 @@ export const LIVE_MESSAGES = {
   'runtime.realtimeConnectDetail': {
     en: 'Live Voice could not connect.{detail}',
     'zh-CN': '无法连接 Live 语音。{detail}',
+  },
+  'runtime.realtimeQuota': {
+    en: 'Realtime quota limit reached. Check your provider quota and concurrent sessions, then retry when available. {detail}',
+    'zh-CN':
+      'Realtime 服务配额受限。请检查服务商配额与并发会话，恢复可用后重试。{detail}',
   },
   'runtime.realtimeAuth': {
     en: 'Realtime authentication failed: {detail} Replace or unset DASHSCOPE_API_KEY/QWEN_LIVE_REALTIME_API_KEY (environment variables override config.json), then restart qwen-live.',

@@ -261,6 +261,7 @@ function fixture(minimumNativeY?: number, diagnosticsEnabled = false) {
     syncVisualCapture: () => {},
   };
   const script = `let overlay;
+let themeColor = 'iris';
 let overlayReady = true, rendererEventsEnabled = true, pointerInteractive = false;
 let pointerOverInteractive = false, settingsOpen = false, overlayDrag, desiredOverlayPosition;
 let hasCustomOverlayPosition = false;
@@ -274,7 +275,7 @@ let visualInput, visualError, visualReady = false;
 const permissions = {}, selfChecks = {};
 const startupInteraction = new StartupInteraction();
 let live = { v: 1, available: true, state: 'idle', shortcut: 'Command+E' };
-const OVERLAY_WIDTH = 384, OVERLAY_HEIGHT = 480, diagnosticsEnabled = ${diagnosticsEnabled}, READINESS_RECONNECT_DEBOUNCE_MS = 2500;
+const OVERLAY_WIDTH = 700, OVERLAY_HEIGHT = 620, diagnosticsEnabled = ${diagnosticsEnabled}, READINESS_RECONNECT_DEBOUNCE_MS = 2500;
 ${functions}
 registerIpc();
 ({ create: (ready = true) => { overlay = createOverlay(); if (ready) overlay.events.get('did-finish-load')?.(); return overlay; }, showOverlay, stopLive,
@@ -487,7 +488,7 @@ describe('native overlay interaction', () => {
     assert.equal(window.moves.length, 0);
     host.controls.stopLive();
     assert.equal(host.hidden(), 0);
-    assert.equal(window.options.height, 480);
+    assert.equal(window.options.height, 620);
   });
 
   it('restores the dragged bottom-right position after native re-show clamps the canvas', () => {
@@ -499,7 +500,7 @@ describe('native overlay interaction', () => {
     const drag = host.ipc.get('live:drag-overlay')!;
     drag(event, 'start', 1000, 700);
     drag(event, 'end', 1100, 800);
-    const desired = { x: 956, y: 326 };
+    const desired = { x: 951, y: 209 };
     const before = window.getBounds();
     assert.deepEqual({ x: before.x, y: before.y }, desired);
     assert.deepEqual(host.saved, [desired]);
@@ -528,7 +529,7 @@ describe('native overlay interaction', () => {
   it('preserves an existing native offset and saved drag position when re-show clamps another edge', () => {
     const host = fixture(33);
     host.area.y = 33;
-    host.stored.position = { x: 956, y: -97 };
+    host.stored.position = { x: 951, y: -97 };
     const window = host.controls.create();
     const event = { sender: window.webContents };
     const layout = host.ipc.get('live:overlay-layout')!;
@@ -536,7 +537,7 @@ describe('native overlay interaction', () => {
     const drag = host.ipc.get('live:drag-overlay')!;
     drag(event, 'start', 292, 255);
     drag(event, 'end', 292, 265);
-    const desired = { x: 956, y: -87 };
+    const desired = { x: 951, y: -87 };
     const before = window.getBounds();
     assert.equal(before.y, 33);
     assert.equal(host.controls.publicState().overlayOffset?.y, -120);
@@ -595,11 +596,11 @@ describe('native overlay interaction', () => {
     drag({ sender: window.webContents }, 'move', 350, 350);
     drag({ sender: window.webContents }, 'end', 350, 350);
     assert.equal(window.getBounds().x, 150);
-    assert.equal(window.getBounds().y, 250);
-    assert.deepEqual(host.saved.at(-1), { x: 150, y: 250 });
+    assert.equal(window.getBounds().y, 234);
+    assert.deepEqual(host.saved.at(-1), { x: 150, y: 234 });
     host.area.width = 400;
     host.controls.clamp();
-    assert.equal(window.getBounds().x, 16);
+    assert.equal(window.getBounds().x, -142);
   });
 
   it('waits for the single graceful daemon quit before exiting Host', async () => {
@@ -734,7 +735,7 @@ describe('native overlay interaction', () => {
     const settings = host.ipc.get('live:settings-open');
     assert(settings);
     settings({ sender: window.webContents }, true);
-    assert.equal(window.ignored.at(-1), false);
+    assert.equal(window.ignored.at(-1), true);
     previous.events.get('blur')?.();
     assert.deepEqual(host.commands, []);
     window.events.get('blur')?.();
@@ -744,44 +745,44 @@ describe('native overlay interaction', () => {
 
   it('uses compact bounds at edges and restores desired position after settings and preview clamps', () => {
     const host = fixture();
-    host.stored.position = { x: 956, y: -100 };
+    host.stored.position = { x: 951, y: -100 };
     const window = host.controls.create();
     const event = { sender: window.webContents };
     const layout = host.ipc.get('live:overlay-layout')!;
     const settings = host.ipc.get('live:settings-open')!;
-    assert.equal(window.getBounds().x, 896);
+    assert.equal(window.getBounds().x, 722);
     layout(event, 'orb');
-    assert.equal(window.getBounds().x, 956);
+    assert.equal(window.getBounds().x, 951);
     assert.equal(window.getBounds().y, -100);
     settings(event, true);
-    assert.equal(window.getBounds().x, 896);
-    assert.equal(window.getBounds().y, 23);
+    assert.equal(window.getBounds().x, 608);
+    assert.equal(window.getBounds().y, 7);
     settings(event, false);
-    assert.equal(window.getBounds().x, 956);
+    assert.equal(window.getBounds().x, 951);
     assert.equal(window.getBounds().y, -100);
     layout(event, 'orb-preview');
-    assert.equal(window.getBounds().y, 1);
+    assert.equal(window.getBounds().y, -87);
     layout(event, 'orb');
     assert.equal(window.getBounds().y, -100);
     assert.deepEqual(host.saved, []);
     const recreated = host.controls.create();
     layout({ sender: recreated.webContents }, 'orb');
     assert.equal(recreated.getBounds().y, -100);
-    assert.equal(recreated.getBounds().x, 956);
+    assert.equal(recreated.getBounds().x, 951);
   });
 
   it('accepts an initial layout before renderer ready and rejects malformed or foreign layout changes', () => {
     const host = fixture();
-    host.stored.position = { x: 956, y: -100 };
+    host.stored.position = { x: 951, y: -100 };
     const window = host.controls.create(false);
     const layout = host.ipc.get('live:overlay-layout')!;
     layout({ sender: window.webContents }, 'orb');
-    assert.equal(window.getBounds().x, 896);
+    assert.equal(window.getBounds().x, 722);
     window.events.get('did-finish-load')?.();
-    assert.equal(window.getBounds().x, 956);
+    assert.equal(window.getBounds().x, 951);
     layout({ sender: {} }, 'setup');
     layout({ sender: window.webContents }, 'unexpected');
-    assert.equal(window.getBounds().x, 956);
+    assert.equal(window.getBounds().x, 951);
     assert.deepEqual(host.saved, []);
   });
 
@@ -824,7 +825,7 @@ describe('native overlay interaction', () => {
     assert.equal(host.controls.publicState().overlayOffset?.y, -120);
     assert.equal(host.saved.at(-1)?.y, -87);
     host.ipc.get('live:settings-open')!(event, true);
-    assert.equal(host.controls.publicState().overlayOffset?.y, 0);
+    assert.equal(host.controls.publicState().overlayOffset?.y, -16);
     host.ipc.get('live:settings-open')!(event, false);
     assert.equal(host.controls.publicState().overlayOffset?.y, -120);
     assert.equal(host.saved.at(-1)?.y, -87);

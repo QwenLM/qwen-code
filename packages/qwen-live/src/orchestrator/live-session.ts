@@ -409,6 +409,12 @@ function realtimeFailureMessage(
     };
   }
   const detail = error.message.trim();
+  if (error.kind === 'quota') {
+    return {
+      message: liveMessage('runtime.realtimeQuota', { detail }),
+      configuration: false,
+    };
+  }
   if (error.kind !== 'configuration') {
     return {
       message: liveMessage(fallback, { detail: detail ? ` ${detail}` : '' }),

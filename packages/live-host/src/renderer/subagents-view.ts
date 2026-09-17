@@ -1,3 +1,4 @@
+import { uiIcon } from './ui-icons.ts';
 import {
   displayLiveMessage,
   liveMessage,
@@ -64,21 +65,8 @@ function text(node: HTMLElement, value: string): void {
 }
 
 function botIcon(): SVGSVGElement {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const svg = uiIcon('task');
   svg.classList.add('subagents-bot');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('aria-hidden', 'true');
-  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  path.setAttribute(
-    'd',
-    'M9 3h3v3M5 8h14v12H5zM2 12v4m20-4v4M9 12v2m6-2v2M9 17h6',
-  );
-  path.setAttribute('fill', 'none');
-  path.setAttribute('stroke', 'currentColor');
-  path.setAttribute('stroke-width', '1.6');
-  path.setAttribute('stroke-linecap', 'round');
-  path.setAttribute('stroke-linejoin', 'round');
-  svg.append(path);
   return svg;
 }
 
@@ -104,6 +92,7 @@ type TaskRow = {
   title: HTMLElement;
   status: HTMLElement;
   activity: HTMLElement;
+  backend: HTMLElement;
   stop: HTMLButtonElement;
 };
 
@@ -231,16 +220,18 @@ export class SubagentsView {
       count.append(symbol, value);
       this.summaryCounts.append(count);
     }
-    uiText(this.close, 'ui.close');
+    uiLabel(this.close, 'ui.close');
+    this.close.append(uiIcon('x'));
     this.back.type = 'button';
-    uiText(this.back, 'subagents.back');
+    uiLabel(this.back, 'subagents.back');
+    this.back.append(uiIcon('back'));
     this.back.addEventListener(
       'click',
       () => void this.run(() => this.api.back(), false),
     );
     this.close.addEventListener('click', () => this.dismiss());
     const header = element('header', 'subagents-header');
-    header.append(this.back, this.heading, this.close);
+    header.append(this.back, botIcon(), this.heading, this.close);
     this.notice.setAttribute('role', 'status');
     this.error.setAttribute('role', 'alert');
     this.feedback.setAttribute('role', 'status');
@@ -341,7 +332,7 @@ export class SubagentsView {
 
   update(state: SubagentsWindowState): void {
     if (this.disposed) return;
-    applyTheme(this.app.ownerDocument, state.resolvedTheme);
+    applyTheme(this.app.ownerDocument, state.resolvedTheme, state.themeColor);
     const priorMode = this.state?.mode;
     if (this.state?.instanceId !== state.instanceId) {
       this.previousOffsets.clear();
@@ -563,6 +554,7 @@ export class SubagentsView {
           title: element('strong', 'subagent-task-title'),
           status: element('span', 'subagent-status'),
           activity: element('span', 'subagent-task-activity'),
+          backend: element('span', 'subagent-task-backend'),
           stop: element('button', 'subagents-stop'),
         };
         row.button.type = 'button';
@@ -572,12 +564,17 @@ export class SubagentsView {
           'click',
           () => void this.run(() => this.api.openDetail(id)),
         );
-        row.button.append(row.title, row.status, row.activity);
+        row.button.append(row.backend, row.status, row.title, row.activity);
         row.element.append(row.button, row.stop);
         this.list.append(row.element);
         this.rows.set(task.id, row);
       }
       text(row.title, task.title);
+      row.title.title = task.title;
+      text(
+        row.backend,
+        task.backend ?? liveText(state.language, `subagents.${task.kind}`),
+      );
       text(row.status, liveText(state.language, STATUS_KEYS[task.status]));
       row.status.dataset.status = task.status;
       text(
@@ -585,6 +582,7 @@ export class SubagentsView {
         displayLiveMessage(state.language, task.activity) ||
           liveText(state.language, 'subagents.noActivity'),
       );
+      row.activity.title = row.activity.textContent ?? '';
       row.button.disabled = !state.connected;
       this.renderStop(row.stop, task, state);
       row.button.setAttribute(

@@ -11,8 +11,16 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
-import { readHostTheme, saveHostTheme } from '../theme-store.ts';
-import { isLiveTheme, LIVE_THEMES } from '../../shared/theme.ts';
+import {
+  readHostTheme,
+  readHostThemeColor,
+  saveHostTheme,
+} from '../theme-store.ts';
+import {
+  isLiveTheme,
+  LIVE_THEMES,
+  LIVE_THEME_COLORS,
+} from '../../shared/theme.ts';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -126,5 +134,36 @@ describe('Host-local theme preferences', () => {
       saveHostTheme(join(blockedParent, 'theme.json'), 'dark'),
     );
     assert.equal(readFileSync(blockedParent, 'utf8'), 'unchanged');
+  });
+});
+
+describe('config.json themeColor preference', () => {
+  it('defaults to Iris and reads every named palette without rewriting the connected config', () => {
+    const path = join(directory(), 'config.json');
+    assert.equal(readHostThemeColor(), 'iris');
+    assert.equal(readHostThemeColor(path), 'iris');
+    for (const color of LIVE_THEME_COLORS) {
+      const config =
+        '\uFEFF' +
+        JSON.stringify({
+          themeColor: color,
+          language: 'zh-CN',
+          realtimeApiKey: 'untouched',
+        });
+      writeFileSync(path, config);
+      assert.equal(readHostThemeColor(path), color);
+      assert.equal(readFileSync(path, 'utf8'), config);
+    }
+    for (const config of [
+      '{}',
+      '{',
+      'null',
+      '[]',
+      '{"themeColor":"unknown"}',
+      '{"themeColor":true}',
+    ]) {
+      writeFileSync(path, config);
+      assert.equal(readHostThemeColor(path), 'iris');
+    }
   });
 });

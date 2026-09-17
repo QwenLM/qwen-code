@@ -34,7 +34,7 @@ function fixture() {
   );
   assert.equal(registrations?.length, 3);
   const area = { x: 0, y: 25, width: 1440, height: 875 };
-  const bounds = { x: 900, y: 200, width: 384, height: 480 };
+  const bounds = { x: 900, y: 200, width: 700, height: 620 };
   const display = {
     id: 1,
     bounds: { x: 0, y: 0, width: 1440, height: 900 },

@@ -307,7 +307,11 @@ export interface QwenRealtimeSession {
   close: (options?: RealtimeCloseOptions) => void;
 }
 
-export type QwenRealtimeErrorKind = 'configuration' | 'transient' | 'protocol';
+export type QwenRealtimeErrorKind =
+  | 'configuration'
+  | 'quota'
+  | 'transient'
+  | 'protocol';
 
 export interface QwenRealtimeErrorOptions {
   kind?: QwenRealtimeErrorKind;
@@ -323,6 +327,9 @@ function classifyRealtimeErrorKind(
   status?: number,
 ): QwenRealtimeErrorKind {
   const normalized = `${code ?? ''} ${message}`.toLowerCase();
+  if (/insufficient[ _.-]?quota|quota[ _.-]?exceeded/.test(normalized)) {
+    return 'quota';
+  }
   if (
     status === 429 ||
     (status !== undefined && status >= 500 && status <= 599) ||
@@ -333,7 +340,7 @@ function classifyRealtimeErrorKind(
       'socket_error',
       'send_failed',
     ].includes(code ?? '') ||
-    /\b429\b|rate[ _.-]?limit|throttl|limit_requests|limitrequests|resourceexhausted|resource_exhausted|limit_burst_rate|insufficient_quota|service_unavailable|internal[ _.-]?error|system[ _.-]?error|modelservicefailed|timeout|temporar/.test(
+    /\b429\b|rate[ _.-]?limit|throttl|limit_requests|limitrequests|resourceexhausted|resource_exhausted|limit_burst_rate|service_unavailable|internal[ _.-]?error|system[ _.-]?error|modelservicefailed|timeout|temporar/.test(
       normalized,
     )
   ) {
@@ -3231,24 +3238,26 @@ export function openQwenRealtimeSession(
       clearResponseTimers();
       removeAbortListener();
       if (closedByClient || terminal) return;
+      const reason = sanitizeErrorText(args[1], config.apiKey);
+      const reasonKind = classifyRealtimeErrorKind(undefined, reason);
       const inputLossError = pendingInputLossError();
-      if (inputLossError) {
+      if (inputLossError && reasonKind !== 'quota') {
         fail(inputLossError);
         return;
       }
       const code = optionalFiniteNumber(args[0]);
       terminal = true;
       if (activeResponseId) collectDialogueResponse(activeResponseId, true);
-      const reason = sanitizeErrorText(args[1], config.apiKey);
       const suffix = code ? ` (${code}${reason ? `: ${reason}` : ''})` : '';
-      const reasonKind = classifyRealtimeErrorKind(undefined, reason);
       const error = new QwenRealtimeError(
         `Realtime connection closed unexpectedly${suffix}.`,
         'connection_closed',
         true,
         {
           kind:
-            code !== undefined && [1001, 1006, 1011, 1012, 1013].includes(code)
+            reasonKind !== 'quota' &&
+            code !== undefined &&
+            [1001, 1006, 1011, 1012, 1013].includes(code)
               ? 'transient'
               : reasonKind,
           closeCode: code,

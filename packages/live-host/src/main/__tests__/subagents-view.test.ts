@@ -925,11 +925,11 @@ describe('Subagents read-only surfaces', () => {
     assert.match(css, /\.subagents-header\s*\{\s*-webkit-app-region: drag;/);
     assert.match(css, /button\s*\{[^}]*-webkit-app-region: no-drag;/);
     assert.match(css, /\.subagent-output\s*\{[^}]*overflow-y: auto;/);
-    assert.match(css, /\.subagent-task-title\s*\{[^}]*height: 36px;/);
-    assert.match(css, /\.subagent-task-activity\s*\{[^}]*height: 34px;/);
+    assert.match(css, /\.subagent-task-title\s*\{[^}]*height: 16px;/);
+    assert.match(css, /\.subagent-task-activity\s*\{[^}]*height: 15px;/);
     assert.match(
       css,
-      /\.subagent-task > \.subagent-status\s*\{[^}]*max-height: 36px;/,
+      /\.subagent-task > \.subagent-status\s*\{[^}]*height: 16px;/,
     );
   });
 });
