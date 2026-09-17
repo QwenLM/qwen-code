@@ -526,7 +526,13 @@ export function getCommandRoots(command: string): string[] {
 }
 
 export function stripShellWrapper(command: string): string {
-  const trimmed = command.trim();
+  // Bash's lexer skips only these characters at a command's edges — plus `\r`,
+  // so CRLF command strings keep normalising. `String.prototype.trim` also
+  // peels off `\v`, `\f`, `\u00a0` and the rest of Unicode whitespace, which
+  // bash keeps as ordinary word characters: trimming `echo x >\u00a0` down to
+  // `echo x >` deletes the redirection target, and a caller that extracts
+  // operations from the result then sees no write at all (#11865).
+  const trimmed = command.replace(/^[ \t\n\r]+|[ \t\n\r]+$/g, '');
   let rest = trimmed;
 
   // Skip leading env assignments (e.g. `FOO=bar bash -c '...'`)

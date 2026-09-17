@@ -744,6 +744,20 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
   });
 
+  // Bash treats these as ordinary word characters, so at the edge of a command
+  // they are part of the last word — for `echo x >\u00a0` the redirection
+  // target — and trimming them off discards it (#11865).
+  it('should keep edge characters bash does not treat as whitespace', async () => {
+    expect(stripShellWrapper('echo x >\u00a0')).toEqual('echo x >\u00a0');
+    expect(stripShellWrapper('echo x >\v')).toEqual('echo x >\v');
+    expect(stripShellWrapper('echo x >\f')).toEqual('echo x >\f');
+  });
+
+  it('should still trim plain whitespace and CRLF at the edges', async () => {
+    expect(stripShellWrapper('  echo x  ')).toEqual('echo x');
+    expect(stripShellWrapper('echo x\r\n')).toEqual('echo x');
+  });
+
   it('should strip absolute-path wrapper /bin/bash -c', async () => {
     expect(stripShellWrapper("/bin/bash -c 'sleep 5'")).toEqual('sleep 5');
     expect(stripShellWrapper('/usr/bin/zsh -c "ls -l"')).toEqual('ls -l');

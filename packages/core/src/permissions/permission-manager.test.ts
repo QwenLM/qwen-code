@@ -29,6 +29,7 @@ import {
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
+import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
 
@@ -651,22 +652,23 @@ describe('splitCompoundCommand', () => {
   // async operator — bash runs two commands. When the scan skipped those four
   // as if they were whitespace, both halves stayed in one segment and the
   // first command's allow rule covered the second.
+  // Titles carry the escaped spelling: the raw characters are invisible in a
+  // terminal and a `\v` or `\f` in a title collapses a line break in the XML of
+  // the JUnit report.
   it.each([
-    ['echo x >\r& rm -rf /tmp/x'],
-    ['echo x >\v& rm -rf /tmp/x'],
-    ['echo x >\f& rm -rf /tmp/x'],
-    ['echo x >\u00a0& rm -rf /tmp/x'],
+    ['\\r', 'echo x >\r& rm -rf /tmp/x', 'echo x >\r'],
+    ['\\v', 'echo x >\v& rm -rf /tmp/x', 'echo x >\v'],
+    ['\\f', 'echo x >\f& rm -rf /tmp/x', 'echo x >\f'],
+    ['\\u00a0', 'echo x >\u00a0& rm -rf /tmp/x', 'echo x >\u00a0'],
     // Spaced variant: real separators around the non-IFS character.
-    ['echo x > \r & rm -rf /tmp/x'],
+    ['\\r (spaced)', 'echo x > \r & rm -rf /tmp/x', 'echo x > \r'],
   ])(
-    'splits %s, where a non-IFS "whitespace" sits between the > and the &',
-    async (command) => {
-      // Segments are trimmed, and `String.prototype.trim` also strips these
-      // characters, so the first segment ends at the bare `>`.
-      expect(splitCompoundCommand(command)).toEqual([
-        'echo x >',
-        'rm -rf /tmp/x',
-      ]);
+    'splits a command with %s between the > and the &',
+    async (_label, command, first) => {
+      // The character is the redirect target, so it stays: trimming discards
+      // only the separators bash's lexer discards, not `String.prototype.trim`'s
+      // wider set.
+      expect(splitCompoundCommand(command)).toEqual([first, 'rm -rf /tmp/x']);
     },
   );
 
@@ -2370,6 +2372,30 @@ describe('PermissionManager', () => {
         }),
       ).toBe('allow');
     });
+
+    // The splitter's array is an intermediate result; the verdict is the
+    // guarantee. Before the fix the backward scan read these characters as
+    // whitespace, the `&` was not an async operator, and the whole command was
+    // one segment — so the `echo` allow rule covered the `rm`.
+    it.each([
+      ['\\r', 'echo x >\r& rm -rf /tmp/x'],
+      ['\\v', 'echo x >\v& rm -rf /tmp/x'],
+      ['\\f', 'echo x >\f& rm -rf /tmp/x'],
+    ])(
+      'compound with %s inside the redirect target: deny in second → deny',
+      async (_label, command) => {
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(echo *)'],
+            permissionsDeny: ['Bash(rm *)'],
+          }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      },
+    );
 
     it('three-part compound: all must pass', async () => {
       pm = new PermissionManager(
@@ -4167,6 +4193,44 @@ describe('PermissionManager — compound shell write attribution', () => {
         toolName: 'run_shell_command',
         command: "cd .qwen && bash -lc 'echo {} > settings.json'",
         cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
+
+  // #11865: a redirect target made of characters that are not bash word
+  // separators — a single NBSP here — is a real filename to bash, so it must
+  // survive into the virtual op. `String.prototype.trim` used to delete it,
+  // and the write disappeared from a verdict that was a `deny`.
+  it('attributes a write whose whole target is an invisible character', () => {
+    expect(
+      extractShellOperationsAcrossCommand('echo x >\u00a0& echo y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+  });
+
+  it('does not invent a read op when an invisible target is followed by a word', () => {
+    // `cat >\u00a0` takes no argument, so a deleted target left the bare `>`
+    // in the positional args and `looksLikePath('>')` turned the real write
+    // into a spurious `read_file '/project/>'`.
+    expect(
+      extractShellOperationsAcrossCommand('cat >\u00a0& echo hi', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+  });
+
+  it('denies an invisible write inside a denied directory', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(echo *)'],
+        permissionsDeny: ['Edit(//project/**)', 'Write(//project/**)'],
+        cwd: '/project',
+        projectRoot: '/project',
+      }),
+    );
+    pm.initialize();
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'echo x >\u00a0& echo y',
+        cwd: '/project',
       }),
     ).toBe('deny');
   });

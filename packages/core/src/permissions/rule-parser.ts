@@ -816,13 +816,38 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
 /**
- * The characters bash treats as word separators (its default `IFS`): space,
- * tab and newline. JavaScript's `\s` also matches `\r`, `\v`, `\f`,
- * `\u00a0` and other Unicode whitespace, none of which bash treats as
- * separators — bash takes such a character as part of the neighbouring word
- * instead.
+ * The characters bash's lexer treats as whitespace (space, tab and newline —
+ * `whitespace(c)` in bash's `parse.y`). These coincide with bash's default
+ * `IFS`, but `IFS` is not what matters here: operator adjacency is decided by
+ * the lexer, so this list must not be widened to follow a custom `IFS` —
+ * doing so re-joins `>\r&`-style payloads into one segment.
+ *
+ * JavaScript's `\s` also matches `\r`, `\v`, `\f`, `\u00a0` and other
+ * Unicode whitespace, none of which bash treats as separators — bash takes
+ * such a character as part of the neighbouring word instead.
  */
 const BASH_WORD_SEPARATORS = [' ', '\t', '\n'];
+
+/**
+ * Trim only the whitespace bash's lexer discards, leaving characters bash
+ * treats as ordinary word characters in place.
+ *
+ * `String.prototype.trim` also strips `\r`, `\v`, `\f` and `\u00a0`, so
+ * trimming a segment with it deletes a redirection target (or the tail of one)
+ * made of those characters, and the virtual write op disappears from a verdict
+ * that was a `deny` (#11865).
+ */
+function trimBashWordSeparators(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && BASH_WORD_SEPARATORS.includes(text[start]!)) {
+    start++;
+  }
+  while (end > start && BASH_WORD_SEPARATORS.includes(text[end - 1]!)) {
+    end--;
+  }
+  return text.slice(start, end);
+}
 
 /**
  * Count the consecutive backslashes immediately before `index`.
@@ -955,7 +980,12 @@ export function splitCompoundCommandSegments(
       if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
         continue;
       }
-      const segment = command.substring(lastSplit, i).trim();
+      // A CRLF pair ends a line, so the `\r` in front of a `\n` terminator is
+      // dropped with it; a lone `\r` is a bash word character and stays.
+      const raw = command.substring(lastSplit, i);
+      const segment = trimBashWordSeparators(
+        op === '\n' ? raw.replace(/\r$/, '') : raw,
+      );
       if (segment) {
         segments.push({ command: segment, terminator: op });
       }
@@ -966,7 +996,7 @@ export function splitCompoundCommandSegments(
   }
 
   // Add the last segment
-  const lastSegment = command.substring(lastSplit).trim();
+  const lastSegment = trimBashWordSeparators(command.substring(lastSplit));
   if (lastSegment) {
     segments.push({ command: lastSegment, terminator: '' });
   }
