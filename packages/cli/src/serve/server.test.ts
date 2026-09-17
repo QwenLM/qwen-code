@@ -3153,6 +3153,17 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
+  it('validates the hosted Harness profile for direct embeds', () => {
+    expect(() =>
+      createServeApp({
+        ...baseOpts,
+        profile: 'hosted-harness',
+        token: 'harness-token',
+        serveWebShell: false,
+      }),
+    ).toThrow(/managed-runtime-broker-url/);
+  });
+
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
       createServeApp({ ...baseOpts, clientMcpOverWs: true }, undefined, {

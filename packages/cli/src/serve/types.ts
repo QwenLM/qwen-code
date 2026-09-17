@@ -43,6 +43,7 @@ import type {
  *   implemented.
  */
 export type ServeMode = 'http-bridge' | 'native';
+export type ServeProfile = 'default' | 'hosted-harness';
 
 export type ServeChannelSelection =
   | { mode: 'all' }
@@ -57,6 +58,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Deployment boundary for provider selection and exposed surfaces. */
+  profile?: ServeProfile;
   /**
    * Bearer token required on every request. Optional when bound to loopback
    * (developer convenience). On a non-loopback bind with neither this option
@@ -337,6 +340,10 @@ export interface ServeOptions {
   experimentalManagedRuntimeUrl?: string;
   /** Bearer credential used only for the remote Runtime worker. */
   experimentalManagedRuntimeToken?: string;
+  /** Java Runtime Broker origin used only by the Hosted Harness profile. */
+  managedRuntimeBrokerUrl?: string;
+  /** Service credential used only for Harness-to-Broker calls. */
+  managedRuntimeBrokerToken?: string;
   /**
    * Per-SSE-connection idle deadline.
    */

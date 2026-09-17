@@ -47,6 +47,7 @@ import { createManagedToolSessionFactory } from './managed-tool-session.js';
 
 const HOST_PRIVATE_ENV_KEYS = new Set([
   'QWEN_SERVER_TOKEN',
+  'QWEN_RUNTIME_BROKER_TOKEN',
   'QWEN_CODE_SIMPLE',
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_ACP_CAPABILITY_ENV,

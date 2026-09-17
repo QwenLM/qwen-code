@@ -50,7 +50,7 @@ describe('daemon execution engines', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  function engines(workspaceTrusted = true) {
+  function engines(workspaceTrusted = true, requireManagedForOrdinary = false) {
     return createDaemonExecutionEngines({
       workspaceCwd: workspace,
       sessionRuntimeBaseDir: runtimeBaseDir,
@@ -59,6 +59,7 @@ describe('daemon execution engines', () => {
       generationGuard: guard,
       argv: daemonManagedHostArgv({}),
       workspaceId: 'workspace-hash',
+      requireManagedForOrdinary,
       legacyFactory: createSpawnChannelFactory(),
       resolveToolRuntimeProvider: () => undefined,
     });
@@ -221,6 +222,20 @@ describe('daemon execution engines', () => {
     await rm(path.join(workspace, '.mcp.json'));
     mkdirSync(path.join(home, 'extensions', 'demo'), { recursive: true });
     await expect(pair.select(spawn())).resolves.toBe('legacy');
+  });
+
+  it('fails an incompatible ordinary spawn instead of falling back in Hosted Harness mode', async () => {
+    writeFileSync(
+      path.join(home, 'settings.json'),
+      JSON.stringify({ mcpServers: { demo: { command: 'echo' } } }),
+    );
+
+    await expect(engines(true, true).select(spawn())).rejects.toThrow(
+      /Hosted Harness requires the managed execution engine/,
+    );
+    await expect(
+      engines(true, true).select(spawn({ sourceType: 'channel' })),
+    ).resolves.toBe('legacy');
   });
 
   it('keeps untrusted workspaces on legacy', async () => {

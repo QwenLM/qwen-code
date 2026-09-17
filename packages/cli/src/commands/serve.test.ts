@@ -126,6 +126,19 @@ describe('serve command args', () => {
     expect(parsed['experimental-managed-runtime-token']).toBe('runtime-secret');
   });
 
+  it('parses the Hosted Harness profile and Runtime Broker options', () => {
+    const parsed = buildParser()
+      .strict()
+      .parseSync(
+        '--profile hosted-harness ' +
+          '--managed-runtime-broker-url http://127.0.0.1:8080 ' +
+          '--managed-runtime-broker-token broker-secret',
+      );
+    expect(parsed['profile']).toBe('hosted-harness');
+    expect(parsed['managed-runtime-broker-url']).toBe('http://127.0.0.1:8080');
+    expect(parsed['managed-runtime-broker-token']).toBe('broker-secret');
+  });
+
   it('parses --permission-response-timeout-ms as a number', () => {
     const parsed = buildParser().parseSync(
       '--permission-response-timeout-ms 60000',
@@ -820,6 +833,27 @@ describe('serve rate limit env parsing', () => {
         experimentalManagedRuntimeWorker: true,
         experimentalManagedRuntimeUrl: 'http://127.0.0.1:4181',
         experimentalManagedRuntimeToken: 'runtime-secret',
+      }),
+    );
+  });
+
+  it('passes the Hosted Harness profile and Runtime Broker options to runQwenServe', async () => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--no-web --profile hosted-harness ' +
+        '--managed-runtime-broker-url http://127.0.0.1:8080 ' +
+        '--managed-runtime-broker-token broker-secret',
+    );
+
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profile: 'hosted-harness',
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
       }),
     );
   });

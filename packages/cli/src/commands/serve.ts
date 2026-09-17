@@ -196,6 +196,7 @@ export async function maybeOpenWebShellBrowser(
 interface ServeArgs {
   port: number;
   hostname: string;
+  profile: 'default' | 'hosted-harness';
   token?: string;
   'max-sessions': number;
   'max-total-sessions'?: number;
@@ -233,6 +234,8 @@ interface ServeArgs {
   'experimental-managed-runtime-auto-local': boolean;
   'experimental-managed-runtime-url'?: string;
   'experimental-managed-runtime-token'?: string;
+  'managed-runtime-broker-url'?: string;
+  'managed-runtime-broker-token'?: string;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
   'initialize-timeout-ms'?: number;
@@ -277,6 +280,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         default: DEFAULT_SERVE_HOSTNAME,
         description:
           'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates, and still refuses when no token source resolved; an empty value is rejected as operator error.',
+      })
+      .option('profile', {
+        choices: ['default', 'hosted-harness'] as const,
+        default: 'default' as const,
+        description:
+          'Deployment profile. hosted-harness runs the resident model loop and delegates every Managed Tool operation through a Java Runtime Broker.',
       })
       .option('token', {
         type: 'string',
@@ -613,6 +622,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Bearer token for the separate Managed Runtime worker. Falls back to QWEN_MANAGED_RUNTIME_TOKEN, then the daemon token.',
       })
+      .option('managed-runtime-broker-url', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Java Runtime Broker HTTP(S) origin for --profile hosted-harness. Falls back to QWEN_RUNTIME_BROKER_URL.',
+      })
+      .option('managed-runtime-broker-token', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Harness-to-Broker bearer credential. Falls back to QWEN_RUNTIME_BROKER_TOKEN.',
+      })
       .option('writer-idle-timeout-ms', {
         type: 'number',
         description:
@@ -898,6 +919,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         runtimeBaseEnvironment,
         port: argv.port,
         hostname: argv.hostname,
+        profile: argv.profile,
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
@@ -958,6 +980,16 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? {
               experimentalManagedRuntimeToken:
                 argv['experimental-managed-runtime-token'],
+            }
+          : {}),
+        ...(argv['managed-runtime-broker-url'] !== undefined
+          ? {
+              managedRuntimeBrokerUrl: argv['managed-runtime-broker-url'],
+            }
+          : {}),
+        ...(argv['managed-runtime-broker-token'] !== undefined
+          ? {
+              managedRuntimeBrokerToken: argv['managed-runtime-broker-token'],
             }
           : {}),
         ...(argv['writer-idle-timeout-ms'] !== undefined

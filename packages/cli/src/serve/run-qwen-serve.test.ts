@@ -7533,6 +7533,171 @@ describe('runQwenServe pre-listen bridge option validation', () => {
   );
 
   it.each([
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: undefined,
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /requires a Harness bearer token/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: true,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /requires --no-web/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /requires --managed-runtime-broker-url/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+      },
+      /requires --managed-runtime-broker-token/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        experimentalManagedRuntimeAutoLocal: true,
+      },
+      /conflicts with the experimental Managed Gateway/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        clientMcpOverWs: true,
+      },
+      /conflicts with client MCP, CDP tunnel, and channel hosting/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://broker.example.com',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      /must use HTTPS/,
+    ],
+  ])(
+    'rejects invalid Hosted Harness configuration %# before listening',
+    async (overrides, message) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-opt-')),
+      );
+      vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
+      vi.stubEnv('QWEN_RUNTIME_BROKER_URL', undefined);
+      vi.stubEnv('QWEN_RUNTIME_BROKER_TOKEN', undefined);
+      try {
+        await expect(
+          runQwenServe({
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            ...overrides,
+          }),
+        ).rejects.toThrow(message);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it('rejects a non-loopback Hosted Harness bind before listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-bind-')),
+    );
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '0.0.0.0',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        profile: 'hosted-harness',
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'https://broker.example.com',
+        managedRuntimeBrokerToken: 'broker-secret',
+      }),
+    ).rejects.toThrow(/requires a loopback --hostname/);
+  });
+
+  it('rejects an injected Runtime provider that could bypass the Hosted Harness Broker', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-deps-')),
+    );
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          profile: 'hosted-harness',
+          token: 'harness-secret',
+          serveWebShell: false,
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          managedRuntimeProvider: {
+            prepare: vi.fn(),
+            cancel: vi.fn(),
+            release: vi.fn(),
+            dispose: vi.fn(),
+          },
+        },
+      ),
+    ).rejects.toThrow(/does not accept injected bridge or Runtime ownership/);
+  });
+
+  it('does not activate Broker environment configuration outside the Hosted Harness profile', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-broker-env-profile-')),
+    );
+    vi.stubEnv('QWEN_RUNTIME_BROKER_URL', 'http://127.0.0.1:8080');
+    vi.stubEnv('QWEN_RUNTIME_BROKER_TOKEN', 'broker-secret');
+    try {
+      await expect(
+        runQwenServe({
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        }),
+      ).rejects.toThrow(/require --profile hosted-harness/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
     ['rateLimitPrompt', 0, /rateLimitPrompt/],
     ['rateLimitMutation', -1, /rateLimitMutation/],
     ['rateLimitRead', 1.5, /rateLimitRead/],
@@ -19491,6 +19656,43 @@ describe('runQwenServe startup observability', () => {
     try {
       await handle.runtimeReady;
       expect(bridge.preheat).not.toHaveBeenCalled();
+      expect((await readStartup(handle))?.preheat).toMatchObject({
+        status: 'not_scheduled',
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('boots Hosted Harness without contacting or preheating a local Runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-preheat-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+    const brokerFetch = vi.spyOn(globalThis, 'fetch');
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        token: 'harness-secret',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        profile: 'hosted-harness',
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+        managedRuntimeBrokerToken: 'broker-secret',
+      },
+      {
+        preheatBridge: true,
+        bootSettings: { serve: { channels: ['hosted-must-ignore'] } },
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridge.preheat).not.toHaveBeenCalled();
+      expect(brokerFetch).not.toHaveBeenCalled();
       expect((await readStartup(handle))?.preheat).toMatchObject({
         status: 'not_scheduled',
       });

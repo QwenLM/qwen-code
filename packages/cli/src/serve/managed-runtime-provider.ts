@@ -57,9 +57,14 @@ export interface ManagedRuntimeReleaseOptions {
   terminal?: boolean;
 }
 
+export interface ManagedRuntimeToolClientContext {
+  readonly harnessSessionId: string;
+}
+
 export interface ManagedRuntimeProvider {
   getToolV2Client?(
     request: ManagedRuntimePrepareRequest,
+    context?: ManagedRuntimeToolClientContext,
   ): Promise<ManagedToolV2Client>;
   prepare(request: ManagedRuntimePrepareRequest): ManagedRuntimeHandle;
   cancel(

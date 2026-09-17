@@ -166,6 +166,10 @@ describe('managed tool Session binding', () => {
   it('captures each actual scope and refuses active RPCs after its context changes while cleanup remains available', async () => {
     const { session, config } = create();
     const remote = await session.getClient();
+    expect(getClient).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: session.sessionId }),
+      { harnessSessionId: config.getSessionId() },
+    );
     const binding = bindings.get(session.sessionId)!;
     expect(binding.executionContext).toEqual({
       workspaceDirectories: [cwd],
@@ -229,8 +233,10 @@ describe('managed tool Session binding', () => {
   });
 
   it('coalesces acquisition and keeps independently owned execution identities', async () => {
-    const first = create().session;
-    const second = create().session;
+    const firstCreated = create();
+    const secondCreated = create();
+    const first = firstCreated.session;
+    const second = secondCreated.session;
     expect(first.sessionId).not.toBe(second.sessionId);
     const [a, b] = await Promise.all([first.getClient(), first.getClient()]);
     expect(a).toBe(b);
@@ -244,6 +250,7 @@ describe('managed tool Session binding', () => {
         workspaceCwd: cwd,
         sessionId: first.sessionId,
       }),
+      { harnessSessionId: firstCreated.config.getSessionId() },
     );
     await first.close();
     expect(release).toHaveBeenCalledWith(

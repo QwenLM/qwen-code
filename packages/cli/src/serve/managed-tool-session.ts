@@ -161,7 +161,9 @@ export function createManagedToolSessionFactory(options: {
           if (!isRoot) await root.raw();
           assertOpen();
           dispatched = true;
-          const acquired = await acquire(request);
+          const acquired = await acquire(request, {
+            harnessSessionId: rootConfig.getSessionId(),
+          });
           assertOpen();
           if (!acquired.fileHistory)
             throw new Error(

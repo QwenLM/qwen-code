@@ -53,6 +53,7 @@ export interface DaemonExecutionEngineOptions {
   argv: CliArgs;
   workspaceId: string;
   tenantId?: string;
+  requireManagedForOrdinary?: boolean;
   legacyFactory: ChannelFactory;
   resolveToolRuntimeProvider: () => ManagedRuntimeProvider | undefined;
   shellConfiguration?: ShellConfiguration;
@@ -121,6 +122,7 @@ export function createDaemonExecutionEngines(
       workspaceCwd,
       runtimeEnvironment,
       workspaceTrusted,
+      requireManagedForOrdinary: options.requireManagedForOrdinary === true,
     });
   };
   return Object.freeze({
@@ -172,18 +174,28 @@ function selectSpawnEngine(
     workspaceCwd: string;
     runtimeEnvironment: Readonly<NodeJS.ProcessEnv>;
     workspaceTrusted: boolean;
+    requireManagedForOrdinary: boolean;
   },
 ): SessionExecutionEngine {
-  if (context.daemonOwnedStandalone) return 'legacy';
   const request = context.request;
-  if (request.parentSessionId) return 'legacy';
-  if (request.worktree || request.branch) return 'legacy';
-  if (!isOrdinarySpawnSource(request)) return 'legacy';
-  if (path.resolve(request.workspaceCwd) !== path.resolve(input.workspaceCwd)) {
-    return 'legacy';
+  const ordinary = isOrdinarySpawnSource(request);
+  const managedCompatible =
+    !context.daemonOwnedStandalone &&
+    !request.parentSessionId &&
+    !request.worktree &&
+    !request.branch &&
+    ordinary &&
+    path.resolve(request.workspaceCwd) === path.resolve(input.workspaceCwd) &&
+    input.workspaceTrusted &&
+    isSpawnCompatible(input);
+  if (managedCompatible) return 'managed';
+  if (ordinary && input.requireManagedForOrdinary) {
+    throw new SessionExecutionEngineError(
+      request.sessionId ?? 'new-session',
+      'Hosted Harness requires the managed execution engine',
+    );
   }
-  if (!input.workspaceTrusted) return 'legacy';
-  return isSpawnCompatible(input) ? 'managed' : 'legacy';
+  return 'legacy';
 }
 
 function isOrdinarySpawnSource(request: {

@@ -189,6 +189,8 @@ import {
   type ManagedRuntimeProvider,
   type ManagedRuntimeHandle,
 } from './managed-runtime-provider.js';
+import { BrokerManagedRuntimeProvider } from './broker-managed-runtime-provider.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import {
   MANAGED_RUNTIME_PROTOCOL_VERSION,
   type ManagedRuntimePrepareRequest,
@@ -485,6 +487,8 @@ const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
 const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MANAGED_RUNTIME_TOKEN_ENV = 'QWEN_MANAGED_RUNTIME_TOKEN';
+const MANAGED_RUNTIME_BROKER_URL_ENV = 'QWEN_RUNTIME_BROKER_URL';
+const MANAGED_RUNTIME_BROKER_TOKEN_ENV = 'QWEN_RUNTIME_BROKER_TOKEN';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 32;
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -3369,6 +3373,7 @@ async function runQwenServeImpl(
   let shouldPreheat =
     !deps.bridge &&
     shouldPreheatBridge(deps) &&
+    optsIn.profile !== 'hosted-harness' &&
     optsIn.experimentalManagedRuntimeUrl === undefined &&
     optsIn.experimentalManagedRuntimeAutoLocal !== true &&
     !deps.ownedManagedRuntime;
@@ -3402,6 +3407,14 @@ async function runQwenServeImpl(
     ...(optsIn.runtimeBaseEnvironment ?? process.env),
   };
   delete baseEnv[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+  const managedRuntimeBrokerUrl =
+    optsIn.managedRuntimeBrokerUrl?.trim() ||
+    process.env[MANAGED_RUNTIME_BROKER_URL_ENV]?.trim();
+  const managedRuntimeBrokerToken =
+    optsIn.managedRuntimeBrokerToken?.trim() ||
+    process.env[MANAGED_RUNTIME_BROKER_TOKEN_ENV]?.trim();
+  delete baseEnv[MANAGED_RUNTIME_BROKER_TOKEN_ENV];
+  delete process.env[MANAGED_RUNTIME_BROKER_TOKEN_ENV];
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
   const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
@@ -3487,6 +3500,12 @@ async function runQwenServeImpl(
         `process command line; prefer ${MANAGED_RUNTIME_TOKEN_ENV}.`,
     );
   }
+  if (optsIn.managedRuntimeBrokerToken !== undefined) {
+    writeStderrLine(
+      `qwen serve: --managed-runtime-broker-token is visible in the ` +
+        `process command line; prefer ${MANAGED_RUNTIME_BROKER_TOKEN_ENV}.`,
+    );
+  }
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackAddress(bindHostname),
     tokenConfigured: token !== undefined,
@@ -3544,6 +3563,8 @@ async function runQwenServeImpl(
     ),
     token,
     experimentalManagedRuntimeToken: managedRuntimeToken,
+    managedRuntimeBrokerUrl,
+    managedRuntimeBrokerToken,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -3756,6 +3777,31 @@ async function runQwenServeImpl(
       `Refusing to start with --require-auth set but no bearer token ` +
         `configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or omit ` +
         `--require-auth to keep the loopback developer default.`,
+    );
+  }
+  validateHostedHarnessProfile(opts, {
+    serverToken: QWEN_SERVER_TOKEN_ENV,
+    brokerUrl: MANAGED_RUNTIME_BROKER_URL_ENV,
+    brokerToken: MANAGED_RUNTIME_BROKER_TOKEN_ENV,
+  });
+  if (
+    opts.profile === 'hosted-harness' &&
+    (deps.bridge !== undefined ||
+      deps.managedRuntimeProvider !== undefined ||
+      deps.managedRuntimeWorkerProvider !== undefined ||
+      deps.ownedManagedRuntime !== undefined)
+  ) {
+    throw new Error(
+      'Hosted Harness does not accept injected bridge or Runtime ownership overrides.',
+    );
+  }
+  if (
+    opts.profile !== 'hosted-harness' &&
+    (managedRuntimeBrokerUrl !== undefined ||
+      managedRuntimeBrokerToken !== undefined)
+  ) {
+    throw new Error(
+      'Managed Runtime Broker options require --profile hosted-harness.',
     );
   }
   if (
@@ -4190,7 +4236,11 @@ async function runQwenServeImpl(
       `workspace serve.channels was not restored: ${detail} Continuing without channels`,
     );
   };
-  if (!opts.channelSelection && bootSettings?.serve?.channels !== undefined) {
+  if (
+    opts.profile !== 'hosted-harness' &&
+    !opts.channelSelection &&
+    bootSettings?.serve?.channels !== undefined
+  ) {
     try {
       const rawChannels = bootSettings.serve.channels;
       if (
@@ -5515,6 +5565,7 @@ async function runQwenServeImpl(
             ...params,
             argv: runtime.daemonManagedHostArgv(opts),
             legacyFactory,
+            requireManagedForOrdinary: opts.profile === 'hosted-harness',
             resolveToolRuntimeProvider: () =>
               managedToolRuntimeProviderRef.current,
           });
@@ -7106,9 +7157,13 @@ async function runQwenServeImpl(
     }
     if (!deps.bridge && !deps.ownedManagedRuntime) {
       if (!managedRuntimeProvider) {
-        managedRuntimeProvider = new LocalManagedRuntimeProvider(
-          workspaceRegistry,
-        );
+        managedRuntimeProvider =
+          opts.profile === 'hosted-harness'
+            ? new BrokerManagedRuntimeProvider({
+                baseUrl: opts.managedRuntimeBrokerUrl!,
+                token: opts.managedRuntimeBrokerToken!,
+              })
+            : new LocalManagedRuntimeProvider(workspaceRegistry);
         ownedManagedRuntimeProviders.add(managedRuntimeProvider);
       }
       managedToolRuntimeProviderRef.current = managedRuntimeProvider;

@@ -103,6 +103,8 @@ import {
   daemonManagedHostArgv,
 } from './daemon-execution-engines.js';
 import { LocalManagedRuntimeProvider } from './managed-runtime-provider.js';
+import { BrokerManagedRuntimeProvider } from './broker-managed-runtime-provider.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
@@ -832,6 +834,11 @@ export function createServeApp(
       'createServeApp: requireAuth requires a non-empty bearer token.',
     );
   }
+  validateHostedHarnessProfile(opts, {
+    serverToken: 'QWEN_SERVER_TOKEN',
+    brokerUrl: 'QWEN_RUNTIME_BROKER_URL',
+    brokerToken: 'QWEN_RUNTIME_BROKER_TOKEN',
+  });
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackBind(opts.hostname),
     tokenConfigured,
@@ -1205,9 +1212,9 @@ export function createServeApp(
     ? createWorkspaceGenerationGuard()
     : undefined;
   const managedToolRuntimeProviderRef: {
-    current: LocalManagedRuntimeProvider | undefined;
+    current: ManagedRuntimeProvider | undefined;
   } = { current: undefined };
-  let ownedEmbedManagedRuntimeProvider: LocalManagedRuntimeProvider | undefined;
+  let ownedEmbedManagedRuntimeProvider: ManagedRuntimeProvider | undefined;
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1249,6 +1256,7 @@ export function createServeApp(
           })(),
         argv: daemonManagedHostArgv(opts),
         workspaceId: hashDaemonWorkspace(boundWorkspace),
+        requireManagedForOrdinary: opts.profile === 'hosted-harness',
         legacyFactory: createSpawnChannelFactory({
           ...(acpChildArgs ? { extraArgs: acpChildArgs } : {}),
         }),
@@ -1436,9 +1444,13 @@ export function createServeApp(
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
   if (ownsDefaultBridge) {
-    ownedEmbedManagedRuntimeProvider = new LocalManagedRuntimeProvider(
-      workspaceRegistry,
-    );
+    ownedEmbedManagedRuntimeProvider =
+      opts.profile === 'hosted-harness'
+        ? new BrokerManagedRuntimeProvider({
+            baseUrl: opts.managedRuntimeBrokerUrl!,
+            token: opts.managedRuntimeBrokerToken!,
+          })
+        : new LocalManagedRuntimeProvider(workspaceRegistry);
     managedToolRuntimeProviderRef.current = ownedEmbedManagedRuntimeProvider;
   }
   const getSessionBridges =

@@ -282,6 +282,7 @@ describe('managed Agent channel', () => {
       DROP_KEY: 'old',
       [PRIVATE_ACP_CAPABILITY_ENV]: 'ambient-capability',
       QWEN_SERVER_TOKEN: 'daemon-token',
+      QWEN_RUNTIME_BROKER_TOKEN: 'broker-token',
       [EXTERNAL_TOOL_GUARD_TOKEN_ENV]: 'guard-token',
       QWEN_CODE_SIMPLE: '1',
     };
@@ -298,6 +299,7 @@ describe('managed Agent channel', () => {
       ...privateOverrides,
       DROP_KEY: undefined,
       QWEN_SERVER_TOKEN: 'cannot-reintroduce',
+      QWEN_RUNTIME_BROKER_TOKEN: 'cannot-reintroduce',
       [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
       [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]:
         EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
