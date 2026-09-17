@@ -1,5 +1,7 @@
 # Selective session restore
 
+> Note (2026-09-17): `prepareRestore` now takes the records alone, and activation no longer replays a pending checkpoint. The Goal runtime stopped checkpointing when the verifier began reading the transcript tail (#12053); the `goalCheckpointWindow` the reader prepares is unused and will be removed with it.
+
 - Status: Draft for review
 - Tracks: #8678
 - Prerequisite status on 2026-08-12: #8691, attachment-identity hardening in

@@ -15,6 +15,7 @@ import {
 import {
   createGoalVerifier,
   GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+  goalVerifierRequestByteLimit,
   GoalVerifierInputTooLargeError,
   measureGoalVerifierEnvelopeBytes,
   parseGoalVerifierText,
@@ -314,6 +315,55 @@ describe('createGoalVerifier', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('goalVerifierRequestByteLimit', () => {
+  const configWith = (model: string, fast?: string, windowSize?: number) =>
+    ({
+      getModel: () => model,
+      getFastModel: () => fast,
+      getContentGeneratorConfig: () =>
+        windowSize === undefined
+          ? undefined
+          : { contextWindowSize: windowSize },
+    }) as unknown as Config;
+
+  it('is the fixed ceiling for a model whose window holds it', () => {
+    expect(goalVerifierRequestByteLimit(configWith('gemini-2.5-pro'))).toBe(
+      GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+    );
+  });
+
+  it('shrinks to a byte per context token for a small-window model', () => {
+    // Half the window at two bytes per token: a 128K model gets 131 072.
+    expect(goalVerifierRequestByteLimit(configWith('gpt-4o-mini'))).toBe(
+      131_072,
+    );
+  });
+
+  it('prefers the window configured for the main model over its name', () => {
+    // A local deployment under an unknown name: the table would say 200K.
+    expect(
+      goalVerifierRequestByteLimit(
+        configWith('local-model', undefined, 32_768),
+      ),
+    ).toBe(32_768);
+    expect(goalVerifierRequestByteLimit(configWith('local-model'))).toBe(
+      200_000,
+    );
+    // The configured window describes the main model, not a fast model.
+    expect(
+      goalVerifierRequestByteLimit(
+        configWith('local-model', 'gpt-4o-mini', 32_768),
+      ),
+    ).toBe(131_072);
+  });
+
+  it('follows the side query model, which is the fast model when set', () => {
+    expect(
+      goalVerifierRequestByteLimit(configWith('gemini-2.5-pro', 'gpt-4o-mini')),
+    ).toBe(131_072);
   });
 });
 

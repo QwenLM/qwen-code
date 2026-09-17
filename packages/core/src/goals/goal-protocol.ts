@@ -692,8 +692,46 @@ export function goalPauseReasonForVerifierFailure(message: string): string {
   const detail = message.trim();
   return truncateGoalPauseReason(
     detail
-      ? `The Goal proposal could not be verified: ${detail}. Resume the Goal to propose again.`
-      : 'The Goal proposal could not be verified. Resume the Goal to propose again.',
+      ? `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}: ${detail}. Resume the Goal to propose again.`
+      : `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}. Resume the Goal to propose again.`,
+  );
+}
+
+/**
+ * The pause reason for a proposal whose transcript could not be anchored:
+ * the cursor is gone from the active chain (a rewind past the Goal), a turn
+ * re-enters the lineage, a record uuid repeats. Resuming such a Goal with
+ * the same cursor would fail the same way on every proposal, so the pause
+ * moves the cursor to its own record and says so: the work that follows is
+ * what the verifier will see.
+ */
+export function goalPauseReasonForUnreadableTranscript(
+  message: string,
+): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}: ${detail}. Evidence now starts from this point; resume the Goal to propose again from the work that follows.`
+      : `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}. Evidence now starts from this point; resume the Goal to propose again from the work that follows.`,
+  );
+}
+
+const GOAL_VERIFIER_FAILURE_PAUSE_PREFIX =
+  'The Goal proposal could not be verified';
+
+/**
+ * Whether a paused Goal stopped because its proposal could not be judged,
+ * as opposed to the user or the no-progress bound stopping it. Read off
+ * the persisted reason so a restart cannot lose it: a resume after this
+ * pause keeps the repeated-blocker audit the proposal had already earned,
+ * because nothing intervened between the audited turns and the retry.
+ */
+export function isGoalVerifierFailurePause(
+  goal: Pick<GoalRecord, 'status' | 'lastReason'> | null | undefined,
+): boolean {
+  return (
+    goal?.status === 'paused' &&
+    (goal.lastReason?.startsWith(GOAL_VERIFIER_FAILURE_PAUSE_PREFIX) ?? false)
   );
 }
 

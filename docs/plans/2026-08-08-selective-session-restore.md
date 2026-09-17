@@ -1,5 +1,7 @@
 # Selective session restore implementation plan
 
+> Note (2026-09-17): `prepareRestore` now takes the records alone; see the matching note in the design document.
+
 - Status: Proposed; as of 2026-08-12, #8691, #8833, #8882, and exact-shape
   restore coalescing in #8933 are merged; selective implementation starts from
   fresh `main` containing #8933 merge commit `962dc8e`

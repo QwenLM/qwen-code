@@ -1,5 +1,7 @@
 # Stopping a Goal that has stopped getting anywhere
 
+> Note (2026-09-17): the checkpoint stall streak this document refers to no longer exists. The Goal runtime stopped checkpointing when the verifier began reading the transcript tail (#12053); the no-progress bound yields only to a spent budget now.
+
 ## Problem
 
 An autonomous Goal has two bounds, and neither one notices a Goal that is

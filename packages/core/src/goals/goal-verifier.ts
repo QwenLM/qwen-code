@@ -7,6 +7,7 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
 
@@ -17,6 +18,14 @@ import type { GoalTerminalProposal } from './goal-protocol.js';
  */
 const GOAL_VERIFIER_TIMEOUT_MS = 120_000;
 export const GOAL_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
+/**
+ * Request bytes per token of the verifier model's context window: half the
+ * window, at a conservative two bytes per token. A transcript is JSON with
+ * escapes, prose and CJK text, and no tokenizer this runs against packs
+ * fewer than two bytes into a token, so the half-window bound holds for a
+ * 32K local model as well as a 1M one.
+ */
+const GOAL_VERIFIER_BYTES_PER_CONTEXT_TOKEN = 1;
 const MAX_VERIFIER_REASON_LENGTH = 2_000;
 
 const GOAL_VERIFIER_SCHEMA = {
@@ -84,6 +93,34 @@ export type GoalVerifier = (
 
 export interface CreateGoalVerifierOptions {
   timeoutMs?: number;
+}
+
+/**
+ * The request bytes one verification may send to this configuration's side
+ * query model: the fixed ceiling, or less when the model's context window
+ * cannot hold it. Resolved the way `runSideQuery` resolves its model.
+ */
+export function goalVerifierRequestByteLimit(
+  config: Pick<
+    Config,
+    'getModel' | 'getFastModel' | 'getContentGeneratorConfig'
+  >,
+): number {
+  const fastModel = config.getFastModel?.();
+  // A fast model is known only by name. The main model may carry a window
+  // the user configured for a local or OpenAI-compatible deployment, and
+  // that figure beats the name table when it is the model the query uses.
+  const configuredWindow =
+    config.getContentGeneratorConfig?.()?.contextWindowSize;
+  const contextTokens = fastModel
+    ? tokenLimit(fastModel)
+    : typeof configuredWindow === 'number' && configuredWindow > 0
+      ? configuredWindow
+      : tokenLimit(config.getModel());
+  return Math.min(
+    GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+    Math.floor(contextTokens * GOAL_VERIFIER_BYTES_PER_CONTEXT_TOKEN),
+  );
 }
 
 export class GoalVerifierInputTooLargeError extends Error {

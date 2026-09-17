@@ -54,6 +54,9 @@ export interface UpdateGoalToolParams {
   status: 'complete' | 'blocked';
   reason: string;
   blockerKind?: GoalBlockerKind;
+  /** Accepted and ignored: older transcripts carry it, and a model that
+   * reads them will send it again. Nothing reads it. */
+  evidenceRefs?: string[];
 }
 
 export type GoalToolResult = ToolResult;
@@ -307,6 +310,12 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             type: 'string',
             minLength: 1,
             maxLength: GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
+          },
+          evidenceRefs: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Ignored. Earlier versions asked for catalog references here; the verifier now reads the transcript itself, so leave this out.',
           },
           blockerKind: {
             type: 'string',

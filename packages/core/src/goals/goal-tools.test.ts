@@ -382,18 +382,22 @@ describe('GetGoalTool', () => {
 });
 
 describe('UpdateGoalTool', () => {
-  it('exposes the transcript-tail contract and no evidence parameter', () => {
+  it('exposes the transcript-tail contract and ignores evidence references', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
     const schema = tool.schema.parametersJsonSchema as {
       properties: Record<string, { maxLength?: number; description?: string }>;
       required: string[];
     };
 
+    // `evidenceRefs` stays in the schema so a model that read an older
+    // transcript and sends it again is not refused; it is ignored.
     expect(Object.keys(schema.properties)).toEqual([
       'status',
       'reason',
+      'evidenceRefs',
       'blockerKind',
     ]);
+    expect(schema.properties['evidenceRefs']!.description).toContain('Ignored');
     expect(schema.required).toEqual(['status', 'reason']);
     expect(tool.description).not.toContain('evidenceRefs');
     expect(tool.description).not.toContain('catalog');
@@ -445,6 +449,8 @@ describe('UpdateGoalTool', () => {
       tool.build({
         status: 'complete',
         reason: 'Focused tests passed',
+        // Sent by a model imitating an older transcript; accepted, ignored.
+        evidenceRefs: ['stale-catalog-uuid'],
       }),
     );
 

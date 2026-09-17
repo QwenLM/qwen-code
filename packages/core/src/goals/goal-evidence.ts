@@ -708,8 +708,9 @@ function anchorGoalTranscript(
 
 /**
  * What one transcript record may add to a verifier request. Content past
- * this is cut in the middle, so both the command a tool result opens with and
- * the result it ends with survive; the verifier is told where the cut was.
+ * this is cut in the middle, so the head and the tail both survive -- a
+ * tool result's opening and its final lines -- and the verifier is told
+ * where the cut was.
  */
 const VERIFIER_RECORD_CONTENT_BYTE_LIMIT = 8_000;
 const VERIFIER_RECORD_HEAD_BYTES = 5_000;
@@ -729,7 +730,12 @@ export interface GoalVerifierWindow {
   evidence: GoalVerifierEvidenceRecord[];
   /** The Goal turns the tail reaches, oldest first. */
   turnIds: string[];
-  /** Records after the cursor, older than the tail, that did not fit. */
+  /**
+   * Records after the cursor, older than the tail, that did not fit. A Goal
+   * restored from before the window existed also counts here the claims its
+   * last checkpoint folded earlier records into: they are not sent, and
+   * the verifier must know that earlier evidence exists but is out of reach.
+   */
   omitted: number;
 }
 
@@ -764,7 +770,7 @@ export function buildGoalVerifierWindow(
   const evidence: GoalVerifierEvidenceRecord[] = [];
   const turnIds = new Set<string>();
   let bytes = 0;
-  let omitted = 0;
+  let omitted = input.goal.evidenceCheckpoint?.claims.length ?? 0;
   let full = false;
   for (let index = input.records.length - 1; index > cursorIndex; index -= 1) {
     const entry = verifierEvidence(input.records[index]!, input);
@@ -809,7 +815,7 @@ function verifierEvidence(
   ) {
     return undefined;
   }
-  const content = evidenceContent(record, provenance);
+  const content = verifierContent(record, provenance);
   if (!content) return undefined;
   return {
     uuid: record.uuid,
@@ -818,6 +824,48 @@ function verifierEvidence(
     proofKind: proofKindOf(provenance),
     content: cutMiddleBytes(content, VERIFIER_RECORD_CONTENT_BYTE_LIMIT),
   };
+}
+
+/**
+ * A record's content as the verifier reads it. Unlike the catalog's
+ * `evidenceContent`, an assistant record keeps the tool calls it made, with
+ * their arguments: a tool result carries only the response, so without the
+ * call the verifier cannot tell which file was read or which command ran.
+ */
+function verifierContent(
+  record: GoalEvidenceRecord,
+  provenance: GoalEvidenceProvenance,
+): string {
+  if (provenance === 'real_user') return evidenceContent(record, provenance);
+  const content: string[] = [];
+  for (const part of record.message?.parts ?? []) {
+    if (part.thought !== true && typeof part.text === 'string') {
+      content.push(part.text);
+    }
+    if (provenance === 'assistant_output' && part.functionCall) {
+      const rendered = renderToolCall(part.functionCall);
+      if (rendered) content.push(rendered);
+    }
+    if (provenance === 'tool_result' && part.functionResponse) {
+      const rendered = renderToolResponse(part.functionResponse);
+      if (rendered) content.push(rendered);
+    }
+  }
+  return content.join('\n').trim();
+}
+
+function renderToolCall(functionCall: {
+  name?: string;
+  args?: unknown;
+}): string {
+  try {
+    return JSON.stringify({
+      call: functionCall.name ?? '',
+      ...(functionCall.args === undefined ? {} : { args: functionCall.args }),
+    });
+  } catch {
+    return '';
+  }
 }
 
 /**

@@ -1006,7 +1006,7 @@ describe('goal runtime', () => {
       expect.objectContaining({
         proposal: expect.objectContaining({ blockerKind: 'infeasible' }),
         blockedPolicy: expect.stringContaining(
-          'An infeasible blocker may also be accepted immediately',
+          'infeasible: accept only when external_fact evidence shows',
         ),
       }),
       expect.any(AbortSignal),
@@ -1171,8 +1171,12 @@ describe('goal runtime', () => {
           lastReason: expect.stringContaining(failure.message),
         },
       });
+      // An anchor failure (the cursor case) also moves the cursor and says
+      // so; every other failure keeps it.
       expect(runtime.getSnapshot().goal?.lastReason).toMatch(
-        /^The Goal proposal could not be verified: .* Resume the Goal to propose again\.$/,
+        failurePoint === 'cursor'
+          ? /^The Goal proposal could not be verified: .* Evidence now starts from this point; resume the Goal to propose again from the work that follows\.$/
+          : /^The Goal proposal could not be verified: .* Resume the Goal to propose again\.$/,
       );
       expect(runtime.getSnapshot().goal).not.toHaveProperty('limitKind');
       expect(journal.appended.at(-1)?.cause).toBe('pause');
@@ -1282,11 +1286,371 @@ describe('goal runtime', () => {
         expectedRevision: permit.revision,
       });
 
-      expect(runtime.permitForTurn('real-user')).toBeDefined();
-      expect(host.started).toHaveLength(1);
+      if (terminalStatus === 'blocked') {
+        expect(runtime.permitForTurn('real-user')).toBeDefined();
+        expect(host.started).toHaveLength(1);
+      } else {
+        // A pause the verifier's failure caused drops the reservation, as
+        // a user pause does: the reserved prompt ran as an ordinary turn
+        // while the Goal was paused, and a permit for its key now would
+        // hold the continuation until that turn ends.
+        expect(runtime.permitForTurn('real-user')).toBeUndefined();
+        expect(host.started).toHaveLength(2);
+      }
       expect(runtime.getSnapshot().activity).toBe('running');
     },
   );
+
+  it('restores a snapshot from before the window and drops its checkpoint health', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'reject' as const,
+      reason: 'The earlier checks are out of reach',
+    }));
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-old',
+          revision: 1,
+          objective: 'deliver result',
+          status: 'active',
+          evidenceCursor: { recordId: 'checkpoint-record' },
+          turnCount: 3,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          evidenceCheckpoint: {
+            checkpointId: 'checkpoint-record',
+            createdAt: 2,
+            claims: [
+              {
+                id: 'checkpoint-record:1',
+                proofKind: 'external_fact',
+                claim: 'The suite passed once',
+                sourceRefs: ['old-1'],
+              },
+              {
+                id: 'checkpoint-record:2',
+                proofKind: 'delivered_output',
+                claim: 'A summary was printed',
+                sourceRefs: ['old-2'],
+              },
+            ],
+          },
+          checkpointStalls: 2,
+          lastCheckpointFailure:
+            'InvalidGoalCheckpointError: Goal checkpoint verifier returned invalid claims',
+        },
+      },
+      // The crash-point state an earlier version wrote: a finished turn
+      // with the checkpoint it was about to run.
+      'turn_finished',
+    );
+    (record.systemPayload as GoalStateRecordPayloadV2).checkpointPending = {
+      permit: { goalId: 'g-old', revision: 1, turnId: 'turn-old' },
+      recordUuid: 'pending-checkpoint-record',
+    };
+
+    await runtime.restore([record]);
+
+    // The record parses whole; the pending checkpoint is not replayed and
+    // the stale health is gone, so no surface shows a streak nothing can
+    // relieve. The checkpoint stays, as the count of evidence out of reach.
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: {
+        status: 'active',
+        evidenceCheckpoint: { checkpointId: 'checkpoint-record' },
+      },
+    });
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+    expect(runtime.getSnapshot().goal).not.toHaveProperty(
+      'lastCheckpointFailure',
+    );
+    expect(host.started).toHaveLength(1);
+
+    const permit = host.started[0]!;
+    records = verifierEvidenceRecords(permit, 'checkpoint-record');
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+    await runtime.finishTurn(permit);
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        evidence: [expect.objectContaining({ uuid: 'assistant-evidence' })],
+        omitted: 2,
+      }),
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('restores a record an earlier version wrote with the checkpoint cause', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-checkpointed',
+          revision: 1,
+          objective: 'deliver result',
+          status: 'active',
+          evidenceCursor: { recordId: 'checkpoint-record' },
+          turnCount: 3,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          evidenceCheckpoint: {
+            checkpointId: 'checkpoint-record',
+            createdAt: 2,
+            claims: [
+              {
+                id: 'checkpoint-record:1',
+                proofKind: 'external_fact',
+                claim: 'The suite passed once',
+                sourceRefs: ['old-1'],
+              },
+            ],
+          },
+        },
+      },
+      'checkpoint',
+    );
+
+    await runtime.restore([record]);
+
+    expect(runtime.getRecoveryCause?.()).toBe('checkpoint');
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('restores a Goal an earlier version stopped for its catalog, and resume re-arms it', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-limited',
+          revision: 1,
+          objective: 'deliver result',
+          status: 'usage_limited',
+          limitKind: 'evidence_catalog',
+          lastReason: 'The evidence catalog overflowed.',
+          evidenceCursor: { recordId: 'old-cursor' },
+          turnCount: 3,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 3,
+          lastCheckpointFailure: 'batch 3/3: invalid JSON',
+        },
+      },
+      'usage_limited',
+    );
+
+    await runtime.restore([record]);
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'evidence_catalog',
+    });
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: 'g-limited',
+      expectedRevision: 1,
+    });
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('moves the cursor when the transcript cannot be anchored, so a resumed proposal can be judged', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The resumed turn shows the result',
+    }));
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const first = host.started[0]!;
+    // A rewind past the Goal: the cursor record is no longer in the chain.
+    records = verifierEvidenceRecords(
+      first,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    ).slice(1);
+    runtime.recordTerminalProposal(first, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(first);
+
+    expect(verifier).not.toHaveBeenCalled();
+    const pauseRecord = journal.records.at(-1)!;
+    expect(journal.appended.at(-1)?.cause).toBe('pause');
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      evidenceCursor: { recordId: pauseRecord.uuid },
+      lastReason: expect.stringContaining(
+        'Evidence now starts from this point',
+      ),
+    });
+
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: first.goalId,
+      expectedRevision: first.revision,
+    });
+    const second = host.started[1]!;
+    records = [
+      pauseRecord,
+      {
+        ...verifierEvidenceRecords(second, pauseRecord.uuid)[1]!,
+        uuid: 'resumed-output',
+        parentUuid: pauseRecord.uuid,
+      },
+    ];
+    runtime.recordTerminalProposal(second, {
+      status: 'complete',
+      reason: 'Delivered after the rewind',
+    });
+    await runtime.finishTurn(second);
+
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        evidence: [expect.objectContaining({ uuid: 'resumed-output' })],
+        omitted: 0,
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(runtime.getSnapshot().goal?.status).toBe('complete');
+  });
+
+  it('keeps the repeated-blocker audit across a pause the verifier caused', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: RuntimeRecord[] = [];
+    let verifierCalls = 0;
+    const verifier: GoalVerifier = vi.fn(async () => {
+      verifierCalls += 1;
+      if (verifierCalls === 1) throw new Error('provider unavailable');
+      return { decision: 'accept' as const, reason: 'The blocker is real' };
+    });
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deploy' });
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [verifierEvidenceRecords(host.started[0]!, cursorId)[0]!];
+    const proposeBlocked = (permit: GoalTurnPermit) => {
+      records = [
+        ...records,
+        {
+          ...verifierEvidenceRecords(permit, cursorId)[1]!,
+          uuid: `attempt-${permit.turnId}`,
+          parentUuid: records.at(-1)!.uuid,
+        },
+      ];
+      return runtime.recordTerminalProposal(permit, {
+        status: 'blocked',
+        reason: 'The registry rejects every push',
+      });
+    };
+
+    for (const index of [0, 1, 2]) {
+      const receipt = proposeBlocked(host.started[index]!);
+      expect(receipt.readyForVerification).toBe(index === 2);
+      await runtime.finishTurn(host.started[index]!);
+    }
+    expect(runtime.getSnapshot().goal?.status).toBe('paused');
+    expect(host.started).toHaveLength(3);
+
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: host.started[0]!.goalId,
+      expectedRevision: host.started[0]!.revision,
+    });
+    // The three audited turns stand: the resumed turn asks the verifier at
+    // once instead of earning three more.
+    const receipt = proposeBlocked(host.started[3]!);
+    expect(receipt).toEqual({ recorded: true, readyForVerification: true });
+    await runtime.finishTurn(host.started[3]!);
+
+    expect(verifier).toHaveBeenCalledTimes(2);
+    expect(runtime.getSnapshot().goal?.status).toBe('blocked');
+  });
+
+  it('bounds the window by the configured request byte limit', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'reject' as const,
+      reason: 'not yet',
+    }));
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+      verifierRequestByteLimit: 2_500,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    const base = verifierEvidenceRecords(permit, cursorId);
+    records = [
+      base[0]!,
+      ...Array.from({ length: 12 }, (_, index) => ({
+        ...base[1]!,
+        uuid: `output-${index}`,
+        message: { role: 'model', parts: [{ text: 'x'.repeat(400) }] },
+      })),
+    ];
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    const input = vi.mocked(verifier).mock.calls[0]![0];
+    expect(input.evidence.length).toBeGreaterThan(0);
+    expect(input.evidence.length).toBeLessThan(12);
+    expect(input.omitted).toBe(12 - input.evidence.length);
+    expect(input.evidence[0]).toMatchObject({ uuid: 'output-11' });
+  });
 
   it('releases a queued user reservation before it is promoted', async () => {
     const host = fakeGoalTurnHost();

@@ -1356,6 +1356,57 @@ describe('buildGoalVerifierWindow', () => {
     expect(window.omitted).toBe(1);
   });
 
+  it('keeps the tool calls an assistant record made, with their arguments', () => {
+    const call: GoalEvidenceRecord = {
+      ...record('call', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+      }),
+      message: {
+        parts: [
+          { text: 'Checking the file.' },
+          { functionCall: { name: 'read_file', args: { path: 'src/a.ts' } } },
+        ],
+      },
+    };
+    const window = buildGoalVerifierWindow(
+      {
+        records: [record('cursor', 'system'), call],
+        goal: goal(),
+        permit: permit(),
+      },
+      { budgetBytes: 10_000 },
+    );
+
+    expect(window.evidence[0]!.content).toBe(
+      'Checking the file.\n{"call":"read_file","args":{"path":"src/a.ts"}}',
+    );
+  });
+
+  it('counts the claims of a checkpoint from before the window as omitted', () => {
+    const legacy = {
+      ...goal(),
+      evidenceCheckpoint: {
+        checkpointId: 'cursor',
+        createdAt: 1,
+        claims: [
+          {
+            id: 'cursor:1',
+            proofKind: 'external_fact' as const,
+            claim: 'The suite passed once',
+            sourceRefs: ['old'],
+          },
+        ],
+      },
+    };
+    const window = buildGoalVerifierWindow(
+      { records: chain(), goal: legacy, permit: permit() },
+      { budgetBytes: 100_000 },
+    );
+    expect(window.evidence).toHaveLength(4);
+    expect(window.omitted).toBe(1);
+  });
+
   it('cuts long content in the middle so the command and the result survive', () => {
     const output = `HEAD ${'x'.repeat(20_000)} TAIL`;
     const window = buildGoalVerifierWindow(
