@@ -399,6 +399,39 @@ describe('getReplayTokenCount', () => {
     ).toBe(23_000);
   });
 
+  it('restores flat persisted usage and ignores newer subagent usage', () => {
+    const usage = { inputTokens: 23_000, totalTokens: 25_000 };
+    const events: DaemonEvent[] = [
+      usageEvent(1, { inputTokens: 11_000 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage },
+        },
+      },
+      {
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            parentToolCallId: 'agent-1',
+            usage: { inputTokens: 1_000 },
+          },
+        },
+      },
+    ];
+
+    expect(getReplayTokenUsage(events)).toEqual(usage);
+    expect(getReplayTokenCount(events)).toBe(23_000);
+  });
+
   it('returns the latest structured usage fields', () => {
     expect(
       getReplayTokenUsage([
