@@ -21,8 +21,10 @@ describe('Web Shell sandbox framing', () => {
     expect(csp).toContain("media-src 'self' data:");
     expect(csp).toContain("base-uri 'none'");
     expect(csp).toContain(
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' data:;",
     );
+    expect(csp).toContain("style-src 'self' 'unsafe-inline' data:;");
+    expect(csp).toContain("connect-src 'self' https://unpkg.com/@qwen-code/");
     expect(csp).not.toContain('frame-src *');
   });
 

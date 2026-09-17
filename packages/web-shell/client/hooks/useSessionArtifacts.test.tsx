@@ -9,11 +9,15 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { requestToast } from '../components/ToastHost';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   useSessionArtifacts,
   type SessionArtifactsState,
 } from './useSessionArtifacts';
+
+vi.mock('../components/ToastHost', () => ({ requestToast: vi.fn() }));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -25,9 +29,11 @@ interface Deferred<T> {
 
 const sdkMock = vi.hoisted(() => ({
   ownerVersion: 0,
+  blocks: [] as unknown[],
   ownerGuard: { capture: vi.fn() },
   actions: {
     loadArtifacts: vi.fn(),
+    addArtifact: vi.fn(),
   },
   connection: {
     status: 'connected',
@@ -39,6 +45,7 @@ const sdkMock = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  useTranscriptBlocks: () => sdkMock.blocks,
   useActions: () => sdkMock.actions,
   useConnection: () => sdkMock.connection,
   useDaemonSessionOwnerGuard: () => sdkMock.ownerGuard,
@@ -101,6 +108,9 @@ async function rerenderHookHost() {
 
 beforeEach(() => {
   latestState = undefined;
+  vi.mocked(requestToast).mockClear();
+  sdkMock.blocks = [];
+  sdkMock.actions.addArtifact.mockReset();
   sdkMock.connection = {
     status: 'connected',
     sessionId: 'session-a',
@@ -128,6 +138,47 @@ afterEach(async () => {
 });
 
 describe('useSessionArtifacts', () => {
+  it('refreshes concurrent registration conflicts without discarding successful checks', async () => {
+    const exported = ['first', 'second'].map((id) => ({
+      ...artifact(id),
+      source: 'client' as const,
+      clientId: 'another-client',
+    }));
+    sdkMock.actions.loadArtifacts
+      .mockResolvedValueOnce({ artifacts: [] })
+      .mockResolvedValue({ artifacts: exported });
+    sdkMock.actions.addArtifact.mockRejectedValue(
+      new DaemonHttpError(
+        403,
+        { code: 'session_artifact_forbidden' },
+        'already owned',
+      ),
+    );
+    await renderHookHost();
+    expect(latestState?.artifacts).toEqual([]);
+    sdkMock.blocks = [
+      {
+        id: 'export-result',
+        kind: 'assistant',
+        text: 'Exported',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: exported.map(({ title, workspacePath }) => ({
+            kind: 'html',
+            storage: 'workspace',
+            title,
+            workspacePath,
+          })),
+        },
+      },
+    ];
+    await rerenderHookHost();
+    expect(sdkMock.actions.addArtifact).toHaveBeenCalledTimes(2);
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(3);
+    expect(latestState?.artifacts).toEqual(exported);
+    expect(requestToast).not.toHaveBeenCalled();
+  });
+
   it('loads new sessions and reuses a previous session result', async () => {
     const sessionA = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const sessionB = deferred<{ artifacts: DaemonSessionArtifact[] }>();

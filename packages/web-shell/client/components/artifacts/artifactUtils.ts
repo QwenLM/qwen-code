@@ -201,7 +201,7 @@ const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
 };
 
 const MAX_WORKSPACE_FILE_BLOB_BYTES = 100 * 1024 * 1024;
-const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 100 * 1024;
+const WORKSPACE_FILE_BLOB_CHUNK_BYTES = 256 * 1024;
 
 export function normalizeArtifactMimeType(mimeType?: string): string {
   return mimeType?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
@@ -388,22 +388,91 @@ export function isSamePath(
 }
 
 const ARTIFACT_PREVIEW_CSP =
-  "default-src 'none'; base-uri 'none'; form-action 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data:;";
+  "default-src 'none'; base-uri 'none'; form-action 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline' data:; img-src data: blob:; font-src data:; media-src data:;";
 
 export function artifactPreviewDocument(html: string, title: string): string {
+  return wrapArtifactPreview(prepareArtifactPreview(html), title);
+}
+
+function wrapArtifactPreview(preview: string, title: string): string {
   // A frame's own CSP cannot block its self-navigation. Keep a trusted parent
   // policy around the opaque content frame, including when the shell allows live URLs.
   return `<!doctype html><html><head>
 <meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PREVIEW_CSP} frame-src 'none';">
 <style>html,body,iframe{width:100%;height:100%;margin:0;border:0;display:block;overflow:hidden}</style>
-</head><body><iframe title="${escapeAttribute(title)}" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeAttribute(withArtifactPreviewCsp(html))}"></iframe></body></html>`;
+</head><body><iframe title="${escapeAttribute(title)}" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeAttribute(preview)}"></iframe></body></html>`;
 }
 
-export function withArtifactPreviewCsp(html: string) {
-  if (typeof DOMParser === 'undefined') {
+export async function loadArtifactPreviewDocument(
+  html: string,
+  title: string,
+  signal: AbortSignal,
+): Promise<string> {
+  if (typeof DOMParser === 'undefined')
+    return artifactPreviewDocument(html, title);
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  if (
+    !doc.querySelector('script#transcript-document[type="application/json"]')
+  ) {
+    return wrapArtifactPreview(prepareArtifactPreview(doc), title);
+  }
+  await Promise.all(
+    [
+      ['script#transcript-renderer', 'src', 'js', 'text/javascript'],
+      [
+        'link#transcript-stylesheet[rel="stylesheet"]',
+        'href',
+        'css',
+        'text/css',
+      ],
+    ].map(async ([selector, attribute, extension, mimeType]) => {
+      const asset = doc.querySelector(selector);
+      const url = asset?.getAttribute(attribute) ?? '';
+      const integrity = asset?.getAttribute('integrity') ?? '';
+      if (!asset) return;
+      const expectedUrl = `https://unpkg.com/@qwen-code/qwen-code@${__WEB_SHELL_VERSION__}/export-transcript-document.${extension}`;
+      if (
+        url !== expectedUrl ||
+        !/^sha384-[A-Za-z0-9+/]{64}$/.test(integrity)
+      ) {
+        throw new Error(
+          'Unsupported export preview resource; use an export matching the current Web Shell version.',
+        );
+      }
+      // Fetch outside the untrusted document: URL-based CSP would also allow
+      // its own scripts to send arbitrary query strings to the CDN.
+      const response = await fetch(url, {
+        integrity,
+        signal,
+        credentials: 'omit',
+        referrerPolicy: 'no-referrer',
+        redirect: 'error',
+      });
+      if (!response.ok)
+        throw new Error(`Could not load export renderer (${response.status}).`);
+      const blob = new Blob([await response.arrayBuffer()], { type: mimeType });
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+      asset.setAttribute(attribute, dataUrl);
+      asset.removeAttribute('integrity');
+      asset.removeAttribute('crossorigin');
+    }),
+  );
+  return wrapArtifactPreview(prepareArtifactPreview(doc), title);
+}
+
+function prepareArtifactPreview(html: string | Document): string {
+  if (typeof html === 'string' && typeof DOMParser === 'undefined') {
     return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PREVIEW_CSP}"></head><body>${stripUnsafePreviewMarkup(html)}</body></html>`;
   }
-  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const doc =
+    typeof html === 'string'
+      ? new DOMParser().parseFromString(html, 'text/html')
+      : html;
   doc
     .querySelectorAll(
       'noscript, meta[http-equiv="refresh" i], meta[http-equiv="Content-Security-Policy" i]',

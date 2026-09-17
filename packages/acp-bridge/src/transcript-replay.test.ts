@@ -81,6 +81,34 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('replays exported artifact descriptors with the slash command result', () => {
+    const sessionArtifacts = [
+      {
+        kind: 'html',
+        storage: 'workspace',
+        title: 'export.html',
+        workspacePath: 'export.html',
+      },
+    ];
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('export-result', {
+        type: 'assistant',
+        text: 'Session exported to HTML: export.html',
+        sessionArtifacts,
+      }),
+    );
+    expect(projected).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'agent_message_chunk',
+        _meta: expect.objectContaining({
+          source: 'slash_command',
+          sessionArtifacts,
+        }),
+      }),
+    ]);
+  });
+
   it('projects the daemon identity on every user block before a turn result', () => {
     const projected = updates(
       createTranscriptReplayMachine(),

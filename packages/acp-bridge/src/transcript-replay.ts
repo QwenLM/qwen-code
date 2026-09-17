@@ -1179,7 +1179,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           role: 'assistant',
           text: item['text'].replace(/\n/g, '  \n'),
           ...meta,
-          extra: { source: 'slash_command' },
+          extra: {
+            source: 'slash_command',
+            ...(Array.isArray(item['sessionArtifacts'])
+              ? { sessionArtifacts: item['sessionArtifacts'] }
+              : {}),
+          },
         }),
       );
     }

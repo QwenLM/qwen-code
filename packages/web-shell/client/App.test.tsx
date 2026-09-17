@@ -7108,6 +7108,7 @@ describe('artifact panel fullscreen', () => {
 
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       'notes.txt',
+      { maxBytes: 256 * 1024 },
     );
     expect(container.textContent).not.toContain(
       'This workspace may have been removed',

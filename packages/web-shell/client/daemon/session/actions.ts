@@ -22,6 +22,8 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
   DaemonTranscriptStore,
   DaemonCapabilities,
   GoalControlRequest,
@@ -3248,6 +3250,17 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
       return withActionTimeout(session.artifacts(), 'Load artifacts timed out');
+    },
+
+    async addArtifact(
+      artifact: DaemonSessionArtifactInput,
+    ): Promise<DaemonSessionArtifactMutationResult> {
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
+      return withActionTimeout(
+        session.addArtifact(artifact),
+        'Add artifact timed out',
+      );
     },
 
     async respondToGlobalPermission(

@@ -16,6 +16,7 @@ import {
   type GoalRecord,
   type GoalSnapshotV2,
   type GoalStateCause,
+  type ToolArtifact,
   type VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './base-emitter.js';
@@ -222,6 +223,7 @@ export class MessageEmitter extends BaseEmitter {
   async emitSlashCommandOutput(
     text: string,
     timestamp?: string | number,
+    artifacts?: readonly ToolArtifact[],
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
@@ -229,6 +231,10 @@ export class MessageEmitter extends BaseEmitter {
       content: { type: 'text', text },
       _meta: {
         source: 'slash_command',
+        // Deliberately not `artifacts`: the bridge's sanitizer strips that key
+        // from every published frame and only ingests it on tool_call_update
+        // frames, so a slash-command payload under that name would be dropped.
+        ...(artifacts?.length ? { sessionArtifacts: artifacts } : {}),
         ...(epochMs != null ? { timestamp: epochMs } : {}),
       },
     });

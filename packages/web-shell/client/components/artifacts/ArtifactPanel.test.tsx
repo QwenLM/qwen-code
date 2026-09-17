@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, StrictMode } from 'react';
+import { Blob as NodeBlob } from 'node:buffer';
 import { createRoot, type Root } from 'react-dom/client';
+import { EditorView } from 'codemirror';
 import type {
   DaemonSessionArtifact,
   DaemonSessionMonitorTaskStatus,
@@ -240,9 +242,10 @@ function artifactPanel(
     workspaceCwd: '/primary',
     workspaceId: 'primary-id',
   },
+  language: 'en' | 'zh-CN' = 'en',
 ) {
   return (
-    <I18nProvider language="en">
+    <I18nProvider language={language}>
       <ArtifactPanel
         artifacts={[artifact]}
         tabs={[
@@ -330,6 +333,7 @@ function scheduledTaskPanel(
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   delete (window as { __TAURI__?: unknown }).__TAURI__;
   for (const { root, container } of mounted) {
     act(() => root.unmount());
@@ -1220,8 +1224,10 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.textContent).toContain('Authoritative verdict');
     expect(container.textContent).toContain('Verdict: Approve');
     expect(container.querySelector('.cm-editor')).toBeNull();
+    // The dedicated renderer reads the whole document, so it passes no window.
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       '.qwen/reviews/review.json',
+      undefined,
     );
   });
 
@@ -1437,6 +1443,7 @@ describe('ArtifactPanel code review artifacts', () => {
     expect(container.textContent).not.toContain('Authoritative verdict');
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       '.qwen/reviews/review.json',
+      { maxBytes: 256 * 1024 },
     );
   });
 
@@ -3041,6 +3048,128 @@ describe('ArtifactPanel image preview tabs', () => {
 
 describe('ArtifactPanel workspace artifact previews', () => {
   it.each([
+    ['html', 'en', -1, false],
+    ['html', 'en', 0, false],
+    ['html', 'en', 1, false],
+    ['md', 'zh-CN', -1, false],
+    ['md', 'zh-CN', 0, false],
+    ['md', 'zh-CN', 1, false],
+    ['html', 'en', 1, true],
+    ['md', 'zh-CN', 1, true],
+  ] as const)(
+    'previews %s in %s at 1 MiB plus %i bytes (truncated: %s)',
+    async (extension, language, extraBytes, truncated) => {
+      const parseHtml = vi.spyOn(DOMParser.prototype, 'parseFromString');
+      const heading =
+        extension === 'html'
+          ? '<h1>Large document</h1>\n'
+          : '# Large document\n';
+      const paddingBytes =
+        1024 * 1024 + extraBytes - Buffer.byteLength(heading + '<!---->');
+      const content =
+        heading +
+        '<!--' +
+        '中'.repeat(Math.floor(paddingBytes / 3)) +
+        ' '.repeat(paddingBytes % 3) +
+        '-->';
+      mockWorkspaceActions.stat.mockResolvedValue({
+        type: 'file',
+        sizeBytes: Buffer.byteLength(content),
+        modifiedMs: 1,
+      });
+      mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+        content: truncated ? content.slice(0, 100) : content,
+        encoding: 'utf-8',
+        sizeBytes: Buffer.byteLength(content),
+        truncated,
+      });
+      if (truncated) {
+        vi.stubGlobal('Blob', NodeBlob);
+        const bytes = Buffer.from(content);
+        mockWorkspaceActions.readFileBytes.mockImplementation(
+          async (_path, { offset, maxBytes }) => {
+            const chunk = bytes.subarray(offset, offset + maxBytes);
+            return {
+              contentBase64: chunk.toString('base64'),
+              offset,
+              returnedBytes: chunk.length,
+              sizeBytes: bytes.length,
+            };
+          },
+        );
+      }
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          artifactPanel(
+            {
+              id: 'large-document',
+              kind: extension === 'html' ? 'html' : 'file',
+              storage: 'workspace',
+              source: 'tool',
+              status: 'available',
+              title: 'Large document',
+              workspacePath: `large.${extension}`,
+              retention: 'ephemeral',
+              clientRetained: false,
+              createdAt: '2026-09-16T00:00:00.000Z',
+              updatedAt: '2026-09-16T00:00:00.000Z',
+            },
+            undefined,
+            language,
+          ),
+        ),
+      );
+      await flush();
+      if (truncated)
+        expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(5);
+      if (extraBytes <= 0) {
+        expect(container.querySelector('.cm-editor')).toBeNull();
+        expect(
+          container.querySelector(extension === 'html' ? 'iframe' : 'h1'),
+        ).not.toBeNull();
+        return;
+      }
+      expect(container.querySelector('iframe, h1')).toBeNull();
+      expect(parseHtml).not.toHaveBeenCalled();
+      const editor = container.querySelector('.cm-editor')!;
+      expect(EditorView.findFromDOM(editor)?.state.doc.toString()).toBe(
+        content,
+      );
+      const toggle = Array.from(container.querySelectorAll('button')).find(
+        (button) =>
+          button.textContent ===
+          (language === 'en' ? 'Render full preview' : '完整排版预览'),
+      )!;
+      expect(container.textContent).toContain(
+        language === 'en'
+          ? 'File is large. Source is shown by default.'
+          : '文件过大，默认展示源码。',
+      );
+      expect(toggle).toBeTruthy();
+      act(() => toggle.click());
+      await flush();
+      expect(
+        container.querySelector(extension === 'html' ? 'iframe' : 'h1'),
+      ).not.toBeNull();
+      if (extension === 'md') {
+        expect(container.querySelector('iframe')).toBeNull();
+      }
+      expect(container.querySelector('.cm-editor')).toBeNull();
+      act(() => toggle.click());
+      await flush();
+      expect(
+        EditorView.findFromDOM(
+          container.querySelector('.cm-editor')!,
+        )?.state.doc.toString(),
+      ).toBe(content);
+    },
+  );
+
+  it.each([
     {
       label: 'Markdown',
       mimeType: 'text/markdown; charset=utf-8',
@@ -3088,6 +3217,7 @@ describe('ArtifactPanel workspace artifact previews', () => {
 
     expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
       'reports/preview',
+      { maxBytes: 256 * 1024 },
     );
     if (testCase.label === 'Markdown') {
       expect(container.querySelector('h1')?.textContent).toBe(
@@ -3103,6 +3233,154 @@ describe('ArtifactPanel workspace artifact previews', () => {
           .querySelector('iframe')!.srcdoc,
       ).toContain(testCase.content);
     }
+  });
+
+  it('loads the complete bytes when a text read is truncated without a cursor', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    const content =
+      '# Exported session\n\n' + '中'.repeat(100_000) + '\n\n## Later turn';
+    const bytes = Buffer.from(content);
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: bytes.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: content.slice(0, 100),
+      encoding: 'utf-8',
+      truncated: true,
+      hasMore: true,
+      nextCursor: null,
+    });
+    mockWorkspaceActions.readFileBytes.mockImplementation(
+      async (_path, { offset, maxBytes }) => {
+        const chunk = bytes.subarray(offset, offset + maxBytes);
+        return {
+          contentBase64: chunk.toString('base64'),
+          offset,
+          returnedBytes: chunk.length,
+          sizeBytes: bytes.length,
+        };
+      },
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'file',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          workspacePath: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          mimeType: 'text/markdown; charset=utf-8',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenNthCalledWith(
+      1,
+      'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+      { maxBytes: 256 * 1024 },
+    );
+    expect(mockWorkspaceActions.readFileBytes).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Exported session');
+    expect(container.textContent).toContain('Later turn');
+    expect(container.textContent).not.toContain(
+      'Preview is truncated because the file is too large.',
+    );
+  });
+
+  it.each(['html', 'md', 'txt'])(
+    'stops showing loading when a %s file read fails',
+    async (extension) => {
+      mockWorkspaceActions.stat.mockResolvedValue({
+        type: 'file',
+        sizeBytes: 200,
+        modifiedMs: 1,
+      });
+      mockWorkspaceActions.readWorkspaceFile.mockRejectedValue(
+        new Error('File changed while loading.'),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          artifactPanel({
+            id: 'failed-preview',
+            kind: extension === 'html' ? 'html' : 'file',
+            storage: 'workspace',
+            source: 'client',
+            status: 'available',
+            title: `failed.${extension}`,
+            workspacePath: `failed.${extension}`,
+            clientRetained: false,
+            createdAt: '2026-09-16',
+            updatedAt: '2026-09-16',
+          }),
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain('File changed while loading.');
+      expect(container.textContent).not.toMatch(/Loading (?:preview|file)/);
+      expect(container.querySelector('iframe, .cm-editor')).toBeNull();
+    },
+  );
+
+  it('rejects a full preview above the existing download size ceiling', async () => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 200 * 1024 * 1024,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockImplementation(async () => ({
+      content: 'x',
+      truncated: true,
+      hasMore: true,
+      nextCursor: null,
+      returnedBytes: 256 * 1024,
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'file',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          workspacePath: 'qwen-code-export-2026-09-16T00-00-00-000Z.md',
+          mimeType: 'text/markdown; charset=utf-8',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toContain(
+      'File is too large to preview or download.',
+    );
+    expect(container.textContent).not.toMatch(/Loading (?:preview|file)/);
   });
 
   it('renders a document artifact as download-only and does not preview it', async () => {

@@ -7,6 +7,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { setBoundedMapEntry } from '../utils/bounded-map';
+import { useReportedArtifactRegistration } from './useReportedArtifactRegistration';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
 const MAX_CACHED_SESSIONS = 20;
@@ -40,7 +41,7 @@ export interface SessionArtifactsState {
   loading: boolean;
   error: string | null;
   hydrated: boolean;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<DaemonSessionArtifact[] | undefined>;
 }
 
 export function useSessionArtifacts(): SessionArtifactsState {
@@ -81,13 +82,16 @@ export function useSessionArtifacts(): SessionArtifactsState {
     }
     try {
       const result = await actions.loadArtifacts();
-      if (requestIdRef.current !== requestId || !owner.isCurrent()) return;
-      cacheArtifacts(
-        artifactsBySessionRef.current,
-        sessionKey,
-        result.artifacts,
-        owner,
-      );
+      if (!owner.isCurrent()) return;
+      if (requestIdRef.current === requestId) {
+        cacheArtifacts(
+          artifactsBySessionRef.current,
+          sessionKey,
+          result.artifacts,
+          owner,
+        );
+      }
+      return result.artifacts;
     } catch {
       // The artifacts panel treats a failed refresh as an empty error state.
       if (
@@ -139,6 +143,11 @@ export function useSessionArtifacts(): SessionArtifactsState {
     () => new Map(visibleArtifacts.map((artifact) => [artifact.id, artifact])),
     [visibleArtifacts],
   );
+  const hydrated = Boolean(
+    sessionKey &&
+      artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
+  );
+  useReportedArtifactRegistration(visibleArtifacts, hydrated, refresh);
   return {
     artifacts: visibleArtifacts,
     artifactById,
@@ -148,10 +157,7 @@ export function useSessionArtifacts(): SessionArtifactsState {
       ) &&
       Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)),
     error: null,
-    hydrated: Boolean(
-      sessionKey &&
-        artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
-    ),
+    hydrated,
     refresh,
   };
 }
