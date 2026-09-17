@@ -938,6 +938,13 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'workflow_invalid_params') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
       if (kind === 'session_busy') {
         res.set('Retry-After', '5');
         res.status(409).json({

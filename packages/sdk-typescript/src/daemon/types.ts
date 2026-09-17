@@ -60,9 +60,9 @@ export interface GoalRecord {
   turnCount: number;
   activeTimeMs: number;
   /**
-   * Model tokens billed to this Goal's own turns, as the daemon's Goal meter
-   * counts them: subagent work and the verifier's own checks are not
-   * included. Optional because a daemon older than the field sends a snapshot
+   * Model tokens billed to Goal turns, direct foreground subagents, and the
+   * Goal's verifier and checkpoint checks. Nested/background agents, other side
+   * queries, cron and notification turns are excluded. Optional because an older daemon sends a snapshot
    * without it.
    */
   tokensUsed?: number;
@@ -2943,6 +2943,10 @@ export interface DaemonSessionSupportedCommandsStatus {
     sourceRef: boolean;
     agentStepId: boolean;
     workflowStepId: boolean;
+    /** Whether `run-saved` reads `args` and `sourceRef` from the request. */
+    runSavedArgs?: boolean;
+    /** Whether the `run-script` action exists. */
+    runScript?: boolean;
   };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
@@ -3182,6 +3186,20 @@ export interface DaemonWorkflowCallTrace {
   startedAt: number;
   endedAt?: number;
   error?: string;
+}
+
+/**
+ * Start input for the `run-saved` and `run-script` workflow actions. The
+ * control actions ignore it: a retry or rerun replays the original run's own
+ * `args` and `sourceRef`. Mirrors the daemon's `ServeWorkflowActionInput`.
+ */
+export interface DaemonWorkflowActionInput {
+  /** Bound to the script's `args` global; any JSON value. */
+  args?: unknown;
+  /** The caller's own definition id and revision, recorded on the run. */
+  sourceRef?: { id: string; revision: string };
+  /** `run-script` only: the script source to run. */
+  script?: string;
 }
 
 export interface DaemonSessionWorkflowTaskStatus {

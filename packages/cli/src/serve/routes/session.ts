@@ -68,6 +68,7 @@ import {
   parseSessionSource,
   summarizeReplay,
 } from '@qwen-code/acp-bridge';
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -7054,18 +7055,20 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const action = safeBody(req)['action'];
+        const body = safeBody(req);
+        const action = body['action'];
         if (
           action !== 'pause' &&
           action !== 'resume' &&
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           res.status(400).json({
             error:
-              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           });
           return;
         }
@@ -7083,6 +7086,7 @@ export function registerSessionRoutes(
               taskId,
               action,
               clientId !== undefined ? { clientId } : undefined,
+              readServeWorkflowActionInput(body),
             ),
           );
       },
