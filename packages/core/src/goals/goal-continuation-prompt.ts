@@ -153,7 +153,7 @@ function renderActiveMinutes(ms: number): string {
  * judgement itself, before it spends the turn.
  */
 const EVIDENCE_LINE =
-  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a completion proposal only from the visible output and tool results of the turn that makes it, so run the decisive checks in that turn.";
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a completion proposal only from the visible output and tool results of the turn that makes it, so run the decisive checks in that turn, immediately before calling update_goal.";
 
 const FIDELITY_LINE =
   'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.';

@@ -40,9 +40,9 @@ Every pause states its reason: that you interrupted it, that you ran `/goal paus
 
 The verifier never runs commands or reads files on its own. It only sees what is already in the transcript, and only from the turn that proposed completion (for a blocked proposal, that turn and the two before it):
 
-- Visible assistant output and tool results of that turn count as evidence. The objective text, your prompts, the model's hidden reasoning, and output from earlier turns do not. A check that ran earlier has to run again in the turn that proposes completion.
+- Visible assistant output and tool results of that turn count as evidence. The objective text, the model's hidden reasoning, and output from earlier turns do not. A check that ran earlier has to run again in the turn that proposes completion, and when a turn is long only its newest records are kept.
 - Printed text proves only that text was printed. A claim that tests pass, a file changed, or a remote is updated needs the corresponding tool result in the transcript.
-- A claim that you confirmed, chose, or approved something needs a real message from you; the verifier rejects proposals that assume it.
+- A claim that you confirmed, chose, or approved something needs a real message from you; the verifier rejects proposals that assume it. Your own messages are the one thing it sees from any turn of the Goal.
 - When evidence is missing the verdict is "not yet", not "done". A condition nobody can evidence keeps the loop running until a limit stops it.
 
 So the objective has to make the agent produce evidence when it proposes completion: run the named check and show the decisive output.

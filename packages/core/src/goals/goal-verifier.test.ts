@@ -9,10 +9,16 @@ import type { Config } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import {
   createGoalVerifier,
+  GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
   GoalVerifierInputTooLargeError,
   parseGoalVerifierText,
   type GoalVerifierInput,
 } from './goal-verifier.js';
+import {
+  buildGoalVerifierEvidenceWindow,
+  type GoalEvidenceRecord,
+} from './goal-evidence.js';
+import { GOAL_PROPOSAL_REASON_MAX_BYTES } from './goal-protocol.js';
 
 function input(): GoalVerifierInput {
   return {
@@ -221,6 +227,69 @@ describe('createGoalVerifier', () => {
       reason: 'grounded',
     });
     expect(generateText).toHaveBeenCalledOnce();
+  });
+
+  it('sends a window built at its own budget with the longest allowed reason', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"grounded"}',
+    );
+    // Production ids are 36-character UUIDs; the per-record JSON overhead is
+    // what the window budget has to leave room for, so model it faithfully.
+    const goalId = '0f8c1d2e-3a4b-4c5d-8e6f-7a8b9c0d1e2f';
+    const turnId = '9e8d7c6b-5a4f-4e3d-9c2b-1a0f9e8d7c6b';
+    const records: GoalEvidenceRecord[] = Array.from(
+      { length: 140 },
+      (_, index) => ({
+        uuid: `${index.toString(16).padStart(8, '0')}-1111-4222-8333-444455556666`,
+        type: 'assistant',
+        provenance: 'assistant_output',
+        goalContext: { goalId, revision: 1, turnId },
+        message: { parts: [{ text: 'x'.repeat(2_100) }] },
+      }),
+    );
+    const objective = 'o'.repeat(1_500);
+    const reason = '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3));
+    const proposal = {
+      status: 'blocked' as const,
+      reason,
+      blockerKind: 'repeated' as const,
+    };
+    const window = buildGoalVerifierEvidenceWindow({
+      records,
+      goal: {
+        goalId,
+        revision: 1,
+        objective,
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 1,
+        activeTimeMs: 0,
+        tokensUsed: 0,
+        createdAt: 0,
+        updatedAt: 0,
+      },
+      permit: { goalId, revision: 1, turnId },
+      proposal,
+    });
+    expect(window.omittedEarlier).toBeGreaterThan(0);
+
+    await expect(
+      createGoalVerifier(config)({
+        goal: { goalId, revision: 1, objective },
+        currentTurnId: turnId,
+        proposal,
+        blockedPolicy: 'p'.repeat(1_500),
+        evidence: window.evidence,
+        evidenceTurnIds: window.turnIds,
+        omittedEarlier: window.omittedEarlier,
+      }),
+    ).resolves.toEqual({ decision: 'accept', reason: 'grounded' });
+    const request = generateText.mock.calls[0]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    expect(
+      Buffer.byteLength(request.contents[0]?.parts?.[0]?.text ?? '', 'utf8'),
+    ).toBeLessThanOrEqual(GOAL_VERIFIER_REQUEST_BYTE_LIMIT);
   });
 
   it('rejects an unbounded verifier request before calling the provider', async () => {

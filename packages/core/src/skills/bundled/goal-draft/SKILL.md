@@ -21,10 +21,10 @@ An active Goal is re-fed to the model every turn, and its completion is judged b
 
 - Visible assistant output and tool results of that turn count as evidence. The objective itself, user prompts, hidden reasoning, and anything printed in earlier turns do not.
 - `delivered_output` evidence proves only that text was printed. It cannot prove that tests passed, files changed, or remote state changed — those need a tool result in the transcript (an `external_fact`).
-- A claim that the user confirmed, chose, or approved something needs a real user message as evidence; otherwise the completion proposal is rejected.
+- A claim that the user confirmed, chose, or approved something needs a real user message as evidence; otherwise the completion proposal is rejected. The user's own messages are the one thing the verifier sees from any turn of the Goal.
 - Vague, subjective, or open-ended conditions never produce decisive evidence; the loop then runs until a limit is hit.
 
-So a good objective makes the agent PRODUCE evidence in the closing turn: run the named check and paste the decisive output line. A check that ran earlier has to run again when completion is proposed.
+So a good objective makes the agent PRODUCE evidence in the closing turn: run the named check immediately before proposing completion and paste the decisive output line. A check that ran earlier has to run again when completion is proposed.
 
 ## Step 0 — should this be a Goal at all?
 

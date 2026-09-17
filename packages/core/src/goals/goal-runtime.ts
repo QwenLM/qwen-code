@@ -67,10 +67,11 @@ import {
   reduceGoalSpend,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
-import type {
-  GoalVerificationResult,
-  GoalVerifier,
-  GoalVerifierInput,
+import {
+  GoalVerifierInputTooLargeError,
+  type GoalVerificationResult,
+  type GoalVerifier,
+  type GoalVerifierInput,
 } from './goal-verifier.js';
 import {
   createMigratedGoalState,
@@ -925,7 +926,7 @@ export function createGoalRuntime(
       ...base,
       proposal: { ...attempt.proposal, status: 'blocked' },
       blockedPolicy:
-        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when cited external_fact evidence shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
+        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when external_fact evidence in the window shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
     };
   };
 
@@ -1155,13 +1156,26 @@ export function createGoalRuntime(
       outcome = { kind: 'decision', result };
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
-      const reason =
-        error instanceof EvidenceSourceUnavailableError
-          ? error.message
-          : error instanceof Error
+      if (error instanceof GoalVerifierInputTooLargeError) {
+        // An oversized request is the proposal's own doing -- a long reason
+        // on top of a full window -- so it is feedback the next turn can act
+        // on, not a limit that stops the Goal.
+        outcome = {
+          kind: 'decision',
+          result: {
+            decision: 'reject',
+            reason: `${error.message}. Keep the proposal reason short and have the decisive checks print compact output in the turn that proposes completion, then propose again.`,
+          },
+        };
+      } else {
+        const reason =
+          error instanceof EvidenceSourceUnavailableError
             ? error.message
-            : String(error);
-      outcome = { kind: 'usage_limited', reason };
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        outcome = { kind: 'usage_limited', reason };
+      }
     }
     const checkpoint = await recordVerificationOutcome(attempt, outcome);
     if (!checkpoint) return;

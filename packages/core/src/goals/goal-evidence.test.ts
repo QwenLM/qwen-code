@@ -16,6 +16,7 @@ import {
   buildGoalEvidenceCatalog,
   buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
+  VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT,
   InvalidGoalEvidenceReferenceError,
   validateGoalEvidenceReferences,
   type GoalEvidenceProvenance,
@@ -1228,9 +1229,14 @@ describe('Goal verifier evidence window', () => {
       proposal,
     });
 
-  it("sends the proposing turn's records newest first and nothing older", () => {
+  it("sends the proposing turn's records newest first, plus the user's own messages from any turn", () => {
     const records = [
       record('cursor', 'system', { provenance: 'goal_control' }),
+      record('choice', 'user', {
+        turnId: 'turn-1',
+        provenance: 'real_user',
+        text: 'Use the second option',
+      }),
       record('earlier-tool', 'tool_result', {
         turnId: 'turn-2',
         toolResponse: { output: 'earlier pass' },
@@ -1262,6 +1268,7 @@ describe('Goal verifier evidence window', () => {
     expect(window.evidence.map((entry) => entry.uuid)).toEqual([
       'tool',
       'text',
+      'choice',
     ]);
     expect(window.evidence[0]).toMatchObject({
       provenance: 'tool_result',
@@ -1274,8 +1281,33 @@ describe('Goal verifier evidence window', () => {
       proofKind: 'delivered_output',
       content: 'Running the suite',
     });
+    expect(window.evidence[2]).toMatchObject({
+      provenance: 'real_user',
+      proofKind: 'user_input',
+      turnId: 'turn-1',
+      content: 'Use the second option',
+    });
     expect(JSON.stringify(window)).not.toContain('hidden reasoning');
     expect(JSON.stringify(window)).not.toContain('earlier');
+  });
+
+  it('returns an empty window for a turn that has recorded nothing yet', () => {
+    const records = [
+      record('t2', 'assistant', { turnId: 'turn-2', text: 'earlier' }),
+    ];
+
+    expect(build(records, complete([]))).toEqual({
+      evidence: [],
+      turnIds: ['turn-3'],
+      omittedEarlier: 0,
+    });
+    // A blocked window still reaches back two turns, so the earlier turn's
+    // record is admitted even though the current turn has none.
+    expect(build(records, blocked('repeated', []))).toMatchObject({
+      evidence: [{ uuid: 't2', turnId: 'turn-2' }],
+      turnIds: ['turn-2', 'turn-3'],
+      omittedEarlier: 0,
+    });
   });
 
   it('covers the current and two preceding turns for a blocked proposal', () => {
@@ -1297,7 +1329,7 @@ describe('Goal verifier evidence window', () => {
     expect(window.omittedEarlier).toBe(0);
   });
 
-  it('caps each record and leaves out the oldest records past the request limit', () => {
+  it('budgets the window by serialized bytes and leaves out the oldest records past it', () => {
     const records = Array.from({ length: 140 }, (_, index) =>
       record(`a-${index}`, 'assistant', {
         turnId: 'turn-3',
@@ -1307,14 +1339,26 @@ describe('Goal verifier evidence window', () => {
 
     const window = build(records, complete([]));
 
-    // 2 000 bytes per capped record, 256 000 bytes per request: the newest
-    // 128 fit and the 12 oldest are reported, never silently dropped.
-    expect(window.evidence).toHaveLength(128);
-    expect(window.omittedEarlier).toBe(12);
+    // Each record is capped to 2 000 content bytes and costs its JSON keys
+    // and ids on top, so fewer than 112 fit the 224 000-byte window; the
+    // ones that do not are the oldest, and they are counted, not dropped.
+    expect(window.evidence.length).toBeLessThan(112);
+    expect(window.evidence.length).toBeGreaterThan(100);
+    expect(window.omittedEarlier).toBe(140 - window.evidence.length);
     expect(window.evidence[0]!.uuid).toBe('a-139');
-    expect(window.evidence.at(-1)!.uuid).toBe('a-12');
+    expect(window.evidence.at(-1)!.uuid).toBe(
+      `a-${140 - window.evidence.length}`,
+    );
     expect(window.evidence[0]!.content.endsWith('…[truncated]')).toBe(true);
     expect(Buffer.byteLength(window.evidence[0]!.content, 'utf8')).toBe(2_000);
+    const serialized = window.evidence.reduce(
+      (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)),
+      0,
+    );
+    expect(serialized).toBeLessThanOrEqual(VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT);
+    expect(
+      serialized + Buffer.byteLength(JSON.stringify(window.evidence[0])),
+    ).toBeGreaterThan(VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT);
   });
 
   it('rejects a permit that does not match the Goal or is not the lineage tail', () => {
@@ -1326,6 +1370,7 @@ describe('Goal verifier evidence window', () => {
     expect(() => build(records, complete([]), permit('turn-2'))).toThrow(
       expect.objectContaining({ code: 'current_turn_not_tail' }),
     );
+    expect(() => build(records, complete([]), permit('turn-4'))).not.toThrow();
     expect(() =>
       build(records, complete([]), { ...permit(), revision: REVISION + 1 }),
     ).toThrow(expect.objectContaining({ code: 'permit_goal_mismatch' }));

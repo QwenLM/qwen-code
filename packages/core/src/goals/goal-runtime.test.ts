@@ -57,7 +57,10 @@ import {
   GoalCheckpointClaimLengthError,
   GoalCheckpointVerifierInputTooLargeError,
 } from './goal-checkpoint-verifier.js';
-import type { GoalVerifier } from './goal-verifier.js';
+import {
+  GoalVerifierInputTooLargeError,
+  type GoalVerifier,
+} from './goal-verifier.js';
 
 // Records the GOAL_RUNTIME debug-log calls so tests can assert that a failed
 // checkpoint check leaves a trace on every arm of its handler. The wrapper
@@ -1188,9 +1191,10 @@ describe('goal runtime', () => {
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
     const permit = host.started[0];
     const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    // 140 records of 2 000 capped bytes against a 256 000-byte request: the
-    // newest 128 are sent and the 12 oldest are counted, so a turn that ran
-    // a hundred tools no longer stops the Goal -- it is judged from its tail.
+    // 140 records of 2 000 capped content bytes against a 224 000-byte
+    // window measured on the serialized records: only the newest hundred or
+    // so are sent and the rest are counted, so a turn that ran a hundred
+    // tools no longer stops the Goal -- it is judged from its tail.
     records = verifierEvidenceWindow(permit, cursorId, 140).map((record) =>
       record.type === 'assistant'
         ? {
@@ -1208,10 +1212,13 @@ describe('goal runtime', () => {
 
     expect(verifier).toHaveBeenCalledOnce();
     const input = vi.mocked(verifier).mock.calls[0]![0];
-    expect(input.evidence).toHaveLength(128);
+    expect(input.evidence.length).toBeGreaterThan(100);
+    expect(input.evidence.length).toBeLessThan(112);
     expect(input.evidence[0]!.uuid).toBe('assistant-evidence-139');
-    expect(input.evidence.at(-1)!.uuid).toBe('assistant-evidence-12');
-    expect(input.omittedEarlier).toBe(12);
+    expect(input.evidence.at(-1)!.uuid).toBe(
+      `assistant-evidence-${140 - input.evidence.length}`,
+    );
+    expect(input.omittedEarlier).toBe(140 - input.evidence.length);
     expect(runtime.getSnapshot().goal).toMatchObject({ status: 'complete' });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
@@ -1219,6 +1226,48 @@ describe('goal runtime', () => {
       'verifier_accept',
       'complete',
     ]);
+  });
+
+  it('rejects with feedback instead of stopping when the verifier request is too large', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => {
+      throw new GoalVerifierInputTooLargeError(300_000);
+    });
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    records = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'verifier_reject',
+    ]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: {
+        status: 'active',
+        lastReason: expect.stringContaining('exceeds the 256000-byte limit'),
+      },
+    });
+    expect(runtime.getSnapshot().goal?.limitKind).toBeUndefined();
+    expect(host.started).toHaveLength(2);
+    expect(runtime.getVerifierFeedback(host.started[1]!)).toContain(
+      'Keep the proposal reason short',
+    );
   });
 
   it('lets a repeated blocker streak reach the verifier when the catalog truncates', async () => {

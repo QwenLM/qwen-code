@@ -42,6 +42,16 @@ const CHECKPOINT_CONTENT_BYTE_LIMIT = 2_000;
 const CHECKPOINT_CONTENT_TRUNCATION_MARKER = '\n\u2026[truncated]';
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
 const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
+/**
+ * Serialized bytes the verifier evidence window may hold, measured on each
+ * record exactly as the verifier request carries it (uuid, provenance,
+ * turnId, proofKind and content, with their JSON keys). The verifier refuses
+ * a request over 256 000 bytes, and the rest of that request -- a proposal
+ * reason of up to 16 000 bytes, the objective, a blocked policy and the
+ * envelope keys -- fits in the 32 000 bytes left over, so a window built at
+ * this limit always reaches the model.
+ */
+export const VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT = 224_000;
 
 export type GoalEvidenceProvenance =
   | 'real_user'
@@ -101,14 +111,18 @@ export interface GoalVerifierEvidenceRecord {
 /**
  * The evidence a terminal proposal is judged from: the records of the Goal
  * turns the proposal's policy speaks about, newest first, bounded by
- * {@link VERIFIER_EVIDENCE_BYTE_LIMIT}.
+ * {@link VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT}.
  *
  * A completion is judged from the turn that proposed it, so the decisive
  * checks have to run in that turn. A blocked proposal is judged from the
  * current turn and the two before it, the span the repeated-blocker policy
- * names. Nothing older is ever sent: the deliverable is in the workspace
- * and the check that proves it can be run again, which is cheaper and more
- * reliable than keeping a citable ledger of everything a long Goal did.
+ * names. The one thing carried over from any older turn of the Goal is the
+ * user's own messages (`real_user`): a claim about what the user asked,
+ * chose or approved can only be proven by one of those, and the answer
+ * usually arrived turns before the work that depends on it finished.
+ * Nothing else older is sent: the deliverable is in the workspace and the
+ * check that proves it can be run again, which is cheaper and more reliable
+ * than keeping a citable ledger of everything a long Goal did.
  */
 export interface GoalVerifierEvidenceWindow {
   /** Newest record first. */
@@ -116,8 +130,10 @@ export interface GoalVerifierEvidenceWindow {
   /** The Goal turns the window covers, oldest first; the current turn is last. */
   turnIds: string[];
   /**
-   * Eligible records of those turns left out because the window reached its
-   * byte limit. Always the oldest ones: the newest record is admitted first.
+   * Eligible records left out because the window reached its byte limit.
+   * Always the oldest ones: the newest record is admitted first, and once
+   * one does not fit nothing older is tried, so the window is a contiguous
+   * newest-first prefix rather than a best packing.
    */
   omittedEarlier: number;
 }
@@ -584,6 +600,12 @@ export function getGoalEvidenceRecordIndexHint(
   return new GoalEvidenceRecordIndexAccumulator(record).finish();
 }
 
+/**
+ * @deprecated No production caller: the verifier reads the proposing turn
+ * directly (see {@link buildGoalVerifierEvidenceWindow}) and `get_goal` no
+ * longer returns a catalog. Kept, with its tests, only until the checkpoint
+ * machinery that shares its helpers is removed (#12053).
+ */
 export function buildGoalEvidenceCatalog(
   input: GoalEvidenceContext,
 ): GoalEvidenceCatalog {
@@ -613,6 +635,11 @@ export function buildGoalEvidenceCheckpointWindow(
   return accumulator.finish();
 }
 
+/**
+ * @deprecated No production caller and nothing catches its errors any more:
+ * terminal proposals carry no references. Kept, with its tests, only until
+ * the checkpoint machinery that shares its helpers is removed (#12053).
+ */
 export function validateGoalEvidenceReferences(
   input: GoalEvidenceValidationInput,
 ): ValidatedGoalEvidence {
@@ -679,7 +706,9 @@ export function validateGoalEvidenceReferences(
  * Throws {@link EvidenceSourceUnavailableError} when the transcript cannot be
  * attributed to this permit: a permit that does not match the Goal revision,
  * a Goal-owned record with malformed turn context, a turn that re-enters the
- * lineage, or a current turn that is not the lineage's tail.
+ * lineage, or a current turn that is in the lineage but not at its tail. A
+ * current turn that has recorded nothing yet is not an error: its window is
+ * empty, and the verifier answers that with a rejection the model can act on.
  */
 export function buildGoalVerifierEvidenceWindow(
   input: GoalEvidenceValidationInput,
@@ -694,17 +723,22 @@ export function buildGoalVerifierEvidenceWindow(
       'The current Goal permit does not match the Goal evidence revision.',
     );
   }
-  const lineageTurnIds = collectGoalTurnLineage(input);
-  if (lineageTurnIds.at(-1) !== input.permit.turnId) {
+  // The whole chain, not the part after the cursor: a blocked window spans
+  // three turns, which can reach behind a cursor that a resume repointed.
+  const lineageTurnIds = collectLineageTurnIds(input, -1);
+  const currentIndex = lineageTurnIds.indexOf(input.permit.turnId);
+  if (currentIndex !== -1 && currentIndex !== lineageTurnIds.length - 1) {
     throw new EvidenceSourceUnavailableError(
       'current_turn_not_tail',
       'The current Goal permit is not the tail of the active transcript lineage.',
     );
   }
-  const turnIds =
-    input.proposal.status === 'blocked'
-      ? lineageTurnIds.slice(-3)
-      : lineageTurnIds.slice(-1);
+  const priorTurnIds =
+    currentIndex === -1 ? lineageTurnIds : lineageTurnIds.slice(0, -1);
+  const turnIds = [
+    ...(input.proposal.status === 'blocked' ? priorTurnIds.slice(-2) : []),
+    input.permit.turnId,
+  ];
   const windowTurnIds = new Set(turnIds);
 
   const evidence: GoalVerifierEvidenceRecord[] = [];
@@ -720,72 +754,29 @@ export function buildGoalVerifierEvidenceWindow(
       !context ||
       context.goalId !== input.goal.goalId ||
       context.revision !== input.goal.revision ||
-      !windowTurnIds.has(context.turnId)
+      (!windowTurnIds.has(context.turnId) && provenance !== 'real_user')
     ) {
       continue;
     }
     const content = capEvidenceContent(evidenceContent(record, provenance));
     if (!content) continue;
-    if (full) {
-      omittedEarlier += 1;
-      continue;
-    }
-    const contentBytes = Buffer.byteLength(content, 'utf8');
-    if (bytes + contentBytes > VERIFIER_EVIDENCE_BYTE_LIMIT) {
-      full = true;
-      omittedEarlier += 1;
-      continue;
-    }
-    bytes += contentBytes;
-    evidence.push({
+    const entry: GoalVerifierEvidenceRecord = {
       uuid: record.uuid,
       provenance,
       turnId: context.turnId,
       proofKind: proofKindOf(provenance),
       content,
-    });
+    };
+    const entryBytes = Buffer.byteLength(JSON.stringify(entry), 'utf8');
+    if (full || bytes + entryBytes > VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT) {
+      full = true;
+      omittedEarlier += 1;
+      continue;
+    }
+    bytes += entryBytes;
+    evidence.push(entry);
   }
   return { evidence, turnIds, omittedEarlier };
-}
-
-/**
- * The Goal turns this revision has recorded, oldest first, read from the
- * turn context stamped on every Goal-owned record rather than from the
- * evidence cursor: the window is defined by turns, not by a position.
- */
-function collectGoalTurnLineage(input: GoalEvidenceContext): string[] {
-  const lineageTurnIds: string[] = [];
-  const seenTurnIds = new Set<string>();
-  let currentTurnId: string | undefined;
-  for (const record of input.records) {
-    const context = parseGoalContext(record.goalContext);
-    if (!context) {
-      if (claimsGoalRevision(record.goalContext, input.goal)) {
-        throw new EvidenceSourceUnavailableError(
-          'malformed_turn_context',
-          `Goal-owned transcript record ${record.uuid} has malformed turn context.`,
-        );
-      }
-      continue;
-    }
-    if (
-      context.goalId !== input.goal.goalId ||
-      context.revision !== input.goal.revision
-    ) {
-      continue;
-    }
-    if (context.turnId === currentTurnId) continue;
-    if (seenTurnIds.has(context.turnId)) {
-      throw new EvidenceSourceUnavailableError(
-        'turn_reentry',
-        `Goal turn ${context.turnId} re-enters the active transcript lineage.`,
-      );
-    }
-    seenTurnIds.add(context.turnId);
-    lineageTurnIds.push(context.turnId);
-    currentTurnId = context.turnId;
-  }
-  return lineageTurnIds;
 }
 
 function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
