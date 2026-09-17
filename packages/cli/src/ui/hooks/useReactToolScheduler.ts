@@ -226,8 +226,49 @@ export function useReactToolScheduler(
       signal: AbortSignal,
       modelOverride?: string,
     ) => {
+      const requests = Array.isArray(request) ? request : [request];
+      const isQueuedCancellation = (error: unknown) =>
+        signal.aborted &&
+        error instanceof Error &&
+        error.message === 'Tool call cancelled while in queue.';
+      const completeAsCancelled = async () => {
+        const reason =
+          '[Operation Cancelled] Reason: Tool call cancelled before execution.';
+        const cancelledCalls: CompletedToolCall[] = requests.map(
+          (toolRequest) => ({
+            status: 'cancelled',
+            request: toolRequest,
+            response: {
+              callId: toolRequest.callId,
+              responseParts: convertToFunctionErrorResponse(
+                toolRequest.name,
+                toolRequest.callId,
+                reason,
+                reason,
+              ),
+              resultDisplay: undefined,
+              error: undefined,
+              errorType: undefined,
+              executionStatus: 'not_started',
+              contentLength: reason.length,
+            },
+            durationMs: 0,
+          }),
+        );
+        await allToolCallsCompleteHandler(cancelledCalls);
+      };
+
       if (!modelOverride?.endsWith('\0')) {
         void scheduler.schedule(request, signal).catch((error: unknown) => {
+          if (isQueuedCancellation(error)) {
+            void completeAsCancelled().catch((completionError: unknown) => {
+              debugLogger.error(
+                'Tool cancellation completion failed:',
+                completionError,
+              );
+            });
+            return;
+          }
           if (signal.aborted) return;
           debugLogger.error(
             `Tool scheduling failed: ${
@@ -239,7 +280,6 @@ export function useReactToolScheduler(
       }
       // Declared outside the detached task so the terminal handler below can
       // name the batch it failed to complete.
-      const requests = Array.isArray(request) ? request : [request];
       void (async () => {
         const completeAsSchedulingError = async (error: unknown) => {
           debugLogger.error(
@@ -306,35 +346,8 @@ export function useReactToolScheduler(
           // rejection is a real scheduling failure and must keep its
           // `errorType`, so this matches the exact Core queue rejection
           // (see `CoreToolScheduler.schedule`).
-          if (
-            signal.aborted &&
-            error instanceof Error &&
-            error.message === 'Tool call cancelled while in queue.'
-          ) {
-            const reason =
-              '[Operation Cancelled] Reason: Tool call cancelled before execution.';
-            const cancelledCalls: CompletedToolCall[] = requests.map(
-              (toolRequest) => ({
-                status: 'cancelled',
-                request: toolRequest,
-                response: {
-                  callId: toolRequest.callId,
-                  responseParts: convertToFunctionErrorResponse(
-                    toolRequest.name,
-                    toolRequest.callId,
-                    reason,
-                    reason,
-                  ),
-                  resultDisplay: undefined,
-                  error: undefined,
-                  errorType: undefined,
-                  executionStatus: 'not_started',
-                  contentLength: reason.length,
-                },
-                durationMs: 0,
-              }),
-            );
-            await allToolCallsCompleteHandler(cancelledCalls);
+          if (isQueuedCancellation(error)) {
+            await completeAsCancelled();
             return;
           }
           await completeAsSchedulingError(error);
