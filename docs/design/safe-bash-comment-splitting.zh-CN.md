@@ -16,23 +16,25 @@
 
 - 为确认通过 Bash 执行的简单单行命令修复 #11815。
 - 对非 Bash shell 和不支持的语法保持现有的保守切分。
-- 让所有 Bash-rule 消费者使用同一个切分决策。
+- 让 `PermissionManager` 内部每一条 `run_shell_command` 的 Bash-rule 路径使用同一个切分决策。
 
 ## 非目标
 
 - 完整解析 Bash 注释或 heredoc。
 - 修改虚拟 shell operation 提取或 cwd 跟踪。
-- 收敛自定义命令使用的另一套旧切分器；该工作由 #11882 负责。
+- 把该快速路径应用到 `monitor`。那里被分析的命令是 `normalizeMonitorCommand()` 去引号后的 `safetyCommand`，而不是 monitor 实际 spawn 的文本，因此其中的 `#` 不一定是注释，按注释折叠可能吞掉 spawned 命令真正会执行的分隔符。monitor 继续使用现有切分器，并由此继续被 `Bash(...)` 规则覆盖。
+- 收敛自定义命令以及 `ShellTool.getConfirmationDetails` 使用的另一套旧切分器（确认对话框列出的子命令，以及它的「始终允许」按钮建议的规则）；该工作由 #11882 负责。
 
 ## 设计
 
-`PermissionManager` 从 `getShellConfiguration()` 读取当前 `ShellType`。它的四个 Bash-rule 路径统一调用现有切分器外的一层 shell-aware 包装。
+`PermissionManager` 从 `getShellConfiguration()` 读取当前 `ShellType`。它的四个 `run_shell_command` Bash-rule 路径统一调用现有切分器外的一层 shell-aware 包装。
 
 只有同时满足以下条件时，该包装才把原命令保留为一个 segment：
 
+- 工具是 `run_shell_command`，即被扫描的字符串正是 shell 将执行的文本；
 - 当前 shell 是 `bash`；
 - 命令只有一个物理行；
-- 引号外的 `#` 位于空格或制表符之后；
+- 引号外的 `#` 位于空格或制表符之后，且不在下标 0——以 `#` 开头的 segment 无法再匹配任何 `Bash(...)` 规则，折叠它会静默丢掉用户显式配置的规则；
 - `#` 之前的代码不包含 shell operator、转义、展开、substitution、分组或重定向语法。
 
 其他所有输入均原样使用现有切分器。因此，不支持的语法可以继续多弹一次确认，但不会因为本次改动获得更宽松的 allow 判定。
@@ -46,4 +48,6 @@
 - #11815 的命令在 Bash 下只有一个 segment，允许的 `echo` 判定为 `allow`。
 - 同一段文本在 `cmd` 和 PowerShell 下仍会切分。
 - 多行命令、包含 substitution 语法的命令，以及注释前存在 operator 的命令保持旧的保守切分。
+- 首字符是 `#` 的命令同样保持旧的保守切分，因此显式 `deny` 规则仍能匹配注释之后的文本。
+- `monitor` 命令中只存在于 wrapper 内层引号里的 `#` 仍会切分，因此 spawned 命令真正执行的分隔符不会被当成注释吞掉。
 - 现有 permission-manager 测试、格式化、lint、typecheck 和 build 检查通过。

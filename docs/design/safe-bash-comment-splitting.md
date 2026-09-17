@@ -16,23 +16,25 @@ Applying Bash comment rules globally is unsafe because Qwen Code can execute thr
 
 - Fix #11815 for simple, single-line commands that are known to run through Bash.
 - Preserve the existing conservative split for non-Bash shells and unsupported syntax.
-- Keep every Bash-rule consumer on the same segmentation decision.
+- Keep every `run_shell_command` Bash-rule path inside `PermissionManager` on the same segmentation decision.
 
 ## Non-goals
 
 - Full Bash comment or heredoc parsing.
 - Changing virtual shell-operation extraction or cwd tracking.
-- Converging the separate legacy splitter used by custom commands; #11882 owns that work.
+- Applying the fast path to `monitor`. There the analysed command is `normalizeMonitorCommand()`'s quote-stripped `safetyCommand`, not the text monitor spawns, so a `#` in it is not necessarily a comment and collapsing on it could swallow a separator the spawned command really executes. Monitor keeps the existing splitter and stays covered by `Bash(...)` rules through it.
+- Converging the separate legacy splitter used by custom commands and by `ShellTool.getConfirmationDetails` (the confirmation dialog's sub-command list and the rules its "Always allow" button proposes); #11882 owns that work.
 
 ## Design
 
-`PermissionManager` reads the active `ShellType` from `getShellConfiguration()`. Its four Bash-rule paths call one shell-aware wrapper around the existing splitter.
+`PermissionManager` reads the active `ShellType` from `getShellConfiguration()`. Its four `run_shell_command` Bash-rule paths call one shell-aware wrapper around the existing splitter.
 
 The wrapper keeps the original command as one segment only when all of these are true:
 
+- the tool is `run_shell_command`, so the scanned string is literally the text the shell will execute;
 - the active shell is `bash`;
 - the command is one physical line;
-- a `#` outside quotes starts after a space or tab;
+- a `#` outside quotes starts after a space or tab, never at index 0 — a segment that begins with `#` can no longer match any `Bash(...)` rule, so collapsing it would silently drop an explicit user rule;
 - the code before that `#` contains no shell operator, escape, expansion, substitution, grouping, or redirection syntax.
 
 Every other input uses the existing splitter unchanged. Unsupported syntax can therefore retain an extra prompt, but it cannot gain a broader allow decision from this change.
@@ -46,4 +48,6 @@ The supported subset is intentionally narrow. Widening it requires evidence agai
 - The #11815 command is one segment under Bash and an allowed `echo` resolves to `allow`.
 - The same text remains split for `cmd` and PowerShell.
 - Multi-line commands, commands containing substitution syntax, and commands with an operator before the comment retain the old conservative split.
+- A command whose first character is `#` also retains it, so an explicit `deny` rule still matches the text after the comment.
+- A `monitor` command whose `#` only exists inside the wrapper's inner quotes still splits, so a separator the spawned command executes is never swallowed as comment text.
 - Existing permission-manager tests, formatting, lint, typecheck, and build checks pass.
