@@ -18,14 +18,17 @@ import {
   type ContextMemoryDetail,
   type ContextSkillDetail,
 } from '../types.js';
+import type { Content } from '@google/genai';
 import {
   DiscoveredMCPTool,
   uiTelemetryService,
   getMainSessionBaseSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
+  buildAvailableSkillsReminder,
   buildSkillLlmContent,
   computeThresholds,
+  getStartupContextLength,
   isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
   formatContextFileDisplayPath,
@@ -93,6 +96,102 @@ function parseMemoryFiles(
   return results;
 }
 
+/** Inverse of core's `escapeXml`; `&amp;` is decoded last. */
+function unescapeXml(text: string): string {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+// `buildAvailableSkillsReminder` emits either the listing or, when nothing is
+// available, a fixed notice in the same prelude slot.
+const AVAILABLE_SKILLS_OPEN = '<available_skills>';
+const NO_SKILLS_NOTICE = 'No skills are currently available.';
+const SKILL_LISTING_ENTRY =
+  /<skill>\n<name>\n([\s\S]*?)\n<\/name>[\s\S]*?<\/skill>/g;
+
+interface SkillListingCost {
+  /** The whole listing reminder as sent, wrapper included. */
+  tokens: number;
+  /** Per-entry cost, keyed by lower-cased skill name. */
+  byName: Map<string, number>;
+}
+
+function isSkillListingText(text: string): boolean {
+  return (
+    text.includes(AVAILABLE_SKILLS_OPEN) || text.includes(NO_SKILLS_NOTICE)
+  );
+}
+
+// Measured from the rendered text rather than re-derived from skill configs,
+// so budget trimming and XML escaping are reflected exactly (#12033).
+function measureSkillListing(text: string): SkillListingCost {
+  const byName = new Map<string, number>();
+  for (const match of text.matchAll(SKILL_LISTING_ENTRY)) {
+    byName.set(
+      unescapeXml(match[1]!).toLowerCase(),
+      estimateContextTextTokens(match[0]),
+    );
+  }
+  return { tokens: estimateContextTextTokens(text), byName };
+}
+
+interface StartupPreludeCost {
+  skillListing: SkillListingCost;
+  /** Prelude text outside the skill listing (environment context, MCP server instructions, deferred-tools reminder). */
+  startupContextTokens: number;
+}
+
+function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
+  const skillListing: SkillListingCost = { tokens: 0, byName: new Map() };
+  let startupContextTokens = 0;
+  for (const content of prelude) {
+    for (const part of content.parts ?? []) {
+      if (typeof part.text !== 'string') continue;
+      if (isSkillListingText(part.text)) {
+        const listing = measureSkillListing(part.text);
+        skillListing.tokens += listing.tokens;
+        for (const [name, tokens] of listing.byName) {
+          skillListing.byName.set(name, tokens);
+        }
+      } else {
+        startupContextTokens += estimateContextTextTokens(part.text);
+      }
+    }
+  }
+  return { skillListing, startupContextTokens };
+}
+
+/**
+ * Content estimate of the conversation after the startup prelude. Skill tool
+ * responses are skipped because the bodies they carry are billed under
+ * `skills`. Media parts have no text to estimate; the provider still counts
+ * them, so their cost surfaces as `unattributed`.
+ */
+function estimateConversationTokens(conversation: Content[]): number {
+  let tokens = 0;
+  for (const content of conversation) {
+    for (const part of content.parts ?? []) {
+      if (typeof part.text === 'string') {
+        tokens += estimateContextTextTokens(part.text);
+      } else if (part.functionCall) {
+        tokens += estimateContextTextTokens(JSON.stringify(part.functionCall));
+      } else if (
+        part.functionResponse &&
+        part.functionResponse.name !== ToolNames.SKILL
+      ) {
+        tokens += estimateContextTextTokens(
+          JSON.stringify(part.functionResponse),
+        );
+      }
+    }
+  }
+  return tokens;
+}
+
 export async function collectContextData(
   config: import('@qwen-code/qwen-code-core').Config,
   showDetails: boolean,
@@ -121,6 +220,15 @@ export async function collectContextData(
   const apiCachedTokens =
     activeChat?.getLastCachedContentTokenCount?.() ??
     uiTelemetryService.getLastCachedContentTokenCount();
+
+  // The startup prelude and the conversation after it are billed request
+  // content, so both are measured from the history the chat will send.
+  const history = activeChat?.getHistory?.() ?? [];
+  const preludeLength = getStartupContextLength(history);
+  const prelude = measureStartupPrelude(history.slice(0, preludeLength));
+  const conversationTokens = estimateConversationTokens(
+    history.slice(preludeLength),
+  );
 
   const systemPromptText = getMainSessionBaseSystemPrompt(config);
   const systemPromptTokens = estimateContextTextTokens(systemPromptText);
@@ -197,11 +305,19 @@ export async function collectContextData(
       .filter((skill) => config.isSkillEnabled(skill))
       .map((skill) => skill.name.toLowerCase()),
   );
+  // Before a chat exists there is no prelude to read; measure the listing the
+  // session would send so the pre-conversation estimate still includes it.
+  let skillListing = prelude.skillListing;
+  if (!activeChat) {
+    const reminder = await buildAvailableSkillsReminder(config);
+    if (reminder) {
+      skillListing = measureSkillListing(reminder.reminder);
+    }
+  }
   let loadedBodiesTokens = 0;
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
-    const listingTokens = estimateContextTextTokens(
-      `<skill>\n<name>\n${skill.name}\n</name>\n<description>\n${skill.description} (${skill.level})\n</description>\n<location>\n${skill.level}\n</location>\n</skill>`,
-    );
+    const listingTokens =
+      skillListing.byName.get(skill.name.toLowerCase()) ?? 0;
     const isLoaded = loadedSkillNames.has(skill.name);
     let bodyTokens: number | undefined;
     if (isLoaded && skill.body) {
@@ -221,7 +337,9 @@ export async function collectContextData(
     };
   });
 
-  const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
+  const skillsTokens =
+    skillToolDefinitionTokens + skillListing.tokens + loadedBodiesTokens;
+  const startupContextTokens = prelude.startupContextTokens;
 
   const thresholds = computeThresholds(
     contextWindowSize,
@@ -241,7 +359,9 @@ export async function collectContextData(
     systemPromptTokens +
     allToolsTokens +
     memoryFilesTokens +
-    loadedBodiesTokens;
+    skillListing.tokens +
+    loadedBodiesTokens +
+    startupContextTokens;
 
   const hasTokenCount = apiTotalTokens > 0;
   const isEstimated =
@@ -258,7 +378,9 @@ export async function collectContextData(
   let displayMcpTools: number;
   let displayMemoryFiles: number;
   let displaySkills: number;
+  let displayStartupContext: number;
   let messagesTokens: number;
+  let unattributedTokens = 0;
   let freeSpace: number;
   let detailBuiltinTools: ContextToolDetail[];
   let detailMcpTools: ContextToolDetail[];
@@ -269,6 +391,7 @@ export async function collectContextData(
     totalTokens = 0;
     displaySystemPrompt = systemPromptTokens;
     displaySkills = skillsTokens;
+    displayStartupContext = startupContextTokens;
     displayBuiltinTools = Math.max(
       0,
       allToolsTokens - skillToolDefinitionTokens - mcpToolsTotalTokens,
@@ -287,33 +410,45 @@ export async function collectContextData(
   } else {
     totalTokens = apiTotalTokens;
 
-    const overheadScale =
-      rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
+    // Categories partition the request by content (#12033). When the
+    // estimates exceed the provider total they are all scaled down together;
+    // when they fall short, the gap is reported as `unattributed` rather than
+    // folded into another category. The cached count is never subtracted: a
+    // cache hit spans several categories, so it is only an annotation.
+    const rawContent = rawOverhead + conversationTokens;
+    const scale = rawContent > totalTokens ? totalTokens / rawContent : 1;
 
-    displaySystemPrompt = Math.round(systemPromptTokens * overheadScale);
-    const scaledAllTools = Math.round(allToolsTokens * overheadScale);
-    displayMemoryFiles = Math.round(memoryFilesTokens * overheadScale);
-    displaySkills = Math.round(skillsTokens * overheadScale);
-    const scaledMcpTotal = Math.round(mcpToolsTotalTokens * overheadScale);
+    displaySystemPrompt = Math.round(systemPromptTokens * scale);
+    const scaledAllTools = Math.round(allToolsTokens * scale);
+    displayMemoryFiles = Math.round(memoryFilesTokens * scale);
+    displaySkills = Math.round(skillsTokens * scale);
+    displayStartupContext = Math.round(startupContextTokens * scale);
+    const scaledMcpTotal = Math.round(mcpToolsTotalTokens * scale);
     displayMcpTools = scaledMcpTotal;
-    const scaledSkillDefinition = Math.round(
-      skillToolDefinitionTokens * overheadScale,
-    );
+    const scaledSkillDefinition = Math.round(skillToolDefinitionTokens * scale);
     displayBuiltinTools = Math.max(
       0,
       scaledAllTools - scaledSkillDefinition - scaledMcpTotal,
     );
 
-    const scaledOverhead =
+    const attributedOverhead =
       displaySystemPrompt +
-      scaledAllTools +
+      displayBuiltinTools +
+      displayMcpTools +
       displayMemoryFiles +
-      Math.round(loadedBodiesTokens * overheadScale);
+      displaySkills +
+      displayStartupContext;
 
-    if (apiCachedTokens > 0) {
-      messagesTokens = Math.max(0, totalTokens - apiCachedTokens);
+    if (scale < 1) {
+      // Fully attributed; messages absorbs the per-row rounding so the rows
+      // sum to the total exactly.
+      messagesTokens = Math.max(0, totalTokens - attributedOverhead);
     } else {
-      messagesTokens = Math.max(0, totalTokens - scaledOverhead);
+      messagesTokens = conversationTokens;
+      unattributedTokens = Math.max(
+        0,
+        totalTokens - attributedOverhead - messagesTokens,
+      );
     }
 
     freeSpace = Math.max(
@@ -322,10 +457,10 @@ export async function collectContextData(
     );
 
     const scaleDetail = <T extends { tokens: number }>(items: T[]): T[] =>
-      overheadScale < 1
+      scale < 1
         ? items.map((item) => ({
             ...item,
-            tokens: Math.round(item.tokens * overheadScale),
+            tokens: Math.round(item.tokens * scale),
           }))
         : items;
 
@@ -333,12 +468,12 @@ export async function collectContextData(
     detailMcpTools = scaleDetail(mcpTools);
     detailMemoryFiles = scaleDetail(memoryFiles);
     detailSkills =
-      overheadScale < 1
+      scale < 1
         ? skills.map((item) => ({
             ...item,
-            tokens: Math.round(item.tokens * overheadScale),
+            tokens: Math.round(item.tokens * scale),
             bodyTokens: item.bodyTokens
-              ? Math.round(item.bodyTokens * overheadScale)
+              ? Math.round(item.bodyTokens * scale)
               : undefined,
           }))
         : skills;
@@ -370,7 +505,10 @@ export async function collectContextData(
     mcpTools: displayMcpTools,
     memoryFiles: displayMemoryFiles,
     skills: displaySkills,
+    startupContext: displayStartupContext,
     messages: messagesTokens,
+    unattributed: unattributedTokens,
+    cachedTokens: hasTokenCount ? apiCachedTokens : 0,
     freeSpace,
     autocompactBuffer,
     thresholds,
@@ -474,6 +612,16 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       lines.push('');
     }
     lines.push(fmtCategoryRow('Used', totalTokens, contextWindowSize));
+    if ((breakdown.cachedTokens ?? 0) > 0) {
+      lines.push(
+        fmtCategoryRow(
+          'Cached prefix',
+          breakdown.cachedTokens!,
+          contextWindowSize,
+          '  └ ',
+        ),
+      );
+    }
     lines.push(fmtCategoryRow('Free', breakdown.freeSpace, contextWindowSize));
     lines.push('');
     lines.push('**Compaction thresholds**');
@@ -503,10 +651,28 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
   );
   lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
+  if ((breakdown.startupContext ?? 0) > 0) {
+    lines.push(
+      fmtCategoryRow(
+        'Startup context',
+        breakdown.startupContext!,
+        contextWindowSize,
+      ),
+    );
+  }
   if (hasTokenCount) {
     lines.push(
       fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
     );
+    if ((breakdown.unattributed ?? 0) > 0) {
+      lines.push(
+        fmtCategoryRow(
+          'Unattributed',
+          breakdown.unattributed!,
+          contextWindowSize,
+        ),
+      );
+    }
   }
 
   if (showDetails) {

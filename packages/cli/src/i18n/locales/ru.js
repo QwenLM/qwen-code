@@ -1812,6 +1812,9 @@ export default {
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
+  'Startup context': 'Стартовый контекст',
+  Unattributed: 'Не распределено',
+  'Cached prefix': 'Кэшированный префикс',
   'Run /context detail for per-item breakdown.':
     'Выполните /context detail для детализации по элементам.',
   active: 'активно',

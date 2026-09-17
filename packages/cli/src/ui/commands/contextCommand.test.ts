@@ -7,13 +7,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  estimateContextTextTokens,
   getBuiltInOutputStyle,
   getCoreSystemPrompt,
   resolveInteractionMode,
+  wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import type { ContextCategoryBreakdown } from '../types.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -156,9 +160,7 @@ describe('collectContextData (contextCommand)', () => {
   });
 
   it('reads the per-session cached-content count, not the process-global singleton (#12047)', async () => {
-    // Same daemon cross-talk as #5763, but for the cache figure that drives
-    // the messages category (total - cached). A foreign cached count silently
-    // collapses messages toward zero via Math.max(0, ...).
+    // Same daemon cross-talk as #5763, but for the cached-prefix annotation.
     mockGetLastPromptTokenCount.mockReturnValue(999_000);
     mockGetLastCachedContentTokenCount.mockReturnValue(64_653); // foreign session
     const getLastPromptTokenCount = vi.fn().mockReturnValue(65_267);
@@ -180,21 +182,12 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(getLastCachedContentTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(65_267);
-    // messages ≈ total - per-session cached (1_000), not total - 64_653.
-    // Allow overhead scaling to reshape the split, but the foreign 64_653
-    // must not be what drove messages toward ~614.
-    expect(data.breakdown.messages).toBeGreaterThan(10_000);
-    // Behavioral proof above: foreign global 64_653 would yield messages ≈ 614.
-    // Do not assert the global spy was untouched — other /context helpers may
-    // still consult the singleton for unrelated figures.
+    expect(data.breakdown.cachedTokens).toBe(1_000);
   });
 
-  it('uses overhead messages when chat cached count is zero despite a foreign global (#12047)', async () => {
+  it('keeps a zero per-session cached count instead of the foreign global (#12047)', async () => {
     // Pins ?? vs || on the per-session preference: a chat that reports 0 must
-    // not fall through to the process-global singleton. With ||, foreign
-    // 64_653 would collapse messages to ~614 via Math.max(0, total - foreign).
-    // With ??, apiCachedTokens stays 0 and messages comes from
-    // total − scaledOverhead.
+    // not fall through to the process-global singleton.
     mockGetLastPromptTokenCount.mockReturnValue(999_000);
     mockGetLastCachedContentTokenCount.mockReturnValue(64_653); // foreign
     const getLastPromptTokenCount = vi.fn().mockReturnValue(65_267);
@@ -216,10 +209,182 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(getLastCachedContentTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(65_267);
-    // Overhead branch: messages = total - scaledOverhead, not total - 64_653.
-    expect(data.breakdown.messages).toBeGreaterThan(10_000);
-    // Arithmetic fingerprint of the || leak (65_267 - 64_653).
-    expect(data.breakdown.messages).not.toBe(614);
+    expect(data.breakdown.cachedTokens).toBe(0);
+  });
+
+  describe('category identity (#12033)', () => {
+    const skillEntry =
+      '<skill>\n<name>\nreport-builder\n</name>\n<description>\nBuild reports (project)\n</description>\n<location>\nproject\n</location>\n</skill>';
+    const listingReminder = wrapSystemReminder(
+      `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${skillEntry}\n</available_skills>`,
+    );
+    const environmentReminder = wrapSystemReminder(
+      'Working directory: /work. Today is 2026-09-18.',
+    );
+    const prelude: Content = {
+      role: 'user',
+      parts: [{ text: listingReminder }, { text: environmentReminder }],
+    };
+    // 400 + 800 ASCII chars → 100 + 200 tokens.
+    const conversation: Content[] = [
+      { role: 'user', parts: [{ text: 'a'.repeat(400) }] },
+      { role: 'model', parts: [{ text: 'b'.repeat(800) }] },
+    ];
+
+    function makeChatConfig(options: {
+      total: number;
+      cached?: number;
+      history: Content[];
+    }): Config {
+      return {
+        ...makeMockConfig(200_000),
+        getSkillManager: vi.fn().mockReturnValue({
+          listSkills: vi.fn().mockResolvedValue([
+            {
+              name: 'report-builder',
+              description: 'Build reports',
+              level: 'project',
+              filePath: '/skills/report-builder/SKILL.md',
+            },
+          ]),
+        }),
+        getLlmClient: vi.fn().mockReturnValue({
+          isInitialized: vi.fn().mockReturnValue(true),
+          getChat: vi.fn().mockReturnValue({
+            getLastPromptTokenCount: vi.fn().mockReturnValue(options.total),
+            getLastCachedContentTokenCount: vi
+              .fn()
+              .mockReturnValue(options.cached ?? 0),
+            isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+            getHistory: vi.fn().mockReturnValue(options.history),
+          }),
+        }),
+      } as unknown as Config;
+    }
+
+    function sumRows(breakdown: ContextCategoryBreakdown): number {
+      return (
+        breakdown.systemPrompt +
+        breakdown.builtinTools +
+        breakdown.mcpTools +
+        breakdown.memoryFiles +
+        breakdown.skills +
+        (breakdown.startupContext ?? 0) +
+        breakdown.messages +
+        (breakdown.unattributed ?? 0)
+      );
+    }
+
+    it('bills the skill listing as sent under skills and the rest of the prelude as startup context', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [prelude, ...conversation],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.breakdown.startupContext).toBe(
+        estimateContextTextTokens(environmentReminder),
+      );
+      expect(data.skills).toEqual([
+        expect.objectContaining({
+          name: 'report-builder',
+          tokens: estimateContextTextTokens(skillEntry),
+        }),
+      ]);
+      expect(data.breakdown.messages).toBe(300);
+    });
+
+    it('closes the rows against the provider total, reporting the gap as unattributed', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [prelude, ...conversation],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.unattributed).toBeGreaterThan(0);
+      expect(sumRows(data.breakdown)).toBe(100_000);
+    });
+
+    it('scales every row down when the estimates exceed the provider total', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 5_000,
+          history: [
+            prelude,
+            { role: 'user', parts: [{ text: 'c'.repeat(40_000) }] },
+          ],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.unattributed).toBe(0);
+      expect(sumRows(data.breakdown)).toBe(5_000);
+    });
+
+    it('never derives messages from the cached count', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          cached: 90_000,
+          history: [prelude, ...conversation],
+        }),
+        false,
+      );
+
+      // The old `total − cached` derivation would print 10_000 here.
+      expect(data.breakdown.messages).toBe(300);
+      expect(data.breakdown.cachedTokens).toBe(90_000);
+      expect(sumRows(data.breakdown)).toBe(100_000);
+    });
+
+    it('does not bill skill tool responses as messages', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            prelude,
+            conversation[0]!,
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    name: 'skill',
+                    response: { output: 'x'.repeat(4_000) },
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+        false,
+      );
+
+      expect(data.breakdown.messages).toBe(100);
+    });
+
+    it('prints the startup context, unattributed and cached rows in text output', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          cached: 40_000,
+          history: [prelude, ...conversation],
+        }),
+        false,
+      );
+      const text = formatContextUsageText(data);
+
+      expect(text).toContain('Startup context');
+      expect(text).toContain('Unattributed');
+      expect(text).toContain('Cached prefix');
+    });
   });
 
   it('reports a nonzero compression-derived count as estimated', async () => {

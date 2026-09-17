@@ -1858,6 +1858,9 @@ export default {
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
+  'Startup context': 'Startkontext',
+  Unattributed: 'Nicht zugeordnet',
+  'Cached prefix': 'Zwischengespeichertes Präfix',
   'Run /context detail for per-item breakdown.':
     'Führen Sie /context detail für eine Aufschlüsselung nach Elementen aus.',
   active: 'aktiv',

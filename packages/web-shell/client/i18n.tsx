@@ -916,6 +916,9 @@ const EN: Messages = {
   'contextUsage.free': 'Free',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
+  'contextUsage.startupContext': 'Startup context',
+  'contextUsage.unattributed': 'Unattributed',
+  'contextUsage.cachedPrefix': 'Cached prefix',
   'contextUsage.mcpTools': 'MCP tools',
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
@@ -4798,6 +4801,9 @@ const ZH: Messages = {
   'contextUsage.free': '空闲',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
+  'contextUsage.startupContext': '启动上下文',
+  'contextUsage.unattributed': '未归因',
+  'contextUsage.cachedPrefix': '缓存前缀',
   'contextUsage.mcpTools': 'MCP 工具',
   'contextUsage.model': '模型',
   'contextUsage.noSession':

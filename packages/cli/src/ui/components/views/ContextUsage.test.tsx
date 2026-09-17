@@ -65,6 +65,29 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(frame).not.toContain('No API response yet');
   });
 
+  it('renders the startup context, unattributed and cached prefix rows when present (#12033)', () => {
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe', {
+          startupContext: 1_200,
+          unattributed: 900,
+          cachedTokens: 30_000,
+        })}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Startup context');
+    expect(frame).toContain('Unattributed');
+    expect(frame).toContain('Cached prefix');
+  });
+
   it('renders the new three-tier section with all four threshold rows', () => {
     const { lastFrame } = render(
       <ContextUsage
