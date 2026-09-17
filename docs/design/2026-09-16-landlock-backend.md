@@ -6,11 +6,11 @@
 
 Design revision, 2026-09-16. The whole-CLI Landlock proposal below is **withdrawn as the recommended implementation plan**. No Landlock production code has been implemented or validated. Source baseline: `c755723286a6224ebbb65147f69b41e826936d5b`. Keep the previous proposal as a record of the compatibility costs, not instructions to begin implementing it.
 
-The merged bwrap implementation still uses whole-CLI confinement in current production code. The replacement design retires that path instead of preserving a second supported mode. Prior behavior and the real Linux coverage in PR #11981 remain baseline evidence; migrate useful safety cases and explicitly report incompatible old configuration rather than silently changing its meaning.
+At the source baseline above, the merged bwrap implementation used whole-CLI confinement. The replacement design retires that path instead of preserving a second supported mode. Prior behavior and the real Linux coverage in PR #11981 remain baseline evidence; migrate useful safety cases and explicitly report incompatible old configuration rather than silently changing its meaning.
 
 ## Revised architectural direction
 
-The current proposal is the [unified tool-execution sandbox design](2026-09-16-tool-execution-sandbox.md), covering both bwrap migration and Landlock integration. Its decisions, capability profile, configuration, call-site inventory, and acceptance criteria take precedence over this historical document; no implementation is claimed.
+The current proposal is the [unified tool-execution sandbox design](2026-09-16-tool-execution-sandbox.md), covering both bwrap migration and Landlock integration. Its decisions, capability profile, configuration, call-site inventory, and acceptance criteria take precedence over this historical document. The [public bwrap stage](2026-09-16-bwrap-public-integration.md) now records the implemented replacement; Landlock remains unimplemented.
 
 - Keep model transport, authentication refresh, session persistence, and approval handling in the trusted host process. Give that process only the authority it needs; being outside the command sandbox is not permission to execute arbitrary model-directed writes.
 - Resolve an immutable effective policy for each invocation from trusted configuration, workspace state, and any applicable approval. Apply kernel confinement when spawning untrusted command code and its descendants.

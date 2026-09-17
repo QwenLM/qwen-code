@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -16,8 +17,28 @@ const installation = process.argv[2];
 const output = process.argv[3];
 if (!installation || !output)
   throw new Error('Usage: verify.mjs INSTALLATION OUTPUT');
-const root = await fs.mkdtemp('/tmp/qwen-runtime-shell-candidate-');
+const root = await fs.mkdtemp(
+  path.join(os.tmpdir(), 'qwen-runtime-shell-candidate-'),
+);
+const binary = process.execPath;
+const testPath = `${path.dirname(binary)}:/usr/bin:/bin`;
 const results = [];
+const activeChildren = new Set();
+for (const [signal, code] of [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+]) {
+  process.on(signal, () => {
+    for (const child of activeChildren) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        /* Already exited. */
+      }
+    }
+    process.exit(code);
+  });
+}
 const allRequests = [];
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const exists = (p) =>
@@ -160,10 +181,10 @@ async function invoke(f, spec = {}, steps = []) {
   const specPath = path.join(f.dir, 'spec.json');
   await fs.writeFile(specPath, JSON.stringify({ ...f, ...spec }));
   const env = {
-    PATH: f.helperPath ? `${f.helperPath}:/usr/bin:/bin` : '/usr/bin:/bin',
+    PATH: f.helperPath ? `${f.helperPath}:${testPath}` : testPath,
     HOME: f.home,
     QWEN_RUNTIME_DIR: f.state,
-    TMPDIR: '/tmp',
+    TMPDIR: f.dir,
     TERM: 'xterm-256color',
     LANG: 'C.UTF-8',
     NO_PROXY: '127.0.0.1,localhost',
@@ -172,7 +193,7 @@ async function invoke(f, spec = {}, steps = []) {
   let stdout = '',
     stderr = '';
   const child = spawn(
-    '/usr/bin/node',
+    binary,
     [path.join(installation, 'launcher.mjs'), specPath],
     {
       cwd: f.workspace,
@@ -181,23 +202,34 @@ async function invoke(f, spec = {}, steps = []) {
       detached: true,
     },
   );
+  activeChildren.add(child);
+  let timedOut = false;
   child.stdout.on('data', (data) => (stdout += data));
   child.stderr.on('data', (data) => (stderr += data));
   const timer = setTimeout(() => {
+    timedOut = true;
     try {
       process.kill(-child.pid, 'SIGKILL');
     } catch {
       // The owned launcher may have exited before the timeout fires.
     }
   }, 45000);
-  const exit = await new Promise((resolve) =>
-    child.on('exit', (code, signal) => resolve({ code, signal })),
-  );
-  clearTimeout(timer);
+  let exit;
+  try {
+    exit = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, signal) => resolve({ code, signal }));
+    });
+  } finally {
+    clearTimeout(timer);
+    activeChildren.delete(child);
+  }
   await Promise.all([
     fs.writeFile(path.join(f.dir, 'stdout.log'), stdout),
     fs.writeFile(path.join(f.dir, 'stderr.log'), stderr),
   ]);
+  assert.equal(timedOut, false, 'Runtime CLI timed out');
+  assert.equal(exit.signal, null, `Runtime CLI terminated by ${exit.signal}`);
   const summary = await read(f.summary).then(JSON.parse, () => undefined);
   return {
     ...exit,
@@ -283,11 +315,11 @@ async function controlled(f, mode) {
   const exit = mode === 'background-fail' ? 7 : 0;
   await fs.writeFile(
     script,
-    `const fs=require('node:fs');require('node:child_process').spawn('/usr/bin/node',['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.appendFileSync(${JSON.stringify(once)},'x');fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({ns:fs.readlinkSync('/proc/self/ns/pid')}));const t=setInterval(()=>{if(${auto ? 'true' : `fs.existsSync(${JSON.stringify(gate)})`}){clearInterval(t);process.exit(${exit})}},${auto ? 500 : 25});`,
+    `const fs=require('node:fs');require('node:child_process').spawn(${JSON.stringify(binary)},['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.appendFileSync(${JSON.stringify(once)},'x');fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({ns:fs.readlinkSync('/proc/self/ns/pid')}));const t=setInterval(()=>{if(${auto ? 'true' : `fs.existsSync(${JSON.stringify(gate)})`}){clearInterval(t);process.exit(${exit})}},${auto ? 500 : 25});`,
   );
   const direct = {
     params: {
-      command: `/usr/bin/node ${quote(script)}`,
+      command: `${quote(binary)} ${quote(script)}`,
       is_background: mode.startsWith('background') || mode === 'task-stop',
       timeout: mode === 'timeout' ? 1000 : 10000,
     },
@@ -344,7 +376,7 @@ try {
       const run = await invoke(f, {}, [
         { command: `printf allowed > ${quote(inside)}` },
         { command: `printf forbidden > ${quote(outside)}` },
-        { command: `/usr/bin/node ${quote(probe)}` },
+        { command: `${quote(binary)} ${quote(probe)}` },
       ]);
       pipelineOkay(run);
       assert.equal(await read(inside), 'allowed');
@@ -387,7 +419,7 @@ try {
         execFileSync('/usr/bin/git', args, {
           cwd: f.workspace,
           env: {
-            PATH: '/usr/bin:/bin',
+            PATH: testPath,
             HOME: f.home,
             LANG: 'C.UTF-8',
             GIT_CONFIG_NOSYSTEM: '1',
@@ -1118,4 +1150,5 @@ console.log(
     output,
   }),
 );
+assert.equal(results.length, 31, 'Unexpected runtime case count');
 process.exitCode = results.every((r) => r.passed) ? 0 : 1;

@@ -2714,6 +2714,43 @@ describe('Server Config (config.ts)', () => {
       },
     });
 
+    it.each(['settings', 'environment'])(
+      'disables Omni host effects despite %s opt-in',
+      async (source) => {
+        const previous = process.env['QWEN_CODE_ENABLE_OMNI'];
+        process.env['QWEN_CODE_ENABLE_OMNI'] =
+          source === 'environment' ? '1' : '0';
+        const probe = vi
+          .spyOn(sandboxPolicy, 'probeShellSandbox')
+          .mockResolvedValue();
+        const ffmpeg = await import('../omni/ffmpeg.js');
+        const assertDependencies = vi
+          .spyOn(ffmpeg, 'assertOmniRuntimeDependencies')
+          .mockRejectedValue(new Error('Unexpected host media process'));
+        try {
+          const config = new Config({
+            ...parameters(),
+            omniEnabled: source === 'settings',
+          });
+          expect(config.isOmniEnabled()).toBe(false);
+          await config.initialize();
+          expect(assertDependencies).not.toHaveBeenCalled();
+          const ordinary = new Config({
+            ...baseParams,
+            bareMode: false,
+            omniEnabled: source === 'settings',
+          });
+          expect(ordinary.isOmniEnabled()).toBe(true);
+        } finally {
+          probe.mockRestore();
+          assertDependencies.mockRestore();
+          if (previous === undefined)
+            delete process.env['QWEN_CODE_ENABLE_OMNI'];
+          else process.env['QWEN_CODE_ENABLE_OMNI'] = previous;
+        }
+      },
+    );
+
     it('stops before recording, hooks, skills and registry setup when probing fails', async () => {
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')

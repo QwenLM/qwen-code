@@ -20,7 +20,7 @@
 
 Ink/OpenTUI `!`、提示词 shell 插值及 Monitor 接入 runtime shell executor。不再为了检测 cwd 变化而创建宿主临时文件；受约束命令继续无状态。模型 Shell 和 Read/Write/Edit 保留已验证的 worker 与传输。只有策略在全部构造/恢复路径保持不变时，才准入嵌套 Code Mode/agents；在设置前拒绝自定义 executor、hooks、MCP 添加及 worktree/working-dir 越界。未迁移的写入/进程工具不注册，直接调用未支持 adapter 也拒绝。
 
-非 bare 初始化必须在启动前抑制未支持的宿主副作用：推测合并、仓库 hook/worktree 清理、自动 skill/team-memory Git 操作、扩展发现和可执行 hooks。UI 渲染不能在宿主执行模型选择的 Mermaid/图片 helper。自定义状态栏命令与 GitHub 查询接入 runtime shell 或在此模式禁用。纯内存渲染及受保护认证/会话/历史记账继续属于可信 runtime。
+非 bare 初始化必须在启动前抑制未支持的宿主副作用：推测合并、仓库 hook/worktree 清理、自动 skill/team-memory Git 操作、Omni 多媒体处理、扩展发现和可执行 hooks。UI 渲染不能在宿主执行模型选择的 Mermaid/图片 helper。自定义状态栏命令与 GitHub 查询接入 runtime shell 或在此模式禁用。纯内存渲染及受保护认证/会话/历史记账继续属于可信 runtime。
 
 策略属于每个 Config，不写进进程全局环境标记。派生 runtime 不能扩大根，审批/YOLO 不能关闭约束，持久化 agent flags 不能替换策略。ACP/serve 启动及委托会话路径在监听器、子进程设置或用户 payload 之前拒绝未支持模式；未启用时保留原 ACP/serve 行为。
 
@@ -34,9 +34,13 @@ Core 覆盖策略准入、Config 初始化/registry、Monitor/嵌套调度及未
 
 真实 Linux 验证 headless、两套 TUI shell、提示词插值、Monitor 和受支持嵌套调用：工作区可写、兄弟目录写入/网络按策略拒绝、宿主模型/会话持久化成功、YOLO 仍受只读约束。测试操作者优先级、恶意 workspace 父值、bare/safe 保留策略、后端不可用、继承标记迁移、未支持启动和无 payload sentinel。保留仍适用的此前 31 组 runtime / 34 组 adapter 检查，有意更新历史断言。缺少内核前提应失败，不能跳过后绿色。
 
-要求 build、typecheck、bundle、定向包单测、lint/format、最终源码/产物检查、两轮干净自审及独立审查。精确已测/未支持入口记录在 `.qwen/e2e-tests/bwrap-public-integration.md`。除非另行请求，本轮不 commit、push、创建 PR、实现 Landlock 或扩展可选 adapter。
+要求 build、typecheck、bundle、定向包单测、lint/format、最终源码/产物检查、两轮干净自审及独立审查。精确已测/未支持入口记录在 `.qwen/e2e-tests/bwrap-public-integration.md`。交付包含 Draft PR 与可重复运行的 Linux CI；Landlock 实现与可选 adapter 扩展仍在范围之外。
 
 操作者设置文件解析失败（包括 JSON 损坏）时拒绝启动，不能将可能存在的沙箱策略重置为空。用户显式触发的 `/doctor` 等管理诊断、`/memory` 中主动打开/编辑的记忆文件或目录，以及 `/skills` 中的设置修改仍属于可信宿主操作。这些管理入口不向模型注册为可调用命令；在 `/skills` 选中技能只填入输入框。提交 `/技能名` 时明确拒绝当前模式，在此之前不应用 hooks/权限、不写入或清除参数文件、不更新项目使用记录。模型 Skill 工具也保持未注册。自动记忆/技能维护继续禁用，显式设置修改不能重新启用当前沙箱 runtime 中被禁用的自动执行路径。工作树/Arena 管理、文件恢复与宿主 Git diff 预览拒绝执行；仅对话历史回退继续可用。IDE 自动探测、提示与连接也禁用。sandbox 单命令子命令保留原始参数并输出文本；交互式 PTY 命令使用终端 `!`。
+
+## 可重复验收
+
+独立的 `sandbox-bwrap` workflow 在 Ubuntu x64 与 ARM64 runner 上分别构建 CLI，使用各 runner 按锁文件安装的原生依赖。它运行公开入口 62 项（包含设置与环境变量启用 Omni 的拒绝验证）、runtime 31 项和 adapter 34 项测试，不依赖外部模型凭据。真实 bwrap 前提检查失败、超时、空用例选择、断言失败或产物变化都会让任务失败。报告包含环境版本、产物哈希和测试自有的合成 fixture。Linux 本地复现方法及历史本地结果与本次 CI 的区别，见[运行说明](../../scripts/sandbox-public/README.md)。
 
 ## 交付验证
 

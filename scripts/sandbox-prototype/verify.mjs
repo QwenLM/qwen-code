@@ -15,6 +15,7 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   renameSync,
   statSync,
@@ -31,7 +32,15 @@ const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 
 const self = fileURLToPath(import.meta.url);
 const installation = path.dirname(self);
-const cleanEnv = { PATH: '/usr/bin:/bin', HOME: os.homedir(), LANG: 'C.UTF-8' };
+const cleanEnv = {
+  PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
+  HOME: os.homedir(),
+  LANG: 'C.UTF-8',
+  ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+  ...(process.env.QWEN_SANDBOX_TEST_REPORT
+    ? { QWEN_SANDBOX_TEST_REPORT: process.env.QWEN_SANDBOX_TEST_REPORT }
+    : {}),
+};
 if (process.platform !== 'linux')
   throw new Error('Real Linux is required; no skip.');
 if (!['--clean', '--parent-driver'].includes(process.argv[2])) {
@@ -144,7 +153,7 @@ if (process.argv[2] === '--parent-driver') {
 }
 
 async function verify() {
-  const fixture = mkdtempSync('/tmp/qwen-tool-prototype-');
+  const fixture = mkdtempSync(path.join(os.tmpdir(), 'qwen-tool-prototype-'));
   const workspace = path.join(fixture, 'workspace');
   const state = path.join(fixture, 'state');
   const outside = path.join(fixture, 'outside.txt');
@@ -904,7 +913,9 @@ async function verify() {
         'driver payload ready',
       );
       const scratch = readFileSync(scratchRecord, 'utf8');
-      assert.match(scratch, /^\/tmp\/qwen-sandbox-[A-Za-z0-9]+$/);
+      assert.equal(path.dirname(scratch), realpathSync(os.tmpdir()));
+      assert.match(path.basename(scratch), /^qwen-sandbox-[A-Za-z0-9]+$/);
+      assert.equal(realpathSync(scratch), scratch);
       ownedScratch.add(scratch);
       const namespace = readFileSync(namespaceFile, 'utf8');
       let members;
@@ -954,7 +965,10 @@ async function verify() {
     ).catch((error) => cleanupErrors.push(error.message));
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    if (cleanupErrors.length === 0) {
+    if (
+      cleanupErrors.length === 0 &&
+      results.every((result) => result.passed)
+    ) {
       for (const scratch of ownedScratch)
         rmSync(scratch, { recursive: true, force: true });
       rmSync(fixture, { recursive: true });
@@ -965,32 +979,33 @@ async function verify() {
       errors: cleanupErrors,
     });
   }
-  console.log(
-    JSON.stringify(
-      {
-        revision: manifest.revision,
-        artifacts: manifest.artifacts,
-        environment: {
-          kernel: os.release(),
-          arch: os.arch(),
-          node: process.version,
-          bwrap: execFileSync('/usr/bin/bwrap', ['--version'], {
-            encoding: 'utf8',
-          }).trim(),
-        },
-        fixture,
-        results,
-        limitations: [
-          'Developer harness, not a CLI/model turn',
-          'No production configuration or tool wiring',
-          'Final exec receipt only; no realtime ready event',
-          'No Landlock implementation',
-          'No full encoding/binary compatibility',
-        ],
-      },
-      null,
-      2,
-    ),
-  );
+  const report = {
+    revision: manifest.revision,
+    artifacts: manifest.artifacts,
+    environment: {
+      kernel: os.release(),
+      arch: os.arch(),
+      node: process.version,
+      bwrap: execFileSync('/usr/bin/bwrap', ['--version'], {
+        encoding: 'utf8',
+      }).trim(),
+    },
+    fixture,
+    results,
+    limitations: [
+      'Developer harness, not a CLI/model turn',
+      'No production configuration or tool wiring',
+      'Final exec receipt only; no realtime ready event',
+      'No Landlock implementation',
+      'No full encoding/binary compatibility',
+    ],
+  };
+  if (process.env.QWEN_SANDBOX_TEST_REPORT)
+    writeFileSync(
+      process.env.QWEN_SANDBOX_TEST_REPORT,
+      JSON.stringify(report, null, 2),
+    );
+  console.log(JSON.stringify(report, null, 2));
+  assert.equal(results.length, 34, 'Unexpected adapter case count');
   process.exitCode = results.every((result) => result.passed) ? 0 : 1;
 }

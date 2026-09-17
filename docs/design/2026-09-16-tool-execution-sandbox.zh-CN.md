@@ -4,19 +4,19 @@
 
 ## 状态与决策
 
-设计提案，2026-09-16。生产 CLI 尚未启用这一架构，拟议配置 schema 与 Landlock 原生 helper 尚未实现。调用入口清单核对基线为 `04721b5dca49e2a100de4d84257a7fa945a698a3`。
+架构于 2026-09-16 确定；bwrap 已在 2026-09-17 的[公开接入阶段](2026-09-16-bwrap-public-integration.zh-CN.md)实现。该阶段定义已交付范围与验收证据：向普通 headless CLI 和两套终端 UI 暴露 `tools.executionSandbox`，并删除整 CLI bwrap。ACP/serve、不支持的适配器、权限扩展和 Landlock 继续后置。下文 Landlock profile 与扩展验收目标描述后续工作，不代表当前可用行为。最初调用入口清单的核对基线为 `04721b5dca49e2a100de4d84257a7fa945a698a3`。
 
-独立的 [bwrap 原型记录](../plans/2026-09-16-bwrap-tool-prototype.zh-CN.md)跟踪基于现有 shell 服务与受限文件 worker 的可行性实验。这些开发脚本没有在生产 CLI 启用本设计，也不代表满足下文全部发布门槛。
+独立的 [bwrap 原型记录](../plans/2026-09-16-bwrap-tool-prototype.zh-CN.md)跟踪基于现有 shell 服务与受限文件 worker 的可行性实验。这些实验早于公开接入，保留为补充回归测试。
 
-[执行 API](2026-09-16-sandbox-execution-api.zh-CN.md)和后续 [runtime Shell 接入](2026-09-16-runtime-shell-sandbox.zh-CN.md)记录已实现的内部阶段。后者将可信策略注入受限的生产 headless 链路，不代表公开配置开关或完成本文发布清单。[runtime 文件工具阶段](2026-09-16-runtime-file-sandbox.zh-CN.md)在同一策略上限下加入 Read/Write/Edit。
+[执行 API](2026-09-16-sandbox-execution-api.zh-CN.md)和后续 [runtime Shell 接入](2026-09-16-runtime-shell-sandbox.zh-CN.md)记录已实现的内部阶段。后者在加入公开配置开关之前，先将可信策略注入受限的生产 headless 链路。[runtime 文件工具阶段](2026-09-16-runtime-file-sandbox.zh-CN.md)在同一策略上限下加入 Read/Write/Edit。
 
 新的 Linux 沙箱边界放在**不可信进程执行和模型驱动的文件变更**处。认证、模型通信、审批和会话持久化留在可信运行时。先用 bwrap 实现边界，再接入能力有明确差异的 Landlock 后端。默认自动选择后端：优先 bwrap，只有 bwrap 不可用且 Landlock 满足所需策略时，才考虑 Landlock。共用策略接口不代表承诺相同的隔离能力。
 
-本文替代[已撤回的整 CLI Landlock 提案](2026-09-16-landlock-backend.zh-CN.md)及[原 Linux 沙箱设计](2026-09-09-linux-kernel-sandbox.zh-CN.md)的实施方向。目标是用工具执行直接替换整 CLI bwrap，不支持两种执行范围并存。新实现通过发布门槛时删除旧 bwrap re-exec 路径，不提供兼容开关，也不回退到它。该实现交付前，生产代码仍使用旧路径。
+本文替代[已撤回的整 CLI Landlock 提案](2026-09-16-landlock-backend.zh-CN.md)及[原 Linux 沙箱设计](2026-09-09-linux-kernel-sandbox.zh-CN.md)的实施方向。目标是用工具执行直接替换整 CLI bwrap，不支持两种执行范围并存。新实现通过发布门槛时删除旧 bwrap re-exec 路径，不提供兼容开关，也不回退到它。公开接入现已删除旧路径，并对旧选择方式返回明确的迁移错误。
 
-## 问题与现状
+## 问题与原有行为
 
-当前 CLI 解析 `tools.sandbox` / `QWEN_SANDBOX`，然后由 `llm.tsx` 调用 `start_sandbox`，重新执行整个 CLI。bwrap 后端同时授予工具与 Qwen 自身所需的写权限，包括运行时状态。网络 namespace 也包住了模型通信。这种进程整体约束有其价值，但把应用自身运行与单条命令的权限混在了一起。
+本次迁移之前，CLI 解析 `tools.sandbox` / `QWEN_SANDBOX`，然后由 `llm.tsx` 调用 `start_sandbox`，重新执行整个 CLI。bwrap 后端同时授予工具与 Qwen 自身所需的写权限，包括运行时状态。网络 namespace 也包住了模型通信。这种进程整体约束有其价值，但把应用自身运行与单条命令的权限混在了一起。
 
 如果只把这一层包装移到 `ShellExecutionService`，直接文件写入和多个进程启动入口仍不受约束，原先处于沙箱中的 hooks 和本地服务还会获得宿主权限。因此迁移需要两个最终副作用边界、明确的入口清单，以及在执行前拒绝不受支持路径的机制。
 
@@ -50,7 +50,7 @@ flowchart TD
 
 ## 配置与迁移
 
-新增一个显式启用、由操作者控制的 `tools.executionSandbox` 设置。首个受支持配置提案如下：
+已实现的首阶段提供显式启用、由操作者控制的 `tools.executionSandbox` 设置：
 
 ```json
 {
@@ -232,7 +232,7 @@ Landlock 使用同一启动和文件 worker 契约，不要求 mount/user namesp
 
 ## 待验证问题与发布风险
 
-本提案的架构方向已确定，以下仍是实施门槛：新 bwrap PID namespace 下可靠的宿主 PID 管理；PTY 适配器兼容的状态通道；Landlock 最小必要设备授权；以及将 worker 分发到可写开发根之外。在广泛接入前先验证，证据改变决策时同步修订中英文版本。
+公开 bwrap 阶段已在真实 Linux 验证宿主 PID 管理、PTY 状态传输与打包的文件 worker。Landlock 设备授权与 helper 分发、更多前端适配器和权限扩展仍是后续实施门槛。以公开接入文档区分已实现范围与这些后续目标；证据改变决策时同步修订中英文版本。
 
 主要兼容性成本是整 CLI bwrap 退役所要求的显式配置迁移、迁移期间禁用部分集成、私有临时/缓存限制、受保护根重叠拒绝，以及 bwrap 进程拓扑变化。在 release notes 说明这项 breaking change。新实现全部必需入口通过后再发布，不把旧模式作为永久退路。ABI 3 相较撤回提案的 ABI-5 下限扩大了 Landlock 潜在部署范围，但实际内核启用状态和安全策略仍决定可用性。没有测量不能承诺用户覆盖率。
 

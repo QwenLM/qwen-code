@@ -1,12 +1,12 @@
 # Internal runtime tool sandbox acceptance
 
-These test scripts exercise the production `loadCliConfig`, authentication, noninteractive model/tool loop, Read/Write/Edit/Shell tools, and background task registry. They inject the trusted host policy through a test launcher. The ordinary public CLI does not accept this internal mode.
+These test scripts exercise the production `loadCliConfig`, authentication, noninteractive model/tool loop, Read/Write/Edit/Shell tools, and background task registry. They inject the trusted host policy through a test launcher. The ordinary public CLI now accepts `tools.executionSandbox`; this supplemental launcher retains direct trusted-policy injection for runtime and lifecycle checks. Use the [public runner](../sandbox-public/README.md) to exercise all three suites together.
 
 ## Prerequisites
 
 - Install repository development dependencies and build workspace packages with Node.js 22 or newer.
-- Run the candidate on Linux with working unprivileged bubblewrap at `/usr/bin/bwrap`, Node.js at `/usr/bin/node`, and Bash at `/bin/bash`.
-- Keep the installation, workspace, runtime state, and HOME directories separate. Tests create their own disposable fixtures under `/tmp`.
+- Run the candidate on Linux with working unprivileged bubblewrap at `/usr/bin/bwrap`, the selected Node.js executable, and Bash at `/bin/bash`.
+- Keep the installation, workspace, runtime state, and HOME directories separate. Tests create their own disposable fixtures under `TMPDIR` (or `/tmp` by default).
 - If testing native PTY transport, provide the Linux `@lydell/node-pty` dependency in the test installation's `node_modules`; do not reuse macOS native packages. The separate `scripts/sandbox-prototype` verifier checks both transport implementations.
 
 No model credentials or internet endpoint are needed. The driver serves a deterministic OpenAI-compatible endpoint over loopback and supplies only a synthetic API key. It clears ambient environment variables and creates an isolated HOME/runtime for each case. It does not change kernel configuration, AppArmor, or shared dependencies.

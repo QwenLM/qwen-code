@@ -4,19 +4,19 @@
 
 ## Status and decision
 
-Proposed design, 2026-09-16. This architecture is not enabled in the production CLI; the proposed configuration schema and Landlock native helper are not implemented. Call-site inventory was checked at `04721b5dca49e2a100de4d84257a7fa945a698a3`.
+Architecture accepted on 2026-09-16; bwrap implementation delivered in the [public integration stage](2026-09-16-bwrap-public-integration.md) on 2026-09-17. That stage defines the implemented scope and acceptance evidence. It exposes `tools.executionSandbox` to the ordinary headless CLI and both terminal UIs and removes whole-CLI bwrap. ACP/serve, unsupported adapters, permission expansion and Landlock remain deferred. The Landlock profile and extended acceptance targets below describe future work, not available behavior. The original call-site inventory baseline was `04721b5dca49e2a100de4d84257a7fa945a698a3`.
 
-The separate [bwrap prototype record](../plans/2026-09-16-bwrap-tool-prototype.md) tracks feasibility experiments using the existing shell service and an isolated file worker. Those developer scripts do not enable this design in the production CLI or satisfy the full release gates below.
+The separate [bwrap prototype record](../plans/2026-09-16-bwrap-tool-prototype.md) tracks feasibility experiments using the existing shell service and an isolated file worker. Those experiments preceded the public integration and are retained as supplemental regression tests.
 
-The [execution API](2026-09-16-sandbox-execution-api.md) and subsequent [runtime shell integration](2026-09-16-runtime-shell-sandbox.md) track the implemented internal stages. The latter injects trusted policy into a restricted production headless pipeline; it is not a public settings toggle or completion of this release checklist. The [runtime file-tool stage](2026-09-16-runtime-file-sandbox.md) adds Read/Write/Edit under the same policy ceiling.
+The [execution API](2026-09-16-sandbox-execution-api.md) and subsequent [runtime shell integration](2026-09-16-runtime-shell-sandbox.md) track the implemented internal stages. The latter introduced trusted policy injection into a restricted production headless pipeline before the public settings toggle was added. The [runtime file-tool stage](2026-09-16-runtime-file-sandbox.md) adds Read/Write/Edit under the same policy ceiling.
 
 Move the new Linux sandbox boundary to **untrusted process execution and model-directed file mutations**. Keep authentication, model communication, approvals, and session persistence in the trusted runtime. Implement the boundary with bwrap first; add Landlock as another backend with explicitly different capabilities. Default to automatic backend selection: prefer bwrap, then consider Landlock only when bwrap is unavailable and Landlock meets the required policy. Sharing a policy interface does not mean claiming identical isolation.
 
-This document replaces the implementation direction in the [withdrawn whole-CLI Landlock proposal](2026-09-16-landlock-backend.md) and the [original Linux sandbox design](2026-09-09-linux-kernel-sandbox.md). The target is a direct replacement of whole-CLI bwrap with tool execution, not two supported execution scopes. Remove the old bwrap re-exec path when the replacement passes its release gates; provide neither a compatibility switch nor a fallback to it. The production code still uses the old path until that implementation lands.
+This document replaces the implementation direction in the [withdrawn whole-CLI Landlock proposal](2026-09-16-landlock-backend.md) and the [original Linux sandbox design](2026-09-09-linux-kernel-sandbox.md). The target is a direct replacement of whole-CLI bwrap with tool execution, not two supported execution scopes. Remove the old bwrap re-exec path when the replacement passes its release gates; provide neither a compatibility switch nor a fallback to it. The public integration has removed the old path and reports explicit migration errors for its selectors.
 
-## Problem and current behavior
+## Problem and original behavior
 
-The current CLI resolves `tools.sandbox` / `QWEN_SANDBOX`, then `llm.tsx` calls `start_sandbox` to re-execute the entire CLI. The bwrap backend grants writes needed by both tools and Qwen itself, including runtime state. Network namespace isolation also surrounds model communication. This is useful process-wide containment, but mixes application operation with permissions needed by an individual command.
+Before this migration, the CLI resolved `tools.sandbox` / `QWEN_SANDBOX`, then `llm.tsx` calls `start_sandbox` to re-execute the entire CLI. The bwrap backend grants writes needed by both tools and Qwen itself, including runtime state. Network namespace isolation also surrounds model communication. This is useful process-wide containment, but mixes application operation with permissions needed by an individual command.
 
 Simply moving that wrapper to `ShellExecutionService` would leave direct writes and several process launchers unrestricted. It would also give formerly confined hooks and local servers host privileges. The migration therefore needs two final effect boundaries, an explicit inventory, and rejection of unsupported paths before they execute.
 
@@ -50,7 +50,7 @@ Policy belongs to the selected runtime, not a process-global environment variabl
 
 ## Configuration and migration
 
-Introduce one opt-in, operator-controlled `tools.executionSandbox` setting. Proposed first supported configuration:
+The implemented first slice exposes one opt-in, operator-controlled `tools.executionSandbox` setting:
 
 ```json
 {
@@ -232,7 +232,7 @@ This is a proposed validation plan, not a test report. Before implementation, tu
 
 ## Remaining feasibility questions and release risks
 
-The architecture decision is settled for this proposal; the following are implementation gates: reliable host PID supervision with the new bwrap PID namespace; a status channel compatible with the PTY adapter; the smallest necessary Landlock device grants; and packaging a worker outside writable development roots. Investigate these before broad integration, and revise both language versions if evidence changes a decision.
+The public bwrap stage has verified host PID supervision, PTY status transport and packaged file workers on real Linux. Landlock device grants and helper packaging, additional frontend adapters, and permission expansion remain future implementation gates. Keep the implemented scope in the public integration document separate from these future targets, and revise both language versions if evidence changes a decision.
 
 Primary compatibility costs are the explicit configuration migration required by retiring whole-CLI bwrap, disabled integrations during migration, private scratch/cache restrictions, protected-root overlap rejection, and changed bwrap process topology. Document this breaking change in release notes. Only ship the replacement after its required surfaces pass, rather than use the old mode as a permanent escape path. ABI 3 broadens potential Landlock deployment relative to the withdrawn ABI-5 proposal, but actual kernel enablement and security policy still determine availability. Do not promise usage coverage without measurements.
 

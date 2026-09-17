@@ -8968,6 +8968,7 @@ export class Config {
   }
 
   isOmniEnabled(): boolean {
+    if (this.shellExecutionSandbox) return false;
     // Bare mode means the minimal toolset and no experimental pipelines:
     // gating here (the single choke point) keeps every omni surface off —
     // tool registration, content normalization, the ffmpeg runtime
