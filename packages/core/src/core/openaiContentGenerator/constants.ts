@@ -71,3 +71,21 @@ export const DEFAULT_DASHSCOPE_BASE_URL =
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
 export const DEFAULT_OPEN_ROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 export const DASHSCOPE_PROXY_BASE_URL = process.env['DASHSCOPE_PROXY_BASE_URL'];
+
+/**
+ * Normalize an OpenAI-family baseUrl to the origin the Responses wire dials:
+ * the pipeline strips any trailing `/v1` and appends `/v1/responses` itself,
+ * so a bare origin, a `/v1`-suffixed URL, and an unset/default URL are the
+ * same endpoint. ModelsConfig's credential-reuse comparison imports this so
+ * the wire and the credential-carry decision can never drift apart on what
+ * "same origin" means. It lives in this dependency-free leaf (not the
+ * streaming pipeline module) so config/model modules can import it without
+ * dragging the Responses pipeline's SDK imports into their static closure.
+ */
+export function normalizeOpenAiWireBaseUrl(
+  baseUrl: string | undefined,
+): string {
+  return (baseUrl || DEFAULT_OPENAI_BASE_URL)
+    .replace(/\/v1\/?$/, '')
+    .replace(/\/$/, '');
+}

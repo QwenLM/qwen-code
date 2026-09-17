@@ -2553,6 +2553,12 @@ export async function runNonInteractive(
           // Process fallback metadata only after the abandoned attempt has
           // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
+          if (
+            event.type === LlmEventType.HookSystemMessage &&
+            outputFormat === OutputFormat.TEXT
+          ) {
+            process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
+          }
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
@@ -2876,6 +2882,14 @@ export async function runNonInteractive(
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
+                if (
+                  event.type === LlmEventType.HookSystemMessage &&
+                  outputFormat === OutputFormat.TEXT
+                ) {
+                  process.stderr.write(
+                    `${sanitizeTerminalText(event.value)}\n`,
+                  );
+                }
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
