@@ -874,6 +874,9 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
       content: [{ text: 'do it' }],
       modelOverride: 'fast-model-x',
       onComplete,
+      // The echoed invocation row, so the consumer can back-fill the
+      // turn's minted promptId onto it (R49-2).
+      invocationItemId: 0,
     });
     // Invocation item marked as sent to the model, like ink updateItem.
     expect(host.updates).toEqual([{ id: 0, updates: { sentToModel: true } }]);

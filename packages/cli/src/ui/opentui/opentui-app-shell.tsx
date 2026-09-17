@@ -134,7 +134,7 @@ export interface OpenTuiAppProps {
     content: PartListUnion,
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
-  ) => void;
+  ) => string | undefined;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
   onQuit?: (messages: readonly HistoryItem[]) => void;
   /** Replays a transcript batch (session switch / resume). */
@@ -636,16 +636,31 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         case 'open_dialog':
           setDialog(outcome.request);
           return;
-        case 'submit_prompt':
-          if (onSubmitPrompt)
-            onSubmitPrompt(outcome.content, undefined, {
-              modelOverride: outcome.modelOverride,
-              refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
-              onComplete: outcome.onComplete,
-              invocationEchoed: true,
+        case 'submit_prompt': {
+          if (!onSubmitPrompt) {
+            notify('The live prompt turn is not wired in this shell.');
+            return;
+          }
+          const mintedPromptId = onSubmitPrompt(outcome.content, undefined, {
+            modelOverride: outcome.modelOverride,
+            refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
+            onComplete: outcome.onComplete,
+            invocationEchoed: true,
+          });
+          // The dispatcher echoed the invocation row, so the turn added no
+          // user item for it — but the entry is still marked with the minted
+          // id. Back-fill the invocation row with that id so the rewind
+          // gate's claim scans see its owner (R49-2).
+          if (
+            mintedPromptId !== undefined &&
+            outcome.invocationItemId !== undefined
+          ) {
+            host.updateItem(outcome.invocationItemId, {
+              promptId: mintedPromptId,
             });
-          else notify('The live prompt turn is not wired in this shell.');
+          }
           return;
+        }
         case 'schedule_tool':
           notify(`Tool scheduling (${outcome.toolName}) is not wired.`);
           return;
@@ -675,7 +690,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         }
       }
     },
-    [onSubmitPrompt, onQuit, onInterrupt, onPopQueue, notify],
+    [onSubmitPrompt, onQuit, onInterrupt, onPopQueue, notify, host],
   );
 
   const onSubmit = useCallback(

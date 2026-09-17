@@ -131,7 +131,10 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
-import { mintLivePromptId } from '../utils/prompt-count-floor.js';
+import {
+  mintLivePromptId,
+  spendLivePromptId,
+} from '../utils/prompt-count-floor.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 import {
@@ -1642,7 +1645,13 @@ export const useLlmStream = (
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+          ? await handleSlashCommand(
+              trimmedQuery,
+              undefined,
+              undefined,
+              undefined,
+              prompt_id,
+            )
           : false;
 
         if (slashCommandResult) {
@@ -1710,6 +1719,7 @@ export const useLlmStream = (
                 abortSignal,
               );
               if (!bridgeResult.shouldProceed) {
+                spendLivePromptId(config, prompt_id);
                 return { queryToSend: null, shouldProceed: false };
               }
               localQueryToSendToLlm = bridgeResult.parts;
@@ -1789,6 +1799,7 @@ export const useLlmStream = (
           });
 
           if (!atCommandResult.shouldProceed) {
+            spendLivePromptId(config, prompt_id);
             return { queryToSend: null, shouldProceed: false };
           }
           localQueryToSendToLlm = atCommandResult.processedQuery;
@@ -1800,6 +1811,7 @@ export const useLlmStream = (
           abortSignal,
         );
         if (!bridgeResult.shouldProceed) {
+          spendLivePromptId(config, prompt_id);
           return { queryToSend: null, shouldProceed: false };
         }
         localQueryToSendToLlm = bridgeResult.parts;

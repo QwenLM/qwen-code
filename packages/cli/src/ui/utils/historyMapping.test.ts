@@ -2239,6 +2239,90 @@ describe('owner-paired censuses close the unpaired-producer class (R40-3)', () =
 
     expect(computeApiTruncationIndex(ui, 8, api)).toBe(8);
   });
+
+  it('refuses (-1) when the suffix scan fires and the walk lands past the proven match (R40-2)', () => {
+    // The target's own entry never landed (absorbed); a claimant-less
+    // re-send wears its id and text, and a still-displayed turn's own
+    // entry sits AFTER the match, so the suffix scan fires. The walk is
+    // NOT one short here — it lands at 6, past the match at 4 — and the
+    // unbounded fallback returned it, keeping the deleted turn's prompt
+    // and response in model context while the UI dropped the turn. No
+    // honest boundary exists (dropping the impostor would cut the 'c
+    // prompt' turn's own entry), so the gate fails closed.
+    const markedUser = (text: string, promptId: string): Content => {
+      const content = userContent(text);
+      markApiHistoryPrompt(content, promptId);
+      return content;
+    };
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'a prompt', 'session########0'),
+      llmItem(2),
+      withPromptId(3, 'b prompt', 'session########1'),
+      llmItem(4),
+      withPromptId(5, 'c prompt', 'session########2'),
+      llmItem(6),
+      withPromptId(7, 'rerun me', 'session########3'), // target; own entry absorbed
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      markedUser('a prompt', 'session########0'),
+      modelContent('r0'),
+      markedUser('b prompt', 'session########1'),
+      modelContent('r1'),
+      markedUser('rerun me', 'session########3'), // claimant-less re-send at 4
+      modelContent('r2'),
+      markedUser('c prompt', 'session########2'), // a displayed turn's own, at 6
+      modelContent('r3'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 7, api)).toBe(-1);
+  });
+
+  it('keeps the ownership-proven match when the walk lands on a submit_prompt invocation turn (R49-2)', () => {
+    // A submit_prompt invocation turn's entry IS marked (client.ts marks
+    // every UserQuery send) and its invocation item wears the same id
+    // (the dispatch echo), so the entry is owned — never unowned excess.
+    // Here the walk lands exactly on that entry: a Goal continuation
+    // inflates the API side, so the walk's third counted prompt is the
+    // invocation turn's own (4). Demoting onto 4 would cut the still
+    // displayed invocation turn's prompt+response out of model context;
+    // the safe-cut scan sees the claim and keeps the proven match (6).
+    // Remove the claim (the dispatch echo, or the marked-entry claim
+    // check in cutDropsDisplayedTurn) and this returns 4.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const submitPromptEntry = userContent('expanded submit_prompt content');
+    markApiHistoryPrompt(submitPromptEntry, 'session########1');
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########2');
+
+    const invocationItem = userItem(3, '/review', true) as HistoryItem & {
+      promptId: string;
+    };
+    invocationItem.promptId = 'session########1';
+
+    const ui: HistoryItem[] = [
+      withPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      invocationItem, // the submit_prompt invocation item, wearing the minted id
+      llmItem(4),
+      llmItem(5), // the Goal continuation's rendered response
+      withPromptId(6, 'target prompt', 'session########2'),
+      llmItem(7),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r0'),
+      userContent('goal continuation'), // claimant-less; no UI item
+      modelContent('g1'),
+      submitPromptEntry, // the invocation turn's own entry: the walk lands here (4)
+      modelContent('r1'),
+      targetEntry, // the target's own entry sits at index 6
+      modelContent('r2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 6, api)).toBe(6);
+  });
 });
 
 describe('promptIdFileKeyOnly guards', () => {
@@ -3047,5 +3131,67 @@ describe('census-withheld duplicate identities (R45-2)', () => {
     // turn's entry — dropping that turn's prompt and response from model
     // context while reporting the rewind as a success.
     expect(computeApiTruncationIndex(ui, target.id, api)).toBe(7);
+  });
+
+  it('keeps the proven match when a POST-target twin wears the withheld id (R48-3)', () => {
+    // The withheld id is shared by construction, so it cannot settle WHICH
+    // carrier owns an entry. Here the second carrier sits AFTER the target:
+    // its own entry ('third prompt') wears the withheld id, and the suffix
+    // scan read the pre-target carrier's claim against that entry and vetoed
+    // the proven match — demoting onto the walk's boundary (1), which drops
+    // the still-displayed first turn's own entry. The ambiguous claim now
+    // requires the entry's prompt text to equal a pre-target carrier's
+    // text, so the twin's entry no longer vetoes, while the first turn's
+    // own entry (same id, matching text) still blocks the demotion.
+    const messages = [
+      rec({
+        type: 'user',
+        promptId: 's########0',
+        message: { role: 'user', parts: [{ text: 'first prompt' }] },
+      }),
+      model('r0'),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: { role: 'user', parts: [{ text: 'target prompt' }] },
+      }),
+      model('r1'),
+      rec({
+        // A re-minted duplicate: shares the first turn's id, sits AFTER the target.
+        type: 'user',
+        promptId: 's########0',
+        message: { role: 'user', parts: [{ text: 'third prompt' }] },
+      }),
+      model('r2'),
+    ];
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    // One unowned excess entry ahead of the group (a Goal continuation:
+    // counted by the walk, owned by no UI item).
+    api.unshift(userContent('goal continuation'));
+
+    const userItems = ui.filter(
+      (item): item is HistoryItem & HistoryItemUser => item.type === 'user',
+    );
+    // The census withheld the shared id from BOTH carriers...
+    expect(userItems.map((item) => item.promptId)).toEqual([
+      undefined,
+      's########1',
+      undefined,
+    ]);
+    expect(userItems.map((item) => item.promptIdAmbiguous)).toEqual([
+      's########0',
+      undefined,
+      's########0',
+    ]);
+
+    const target = userItems[1]!;
+    // The target's own entry sits at index 3 (after the unshifted excess).
+    expect(computeApiTruncationIndex(ui, target.id, api)).toBe(3);
   });
 });

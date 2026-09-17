@@ -14,6 +14,7 @@ import {
   useLlmStream,
 } from './use-llm-stream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
+import { resetPromptCountFloorForTesting } from '../utils/prompt-count-floor.js';
 import type {
   TrackedToolCall,
   TrackedCompletedToolCall,
@@ -238,6 +239,9 @@ describe('useLlmStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
+    // The mint floor is module-global; a test that spends a mint (aborted
+    // @-command / vision-bridge decline) must not leak it into later mints.
+    resetPromptCountFloorForTesting();
     mockGetActiveInteractionSpan.mockReturnValue(mockInteractionSpan);
     mockRefreshMemoryAfterManagedWrite.mockResolvedValue(false);
     mockRefreshMemoryInstruction.mockResolvedValue(undefined);
@@ -830,6 +834,55 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
       'submittedPrompt',
     );
+  });
+
+  describe('aborted @-command prompt identity (R51-1)', () => {
+    it('mints a fresh id for the next submit after an @-command aborts post-echo', async () => {
+      // The @-command path adds its user item wearing the minted id BEFORE
+      // handleAtCommand runs; when the command declines to proceed,
+      // startNewPrompt never runs, so the counter stays put. Spending the
+      // mint keeps the next submit from re-issuing the id the displayed
+      // item still wears — otherwise two live items share one checkpoint
+      // identity and the rewind file-restore refuses a turn whose snapshot
+      // is unambiguous.
+      // The shared stats mock keeps getPromptCount at 5 and startNewPrompt
+      // never advances it — exactly the live-session counter shape after an
+      // aborted submit. The spend, not the counter, must separate the ids.
+      handleAtCommandSpy.mockResolvedValue({
+        shouldProceed: false,
+      } as unknown as Awaited<
+        ReturnType<typeof atCommandProcessor.handleAtCommand>
+      >);
+
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('@missing/file.txt fix this');
+      });
+      expect(handleAtCommandSpy).toHaveBeenCalled();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.USER,
+          text: '@missing/file.txt fix this',
+          promptId: 'test-session-id########5',
+        }),
+        expect.any(Number),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('plain follow-up prompt');
+      });
+      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.USER,
+          text: 'plain follow-up prompt',
+          promptId: 'test-session-id########6',
+        }),
+        expect.any(Number),
+      );
+    });
   });
 
   describe('vision bridge gate', () => {
@@ -13196,7 +13249,13 @@ describe('useLlmStream', () => {
       });
 
       await waitFor(() => {
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/help');
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/help',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
       });
@@ -13224,6 +13283,10 @@ describe('useLlmStream', () => {
       await waitFor(() => {
         expect(mockHandleSlashCommand).toHaveBeenCalledWith(
           '/my-custom-command',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
         );
 
         expect(localMockSendMessageStream).not.toHaveBeenCalledWith(
@@ -13261,7 +13324,13 @@ describe('useLlmStream', () => {
       });
 
       await waitFor(() => {
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/emptycmd');
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/emptycmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(localMockSendMessageStream).toHaveBeenCalledWith(
           '',
           expect.any(AbortSignal),
@@ -14415,6 +14484,10 @@ describe('useLlmStream', () => {
           await waitFor(() =>
             expect(mockHandleSlashCommand).toHaveBeenCalledWith(
               '/loop check status',
+              undefined,
+              undefined,
+              undefined,
+              'test-session-id########5',
             ),
           );
           expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -14496,7 +14569,13 @@ describe('useLlmStream', () => {
           release();
           rerender(rerenderProps(client));
           await waitFor(() =>
-            expect(mockHandleSlashCommand).toHaveBeenCalledWith('/loop cron 0'),
+            expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+              '/loop cron 0',
+              undefined,
+              undefined,
+              undefined,
+              'test-session-id########5',
+            ),
           );
 
           expect(notificationTexts()).not.toContainEqual(
@@ -18116,7 +18195,13 @@ describe('useLlmStream', () => {
           await result.current.submitQuery(btwQuery);
         });
 
-        expect(mockHandleSlashCommand).toHaveBeenCalledWith(btwQuery);
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          btwQuery,
+          undefined,
+          undefined,
+          undefined,
+          'test-session-id########5',
+        );
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       } finally {
         resolveFirstCall();

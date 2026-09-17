@@ -58,3 +58,26 @@ export function mintLivePromptId(
   }
   return `${sessionId}########${count}`;
 }
+
+/**
+ * Spends a live mint whose turn was abandoned AFTER the id reached a
+ * displayed history item — an @-command or vision bridge that declined to
+ * proceed leaves its user/invocation item wearing the id, while the prompt
+ * counter only advances on an actual send. Without this the next submit
+ * re-mints the same id and two live items share it, tripping the
+ * shared-identity rewind refusal on a turn whose snapshot is unambiguous
+ * (R51-1). Parses the ordinal back out of the id so the caller needs no
+ * mint-time state; a foreign-format id is a no-op.
+ */
+export function spendLivePromptId(
+  config: { getSessionId: () => string },
+  promptId: string,
+): void {
+  const sessionId = config.getSessionId();
+  const prefix = `${sessionId}########`;
+  if (!promptId.startsWith(prefix)) return;
+  const ordinal = Number(promptId.slice(prefix.length));
+  if (Number.isSafeInteger(ordinal) && ordinal >= 0) {
+    recordPromptCountFloor(sessionId, ordinal + 1);
+  }
+}

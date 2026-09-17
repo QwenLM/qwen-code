@@ -356,14 +356,26 @@ export function computeApiTruncationIndex(
     // census removes the resolution key (`promptId`), not the ownership, so
     // the scan must read the withheld id too — otherwise an ownership-proven
     // match is demoted onto a boundary that drops a displayed turn (R45-2).
-    const isMarkClaimedByPreTargetTurn = (mark: string): boolean =>
+    // But a withheld id is shared by construction, so the id alone cannot
+    // settle WHICH carrier owns the entry: a post-target twin wearing it
+    // would veto the proven match through the suffix scan (R48-3). The
+    // ambiguous disjunct therefore also requires the entry's prompt text to
+    // equal a pre-target carrier's model-facing text — the same proof the
+    // unmarked half of the scan uses.
+    const isMarkClaimedByPreTargetTurn = (
+      mark: string,
+      entry: Content,
+    ): boolean =>
       uiHistory.some(
         (item, index) =>
           index < targetIndex &&
           (compressionIndex === -1 || index > compressionIndex) &&
           isRealUserTurn(item) &&
           !item.promptIdFileKeyOnly &&
-          (item.promptId === mark || item.promptIdAmbiguous === mark),
+          (item.promptId === mark ||
+            (item.promptIdAmbiguous === mark &&
+              item.promptHasModelText !== false &&
+              isApiEntryOwnedByText(entry, item.promptOwnerText ?? item.text))),
       );
     // A drained background-agent/cron completion renders one notification
     // ITEM per drained task but submits one user-role ENTRY per drain batch,
@@ -427,7 +439,7 @@ export function computeApiTruncationIndex(
         const entry = apiHistory[i]!;
         const mark = getApiHistoryPromptId(entry);
         if (mark !== undefined) {
-          if (isMarkClaimedByPreTargetTurn(mark)) {
+          if (isMarkClaimedByPreTargetTurn(mark, entry)) {
             return true;
           }
           continue;
@@ -485,7 +497,9 @@ export function computeApiTruncationIndex(
         // claimant and stays out (R35-4).
         const claimedBeforeTarget = (() => {
           const mark = getApiHistoryPromptId(entry);
-          return mark !== undefined && isMarkClaimedByPreTargetTurn(mark);
+          return (
+            mark !== undefined && isMarkClaimedByPreTargetTurn(mark, entry)
+          );
         })();
         if (
           entry.role === 'user' &&
@@ -568,7 +582,14 @@ export function computeApiTruncationIndex(
       // resolve; fall back to the walk, whose loud -1 is the pre-identity
       // answer here.
       if (cutDropsDisplayedTurn(identifiedIndex + 1, apiHistory.length)) {
-        return positionalTruncationIndex();
+        // The fallback stays bounded by the proven match: a walk landing
+        // PAST it would keep the deleted turn's prompt and response in
+        // model context while the UI drops the turn and reports success
+        // (R40-2). Fail closed instead.
+        const positional = positionalTruncationIndex();
+        return positional !== -1 && positional <= identifiedIndex
+          ? positional
+          : -1;
       }
       const positional = positionalTruncationIndex();
       if (positional !== -1 && positional < identifiedIndex) {
