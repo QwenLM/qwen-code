@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  readWorkspaceActivity,
+  type WorkspaceRemovalActivity,
+} from '../workspace-activity.js';
 import { readdir, stat } from 'node:fs/promises';
 import {
   translateAndCheckAbsoluteWorkspacePath,
@@ -81,16 +85,7 @@ export interface WorkspaceManagementRouteDeps {
   reservedWorkspaceRoots?: readonly string[];
 }
 
-export interface WorkspaceRemovalActivity {
-  sessions: number;
-  activePrompts: number;
-  pendingSessionStarts: number;
-  acpConnections: number;
-  memoryTasks: number;
-  channelWorkers: number;
-  voiceSessions: number;
-  workspaceRuntime: number;
-}
+export type { WorkspaceRemovalActivity } from '../workspace-activity.js';
 
 export interface WorkspaceRuntimeRemovalController {
   runtimeAdded?(runtime: WorkspaceRuntime): Promise<void>;
@@ -1267,30 +1262,12 @@ export function registerWorkspaceManagementRoutes(
 
   const workspaceActivity = (
     runtime: WorkspaceRuntime,
-  ): WorkspaceRemovalActivity => {
-    const controllerActivity = runtimeRemoval?.getActivity(runtime) ?? {
-      pendingSessionStarts: 0,
-      channelWorkers: 0,
-      voiceSessions: 0,
-    };
-    const acpActivity = getAcpHandle?.()?.getWorkspaceActivity(
-      runtime.workspaceId,
-    ) ?? { acpConnections: 0, memoryTasks: 0 };
-    return {
-      pendingSessionStarts: controllerActivity.pendingSessionStarts,
-      sessions: runtime.bridge.sessionCount,
-      activePrompts: runtime.bridge.activePromptCount,
-      acpConnections: acpActivity.acpConnections,
-      memoryTasks: acpActivity.memoryTasks,
-      channelWorkers: controllerActivity.channelWorkers,
-      voiceSessions: controllerActivity.voiceSessions,
-      workspaceRuntime:
-        getWorkspaceRuntimeCoordinatorIfSupported(runtime)?.hasActiveWork() ===
-        true
-          ? 1
-          : 0,
-    };
-  };
+  ): WorkspaceRemovalActivity =>
+    readWorkspaceActivity(
+      runtime,
+      runtimeRemoval?.getActivity(runtime),
+      getAcpHandle?.()?.getWorkspaceActivity(runtime.workspaceId),
+    );
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>
     Object.values(activity).some((count) => count > 0);
   const resolveManagedRuntime = (
