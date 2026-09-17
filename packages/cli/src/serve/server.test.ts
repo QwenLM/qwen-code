@@ -748,6 +748,8 @@ const EXPECTED_STAGE1_FEATURES = [
 //
 // Conditional tags registered in capabilities.ts registry order.
 const EXPECTED_REGISTERED_FEATURES = [
+  'managed_sessions',
+  'managed_session_cancel',
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
   // ...always-on PR16/17/19/20/21 features, then F2's conditional
   // pair (mcp_workspace_pool + mcp_pool_restart inserted after
@@ -757,6 +759,9 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
+    if (feature === 'capabilities') {
+      return [feature, 'hosted_harness_private_v1'];
+    }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
     }
@@ -3249,12 +3254,68 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'managed_sessions') {
+          expect(predicate({ managedSessionsAvailable: true })).toBe(true);
+          expect(predicate({ managedSessionsAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              managedSessionsAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'managed_session_cancel') {
+          expect(
+            predicate({
+              managedSessionsAvailable: true,
+              managedSessionCancelAvailable: true,
+            }),
+          ).toBe(true);
+          expect(
+            predicate({
+              managedSessionsAvailable: true,
+              managedSessionCancelAvailable: false,
+            }),
+          ).toBe(false);
+          expect(predicate({ managedSessionCancelAvailable: true })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              managedSessionsAvailable: true,
+              managedSessionCancelAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'require_auth') {
           expect(predicate({ requireAuth: true })).toBe(true);
           expect(predicate({ requireAuth: false })).toBe(false);
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'hosted_harness_private_v1') {
+          expect(predicate({ hostedHarnessAvailable: true })).toBe(true);
+          expect(predicate({ hostedHarnessAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              hostedHarnessAvailable: true,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,

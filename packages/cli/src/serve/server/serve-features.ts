@@ -133,6 +133,7 @@ export function createServeFeatures(
       return getAdvertisedServeFeatures(undefined, {
         managedSessionsAvailable: deps.managedSessionsAvailable,
         managedSessionCancelAvailable: deps.managedSessionCancelAvailable,
+        hostedHarnessAvailable: opts.profile === 'hosted-harness',
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
         allowOriginActive:

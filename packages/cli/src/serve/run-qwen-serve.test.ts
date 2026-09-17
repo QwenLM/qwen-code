@@ -117,6 +117,7 @@ import {
 } from './managed-runtime-protocol.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+const HOSTED_HARNESS_CAPABILITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 const isolatedTestRuntimeDir = fs.realpathSync(
   fs.mkdtempSync(path.join(os.tmpdir(), 'qws-run-serve-tests-')),
 );
@@ -7626,6 +7627,28 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       },
       /must use HTTPS/,
     ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: undefined,
+      },
+      /QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST/,
+    ],
+    [
+      {
+        profile: 'hosted-harness' as const,
+        token: 'harness-secret',
+        serveWebShell: false,
+        managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+        managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: 'sha256:invalid',
+      },
+      /QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST/,
+    ],
   ])(
     'rejects invalid Hosted Harness configuration %# before listening',
     async (overrides, message) => {
@@ -7635,6 +7658,7 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       vi.stubEnv('QWEN_SERVER_TOKEN', undefined);
       vi.stubEnv('QWEN_RUNTIME_BROKER_URL', undefined);
       vi.stubEnv('QWEN_RUNTIME_BROKER_TOKEN', undefined);
+      vi.stubEnv('QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST', undefined);
       try {
         await expect(
           runQwenServe({
@@ -7642,6 +7666,7 @@ describe('runQwenServe pre-listen bridge option validation', () => {
             hostname: '127.0.0.1',
             mode: 'http-bridge',
             workspace: tmpDir,
+            hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
             ...overrides,
           }),
         ).rejects.toThrow(message);
@@ -7666,6 +7691,7 @@ describe('runQwenServe pre-listen bridge option validation', () => {
         serveWebShell: false,
         managedRuntimeBrokerUrl: 'https://broker.example.com',
         managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
       }),
     ).rejects.toThrow(/requires a loopback --hostname/);
   });
@@ -7686,6 +7712,7 @@ describe('runQwenServe pre-listen bridge option validation', () => {
           serveWebShell: false,
           managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
           managedRuntimeBrokerToken: 'broker-secret',
+          hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
         },
         {
           managedRuntimeProvider: {
@@ -19705,6 +19732,7 @@ describe('runQwenServe startup observability', () => {
         profile: 'hosted-harness',
         managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
         managedRuntimeBrokerToken: 'broker-secret',
+        hostedHarnessCapabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
       },
       {
         preheatBridge: true,
@@ -19716,11 +19744,114 @@ describe('runQwenServe startup observability', () => {
       await handle.runtimeReady;
       expect(bridge.preheat).not.toHaveBeenCalled();
       expect(brokerFetch).not.toHaveBeenCalled();
+      const capabilitiesResponse = await fetch(`${handle.url}/capabilities`, {
+        headers: { Authorization: 'Bearer harness-secret' },
+      });
+      expect(capabilitiesResponse.status).toBe(200);
+      expect(await capabilitiesResponse.json()).toMatchObject({
+        features: expect.arrayContaining(['hosted_harness_private_v1']),
+        hostedHarness: {
+          protocolVersions: { current: 1, supported: [1] },
+          bootId: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+          ),
+          capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST,
+        },
+      });
       expect((await readStartup(handle))?.preheat).toMatchObject({
         status: 'not_scheduled',
       });
     } finally {
       await handle.close();
+    }
+  });
+
+  it('keeps one Hosted Harness boot generation across bootstrap and runtime', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-harness-boot-id-')),
+    );
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      new Promise((resolve) => {
+        resolveTelemetry = resolve;
+      }),
+    );
+    const originalCapabilityDigest =
+      process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'];
+    process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'] =
+      HOSTED_HARNESS_CAPABILITY_DIGEST;
+    let handle: RunHandle | undefined;
+    const authorization = { Authorization: 'Bearer harness-secret' };
+
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          token: 'harness-secret',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+          profile: 'hosted-harness',
+          managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          resolveOnListen: true,
+          runtimeStartupTimeoutMs: 0,
+          bootSettings: {},
+          daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        },
+      );
+      const bootstrapCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`, { headers: authorization })
+      ).json()) as { hostedHarness: { bootId: string } };
+      const bootId = bootstrapCapabilities.hostedHarness.bootId;
+
+      const missingHandshake = await fetch(`${handle.url}/session/example`, {
+        headers: authorization,
+      });
+      expect(missingHandshake.status).toBe(426);
+      expect(missingHandshake.headers.get('x-qwen-harness-boot-id')).toBe(
+        bootId,
+      );
+
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.runtimeReady;
+
+      const runtimeCapabilities = (await (
+        await fetch(`${handle.url}/capabilities`, { headers: authorization })
+      ).json()) as { hostedHarness: { bootId: string } };
+      expect(runtimeCapabilities.hostedHarness.bootId).toBe(bootId);
+
+      const admitted = await fetch(`${handle.url}/session/example`, {
+        headers: {
+          ...authorization,
+          'X-Qwen-Harness-Protocol-Version': '1',
+          'X-Qwen-Harness-Boot-Id': bootId,
+        },
+      });
+      expect(admitted.status).not.toBe(426);
+      expect(admitted.status).not.toBe(409);
+      expect(admitted.headers.get('x-qwen-harness-boot-id')).toBe(bootId);
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle?.close();
+      if (originalCapabilityDigest === undefined) {
+        delete process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'];
+      } else {
+        process.env['QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST'] =
+          originalCapabilityDigest;
+      }
     }
   });
 

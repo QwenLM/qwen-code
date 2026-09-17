@@ -6,6 +6,7 @@
 
 import type { ServeOptions } from './types.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './broker-managed-runtime-provider.js';
+import { isHostedHarnessCapabilityDigest } from './hosted-harness-contract.js';
 import { isLoopbackBind } from './loopback-binds.js';
 
 export function validateHostedHarnessProfile(
@@ -14,6 +15,7 @@ export function validateHostedHarnessProfile(
     readonly serverToken: string;
     readonly brokerUrl: string;
     readonly brokerToken: string;
+    readonly capabilityDigest: string;
   },
 ): void {
   if (opts.profile !== 'hosted-harness') return;
@@ -70,4 +72,12 @@ export function validateHostedHarnessProfile(
     );
   }
   resolveManagedRuntimeBrokerBaseUrl(opts.managedRuntimeBrokerUrl);
+  if (
+    !opts.hostedHarnessCapabilityDigest ||
+    !isHostedHarnessCapabilityDigest(opts.hostedHarnessCapabilityDigest)
+  ) {
+    throw new Error(
+      `--profile hosted-harness requires ${environment.capabilityDigest}=sha256:<64 lowercase hex characters>.`,
+    );
+  }
 }

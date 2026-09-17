@@ -344,6 +344,8 @@ export interface ServeOptions {
   managedRuntimeBrokerUrl?: string;
   /** Service credential used only for Harness-to-Broker calls. */
   managedRuntimeBrokerToken?: string;
+  /** Deployment-generated digest for the Hosted Harness private contract. */
+  hostedHarnessCapabilityDigest?: string;
   /**
    * Per-SSE-connection idle deadline.
    */
@@ -429,6 +431,15 @@ export interface ServeOptions {
  *
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
+export interface HostedHarnessCapabilities {
+  protocolVersions: {
+    current: 1;
+    supported: [1];
+  };
+  bootId: string;
+  capabilityDigest: string;
+}
+
 export interface CapabilitiesEnvelope {
   v: 1;
   /**
@@ -443,6 +454,8 @@ export interface CapabilitiesEnvelope {
   qwenCodeVersion?: string;
   /** Process-wide live-state polling interval in milliseconds; older daemons omit it. */
   sessionLiveStatePollIntervalMs?: number;
+  /** Private Hosted Harness handshake. Present only in that deployment profile. */
+  hostedHarness?: HostedHarnessCapabilities;
   mode: ServeMode;
   features: string[];
   /**

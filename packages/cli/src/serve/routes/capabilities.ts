@@ -8,6 +8,7 @@ import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
+import type { HostedHarnessContract } from '../hosted-harness-contract.js';
 import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
   advertisedMaxPendingPromptsPerSession,
@@ -38,6 +39,7 @@ interface RegisterCapabilitiesRoutesDeps {
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
   daemonEnv: Readonly<NodeJS.ProcessEnv>;
+  hostedHarnessContract?: HostedHarnessContract;
 }
 
 function workflowsEnabledForRuntime(
@@ -88,6 +90,9 @@ export function registerCapabilitiesRoutes(
       protocolVersions: getServeProtocolVersions(),
       ...(deps.qwenCodeVersion
         ? { qwenCodeVersion: deps.qwenCodeVersion }
+        : {}),
+      ...(deps.hostedHarnessContract
+        ? { hostedHarness: deps.hostedHarnessContract }
         : {}),
       mode: deps.mode,
       features,

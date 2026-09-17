@@ -106,6 +106,12 @@ import { LocalManagedRuntimeProvider } from './managed-runtime-provider.js';
 import { BrokerManagedRuntimeProvider } from './broker-managed-runtime-provider.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import {
+  createHostedHarnessContract,
+  HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
+  installHostedHarnessContractMiddleware,
+  type HostedHarnessContract,
+} from './hosted-harness-contract.js';
+import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
@@ -490,6 +496,8 @@ function getRuntimeEffectiveEnv(
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /** Shared by bootstrap and runtime so one process advertises one generation. */
+  hostedHarnessContract?: HostedHarnessContract;
   /**
    * Enables resident management of scheduled-task-owned sessions: a periodic
    * keepalive (so their schedulers aren't idle-reaped) and a boot-time
@@ -838,7 +846,27 @@ export function createServeApp(
     serverToken: 'QWEN_SERVER_TOKEN',
     brokerUrl: 'QWEN_RUNTIME_BROKER_URL',
     brokerToken: 'QWEN_RUNTIME_BROKER_TOKEN',
+    capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
   });
+  if (opts.profile !== 'hosted-harness' && deps.hostedHarnessContract) {
+    throw new Error(
+      'createServeApp: Hosted Harness contract requires profile hosted-harness.',
+    );
+  }
+  const hostedHarnessContract =
+    opts.profile === 'hosted-harness'
+      ? (deps.hostedHarnessContract ??
+        createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!))
+      : undefined;
+  if (
+    hostedHarnessContract &&
+    hostedHarnessContract.capabilityDigest !==
+      opts.hostedHarnessCapabilityDigest
+  ) {
+    throw new Error(
+      'createServeApp: Hosted Harness contract capability digest does not match the configured digest.',
+    );
+  }
   const trustedLoopbackMode = isTrustedLoopbackMode({
     loopbackBind: isLoopbackBind(opts.hostname),
     tokenConfigured,
@@ -2219,6 +2247,8 @@ export function createServeApp(
     app.use(rateLimiter.middleware);
   }
 
+  installHostedHarnessContractMiddleware(app, hostedHarnessContract);
+
   if (!healthRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
     // `/health` AFTER `bearerAuth` so probes must carry the token.
@@ -2379,6 +2409,7 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+    hostedHarnessContract,
   });
   registerBrandRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,

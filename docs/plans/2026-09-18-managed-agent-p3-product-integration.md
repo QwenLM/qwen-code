@@ -1,8 +1,10 @@
 # Managed Agent P3 Java Prompt 服务接入执行方案
 
-状态：可开工
+状态：P3a 已实现并验证，P3b 待执行
 
 日期：2026-09-18
+
+实施进度：Hosted Harness 私有协议 v1、进程代际 fencing、能力协商和普通 `qwen serve` 兼容性已经落地；下一步实现 Java Hosted Harness Client。
 
 上游方案：[Managed Agent Hosted Runtime 可执行技术方案](./2026-09-17-managed-agent-hosted-runtime-execution.md)
 

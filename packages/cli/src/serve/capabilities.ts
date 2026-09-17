@@ -35,6 +35,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   health: { since: 'v1' },
   daemon_status: { since: 'v1' },
   capabilities: { since: 'v1' },
+  hosted_harness_private_v1: { since: 'v1' },
   session_create: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
@@ -579,6 +580,7 @@ export interface AdvertiseFeatureToggles {
   realtimeVoiceEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   standaloneSessionsAvailable?: boolean;
+  hostedHarnessAvailable?: boolean;
 }
 
 /**
@@ -618,6 +620,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
+  [
+    'hosted_harness_private_v1',
+    (toggles) => toggles.hostedHarnessAvailable === true,
+  ],
   [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,

@@ -192,6 +192,12 @@ import {
 import { BrokerManagedRuntimeProvider } from './broker-managed-runtime-provider.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import {
+  createHostedHarnessContract,
+  HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
+  installHostedHarnessContractMiddleware,
+  type HostedHarnessContract,
+} from './hosted-harness-contract.js';
+import {
   MANAGED_RUNTIME_PROTOCOL_VERSION,
   type ManagedRuntimePrepareRequest,
 } from './managed-runtime-protocol.js';
@@ -2428,6 +2434,7 @@ function currentServeFeaturesForRunQwenServe(
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
+    hostedHarnessAvailable: opts.profile === 'hosted-harness',
     mcpPoolActive: opts.mcpPoolActive !== false,
     externalToolGuardActive: opts.externalToolGuard?.mode === 'required',
     allowOriginActive:
@@ -2485,12 +2492,16 @@ function createBootstrapCapabilities(input: {
   nativeDirectoryPickerAvailable: boolean;
   localPathOpenAvailable: boolean;
   localTerminalOpenAvailable: boolean;
+  hostedHarnessContract?: HostedHarnessContract;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
     protocolVersions: getServeProtocolVersions(),
     ...(input.qwenCodeVersion
       ? { qwenCodeVersion: input.qwenCodeVersion }
+      : {}),
+    ...(input.hostedHarnessContract
+      ? { hostedHarness: input.hostedHarnessContract }
       : {}),
     mode: input.opts.mode,
     features: currentServeFeaturesForRunQwenServe(
@@ -2665,6 +2676,7 @@ function createBootstrapServeApp(input: {
   >;
   getChannelWorkerSnapshots: () => ChannelWorkerGroupSnapshot[];
   onHealthServed?: () => void;
+  hostedHarnessContract?: HostedHarnessContract;
 }): Application {
   const {
     opts,
@@ -2683,6 +2695,7 @@ function createBootstrapServeApp(input: {
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
     onHealthServed,
+    hostedHarnessContract,
   } = input;
   const app = express();
   // The probe stats `/dev/console` (macOS) or scans `PATH` for `zenity`
@@ -2733,6 +2746,8 @@ function createBootstrapServeApp(input: {
 
   app.use(bearerAuth(opts.token));
 
+  installHostedHarnessContractMiddleware(app, hostedHarnessContract);
+
   if (!exposeHealthPreAuth) {
     app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
@@ -2760,6 +2775,7 @@ function createBootstrapServeApp(input: {
         nativeDirectoryPickerAvailable,
         localPathOpenAvailable,
         localTerminalOpenAvailable,
+        hostedHarnessContract,
       }),
     );
   });
@@ -3413,6 +3429,11 @@ async function runQwenServeImpl(
   const managedRuntimeBrokerToken =
     optsIn.managedRuntimeBrokerToken?.trim() ||
     process.env[MANAGED_RUNTIME_BROKER_TOKEN_ENV]?.trim();
+  const hostedHarnessCapabilityDigest =
+    optsIn.hostedHarnessCapabilityDigest?.trim() ||
+    (optsIn.profile === 'hosted-harness'
+      ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]?.trim()
+      : undefined);
   delete baseEnv[MANAGED_RUNTIME_BROKER_TOKEN_ENV];
   delete process.env[MANAGED_RUNTIME_BROKER_TOKEN_ENV];
   const launchMemoryProjectScopeValue =
@@ -3565,6 +3586,7 @@ async function runQwenServeImpl(
     experimentalManagedRuntimeToken: managedRuntimeToken,
     managedRuntimeBrokerUrl,
     managedRuntimeBrokerToken,
+    hostedHarnessCapabilityDigest,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -3783,7 +3805,12 @@ async function runQwenServeImpl(
     serverToken: QWEN_SERVER_TOKEN_ENV,
     brokerUrl: MANAGED_RUNTIME_BROKER_URL_ENV,
     brokerToken: MANAGED_RUNTIME_BROKER_TOKEN_ENV,
+    capabilityDigest: HOSTED_HARNESS_CAPABILITY_DIGEST_ENV,
   });
+  const hostedHarnessContract =
+    opts.profile === 'hosted-harness'
+      ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
+      : undefined;
   if (
     opts.profile === 'hosted-harness' &&
     (deps.bridge !== undefined ||
@@ -8358,6 +8385,7 @@ async function runQwenServeImpl(
       webShellDir,
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
+      hostedHarnessContract,
       startup,
       // The real long-running daemon keeps scheduled-task sessions resident
       // (keepalive) and reloads them on boot (rehydration). Off by default so
@@ -8769,6 +8797,7 @@ async function runQwenServeImpl(
     onHealthServed: deferRuntimeUntilFirstHealth
       ? () => startRuntimeAfterHealth?.()
       : undefined,
+    hostedHarnessContract,
   });
   const deferredChannelWebhookAuth = deferRuntimeUntilFirstHealth
     ? createDeferredChannelWebhookAuth(
