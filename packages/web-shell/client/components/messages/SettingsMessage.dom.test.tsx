@@ -761,6 +761,30 @@ describe('SettingsMessage user-scope editing', () => {
     expect(container.textContent).not.toContain('Fast Model');
   });
 
+  it('hides Omni media delivery when all published settings items are excluded', () => {
+    const state = makeState(
+      [
+        {
+          ...boolSetting(),
+          key: 'omni.enabled',
+          label: 'Enable Omni Media Delivery',
+          category: 'Experimental',
+        },
+      ],
+      vi.fn(),
+    );
+    const baseline = renderPanel(state);
+    expect(baseline.textContent).toContain('Enable Omni Media Delivery');
+    const excluded = renderPanel(state, {
+      presentation: { excludeItems: WEB_SHELL_SETTING_ITEM_IDS },
+    });
+    expect(excluded.querySelectorAll('nav button')).toHaveLength(0);
+    expect(excluded.querySelector('[data-slot="empty"]')).toBeTruthy();
+    clickUserTab(excluded);
+    expect(excluded.querySelectorAll('nav button')).toHaveLength(0);
+    expect(excluded.querySelector('[data-slot="empty"]')).toBeTruthy();
+  });
+
   it('shows an empty state when every available item is excluded', () => {
     const container = renderPanel(makeState([subDialogSetting()], vi.fn()), {
       modelManagement: makeModelManagement(),

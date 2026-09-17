@@ -22,6 +22,8 @@ Changes stay in the web-shell package: client/settings.ts, App.tsx, index.tsx, S
 
 Test default/empty-list equivalence, ordinary exclusions in both scopes, builtin independence, empty categories and initial-category fallback, model list/select after all ordinary Model fields are excluded, model block exclusion, and dynamic exclusions of settings-launched dialogs. Exercise a browser fixture at desktop and mobile sizes, then build/typecheck, focused tests, full preflight, and two clean self-audit passes. Parent integration additionally verifies runtime, Console, extension, real model interaction and portable deployment packaging.
 
+A gating browser smoke test reads settings descriptors from a real daemon and verifies that all published exclusions empty the page in both scopes. This detects newly rendered settings missing an alias without duplicating schema or hidden-key lists. App tests also pin host-option forwarding and runtime updates.
+
 ## Decisions and status
 
 Implemented locally, 2026-09-16. Focused tests and desktop/mobile browser checks pass; full validation is pending. This reduced scope does not require scope-policy changes from #6974.
