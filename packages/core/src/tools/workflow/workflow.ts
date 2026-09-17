@@ -11,6 +11,10 @@
  */
 
 import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../../agents/workflow-correlation.js';
+import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
@@ -61,10 +65,14 @@ import {
   type WorkflowRunHandle,
 } from '../../agents/runtime/workflow-runner.js';
 import {
+  computeWorkflowScriptDigest,
   findActiveExtensionWorkflowByPath,
   findActiveExtensionWorkflowByPathCanonical,
+  getActiveExtensionWorkflows,
   isSymlinkedRoot,
   parseExtensionWorkflowName,
+  resolveSavedWorkflowScript,
+  type ResolvedSavedWorkflow,
 } from '../../agents/runtime/workflow-saved.js';
 import type { ExtensionWorkflowDefinition } from '../../agents/runtime/workflow-extension.js';
 import { promises as fs } from 'node:fs';
@@ -74,6 +82,12 @@ import type {
   WorkflowTask,
 } from '../../agents/workflow-run-registry.js';
 import { buildFailureLines } from '../../agents/workflow-failure-lines.js';
+import {
+  buildWorkflowSizeGuidelineParagraph,
+  resolveWorkflowSizeGuidelineSetting,
+  type WorkflowSizeGuidelineSetting,
+} from '../../agents/runtime/workflow-size.js';
+import { scanWorkflowScriptShape } from '../../agents/runtime/workflow-script-shape.js';
 import {
   readWorkflowAuthoringReference,
   resolveWorkflowAuthoringSurface,
@@ -89,20 +103,27 @@ import {
 } from '../../agents/workflow-resume-call.js';
 
 export interface WorkflowParams {
+  sourceRef?: WorkflowSourceRef;
   /**
    * Inline JavaScript source for the workflow. Provide exactly one of
-   * `script` or `scriptPath`.
+   * `script`, `scriptPath` or `name`.
    */
   script?: string;
   /**
    * P7b: absolute path to a workflow `.js` file to load and run instead of
    * inline `script` — a saved workflow, set by the `/<name>` slash command
    * (`SavedWorkflowLoader`), or a one-run script a tool generated under the
-   * generated-scripts root. Read at execution time so edits to the file take
-   * effect on the next run; the resolved path is recorded on the registry
-   * entry as run provenance.
+   * generated-scripts root. Read once per call, before approval, and that
+   * content is what runs, so edits to the file take effect on the next call;
+   * the resolved path is recorded on the registry entry as run provenance.
    */
   scriptPath?: string;
+  /**
+   * Name of a saved workflow to run: `<name>` from the project or user
+   * workflow directory, or `<extension>:<name>` from an active extension.
+   * Resolved like `scriptPath`: once per call, before approval.
+   */
+  name?: string;
   /** Optional structured value bound to the `args` global inside the script. */
   args?: unknown;
   /**
@@ -126,6 +147,7 @@ export interface WorkflowToolOptions {
 }
 
 export interface WorkflowToolResult extends ToolResult {
+  sourceRef?: WorkflowSourceRef;
   /** Exact run started by a successfully admitted background invocation. */
   workflowRunId?: string;
   /**
@@ -141,6 +163,17 @@ export interface WorkflowToolResult extends ToolResult {
 const WORKFLOW_PARAM_SCHEMA = {
   type: 'object',
   properties: {
+    sourceRef: {
+      type: 'object',
+      description:
+        'Optional caller-supplied definition id and revision for run correlation. Requires a writable journal; omit for ordinary workflows.',
+      properties: {
+        id: { type: 'string', minLength: 1, maxLength: 256 },
+        revision: { type: 'string', minLength: 1, maxLength: 256 },
+      },
+      required: ['id', 'revision'],
+      additionalProperties: false,
+    },
     script: {
       type: 'string',
       description:
@@ -169,11 +202,21 @@ const WORKFLOW_PARAM_SCHEMA = {
         'ships, or sit under the generated-scripts root ' +
         '(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project ' +
         'runtime dir, not the project tree) — any other path is refused. ' +
-        'Provide exactly ONE of `script` or `scriptPath`. The file is read ' +
-        'at execution time, so edits to a saved workflow take effect on the ' +
-        'next run. An inline `script` is persisted to ' +
+        'Provide exactly ONE of `script`, `scriptPath` or `name`. The file ' +
+        'is read once per call, before approval, so edits to a saved ' +
+        'workflow take effect on the next call. An inline `script` is ' +
+        'persisted to ' +
         '`<generated root>/inline/<runId>.js` and that path comes back in the ' +
         'result, so a resume passes the path instead of the source.',
+    },
+    name: {
+      type: 'string',
+      description:
+        'Optional. Name of a saved workflow to run instead of inline ' +
+        '`script`: `<name>` for one in `.qwen/workflows` or ' +
+        '`~/.qwen/workflows`, or `<extension>:<name>` for one an active ' +
+        'extension ships. Provide exactly ONE of `script`, `scriptPath` or ' +
+        '`name`.',
     },
     args: {
       description:
@@ -202,10 +245,10 @@ const WORKFLOW_PARAM_SCHEMA = {
         'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
     },
   },
-  // `script` is required UNLESS `scriptPath` is supplied; this XOR can't be
-  // expressed as a plain `required` list, so it's enforced in
-  // `validateToolParamValues`. Inline authoring (the LLM path) should always
-  // pass `script`; the `scriptPath` property description states the XOR.
+  // Exactly one of `script`, `scriptPath` and `name`; that can't be expressed
+  // as a plain `required` list, so it's enforced in `validateToolParamValues`.
+  // Inline authoring (the LLM path) passes `script`; the `scriptPath` and
+  // `name` property descriptions state the rule.
 } as const;
 
 class WorkflowToolInvocation extends BaseToolInvocation<
@@ -225,7 +268,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     if (!this.authoringHint) return null;
     return isScriptAuthoredByThisCall(
       this.config,
-      this.workflowName,
+      this.workflowName ?? this.params.name,
       this.params.scriptPath,
     )
       ? this.authoringHint
@@ -263,10 +306,51 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     return this.metaCache;
   }
 
+  /**
+   * The file a `scriptPath` or `name` call runs, read once. The permission
+   * check, the approval dialog and the run all use this one read, so the
+   * script the user approved is the script that runs, even when the file
+   * changes while the dialog is open.
+   */
+  private scriptLoad?: Promise<WorkflowScriptLoad>;
+  /** {@link scriptLoad} once settled, for the synchronous rule-match hook. */
+  private settledScriptLoad?: WorkflowScriptLoad;
+
+  private loadReferencedScript(): Promise<WorkflowScriptLoad> | undefined {
+    if (this.params.script !== undefined) return undefined;
+    const { name, scriptPath } = this.params;
+    if (!name && !scriptPath) return undefined;
+    this.scriptLoad ??= (async (): Promise<WorkflowScriptLoad> => {
+      try {
+        const loaded = await resolveSavedWorkflowScript(
+          name ? name : { scriptPath: scriptPath! },
+          this.config,
+        );
+        return {
+          ok: true,
+          loaded,
+          digest: computeWorkflowScriptDigest(loaded.script),
+        };
+      } catch (error) {
+        return { ok: false, error };
+      }
+    })().then((load) => {
+      this.settledScriptLoad = load;
+      return load;
+    });
+    return this.scriptLoad;
+  }
+
   getDescription(): string {
     const meta = this.resolveMeta();
     if (meta) {
       return `Run workflow: ${sanitizeLine(meta.name)}`;
+    }
+    if (this.params.name && this.params.script === undefined) {
+      const kind = parseExtensionWorkflowName(this.params.name)
+        ? 'extension'
+        : 'saved';
+      return `Run ${kind} workflow (${sanitizeLine(this.params.name)})`;
     }
     if (this.params.scriptPath && this.params.script === undefined) {
       if (isGeneratedWorkflowScriptPath(this.config, this.params.scriptPath)) {
@@ -288,8 +372,28 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     return [];
   }
 
-  override getDefaultPermission(): Promise<'ask'> {
-    return Promise.resolve('ask');
+  override async getDefaultPermission(): Promise<'allow' | 'ask'> {
+    const load = await this.loadReferencedScript();
+    // A saved workflow that cannot be loaded has nothing to run: the call
+    // fails with the load error, which lists the available names, without
+    // asking the user to approve a run that cannot start. The run reuses this
+    // failed load rather than reading again, so a file that appears after
+    // this check never runs unapproved. Deny and ask rules still apply.
+    return load && !load.ok ? 'allow' : 'ask';
+  }
+
+  /**
+   * An "always allow" for a saved or extension workflow is pinned to the
+   * script it approved: `Workflow(name:gcp:audit,sha256:…)`. The digest is
+   * computed from the file this call loaded. A `sha256` the model passed is
+   * overwritten, and a call that loaded nothing matches no digest.
+   */
+  getPermissionMatchParams(): Record<string, unknown> {
+    const load = this.settledScriptLoad;
+    return {
+      ...(this.params as Record<string, unknown>),
+      [WORKFLOW_RULE_DIGEST_KEY]: load?.ok ? load.digest : undefined,
+    };
   }
 
   /**
@@ -311,14 +415,20 @@ class WorkflowToolInvocation extends BaseToolInvocation<
    *     empty `permissionRules` stops `injectPermissionRulesIfMissing` from
    *     supplying the bare-tool-name rule, which `buildPermissionRules`
    *     documents as matching *all* invocations.
-   *   - A `scriptPath` names a file on disk that the user chose, so it can be
-   *     pre-approved — but scoped to that path. The rule is built with the
-   *     same helpers the matcher uses so a tool rename moves both sides.
+   *   - A `scriptPath` or `name` names a file on disk that the user chose,
+   *     so it can be pre-approved — scoped to that path or name, and pinned
+   *     to the digest of the content shown here, so a changed script asks
+   *     again. The rule is built with the same helpers the matcher uses so a
+   *     tool rename moves both sides.
    */
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
-    const meta = this.resolveMeta();
+    const load = await this.loadReferencedScript();
+    const loaded = load?.ok ? load : undefined;
+    const meta = loaded
+      ? readMetaForConfirmation(loaded.loaded.script)
+      : this.resolveMeta();
     // The consent surface classifies canonically (the loader's own
     // normalization) so the label matches the content that actually loads.
     const isGeneratedScriptPath =
@@ -335,13 +445,18 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       ));
     // An extension's file is third-party: name the extension workflow rather
     // than presenting it as one the user saved.
-    const extensionWorkflow =
-      this.params.scriptPath !== undefined && !isGeneratedScriptPath
-        ? await findActiveExtensionWorkflowByPathCanonical(
-            this.config,
-            this.params.scriptPath,
+    const extensionWorkflow = isGeneratedScriptPath
+      ? undefined
+      : this.params.name
+        ? getActiveExtensionWorkflows(this.config).find(
+            (workflow) => workflow.name === this.params.name,
           )
-        : undefined;
+        : this.params.scriptPath !== undefined
+          ? await findActiveExtensionWorkflowByPathCanonical(
+              this.config,
+              this.params.scriptPath,
+            )
+          : undefined;
     const body = buildConfirmationPrompt(
       this.params,
       meta,
@@ -350,6 +465,15 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         : extensionWorkflow
           ? { kind: 'extension', workflow: extensionWorkflow }
           : { kind: 'saved' },
+      loaded
+        ? {
+            scriptPath: loaded.loaded.scriptPath,
+            script: loaded.loaded.script,
+            digest: loaded.digest,
+          }
+        : load
+          ? { error: describeLoadError(load) }
+          : undefined,
     );
 
     // The cost warning belongs before the spend, not after it. The registry
@@ -363,6 +487,11 @@ class WorkflowToolInvocation extends BaseToolInvocation<
 
     const isInlineScript =
       this.params.script !== undefined || isGeneratedInlineScriptPath;
+    // Nothing loaded means nothing to pin a grant to.
+    const grantRule =
+      isInlineScript || !loaded
+        ? undefined
+        : buildWorkflowGrantRule(this.params, loaded.digest);
     const details: ToolInfoConfirmationDetails = {
       type: 'info',
       title: 'Run a dynamic workflow?',
@@ -370,12 +499,8 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // The body is a script excerpt and a phase list: rendering it as
       // Markdown would swallow the very characters the reader needs to see.
       renderPromptAsPlainText: true,
-      hideAlwaysAllow: isInlineScript,
-      permissionRules: isInlineScript
-        ? []
-        : [
-            `${getRuleDisplayName(resolveToolName(ToolNames.WORKFLOW))}(scriptPath:${this.params.scriptPath})`,
-          ],
+      hideAlwaysAllow: grantRule === undefined,
+      permissionRules: grantRule ? [grantRule] : [],
       onConfirm: async (
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
@@ -395,6 +520,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     if (runInBackground && signal.aborted) {
       return startCancelledResult();
     }
+    const load = this.loadReferencedScript();
     let handle: WorkflowRunHandle;
     try {
       handle = await WorkflowRunner.start({
@@ -405,7 +531,9 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         ...authoringHintOption(this.authoredScriptHint()),
         script: this.params.script,
         scriptPath: this.params.scriptPath,
+        ...(load ? { loadScript: () => unwrapScriptLoad(load) } : {}),
         args: this.params.args,
+        sourceRef: this.params.sourceRef,
         resumeFromRunId: this.params.resumeFromRunId,
         dispatch: this.toolOptions.dispatch,
         runInBackground,
@@ -462,6 +590,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         workflowRunId: handle.runId,
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         llmContent: [
           {
             text: buildBackgroundStartText(handle, status),
@@ -503,6 +632,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // keep the payload shape minimal.
       const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         ...(outcome.meta ? { meta: outcome.meta } : {}),
         phases: outcome.phases,
         logs: outcome.logs,
@@ -534,6 +664,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       return {
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         // Two parts: the script's return value is left exactly as it was,
         // and the run handle follows as a separate part. Note what this does
         // NOT mean — `convertToFunctionResponse` joins the text parts with a
@@ -605,6 +736,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       return {
         ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
         ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        ...(handle.sourceRef ? { sourceRef: handle.sourceRef } : {}),
         // The failure message alone names what threw but not where to look:
         // the logs the runtime already mirrored (`dispatch failed (result not
         // consumed)` and friends) only reached `returnDisplay`, which the
@@ -875,6 +1007,12 @@ const CONFIRM_ARGS_CHARS = 300;
 /** Phases listed individually before the remainder becomes a count. */
 const CONFIRM_MAX_PHASES = 12;
 
+/** Rows of the script's static structure shown in the approval dialog. */
+const CONFIRM_MAX_STRUCTURE_ROWS = 12;
+/** Says what a row's number is, so no reader takes it for an agent count. */
+const CONFIRM_STRUCTURE_HEADING =
+  'Structure (where the script calls agent(); a loop or a fan-out runs each call many times):';
+
 /**
  * Sanitize a value that will be rendered on one line of the approval dialog.
  *
@@ -1004,24 +1142,47 @@ function buildConfirmationPrompt(
   params: WorkflowParams,
   meta: WorkflowMeta | null,
   provenance: ScriptPathProvenance,
+  referenced?: ReferencedScript | { readonly error: string },
 ): string {
   const lines: string[] = [];
+  const loaded = referenced && 'script' in referenced ? referenced : undefined;
+  const loadError =
+    referenced && 'error' in referenced ? referenced.error : undefined;
+  const isReference =
+    params.script === undefined && Boolean(params.name || params.scriptPath);
 
-  if (meta) {
-    lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
-    lines.push(sanitizeLine(meta.description));
-  } else if (params.scriptPath && provenance.kind === 'extension') {
+  if (!isReference) {
+    if (meta) {
+      lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
+      lines.push(sanitizeLine(meta.description));
+    } else {
+      lines.push('Workflow: (the script declares no meta block)');
+    }
+  } else if (provenance.kind === 'extension') {
     lines.push(`Extension workflow: ${sanitizeLine(provenance.workflow.name)}`);
     lines.push(sanitizeLine(provenance.workflow.description));
-    lines.push('', `Loaded from: ${sanitizeLine(params.scriptPath)}`);
-  } else if (params.scriptPath) {
+    lines.push(
+      '',
+      `Loaded from: ${sanitizeLine(params.scriptPath ?? loaded?.scriptPath ?? provenance.workflow.scriptPath)}`,
+    );
+  } else {
     const label =
       provenance.kind === 'generated'
         ? 'Generated workflow script'
         : 'Saved workflow';
-    lines.push(`${label}: ${sanitizeLine(params.scriptPath)}`);
-  } else {
-    lines.push('Workflow: (the script declares no meta block)');
+    lines.push(
+      `${label}: ${sanitizeLine(params.name || params.scriptPath || '')}`,
+    );
+    if (meta) {
+      lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
+      lines.push(sanitizeLine(meta.description));
+    }
+    if (params.name && loaded) {
+      lines.push('', `Loaded from: ${sanitizeLine(loaded.scriptPath)}`);
+    }
+  }
+  if (loadError !== undefined) {
+    lines.push('', `Cannot load the script: ${sanitizeLine(loadError)}`);
   }
 
   if (meta?.phases?.length) {
@@ -1036,8 +1197,12 @@ function buildConfirmationPrompt(
     }
   }
 
-  if (params.scriptPath && meta) {
-    lines.push('', `Loaded from: ${sanitizeLine(params.scriptPath)}`);
+  const structureSource = params.script || loaded?.script;
+  if (structureSource) {
+    const structure = buildConfirmationStructure(structureSource);
+    if (structure.length > 0) {
+      lines.push('', CONFIRM_STRUCTURE_HEADING, ...structure);
+    }
   }
 
   if (params.resumeFromRunId) {
@@ -1057,18 +1222,101 @@ function buildConfirmationPrompt(
     );
   }
 
-  if (params.script) {
+  const scriptText = params.script || loaded?.script;
+  if (scriptText) {
     lines.push(
       '',
-      'Script:',
-      clampForDisplay(
-        sanitizeBlock(params.script),
-        CONFIRM_SCRIPT_EXCERPT_CHARS,
-      ),
+      loaded
+        ? `Script (${WORKFLOW_RULE_DIGEST_KEY} ${loaded.digest}):`
+        : 'Script:',
+      clampForDisplay(sanitizeBlock(scriptText), CONFIRM_SCRIPT_EXCERPT_CHARS),
     );
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Where the script's agents are, read statically: one row per run of step
+ * calls, per fan-out and per loop, with the first prompts of each. Declared
+ * phases say what the author meant; this says what the code does, and a reader
+ * approving a run that may dispatch hundreds of agents needs both. A row counts
+ * `agent()` call sites, never agents: a loop or a fan-out over `args` has no
+ * static count, so a number shaped like one would read as a promise.
+ */
+function buildConfirmationStructure(script: string): string[] {
+  const shape = scanWorkflowScriptShape(script);
+  const shown = shape.rows.slice(0, CONFIRM_MAX_STRUCTURE_ROWS);
+  const lines = shown.map((row) => {
+    const label =
+      row.kind === 'loop'
+        ? `loop ${sanitizeLine(row.condition ?? '')}`
+        : row.kind;
+    if (row.count === 0) {
+      return `  ${label} — runs functions built elsewhere in the script`;
+    }
+    const sites = row.count > 1 ? `, ${row.count} agent() call sites` : '';
+    const prompts = row.prompts
+      .map((prompt) => `"${sanitizeLine(prompt)}"`)
+      .join(', ');
+    return prompts ? `  ${label}${sites} — ${prompts}` : `  ${label}${sites}`;
+  });
+  if (shape.rows.length > shown.length) {
+    lines.push(`  … and ${shape.rows.length - shown.length} more`);
+  }
+  return lines;
+}
+
+/** The rule key an "always allow" pins a saved workflow's content under. */
+const WORKFLOW_RULE_DIGEST_KEY = 'sha256';
+
+/** A script a `scriptPath` or `name` call loaded, as the dialog shows it. */
+interface ReferencedScript {
+  readonly scriptPath: string;
+  readonly script: string;
+  readonly digest: string;
+}
+
+/** One read of the file a `scriptPath` or `name` call runs. */
+type WorkflowScriptLoad =
+  | {
+      readonly ok: true;
+      readonly loaded: ResolvedSavedWorkflow;
+      readonly digest: string;
+    }
+  | { readonly ok: false; readonly error: unknown };
+
+function describeLoadError(load: WorkflowScriptLoad): string {
+  if (load.ok) return '';
+  return load.error instanceof Error ? load.error.message : String(load.error);
+}
+
+/** Hands the runner the approved read, or its failure, without reading again. */
+async function unwrapScriptLoad(
+  load: Promise<WorkflowScriptLoad>,
+): Promise<ResolvedSavedWorkflow> {
+  const settled = await load;
+  if (settled.ok) return settled.loaded;
+  throw settled.error;
+}
+
+/**
+ * The "always allow" rule for a loaded saved or extension workflow, pinned to
+ * the content the user approved. `undefined` when the value would not survive
+ * the rule parser: a comma splits the specifier and `*` is a glob, so such a
+ * rule would match nothing, or more than was approved.
+ */
+function buildWorkflowGrantRule(
+  params: WorkflowParams,
+  digest: string,
+): string | undefined {
+  const [key, value] = params.name
+    ? ['name', params.name]
+    : ['scriptPath', params.scriptPath];
+  if (!value || /[,*]/.test(value) || value.trim() !== value) {
+    return undefined;
+  }
+  return `${getRuleDisplayName(resolveToolName(ToolNames.WORKFLOW))}(${key}:${value},${WORKFLOW_RULE_DIGEST_KEY}:${digest})`;
 }
 
 /** What the usage banner needs to know about the budget a run will get. */
@@ -1204,8 +1452,8 @@ Do not call this tool unless the user has asked for multi-agent orchestration. A
 
 - The user's message contains the word \`workflow\`; a system reminder confirms it when it does.
 - The user asked for orchestration in their own words — run a workflow, fan out agents, orchestrate this with subagents.
-- A skill or slash command the user invoked instructs you to use this tool.
-- The user named a saved workflow to run, reached through \`workflow('<name>')\` or \`scriptPath\`.
+- A skill or slash command that ran — invoked by the user, or by you through the Skill tool — instructs you to use this tool.
+- The user named a saved workflow to run, reached through \`name\`, \`workflow('<name>')\` or \`scriptPath\`.
 - The user asked to resume or continue an earlier run, which is \`resumeFromRunId\`.
 
 Otherwise do not call it, however well the task would parallelize. Do the work in the main loop, or spawn a single subagent for one self-contained piece. When a workflow would genuinely be the better tool, say in one sentence what it would fan out over and roughly how many agents that is, then let the user decide — and mention that including the word \`workflow\` next time skips the ask.
@@ -1265,18 +1513,28 @@ const WORKFLOW_AUTHORING_INLINE_NOTE =
 export function buildWorkflowToolDescription(
   surface: WorkflowAuthoringSurface,
   reference: WorkflowAuthoringReference | null = readWorkflowAuthoringReference(),
+  sizeGuideline: WorkflowSizeGuidelineSetting | null = null,
 ): string {
-  const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_TOOL_RUNTIME}\n\n${WORKFLOW_AUTHORING_POINTER}`;
+  // The size guideline is one more number the model plans a run around, so it
+  // sits with the runtime facts. The inline shape has no runtime section and
+  // carries it right after the decision instead.
+  const size = sizeGuideline
+    ? buildWorkflowSizeGuidelineParagraph(sizeGuideline)
+    : null;
+  const runtime = size
+    ? `${WORKFLOW_TOOL_RUNTIME}\n\n${size}`
+    : WORKFLOW_TOOL_RUNTIME;
+  const pointer = `${WORKFLOW_TOOL_DECISION}\n\n${runtime}\n\n${WORKFLOW_AUTHORING_POINTER}`;
   switch (surface) {
     case 'pointer':
       return pointer;
     case 'pointer-via-tool-search':
       return `${pointer}${WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE}`;
     case 'withheld':
-      return `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_TOOL_RUNTIME}`;
+      return `${WORKFLOW_TOOL_DECISION}\n\n${runtime}`;
     case 'inline':
       return reference
-        ? `${WORKFLOW_TOOL_DECISION}\n\n${WORKFLOW_AUTHORING_INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`
+        ? `${WORKFLOW_TOOL_DECISION}\n\n${size ? `${size}\n\n` : ''}${WORKFLOW_AUTHORING_INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`
         : pointer;
     default: {
       // Unreachable while every surface has a case above. Typed `never` so a
@@ -1382,7 +1640,12 @@ export class WorkflowTool extends BaseDeclarativeTool<
     super(
       ToolNames.WORKFLOW,
       ToolDisplayNames.WORKFLOW,
-      buildWorkflowToolDescription(surface),
+      buildWorkflowToolDescription(
+        surface,
+        undefined,
+        config.getWorkflowSizeGuideline?.() ??
+          resolveWorkflowSizeGuidelineSetting(undefined),
+      ),
       Kind.Other,
       buildWorkflowParamSchema(surface),
       /* isOutputMarkdown */ true,
@@ -1416,17 +1679,28 @@ export class WorkflowTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: WorkflowParams,
   ): string | null {
+    try {
+      readWorkflowSourceRef(params.sourceRef);
+    } catch (error) {
+      return error instanceof Error
+        ? error.message
+        : 'Invalid workflow sourceRef.';
+    }
     const hasScript =
       typeof params.script === 'string' && params.script.length > 0;
     const hasPath =
       typeof params.scriptPath === 'string' && params.scriptPath.length > 0;
-    // XOR: inline `script` (LLM authoring) or `scriptPath` (a saved-workflow
-    // slash command or a generated script), never both, never neither.
-    if (!hasScript && !hasPath) {
-      return 'WorkflowTool: provide `script` (inline source) or `scriptPath` (a workflow script file).';
+    const hasName = typeof params.name === 'string' && params.name.length > 0;
+    // Exactly one source: inline `script` (LLM authoring), `scriptPath` (a
+    // saved-workflow slash command or a generated script), or `name` (a saved
+    // or extension workflow). A second one would leave a grant scoped by one
+    // of them running the other.
+    const sources = [hasScript, hasPath, hasName].filter(Boolean).length;
+    if (sources === 0) {
+      return 'WorkflowTool: provide `script` (inline source), `scriptPath` (a workflow script file) or `name` (a saved workflow).';
     }
-    if (hasScript && hasPath) {
-      return 'WorkflowTool: provide exactly one of `script` or `scriptPath`, not both.';
+    if (sources > 1) {
+      return 'WorkflowTool: provide exactly one of `script`, `scriptPath` or `name`.';
     }
     // Security: `resumeFromRunId` becomes the `runId` and flows verbatim into
     // `getWorkflowRunJournalPath` / `getWorkflowRunSnapshotPath` (both

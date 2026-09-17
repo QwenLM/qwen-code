@@ -179,6 +179,7 @@ export type ArtifactPanelTab =
       id: string;
       kind: 'file';
       title: string;
+      previewVersion?: number;
       workspacePath: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -1143,6 +1144,7 @@ export function ArtifactPanel({
             <WorkspaceFilePreview
               key={activeTab.id}
               workspacePath={activeTab.workspacePath}
+              artifactVersion={String(activeTab.previewVersion ?? 0)}
               workspaceActions={activeWorkspaceActions!}
               previewContent={activeTab.previewContent}
               previewData={activeTab.previewData}

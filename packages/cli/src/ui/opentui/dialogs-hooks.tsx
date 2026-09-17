@@ -546,7 +546,13 @@ export function OpenTuiHooksDialog({
         </text>
         <text fg={C.dim}>{` · ${countText}`}</text>
       </box>
-      {notice ? <text fg={C.dim}>{notice}</text> : null}
+      {notice
+        ? notice.split('\n').map((line, index) => (
+            <text key={`notice-${index}`} fg={C.dim}>
+              {line}
+            </text>
+          ))
+        : null}
       {banner ? (
         <box marginTop={1}>
           <text fg={C.yellow}>{banner}</text>

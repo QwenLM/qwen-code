@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   buildHooksListing,
   type ContentGeneratorConfig,
@@ -88,6 +89,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
+  ToolErrorType,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
@@ -139,6 +141,7 @@ import {
   type ChatRecord,
   type ToolInvocationGuard,
   type WorkflowParams,
+  type WorkflowSourceRef,
   type WorkflowToolResult,
   type WorkflowRunRegistry,
   getWorkflowTaskMutationKey,
@@ -156,6 +159,7 @@ import {
   resolveModelId,
   buildModelIdContext,
   registerSession,
+  getLastPeerInboxFailure,
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
@@ -208,13 +212,14 @@ import {
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
-import { Readable, Writable } from 'node:stream';
+import { Readable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
@@ -289,10 +294,11 @@ import {
   startChildHeapProbe,
   type ChildHeapProbe,
 } from './child-heap-probe.js';
+import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
-  buildModelReasoningConfigPreview,
+  buildModelReasoningRoutePreview,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
   getDefaultReasoningConfig,
@@ -300,7 +306,6 @@ import {
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
-  resolvePersistedReasoningConfigState,
   REASONING_SELECTION_PERSISTED_META_KEY,
   REASONING_EFFORT_DEFAULT,
   REASONING_EFFORT_NAMES,
@@ -342,6 +347,7 @@ import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
@@ -508,6 +514,39 @@ function isSessionOwnedWorkflowTool(
     'buildSessionOwnedBackground' in value &&
     typeof value.buildSessionOwnedBackground === 'function'
   );
+}
+
+/**
+ * Start a session-owned run, reporting a rejected parameter as one.
+ *
+ * `buildSessionOwnedBackground` validates the call the way the tool would for
+ * the model — a `sourceRef` that is not `{id, revision}`, an empty script —
+ * and throws a plain `Error`. Left alone that reaches the caller as an
+ * internal error, which reads as a daemon fault rather than the request
+ * problem it is.
+ */
+async function startSessionOwnedWorkflow(
+  tool: SessionOwnedWorkflowTool,
+  params: Omit<WorkflowParams, 'run_in_background'>,
+  workflowName: string | undefined,
+): Promise<WorkflowToolResult> {
+  let invocation;
+  try {
+    invocation = tool.buildSessionOwnedBackground(params, workflowName);
+  } catch (error) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const result = await invocation.execute(new AbortController().signal);
+  if (result.error?.type === ToolErrorType.INVALID_TOOL_PARAMS) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      result.error.message,
+    );
+  }
+  return result;
 }
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -2854,9 +2893,10 @@ export async function runAcpAgent(
 
   let agentInstance: QwenAgent | undefined;
   let connection: AgentSideConnection;
+  let output: ReturnType<typeof createAcpOutput>;
   markAcpStartup('transportSetupStart');
   try {
-    const stdout = Writable.toWeb(process.stdout) as WritableStream;
+    output = createAcpOutput(process.stdout);
     const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
     // Stdout is used to send messages to the client, so console.log/console.info
@@ -2867,7 +2907,7 @@ export async function runAcpAgent(
 
     let initializeRequestId: string | number | null | undefined;
     const pendingNewSessionRequestIds = new Set<string | number | null>();
-    const stream = ndJsonStream(stdout, stdin, {
+    const stream = ndJsonStream(output.stream, stdin, {
       onMessageObserved: ({ direction, bytes, message }) => {
         if (direction === 'sent') {
           observeAcpToolResultWire(message, bytes);
@@ -3151,6 +3191,7 @@ export async function runAcpAgent(
   const shutdownHandler = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    prepareFileWatchersForProcessExit();
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
 
     if (agentInstance?.isTrustedManagedParent()) {
@@ -3210,8 +3251,10 @@ export async function runAcpAgent(
   process.on('SIGTERM', shutdownHandler);
   process.on('SIGINT', shutdownHandler);
 
+  const shutdownFailures: unknown[] = [];
   try {
     await connection.closed;
+    prepareFileWatchersForProcessExit();
     if (agentInstance?.isTrustedManagedParent()) {
       try {
         await shutdownManagedAgent(
@@ -3230,10 +3273,21 @@ export async function runAcpAgent(
       await drainPoolBeforeExit('ide_close');
       await disposeSessionsOnce();
     }
+  } catch (error) {
+    shutdownFailures.push(error);
   } finally {
+    try {
+      if (!shuttingDown) await output.close();
+    } catch (error) {
+      if (!shuttingDown) shutdownFailures.push(error);
+    }
     process.off('SIGTERM', shutdownHandler);
     process.off('SIGINT', shutdownHandler);
     eventLoopMonitor.dispose();
+  }
+  if (shutdownFailures.length === 1) throw shutdownFailures[0];
+  if (shutdownFailures.length > 1) {
+    throw new AggregateError(shutdownFailures, 'ACP EOF shutdown failed');
   }
 }
 
@@ -4725,7 +4779,16 @@ class QwenAgent implements Agent {
         });
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
-        if (messaging === null) this.peerMessagingStart = null;
+        // Except for a platform with no inbox transport. That refusal is
+        // decided before any filesystem call and holds for every candidate
+        // path, so no later session in this process can succeed; keep the
+        // settled null so the attempt, and its log line, happen once.
+        if (
+          messaging === null &&
+          getLastPeerInboxFailure()?.cause !== 'unsupported_platform'
+        ) {
+          this.peerMessagingStart = null;
+        }
         return messaging;
       } catch (error) {
         debugLogger.error(
@@ -4775,7 +4838,7 @@ class QwenAgent implements Agent {
     // from more than one workspace, and a record exists to be addressed,
     // so it is written only when that session's settings turn messaging
     // on. The process's startup settings answer for nobody else.
-    if (settings.merged.agents?.crossSessionMessaging !== true) return;
+    if (!isCrossSessionMessagingEnabled(settings.merged)) return;
     // Bound by the first session that needs it rather than at startup: an
     // ACP process with no session has nothing to advertise and nobody to
     // receive for, and this is also the first moment the agent exists.
@@ -7914,34 +7977,31 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
-        const resolved =
-          !model.isRuntimeModel && !modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? config.getResolvedModelConfig?.(
-                model.authType,
-                model.id,
-                model.registryBaseUrl ?? model.baseUrl,
-              )
-            : undefined;
-        const configOptions =
-          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-            ? undefined
-            : buildModelReasoningConfigPreview(
-                model.id,
-                resolvePersistedReasoningConfigState(
-                  model.id,
-                  settings.merged.model?.reasoningEffort,
-                  resolved?.generationConfig.thinkingMandatory === true,
-                  model.capabilities?.reasoning,
-                ),
-                model.capabilities?.reasoning,
-                resolved
-                  ? {
-                      ...resolved.generationConfig,
-                      model: model.id,
-                      baseUrl: resolved.baseUrl,
-                    }
-                  : undefined,
-              );
+        const resolved = !model.isRuntimeModel
+          ? config.getResolvedModelConfig?.(
+              model.authType,
+              model.id,
+              model.registryBaseUrl,
+            )
+          : undefined;
+        const generation: ContentGeneratorConfig = {
+          ...resolved?.generationConfig,
+          model: model.id,
+          authType: model.authType,
+          baseUrl: resolved?.baseUrl,
+        };
+        const configOptions = model.isRuntimeModel
+          ? undefined
+          : buildModelReasoningRoutePreview(
+              generation,
+              resolveReasoningCapabilities(
+                generation,
+                model.capabilities?.reasoning ??
+                  resolved?.capabilities?.reasoning,
+              ),
+              settings.merged.model?.reasoningEffort,
+              modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+            );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -8528,6 +8588,13 @@ class QwenAgent implements Agent {
           : availableCommands.filter((command) => command.name !== 'workflows'),
       availableSkills: availableSkills ?? [],
       workflowsEnabled,
+      workflowToolFeatures: {
+        sourceRef: true,
+        agentStepId: true,
+        workflowStepId: true,
+        runSavedArgs: true,
+        runScript: true,
+      },
       savedWorkflows,
     };
   }
@@ -12576,22 +12643,39 @@ class QwenAgent implements Agent {
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           );
         }
+        // What the two start actions run with. A retry or rerun replays the
+        // original run's own args and `sourceRef` — that is what keeps it the
+        // same run — so anything sent alongside those actions is ignored.
+        const startInput: Omit<WorkflowParams, 'run_in_background'> = {
+          // `args` is any JSON value, `null` included, so presence decides.
+          ...(Object.hasOwn(params, 'args') ? { args: params['args'] } : {}),
+          ...(params['sourceRef'] !== undefined
+            ? { sourceRef: params['sourceRef'] as WorkflowSourceRef }
+            : {}),
+        };
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         if (!this.canUseWorkflowControls(config)) {
           return { changed: false };
         }
+        // `taskId` is a run id for the control actions, a definition name for
+        // `run-saved` and the caller's own start key for `run-script`. Each
+        // namespace claims separately, so one cannot block another; within a
+        // namespace, a second concurrent start of the same key is refused.
         const mutationClaim =
           action === 'run-saved'
             ? getWorkflowTaskMutationKey(config, taskId, 'saved')
-            : getWorkflowTaskMutationKey(config, taskId);
+            : action === 'run-script'
+              ? getWorkflowTaskMutationKey(config, taskId, 'script')
+              : getWorkflowTaskMutationKey(config, taskId);
         if (action === 'delete-history') {
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
@@ -12639,14 +12723,56 @@ class QwenAgent implements Agent {
                   'The workflow tool is unavailable; cannot run this saved workflow.',
                 );
               }
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  {
-                    scriptPath: savedWorkflow.scriptPath,
-                  },
-                  savedWorkflow.name,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, scriptPath: savedWorkflow.scriptPath },
+                savedWorkflow.name,
+              );
+              const startedTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              return startedTask
+                ? {
+                    changed: true,
+                    status: startedTask.status,
+                    taskId: startedTask.runId,
+                  }
+                : { changed: false };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        if (action === 'run-script') {
+          const script = params['script'];
+          if (typeof script !== 'string' || script.length === 0) {
+            throw RequestError.invalidParams(
+              { errorKind: 'workflow_invalid_params' },
+              '`script` is required for the "run-script" action',
+            );
+          }
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'The workflow tool is unavailable; cannot run this script.',
+                );
+              }
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, script },
+                // No definition name: a caller-supplied script is named by its
+                // own `export const meta`, which is where the run's label
+                // comes from when no saved workflow backs it.
+                undefined,
+              );
               const startedTask = result.workflowRunId
                 ? registry.get(result.workflowRunId)
                 : undefined;
@@ -12724,14 +12850,14 @@ class QwenAgent implements Agent {
                   ? { scriptPath: readableScriptPath }
                   : { script: task.script }),
                 args: task.args,
+                ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  startParams,
-                  readableScriptPath ? task.workflowName : undefined,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                startParams,
+                readableScriptPath ? task.workflowName : undefined,
+              );
               if (action === 'rerun') {
                 const rerunTask = result.workflowRunId
                   ? registry.get(result.workflowRunId)
@@ -14117,6 +14243,22 @@ class QwenAgent implements Agent {
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
+            const reasoningError = session
+              .getConfig()
+              .stageReasoningOverrides?.(
+                newMerged.modelProviders,
+                newMerged.providerProtocol ?? {},
+              );
+            if (reasoningError)
+              await session
+                .sendUpdate({
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: reasoningError },
+                  _meta: { qwenDiscreteMessage: true },
+                })
+                .catch((error) =>
+                  debugLogger.warn('Reasoning notice delivery failed', error),
+                );
             if (!session.isIdle()) {
               skipped.push(id);
               return;
@@ -15619,7 +15761,8 @@ class QwenAgent implements Agent {
 
     if (
       activeRuntimeSnapshot ||
-      currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+      (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+        !modelReasoning?.profile) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,
@@ -15671,6 +15814,13 @@ class QwenAgent implements Agent {
       generation,
       modelReasoning,
     );
+    if (
+      modelReasoning?.profile &&
+      gptOverride?.enabled &&
+      gptOverride.useDefaultEffort
+    ) {
+      return [modeConfigOption, modelConfigOption];
+    }
     const gptEnableOverride =
       generation.reasoning === false
         ? getGptReasoningOverrideState(
@@ -15769,10 +15919,11 @@ class QwenAgent implements Agent {
         config.getAuthType?.(),
         config.getCurrentModelRegistryBaseUrl?.(),
       );
-    if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
-      return undefined;
-    }
-    return getConfiguredModelReasoning(config);
+    const reasoning = getConfiguredModelReasoning(config);
+    return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+      !reasoning?.profile
+      ? undefined
+      : reasoning;
   }
 
   private buildSelectableModelOptions(config: Config) {

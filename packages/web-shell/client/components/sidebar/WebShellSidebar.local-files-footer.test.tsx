@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type Root } from 'react';
 import { createRoot } from 'react-dom/client';
+import { StandaloneContext } from '../../config/standalone';
 import type { WebShellSidebarFooterItem } from './WebShellSidebar';
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
@@ -29,6 +30,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
         capabilities: undefined,
       },
       workspace: {
+        baseUrl: '',
         capabilities: undefined,
         client: {
           workspaceByCwd: vi.fn(() => ({
@@ -58,6 +60,24 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
       archived: makeSessions(),
     };
   });
+
+// Counts every mount of the browser-local bridge hook. The sidebar gate is the
+// only thing between a remote daemon and a client directory, so pin the hook
+// itself and not just the absent trigger: a refactor that hoisted the hook out
+// of LocalFilesControl would keep the trigger assertions green while the bridge
+// registered for a remote daemon.
+const bridgeHookCalls = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock('../../local-files/useLocalFilesBridge', () => ({
+  useLocalFilesBridge: () => {
+    bridgeHookCalls.count += 1;
+    return {
+      status: { phase: 'idle', blocker: null },
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  },
+}));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
@@ -123,28 +143,33 @@ const LOCAL_FILES_LABEL = 'Local files';
 let root: Root;
 let container: HTMLDivElement;
 
-function renderSidebar(footer?: {
-  items: readonly WebShellSidebarFooterItem[];
-}) {
+function renderSidebar(
+  footer?: {
+    items: readonly WebShellSidebarFooterItem[];
+  },
+  standalone = false,
+) {
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <WebShellSidebar
-          collapsed={false}
-          onCollapsedChange={() => {}}
-          onOpenSettings={() => {}}
-          onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
-          onOpenWorkflows={() => {}}
-          onOpenGoals={() => {}}
-          onOpenSessions={() => {}}
-          onOpenSplitView={() => {}}
-          onNewSession={() => false}
-          onLoadSession={vi.fn()}
-          onError={() => {}}
-          footer={footer}
-        />
-      </I18nProvider>,
+      <StandaloneContext.Provider value={standalone}>
+        <I18nProvider language="en">
+          <WebShellSidebar
+            collapsed={false}
+            onCollapsedChange={() => {}}
+            onOpenSettings={() => {}}
+            onOpenDaemonStatus={() => {}}
+            onOpenScheduledTasks={() => {}}
+            onOpenWorkflows={() => {}}
+            onOpenGoals={() => {}}
+            onOpenSessions={() => {}}
+            onOpenSplitView={() => {}}
+            onNewSession={() => false}
+            onLoadSession={vi.fn()}
+            onError={() => {}}
+            footer={footer}
+          />
+        </I18nProvider>
+      </StandaloneContext.Provider>,
     );
   });
 }
@@ -164,6 +189,8 @@ function setDesktopShell(enabled: boolean) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  workspace.baseUrl = window.location.origin;
+  bridgeHookCalls.count = 0;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -195,4 +222,24 @@ describe('local files footer entry', () => {
     renderSidebar({ items: ['localFiles'] });
     expect(localFilesTrigger()).not.toBeNull();
   });
+});
+
+it('withholds browser-local files on a remote daemon for standalone and embedded hosts alike', () => {
+  workspace.baseUrl = 'https://remote.example';
+  renderSidebar(undefined, true);
+  expect(localFilesTrigger()).toBeNull();
+  // The gate keys on the connected daemon's origin, never on how the page is
+  // hosted, so an embedded shell pointed at a remote daemon withholds the
+  // bridge too — a client directory must not be handed to a remote daemon.
+  renderSidebar();
+  expect(localFilesTrigger()).toBeNull();
+  // Not merely hidden: the bridge hook never ran, so nothing registered,
+  // opened a WebSocket, or restored a directory handle for that origin.
+  // `https://` matters here — a remote secure context is exactly the case
+  // where the File System Access API would otherwise be available.
+  expect(bridgeHookCalls.count).toBe(0);
+  workspace.baseUrl = window.location.origin;
+  renderSidebar(undefined, true);
+  expect(localFilesTrigger()).not.toBeNull();
+  expect(bridgeHookCalls.count).toBeGreaterThan(0);
 });
