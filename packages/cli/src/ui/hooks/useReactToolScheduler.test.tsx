@@ -330,4 +330,88 @@ describe('useReactToolScheduler', () => {
     });
     expect(firstOnComplete).not.toHaveBeenCalled();
   });
+
+  it('resolves the tool registry lazily so a scheduler created before initialize still runs tools', async () => {
+    const execute = vi.fn(
+      (): Promise<ToolResult> =>
+        Promise.resolve({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        }),
+    );
+    const mockTool = new MockTool({
+      name: 'mockTool',
+      displayName: 'Mock Tool',
+      execute,
+    });
+    const mockToolRegistry = {
+      getTool: vi.fn(() => mockTool),
+      ensureTool: vi.fn(async () => mockTool),
+      getAllToolNames: vi.fn(() => ['mockTool']),
+    };
+    const getToolRegistry = vi.fn(
+      (): typeof mockToolRegistry | undefined => undefined,
+    );
+    const mockConfig = {
+      getToolRegistry,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () => 4_000_000,
+      getTruncateToolOutputLines: () => 1000,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getBaseLlmClient: vi.fn(),
+      getUseModelRouter: () => false,
+      getLlmClient: () => null,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 80,
+        terminalHeight: 24,
+      }),
+      getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getDisableAllHooks: () => true,
+      getHookSystem: () => undefined,
+      getDebugLogger: () => ({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as Config;
+
+    const onComplete = vi.fn(async () => {});
+    const { result, rerender } = renderHook(() =>
+      useReactToolScheduler(onComplete, mockConfig, () => undefined, vi.fn()),
+    );
+
+    getToolRegistry.mockReturnValue(mockToolRegistry);
+    rerender();
+
+    act(() => {
+      result.current[1](
+        {
+          callId: 'call-late-registry',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-late-registry',
+        },
+        new AbortController().signal,
+      );
+    });
+
+    await waitFor(() => {
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalled();
+    });
+    expect(onComplete.mock.calls[0][0][0].status).toBe('success');
+  });
 });
