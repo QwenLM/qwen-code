@@ -1023,6 +1023,61 @@ describe('ndJsonStream', () => {
     stderr.mockRestore();
   });
 
+  it('fails closed on an oversized content-bearing session/update notification', async () => {
+    const toolCallContent = Object.fromEntries(
+      Array.from({ length: 10_001 }, (_, index) => [
+        `part-${index}`,
+        index === 0 ? 'do-not-log-tool-body' : index,
+      ]),
+    );
+    const oversized = {
+      jsonrpc: '2.0',
+      method: 'session/update',
+      params: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-1',
+          content: toolCallContent,
+        },
+      },
+    } satisfies AnyMessage;
+    const later = message('after-oversized', { ok: true });
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTransportError = vi.fn();
+    const onMessageReceived = vi.fn();
+    const validateInboundMessage = vi.fn((_message: AnyMessage) => true);
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([
+        encoder.encode(
+          `${JSON.stringify(oversized)}\n${JSON.stringify(later)}\n`,
+        ),
+      ]),
+      { onTransportError, onMessageReceived },
+      limits({ maxFrameBytes: 512_000, maxQueuedBytes: 512_000 }),
+      validateInboundMessage,
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([]);
+    expect(onTransportError).toHaveBeenCalledOnce();
+    expect(onTransportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'ndjson_invalid_message' }),
+    );
+    expect(onMessageReceived).not.toHaveBeenCalled();
+    expect(validateInboundMessage).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith('Failed to parse JSON message:', {
+      errorKind: 'ndjson_invalid_message',
+      bytes: expect.any(Number),
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      payloadOmitted: true,
+    });
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain(
+      'do-not-log-tool-body',
+    );
+    stderr.mockRestore();
+  });
+
   it('does not abort the ACP connection after dropping an oversized notification', async () => {
     const oversized = {
       jsonrpc: '2.0',

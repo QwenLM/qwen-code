@@ -593,10 +593,13 @@ function handleBoundedLine(
   // MAX_JSON_NODES well under the 64MiB byte budget. Throwing
   // NdJsonInvalidMessageError here used to SIGKILL the ACP child, after
   // which every later request 404s "No session with id" (issue #11908).
-  // Drop the oversized snapshot, log bounded metadata, and keep the
-  // channel up. Malformed JSON and invalid envelopes still tear down.
+  // Drop is narrowed to latest-wins snapshots
+  // (`available_commands_update`, `current_mode_update`,
+  // `session_info_update`): log bounded metadata and keep the channel up.
+  // Other oversized notifications stay fail-closed via throw. Malformed
+  // JSON and invalid envelopes still tear down.
   if (!isResponse && !hasBoundedJsonStructure(parsed)) {
-    if (isJsonRpcNotificationMessage(parsed)) {
+    if (isLatestWinsSnapshotNotification(parsed)) {
       logDroppedOversizedNotification(parsed.method, lineBytes);
       return;
     }
@@ -737,6 +740,26 @@ function isJsonRpcNotificationMessage(
   value: AnyMessage,
 ): value is AnyMessage & { method: string } {
   return 'method' in value && !('id' in value);
+}
+
+function isLatestWinsSnapshotNotification(
+  value: AnyMessage,
+): value is AnyMessage & { method: string } {
+  if (
+    !isJsonRpcNotificationMessage(value) ||
+    value.method !== 'session/update'
+  ) {
+    return false;
+  }
+  // Params are unvalidated here: read only the latest-wins discriminator.
+  const sessionUpdate = (
+    value as { params?: { update?: { sessionUpdate?: unknown } } }
+  ).params?.update?.sessionUpdate;
+  return (
+    sessionUpdate === 'available_commands_update' ||
+    sessionUpdate === 'current_mode_update' ||
+    sessionUpdate === 'session_info_update'
+  );
 }
 
 function isJsonRpcResponseMessage(
