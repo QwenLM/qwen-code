@@ -146,6 +146,32 @@ describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
   });
 });
 
+describe('foldLiveEvent tool-queued (approved but not started)', () => {
+  it('records the queued status and clears it again', () => {
+    const queued = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(queued[0]).toMatchObject({ confirm: 'approved', queued: true });
+    const running = foldLiveEvent(queued, {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: false,
+    });
+    expect(running[0]).toMatchObject({ queued: false });
+  });
+
+  it('ignores a status for a call with no card', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(items).toHaveLength(1);
+  });
+});
+
 describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
   it('carries promptId and sentToModel onto the user item (R1-16)', () => {
     const items = foldLiveEvent([assistant('hi')], {
@@ -328,6 +354,48 @@ describe('foldLiveEvent tool-result ansi', () => {
       totalLines: 30,
       totalBytes: 4096,
     });
+  });
+
+  it('drops the grid when a later chunk carries plain text', () => {
+    // A shell run that streams ANSI and then trips binary detection replaces
+    // the grid with a plain string, and ToolCardBody prefers the grid
+    // unconditionally — a stale one would hide the notice for good, including
+    // in the settled card.
+    const grid = [
+      [
+        {
+          text: 'partial',
+          bold: false,
+          italic: false,
+          underline: false,
+          dim: false,
+          inverse: false,
+          fg: '',
+          bg: '',
+        },
+      ],
+    ];
+    let items = foldLiveEvent([], {
+      type: 'tool-start',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'run_shell_command',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: '',
+      ansi: { grid },
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-output',
+      id: 'tool1',
+      output: '[Binary output detected. Halting stream...]',
+    });
+    const tool = items[0];
+    if (tool.kind !== 'tool') throw new Error('expected tool item');
+    expect(tool.ansi).toBeUndefined();
+    expect(tool.output).toBe('[Binary output detected. Halting stream...]');
   });
 });
 

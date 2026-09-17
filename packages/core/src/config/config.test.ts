@@ -97,7 +97,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { applySkillSideEffects } from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
-import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -145,6 +145,8 @@ import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { createHookOutput, HookSystem } from '../hooks/index.js';
+import { HookRegistry } from '../hooks/hookRegistry.js';
+import { HookPlanner } from '../hooks/hookPlanner.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -930,6 +932,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('setHooksFromSettings', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
     const userHooks = {
       PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
     };
@@ -988,6 +993,298 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getProjectHooks()).toBeUndefined();
       expect(config.getUserHooks()).toBe(userHooks);
+    });
+
+    it('replaces system hooks together with the other fields', () => {
+      const config = new Config({ ...baseParams, systemHooks });
+
+      config.setHooksFromSettings({ userHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBe(userHooks);
+    });
+  });
+
+  describe('per-scope hooks and the legacy merged fallback', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
+    const userHooks = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    const projectHooks = {
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'echo project' }] }],
+    };
+    const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+
+    it('does not read the merged hooks as project hooks when only user hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        userHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getUserHooks()).toBe(userHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('does not read the merged hooks as user hooks when only project hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        projectHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBeUndefined();
+    });
+
+    it('still serves the merged hooks as user and project hooks when no scope is supplied', () => {
+      const config = new Config({ ...baseParams, hooks: mergedHooks });
+
+      expect(config.getUserHooks()).toBe(mergedHooks);
+      expect(config.getProjectHooks()).toBe(mergedHooks);
+    });
+
+    it('serves system hooks without promoting the merged hooks to system hooks', () => {
+      const withSystem = new Config({
+        ...baseParams,
+        systemHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(withSystem.getSystemHooks()).toBe(systemHooks);
+      expect(withSystem.getUserHooks()).toBeUndefined();
+      expect(withSystem.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['safe mode', { safeMode: true }],
+      ['bare mode', { bareMode: true }],
+    ])('loads no system hooks in %s', (_label, mode) => {
+      const config = new Config({ ...baseParams, ...mode, systemHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+    });
+
+    describe('registration through the hook registry', () => {
+      // What the CLI handed Config before system hooks had their own channel:
+      // a user settings hook, no workspace hooks, and the merged settings
+      // (which then held only that user hook) as the legacy field.
+      const lintHook = {
+        PreToolUse: [
+          {
+            hooks: [{ type: 'command', command: './lint.sh', name: 'lint' }],
+          },
+        ],
+      };
+
+      async function registryFor(params: Partial<ConfigParameters>) {
+        const config = new Config({ ...baseParams, ...params });
+        const registry = new HookRegistry(config);
+        await registry.initialize();
+        return registry;
+      }
+
+      it('registers a user settings hook once, under the user source', async () => {
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        expect(
+          registry.getAllHooks().map(({ eventName, source }) => ({
+            eventName,
+            source,
+          })),
+        ).toEqual([{ eventName: HookEventName.PreToolUse, source: 'user' }]);
+      });
+
+      it('runs that hook once per event, as it did while it was registered twice', async () => {
+        // The planner dedups by hook identity regardless of source, so the
+        // double registration never doubled execution; this pins that the
+        // change above does not alter how many times the hook runs.
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+
+      it('runs a hook registered under two sources once, because the planner dedups by identity', async () => {
+        // A Config built from merged settings alone still registers the hook
+        // under both the user and project sources. The planner is what keeps
+        // that from running it twice.
+        const registry = await registryFor({ hooks: lintHook });
+        expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
+          'user',
+          'project',
+        ]);
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+    });
+
+    it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
+      const config = new Config({
+        ...baseParams,
+        trustedFolder: false,
+        systemHooks,
+        projectHooks,
+      });
+
+      expect(config.getSystemHooks()).toBe(systemHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+  });
+
+  describe('onMessageBusChange', () => {
+    it('calls a listener at once when a bus already exists', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('waits for initialize when no bus exists yet', async () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+      expect(listener).not.toHaveBeenCalled();
+
+      await config.initialize();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('announces the bus only once it can run hooks', async () => {
+      const config = new Config({ ...baseParams });
+      const requestListenerCounts: number[] = [];
+      config.onMessageBusChange((bus) => {
+        requestListenerCounts.push(
+          bus.listenerCount(MessageBusType.HOOK_EXECUTION_REQUEST),
+        );
+      });
+
+      await config.initialize();
+
+      expect(requestListenerCounts).toHaveLength(1);
+      expect(requestListenerCounts[0]).toBeGreaterThanOrEqual(1);
+    });
+
+    it('stops notifying a disposed listener', () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+      const dispose = config.onMessageBusChange(listener);
+
+      dispose();
+      config.setMessageBus(new MessageBus());
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('keeps initializing and notifying others when a listener throws', async () => {
+      const config = new Config({ ...baseParams });
+      config.onMessageBusChange(() => {
+        throw new Error('observer broke');
+      });
+      const other = vi.fn();
+      config.onMessageBusChange(other);
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(other).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles a rejection from an async listener', async () => {
+      const config = new Config({ ...baseParams });
+      let catchSpy: ReturnType<typeof vi.fn> | undefined;
+      config.onMessageBusChange(() => {
+        // Created while notified, so the only chance to handle it is the
+        // caller's: nothing else attaches a handler before it settles.
+        const rejection = Promise.reject(new Error('async observer broke'));
+        catchSpy = vi.spyOn(rejection, 'catch') as unknown as ReturnType<
+          typeof vi.fn
+        >;
+        return rejection;
+      });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(catchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets a listener dispose itself while it is notified', () => {
+      const config = new Config({ ...baseParams });
+      const calls: string[] = [];
+      const dispose = config.onMessageBusChange(() => {
+        calls.push('self-disposing');
+        dispose();
+      });
+      config.onMessageBusChange(() => {
+        calls.push('other');
+      });
+
+      expect(() => config.setMessageBus(new MessageBus())).not.toThrow();
+      config.setMessageBus(new MessageBus());
+
+      expect(calls).toEqual(['self-disposing', 'other', 'other']);
+    });
+
+    it('notifies a listener added during notification exactly once', () => {
+      const config = new Config({ ...baseParams });
+      const late = vi.fn();
+      const dispose = config.onMessageBusChange(() => {
+        dispose();
+        config.onMessageBusChange(late);
+      });
+
+      config.setMessageBus(new MessageBus());
+
+      // Once from its own registration, which sees the bus already set; the
+      // announcement in progress must not reach it a second time.
+      expect(late).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-announce the bus it already has', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      config.setMessageBus(bus);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces nothing when all hooks are disabled', async () => {
+      const config = new Config({ ...baseParams, disableAllHooks: true });
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      await config.initialize();
+
+      expect(config.getMessageBus()).toBeUndefined();
+      expect(listener).not.toHaveBeenCalled();
     });
   });
 
@@ -5130,6 +5427,67 @@ describe('Server Config (config.ts)', () => {
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  describe('isWorkflowNameOnly', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('is off by default, and on from the setting or the environment', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: true,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(true);
+      // The environment only turns the lock on.
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: false,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+    });
+
+    // Notifications read the lock from the registry the config owns, so the
+    // two cannot disagree about which resume call to offer.
+    it('hands the lock to its workflow run registry', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      for (const workflowNameOnly of [true, false]) {
+        const registry = new Config({
+          ...baseParams,
+          workflowNameOnly,
+        }).getWorkflowRunRegistry();
+        const completion = vi.fn();
+        registry.setCompletionCallback(completion);
+        const entry = registry.register({
+          runId: 'wf_lock',
+          meta: null,
+          status: 'running',
+          startTime: 1,
+          outputFile: '',
+          abortController: new AbortController(),
+          isBackgrounded: true,
+          scriptPath: '/runtime/workflows/generated/inline/wf_lock.js',
+        } as never);
+        registry.fail(entry.runId, 'boom', 2);
+        const text = completion.mock.calls[0][1] as string;
+        expect(text.includes('only whoever started it')).toBe(workflowNameOnly);
+        expect(text.includes('Workflow({ scriptPath')).toBe(!workflowNameOnly);
+      }
+    });
+
+    it('is decided when the session starts', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      const config = new Config(baseParams);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(config.isWorkflowNameOnly()).toBe(false);
+    });
+  });
+
   it('keeps project-derived features disabled for a provisional workspace', () => {
     const config = new Config({
       ...baseParams,
@@ -7879,6 +8237,148 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('refreshAuth', () => {
+    it('creates the initial generator with the model API resolved from raw OpenAI settings', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'responses-model',
+        modelProvidersConfig: {
+          openai: [{ id: 'responses-model', wireApi: 'responses' }],
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'responses-model', authType },
+          sources: {},
+        }),
+      );
+
+      await config.refreshAuth(AuthType.USE_OPENAI, true);
+
+      expect(resolveContentGeneratorConfigWithSources).toHaveBeenLastCalledWith(
+        config,
+        AuthType.USE_OPENAI_RESPONSES,
+        expect.objectContaining({ model: 'responses-model' }),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(createContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+        config,
+        true,
+      );
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+    });
+
+    it.each(['retry', 'install', 'switch', 'invalid-switch'] as const)(
+      'honors %s after initial Responses authentication fails',
+      async (action) => {
+        const baseUrl = 'https://gateway.example/v1';
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'same',
+          modelProvidersConfig: {
+            openai: [{ id: 'same', baseUrl, wireApi: 'responses' }],
+          },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          (_config, authType, generationConfig) => ({
+            config: { ...generationConfig, model: 'same', authType },
+            sources: {},
+          }),
+        );
+        vi.mocked(createContentGenerator).mockRejectedValueOnce(
+          new Error('missing key'),
+        );
+        await expect(
+          config.refreshAuth(AuthType.USE_OPENAI, true),
+        ).rejects.toThrow('missing key');
+        config.reloadModelProvidersConfig({
+          openai: [
+            { id: 'same', baseUrl },
+            { id: 'same', baseUrl, wireApi: 'responses' },
+          ],
+        });
+        if (action === 'install') {
+          config.syncModelSelection(AuthType.USE_OPENAI, 'same', baseUrl);
+        } else if (action === 'switch') {
+          await config.switchModel(AuthType.USE_OPENAI, 'same', { baseUrl });
+        } else if (action === 'invalid-switch') {
+          await expect(
+            config.switchModel(AuthType.USE_OPENAI, 'missing', { baseUrl }),
+          ).rejects.toThrow();
+        }
+        await config.refreshAuth(AuthType.USE_OPENAI, true);
+        const expectedAuth =
+          action === 'install' || action === 'switch'
+            ? AuthType.USE_OPENAI
+            : AuthType.USE_OPENAI_RESPONSES;
+        expect(createContentGenerator).toHaveBeenLastCalledWith(
+          expect.objectContaining({ model: 'same', authType: expectedAuth }),
+          config,
+          true,
+        );
+        expect(config.getAuthType()).toBe(expectedAuth);
+      },
+    );
+
+    it('does not redirect an OpenAI retry after the first Gemini refresh fails', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'test-model', authType },
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockRejectedValueOnce(
+        new Error('test generator failure'),
+      );
+      await expect(config.refreshAuth(AuthType.USE_GEMINI)).rejects.toThrow(
+        'test generator failure',
+      );
+      await config.refreshAuth(AuthType.USE_OPENAI, true);
+      expect(createContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+        config,
+        true,
+      );
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('requires explicit selection after hot reload removes the selected API route', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        model: 'shared',
+        modelProvidersConfig: {
+          openai: [{ id: 'shared', wireApi: 'responses' }],
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'shared', authType },
+          sources: {},
+        }),
+      );
+      await config.refreshAuth(AuthType.USE_OPENAI_RESPONSES);
+      vi.mocked(createContentGenerator).mockClear();
+      config.reloadModelProvidersConfig({ openai: [{ id: 'shared' }] });
+
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      expect(createContentGenerator).not.toHaveBeenCalled();
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(config.getModel()).toBe('shared');
+    });
+
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);
       const authType = AuthType.USE_GEMINI;
