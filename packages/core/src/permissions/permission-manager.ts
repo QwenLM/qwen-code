@@ -20,7 +20,10 @@ import {
   isShellCommandReadOnlyAST,
   isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
-import { normalizeMonitorCommand } from '../utils/shell-utils.js';
+import {
+  getShellConfiguration,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   findDangerousAllowRules,
@@ -67,6 +70,39 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
   default: 1,
   allow: 0,
 };
+
+function splitCommandForRules(command: string): string[] {
+  if (
+    getShellConfiguration().shell !== 'bash' ||
+    command.includes('\n') ||
+    command.includes('\r')
+  ) {
+    return splitCompoundCommand(command);
+  }
+
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (ch === '\\' || ch === '$' || ch === '`' || ';&|(){}<>'.includes(ch)) {
+      return splitCompoundCommand(command);
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+    } else if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+    } else if (
+      ch === '#' &&
+      !inSingle &&
+      !inDouble &&
+      (i === 0 || command[i - 1] === ' ' || command[i - 1] === '\t')
+    ) {
+      return [command];
+    }
+  }
+
+  return splitCompoundCommand(command);
+}
 
 /**
  * Minimal interface for the parts of Config used by PermissionManager.
@@ -333,7 +369,7 @@ export class PermissionManager {
     // most restrictive result. Priority: deny > ask > allow.
     let bashDecision: PermissionDecision;
     if (command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCommandForRules(command);
       if (subCommands.length > 1) {
         bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
       } else {
@@ -953,7 +989,7 @@ export class PermissionManager {
     // rule matching any segment is the deciding rule. Recurse per segment so
     // nested compounds and per-segment virtual ops are covered.
     if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCommandForRules(command);
       if (subCommands.length > 1) {
         for (const subCmd of subCommands) {
           const rule = this.findMatchingDenyRule({ ...ctx, command: subCmd });
@@ -1109,7 +1145,7 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCommandForRules(command);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
           this.hasRelevantRules({ ...ctx, command: subCmd }),
@@ -1207,7 +1243,7 @@ export class PermissionManager {
     }
 
     if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
+      const subCommands = splitCommandForRules(command);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
           this.hasMatchingAskRule({ ...ctx, command: subCmd }),

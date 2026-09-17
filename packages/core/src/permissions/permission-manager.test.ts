@@ -40,9 +40,25 @@ const debugLoggerMock = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
+const shellTypeMock = vi.hoisted(() => ({
+  value: 'bash' as 'bash' | 'cmd' | 'powershell',
+}));
+
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => debugLoggerMock,
 }));
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () => ({
+      ...actual.getShellConfiguration(),
+      shell: shellTypeMock.value,
+    }),
+  };
+});
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
@@ -1755,6 +1771,10 @@ function makeConfig(
 describe('PermissionManager', () => {
   let pm: PermissionManager;
 
+  beforeEach(() => {
+    shellTypeMock.value = 'bash';
+  });
+
   describe('basic rule evaluation', () => {
     beforeEach(() => {
       pm = new PermissionManager(
@@ -2345,6 +2365,33 @@ describe('PermissionManager', () => {
         }),
       ).toBe('allow');
     });
+
+    it.each([
+      ['bash', `echo 'a' # comment ; rm -rf /tmp/x`, 'allow'],
+      ['cmd', `echo 'a' # comment ; rm -rf /tmp/x`, 'deny'],
+      ['powershell', `echo 'a' # comment ; rm -rf /tmp/x`, 'deny'],
+      ['bash', 'echo $(date) # comment ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi # comment\nrm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi ; rm -rf /tmp/x # comment ; echo ignored', 'deny'],
+    ] as const)(
+      'handles comments conservatively for %s',
+      async (shell, command, expected) => {
+        shellTypeMock.value = shell;
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(echo *)'],
+            permissionsDeny: ['Bash(rm *)'],
+          }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command,
+          }),
+        ).toBe(expected);
+      },
+    );
 
     it('three-part compound: all must pass', async () => {
       pm = new PermissionManager(
