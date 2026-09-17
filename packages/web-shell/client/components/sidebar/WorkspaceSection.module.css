@@ -56,8 +56,37 @@
   align-items: center;
 }
 
+.folderIconFrame {
+  position: relative;
+  display: inline-flex;
+  align-items: flex-start;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
 .folderIcon {
   display: block;
+  margin-top: 1px;
+}
+
+.remoteFolderBadge {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--sidebar-background);
+  color: var(--agent-blue-500, #4a9eff);
+}
+
+.headerRow:hover .remoteFolderBadge,
+.headerRow:focus-within .remoteFolderBadge {
+  background: var(--sidebar-accent);
 }
 
 .chevronOpen {

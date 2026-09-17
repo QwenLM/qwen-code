@@ -31,7 +31,7 @@ Web Shell 已经通过同一个 daemon `baseUrl` 发送 workspace、session、�
 
 连接前页面始终提供 daemon 地址和可选 token 表单，包括 URL 中目标无效的情况。连接成功后，现有 Daemon 状态概览会显示当前目标和连接状态，并提供相同的切换控件。切换目标时执行完整页面导航，清除 URL 中已选的 session、workspace 和 context，并为新 daemon 创建全新的 SDK client。重连到当前正在使用的目标时改为原地重新加载，因此已选的 session、workspace 和 context 会像普通刷新一样原样保留。此过程不会探测或回退到其他 runtime。
 
-现有侧边栏继续作为 workspace 和 session 管理界面。远程连接验证成功后，仅把其 origin 记录到浏览器本地的连接目录中，bearer token 仍限定在当前标签页。普通的“添加工作区”操作会先选择计算机：这台计算机或一台已连接的远程计算机。选择远端后导航到对应 daemon，再续接到目录浏览状态。目录浏览使用 daemon 返回的目录建议，支持进入上级目录和手工填写绝对路径，并通过现有 workspace mutation 注册所选目录；连接远程 daemon 时继续隐藏原生目录选择器。session 发现、对话记录加载、文件引用、终端流量和执行不需要再实现一套远程专用逻辑，因为它们已经统一使用所选 SDK client。
+现有侧边栏继续作为 workspace 和 session 管理界面。远程连接验证成功后，仅把其 origin 记录到浏览器本地的连接目录中，bearer token 仍限定在当前标签页。普通的“添加工作区”操作会先选择计算机：这台计算机或一台已连接的远程计算机。选择远端后导航到对应 daemon，再续接到目录浏览状态。目录浏览使用 daemon 返回的目录建议，支持进入上级目录和手工填写绝对路径，并通过现有 workspace mutation 注册所选目录；连接远程 daemon 时继续隐藏原生目录选择器。来自跨 origin daemon 的 workspace 会在文件夹图标右下角显示小地球标记，本地 workspace 仍使用普通文件夹图标。session 发现、对话记录加载、文件引用、终端流量和执行不需要再实现一套远程专用逻辑，因为它们已经统一使用所选 SDK client。
 
 添加操作仍是一次性流程。导航期间只在当前标签页保存来源 URL；取消会返回该 URL，更换计算机会回到来源并重新打开计算机选择，注册成功后留在所选 daemon 并清除续接状态。连接目录只保存 origin，不缓存远程 workspace，也不聚合多个 daemon 的项目。普通 daemon 切换不会续接该流程。
 
