@@ -3342,6 +3342,69 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
+  it('drops a checkpoint an earlier build left pending and continues the Goal', async () => {
+    // Written by a runtime that still ran checkpoints, then interrupted
+    // before the check answered.
+    const result = deferred<GoalCheckpointVerificationResult>();
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const host = fakeGoalTurnHost();
+    const earlier = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier: vi.fn(),
+      checkpointVerifier: vi.fn(() => result.promise),
+    });
+    earlier.bindHost(host);
+    await earlier.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    const evidence = verifierEvidenceWindow(
+      permit,
+      earlier.getSnapshot().goal!.evidenceCursor.recordId!,
+      80,
+    );
+    records = evidence;
+    const finishing = earlier.finishTurn(permit);
+    await vi.waitFor(() =>
+      expect(journal.appended.at(-1)).toHaveProperty('checkpointPending'),
+    );
+    earlier.dispose();
+    result.resolve({
+      claims: [],
+    } as unknown as GoalCheckpointVerificationResult);
+    await finishing.catch(() => undefined);
+
+    const recoveryRecords = [
+      journal.records[0]!,
+      ...evidence.slice(1),
+      journal.records[1]!,
+    ];
+    const restoredJournal = fakeGoalJournal();
+    const restoredHost = fakeGoalTurnHost();
+    const restored = createGoalRuntime({
+      journal: restoredJournal,
+      evidenceSource: fakeEvidenceSource(() => recoveryRecords),
+      verifier: vi.fn(),
+    });
+    restored.bindHost(restoredHost);
+
+    await restored.restore(recoveryRecords);
+
+    // Nothing is replayed and nothing is written for it: the Goal goes
+    // straight to its next turn, with no checkpoint on the record.
+    expect(restoredJournal.appended.map((payload) => payload.cause)).toEqual(
+      [],
+    );
+    expect(restored.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active' },
+    });
+    expect(restored.getSnapshot().goal).not.toHaveProperty(
+      'evidenceCheckpoint',
+    );
+    expect(restoredHost.started).toHaveLength(1);
+  });
+
   it('recovers a durable pending checkpoint before continuing after a crash', async () => {
     const result = deferred<GoalCheckpointVerificationResult>();
     const journal = fakeGoalJournal();
