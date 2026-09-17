@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
@@ -24,6 +25,7 @@ import type {
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import type { AgentRunContext } from '../../agents/workspace-agents/run-context.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
@@ -290,7 +292,8 @@ export type ProgrammaticBackgroundAgentLaunchResult =
 
 interface ProgrammaticBackgroundAgentLaunchOptions {
   agentId: string;
-  meshAgentId: string;
+  workspaceAgentId: string;
+  agentRun?: AgentRunContext;
   subagentConfig: SubagentConfig;
   toolConfig: ToolConfig;
 }
@@ -3195,6 +3198,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
+      if (this.programmatic?.agentRun) {
+        contextState.set('external_inputs_override', [
+          {
+            kind: 'message',
+            text: taskPrompt,
+            deliveryId: this.programmatic.agentRun.runId,
+          },
+        ]);
+      }
       // Always set hook_context so ${hook_context} in systemPrompt does not
       // throw when no hook is configured or the hook returns no additional context.
       contextState.set('hook_context', '');
@@ -3256,10 +3268,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           buildAgentTranscriptAttach(this.config, hookOpts.agentId, {
             agentName: subagentConfig.name,
             agentColor: subagentConfig.color,
-            // Seed the JSONL with the launching prompt so the transcript is
-            // self-describing — readers don't need to consult .meta.json to
-            // know what the agent was asked to do.
-            initialUserPrompt: this.params.prompt,
+            // Agent launch input is recorded by its correlated external-input
+            // event; ordinary launches still need this transcript seed.
+            ...(this.programmatic?.agentRun
+              ? {}
+              : { initialUserPrompt: this.params.prompt }),
             bootstrapHistory: isFork ? bgInitialMessages : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           });
@@ -3366,7 +3379,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
           ...(this.programmatic
-            ? { meshAgentId: this.programmatic.meshAgentId }
+            ? {
+                workspaceAgentId: this.programmatic.workspaceAgentId,
+              }
             : {}),
           agentType: hookOpts.agentType,
           description: this.params.description,
@@ -3882,18 +3897,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 isFork ? 'fork' : 'background',
               ),
               turnAbortController.signal,
-              (recordOutcome) =>
-                runWithAgentContext(
-                  hookOpts.agentId,
-                  () =>
-                    bgBody(
-                      turnContextState,
-                      turnAbortController,
-                      recordOutcome,
-                      fireStartHook,
-                    ),
-                  launchDepth,
-                ),
+              (recordOutcome) => {
+                const body = () =>
+                  bgBody(
+                    turnContextState,
+                    turnAbortController,
+                    recordOutcome,
+                    fireStartHook,
+                  );
+                return runWithAgentContext(hookOpts.agentId, body, launchDepth);
+              },
             );
           return isFork ? runInForkContext(framedBgBody) : framedBgBody();
         };
@@ -4111,6 +4124,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Wrap in qwen-code.subagent span (#3731 Phase 3). Foreground
       // invocations are child spans of the AGENT tool's `qwen-code.tool`
       // span, inheriting its traceId so the trace tree stays unified.
+      const goalPermit = getCurrentAgentId()
+        ? undefined
+        : goalTurnContext.getStore();
       const runFramed = () =>
         this.runWithSubagentSpan(
           this.buildSubagentSpanSpec(hookOpts, subagentConfig, 'foreground'),
@@ -4361,6 +4377,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           returnDisplay: this.currentDisplay!,
         };
       } finally {
+        // Background and nested launches have no direct Goal-turn accounting anchor.
+        if (goalPermit && subagentConfig.executor === undefined) {
+          this.config
+            .getChatRecordingService()
+            ?.billGoalTurnTokens(
+              goalPermit.turnId,
+              subagent.getExecutionSummary().totalTokens,
+            );
+        }
         // Mirror the background path: ensure the isolation worktree is
         // reaped on every termination shape (success, failure, cancel,
         // and any uncaught throw inside runFramed). The helper itself

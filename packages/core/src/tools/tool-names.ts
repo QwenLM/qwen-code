@@ -67,8 +67,33 @@ export const ToolNames = {
   REPORT_FINDINGS: 'report_findings',
   GET_GOAL: 'get_goal',
   UPDATE_GOAL: 'update_goal',
+  // Omni media-policy tools (fixed-policy-only by default; modelAccess
+  // config can open them to the model).
+  OMNI_DOWNSAMPLE_IMAGE: 'omni_downsample_image',
+  OMNI_DOWNSCALE_VIDEO: 'omni_downscale_video',
+  OMNI_DOWNSAMPLE_AUDIO: 'omni_downsample_audio',
+  OMNI_EXTRACT_KEYFRAMES: 'omni_extract_keyframes',
+  OMNI_EXTRACT_AUDIO: 'omni_extract_audio',
+  OMNI_CLIP_VIDEO: 'omni_clip_video',
+  OMNI_CONVERT_IMAGE: 'omni_convert_image',
+  OMNI_TRANSCRIBE_AUDIO: 'omni_transcribe_audio',
+  OMNI_CLIP_IMAGE: 'omni_clip_image',
+  OMNI_CLIP_AUDIO: 'omni_clip_audio',
+  OMNI_CAPTION_IMAGE: 'omni_caption_image',
+  OMNI_CAPTION_AUDIO: 'omni_caption_audio',
+  OMNI_OCR_IMAGE: 'omni_ocr_image',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'omni_understand_video_segments',
+  // Omni memory recall (registered only when omni is enabled AND
+  // `omni.memory.recall.mode === 'active'` — D10 mutual exclusion).
+  OMNI_RECALL_MEDIA_MEMORY: 'omni_recall_media_memory',
   PROPOSE_GOAL: 'propose_goal',
   DISPLAY_IMAGE: 'display_image',
+  THREAD_POST: 'thread_post',
+  THREAD_WAIT: 'thread_wait',
+  THREAD_BLOCK: 'thread_block',
+  THREAD_REVIEW: 'thread_review',
+  THREAD_CREATE: 'thread_create',
+  THREAD_READ: 'thread_read',
 } as const;
 
 /**
@@ -126,8 +151,29 @@ export const ToolDisplayNames = {
   REPORT_FINDINGS: 'ReportFindings',
   GET_GOAL: 'Goal',
   UPDATE_GOAL: 'UpdateGoal',
+  OMNI_DOWNSAMPLE_IMAGE: 'DownsampleImage',
+  OMNI_DOWNSCALE_VIDEO: 'DownscaleVideo',
+  OMNI_DOWNSAMPLE_AUDIO: 'DownsampleAudio',
+  OMNI_EXTRACT_KEYFRAMES: 'ExtractKeyframes',
+  OMNI_EXTRACT_AUDIO: 'ExtractAudio',
+  OMNI_CLIP_VIDEO: 'ClipVideo',
+  OMNI_CONVERT_IMAGE: 'ConvertImage',
+  OMNI_TRANSCRIBE_AUDIO: 'TranscribeAudio',
+  OMNI_CLIP_IMAGE: 'ClipImage',
+  OMNI_CLIP_AUDIO: 'ClipAudio',
+  OMNI_CAPTION_IMAGE: 'CaptionImage',
+  OMNI_CAPTION_AUDIO: 'CaptionAudio',
+  OMNI_OCR_IMAGE: 'OcrImage',
+  OMNI_UNDERSTAND_VIDEO_SEGMENTS: 'UnderstandVideoSegments',
+  OMNI_RECALL_MEDIA_MEMORY: 'RecallMediaMemory',
   PROPOSE_GOAL: 'ProposeGoal',
   DISPLAY_IMAGE: 'DisplayImage',
+  THREAD_POST: 'ThreadPost',
+  THREAD_WAIT: 'ThreadWait',
+  THREAD_BLOCK: 'ThreadBlock',
+  THREAD_REVIEW: 'ThreadReview',
+  THREAD_CREATE: 'ThreadCreate',
+  THREAD_READ: 'ThreadRead',
 } as const;
 
 // Migration from old tool names to new tool names

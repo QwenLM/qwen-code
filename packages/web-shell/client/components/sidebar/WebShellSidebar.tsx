@@ -19,6 +19,10 @@ import {
   useWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
+  COLLABORATION_SOURCE,
+  useProjectConversations,
+} from '../workspace-agents/useProjectConversations';
+import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionGroup,
   type DaemonSessionGroupColor,
@@ -31,6 +35,7 @@ import {
 import {
   FolderKanbanIcon,
   ActivityIcon,
+  BotIcon,
   BlocksIcon,
   CalendarClockIcon,
   ChevronDownIcon,
@@ -100,7 +105,7 @@ import {
 } from './workspaceOverviewModel';
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
-import { isLocalDaemon } from '../../config/daemon';
+import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import {
   mergeSessionContentHits,
   sessionMatchesGitQuery,
@@ -253,6 +258,7 @@ export interface WebShellSidebarLockedWorkspace {
 
 export type WebShellSidebarPrimaryNavItem =
   | 'newTask'
+  | 'agents'
   | 'plugins'
   | 'channels'
   | 'scheduledTasks'
@@ -293,6 +299,7 @@ const DESKTOP_DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] =
 
 const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'newTask',
+  'agents',
   'plugins',
   'channels',
   'scheduledTasks',
@@ -396,9 +403,12 @@ export interface WebShellSidebarWorkspaceOverviewOptions {
 export type { WorkspaceManagementTarget, WorkspaceOverviewItem };
 
 interface WebShellSidebarProps {
+  selectedCollaborationId?: string;
+  onOpenCollaboration?: (id: string, cwd: string) => void;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenAgents?: (view?: 'agents' | 'tasks' | 'runtime') => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;
@@ -930,9 +940,12 @@ function SidebarSessionSurface({
 }
 
 export function WebShellSidebar({
+  selectedCollaborationId,
+  onOpenCollaboration,
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
   onOpenDaemonStatus,
@@ -1006,6 +1019,7 @@ export function WebShellSidebar({
   const hasScrollingPrimaryNav =
     (projectFeaturesEnabled &&
       (primaryNavItems.has('plugins') ||
+        (primaryNavItems.has('agents') && Boolean(onOpenAgents)) ||
         primaryNavItems.has('channels') ||
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
@@ -1032,6 +1046,7 @@ export function WebShellSidebar({
   );
   const [sessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
+  const [agentsNavExpanded, setAgentsNavExpanded] = useState(false);
   // Reset before commit so effects that key bookkeeping by the raw source
   // cannot observe a hidden switch with channel state and default catalogs.
   if (!showSessionSourceSwitch && sessionSource !== 'default') {
@@ -1752,6 +1767,16 @@ export function WebShellSidebar({
     () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
     [displayedWorkspaces],
   );
+  const projectConversations = useProjectConversations(
+    projectWorkspaces
+      .filter((ws) => ws.primary || ws.trusted)
+      .map((ws) => ws.cwd),
+  );
+  const collaborationSessions = useMemo(
+    () =>
+      selectedSessionSource === 'channel' ? [] : projectConversations.sessions,
+    [selectedSessionSource, projectConversations.sessions],
+  );
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
       const explicitCwd = session.workspaceCwd;
@@ -1957,6 +1982,7 @@ export function WebShellSidebar({
   );
   const canShowDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('delete') &&
       canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
     [
@@ -2057,6 +2083,7 @@ export function WebShellSidebar({
   );
   const canArchiveSession = useCallback(
     (session: DaemonSessionSummary) =>
+      session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
       !session.hasActivePrompt &&
@@ -3765,11 +3792,20 @@ export function WebShellSidebar({
 
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    const sourceScopedSessions = sessions
-      .map(applyOptimisticPin)
-      .filter((session) =>
-        matchesSessionSource(session, selectedSessionSource),
-      );
+    const sourceScopedSessions = [
+      ...sessions
+        .map(applyOptimisticPin)
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        ),
+      ...collaborationSessions.filter(
+        (session) => session.workspaceCwd === primaryWorkspaceCwd,
+      ),
+    ].sort(
+      (a, b) =>
+        Date.parse(b.updatedAt ?? b.createdAt ?? '') -
+        Date.parse(a.updatedAt ?? a.createdAt ?? ''),
+    );
     if (!query) return sourceScopedSessions;
     const localMatches = sourceScopedSessions.filter((session) => {
       const label = getSessionLabel(session).toLowerCase();
@@ -3791,6 +3827,8 @@ export function WebShellSidebar({
   }, [
     applyOptimisticPin,
     contentSearchHits,
+    collaborationSessions,
+    primaryWorkspaceCwd,
     searchQuery,
     selectedSessionSource,
     sessions,
@@ -4188,6 +4226,42 @@ export function WebShellSidebar({
           : undefined,
         standalone,
       } = options;
+      if (session.sourceType === COLLABORATION_SOURCE) {
+        return (
+          <button
+            key={session.sessionId}
+            type="button"
+            className={cx(
+              styles.sessionRow,
+              'w-full min-h-8 border-0 bg-transparent text-sm',
+              selectedCollaborationId === session.sourceId &&
+                styles.currentSession,
+            )}
+            aria-current={
+              selectedCollaborationId === session.sourceId ? 'page' : undefined
+            }
+            title={session.displayName}
+            onClick={() => {
+              if (session.sourceId)
+                onOpenCollaboration?.(session.sourceId, session.workspaceCwd);
+            }}
+          >
+            <span className={styles.sessionStatusSlot}>
+              {session.hasActivePrompt && (
+                <span
+                  className={cx(
+                    styles.sessionStatusDot,
+                    styles.sessionStatusDotRunning,
+                  )}
+                />
+              )}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-left">
+              {session.displayName}
+            </span>
+          </button>
+        );
+      }
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -4421,7 +4495,9 @@ export function WebShellSidebar({
       const showPin = !standalone && canOrganizeSession(session, 'pin');
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
-        : sessionActionItems.has('archive') && canMutateSessionArchive(session);
+        : session.sourceType !== 'qwen-live' &&
+          sessionActionItems.has('archive') &&
+          canMutateSessionArchive(session);
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
@@ -4815,6 +4891,8 @@ export function WebShellSidebar({
     },
     [
       busySessionIds,
+      selectedCollaborationId,
+      onOpenCollaboration,
       canDeleteSession,
       canShowDeleteSession,
       canOrganizeSession,
@@ -5579,6 +5657,56 @@ export function WebShellSidebar({
         >
           {hasScrollingPrimaryNav && (
             <div className={styles.primaryNav}>
+              {projectFeaturesEnabled &&
+                onOpenAgents &&
+                primaryNavItems.has('agents') && (
+                  <div>
+                    <button
+                      className={styles.pluginButton}
+                      type="button"
+                      title={t('agents.title')}
+                      aria-label={t('agents.title')}
+                      aria-expanded={agentsNavExpanded}
+                      onClick={() => {
+                        if (collapsed) onOpenAgents('agents');
+                        else setAgentsNavExpanded((value) => !value);
+                      }}
+                    >
+                      <span className={styles.navIcon}>
+                        <BotIcon size={16} strokeWidth={1.2} />
+                      </span>
+                      {!collapsed && <span>{t('agents.title')}</span>}
+                      {!collapsed && (
+                        <span className="ml-auto" aria-hidden="true">
+                          {agentsNavExpanded ? '▾' : '▸'}
+                        </span>
+                      )}
+                    </button>
+                    {!collapsed && agentsNavExpanded && (
+                      <div
+                        className="ml-7 flex flex-col border-l border-border pl-2"
+                        aria-label="智能体导航"
+                      >
+                        {(['agents', 'tasks', 'runtime'] as const).map(
+                          (view) => (
+                            <button
+                              key={view}
+                              type="button"
+                              className={styles.pluginButton}
+                              onClick={() => onOpenAgents(view)}
+                            >
+                              {view === 'agents'
+                                ? '智能体列表'
+                                : view === 'tasks'
+                                  ? '任务看板'
+                                  : '执行主机'}
+                            </button>
+                          ),
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               {projectFeaturesEnabled && primaryNavItems.has('plugins') && (
                 <button
                   className={styles.pluginButton}
@@ -5682,13 +5810,17 @@ export function WebShellSidebar({
                   className="w-full"
                   aria-label={t('sidebar.sessionSource')}
                 >
-                  <TabsTrigger value="default">
+                  <TabsTrigger value="default" className="min-w-0">
                     <ListTodoIcon />
-                    {t('sidebar.sessionSource.tasks')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.tasks')}
+                    </span>
                   </TabsTrigger>
-                  <TabsTrigger value="channel">
+                  <TabsTrigger value="channel" className="min-w-0">
                     <MessageCircleIcon />
-                    {t('sidebar.sessionSource.channels')}
+                    <span className="min-w-0 truncate">
+                      {t('sidebar.sessionSource.channels')}
+                    </span>
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
@@ -5716,6 +5848,11 @@ export function WebShellSidebar({
                   )}
                 </>
               )}
+            {projectConversations.error && (
+              <p role="status" className={styles.notice}>
+                {projectConversations.error}
+              </p>
+            )}
             {liveWorkspaces.map((ws) => (
               <WorkspaceSection
                 key={ws.id}
@@ -5918,6 +6055,9 @@ export function WebShellSidebar({
                     <Fragment key={ws.id}>
                       <WorkspaceSection
                         workspace={ws}
+                        additionalSessions={collaborationSessions.filter(
+                          (session) => session.workspaceCwd === ws.cwd,
+                        )}
                         renderHeader={
                           lockedWorkspaceCwd && lockedWorkspaceOptions?.render
                             ? (expanded) =>
@@ -6395,12 +6535,15 @@ export function WebShellSidebar({
                   <ActivityIcon size={16} strokeWidth={1.2} />
                 </button>
               )}
-              {footerItems.has('localFiles') && (
-                <LocalFilesControl
-                  triggerClassName={styles.collapseButton}
-                  workspaces={workspaces}
-                />
-              )}
+              {footerItems.has('localFiles') &&
+                // The browser-local bridge is only offered when the connected
+                // daemon is the page's own origin (see isPageOriginDaemon).
+                isPageOriginDaemon(workspace.baseUrl) && (
+                  <LocalFilesControl
+                    triggerClassName={styles.collapseButton}
+                    workspaces={workspaces}
+                  />
+                )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button
                   className={styles.collapseButton}

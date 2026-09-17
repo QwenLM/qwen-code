@@ -10,6 +10,7 @@ import type {
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
+  DispatchRecord,
   SessionGroupPresetColor,
   SessionSourceInput,
   SessionSourcesResult,
@@ -56,6 +57,7 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
+  ServeWorkflowActionInput,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -117,6 +119,8 @@ export type BridgePromptContentBlock =
 
 export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
   prompt: BridgePromptContentBlock[];
+  /** Per-prompt projection before ring retention and fan-out; defaults to full. */
+  eventDetailMode?: LiveReplayMode;
 };
 
 export interface RewindRequest {
@@ -305,6 +309,8 @@ export interface BridgeRestoreSessionRequest {
   historyPageSize?: number;
   /** Load-only live-turn replay projection; defaults to the complete journal. */
   liveReplayMode?: LiveReplayMode;
+  /** Load response projection for durable replay; defaults to full. */
+  compactedReplayMode?: LiveReplayMode;
   /** Keep inherited fork records as model context without replaying them. */
   hideInheritedHistory?: boolean;
   approvalMode?: ApprovalMode;
@@ -713,6 +719,8 @@ export interface BridgeForkAgentResult {
   launched: boolean;
 }
 
+export type BridgeAgentDispatchRecord = DispatchRecord;
+
 export interface BridgeConversationDirectoryExpectation {
   canonicalSessionId: string;
   root: {
@@ -847,6 +855,12 @@ export interface BridgePendingUserQuestionInteraction {
   options: BridgePendingInteractionOption[];
 }
 
+export interface BridgeIdleChannelCandidate {
+  channelId: string;
+  runtimeEpoch: number;
+  lastUsedAt: number;
+}
+
 export interface BridgeWorkspaceRuntimeLifecycleSnapshot {
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
   runtimeLive: boolean;
@@ -940,7 +954,7 @@ export interface BridgeSessionGoal {
     /** Canonical Goal turns completed so far. */
     iterations: number;
     setAt: number;
-    /** The judge's verdict on the most recent turn, when it has run. */
+    /** Why the Goal last stopped, or the verifier's most recent reason. */
     lastReason?: string;
   } | null;
 }
@@ -1054,6 +1068,23 @@ export interface BridgeClientRequestContext {
     };
   };
   /**
+   * The workspace-agent run this prompt is a turn of. Trusted: injected by the
+   * daemon dispatcher, never populated from caller-controlled ACP metadata.
+   *
+   * Present on every prompt the dispatcher sends to an agent session, and on
+   * nothing else. The child re-establishes its run frame from this, which is
+   * what lets the thread tools know which thread they are acting on.
+   */
+  agentRun?: {
+    workspaceId: string;
+    agentId: string;
+    runId: string;
+    threadId: string;
+    rootThreadId: string;
+    attempt: number;
+    contextThroughSequence?: number;
+  };
+  /**
    * Internal: set ONLY by `continueSession` to re-arm the continuation meta
    * key that `sendPrompt` strips from untrusted callers. HTTP routes never
    * populate this from request input, so an external caller cannot use it to
@@ -1113,9 +1144,17 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
+/**
+ * Which workspace-agent run a prompt is one turn of.
+ *
+ * Trusted like {@link DAEMON_CHANNEL_DELIVERY_META_KEY}: the bridge strips this
+ * wire key from every caller and re-injects it only from the daemon-supplied
+ * request context. An agent's thread tools act on whatever this names, so a
+ * caller that could set it could make one agent post as another.
+ */
+export const DAEMON_AGENT_RUN_META_KEY = 'qwen.daemon.agentRun';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
 export const DAEMON_SUBMITTED_PROMPT_META_KEY = 'qwen.daemon.submittedPrompt';
-
 export const DAEMON_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 // Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
@@ -1230,8 +1269,10 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
 
 /** One daemon-owned, session-global queued mid-turn message. */
 export interface MidTurnQueueEntry {
+  eventDetailMode?: LiveReplayMode;
   messageId: string;
   text: string;
+  agentRun?: BridgeClientRequestContext['agentRun'];
   /**
    * Image content blocks attached to the message. The drain
    * combines them with `text` into structured `items` for the ACP child;
@@ -1262,6 +1303,7 @@ export interface BridgeMidTurnMessagesSnapshot {
  * `removePendingPrompt` can cancel a queued-but-not-yet-started prompt.
  */
 export interface PendingPromptEntry {
+  eventDetailMode?: LiveReplayMode;
   promptId: string;
   queuedAt: number;
   startedAt?: number;
@@ -2121,7 +2163,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
 
+  /** Launch one configured agent identity inside its hidden host session. */
+
+  /** Dispatch durable agent bookings inside their hidden host session. */
+
   /** Control a run, delete history, or start a saved workflow definition. */
+  /**
+   * Control a run, delete history, or start a new one — from a saved
+   * definition (`run-saved`, where `taskId` is the definition name) or from a
+   * script the caller supplies (`run-script`, where `taskId` is the caller's
+   * own start key). `input` carries what the two start actions run with.
+   */
   controlSessionWorkflowTask(
     sessionId: string,
     taskId: string,
@@ -2131,8 +2183,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved',
+      | 'run-saved'
+      | 'run-script',
     context?: BridgeClientRequestContext,
+    input?: ServeWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: ServeSessionWorkflowTaskStatus['status'];
@@ -2382,6 +2436,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
+      /** Applied only if the message is promoted into a new prompt. */
+      eventDetailMode?: LiveReplayMode;
       content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string; reason?: 'session_idle' };
@@ -2604,6 +2660,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * workspace runtime control when it is absent.
    */
   getWorkspaceRuntimeLifecycleSnapshot?(): BridgeWorkspaceRuntimeLifecycleSnapshot;
+
+  getIdleChannelCandidate?(): BridgeIdleChannelCandidate | undefined;
+  reclaimIdleChannel?(
+    candidate: BridgeIdleChannelCandidate,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
 
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;

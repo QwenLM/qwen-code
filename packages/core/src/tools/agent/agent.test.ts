@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AgentTool,
@@ -14,6 +15,7 @@ import {
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import type { ResidentAgentContinuationResult } from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
 import {
   Config,
@@ -2422,6 +2424,47 @@ describe('AgentTool', () => {
       // Unbridged in the foreground finally — no listener leak.
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
     });
+
+    it.each(['success', 'throw', 'cancel', 'no-goal', 'nested'])(
+      'meters direct foreground Goal work on %s',
+      async (mode) => {
+        const billGoalTurnTokens = vi.fn();
+        Object.assign(config, {
+          getChatRecordingService: () => ({ billGoalTurnTokens }),
+        });
+        if (mode === 'throw')
+          vi.mocked(mockAgent.execute).mockRejectedValue(
+            new Error('provider failed'),
+          );
+        if (mode === 'cancel')
+          vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+            AgentTerminateMode.CANCELLED,
+          );
+        const invocation = agentTool.build({
+          description: 'Search files',
+          prompt: 'Find files',
+          subagent_type: 'file-search',
+          run_in_background: false,
+        });
+        const execute = () => invocation.execute(new AbortController().signal);
+        const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+        await (mode === 'no-goal'
+          ? execute()
+          : goalTurnContext.run(permit, () =>
+              mode === 'nested'
+                ? runWithAgentContext('parent', execute)
+                : execute(),
+            ));
+        expect(mockAgent.execute).toHaveBeenCalledOnce();
+        if (mode === 'no-goal' || mode === 'nested')
+          expect(billGoalTurnTokens).not.toHaveBeenCalled();
+        else
+          expect(billGoalTurnTokens).toHaveBeenCalledExactlyOnceWith(
+            'turn-1',
+            1500,
+          );
+      },
+    );
 
     it('does not bridge approvals for a top-level foreground launch', async () => {
       // No agent-context frame → no backgrounded ancestor → the inline
@@ -6159,9 +6202,11 @@ describe('AgentTool', () => {
           );
           const resident = mockRegistry.registerResidentAgent.mock
             .calls[0]?.[1] as {
-            continue: (message: string) => boolean;
+            continue: (message: string) => ResidentAgentContinuationResult;
           };
-          expect(resident.continue('Continue externally')).toBe(true);
+          // A string union now, not a boolean: 'continued' is the success
+          // value, and the other members say why a continuation did not happen.
+          expect(resident.continue('Continue externally')).toBe('continued');
           await vi.waitFor(() =>
             expect(mockAgent.execute).toHaveBeenCalledTimes(2),
           );
@@ -6335,6 +6380,28 @@ describe('AgentTool', () => {
         }
       },
     );
+
+    it('does not bill a Goal for a completed background agent', async () => {
+      const billGoalTurnTokens = vi.fn();
+      Object.assign(config, {
+        getChatRecordingService: () => ({ billGoalTurnTokens }),
+      });
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Background task',
+        prompt: 'Do the task',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      });
+      await goalTurnContext.run(
+        { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
+        () => invocation.execute(),
+      );
+      await vi.waitFor(() => expect(mockRegistry.complete).toHaveBeenCalled());
+      expect(mockAgent.execute).toHaveBeenCalledOnce();
+      expect(billGoalTurnTokens).not.toHaveBeenCalled();
+    });
 
     it('publishes the real failure reason, not just the usage notice, for a background external agent that produced no text', async () => {
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({

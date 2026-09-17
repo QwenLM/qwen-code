@@ -56,22 +56,113 @@ function id(value: unknown): string {
   return value;
 }
 
-async function runCodex(
-  params: ExternalAgentExecutorParams,
+type CodexAppServerParams = {
+  command: string;
+  args?: string[];
+  cwd: string;
+  maxTimeMinutes?: number;
+  onMessage?: (itemId: string, text: string) => void;
+  onThought?: (delta: string) => void;
+  onActivity?: (stage: string, detail: string) => void;
+  onCleanupWarning?: (detail: string) => void;
+  keepAlive?: boolean;
+  session?: {
+    threadId?: string;
+    save: (threadId: string) => Promise<void>;
+  };
+};
+
+type CodexNextTurn = {
+  params: CodexAppServerParams;
+  prompt: string;
+  signal: AbortSignal;
+};
+type CodexConnection = {
+  iterator: AsyncGenerator<string, void, CodexNextTurn | undefined>;
+  busy: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+};
+const codexConnections = new Map<string, CodexConnection>();
+const codexExitHandlers = new Set<() => void>();
+const stopCodexOnExit = () => {
+  for (const stop of codexExitHandlers) stop();
+};
+
+export async function runCodexAppServer(
+  params: CodexAppServerParams,
   prompt: string,
   sandbox: string,
   signal: AbortSignal,
 ): Promise<string> {
+  if (signal.aborted) throw new CodexInterruption(AgentTerminateMode.CANCELLED);
+  const cacheKey = () =>
+    JSON.stringify([
+      params.command,
+      params.args,
+      params.cwd,
+      sandbox,
+      params.session?.threadId,
+    ]);
+  const cached = params.session?.threadId
+    ? codexConnections.get(cacheKey())
+    : undefined;
+  const connection: CodexConnection = cached ?? {
+    iterator: codexAppServer(params, prompt, sandbox, signal),
+    busy: false,
+  };
+  if (connection.busy)
+    throw new Error('Codex session already has an active turn.');
+  connection.busy = true;
+  clearTimeout(connection.timer);
+  const close = async () => {
+    if (codexConnections.get(cacheKey()) === connection)
+      codexConnections.delete(cacheKey());
+    await connection.iterator.return(undefined);
+  };
+  try {
+    const result = await connection.iterator.next(
+      cached ? { params, prompt, signal } : undefined,
+    );
+    if (result.done) throw new Error('Codex session closed before replying.');
+    if (params.keepAlive && params.session?.threadId) {
+      codexConnections.set(cacheKey(), connection);
+      // ponytail: keep idle conversations warm for five minutes, then resume from disk.
+      connection.timer = setTimeout(
+        () =>
+          void close().catch((error: unknown) => {
+            debugLogger.warn(`Codex idle cleanup failed: ${String(error)}`);
+          }),
+        300_000,
+      );
+      connection.timer.unref();
+    } else {
+      await close();
+    }
+    return result.value;
+  } catch (error) {
+    await close();
+    throw error;
+  } finally {
+    connection.busy = false;
+  }
+}
+
+async function* codexAppServer(
+  params: CodexAppServerParams,
+  prompt: string,
+  sandbox: string,
+  signal: AbortSignal,
+): AsyncGenerator<string, void, CodexNextTurn | undefined> {
   if (signal.aborted) throw new CodexInterruption(AgentTerminateMode.CANCELLED);
   const env = sanitizeChildEnv(process.env);
   delete env['CODEX_THREAD_ID'];
   delete env['CLAUDECODE'];
   delete env['NODE_OPTIONS'];
   const child = spawn(
-    params.spec.command,
-    params.spec.args ?? ['app-server', '--stdio'],
+    params.command,
+    params.args ?? ['app-server', '--stdio'],
     {
-      cwd: params.runtimeContext.getTargetDir(),
+      cwd: params.cwd,
       env,
       stdio: 'pipe',
       detached: process.platform !== 'win32',
@@ -81,6 +172,26 @@ async function runCodex(
   const tracked = new ProcessRegistry().reserve().attach(child, {
     ownsProcessTree: true,
   });
+  params.onActivity?.(
+    params.session?.threadId ? 'resuming' : 'starting',
+    `Codex PID ${child.pid} · ${params.session?.threadId ? '恢复原会话' : '启动会话'}`,
+  );
+  const onHostExit = () => {
+    if (child.exitCode === null && child.signalCode === null && child.pid) {
+      try {
+        process.kill(
+          process.platform === 'win32' ? child.pid : -child.pid,
+          'SIGTERM',
+        );
+      } catch {
+        /* Already exited. */
+      }
+    }
+  };
+  if (params.keepAlive) {
+    if (codexExitHandlers.size === 0) process.once('exit', stopCodexOnExit);
+    codexExitHandlers.add(onHostExit);
+  }
   child.stderr.resume();
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const pending = new Map<
@@ -91,6 +202,7 @@ async function runCodex(
   let threadId: string | undefined;
   let turnId: string | undefined;
   let finalAnswer: string | undefined;
+  const messageText = new Map<string, string>();
   let unphasedAnswer: string | undefined;
   let terminal = false;
   let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -99,7 +211,7 @@ async function runCodex(
     fail = reject;
   });
   let complete!: (turn: JsonObject) => void;
-  const completed = new Promise<JsonObject>((resolve) => {
+  let completed = new Promise<JsonObject>((resolve) => {
     complete = resolve;
   });
   const write = (frame: JsonObject) => {
@@ -126,7 +238,7 @@ async function runCodex(
     fail(
       new Error(
         error.code === 'ENOENT'
-          ? `Cannot start ${params.spec.command}. Install Codex and make it available on PATH.`
+          ? `Cannot start ${params.command}. Install Codex and make it available on PATH.`
           : `Cannot start Codex: ${error.code ?? 'process error'}`,
       ),
     );
@@ -224,12 +336,39 @@ async function runCodex(
           terminal = true;
           complete(turn);
         }
+      } else if (method === 'item/agentMessage/delta') {
+        associateTurn(parameters['turnId']);
+        const itemId = id(parameters['itemId']);
+        if (typeof parameters['delta'] !== 'string')
+          throw new Error('Codex returned an invalid text delta.');
+        const text = (messageText.get(itemId) ?? '') + parameters['delta'];
+        messageText.set(itemId, text);
+        params.onMessage?.(itemId, text);
+      } else if (method === 'item/reasoning/summaryTextDelta') {
+        associateTurn(parameters['turnId']);
+        if (typeof parameters['delta'] === 'string')
+          params.onThought?.(parameters['delta']);
+      } else if (method === 'item/started') {
+        associateTurn(parameters['turnId']);
+        const item = object(parameters['item']);
+        if (item['type'] === 'reasoning')
+          params.onActivity?.('thinking', 'Codex 正在思考');
+        else if (
+          [
+            'commandExecution',
+            'mcpToolCall',
+            'webSearch',
+            'fileChange',
+          ].includes(String(item['type']))
+        )
+          params.onActivity?.('tool', 'Codex 正在执行工具');
       } else if (method === 'item/completed') {
         associateTurn(parameters['turnId']);
         const item = object(parameters['item']);
         if (item['type'] !== 'agentMessage') return;
         if (typeof item['text'] !== 'string')
           throw new Error('Codex returned an invalid message.');
+        if (params.onMessage) params.onMessage(id(item['id']), item['text']);
         if (item['phase'] === 'final_answer') finalAnswer = item['text'];
         else if (item['phase'] == null) unphasedAnswer = item['text'];
       }
@@ -249,8 +388,8 @@ async function runCodex(
     () => fail(new Error('Codex initialization timed out.')),
     10_000,
   );
-  const minutes = params.runConfig.max_time_minutes;
-  const executionTimer =
+  const minutes = params.maxTimeMinutes;
+  let executionTimer =
     minutes === undefined
       ? undefined
       : setTimeout(
@@ -258,24 +397,38 @@ async function runCodex(
           minutes * 60_000,
         );
   const run = async () => {
-    await request('initialize', {
-      clientInfo: { name: 'qwen-code', version: '1.0.0' },
-      capabilities: { experimentalApi: false },
-    });
-    write({ method: 'initialized' });
-    const started = await request('thread/start', {
-      cwd: params.runtimeContext.getTargetDir(),
-      ephemeral: true,
-      approvalPolicy: 'never',
-      sandbox,
-    });
-    const thread = object(started['thread']);
-    threadId = id(thread['id']);
-    if (thread['ephemeral'] !== true)
-      throw new Error('Codex did not create an ephemeral thread.');
-    clearTimeout(initTimer);
+    if (!threadId) {
+      await request('initialize', {
+        clientInfo: { name: 'qwen-code', version: '1.0.0' },
+        capabilities: { experimentalApi: false },
+      });
+      write({ method: 'initialized' });
+      const resumeId = params.session?.threadId;
+      const started = await request(
+        resumeId ? 'thread/resume' : 'thread/start',
+        {
+          cwd: params.cwd,
+          ...(resumeId
+            ? { threadId: resumeId }
+            : { ephemeral: !params.session }),
+          approvalPolicy: 'never',
+          sandbox,
+        },
+      );
+      const thread = object(started['thread']);
+      threadId = id(thread['id']);
+      if (resumeId && threadId !== resumeId)
+        throw new Error('Codex resumed a different thread.');
+      if (params.session && thread['ephemeral'] === true)
+        throw new Error('Codex did not create a persistent thread.');
+      if (!params.session && thread['ephemeral'] !== true)
+        throw new Error('Codex did not create an ephemeral thread.');
+      await params.session?.save(threadId);
+      clearTimeout(initTimer);
+    }
     const startedTurn = await request('turn/start', {
       threadId,
+      ...(params.onThought ? { summary: 'auto' } : {}),
       input: [{ type: 'text', text: prompt, text_elements: [] }],
     });
     associateTurn(object(startedTurn['turn'])['id']);
@@ -292,8 +445,37 @@ async function runCodex(
   let completedAnswer: string | undefined;
   let interruption: CodexInterruption | undefined;
   try {
-    completedAnswer = await Promise.race([run(), failure]);
-    return completedAnswer;
+    for (;;) {
+      completedAnswer = await Promise.race([run(), failure]);
+      clearTimeout(executionTimer);
+      signal.removeEventListener('abort', abort);
+      const next = yield completedAnswer;
+      if (!next) return;
+      ({ params, prompt, signal } = next);
+      if (signal.aborted)
+        throw new CodexInterruption(AgentTerminateMode.CANCELLED);
+      params.onActivity?.(
+        'resuming',
+        `Codex PID ${child.pid} · 复用进程，继续原会话`,
+      );
+      turnId = undefined;
+      finalAnswer = undefined;
+      unphasedAnswer = undefined;
+      completedAnswer = undefined;
+      messageText.clear();
+      terminal = false;
+      completed = new Promise<JsonObject>((resolve) => {
+        complete = resolve;
+      });
+      signal.addEventListener('abort', abort, { once: true });
+      executionTimer =
+        params.maxTimeMinutes === undefined
+          ? undefined
+          : setTimeout(
+              () => fail(new CodexInterruption(AgentTerminateMode.TIMEOUT)),
+              params.maxTimeMinutes * 60_000,
+            );
+    }
   } catch (error) {
     if (error instanceof CodexInterruption) interruption = error;
     throw error;
@@ -302,6 +484,9 @@ async function runCodex(
     clearTimeout(executionTimer);
     clearTimeout(exitDrainTimer);
     child.removeListener('exit', onExit);
+    codexExitHandlers.delete(onHostExit);
+    if (codexExitHandlers.size === 0)
+      process.removeListener('exit', stopCodexOnExit);
     signal.removeEventListener('abort', abort);
     lines.close();
     for (const reply of pending.values())
@@ -314,13 +499,7 @@ async function runCodex(
         if (isUnprovenExternalAgentTreeExit(error)) {
           const diagnostic = `Codex process tree not proven gone after cleanup: ${detail}`;
           debugLogger.warn(diagnostic);
-          if (params.eventEmitter?.rawListeners(AgentEventType.ERROR).length) {
-            params.eventEmitter.emit(AgentEventType.ERROR, {
-              subagentId: params.subagentId ?? params.name,
-              error: diagnostic,
-              timestamp: Date.now(),
-            });
-          }
+          params.onCleanupWarning?.(diagnostic);
         } else if (!isExpectedExternalAgentCleanupExit(error)) {
           if (interruption) {
             interruption.message += `\n\nCodex cleanup failed: ${detail}`;
@@ -430,8 +609,22 @@ class CodexSubagentExecutor implements SubagentExecutor {
         this.params.runtimeContext,
       );
       const task = String(context.get('task_prompt') ?? 'Get Started!');
-      this.finalText = await runCodex(
-        { ...this.params, eventEmitter: this.emitter },
+      this.finalText = await runCodexAppServer(
+        {
+          command: this.params.spec.command,
+          args: this.params.spec.args,
+          cwd: this.params.runtimeContext.getTargetDir(),
+          maxTimeMinutes: this.params.runConfig.max_time_minutes,
+          onCleanupWarning: (error) => {
+            if (this.emitter.rawListeners(AgentEventType.ERROR).length) {
+              this.emitter.emit(AgentEventType.ERROR, {
+                subagentId,
+                error,
+                timestamp: Date.now(),
+              });
+            }
+          },
+        },
         [system, task].filter(Boolean).join('\n\n'),
         this.sandbox,
         this.controller.signal,
