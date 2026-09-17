@@ -57,8 +57,14 @@ The H5 loads directly from the daemon, without a local copy. Direct same-origin 
 configuration. Reverse proxies and remote terminal/voice WebSocket connections
 retain the daemon's [origin requirements](../../docs/users/qwen-serve.md#security-threat-model). Same-origin navigation compares scheme, host and effective port. Supported external main-frame links open in other apps; file/content and mixed-content access are disabled. Connection failures show a native Retry screen.
 
+## Microphone
+
+Existing Web Shell dictation can request audio capture from its connected daemon origin. A native prompt names that origin and asks for explicit consent before Android recording permission. Camera, mixed audio/video, unknown permissions and requests from other origins are denied. Permission is not requested on startup; denying it leaves text chat available. A compatible daemon with voice configured and a secure web context are still required.
+
+A microphone-enabled connection closes when the app leaves the foreground, even if dictation already stopped. This also applies when another full-screen app, including a document picker, opens. Unsent page state may be lost; the prompt explains this before consent, and returning offers manual reconnection. Text-only connections remain open. This conservative development-client behavior prevents background capture without a new JavaScript bridge. See the [microphone design](../../docs/design/mobile-microphone-permission.md).
+
 ## Limitations
 
-This is not a released production mobile client. File selection, microphone permission bridging, downloads and new-window handling still need native integrations. System font-scale integration and full pinch-zoom/accessibility acceptance remain follow-ups. Renderer failure offers a new connection. No foreground service runs. The Web Shell probes its existing capabilities on each fresh connection; this slice adds no native workspace cache or native REST client. Phase 2 still requires maintainer-provided per-device revocation, background SSE, notification permissions and a stronger H5 token-persistence contract.
+This is not a released production mobile client. File selection, downloads and new-window handling still need native integrations. System font-scale integration and full pinch-zoom/accessibility acceptance remain follow-ups. Renderer failure offers a new connection. No foreground service runs. The Web Shell probes its existing capabilities on each fresh connection; this slice adds no native workspace cache or native REST client. Phase 2 still requires maintainer-provided per-device revocation, background SSE, notification permissions and a stronger H5 token-persistence contract.
 
 JVM tests and APK compilation are separate from emulator/physical-device acceptance. Consult the PR verification report for actual completed checks; source presence does not establish device validation.
