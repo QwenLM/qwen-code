@@ -121,7 +121,10 @@ export function AddWorkspaceDialog({
       return undefined;
     }
     const seq = ++suggestSeqRef.current;
-    setSuggestions([]);
+    // Browse mode drives the list from the typed path, so results for the
+    // previous directory must not linger. The typed-path autocomplete keeps its
+    // previous list visible until the next answer instead of blanking here.
+    if (browseDirectories) setSuggestions([]);
     setSuggestionsLoaded(false);
     setSuggestionsError(false);
     const openOnResult = !suppressNextFetchOpenRef.current;

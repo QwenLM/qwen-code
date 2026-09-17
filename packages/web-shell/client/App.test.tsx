@@ -17785,9 +17785,16 @@ describe('App session callbacks', () => {
     const browserView = renderApp({}, undefined, true);
     await flush();
 
+    // The resumed shell stands in while the daemon's capabilities are unknown;
+    // its title is neutral because a Local add reaches it too.
     expect(
       browserView.container.querySelector(
-        '[data-dialog-title="Add remote workspace"]',
+        '[data-testid="add-workspace-dialog"]',
+      ),
+    ).toBeNull();
+    expect(
+      browserView.container.querySelector(
+        '[data-dialog-title="Add Workspace"]',
       ),
     ).not.toBeNull();
 

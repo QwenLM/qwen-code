@@ -204,7 +204,7 @@ it('preserves remote-add continuation when correcting the daemon target', async 
     onChangeTarget,
   );
 
-  expect(container.textContent).toContain('Cancel adding remote workspace');
+  expect(container.textContent).toContain('Cancel adding workspace');
   await act(submitForm);
   expect(onChangeTarget).toHaveBeenCalledWith(
     'http://replacement.example:4170',

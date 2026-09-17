@@ -18287,7 +18287,8 @@ export function App({
             remoteWorkspaceAddActiveRef.current &&
             !workspaceCapabilitiesReady && (
               <DialogShell
-                title={t('sidebar.addRemoteWorkspace')}
+                // Neutral: a Local add resumes into this same shell.
+                title={t('sidebar.addWorkspaceTitle')}
                 size="md"
                 onClose={closeAddWorkspaceDialog}
               >
@@ -18369,7 +18370,8 @@ export function App({
             workspaceCapabilitiesReady &&
             !dynamicWorkspaceRegistrationSupported && (
               <DialogShell
-                title={t('sidebar.addRemoteWorkspace')}
+                // Neutral: a Local add resumes into this same shell.
+                title={t('sidebar.addWorkspaceTitle')}
                 size="md"
                 onClose={closeAddWorkspaceDialog}
               >
