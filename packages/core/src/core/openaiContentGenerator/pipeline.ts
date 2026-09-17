@@ -5,6 +5,7 @@
  */
 
 import type OpenAI from 'openai';
+import { recordRateLimitHeaders } from './rate-limit-headers.js';
 import {
   type GenerateContentParameters,
   GenerateContentResponse,
@@ -514,6 +515,13 @@ export class ContentGenerationPipeline {
               }
             ).withResponse();
             stream = data;
+
+            // The response is already in hand here; remember where the
+            // account stands before the rest of it is discarded (#2800).
+            recordRateLimitHeaders(
+              this.contentGeneratorConfig.authType ?? 'default',
+              httpResponse.headers,
+            );
 
             // Validate content-type: a non-SSE content-type on a streaming
             // request means the upstream (gateway/proxy) returned something
