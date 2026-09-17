@@ -951,6 +951,99 @@ describe('createTranscriptReplayMachine', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
 
+    it.each(['read both', ''])(
+      'replays original resource links with unchanged URIs and metadata (%j)',
+      (text) => {
+        const resourceLinks = [
+          {
+            type: 'resource_link',
+            uri: 'transit://resource-a',
+            name: 'notes.md',
+            mimeType: 'text/markdown',
+            size: 0,
+            title: 'First notes',
+            description: 'Original reference',
+            annotations: { audience: ['user'], priority: 0.5 },
+            _meta: { preview: { version: 1 } },
+          },
+          {
+            type: 'resource_link',
+            uri: 'https://example.com/notes.md',
+            name: 'notes.md',
+            mimeType: null,
+          },
+        ];
+        const projected = updates(
+          createTranscriptReplayMachine(),
+          record('user-resource', 'user', {
+            daemonPromptId: 'resource-prompt',
+            message: {
+              role: 'user',
+              parts: [{ text: 'expanded model input' }],
+            },
+            systemPayload: {
+              displayText: text,
+              hookContext: '',
+              resourceLinks,
+            },
+          }),
+        );
+
+        expect(
+          projected.map((update) =>
+            'content' in update ? update.content : update,
+          ),
+        ).toEqual([
+          ...(text ? [{ type: 'text', text }] : []),
+          ...resourceLinks,
+        ]);
+        for (const update of projected) {
+          expect(update._meta).toMatchObject({
+            promptId: 'resource-prompt',
+            qwenTranscript: { sourceRecordIds: ['user-resource'] },
+          });
+        }
+        const lastUpdate = projected.at(-1)!;
+        expect(
+          'content' in lastUpdate ? lastUpdate.content : lastUpdate,
+        ).not.toBe(resourceLinks[1]);
+      },
+    );
+
+    it('ignores invalid resource references and does not infer them from fileData', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-resource', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'read' },
+              { fileData: { fileUri: 'https://example.com/video.mp4' } },
+            ],
+          },
+          systemPayload: {
+            displayText: 'read',
+            hookContext: '',
+            resourceLinks: [
+              null,
+              { type: 'resource_link', uri: 'transit://x' },
+              {
+                type: 'resource_link',
+                uri: '',
+                name: 'empty',
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(
+        projected.map((update) =>
+          'content' in update ? update.content : update,
+        ),
+      ).toEqual([{ type: 'text', text: 'read' }]);
+    });
+
     it('replays daemon attachment references without embedding base64', () => {
       const projected = updates(
         createTranscriptReplayMachine(),

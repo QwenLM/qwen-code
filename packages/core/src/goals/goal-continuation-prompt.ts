@@ -68,9 +68,9 @@ const DATA_CLOSE_TAG = '</goal_runtime_data>';
 
 const SHARED_LINES = [
   'Continue working on the active Goal.',
-  'Use get_goal for the authoritative objective and evidence state.',
+  'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
   "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-  'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
+  'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
 ];
 
 const SYNTHETIC_TURN_GUARD_LINES = [
@@ -153,7 +153,7 @@ function renderActiveMinutes(ms: number): string {
  * judgement itself, before it spends the turn.
  */
 const EVIDENCE_LINE =
-  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported.";
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a proposal from the most recent records of this Goal's transcript, newest first, and older records drop out when the request is full, so run the decisive checks immediately before calling update_goal.";
 
 const FIDELITY_LINE =
   'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.';
@@ -164,10 +164,10 @@ const FIDELITY_LINE =
  * turn that does not exist invites it to describe one.
  */
 const NO_PROGRESS_LINE =
-  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, cite it through update_goal rather than repeating it.';
+  'Judge your previous Goal turn before acting: it made progress only if it changed the workspace or produced evidence that changes what to do next. If it did not, take a different concrete action now instead of restating status; if the same blocker still stands, report it through update_goal rather than repeating it.';
 
 const COMPLETION_AUDIT_LINE =
-  'Before proposing that the Goal is complete, check every explicit requirement in the objective against evidence you can cite. Missing, indirect, or self-reported evidence means not done: keep working.';
+  'Before proposing that the Goal is complete, treat completion as unproven: for every explicit requirement in the objective, identify the tool result that proves it and, unless it is among the most recent records, produce it again now, matching the scope of the check to the scope of the requirement. Missing, indirect, or self-reported evidence means not done: keep working, and do not redefine success around the work that already exists.';
 
 /**
  * Sent once per spend window, on the continuation the budget gate grants
@@ -180,7 +180,7 @@ const COMPLETION_AUDIT_LINE =
  */
 const WIND_DOWN_LINES = [
   'An autonomous budget for this Goal window is spent -- the budget line above says which. This is the final turn before the Goal stops and waits for the user; do not start new work.',
-  'Deliver a concise hand-off: what was accomplished, citing evidence references from get_goal; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
+  'Deliver a concise hand-off: what was accomplished, naming the tool results that show it; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
 ];
 
 /**

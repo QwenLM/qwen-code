@@ -242,6 +242,11 @@ import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { McpAppHostContext } from './mcpAppHostContext';
+import {
+  isItemExcluded,
+  isSettingExcluded,
+  type WebShellSettingsOptions,
+} from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -1121,6 +1126,8 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Native settings-page presentation. Does not restrict commands or daemon access. */
+  settings?: WebShellSettingsOptions;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -3062,6 +3069,7 @@ export function App({
   bottomStatusItems,
   chatMaxWidth,
   sidebar,
+  settings: settingsPresentation,
   header,
   rightPanel,
   environmentPanel,
@@ -8322,6 +8330,9 @@ export function App({
   const [modelSettingScope, setModelSettingScope] = useState<
     'workspace' | 'user'
   >('workspace');
+  const settingsDialogKeyRef = useRef<string | undefined>(undefined);
+  const settingsPresentationRef = useRef(settingsPresentation);
+  settingsPresentationRef.current = settingsPresentation;
   const [showFallbacksDialog, setShowFallbacksDialog] = useState(false);
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
@@ -11643,7 +11654,8 @@ export function App({
           voiceFeaturesRef.current,
         ) &&
         (source === 'settings'
-          ? activePanelRef.current === 'settings'
+          ? activePanelRef.current === 'settings' &&
+            !isSettingExcluded('voiceModel', settingsPresentationRef.current)
           : activePanelRef.current === null) &&
         mainViewRef.current === 'chat' &&
         modelDialogModeRef.current === null &&
@@ -15348,6 +15360,12 @@ export function App({
             return true;
           }
           if (cmd === 'auth') {
+            // Take over only the surface this command owns: clearing an
+            // unrelated settings-launched key would disarm its exclusion
+            // force-close.
+            if (settingsDialogKeyRef.current === 'builtin:model-management') {
+              settingsDialogKeyRef.current = undefined;
+            }
             setShowAuthDialog(true);
             return true;
           }
@@ -15361,6 +15379,9 @@ export function App({
               return true;
             }
             if (modelArg === '--fast') {
+              if (settingsDialogKeyRef.current === 'fastModel') {
+                settingsDialogKeyRef.current = undefined;
+              }
               setModelDialogMode('fast');
               return true;
             }
@@ -15389,6 +15410,9 @@ export function App({
               return true;
             }
             if (modelArg === '--vision') {
+              if (settingsDialogKeyRef.current === 'visionModel') {
+                settingsDialogKeyRef.current = undefined;
+              }
               setModelDialogMode('vision');
               return true;
             }
@@ -17158,6 +17182,61 @@ export function App({
     }
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
+  useEffect(() => {
+    const key = settingsDialogKeyRef.current;
+    if (!key) return;
+    const excluded =
+      key === 'builtin:model-management'
+        ? isItemExcluded(key, settingsPresentation)
+        : isSettingExcluded(key, settingsPresentation);
+    if (excluded) {
+      if (pendingVoicePickerSourceRef.current === 'settings') {
+        voicePickerRequestRef.current++;
+        pendingVoicePickerSourceRef.current = undefined;
+      }
+      // Close only the dialog the held key owns: a stale key left over from a
+      // settings launch must not close a surface a command or the status bar
+      // opened afterwards.
+      if (key === 'modelFallbacks') {
+        setShowFallbacksDialog(false);
+      } else if (key === 'builtin:model-management') {
+        handleCloseAuthDialog();
+      } else {
+        const ownedMode =
+          key === 'fastModel'
+            ? 'fast'
+            : key === 'visionModel'
+              ? 'vision'
+              : key === 'advisorModel'
+                ? 'advisor'
+                : key === 'imageModel'
+                  ? 'image'
+                  : key === 'voiceModel'
+                    ? 'voice'
+                    : null;
+        if (ownedMode) {
+          setModelDialogMode((cur) => (cur === ownedMode ? null : cur));
+        }
+      }
+      settingsDialogKeyRef.current = undefined;
+    } else if (
+      !modelDialogMode &&
+      !showFallbacksDialog &&
+      !showApprovalModeDialog &&
+      !showAuthDialog &&
+      pendingVoicePickerSourceRef.current !== 'settings'
+    ) {
+      settingsDialogKeyRef.current = undefined;
+    }
+  }, [
+    settingsPresentation,
+    showAuthDialog,
+    handleCloseAuthDialog,
+    modelDialogMode,
+    showFallbacksDialog,
+    showApprovalModeDialog,
+  ]);
+
   const useWorkspaceSkillSnapshot =
     workspaceContextActive &&
     loadedSkillsReady &&
@@ -18858,6 +18937,7 @@ export function App({
                       {activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={targetedWorkspaceSettingsState}
+                        presentation={settingsPresentation}
                         embedded
                         initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
@@ -18878,9 +18958,22 @@ export function App({
                           busy: modelActionBusy,
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
-                          onAddModel: () => setShowAuthDialog(true),
+                          onAddModel: () => {
+                            if (
+                              isItemExcluded(
+                                'builtin:model-management',
+                                settingsPresentation,
+                              )
+                            )
+                              return;
+                            settingsDialogKeyRef.current =
+                              'builtin:model-management';
+                            setShowAuthDialog(true);
+                          },
                         }}
                         onSubDialog={(key, scope) => {
+                          if (isSettingExcluded(key, settingsPresentation)) return;
+                          settingsDialogKeyRef.current = key;
                           // Record the persist scope only for model settings —
                           // the reset effect is gated on the dialog/fallback/auth
                           // flags, so it never runs for the approvalMode dialog
