@@ -612,14 +612,19 @@ function SessionOverviewPanelInner({
   const canArchiveCard = useCallback(
     (card: SessionCard) =>
       sessionArchiveEnabled &&
+      sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
+        'qwen-live' &&
       card.status === 'idle' &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionArchiveEnabled],
+    [canUseSessionMutation, sessionArchiveEnabled, sessionByIdentity],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
-      card.status === 'idle' && canUseSessionMutation(card),
-    [canUseSessionMutation],
+      sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
+        'qwen-live' &&
+      card.status === 'idle' &&
+      canUseSessionMutation(card),
+    [canUseSessionMutation, sessionByIdentity],
   );
   const canRenameCard = useCallback(
     (card: SessionCard) =>
