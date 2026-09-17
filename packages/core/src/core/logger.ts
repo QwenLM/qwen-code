@@ -549,10 +549,8 @@ export class Logger {
    * One optimistic in-memory removal, one queued op, one file rewrite — not one of
    * each per id. Per-id calls cost a full read → filter → write of the whole
    * project-shared `logs.json` each, which the next `logMessage` then waits behind
-   * on the same queue; and each op assigns `this.logs` from its own disk snapshot,
-   * which still holds the rows of every purge queued behind it, so an earlier op
-   * re-adopts rows a later optimistic removal had already dropped. Both go away when
-   * the batch is one op.
+   * on the same queue. Per-id calls stay correct, since every adoption goes through
+   * `adoptDiskSnapshot`; the batch only saves the extra rewrites.
    *
    * @param sessionIds the sessions to purge; duplicates and unknown ids are harmless
    * @returns true when rows were actually removed from the file

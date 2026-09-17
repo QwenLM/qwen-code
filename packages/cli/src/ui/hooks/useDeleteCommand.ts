@@ -56,9 +56,8 @@ export function useDeleteCommand(
   const purgeSessionLogs = useCallback(
     (sessionIds: readonly string[]) => {
       if (sessionIds.length === 0) return;
-      // One call for the whole batch: per-id purges each rewrite the entire
-      // project-shared `logs.json` and queue behind one another, and each would
-      // adopt a disk snapshot that still holds the rows the later ones dropped.
+      // One call for the whole batch: per-id purges would each rewrite the
+      // entire project-shared `logs.json` and queue behind one another.
       void logger
         ?.removeSessionsMessages(sessionIds)
         .catch((error: unknown) => {
