@@ -793,6 +793,10 @@ describe('useDeleteCommand', () => {
         }),
         expect.any(Number),
       );
+      expect(consoleError).toHaveBeenCalledWith(
+        'Failed to purge deleted sessions from log:',
+        expect.objectContaining({ message: 'disk full' }),
+      );
       consoleError.mockRestore();
     });
 
