@@ -127,30 +127,17 @@ describe('GoalPill', () => {
     unmount();
   });
 
-  it('warns about stalled checkpoints before the stall breaker stops the Goal', () => {
+  it('keeps the plain labels on a record an earlier build left a stall streak on', () => {
     vi.setSystemTime(NOW);
-    const { lastFrame, unmount } = renderPill({
+    // Goals no longer run evidence checkpoints, so the two fields can only
+    // come from a record an earlier build wrote, and they are not drawn.
+    const quiet = renderPill({
       snapshot: snapshot('active', 'running', {
         checkpointStalls: 2,
         lastCheckpointFailure: 'Error: provider failed',
       }),
     });
-
-    expect(lastFrame()).toContain('! /goal checkpoint 2/3 stalled');
-    // The footer has no room for the failure itself; the status card has it.
-    expect(lastFrame()).not.toContain('provider failed');
-    unmount();
-  });
-
-  it('keeps the plain labels when no checkpoint has stalled', () => {
-    vi.setSystemTime(NOW);
-    // A failure on a window with room spends no stall and is the card's to
-    // show; the footer stays quiet until the streak starts.
-    const quiet = renderPill({
-      snapshot: snapshot('active', 'running', {
-        lastCheckpointFailure: 'Error: provider failed',
-      }),
-    });
+    expect(quiet.lastFrame()).not.toContain('checkpoint');
     expect(quiet.lastFrame()).toContain('/goal active');
     quiet.unmount();
 

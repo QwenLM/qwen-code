@@ -1730,14 +1730,14 @@ const SETTINGS_SCHEMA = {
       },
       goalCheckpointTimeoutSeconds: {
         type: 'integer',
-        label: 'Goal Checkpoint Timeout (seconds)',
+        label: 'Goal Checkpoint Timeout (seconds, deprecated)',
         category: 'Model',
         requiresRestart: false,
         default: undefined as number | undefined,
         minimum: 1,
         maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
         description:
-          'Ceiling on one Goal evidence-checkpoint model call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; when a call makes its one corrective retry, both requests share this ceiling (docs/users/features/goals.md lists which failures earn one). A check on an overflowing window after a stalled checkpoint sends its evidence in batches, one call per batch, each under its own ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
+          'Deprecated. Goals no longer run evidence-checkpoint model calls, because the verifier reads the transcript directly, so this value has no effect. It is still accepted and validated as an integer between 1 and 900 so that existing settings files keep loading.',
         showInDialog: false,
       },
       maxToolCalls: {
