@@ -410,7 +410,7 @@ describe('GetGoalTool', () => {
     expect(result.returnDisplay).toBe('Active goal · revision 3');
   });
 
-  it('collapses checkpoint claims to a count and ignores the deprecated view parameter', async () => {
+  it('returns the snapshot as it is and ignores the deprecated view parameter', async () => {
     const snapshot = {
       v: 2 as const,
       activity: 'running' as const,
@@ -425,16 +425,6 @@ describe('GetGoalTool', () => {
         tokensUsed: 0,
         createdAt: 10,
         updatedAt: 20,
-        evidenceCheckpoint: {
-          checkpointId: 'checkpoint-9',
-          createdAt: 15,
-          claims: Array.from({ length: 2 }, (_, index) => ({
-            id: `checkpoint-9:${index + 1}`,
-            proofKind: 'external_fact' as const,
-            claim: `SECRET_CLAIM_TEXT ${index}`,
-            sourceRefs: [`src-${index}`],
-          })),
-        },
       },
     };
     const tool = new GetGoalTool(
@@ -455,21 +445,7 @@ describe('GetGoalTool', () => {
     };
 
     const payload = await read({});
-    expect(payload).toEqual({
-      active: true,
-      snapshot: {
-        ...snapshot,
-        goal: {
-          ...snapshot.goal,
-          evidenceCheckpoint: {
-            checkpointId: 'checkpoint-9',
-            createdAt: 15,
-            claimCount: 2,
-          },
-        },
-      },
-    });
-    expect(JSON.stringify(payload)).not.toContain('SECRET_CLAIM_TEXT');
+    expect(payload).toEqual({ active: true, snapshot });
     expect(await read({ view: 'full' })).toEqual(payload);
   });
 

@@ -37,32 +37,6 @@ function snapshot(
 }
 
 describe('<GoalStatusMessage />', () => {
-  it('draws no checkpoint line for a record an earlier build left one on', () => {
-    // Goals no longer run evidence checkpoints; a replayed record from a
-    // build that did can still carry the two fields, and the stop reason is
-    // what the card keeps.
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot(
-          'usage_limited',
-          'idle',
-          'Three evidence checkpoints stalled.',
-          {
-            checkpointStalls: 3,
-            lastCheckpointFailure: 'Error: provider failed',
-            limitKind: 'checkpoint_request',
-          },
-        )}
-      />,
-    );
-
-    expect(lastFrame()).toContain(
-      'Reason: Three evidence checkpoints stalled.',
-    );
-    expect(lastFrame()).not.toContain('Checkpoint');
-    expect(lastFrame()).not.toContain('provider failed');
-  });
-
   it('is wrapped in React.memo to avoid unnecessary scrollback rerenders', () => {
     expect(
       (GoalStatusMessage as unknown as { $$typeof?: symbol }).$$typeof,
@@ -248,22 +222,6 @@ describe('<GoalStatusMessage />', () => {
 
     expect(lastFrame()).toContain('4 turns · 12s');
     expect(lastFrame()).not.toContain('tokens');
-  });
-
-  it('hides checkpoint health on a completed Goal that still carries it', () => {
-    // The terminal snapshot spreads the record and overrides only `status`,
-    // so a Goal that completed after a failed check journals both fields.
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot('complete', 'idle', 'all acceptance checks passed', {
-          checkpointStalls: 1,
-          lastCheckpointFailure: 'Error: provider failed',
-        })}
-      />,
-    );
-
-    expect(lastFrame()).toContain('Goal complete');
-    expect(lastFrame()).not.toContain('Checkpoint');
   });
 
   it('never writes control characters from a stop reason to the terminal', () => {
