@@ -176,7 +176,7 @@ export function buildGoalVerifierEvidenceWindow(
     record: GoalEvidenceRecord;
     provenance: GoalEvidenceProvenance;
     turnId: string;
-    rendered?: { entry: GoalVerifierEvidenceRecord; bytes: number };
+    rendered?: { entry: GoalVerifierEvidenceRecord; bytes: number } | null;
   }
   const current: Candidate[] = [];
   const user: Candidate[] = [];
@@ -198,9 +198,10 @@ export function buildGoalVerifierEvidenceWindow(
       // Only a message this objective can have prompted: recorded after the
       // cursor, or stamped for this revision wherever it sits. A message
       // stamped for another Goal or an earlier revision may be the user's
-      // consent to something else.
+      // consent to something else, and one whose stamp cannot be read is
+      // not trusted as unstamped.
+      if (record.goalContext !== undefined && !ownContext) continue;
       if (index <= cursorIndex && !ownContext) continue;
-      if (context !== undefined && !ownContext) continue;
       const candidate = {
         index,
         record,
@@ -219,15 +220,22 @@ export function buildGoalVerifierEvidenceWindow(
     group?.push({ index, record, provenance, turnId: context.turnId });
   }
   const render = (candidate: Candidate) => {
-    if (candidate.rendered) return candidate.rendered;
+    if (candidate.rendered !== undefined) return candidate.rendered;
+    const content = capRecordContent(
+      evidenceContent(candidate.record, candidate.provenance),
+    );
+    if (!content) {
+      // The shape check said content and the renderer found none (a tool
+      // response that cannot be serialized): not evidence, not an omission.
+      candidate.rendered = null;
+      return null;
+    }
     const entry: GoalVerifierEvidenceRecord = {
       uuid: candidate.record.uuid,
       provenance: candidate.provenance,
       turnId: candidate.turnId,
       proofKind: proofKindOf(candidate.provenance),
-      content: capRecordContent(
-        evidenceContent(candidate.record, candidate.provenance),
-      ),
+      content,
     };
     candidate.rendered = {
       entry,
@@ -243,7 +251,8 @@ export function buildGoalVerifierEvidenceWindow(
   // most `share` bytes on this pass. A record that does not fit is skipped,
   // not the end of the pass, so a short, older message can still make it in
   // behind a long one. The pass stops once nothing could fit at all, or once
-  // `missLimit` rendered records in a row have failed to fit.
+  // `missLimit` rendered records in a row have failed to fit; an admission
+  // starts that count over.
   const admit = (
     group: readonly Candidate[],
     {
@@ -270,31 +279,36 @@ export function buildGoalVerifierEvidenceWindow(
         break;
       }
       if (admitted.has(candidate.index) || !accept(candidate)) continue;
-      // The text parts alone bound the entry from below; a record that
-      // cannot fit on that bound is skipped without serializing its tool
-      // response.
-      if (used + leastBytes(candidate.record) > budget) continue;
+      // The text parts alone bound a model or tool record from below; one
+      // that cannot fit on that bound is skipped without serializing its
+      // tool response. A user record is always rendered: its parts may be an
+      // expanded file reference that displays as one line.
+      if (used + leastBytes(candidate) > budget) continue;
       const rendered = render(candidate);
+      if (!rendered) continue;
       if (spent + rendered.bytes > share || used + rendered.bytes > budget) {
         misses += 1;
         continue;
       }
       admitted.add(candidate.index);
+      misses = 0;
       taken += 1;
       spent += rendered.bytes;
       used += rendered.bytes;
     }
   };
-  // The proposing turn's newest record first: a completion is proven by what
-  // its own turn produced. Then one record the model did not merely write
-  // from each preceding turn a blocked policy reads, then the user's newest
-  // messages, then the user's share, then everything else by recency.
-  admit(current, { count: 1 });
+  // The proposing turn's newest tool result first: a completion is proven by
+  // what its own turn produced, and the decisive check is usually followed
+  // by the model's closing prose. Then one record the model did not merely
+  // write from each preceding turn a blocked policy reads, then the user's
+  // newest messages, then the user's share, then everything else by
+  // recency, which puts that closing prose next.
+  const notProse = (candidate: Candidate) =>
+    candidate.provenance !== 'assistant_output';
+  admit(current, { count: 1, accept: notProse });
+  if (admitted.size === 0) admit(current, { count: 1 });
   for (const group of prior.values()) {
-    admit(group, {
-      count: 1,
-      accept: (candidate) => candidate.provenance !== 'assistant_output',
-    });
+    admit(group, { count: 1, accept: notProse });
   }
   admit(user, { count: USER_MESSAGE_GUARANTEED_COUNT });
   admit(user, { share: Math.floor(budget / USER_MESSAGE_BUDGET_FRACTION) });
@@ -312,7 +326,14 @@ export function buildGoalVerifierEvidenceWindow(
   const evidence = rest
     .filter((candidate) => admitted.has(candidate.index))
     .map((candidate) => candidate.rendered!.entry);
-  return { evidence, turnIds, omitted: rest.length - evidence.length };
+  return {
+    evidence,
+    turnIds,
+    omitted: rest.filter(
+      (candidate) =>
+        !admitted.has(candidate.index) && candidate.rendered !== null,
+    ).length,
+  };
 }
 
 export class GoalVerifierCoverageError extends Error {
@@ -338,8 +359,10 @@ export class GoalVerifierCoverageError extends Error {
  *
  * An infeasible blocker needs a tool result in the current turn; an
  * authority or external blocker needs such a user message or a tool result
- * in the current turn; a repeated blocker needs at least three lineage turns
- * with a tool result or a user message in each of the last three. A
+ * in the current turn; a repeated blocker needs at least three lineage
+ * turns, evidence of any kind in the current one and a tool result or a
+ * user message in each of the two before it, as the rule this replaces
+ * required. A
  * verifier prompt can restate these rules; only code can refuse a proposal
  * that breaks them every time. The newest records are what the window sends
  * first, so contradictory newer evidence cannot be left out the way a cited
@@ -352,16 +375,12 @@ export function validateGoalVerifierCoverage(
   if (proposal.status !== 'blocked') return;
   const { cursorIndex, lineageTurnIds } = attributeTranscript(input);
   const currentTurnId = input.permit.turnId;
-  const kindsByTurn = new Map<string, Set<'tool' | 'user'>>();
+  const kindsByTurn = new Map<string, Set<GoalEvidenceProvenance>>();
   let userMessage = false;
   for (let index = 0; index < input.records.length; index += 1) {
     const record = input.records[index]!;
     const provenance = coherentEvidenceProvenance(record);
-    if (
-      !provenance ||
-      provenance === 'assistant_output' ||
-      !recordHasEvidenceContent(record, provenance)
-    ) {
+    if (!provenance || !recordHasEvidenceContent(record, provenance)) {
       continue;
     }
     const context = parseGoalContext(record.goalContext);
@@ -370,28 +389,31 @@ export function validateGoalVerifierCoverage(
       context.goalId === input.goal.goalId &&
       context.revision === input.goal.revision;
     if (provenance === 'real_user') {
+      if (record.goalContext !== undefined && !ownContext) continue;
       if (index <= cursorIndex && !ownContext) continue;
-      if (context !== undefined && !ownContext) continue;
       userMessage = true;
       if (!context) continue;
     } else if (index <= cursorIndex || !ownContext) {
       continue;
     }
     const kinds = kindsByTurn.get(context!.turnId) ?? new Set();
-    kinds.add(provenance === 'real_user' ? 'user' : 'tool');
+    kinds.add(provenance);
     kindsByTurn.set(context!.turnId, kinds);
   }
-  const has = (turnId: string, kind: 'tool' | 'user') =>
-    kindsByTurn.get(turnId)?.has(kind) ?? false;
+  const has = (turnId: string, ...kinds: GoalEvidenceProvenance[]) =>
+    kinds.some((kind) => kindsByTurn.get(turnId)?.has(kind) ?? false);
 
-  if (proposal.blockerKind === 'infeasible' && !has(currentTurnId, 'tool')) {
+  if (
+    proposal.blockerKind === 'infeasible' &&
+    !has(currentTurnId, 'tool_result')
+  ) {
     throw new GoalVerifierCoverageError(
       'infeasible_blocker_external_fact_required',
       'An infeasible blocker requires a tool result in this turn showing the fact that makes the objective unsatisfiable.',
     );
   }
   if (!isRepeatedBlockerProposal(proposal)) {
-    if (!userMessage && !has(currentTurnId, 'tool')) {
+    if (!userMessage && !has(currentTurnId, 'tool_result')) {
       throw new GoalVerifierCoverageError(
         'immediate_blocker_external_evidence_required',
         'An immediate blocker requires a message from the user during this Goal or a tool result in this turn as evidence.',
@@ -399,15 +421,22 @@ export function validateGoalVerifierCoverage(
     }
     return;
   }
+  // The current turn is the one being judged, so what the model wrote in
+  // it counts; the two turns before it have to show something the model
+  // did not merely say, as the rule this replaces required.
   const required = lineageTurnIds.slice(-3);
-  if (
-    lineageTurnIds.at(-1) !== currentTurnId ||
-    required.length !== 3 ||
-    !required.every((turnId) => has(turnId, 'tool') || has(turnId, 'user'))
-  ) {
+  const covered =
+    lineageTurnIds.at(-1) === currentTurnId &&
+    required.length === 3 &&
+    required.every((turnId) =>
+      turnId === currentTurnId
+        ? has(turnId, 'tool_result', 'real_user', 'assistant_output')
+        : has(turnId, 'tool_result', 'real_user'),
+    );
+  if (!covered) {
     throw new GoalVerifierCoverageError(
       'repeated_blocker_turn_coverage',
-      'A repeated blocker requires a tool result or a message from the user in each of the current and two immediately preceding Goal turns.',
+      'A repeated blocker requires evidence in the current turn and a tool result or a message from the user in each of the two immediately preceding Goal turns.',
     );
   }
 }
@@ -450,17 +479,28 @@ function attributeTranscript(input: GoalEvidenceValidationInput): {
 }
 
 /**
- * A lower bound on a record's serialized entry from its text parts alone,
- * cheap enough to decide "cannot fit" without serializing a tool response.
+ * A lower bound on a record's serialized entry, cheap enough to decide
+ * "cannot fit" without serializing a tool response. For a model or tool
+ * record the trimmed text parts are sent as they are, so their length is a
+ * bound (a UTF-16 unit is at least one UTF-8 byte). A user record has no
+ * such bound: its parts may be an expanded file reference that displays as
+ * one line, so it costs only the bare entry until rendered.
  */
-function leastBytes(record: GoalEvidenceRecord): number {
+function leastBytes(candidate: {
+  record: GoalEvidenceRecord;
+  provenance: GoalEvidenceProvenance;
+}): number {
+  if (candidate.provenance === 'real_user') return MIN_ENTRY_BYTES;
   let text = 0;
-  for (const part of record.message?.parts ?? []) {
+  for (const part of candidate.record.message?.parts ?? []) {
     if (part.thought !== true && typeof part.text === 'string') {
-      text += part.text.length;
+      text += part.text.trim().length;
     }
   }
-  return MIN_ENTRY_BYTES + Math.min(text, RECORD_CONTENT_BYTE_LIMIT);
+  const capped =
+    RECORD_CONTENT_BYTE_LIMIT -
+    Buffer.byteLength(MIDDLE_TRUNCATION_MARKER, 'utf8');
+  return MIN_ENTRY_BYTES + Math.min(text, capped);
 }
 
 /**

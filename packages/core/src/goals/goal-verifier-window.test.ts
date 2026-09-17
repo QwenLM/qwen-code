@@ -42,6 +42,7 @@ interface RecordOptions {
   thought?: string;
   toolResponse?: Record<string, unknown>;
   goalContext?: unknown;
+  systemPayload?: unknown;
 }
 
 function record(
@@ -75,6 +76,9 @@ function record(
       ? {}
       : { provenance: options.provenance }),
     ...(goalContext === undefined ? {} : { goalContext }),
+    ...(options.systemPayload === undefined
+      ? {}
+      : { systemPayload: options.systemPayload }),
     ...(parts.length === 0 ? {} : { message: { parts } }),
   };
 }
@@ -515,6 +519,111 @@ describe('buildGoalVerifierEvidenceWindow', () => {
     expect(window.omitted).toBe(10);
   });
 
+  it('keeps admitting small records between large ones that do not fit', () => {
+    const records: GoalEvidenceRecord[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      records.push(tool(`big-${i}`, 'turn-3', 'y'.repeat(25_000)));
+      records.push(tool(`small-${i}`, 'turn-3', 'ok'));
+    }
+
+    const window = build(records, complete, permit(), 64_000);
+
+    // Three capped records fill the window. Every later large record is a
+    // miss, but each small one between them is admitted, which starts the
+    // miss count over, so the pass reaches all thirty of them.
+    const uuids = window.evidence.map((e) => e.uuid);
+    expect(uuids.filter((uuid) => uuid.startsWith('small-'))).toHaveLength(30);
+    expect(uuids.filter((uuid) => uuid.startsWith('big-'))).toHaveLength(3);
+  });
+
+  it('renders a user message whose expanded parts are far larger than its display text', () => {
+    const records = [
+      record('approval', 'user', {
+        provenance: 'real_user',
+        turnId: 'turn-1',
+        text: `yes, go ahead @design.md\n${'design file contents\n'.repeat(1_500)}`,
+        systemPayload: {
+          hookContext: 'expanded',
+          displayText: 'yes, go ahead @design.md',
+        },
+      }),
+      ...Array.from({ length: 6 }, (_, i) =>
+        tool(`t3-${i}`, 'turn-3', 'x'.repeat(17_000)),
+      ),
+    ];
+
+    const window = build(records, complete, permit(), 64_000);
+
+    expect(window.evidence.find((e) => e.uuid === 'approval')).toMatchObject({
+      proofKind: 'user_input',
+      content: 'yes, go ahead @design.md',
+    });
+  });
+
+  it("guarantees the proposing turn's newest tool result ahead of its closing prose", () => {
+    const records = [
+      ...Array.from({ length: 4 }, (_, i) =>
+        tool(`t2-${i}`, 'turn-2', 'x'.repeat(17_000)),
+      ),
+      ...Array.from({ length: 4 }, (_, i) =>
+        tool(`t3-${i}`, 'turn-3', 'x'.repeat(17_000)),
+      ),
+      tool('decisive', 'turn-4', `dependency check\n${'x'.repeat(17_000)}`),
+      text('closing-prose', 'turn-4', 'z'.repeat(17_000)),
+    ];
+
+    const window = build(
+      records,
+      blocked('repeated'),
+      permit('turn-4'),
+      64_000,
+    );
+
+    const uuids = window.evidence.map((e) => e.uuid);
+    expect(uuids).toContain('decisive');
+    expect(uuids).toContain('t3-3');
+    expect(uuids).toContain('t2-3');
+    expect(uuids).not.toContain('closing-prose');
+  });
+
+  it('does not take a user message whose Goal stamp cannot be read', () => {
+    const records = [
+      record('tainted', 'user', {
+        provenance: 'real_user',
+        text: 'approved',
+        goalContext: { goalId: 'goal-9' },
+      }),
+      tool('run', 'turn-2', 'ok'),
+    ];
+
+    // The preceding turn's tool result is in a blocked window; the tainted
+    // message is not, and it cannot stand in for user input either.
+    expect(
+      build(records, blocked('authority')).evidence.map((e) => e.uuid),
+    ).toEqual(['run']);
+    expect(() => coverage(records, blocked('authority'))).toThrow(
+      expect.objectContaining({
+        code: 'immediate_blocker_external_evidence_required',
+      }),
+    );
+  });
+
+  it('treats a user prompt whose display text is blank as no evidence', () => {
+    const records = [
+      record('blank-prompt', 'user', {
+        provenance: 'real_user',
+        turnId: 'turn-3',
+        text: 'expanded context that the user never typed',
+        systemPayload: { hookContext: 'expanded', displayText: '   ' },
+      }),
+    ];
+
+    expect(build(records, complete).evidence).toEqual([]);
+    expect(() => coverage(records, blocked('authority'))).toThrow(
+      GoalVerifierCoverageError,
+    );
+  });
+
   it('refuses a budget that is not a finite number or too small to judge anything', () => {
     const records = [tool('run', 'turn-3', 'ok')];
 
@@ -654,7 +763,7 @@ describe('validateGoalVerifierCoverage', () => {
     }
   });
 
-  it('requires three lineage turns with non-assistant evidence for a repeated blocker', () => {
+  it('requires three lineage turns, the earlier two with non-assistant evidence, for a repeated blocker', () => {
     const repeated = blocked('repeated');
     expect(() => coverage(proseOnly, repeated, permit('turn-4'))).toThrow(
       expect.objectContaining({ code: 'repeated_blocker_turn_coverage' }),
@@ -664,9 +773,18 @@ describe('validateGoalVerifierCoverage', () => {
     ).toThrow(
       expect.objectContaining({ code: 'repeated_blocker_turn_coverage' }),
     );
+    // The current turn is the one being judged: what the model wrote in it
+    // counts, as the rule this replaces allowed.
     expect(() =>
       coverage(
         [withFacts[0]!, withFacts[1]!, proseOnly[2]!],
+        repeated,
+        permit('turn-4'),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      coverage(
+        [withFacts[0]!, proseOnly[1]!, withFacts[2]!],
         repeated,
         permit('turn-4'),
       ),

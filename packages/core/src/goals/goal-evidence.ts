@@ -713,13 +713,17 @@ export function recordHasEvidenceContent(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
 ): boolean {
-  if (provenance === 'real_user') {
-    const projection = projectUserTranscriptForDisplay(record);
-    if (projection?.displayText !== undefined) {
-      return projection.displayText.trim().length > 0;
-    }
+  // The same projection `evidenceContent` renders from, so the two cannot
+  // disagree: a user prompt's display text stands in for its parts, and a
+  // trailing hook-context part is not content.
+  const projection =
+    provenance === 'real_user'
+      ? projectUserTranscriptForDisplay(record)
+      : undefined;
+  if (projection?.displayText !== undefined) {
+    return projection.displayText.trim().length > 0;
   }
-  for (const part of record.message?.parts ?? []) {
+  for (const part of projection?.parts ?? record.message?.parts ?? []) {
     if (
       part.thought !== true &&
       typeof part.text === 'string' &&
@@ -1058,23 +1062,7 @@ function hasCatalogEligibleEvidence(
   ) {
     return false;
   }
-  for (const part of record.message?.parts ?? []) {
-    if (
-      part.thought !== true &&
-      typeof part.text === 'string' &&
-      part.text.trim()
-    ) {
-      return true;
-    }
-    if (
-      provenance === 'tool_result' &&
-      part.functionResponse &&
-      part.functionResponse.response !== undefined
-    ) {
-      return true;
-    }
-  }
-  return false;
+  return recordHasEvidenceContent(record, provenance);
 }
 
 function catalogEvidence(
