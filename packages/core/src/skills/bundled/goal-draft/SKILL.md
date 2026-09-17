@@ -112,7 +112,7 @@ Check every line before printing:
 
 Then hand off, and nothing else:
 
-**If the `propose_goal` tool is available and no Goal is active**, call it with the objective on one line. The user approves or declines it in a dialog; only their approval sets the Goal. If they decline you will not be told why: stop, do not ask about it, and do not propose the same or a reworded objective again. After approval, acknowledge it in one sentence and end the turn — the Goal runtime starts the first Goal turn on its own.
+**If the `propose_goal` tool is available and no Goal is active**, call it with the objective on one line. `propose_goal` refuses an objective over 1,500 characters: tighten a longer draft before calling it, never cut it off mid-check. The user approves or declines it in a dialog; only their approval sets the Goal. If they decline you will not be told why: stop, do not ask about it, and do not propose the same or a reworded objective again. After approval, acknowledge it in one sentence and end the turn — the Goal runtime starts the first Goal turn on its own.
 
 **Otherwise** (a client without Goal proposal support, headless, the tool is disabled, or a Goal is active), print:
 
