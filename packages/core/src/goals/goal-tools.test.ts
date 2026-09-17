@@ -371,12 +371,47 @@ describe('GetGoalTool', () => {
     expect(tool.description).toContain('nothing here to cite');
   });
 
-  it('exposes no parameters', () => {
-    const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
-    expect(tool.schema.parametersJsonSchema).toEqual({
-      type: 'object',
-      properties: {},
-      additionalProperties: false,
+  it('accepts and ignores the retired view parameter', async () => {
+    // Older transcripts are full of get_goal({ view: 'full' }); a model that
+    // reads them will send it again, and a refusal would cost a retry.
+    const getGoalForWorker = vi.fn().mockResolvedValue({
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: 'Ship Goal v3',
+      evidenceCursor: { recordId: 'cursor-1' },
+    });
+    const getSnapshotForPermit = vi.fn(() => ({
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'Ship Goal v3',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'cursor-1' },
+        turnCount: 4,
+        activeTimeMs: 120,
+        tokensUsed: 0,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    }));
+    const tool = new GetGoalTool(
+      makeConfig({ getGoalForWorker, getSnapshotForPermit }),
+    );
+    expect(tool.schema.parametersJsonSchema).toMatchObject({
+      properties: {
+        view: { description: expect.stringContaining('Ignored') },
+      },
+    });
+
+    const result = await goalTurnContext
+      .run(permit, () => tool.build({ view: 'full' }))
+      .execute(new AbortController().signal);
+
+    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty('view');
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      active: true,
     });
   });
 });

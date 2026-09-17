@@ -10196,7 +10196,9 @@ export class Config {
       // are recorded rather than reconstructed from session totals.
       ledger: recorder,
       verifier: createGoalVerifier(this),
-      verifierRequestByteLimit: goalVerifierRequestByteLimit(this),
+      // Resolved per verification: the fast model and the main model's
+      // window are both set after this constructor and can change later.
+      verifierRequestByteLimit: () => goalVerifierRequestByteLimit(this),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,

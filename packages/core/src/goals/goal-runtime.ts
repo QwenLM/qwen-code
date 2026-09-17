@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import {
   buildGoalVerifierWindow,
   EvidenceSourceUnavailableError,
+  type EvidenceSourceUnavailableCode,
   type GoalEvidenceRecord,
   type GoalVerifierWindow,
 } from './goal-evidence.js';
@@ -17,7 +18,9 @@ import {
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
   GOAL_STATE_VERSION,
+  GOAL_REPEATED_BLOCKER_OUT_OF_REACH_REASON,
   goalActiveTimeBudgetReason,
+  goalPauseReasonForInconsistentTranscript,
   goalPauseReasonForUnreadableTranscript,
   goalPauseReasonForVerifierFailure,
   isGoalVerifierFailurePause,
@@ -80,9 +83,11 @@ export interface CreateGoalRuntimeOptions {
   /**
    * Bytes one verification request may carry, envelope included. Defaults
    * to the verifier's fixed ceiling; `goalVerifierRequestByteLimit` lowers
-   * it for a side query model whose context window cannot hold that.
+   * it for a side query model whose context window cannot hold that. A
+   * function is called at each verification, so a model switched after the
+   * runtime was built is honoured.
    */
-  verifierRequestByteLimit?: number;
+  verifierRequestByteLimit?: number | (() => number);
   ledger?: GoalTurnLedger;
   /**
    * The autonomous spend window one user action (create, edit of a spent
@@ -374,10 +379,18 @@ export function createGoalRuntime(
     }
   };
 
-  const verifierRequestByteLimit = Math.min(
-    GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
-    options.verifierRequestByteLimit ?? GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
-  );
+  const verifierRequestByteLimit = (): number => {
+    const limit =
+      typeof options.verifierRequestByteLimit === 'function'
+        ? options.verifierRequestByteLimit()
+        : options.verifierRequestByteLimit;
+    return Math.min(
+      GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+      typeof limit === 'number' && Number.isFinite(limit) && limit > 0
+        ? Math.floor(limit)
+        : GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+    );
+  };
   const tokenBudgetGrant =
     options.tokenBudgetGrant ?? GOAL_DEFAULT_TOKEN_BUDGET;
   const turnBudgetGrant = options.turnBudgetGrant ?? Number.POSITIVE_INFINITY;
@@ -498,27 +511,65 @@ export function createGoalRuntime(
    * itself is not kept, because a resumed turn re-proposes from the
    * transcript it can see.
    */
+  /**
+   * What a failed verification says about the transcript: nothing (the
+   * verifier or the provider failed), that the cursor no longer anchors it
+   * and a new one would, or that no cursor can make it readable.
+   */
+  type VerifierFailure = {
+    detail: string;
+    transcript: 'readable' | 'reanchor' | 'inconsistent';
+  };
+  const REANCHORABLE_CODES = new Set<EvidenceSourceUnavailableCode>([
+    'cursor_unset',
+    'cursor_not_found',
+    'turn_reentry',
+    'malformed_turn_context',
+    'current_turn_not_tail',
+  ]);
+  const describeVerifierFailure = (error: unknown): VerifierFailure => ({
+    detail: error instanceof Error ? error.message : String(error),
+    transcript:
+      error instanceof EvidenceSourceUnavailableError
+        ? REANCHORABLE_CODES.has(error.code)
+          ? 'reanchor'
+          : 'inconsistent'
+        : 'readable',
+  });
+
   const verifierFailurePausedSnapshot = (
     goal: NonNullable<GoalSnapshotV2['goal']>,
-    detail: string,
-    reanchorTo: string | undefined,
+    failure: VerifierFailure,
+    recordUuid: string,
   ): GoalSnapshotV2 => {
-    if (reanchorTo === undefined) {
-      return settledSnapshot(
-        goal,
-        'paused',
-        goalPauseReasonForVerifierFailure(detail),
-      );
+    switch (failure.transcript) {
+      case 'readable':
+        return settledSnapshot(
+          goal,
+          'paused',
+          goalPauseReasonForVerifierFailure(failure.detail),
+        );
+      case 'reanchor':
+        // The transcript could not be anchored at the cursor, and the same
+        // cursor would fail the same way on every later proposal. Move it
+        // to the pause record itself: everything the resumed Goal does lands
+        // after it, and the reason tells the user what was left behind.
+        return settledSnapshot(
+          { ...goal, evidenceCursor: { recordId: recordUuid } },
+          'paused',
+          goalPauseReasonForUnreadableTranscript(failure.detail),
+        );
+      case 'inconsistent':
+        return settledSnapshot(
+          goal,
+          'paused',
+          goalPauseReasonForInconsistentTranscript(failure.detail),
+        );
+      default: {
+        const exhaustive: never = failure.transcript;
+        return exhaustive;
+      }
     }
-    // The transcript could not be anchored at the cursor, and the same
-    // cursor would fail the same way on every later proposal. Move it to
-    // the pause record itself: everything the resumed Goal does lands after
-    // it, and the reason tells the user what was left behind.
-    return settledSnapshot(
-      { ...goal, evidenceCursor: { recordId: reanchorTo } },
-      'paused',
-      goalPauseReasonForUnreadableTranscript(detail),
-    );
   };
 
   /**
@@ -850,7 +901,7 @@ export function createGoalRuntime(
     attempt: VerificationAttempt,
     outcome:
       | { kind: 'decision'; result: GoalVerificationResult }
-      | { kind: 'paused'; detail: string; reanchor: boolean },
+      | ({ kind: 'paused' } & VerifierFailure),
   ): Promise<void> =>
     enqueue(async () => {
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
@@ -922,17 +973,28 @@ export function createGoalRuntime(
         const recordUuid = randomUUID();
         const pausedSnapshot = verifierFailurePausedSnapshot(
           meteredGoal,
-          outcome.detail,
-          outcome.reanchor ? recordUuid : undefined,
+          outcome,
+          recordUuid,
         );
-        await options.journal.recordGoalState(recordUuid, {
-          v: GOAL_STATE_VERSION,
-          cause: 'pause',
-          snapshot: pausedSnapshot,
-          ...(blockedAudit
-            ? { blockedAudit: structuredClone(blockedAudit) }
-            : {}),
-        });
+        // A moved cursor leaves the audited turns behind it, where no
+        // window reaches; an audit that survived would let the policy's
+        // word stand in for evidence the verifier cannot see.
+        if (outcome.transcript === 'reanchor') blockedAudit = undefined;
+        try {
+          await options.journal.recordGoalState(recordUuid, {
+            v: GOAL_STATE_VERSION,
+            cause: 'pause',
+            snapshot: pausedSnapshot,
+            ...(blockedAudit
+              ? { blockedAudit: structuredClone(blockedAudit) }
+              : {}),
+          });
+        } catch {
+          // A lost settle write must not strand an "active" Goal that
+          // nothing will continue: the proposal is unjudged either way, so
+          // show the pause and let the user's next action surface the
+          // persistence loss. Same shape as the no-progress pause.
+        }
         if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
         verificationAttempt = undefined;
         pendingProposal = undefined;
@@ -994,7 +1056,7 @@ export function createGoalRuntime(
 
     let outcome:
       | { kind: 'decision'; result: GoalVerificationResult }
-      | { kind: 'paused'; detail: string; reanchor: boolean };
+      | ({ kind: 'paused' } & VerifierFailure);
     try {
       await evidenceSource.flush();
       if (attempt.controller.signal.aborted) return;
@@ -1009,25 +1071,37 @@ export function createGoalRuntime(
         { records, goal: attempt.goal, permit: attempt.permit },
         {
           budgetBytes:
-            verifierRequestByteLimit -
+            verifierRequestByteLimit() -
             measureGoalVerifierEnvelopeBytes(envelope),
         },
       );
-      const result = await verifier(
-        verifierInput(attempt, window),
-        attempt.controller.signal,
-      );
-      if (attempt.controller.signal.aborted) return;
-      outcome = { kind: 'decision', result };
+      // The blocked policy tells the verifier a repeated blocker was
+      // recorded on three consecutive turns. That is only evidence if the
+      // verifier can see those turns; otherwise the policy's word would be
+      // doing the proving, so the runtime rejects before asking.
+      if (
+        isRepeatedBlockerProposal(attempt.proposal) &&
+        blockedAudit !== undefined &&
+        !blockedAudit.turnIds.every((turnId) => window.turnIds.includes(turnId))
+      ) {
+        outcome = {
+          kind: 'decision',
+          result: {
+            decision: 'reject',
+            reason: GOAL_REPEATED_BLOCKER_OUT_OF_REACH_REASON,
+          },
+        };
+      } else {
+        const result = await verifier(
+          verifierInput(attempt, window),
+          attempt.controller.signal,
+        );
+        if (attempt.controller.signal.aborted) return;
+        outcome = { kind: 'decision', result };
+      }
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
-      outcome = {
-        kind: 'paused',
-        detail: error instanceof Error ? error.message : String(error),
-        // An anchor failure is deterministic: the same cursor fails the
-        // same way on every retry, so the pause moves it.
-        reanchor: error instanceof EvidenceSourceUnavailableError,
-      };
+      outcome = { kind: 'paused', ...describeVerifierFailure(error) };
     }
     await recordVerificationOutcome(attempt, outcome);
   };
@@ -1579,11 +1653,22 @@ export function createGoalRuntime(
               }
             : {}),
         };
+        // A resume after a pause the verifier's failure caused keeps the
+        // repeated-blocker audit the proposal had earned, and the record
+        // carries it so a restart between this resume and the next finished
+        // turn does not lose it.
+        const keepsBlockedAudit =
+          request.action === 'resume' &&
+          blockedAudit !== undefined &&
+          isGoalVerifierFailurePause(snapshot.goal);
         try {
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,
             cause: request.action,
             snapshot: nextSnapshot,
+            ...(keepsBlockedAudit
+              ? { blockedAudit: structuredClone(blockedAudit) }
+              : {}),
           });
         } catch (error) {
           // A lost session writer surfaces here as `SessionWriterUnavailableError`
@@ -1623,10 +1708,7 @@ export function createGoalRuntime(
           currentTurnFeedback = undefined;
           continuationQueued = false;
           if (request.action === 'clear') announcedObjective = undefined;
-        } else if (
-          request.action === 'resume' &&
-          !isGoalVerifierFailurePause(snapshot.goal)
-        ) {
+        } else if (request.action === 'resume' && !keepsBlockedAudit) {
           // A user pause breaks the streak a repeated blocker must earn on
           // consecutive turns. A pause the verifier's failure caused does
           // not: the audited turns stand, and the resumed turn may propose

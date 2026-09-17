@@ -681,6 +681,29 @@ function truncateGoalPauseReason(reason: string): string {
     : `${codePoints.slice(0, GOAL_PAUSE_REASON_MAX_CHARACTERS - 1).join('')}\u2026`;
 }
 
+const GOAL_VERIFIER_FAILURE_PAUSE_PREFIX =
+  'The Goal proposal could not be verified';
+
+/**
+ * `prefix: detail. instruction`, cut to the reason cap by shortening the
+ * detail alone: the instruction is the part that tells the user what the
+ * pause means and what to do next, so it is the part that must survive a
+ * long provider error. A detail's own closing period is dropped so the
+ * seam does not read "lineage.. Evidence".
+ */
+function composeGoalPauseReason(detail: string, instruction: string): string {
+  const trimmed = detail.trim().replace(/[.\u3002]+$/u, '');
+  if (!trimmed) return `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}. ${instruction}`;
+  const frame = `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}: . ${instruction}`;
+  const room = GOAL_PAUSE_REASON_MAX_CHARACTERS - [...frame].length;
+  const points = [...trimmed];
+  const shown =
+    points.length <= room
+      ? trimmed
+      : `${points.slice(0, Math.max(0, room - 1)).join('')}\u2026`;
+  return `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}: ${shown}. ${instruction}`;
+}
+
 /**
  * The pause reason for a terminal proposal whose verification could not run:
  * the verifier timed out, the side query failed, or the transcript could not
@@ -689,35 +712,40 @@ function truncateGoalPauseReason(reason: string): string {
  * headless-reachable, so it names no slash command.
  */
 export function goalPauseReasonForVerifierFailure(message: string): string {
-  const detail = message.trim();
-  return truncateGoalPauseReason(
-    detail
-      ? `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}: ${detail}. Resume the Goal to propose again.`
-      : `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}. Resume the Goal to propose again.`,
-  );
+  return composeGoalPauseReason(message, 'Resume the Goal to propose again.');
 }
 
 /**
- * The pause reason for a proposal whose transcript could not be anchored:
- * the cursor is gone from the active chain (a rewind past the Goal), a turn
- * re-enters the lineage, a record uuid repeats. Resuming such a Goal with
- * the same cursor would fail the same way on every proposal, so the pause
- * moves the cursor to its own record and says so: the work that follows is
- * what the verifier will see.
+ * The pause reason for a proposal whose transcript could not be anchored at
+ * the cursor: the cursor is gone from the active chain (a rewind past the
+ * Goal), a turn re-enters the lineage, a record claims the Goal with a
+ * malformed context. Resuming with the same cursor would fail the same way
+ * on every proposal, so the pause moves the cursor to its own record and
+ * says so: the work that follows is what the verifier will see.
  */
 export function goalPauseReasonForUnreadableTranscript(
   message: string,
 ): string {
-  const detail = message.trim();
-  return truncateGoalPauseReason(
-    detail
-      ? `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}: ${detail}. Evidence now starts from this point; resume the Goal to propose again from the work that follows.`
-      : `${GOAL_VERIFIER_FAILURE_PAUSE_PREFIX}. Evidence now starts from this point; resume the Goal to propose again from the work that follows.`,
+  return composeGoalPauseReason(
+    message,
+    'Evidence now starts from this point; resume the Goal to propose again from the work that follows.',
   );
 }
 
-const GOAL_VERIFIER_FAILURE_PAUSE_PREFIX =
-  'The Goal proposal could not be verified';
+/**
+ * The pause reason for a transcript that no cursor can make readable: a
+ * record uuid repeats in the chain, or the permit does not match the Goal.
+ * Moving the cursor would not help, so the pause leaves it and says what
+ * would: a new Goal.
+ */
+export function goalPauseReasonForInconsistentTranscript(
+  message: string,
+): string {
+  return composeGoalPauseReason(
+    message,
+    'Resuming would fail the same way; clear the Goal, or replace it to start a new one.',
+  );
+}
 
 /**
  * Whether a paused Goal stopped because its proposal could not be judged,
@@ -734,6 +762,15 @@ export function isGoalVerifierFailurePause(
     (goal.lastReason?.startsWith(GOAL_VERIFIER_FAILURE_PAUSE_PREFIX) ?? false)
   );
 }
+
+/**
+ * The local rejection for a repeated blocker whose audited turns the
+ * verifier's window does not all reach. The blocked policy tells the
+ * verifier those three turns were recorded; letting it judge without seeing
+ * them would make the policy's word the evidence.
+ */
+export const GOAL_REPEATED_BLOCKER_OUT_OF_REACH_REASON =
+  'The repeated blocker was recorded on Goal turns the verifier cannot see: its window holds only the newest records, and all three audited turns must be within it. Show the blocker again in the coming turns, with the tool results that prove it, so that they fit the window together.';
 
 /** The pause reason for a Goal turn that failed rather than being stopped. */
 export function goalPauseReasonForFailure(message: string): string {

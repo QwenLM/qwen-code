@@ -145,7 +145,7 @@ describe('createGoalVerifier', () => {
     expect(request).toMatchObject({
       model: 'fast-model',
       promptId: 'side-query:goal-verifier',
-      maxAttempts: 1,
+      maxAttempts: 2,
       config: {
         temperature: 0,
         responseMimeType: 'application/json',

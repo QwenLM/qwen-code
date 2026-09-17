@@ -1609,6 +1609,137 @@ describe('goal runtime', () => {
 
     expect(verifier).toHaveBeenCalledTimes(2);
     expect(runtime.getSnapshot().goal?.status).toBe('blocked');
+    // The resume record carried the audit, so a restart between the resume
+    // and the next finished turn would not have lost it.
+    expect(
+      journal.appended.find((payload) => payload.cause === 'resume'),
+    ).toMatchObject({ blockedAudit: { count: 3 } });
+  });
+
+  it('rejects a repeated blocker locally when the window cannot reach its audited turns', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'unreachable',
+    }));
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+      // Room for one turn's records, not three.
+      verifierRequestByteLimit: 4_000,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deploy' });
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [verifierEvidenceRecords(host.started[0]!, cursorId)[0]!];
+    for (const index of [0, 1, 2]) {
+      const permit = host.started[index]!;
+      records = [
+        ...records,
+        {
+          ...verifierEvidenceRecords(permit, cursorId)[1]!,
+          uuid: `attempt-${index}`,
+          parentUuid: records.at(-1)!.uuid,
+          message: { role: 'model', parts: [{ text: 'x'.repeat(2_000) }] },
+        },
+      ];
+      runtime.recordTerminalProposal(permit, {
+        status: 'blocked',
+        reason: 'The registry rejects every push',
+      });
+      await runtime.finishTurn(permit);
+    }
+
+    // Three consecutive turns recorded the blocker, but the window holds
+    // only the newest; the policy's word about the other two is not
+    // evidence the verifier can check, so it is never asked.
+    expect(verifier).not.toHaveBeenCalled();
+    expect(journal.appended.at(-1)?.cause).toBe('verifier_reject');
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'active',
+      lastReason: expect.stringContaining('turns the verifier cannot see'),
+    });
+    expect(host.inputs[3]).toMatchObject({
+      verifierFeedback: expect.stringContaining('audited turns must be within'),
+    });
+  });
+
+  it('pauses without moving the cursor when no cursor could make the transcript readable', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    const base = verifierEvidenceRecords(permit, cursorId);
+    // A duplicated uuid is a property of the whole chain; no cursor fixes it.
+    records = [base[0]!, base[1]!, { ...base[1]! }];
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      evidenceCursor: { recordId: cursorId },
+      lastReason: expect.stringContaining(
+        'clear the Goal, or replace it to start a new one',
+      ),
+    });
+  });
+
+  it('shows the verifier-failure pause even when the settle write fails', async () => {
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, undefined, new Error('session writer lost')],
+    });
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => {
+      throw new Error('provider unavailable');
+    });
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    records = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await expect(runtime.finishTurn(permit)).resolves.toBeUndefined();
+
+    // The pause did not persist, but the Goal is not stranded verifying:
+    // the user sees the pause and their next action surfaces the loss.
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+    ]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: { status: 'paused' },
+    });
+    expect(runtime.beginTurn('user-1')).toBeUndefined();
   });
 
   it('bounds the window by the configured request byte limit', async () => {
@@ -1623,7 +1754,8 @@ describe('goal runtime', () => {
       journal,
       evidenceSource: fakeEvidenceSource(() => records),
       verifier,
-      verifierRequestByteLimit: 2_500,
+      // A getter: the limit follows the model in use at verification time.
+      verifierRequestByteLimit: () => 2_500,
     });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
@@ -1919,11 +2051,13 @@ describe('goal runtime', () => {
     });
   });
 
+  // A verdict that could not be persisted must not be acted on; a pause the
+  // verifier's failure caused is different (nothing was judged) and is shown
+  // even when its write is lost, see the settle-write test below.
   it.each([
     ['verifier_accept', 2, 'accept'],
     ['complete', 3, 'accept'],
     ['verifier_reject', 2, 'reject'],
-    ['usage_limited', 2, 'usage'],
   ] as const)(
     'keeps verifying and does not continue when %s persistence fails',
     async (_cause, failingAppendIndex, outcome) => {
@@ -1937,9 +2071,6 @@ describe('goal runtime', () => {
       const journal = fakeGoalJournal({ appendErrors });
       let records: readonly RuntimeRecord[] = [];
       const evidenceSource = fakeEvidenceSource(() => records);
-      if (outcome === 'usage') {
-        evidenceSource.flush.mockRejectedValueOnce(new Error('source failed'));
-      }
       const verifier: GoalVerifier = vi.fn(async () => {
         if (outcome === 'reject') {
           return {

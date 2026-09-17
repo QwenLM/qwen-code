@@ -48,7 +48,11 @@ export interface GoalToolConfig {
   getGoalRuntime(): GoalRuntime;
 }
 
-export type GetGoalToolParams = Record<string, never>;
+export interface GetGoalToolParams {
+  /** Accepted and ignored: earlier versions sized the evidence catalog with
+   * it, and a model that read an older transcript will send it again. */
+  view?: 'summary' | 'full';
+}
 
 export interface UpdateGoalToolParams {
   status: 'complete' | 'blocked';
@@ -139,7 +143,14 @@ export class GetGoalTool extends BaseDeclarativeTool<
       Kind.Read,
       {
         type: 'object',
-        properties: {},
+        properties: {
+          view: {
+            type: 'string',
+            enum: ['summary', 'full'],
+            description:
+              'Ignored. Earlier versions sized an evidence catalog with it; there is no catalog now, so leave this out.',
+          },
+        },
         additionalProperties: false,
       },
     );

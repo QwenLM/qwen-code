@@ -1267,7 +1267,44 @@ describe('buildGoalVerifierWindow', () => {
     });
     expect(window.evidence[1]!.content).toContain('18 tests passed');
     expect(window.turnIds).toEqual(['turn-1', 'turn-3']);
+    // The record before the cursor belongs to this revision too: it is not
+    // sent, and the verifier is told it exists.
+    expect(window.omitted).toBe(1);
+  });
+
+  it('shrinks the per-record limit so a small budget still holds the newest records', () => {
+    const records = [
+      record('cursor', 'system'),
+      assistant('older', 'turn-3', 'o'.repeat(6_000)),
+      assistant('newest', 'turn-3', 'n'.repeat(6_000)),
+    ];
+    // Well under two full-size records: each is cut to a quarter of the
+    // budget, so both fit instead of the window coming back empty.
+    const window = buildGoalVerifierWindow(
+      { records, goal: goal(), permit: permit() },
+      { budgetBytes: 6_000 },
+    );
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual([
+      'newest',
+      'older',
+    ]);
+    for (const entry of window.evidence) {
+      expect(Buffer.byteLength(entry.content, 'utf8')).toBeLessThanOrEqual(
+        1_500,
+      );
+      expect(entry.content).toContain(VERIFIER_MIDDLE_TRUNCATION_MARKER);
+    }
     expect(window.omitted).toBe(0);
+    // The limit never drops below a floor, so a record is never cut to
+    // nothing but its marker.
+    const tiny = buildGoalVerifierWindow(
+      { records, goal: goal(), permit: permit() },
+      { budgetBytes: 1_300 },
+    );
+    expect(tiny.evidence).toHaveLength(1);
+    expect(
+      Buffer.byteLength(tiny.evidence[0]!.content, 'utf8'),
+    ).toBeLessThanOrEqual(1_000);
   });
 
   it('ends at the first record that does not fit and counts the rest as omitted', () => {
@@ -1404,7 +1441,8 @@ describe('buildGoalVerifierWindow', () => {
       { budgetBytes: 100_000 },
     );
     expect(window.evidence).toHaveLength(4);
-    expect(window.omitted).toBe(1);
+    // One claim, plus the record before the cursor.
+    expect(window.omitted).toBe(2);
   });
 
   it('cuts long content in the middle so the command and the result survive', () => {
@@ -1442,7 +1480,7 @@ describe('buildGoalVerifierWindow', () => {
         { budgetBytes },
       );
       expect(window.evidence).toEqual([]);
-      expect(window.omitted).toBe(4);
+      expect(window.omitted).toBe(5);
     }
   });
 

@@ -25,6 +25,10 @@ import {
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   goalActiveTimeBudgetReason,
   goalPauseReasonForFailure,
+  goalPauseReasonForInconsistentTranscript,
+  goalPauseReasonForUnreadableTranscript,
+  goalPauseReasonForVerifierFailure,
+  isGoalVerifierFailurePause,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
   goalTurnBudgetReason,
@@ -343,5 +347,62 @@ describe('Goal cadence budget reasons', () => {
     expect(goalActiveTimeBudgetReason(30_000)).toContain('(30 seconds)');
     expect(goalActiveTimeBudgetReason(60_000)).toContain('(1 minute)');
     expect(goalActiveTimeBudgetReason(120_000)).toContain('(2 minutes)');
+  });
+});
+
+describe('verifier failure pause reasons', () => {
+  it('joins the detail without doubling its closing period', () => {
+    expect(
+      goalPauseReasonForUnreadableTranscript(
+        'The Goal evidence cursor x is not in the active transcript chain.',
+      ),
+    ).toBe(
+      'The Goal proposal could not be verified: The Goal evidence cursor x is not in the active transcript chain. Evidence now starts from this point; resume the Goal to propose again from the work that follows.',
+    );
+    expect(goalPauseReasonForVerifierFailure('  ')).toBe(
+      'The Goal proposal could not be verified. Resume the Goal to propose again.',
+    );
+  });
+
+  it('cuts a long detail, never the instruction that follows it', () => {
+    const reason = goalPauseReasonForUnreadableTranscript('x'.repeat(5_000));
+    expect([...reason].length).toBe(GOAL_PAUSE_REASON_MAX_CHARACTERS);
+    expect(
+      reason.endsWith(
+        'resume the Goal to propose again from the work that follows.',
+      ),
+    ).toBe(true);
+    expect(reason).toContain('\u2026. Evidence now starts');
+    const inconsistent = goalPauseReasonForInconsistentTranscript(
+      'y'.repeat(5_000),
+    );
+    expect([...inconsistent].length).toBe(GOAL_PAUSE_REASON_MAX_CHARACTERS);
+    expect(
+      inconsistent.endsWith(
+        'clear the Goal, or replace it to start a new one.',
+      ),
+    ).toBe(true);
+  });
+
+  it('recognises every verifier failure pause, and nothing else', () => {
+    for (const reason of [
+      goalPauseReasonForVerifierFailure('timed out'),
+      goalPauseReasonForUnreadableTranscript('rewound'),
+      goalPauseReasonForInconsistentTranscript('duplicate uuid'),
+    ]) {
+      expect(
+        isGoalVerifierFailurePause({ status: 'paused', lastReason: reason }),
+      ).toBe(true);
+      expect(
+        isGoalVerifierFailurePause({ status: 'active', lastReason: reason }),
+      ).toBe(false);
+    }
+    expect(
+      isGoalVerifierFailurePause({
+        status: 'paused',
+        lastReason: goalPauseReasonForFailure('the turn failed'),
+      }),
+    ).toBe(false);
+    expect(isGoalVerifierFailurePause(null)).toBe(false);
   });
 });

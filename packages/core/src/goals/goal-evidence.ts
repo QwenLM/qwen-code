@@ -713,7 +713,15 @@ function anchorGoalTranscript(
  * where the cut was.
  */
 const VERIFIER_RECORD_CONTENT_BYTE_LIMIT = 8_000;
-const VERIFIER_RECORD_HEAD_BYTES = 5_000;
+/**
+ * A window too small for four records at the full limit shrinks the limit
+ * instead of the window: on a side query model with a few thousand bytes
+ * to spare, the newest records must still fit, or nothing is ever judged.
+ */
+const VERIFIER_RECORD_BUDGET_SHARE = 4;
+const VERIFIER_RECORD_CONTENT_BYTE_FLOOR = 1_000;
+/** The head keeps five eighths of a cut record; the tail the rest. */
+const VERIFIER_RECORD_HEAD_SHARE = 5 / 8;
 export const VERIFIER_MIDDLE_TRUNCATION_MARKER =
   '\n\u2026[middle truncated]\u2026\n';
 
@@ -731,10 +739,11 @@ export interface GoalVerifierWindow {
   /** The Goal turns the tail reaches, oldest first. */
   turnIds: string[];
   /**
-   * Records after the cursor, older than the tail, that did not fit. A Goal
-   * restored from before the window existed also counts here the claims its
-   * last checkpoint folded earlier records into: they are not sent, and
-   * the verifier must know that earlier evidence exists but is out of reach.
+   * Evidence of this Goal revision the window does not hold: records after
+   * the cursor that did not fit, records before the cursor (a pause that
+   * moved it, a resume) and, for a Goal restored from before the window
+   * existed, the claims its last checkpoint folded earlier records into.
+   * None of it is sent; the verifier must know it exists out of reach.
    */
   omitted: number;
 }
@@ -767,18 +776,29 @@ export function buildGoalVerifierWindow(
   const budget = Number.isFinite(options.budgetBytes)
     ? Math.max(0, Math.floor(options.budgetBytes))
     : 0;
+  const recordLimit = Math.min(
+    VERIFIER_RECORD_CONTENT_BYTE_LIMIT,
+    Math.max(
+      VERIFIER_RECORD_CONTENT_BYTE_FLOOR,
+      Math.floor(budget / VERIFIER_RECORD_BUDGET_SHARE),
+    ),
+  );
   const evidence: GoalVerifierEvidenceRecord[] = [];
   const turnIds = new Set<string>();
   let bytes = 0;
   let omitted = input.goal.evidenceCheckpoint?.claims.length ?? 0;
   let full = false;
-  for (let index = input.records.length - 1; index > cursorIndex; index -= 1) {
-    const entry = verifierEvidence(input.records[index]!, input);
-    if (!entry) continue;
-    if (full) {
-      omitted += 1;
+  for (let index = input.records.length - 1; index >= 0; index -= 1) {
+    const record = input.records[index]!;
+    // Once the window is full, or before the cursor, a record is only
+    // counted: eligibility is cheap, rendering a multi-megabyte tool result
+    // for a count is not.
+    if (full || index <= cursorIndex) {
+      if (isVerifierEvidence(record, input)) omitted += 1;
       continue;
     }
+    const entry = verifierEvidence(record, input, recordLimit);
+    if (!entry) continue;
     const entryBytes =
       Buffer.byteLength(JSON.stringify(entry), 'utf8') +
       1 +
@@ -804,7 +824,36 @@ export function buildGoalVerifierWindow(
 function verifierEvidence(
   record: GoalEvidenceRecord,
   input: GoalEvidenceContext,
+  recordLimit: number,
 ): GoalVerifierEvidenceRecord | undefined {
+  const admitted = admissibleVerifierRecord(record, input);
+  if (!admitted) return undefined;
+  const content = verifierContent(record, admitted.provenance);
+  if (!content) return undefined;
+  return {
+    uuid: record.uuid,
+    provenance: admitted.provenance,
+    turnId: admitted.turnId,
+    proofKind: proofKindOf(admitted.provenance),
+    content: cutMiddleBytes(content, recordLimit),
+  };
+}
+
+/** Whether the record would enter the window, decided without rendering it. */
+function isVerifierEvidence(
+  record: GoalEvidenceRecord,
+  input: GoalEvidenceContext,
+): boolean {
+  const admitted = admissibleVerifierRecord(record, input);
+  return (
+    admitted !== undefined && hasVerifierContent(record, admitted.provenance)
+  );
+}
+
+function admissibleVerifierRecord(
+  record: GoalEvidenceRecord,
+  input: GoalEvidenceContext,
+): { provenance: GoalEvidenceProvenance; turnId: string } | undefined {
   const provenance = coherentEvidenceProvenance(record);
   if (!provenance) return undefined;
   const context = parseGoalContext(record.goalContext);
@@ -815,15 +864,25 @@ function verifierEvidence(
   ) {
     return undefined;
   }
-  const content = verifierContent(record, provenance);
-  if (!content) return undefined;
-  return {
-    uuid: record.uuid,
-    provenance,
-    turnId: context.turnId,
-    proofKind: proofKindOf(provenance),
-    content: cutMiddleBytes(content, VERIFIER_RECORD_CONTENT_BYTE_LIMIT),
-  };
+  return { provenance, turnId: context.turnId };
+}
+
+function hasVerifierContent(
+  record: GoalEvidenceRecord,
+  provenance: GoalEvidenceProvenance,
+): boolean {
+  if (provenance === 'real_user') {
+    return evidenceContent(record, provenance).length > 0;
+  }
+  return (record.message?.parts ?? []).some(
+    (part) =>
+      (part.thought !== true &&
+        typeof part.text === 'string' &&
+        part.text.trim().length > 0) ||
+      (provenance === 'assistant_output' && part.functionCall !== undefined) ||
+      (provenance === 'tool_result' &&
+        part.functionResponse?.response !== undefined),
+  );
 }
 
 /**
@@ -870,8 +929,8 @@ function renderToolCall(functionCall: {
 
 /**
  * Cut `content` to at most `limit` UTF-8 bytes by removing its middle,
- * never splitting a code point. The head keeps up to
- * `VERIFIER_RECORD_HEAD_BYTES`; the marker and the tail take the rest.
+ * never splitting a code point. The head keeps `VERIFIER_RECORD_HEAD_SHARE`
+ * of what the marker leaves; the tail keeps the rest.
  */
 export function cutMiddleBytes(content: string, limit: number): string {
   const bytes = Buffer.from(content, 'utf8');
@@ -880,11 +939,9 @@ export function cutMiddleBytes(content: string, limit: number): string {
     VERIFIER_MIDDLE_TRUNCATION_MARKER,
     'utf8',
   );
-  const headBytes = Math.max(
-    0,
-    Math.min(VERIFIER_RECORD_HEAD_BYTES, limit - markerBytes),
-  );
-  const tailBytes = Math.max(0, limit - markerBytes - headBytes);
+  const room = Math.max(0, limit - markerBytes);
+  const headBytes = Math.floor(room * VERIFIER_RECORD_HEAD_SHARE);
+  const tailBytes = room - headBytes;
   return `${leadingBytes(bytes, headBytes)}${VERIFIER_MIDDLE_TRUNCATION_MARKER}${trailingBytes(bytes, tailBytes)}`;
 }
 

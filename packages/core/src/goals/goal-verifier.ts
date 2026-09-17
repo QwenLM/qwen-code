@@ -106,17 +106,21 @@ export function goalVerifierRequestByteLimit(
     'getModel' | 'getFastModel' | 'getContentGeneratorConfig'
   >,
 ): number {
-  const fastModel = config.getFastModel?.();
+  // Resolved the way `runSideQuery` picks its model, and meant to be called
+  // at verification time: the fast model and the main model's window are
+  // both set after the Goal runtime is constructed and can change later.
+  const fastModel = config.getFastModel?.() ?? undefined;
   // A fast model is known only by name. The main model may carry a window
   // the user configured for a local or OpenAI-compatible deployment, and
   // that figure beats the name table when it is the model the query uses.
   const configuredWindow =
     config.getContentGeneratorConfig?.()?.contextWindowSize;
-  const contextTokens = fastModel
-    ? tokenLimit(fastModel)
-    : typeof configuredWindow === 'number' && configuredWindow > 0
-      ? configuredWindow
-      : tokenLimit(config.getModel());
+  const contextTokens =
+    fastModel !== undefined
+      ? tokenLimit(fastModel)
+      : typeof configuredWindow === 'number' && configuredWindow > 0
+        ? configuredWindow
+        : tokenLimit(config.getModel());
   return Math.min(
     GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
     Math.floor(contextTokens * GOAL_VERIFIER_BYTES_PER_CONTEXT_TOKEN),
@@ -263,7 +267,9 @@ export function createGoalVerifier(
         contents,
         abortSignal,
         purpose: 'goal-verifier',
-        maxAttempts: 1,
+        // One retry with backoff for a transient provider failure (a 429
+        // or a 5xx): an unattended Goal should not pause on the first one.
+        maxAttempts: 2,
         skipOutputLanguagePreference: true,
         systemInstruction: GOAL_VERIFIER_SYSTEM_PROMPT,
         config: {
