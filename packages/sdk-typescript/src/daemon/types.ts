@@ -238,6 +238,7 @@ export interface DaemonRuntimeStopResult {
   closedSessionIds: string[];
   interruptedSessionIds: string[];
   remainingSessionIds: string[];
+  /** Failure detail, or a warning if stopped and released are true. */
   error?: string;
 }
 
