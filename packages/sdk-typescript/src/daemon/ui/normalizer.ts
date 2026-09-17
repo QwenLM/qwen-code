@@ -688,7 +688,10 @@ function createBase(
       : undefined) ??
       (isRecord(event.data) ? event.data['backgroundTurn'] : undefined),
   );
-  const promptId = event.promptId ?? backgroundTurn?.turnId;
+  const promptId =
+    event.promptId ??
+    getString(update?.['_meta'], 'promptId') ??
+    backgroundTurn?.turnId;
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
@@ -840,6 +843,27 @@ function normalizeSessionUpdate(
       }
       const meta = extractUpdateMeta(update);
       const content = update['content'];
+      if (
+        isRecord(content) &&
+        content['type'] === 'resource_link' &&
+        typeof content['uri'] === 'string' &&
+        content['uri'].length > 0 &&
+        typeof content['name'] === 'string'
+      ) {
+        return [
+          {
+            ...base,
+            type: 'user.resource_link.delta',
+            resourceLink: {
+              ...content,
+              type: 'resource_link',
+              uri: content['uri'],
+              name: content['name'],
+            },
+            ...(meta ? { meta } : {}),
+          },
+        ];
+      }
       const part = extractContentPart(content);
       if (part) {
         if (part.kind === 'image') {
