@@ -120,6 +120,38 @@ describe('HookRegistry', () => {
         ]);
       });
 
+      it('runs hooks for an event in source priority order: project, user, system, extensions', async () => {
+        mockConfig.getSystemHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo system', 'system-hook'));
+        mockConfig.getUserHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo user', 'user-hook'));
+        mockConfig.getProjectHooks = vi
+          .fn()
+          .mockReturnValue(commandHooks('echo project', 'project-hook'));
+        mockConfig.getExtensions = vi.fn().mockReturnValue([
+          {
+            isActive: true,
+            hooks: commandHooks('echo extension', 'extension-hook'),
+          },
+        ]);
+
+        const registry = new HookRegistry(mockConfig);
+        await registry.initialize();
+
+        expect(
+          registry
+            .getHooksForEvent(HookEventName.PreToolUse)
+            .map(({ source }) => source),
+        ).toEqual([
+          HooksConfigSource.Project,
+          HooksConfigSource.User,
+          HooksConfigSource.System,
+          HooksConfigSource.Extensions,
+        ]);
+      });
+
       it('registers system-only hooks as system hooks, not user hooks', async () => {
         mockConfig.getSystemHooks = vi
           .fn()

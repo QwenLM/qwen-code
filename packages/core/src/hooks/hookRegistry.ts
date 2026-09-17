@@ -253,10 +253,10 @@ export class HookRegistry {
    * Process hooks from the config that was already loaded by the CLI
    */
   private processHooksFromConfig(): void {
-    // System hooks first: administrator configuration is the base layer, and
-    // within one event hooks run in registration order when sequential. The
-    // order is System, User, Project, Extensions. Like user hooks, system
-    // hooks load regardless of folder trust.
+    // System hooks, from the System and SystemDefaults settings files. Like
+    // user hooks they load regardless of folder trust. Registration order does
+    // not decide execution order: getHooksForEvent sorts by source priority
+    // (Project, User, System, Extensions).
     const systemHooks = this.config.getSystemHooks();
     if (systemHooks) {
       this.processHooksConfiguration(systemHooks, HooksConfigSource.System);
