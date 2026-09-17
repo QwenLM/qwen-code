@@ -1619,6 +1619,19 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
   return false;
 }
 
+/**
+ * Whether a deny entry covers a tool name, as a subagent's tool filter judges
+ * it: an MCP tool matches server-level, wildcard and exact MCP patterns (see
+ * {@link matchesMcpPattern}); every other tool matches only its exact name.
+ * One predicate for every place that applies a deny list to a tool pool, so the
+ * declaration filter and the callers that predict it cannot disagree.
+ */
+export function matchesToolPattern(pattern: string, toolName: string): boolean {
+  return toolName.startsWith('mcp__')
+    ? matchesMcpPattern(pattern, toolName)
+    : pattern === toolName;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Unified rule matching
 // ─────────────────────────────────────────────────────────────────────────────
