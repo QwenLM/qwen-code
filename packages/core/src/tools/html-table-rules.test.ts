@@ -168,6 +168,72 @@ describe('addTableRules', () => {
     ]);
   });
 
+  it('writes a header row and its body with no blank line between them', () => {
+    // A blank line anywhere between two rows ends the table, so the whole
+    // output is pinned rather than only the lines that start with a pipe.
+    expect(service(true).turndown(PRICING)).toBe(
+      '| Plan | Price | Seats |\n' +
+        '| --- | --- | --- |\n' +
+        '| Starter | 9 EUR | 3 |\n' +
+        '| Pro | 29 EUR | 10 |',
+    );
+  });
+
+  it('does not let a span attribute grow the output', () => {
+    const page = (span: number) =>
+      `<table><tr><td colspan="${span}">x</td></tr>` +
+      '<tr><td>a</td></tr></table><p>after</p>';
+
+    // colspan="1000000" produced 10,000,026 characters, which pushed the rest
+    // of the page past the 100 KB the tool returns.
+    const huge = service(true).turndown(page(1_000_000));
+
+    expect(huge).toBe(service(true).turndown(page(1000)));
+    expect(huge.length).toBeLessThan(100);
+    expect(huge).toContain('after');
+  });
+
+  it('survives spans that would cover millions of grid cells', () => {
+    // Tracking that many slots threw "RangeError: Set maximum size exceeded".
+    const html = `<table>${'<tr><td rowspan="65534" colspan="1000">x</td></tr>'.repeat(3)}</table>`;
+
+    expect(() => service(true).turndown(html)).not.toThrow();
+  });
+
+  it('keeps the table whole around a row that has no cells', () => {
+    // Turndown writes a cell-less row as a blank line, which ended the table
+    // and pushed the body out of it.
+    const html =
+      '<table><tr><th>A</th><th>B</th></tr><tr></tr>' +
+      '<tr><td>1</td><td>2</td></tr></table>';
+
+    expect(service(true).turndown(html)).toBe(
+      '| A | B |\n| --- | --- |\n| 1 | 2 |',
+    );
+  });
+
+  it('puts the delimiter under the first row that has cells', () => {
+    // A leading cell-less row used to be taken as the header, so no row wrote
+    // the delimiter and nothing on the page was a table.
+    const html =
+      '<table><tr></tr><tr><td>a</td><td>b</td></tr>' +
+      '<tr><td>1</td><td>2</td></tr></table>';
+
+    expect(service(true).turndown(html)).toBe(
+      '| a | b |\n| --- | --- |\n| 1 | 2 |',
+    );
+  });
+
+  it('folds a long run of non-breaking spaces without backtracking', () => {
+    // The `\s*\n\s*` fold took 4.7 s for 80,000 of them at the end of a cell
+    // and grows with the square of the run, so 200,000 would take far longer
+    // than this timeout.
+    const run = '\u00a0'.repeat(200_000);
+    const html = `<table><tr><th>A</th></tr><tr><td>x${run}</td></tr></table>`;
+
+    expect(tableRows(service(true).turndown(html))[2]).toEqual(['x']);
+  }, 5_000);
+
   it('leaves markup without a table alone', () => {
     const html = '<p>hello</p><ul><li>a</li><li>b</li></ul>';
 
