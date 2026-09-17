@@ -290,6 +290,8 @@ P4 已自动化并接入 Java CI：
 
 ### P7：Agent API 兼容层
 
+详细执行方案：[Managed Agent 公共 Agent API 适配层执行方案](./2026-09-18-managed-agent-public-api-adapter.md)
+
 在 Java 公共对象层提供 Agent、Session/Thread、Turn/Run、Item/Message、Artifact 和 Event 映射。外部 API 可以兼容 GPT/Claude 风格，但内部仍使用稳定的公共 ID 映射到 Harness/Runtime ID，不把供应商字段写入核心执行协议。
 
 完成门槛：同一个底层 Turn 可以被现有 DataAgent API 和新的 Agent API Adapter 读取；Adapter 不绕过 admission、事件、取消和权限控制。
