@@ -17,8 +17,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     private final HttpClient client;
 
     public HttpRuntimeTransport() {
-        this(HttpClient.newBuilder().followRedirects(
-                HttpClient.Redirect.NEVER).build());
+        this(HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .followRedirects(HttpClient.Redirect.NEVER).build());
     }
 
     public HttpRuntimeTransport(HttpClient client) {
@@ -108,8 +109,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
         client.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray())
                 .whenComplete((response, error) -> {
                     if (error != null) {
-                        result.completeExceptionally(unavailable(
-                                "Managed Runtime request failed."));
+                        RuntimeBrokerException failure = unavailable(
+                                "Managed Runtime request failed.");
+                        failure.initCause(error);
+                        result.completeExceptionally(failure);
                         return;
                     }
                     byte[] bytes = response.body();

@@ -26,6 +26,17 @@ class RuntimeBrokerServiceTest {
             "lease-1", 1);
 
     @Test
+    void usesManagedRuntimeTurnKinds() {
+        RuntimeSession continuation = new RuntimeSession(HARNESS_SESSION,
+                RUNTIME_SESSION, "continuation", SCOPE);
+
+        assertEquals("continuation", continuation.getTurnKind());
+        assertThrows(IllegalArgumentException.class,
+                () -> new RuntimeSession(HARNESS_SESSION, RUNTIME_SESSION,
+                        "followup", SCOPE));
+    }
+
+    @Test
     void staticProvisionerReturnsTheConfiguredLease() throws Exception {
         StaticRuntimeProvisioner provisioner =
                 new StaticRuntimeProvisioner(LEASE);

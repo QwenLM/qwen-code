@@ -13,9 +13,10 @@ public final class RuntimeSession {
                 "harnessSessionId");
         this.runtimeSessionId = BrokerValues.requireId(runtimeSessionId,
                 "runtimeSessionId");
-        if (!"bootstrap".equals(turnKind) && !"followup".equals(turnKind)) {
+        if (!"bootstrap".equals(turnKind)
+                && !"continuation".equals(turnKind)) {
             throw new IllegalArgumentException(
-                    "turnKind must be bootstrap or followup");
+                    "turnKind must be bootstrap or continuation");
         }
         this.turnKind = turnKind;
         this.scope = scope;
