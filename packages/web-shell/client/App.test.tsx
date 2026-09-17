@@ -1512,6 +1512,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           'button',
           {
             'data-testid': 'open-add-workspace',
+            'data-has-add-workspace': String(Boolean(props.onOpenAddWorkspace)),
             type: 'button',
             onClick: props.onOpenAddWorkspace,
           },
@@ -17833,6 +17834,30 @@ describe('App session callbacks', () => {
     expect(
       new URLSearchParams(window.location.search).has('addRemoteWorkspace'),
     ).toBe(false);
+  });
+
+  it('keeps the add workspace entry out of an embedded shell without the capability', async () => {
+    mockWorkspace.capabilities = {
+      features: [],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    // The standalone location flow is the only reason this PR widens the
+    // entry's visibility; an embedded shell must still hide it.
+    expect(
+      container
+        .querySelector('[data-testid="open-add-workspace"]')
+        ?.getAttribute('data-has-add-workspace'),
+    ).toBe('false');
   });
 
   it('closes the Add workspace dialog when navigation enters a standalone chat', async () => {
