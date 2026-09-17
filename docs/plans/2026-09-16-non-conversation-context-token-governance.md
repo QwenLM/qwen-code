@@ -121,6 +121,8 @@
 
 **先确认部署里这些开关的状态**，关掉用不上的比任何 deny 规则都干净。
 
+> 2026-09-17 更正（据 #12054 triage）：`workflow` 的 3,829 反映的是旧版本。main 上已按 #11013 第 4 项把写作规范移入内置的 `workflow-authoring` skill，默认 `pointer` 形态的描述上限为 4,800 字符并有 CI 预算测试（`workflow.test.ts`）；只有 Skill 工具不可达时才回落到 ≤26,500 字符的 `inline` 形态。部署升级后需在自己的版本上重新测 `/context detail`，不要把 3,829 当基线。真正没有上限、会随子 agent 数量增长的是 `agent`。
+
 ### 步骤 2：`tools.eager` 白名单（0 代码，低风险）
 
 ```jsonc
@@ -146,7 +148,7 @@
 
 **不需要意图分类器。** ToolSearch 本身就是模型驱动的按需加载，揭示结果在会话内复用、压缩后保留（`client.ts` 的 `resetChat` 注释：只有 `/clear` 清空），延迟工具提醒就是兜底。若上线后 `tool_search` 调用率超过 §6 的盈亏线，退路是让部署后端在**创建会话时**按入口场景（文件分析 / SQL 查询等）设置 `tools.visible`：会话级、零路由开销，也不会在会话中途打掉缓存。
 
-**常驻工具的描述精简（可选，收益小）。** 延迟工具揭示前不占 token，所以只有白名单内的工具值得精简。白名单生效后最大的常驻项是 `run_shell_command`（1,495）：其描述（`shell.ts` 的 `getShellToolDescription`）大半是开发场景示例（dev server、build watcher、`mongod`/`redis-server`、`npm install`、`git push`）和 good/bad 代码块，可换成一两个数据处理示例；**要保留**的是调用约定——超时与 `is_background`、用 `task_stop` 而非按进程名 kill、引号与命令串联、优先专用文件工具、避免 `cd`，删了会直接表现为调用失败。实现上沿用已有写法：`AgentTool.updateDescriptionAndSchema` 已经按 `isAgentTeamEnabled()` / `isTodoWriteEnabled()` 条件拼装描述，给少数大工具加一个由开关控制的精简变体即可，不要在部署侧整段覆盖描述（和替换系统提示词一样会与上游脱节）。目前没有对应 issue。
+**常驻工具的描述精简（可选，收益小）。** 延迟工具揭示前不占 token，所以只有白名单内的工具值得精简。白名单生效后最大的常驻项是 `run_shell_command`（1,495）：其描述（`shell.ts` 的 `getShellToolDescription`）大半是开发场景示例（dev server、build watcher、`mongod`/`redis-server`、`npm install`、`git push`）和 good/bad 代码块，可换成一两个数据处理示例；**要保留**的是调用约定——超时与 `is_background`、用 `task_stop` 而非按进程名 kill、引号与命令串联、优先专用文件工具、避免 `cd`，删了会直接表现为调用失败。实现上沿用已有写法：`AgentTool.updateDescriptionAndSchema` 已经按 `isAgentTeamEnabled()` / `isTodoWriteEnabled()` 条件拼装描述，给少数大工具加一个由开关控制的精简变体即可，不要在部署侧整段覆盖描述（和替换系统提示词一样会与上游脱节）。跟进在 #12054：triage 已把范围收窄为先治 `agent`（按 `workflow` 的做法外置委派说明，并在 `agent.test.ts` 加描述体积预算），再把 `workflow.test.ts` 的预算测试推广到其余常驻工具；合并文件工具另行讨论。
 
 ### 步骤 3：extension 上下文文件迁移（0 代码，低风险）
 
@@ -252,7 +254,7 @@ extension 的内容按性质分三层：
 - 任务集：真实会话抽 100–200 条，按类型分层（纯问答、文件处理、Shell、数据查询、多步任务），每类 ≥20 条；另备 10–20 条安全用例（危险命令、伪装成用户指令的 hook 文本、被拒后是否绕路）。
 - 跑法：headless 模式对同一任务集跑新旧配置，模型与温度固定，每条跑 3 次以估噪声。
 - 指标：空载成本 · 每任务总 input token · 缓存命中/未命中与实际计费 · 工具召回率 · `tool_search` 调用率（即"路由遗漏比例"）· 坏调用率（相对路径、未声明工具名、参数校验失败）· 任务成功率 · 安全用例通过率（必须 100%）。
-- 埋点缺口：OTel 属性 `qwen-code.context.usage` 目前只有分类合计。`context-usage-snapshot.ts` 的 `estimateToolCategories` 本来就逐个遍历声明，扩展为输出**每个工具的 token、声明的工具数、加载原因**（常驻 / `tool_search` 揭示 / 预算预加载 / 历史回放 / `tools.visible`），`tool_search` 调用率与"每会话揭示次数 ≤ 2"这条运营线就能直接从线上遥测读，而不用解析会话记录。目前没有对应 issue。
+- 埋点缺口：OTel 属性 `qwen-code.context.usage` 目前只有分类合计。`context-usage-snapshot.ts` 的 `estimateToolCategories` 本来就逐个遍历声明，扩展为输出**每个工具的 token、声明的工具数、加载原因**（常驻 / `tool_search` 揭示 / 预算预加载 / 历史回放 / `tools.visible`），`tool_search` 调用率与"每会话揭示次数 ≤ 2"这条运营线就能直接从线上遥测读，而不用解析会话记录。遥测数字本身的正确性在 #12048（两套估算器、skill 正文归因）；按工具明细与加载原因目前还没有 issue。
 
 **第 3 层 · 线上灰度（天级）**
 - 独立进程池跑新配置，切 5–10% 流量，指标同第 2 层，另加重试率与负反馈。一周无异常再放量。
