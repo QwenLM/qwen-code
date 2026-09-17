@@ -545,27 +545,40 @@ describe('parseFeishuContent (#11554)', () => {
   });
 
   it('parses an unbroken image-opener run within a linear-time budget', () => {
-    const start = performance.now();
-    parseFeishuContent(
-      'post',
-      JSON.stringify({
-        content_v2: [[{ tag: 'md', text: '!['.repeat(20_000) }]],
-      }),
-    );
-    expect(performance.now() - start).toBeLessThan(100);
+    const timeParse = (n: number) => {
+      const start = performance.now();
+      parseFeishuContent(
+        'post',
+        JSON.stringify({
+          content_v2: [[{ tag: 'md', text: '!['.repeat(n) }]],
+        }),
+      );
+      return performance.now() - start;
+    };
+    timeParse(10_000); // warm up the JIT before measuring
+    const t10k = Math.min(timeParse(10_000), timeParse(10_000));
+    const t40k = Math.min(timeParse(40_000), timeParse(40_000));
+    // A ratio pins the algorithm, not the host: an absolute budget red-ed
+    // this suite on a busy machine with a healthy parser. A linear scan
+    // measures ~4x here; a backtracking citation grammar measures ~17x.
+    expect(t40k).toBeLessThan(8 * t10k + 50);
   });
 
   it('parses an unterminated at-tag run within a linear-time budget', () => {
-    const start = performance.now();
-    parseFeishuContent(
-      'post',
-      JSON.stringify({
-        content_v2: [
-          [{ tag: 'md', text: '<at user_id="ou_x">'.repeat(20_000) }],
-        ],
-      }),
-    );
-    expect(performance.now() - start).toBeLessThan(100);
+    const timeParse = (n: number) => {
+      const start = performance.now();
+      parseFeishuContent(
+        'post',
+        JSON.stringify({
+          content_v2: [[{ tag: 'md', text: '<at user_id="ou_x">'.repeat(n) }]],
+        }),
+      );
+      return performance.now() - start;
+    };
+    timeParse(10_000); // warm up the JIT before measuring
+    const t10k = Math.min(timeParse(10_000), timeParse(10_000));
+    const t40k = Math.min(timeParse(40_000), timeParse(40_000));
+    expect(t40k).toBeLessThan(8 * t10k + 50);
   });
 
   it('synthesizes the (media) placeholder when only resources survive', () => {
@@ -783,5 +796,134 @@ describe('parseFeishuContent (#11554)', () => {
       }),
     );
     expect(result.userAuthoredText).toBe(false);
+  });
+
+  it('keeps a fence alive across a quote line inside its list item', () => {
+    // A `>` past the item's content indent is fence content (or a quote
+    // inside the item), not the item's container boundary: stripping it
+    // before measuring the indent tears the fence open, harvesting the code
+    // sample and losing the real trailing image — the inversion this pins.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '- item\n  ```\n  > ![a](img_k)\n  ```\ntail ![t](img_k_tail)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_k_tail' }]);
+  });
+
+  it.each([
+    ['heading', '# Title\n    ![a](img_heading_code)'],
+    ['thematic break', '---\n    ![a](img_hr_code)'],
+    ['setext underline', 'Title\n=====\n    ![a](img_setext_code)'],
+  ])(
+    'treats an indented line after a %s as code, not a lazy continuation',
+    (_label, text) => {
+      const result = parseFeishuContent(
+        'post',
+        JSON.stringify({ content_v2: [[{ tag: 'md', text }]] }),
+      );
+      expect(result.resources).toEqual([]);
+    },
+  );
+
+  it('opens a fence on a list marker line and harvests after its close', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '- ```\n  sample\n  ```\n  ![pic](img_real_after)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([
+      { type: 'image', key: 'img_real_after' },
+    ]);
+  });
+
+  it('never harvests inside a fence opened on a list marker line', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [{ tag: 'md', text: '- ```\n  ![x](img_inside_code)\n  ```' }],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([]);
+  });
+
+  it('orders a nested-parenthesis citation by its text position', () => {
+    // The loose citation sweep consumes up to the first `)` and never sees
+    // the inner citation; the tight harvest does. Order must come from the
+    // text offset, so the inner key still precedes the later one.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_INNER' }],
+          [{ tag: 'img', image_key: 'img_AFTER' }],
+        ],
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '![a](nope ![b](img_INNER)) then ![c](img_AFTER)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual([
+      'img_INNER',
+      'img_AFTER',
+    ]);
+  });
+
+  it('keeps a first-cited key whose destination overflows the citation grammar', () => {
+    // A 353-char destination is inside the harvest grammar's bound but past
+    // the citation sweep's, so only the text offset keeps the first-cited
+    // key ahead of the eight cited after it.
+    const longKey = `img_${'k'.repeat(196)}`;
+    const longForm = `![a](${longKey} "${'t'.repeat(150)}")`;
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: longKey }],
+          ...Array.from({ length: 8 }, (_, i) => [
+            { tag: 'img', image_key: `img_H${i}` },
+          ]),
+        ],
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: `${longForm} ${Array.from(
+                { length: 8 },
+                (_, i) => `![h${i}](img_H${i})`,
+              ).join(' ')}`,
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual([
+      longKey,
+      ...Array.from({ length: 7 }, (_, i) => `img_H${i}`),
+    ]);
+    expect(result.droppedResourceCount).toBe(1);
   });
 });
