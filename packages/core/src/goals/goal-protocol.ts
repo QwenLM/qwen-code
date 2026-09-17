@@ -175,9 +175,9 @@ export function goalCheckpointHealthLine(
  * tokens on the `tokensUsed` metric (`totalTokenCount` summed per model call,
  * so a call's full input context counts every time it is sent).
  *
- * The meter bills Goal-turn model calls only -- per-turn side queries and
- * checkpoint-verifier calls are unmetered -- so real provider spend at a
- * stop runs above this window.
+ * The meter includes Goal-turn model calls, direct foreground subagents, and
+ * the Goal's verifier and checkpoint checks. Nested/background agents and
+ * unrelated side queries, cron and notification turns are not included.
  *
  * This is an authorization quantum, not a cost estimate: it bounds how much
  * autonomous continuation one explicit user action (create, or a later
@@ -381,8 +381,9 @@ export interface GoalRecord {
   /**
    * Model tokens billed to this Goal so far, summed across its turn windows.
    *
-   * Measured from the same session token source as `/stats`. Verification and
-   * checkpoint side queries run between turn windows and are not included.
+   * Includes Goal-turn model calls, direct foreground subagents, and the Goal's
+   * verifier and checkpoint checks. Nested/background agents, other side
+   * queries, cron and notification turns are excluded.
    * Zero on Goals recovered from a transcript written before the field existed.
    */
   tokensUsed: number;
@@ -565,7 +566,12 @@ export type GoalBlockerKind =
 export interface GoalTerminalProposal {
   status: 'complete' | 'blocked';
   reason: string;
-  evidenceRefs: string[];
+  /**
+   * @deprecated The verifier judges a proposal from the tail of the Goal's
+   * transcript, not from references the model cites. Accepted and ignored so
+   * a model still following the older contract is not refused.
+   */
+  evidenceRefs?: string[];
   blockerKind?: GoalBlockerKind;
 }
 
@@ -686,6 +692,19 @@ export function goalPauseReasonForFailure(message: string): string {
 }
 
 /**
+ * The pause reason for a terminal proposal the verifier gave no verdict on:
+ * it timed out, the side query failed, or its answer was not a verdict.
+ */
+export function goalPauseReasonForVerifierFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The Goal verifier could not judge the proposal: ${detail}. Run /goal resume to continue.`
+      : 'The Goal verifier could not judge the proposal. Run /goal resume to continue.',
+  );
+}
+
+/**
  * The pause reason for a headless Goal turn that died with an error. Same
  * register as `GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED` -- it names the failure
  * without claiming the run ended cleanly, and without pointing at a slash
@@ -725,6 +744,19 @@ export type GoalStateCause =
   | 'usage_limited'
   | 'clear'
   | 'migrated';
+
+/**
+ * What a runtime broadcast carries beyond the snapshot and its cause.
+ *
+ * `restore()` republishes recovered state with the cause of the record it was
+ * recovered from, so a subscriber that counts transitions cannot otherwise
+ * tell that broadcast from the live one that first produced it, and would
+ * count the same `create` or `usage_limited` again on every resume.
+ */
+export interface GoalBroadcastMeta {
+  /** True only on the broadcast that republishes restored state. */
+  replayed: boolean;
+}
 
 export interface GoalStateRecordPayloadV2 {
   v: typeof GOAL_STATE_VERSION;

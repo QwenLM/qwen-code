@@ -74,7 +74,8 @@ export async function evaluatePermissionFlow(
   const pm = config.getPermissionManager?.();
   const pmCtx = buildPermissionCheckContext(
     toolName,
-    toolParams,
+    // Some tools scope their rules by values derived during the L3 check.
+    invocation.getPermissionMatchParams?.() ?? toolParams,
     config.getTargetDir?.() ?? '',
     invocation.permissionAliases,
   );

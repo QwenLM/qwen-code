@@ -288,18 +288,21 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
 /**
  * Settings a Workspace may only make stricter.
  *
- * A cloned repository must not open the user's session to peers or force
- * incoming messages through, so the loosening direction is dropped like a
- * restricted setting. The tightening direction is the one a repository has
- * a legitimate reason to set — automation agents in a monorepo that must
- * not be able to reach a person's session, say — so a workspace value
- * that is stricter than what the operator scopes set is honored. System
- * scope stays the admin override: when it sets the key the workspace
- * value is dropped regardless.
+ * A cloned repository must not loosen a boundary the operator set — open
+ * the user's session to peers, force incoming messages through, or let the
+ * model run workflow scripts in a session locked to named workflows — so
+ * the loosening direction is dropped like a restricted setting. The
+ * tightening direction is the one a repository has a legitimate reason to
+ * set — automation agents in a monorepo that must not be able to reach a
+ * person's session, say, or a repository that wants only its named
+ * workflows run — so a workspace value that is stricter than the value in
+ * force without it is honored. System scope stays the admin override: when
+ * it sets the key the workspace value is dropped regardless.
  *
  * `strictness` ranks the behavior a value produces; higher is stricter.
  * An unrecognized value gets the rank of the fail-closed behavior its
- * reader applies: messaging is off, and inbound messages are held.
+ * reader applies: messaging is off, inbound messages are held, and the
+ * workflow lock (which only `true` turns on) stays off.
  * `undefined` is ranked too, so a workspace value is compared against the
  * feature's own default when no operator scope sets the key.
  *
@@ -308,9 +311,19 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
  */
 export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
   {
+    section: 'tools',
+    key: 'workflowNameOnly',
+    // Only `true` turns the lock on; anything else leaves the model free to
+    // run scripts, so it ranks with unset.
+    strictness: (value: unknown): number => (value === true ? 1 : 0),
+  },
+  {
     section: 'agents',
     key: 'crossSessionMessaging',
-    strictness: (value: unknown): number => (value === true ? 0 : 1),
+    // Unset means on — the default — so it ranks with `true`. Anything the
+    // reader does not recognize keeps the socket closed, like `false`.
+    strictness: (value: unknown): number =>
+      value === true || value === undefined ? 0 : 1,
   },
   {
     section: 'agents',

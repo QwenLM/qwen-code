@@ -82,6 +82,11 @@ export type OpenTuiStreamEvent =
       id: string;
       outcome: 'approved' | 'rejected';
     }
+  /** The tracked call's own scheduler status: `queued` is true while it sits
+   * in 'scheduled' — approved, but not started because the batch still holds
+   * another approval. ink reads this status off the same update and draws
+   * TOOL_STATUS.PENDING for it. */
+  | { type: 'tool-queued'; id: string; queued: boolean }
   /** Structured compression item (/compress command): rendered as the ink
    * CompressionMessage row (spinner/diamond + token counts) instead of the
    * flattened text projection. */
@@ -801,11 +806,11 @@ export type GoalSnapshotLike = {
     objective?: string;
     status?: string;
     turnCount?: number;
+    turnBudget?: number;
     activeTimeMs?: number;
+    activeTimeBudgetMs?: number;
     tokensUsed?: number;
     tokenBudget?: number;
-    checkpointStalls?: number;
-    lastCheckpointFailure?: string;
     lastReason?: string;
   } | null;
   activity?: string;
