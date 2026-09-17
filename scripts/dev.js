@@ -26,6 +26,7 @@ import {
   symlinkSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 
@@ -89,6 +90,42 @@ for (const [subpath, conditions] of Object.entries(coreExports ?? {})) {
     coreSubpathSourceUrls[`${coreSpecifier}/${subpath.slice(2)}`] =
       pathToFileURL(sourcePath).href;
   }
+}
+
+// Shared node_modules may resolve the bridge from another checkout. Keep the
+// daemon and its ACP children on this checkout's protocol without a build.
+const bridgeDir = join(root, 'packages', 'acp-bridge');
+// `?? {}` rather than a bare read: a manifest without an `exports` map means
+// there is nothing to remap, and `Object.entries(undefined)` would throw at
+// module load — taking the launcher down for every caller, not just this
+// remapping.
+const bridgeExports =
+  JSON.parse(readFileSync(join(bridgeDir, 'package.json'), 'utf-8')).exports ??
+  {};
+for (const [subpath, conditions] of Object.entries(bridgeExports)) {
+  const entry = conditions?.import;
+  if (typeof entry !== 'string' || !entry.startsWith('./dist/')) continue;
+  const sourcePath = join(
+    bridgeDir,
+    'src',
+    entry.slice('./dist/'.length).replace(/\.js$/, '.ts'),
+  );
+  if (!existsSync(sourcePath)) continue;
+  const specifier =
+    subpath === '.'
+      ? '@qwen-code/acp-bridge'
+      : `@qwen-code/acp-bridge/${subpath.slice(2)}`;
+  coreSubpathSourceUrls[specifier] = pathToFileURL(sourcePath).href;
+}
+
+// Keep shared worktree installs from mixing another checkout's channel build.
+for (const name of readdirSync(join(root, 'packages', 'channels'))) {
+  const directory = join(root, 'packages', 'channels', name);
+  const manifest = join(directory, 'package.json');
+  const entry = join(directory, 'src', 'index.ts');
+  if (!existsSync(manifest) || !existsSync(entry)) continue;
+  const channel = JSON.parse(readFileSync(manifest, 'utf8'));
+  coreSubpathSourceUrls[channel.name] = pathToFileURL(entry).href;
 }
 
 const loaderCode = `
@@ -177,6 +214,8 @@ const tsxCmd = hasLocalTsxCli
     : tsxBinName;
 const tsxArgs = [
   ...(hasLocalTsxCli ? [localTsxCli] : []),
+  '--tsconfig',
+  join(cliPackageDir, 'tsconfig.json'),
   cliEntry,
   ...process.argv.slice(2),
 ];

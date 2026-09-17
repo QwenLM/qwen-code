@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 import { DaemonHttpError } from '../../src/daemon/DaemonHttpError.js';
 import {
@@ -135,6 +135,10 @@ function recordingFetch(
 }
 
 describe('DaemonClient standalone sessions', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('gates standalone options with their dedicated capability', async () => {
     const { fetch, calls } = recordingFetch(() =>
       capabilityResponse(true, false),
@@ -304,6 +308,51 @@ describe('DaemonClient standalone sessions', () => {
     expect(body).not.toHaveProperty('cwd');
     expect(body).not.toHaveProperty('workspaceCwd');
     expect(created.sessionId).toBe(body['sessionId']);
+  });
+
+  it.each([
+    [0x00, '00000000-0000-4000-8000-000000000000'],
+    [0xff, 'ffffffff-ffff-4fff-bfff-ffffffffffff'],
+  ])(
+    'creates a UUID without randomUUID from random byte %i',
+    async (byte, id) => {
+      const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(byte));
+      vi.stubGlobal('crypto', { getRandomValues });
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? capabilityResponse()
+          : jsonResponse(200, standaloneSession(id)),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const created = await client.createStandaloneSession();
+
+      expect(getRandomValues).toHaveBeenCalledOnce();
+      expect(getRandomValues.mock.calls[0]?.[0]).toHaveLength(16);
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/standalone/sessions',
+        method: 'POST',
+        body: JSON.stringify({ sessionId: id }),
+      });
+      expect(created.sessionId).toBe(id);
+    },
+  );
+
+  it('preserves a caller UUID without requiring browser crypto', async () => {
+    vi.stubGlobal('crypto', undefined);
+    const { fetch, calls } = recordingFetch((request) =>
+      request.url.endsWith('/capabilities')
+        ? capabilityResponse()
+        : jsonResponse(200, standaloneSession()),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const created = await client.createStandaloneSession({
+      sessionId: UPPER_SESSION_ID,
+    });
+
+    expect(created.sessionId).toBe(SESSION_ID);
+    expect(calls[1]?.body).toBe(JSON.stringify({ sessionId: SESSION_ID }));
   });
 
   it('exposes modelApplied from the create response', async () => {
@@ -656,52 +705,62 @@ describe('DaemonClient standalone sessions', () => {
     });
   });
 
-  it('recovers the generated UUID after a create transport timeout', async () => {
-    let createAttempts = 0;
-    let generatedSessionId: string | undefined;
-    const { fetch } = recordingFetch((request) => {
-      const url = new URL(request.url);
-      if (url.pathname === '/capabilities') return capabilityResponse();
-      if (url.pathname === '/standalone/sessions') {
-        createAttempts += 1;
-        generatedSessionId = (
-          JSON.parse(request.body ?? '{}') as { sessionId: string }
-        ).sessionId;
-        return new Promise<Response>((_resolve, reject) => {
-          request.signal?.addEventListener('abort', () => {
-            reject(request.signal?.reason);
-          });
+  it.each([true, false])(
+    'recovers the generated UUID after a create transport timeout (randomUUID available: %s)',
+    async (randomUUIDAvailable) => {
+      if (!randomUUIDAvailable) {
+        vi.stubGlobal('crypto', {
+          getRandomValues: globalThis.crypto.getRandomValues.bind(
+            globalThis.crypto,
+          ),
         });
       }
-      return jsonResponse(200, standaloneSummary(generatedSessionId));
-    });
-    const client = new DaemonClient({
-      baseUrl: 'http://daemon',
-      fetch,
-      fetchTimeoutMs: 10,
-    });
+      let createAttempts = 0;
+      let generatedSessionId: string | undefined;
+      const { fetch } = recordingFetch((request) => {
+        const url = new URL(request.url);
+        if (url.pathname === '/capabilities') return capabilityResponse();
+        if (url.pathname === '/standalone/sessions') {
+          createAttempts += 1;
+          generatedSessionId = (
+            JSON.parse(request.body ?? '{}') as { sessionId: string }
+          ).sessionId;
+          return new Promise<Response>((_resolve, reject) => {
+            request.signal?.addEventListener('abort', () => {
+              reject(request.signal?.reason);
+            });
+          });
+        }
+        return jsonResponse(200, standaloneSummary(generatedSessionId));
+      });
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 10,
+      });
 
-    const error = await client
-      .createStandaloneSession()
-      .catch((reason: unknown) => reason);
+      const error = await client
+        .createStandaloneSession()
+        .catch((reason: unknown) => reason);
 
-    expect(error).toMatchObject({
-      name: 'DaemonStandaloneCreationOutcomeUnknownError',
-      sessionId: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
-      ),
-      recovery: {
-        state: 'existing',
-        session: { sessionId: expect.any(String) },
-      },
-    });
-    expect(error).toHaveProperty('sessionId', generatedSessionId);
-    expect(error).toHaveProperty(
-      'recovery.session.sessionId',
-      generatedSessionId,
-    );
-    expect(createAttempts).toBe(1);
-  });
+      expect(error).toMatchObject({
+        name: 'DaemonStandaloneCreationOutcomeUnknownError',
+        sessionId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+        ),
+        recovery: {
+          state: 'existing',
+          session: { sessionId: expect.any(String) },
+        },
+      });
+      expect(error).toHaveProperty('sessionId', generatedSessionId);
+      expect(error).toHaveProperty(
+        'recovery.session.sessionId',
+        generatedSessionId,
+      );
+      expect(createAttempts).toBe(1);
+    },
+  );
 
   it('maps structured unknown outcome to an exact creating recovery', async () => {
     const { fetch } = recordingFetch((request) => {

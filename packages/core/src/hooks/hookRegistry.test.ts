@@ -10,14 +10,6 @@ import { HookRegistry } from './hookRegistry.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookConfig } from './types.js';
 
-// Mock TrustedHooksManager
-vi.mock('./trustedHooks.js', () => ({
-  TrustedHooksManager: vi.fn().mockImplementation(() => ({
-    getUntrustedHooks: vi.fn().mockReturnValue([]),
-    trustHooks: vi.fn(),
-  })),
-}));
-
 describe('HookRegistry', () => {
   let mockConfig: HookRegistryConfig;
   let mockFeedbackEmitter: FeedbackEmitter;

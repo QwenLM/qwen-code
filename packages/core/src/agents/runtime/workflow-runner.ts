@@ -6,8 +6,14 @@
 
 import { randomBytes } from 'node:crypto';
 import type { Config } from '../../config/config.js';
-import { logWorkflowRun } from '../../telemetry/loggers.js';
-import { WorkflowRunEvent } from '../../telemetry/types.js';
+import {
+  logWorkflowRun,
+  logWorkflowSizeWarning,
+} from '../../telemetry/loggers.js';
+import {
+  WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
+} from '../../telemetry/types.js';
 import {
   createAbortController,
   createChildAbortController,
@@ -22,6 +28,10 @@ import {
 } from '../workflow-run-registry.js';
 import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
 import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../workflow-correlation.js';
+import {
   createProductionDispatch,
   resolveConcurrencyLimit,
   WorkflowExecutionError,
@@ -31,30 +41,57 @@ import {
   type WorkflowRunOutcome,
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
+import {
+  describeWorkflowDeterminismViolations,
+  scanWorkflowScriptShape,
+} from './workflow-script-shape.js';
+import {
+  evaluateWorkflowSize,
+  resolveWorkflowSizeCaps,
+  resolveWorkflowSizeGuidelineSetting,
+} from './workflow-size.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import {
   deleteInlineWorkflowScript,
   persistInlineWorkflowScript,
   resolveSavedWorkflowScript,
+  type ResolvedSavedWorkflow,
 } from './workflow-saved.js';
 import {
   compileWorkflowScript,
   describeWorkflowCompileError,
 } from './workflow-sandbox.js';
+import {
+  resolveReviewWorkflowLimits,
+  type ReviewWorkflowLimits,
+} from './review-workflow.js';
 
 export interface WorkflowRunnerOptions {
   config: Config;
   signal: AbortSignal;
   toolUseId?: string;
   workflowName?: string;
+  sourceRef?: WorkflowSourceRef;
   script?: string;
   scriptPath?: string;
+  /**
+   * Loads the script a `scriptPath` or saved-workflow `name` call runs, in
+   * place of reading `scriptPath` here. The Workflow tool passes the load it
+   * showed for approval, so the content that runs is the content approved.
+   */
+  loadScript?: () => Promise<ResolvedSavedWorkflow>;
   args: unknown;
   resumeFromRunId?: string;
   dispatch?: WorkflowAgentDispatch;
   onUpdate?: (entry: WorkflowTask) => void;
   runInBackground?: boolean;
+  /**
+   * Where this session's authoring reference is, sent with a failed background
+   * run's completion notification. Omitted for a script the model did not
+   * author (a saved workflow), where "fix the script" would be wrong advice.
+   */
+  authoringHint?: string;
 }
 
 export type WorkflowRunSettlement =
@@ -73,6 +110,7 @@ export class WorkflowRunHandle {
   readonly scriptPath: string | undefined;
   /** This run's resume journal, when the config has a `storage` to hold one. */
   readonly journalPath: string | undefined;
+  readonly sourceRef: WorkflowSourceRef | undefined;
 
   constructor(
     readonly runId: string,
@@ -81,10 +119,15 @@ export class WorkflowRunHandle {
     private readonly controller: AbortController,
     private readonly scheduler: WorkflowDispatchScheduler,
     start: () => Promise<WorkflowRunSettlement>,
-    locations: { scriptPath?: string; journalPath?: string } = {},
+    locations: {
+      scriptPath?: string;
+      journalPath?: string;
+      sourceRef?: WorkflowSourceRef;
+    } = {},
   ) {
     this.scriptPath = locations.scriptPath;
     this.journalPath = locations.journalPath;
+    this.sourceRef = locations.sourceRef;
     this.completion = Promise.resolve().then(start);
   }
 
@@ -101,8 +144,14 @@ export class WorkflowRunHandle {
   }
 }
 
+const WORKFLOW_SCRIPT_SYNTAX_HINT =
+  'Workflow scripts must be plain JavaScript — the usual causes are ' +
+  'TypeScript syntax (type annotations, interfaces, generics) and ' +
+  'broken string quoting or escaping. Metadata must use literal values.';
+
 /**
- * The script never compiled, so no run was created.
+ * The script was refused before a run was created: it did not compile, or it
+ * calls something a resumable workflow cannot replay.
  *
  * Distinct from `WorkflowExecutionError` on purpose: that one describes a run
  * that existed and failed, and callers report it as such. This one means there
@@ -111,12 +160,20 @@ export class WorkflowRunHandle {
  * than that it failed.
  */
 export class WorkflowScriptNotLaunchedError extends Error {
-  constructor(readonly detail: string) {
+  /**
+   * @param detail What is wrong with the script.
+   * @param hint The usual causes, appended after `detail`. Defaults to the
+   *   syntax causes of a compile failure; a refusal with a cause of its own
+   *   passes an empty hint, so the reader is not sent looking for TypeScript
+   *   syntax that is not there.
+   */
+  constructor(
+    readonly detail: string,
+    hint: string = WORKFLOW_SCRIPT_SYNTAX_HINT,
+  ) {
     super(
-      `Workflow script is invalid and was not launched:\n${detail}\n\n` +
-        `Workflow scripts must be plain JavaScript — the usual causes are ` +
-        `TypeScript syntax (type annotations, interfaces, generics) and ` +
-        `broken string quoting or escaping. Metadata must use literal values.`,
+      `Workflow script is invalid and was not launched:\n${detail}` +
+        (hint ? `\n\n${hint}` : ''),
     );
     this.name = 'WorkflowScriptNotLaunchedError';
   }
@@ -162,7 +219,13 @@ export class WorkflowRunner {
   ): Promise<WorkflowRunHandle> {
     const config = options.config;
     const runInBackground = options.runInBackground === true;
-    const budget = WorkflowBudgetImpl.fromEnv();
+    const budget = WorkflowBudgetImpl.fromConfig(config);
+    // Read once per run: a guideline the user changes mid-run applies from the
+    // next run, the same way the tool description does.
+    const sizeCaps = resolveWorkflowSizeCaps(
+      config.getWorkflowSizeGuideline?.() ??
+        resolveWorkflowSizeGuidelineSetting(undefined),
+    );
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const registry = config.getWorkflowRunRegistry?.();
@@ -200,12 +263,15 @@ export class WorkflowRunner {
     let script: string;
     let scriptPath: string | undefined;
     let resumeReplay: JournalReplay | undefined;
+    let sourceRef: WorkflowSourceRef | undefined;
     let persistedInlineScript = false;
     let callerWasAbortedBeforeStart: boolean;
     let orchestrator: WorkflowOrchestrator;
+    let reviewLimits: ReviewWorkflowLimits | undefined;
     try {
-      const loaded =
-        options.scriptPath && options.script === undefined
+      const loaded = options.loadScript
+        ? await options.loadScript()
+        : options.scriptPath && options.script === undefined
           ? await resolveSavedWorkflowScript(
               { scriptPath: options.scriptPath },
               config,
@@ -213,6 +279,13 @@ export class WorkflowRunner {
           : undefined;
       script = loaded?.script ?? options.script ?? '';
       scriptPath = loaded?.scriptPath ?? options.scriptPath;
+      if (loaded && scriptPath && storage) {
+        reviewLimits = await resolveReviewWorkflowLimits(
+          scriptPath,
+          storage.getGeneratedWorkflowsDir(),
+          script,
+        );
+      }
       const workflowName =
         options.workflowName ??
         loaded?.savedWorkflowName ??
@@ -228,10 +301,42 @@ export class WorkflowRunner {
           ),
         );
       }
+      // A script that reads a clock or a random source cannot be replayed on
+      // resume. Refused here, before any agent spends a token, rather than on
+      // whichever call reaches the sandbox guard first.
+      const determinismViolations =
+        scanWorkflowScriptShape(script).determinismViolations;
+      if (determinismViolations.length > 0) {
+        throw new WorkflowScriptNotLaunchedError(
+          describeWorkflowDeterminismViolations(determinismViolations),
+          '',
+        );
+      }
 
       resumeReplay = options.resumeFromRunId
         ? await journal?.load()
         : undefined;
+      sourceRef = readWorkflowSourceRef(options.sourceRef);
+      if (resumeReplay?.sourceError) throw new Error(resumeReplay.sourceError);
+      if (options.resumeFromRunId) {
+        const original = resumeReplay?.sourceRef;
+        if (
+          sourceRef &&
+          (!original ||
+            sourceRef.id !== original.id ||
+            sourceRef.revision !== original.revision)
+        ) {
+          throw new Error(
+            'Workflow sourceRef must match the original journal. Start a new run to use a different source.',
+          );
+        }
+        if (previousEntry?.sourceRef && !original) {
+          throw new Error(
+            'Workflow source metadata is missing from its journal.',
+          );
+        }
+        sourceRef = original;
+      }
       // A registry-side cancel (`cancelStarting`, `abortAll`) aborts the
       // reserved controller while the caller's signal stays live. It is a
       // cancel in either mode: registering anyway would let the settlement
@@ -243,6 +348,19 @@ export class WorkflowRunner {
       // start; a foreground start registers and settles `cancelled` so the
       // caller's tool result carries the run it asked for.
       callerWasAbortedBeforeStart = options.signal.aborted;
+      if (journal && !(await journal.ensureExists())) {
+        journalPath = undefined;
+      }
+      if (sourceRef) {
+        if (!journal || !journalPath) {
+          throw new Error(
+            'Workflow sourceRef requires a writable resume journal.',
+          );
+        }
+        if (!options.resumeFromRunId) {
+          await journal.append({ type: 'source', version: 1, sourceRef });
+        }
+      }
       // Persisted only once the run is certain to start: a script that never
       // compiled, and a start the registry cancelled out from under us, leave
       // no file behind. A resume of an inline script overwrites the copy from
@@ -255,9 +373,6 @@ export class WorkflowRunner {
         );
         scriptPath = persisted ?? undefined;
         persistedInlineScript = persisted !== null;
-      }
-      if (journal && !(await journal.ensureExists())) {
-        journalPath = undefined;
       }
       assertStartNotCancelled();
       const dispatch =
@@ -277,6 +392,7 @@ export class WorkflowRunner {
                     )
                   : () => undefined
             : undefined,
+          reviewLimits?.subagent,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       entry = registry?.register(
@@ -284,15 +400,25 @@ export class WorkflowRunner {
           runId,
           toolUseId: options.toolUseId,
           ...(workflowName ? { workflowName } : {}),
+          ...(sourceRef ? { sourceRef } : {}),
           meta: null,
           status: 'running',
           startTime: Date.now(),
           outputFile: '',
           abortController: controller,
-          tokenBudgetTotal: budget.total,
+          // The registry and `/workflows` show one run: a turn target is not
+          // this run's cap, and its spend is not this run's alone.
+          tokenBudgetTotal: budget.runCap(),
           script,
           scriptPath,
           ...(journalPath ? { journalPath } : {}),
+          // A saved workflow is the user's file, and the recovery advice says to
+          // copy it first. The name is resolved here — from the resumed run
+          // too, which a caller re-running a saved workflow's inline source
+          // does not pass — so the hint follows the same decision.
+          ...(options.authoringHint && !workflowName
+            ? { authoringHint: options.authoringHint }
+            : {}),
           args: options.args,
           ...(options.resumeFromRunId
             ? {
@@ -331,7 +457,47 @@ export class WorkflowRunner {
         // UI refresh failures must not affect workflow execution.
       }
     };
+    // The large-run flag. Checked whenever the run schedules an agent or
+    // records spend; the registry keeps only the first warning.
+    const maybeWarnSize = (): void => {
+      const current = registry?.get(runId);
+      if (!registry || !current || current.sizeWarning !== undefined) return;
+      let scheduledAgents = 0;
+      let settledAgents = 0;
+      for (const dispatch of current.dispatches) {
+        // A journal replay spends nothing and schedules no agent.
+        if (dispatch.status === 'cached') continue;
+        scheduledAgents++;
+        if (
+          dispatch.status === 'completed' ||
+          dispatch.status === 'failed' ||
+          dispatch.status === 'cancelled'
+        ) {
+          settledAgents++;
+        }
+      }
+      const warning = evaluateWorkflowSize(
+        { scheduledAgents, settledAgents, tokensSpent: current.tokensSpent },
+        sizeCaps,
+      );
+      if (!warning || !registry.onSizeWarning(runId, warning)) return;
+      try {
+        logWorkflowSizeWarning(config, new WorkflowSizeWarningEvent(warning));
+      } catch {
+        // Telemetry must never disturb the run it describes.
+      }
+    };
     const emitter: WorkflowOrchestratorEmitter = {
+      workflowCallUpdated: (call) => {
+        if (!isCurrentEntry()) return;
+        registry?.onWorkflowCallUpdated(runId, call);
+        emitUpdate();
+      },
+      workflowCallsTruncated: () => {
+        if (!isCurrentEntry()) return;
+        registry?.onWorkflowCallsTruncated(runId);
+        emitUpdate();
+      },
       phaseStarted: (title) => {
         if (!isCurrentEntry()) return;
         registry?.onPhaseStarted(runId, title);
@@ -351,6 +517,7 @@ export class WorkflowRunner {
       dispatchQueued: (event) => {
         if (!isCurrentEntry()) return;
         registry?.onDispatchQueued(runId, event);
+        maybeWarnSize();
         emitUpdate();
       },
       dispatchStarted: (dispatchId, startedAt) => {
@@ -378,12 +545,18 @@ export class WorkflowRunner {
       budgetUpdated: (spent, total) => {
         if (!isCurrentEntry()) return;
         registry?.onBudgetUpdated(runId, spent, total);
+        maybeWarnSize();
+        emitUpdate();
+      },
+      resumeRespawn: (line) => {
+        if (!isCurrentEntry()) return;
+        registry?.onResumeRespawn(runId, line);
         emitUpdate();
       },
     };
 
     const scheduler = new WorkflowDispatchScheduler(
-      resolveConcurrencyLimit(),
+      reviewLimits?.concurrency ?? resolveConcurrencyLimit(),
       controller.signal,
       ({ state }) => {
         if (!isCurrentEntry()) return;
@@ -402,6 +575,7 @@ export class WorkflowRunner {
           const outcome = await orchestrator.run({
             script,
             args: options.args,
+            maxWallClockMs: reviewLimits?.maxWallClockMs,
             abortOnTimeout: controller,
             runId,
             emitter,
@@ -481,6 +655,19 @@ export class WorkflowRunner {
               status: entry.status,
               agents_dispatched: entry.agentsDispatched,
               agents_completed: entry.agentsCompleted,
+              // Read off the dispatch traces rather than the counters: a
+              // dispatch that failed or replayed from cache still counts as
+              // completed, so without these three a run that lost half its
+              // fan-out and one that lost none report identically.
+              agents_failed: entry.dispatches.reduce(
+                (n, dispatch) => (dispatch.status === 'failed' ? n + 1 : n),
+                0,
+              ),
+              agents_cached: entry.dispatches.reduce(
+                (n, dispatch) => (dispatch.status === 'cached' ? n + 1 : n),
+                0,
+              ),
+              agents_respawned: entry.agentsRespawned ?? 0,
               phase_count: entry.phases.length,
               tokens_spent: entry.tokensSpent,
               duration_ms: (entry.endTime ?? entry.startTime) - entry.startTime,
@@ -509,6 +696,7 @@ export class WorkflowRunner {
       {
         ...(scriptPath ? { scriptPath } : {}),
         ...(journalPath ? { journalPath } : {}),
+        ...(sourceRef ? { sourceRef } : {}),
       },
     );
     registry?.attachHandle(handle);

@@ -124,6 +124,7 @@ test('platform-coupled subsystems match on segments, not substrings', () => {
     'packages/core/src/telemetry/uploader.ts',
     'packages/cli/src/services/plateauDetector.ts',
     'packages/web-shell/client/components/Shellfish.tsx',
+    'packages/cli/src/ui/hooks/shellCommandProcessor.ts',
   ]) {
     assert.equal(classifyChangedFiles([file]), PLATFORM_INSENSITIVE, file);
   }

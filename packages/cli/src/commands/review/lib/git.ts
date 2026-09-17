@@ -8,9 +8,14 @@
 // `execFileSync` pattern as `lib/gh.ts` so quoting / escaping is consistent
 // across platforms.
 
-import { execFileSync } from 'node:child_process';
-import { redirectedAncestor, sanitizedGitEnv } from './worktree.js';
-import { existsSync, lstatSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  insideReviewTmpLexically,
+  redirectedAncestor,
+  sanitizedGitEnv,
+  untrustedRepositoryFrom,
+} from './worktree.js';
+import { existsSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 /** Deadline for a single `git` invocation. Generous; a hang must still end. */
@@ -45,8 +50,161 @@ function gitOpts() {
   };
 }
 
+/**
+ * The launch directory, judged once per directory this process runs git from.
+ *
+ * Every wrapper below runs git with NO `cwd`, so each one discovers its
+ * repository from `process.cwd()` — and in the nested geometry `mountRootFor`
+ * documents, that directory is a review worktree inside the OUTER review's
+ * read-write mount, where the reviewed code can rewrite the `.git` pointer git
+ * follows. What the individual commands then do through it is not a short list:
+ * `fetch` loads the plant's transport config, `diff` refreshes the index and
+ * honours `diff.<driver>.command`, `show <base>:<path>` hands back the plant's
+ * content as this review's own rules, `remote get-url` names where a submission
+ * goes. Gating those command by command is how this class kept re-opening, so
+ * the question is asked HERE, at the four functions every one of them goes
+ * through.
+ *
+ * A `-C <tree>` argument does not change the answer's relevance: that scopes
+ * the command to another tree, and THAT tree's pointer is the subject of
+ * `untrustedGitfile`, which its callers ask separately. This one is only ever
+ * about where the process stands.
+ *
+ * Only the NEGATIVE is memoized, and only where repeating it costs nothing:
+ * outside a review temp dir `untrustedRepositoryFrom` returns on its first line
+ * — a string scan, no spawn — so caching that keeps `gitProbe`, called per
+ * thread by `comment-status`, off a per-call syscall and an ordinary checkout
+ * never pays for this gate at all.
+ *
+ * The memo's key is the LEXICAL marker scan, never `mountRootFor`'s answer.
+ * That null is overloaded (see `insideReviewTmpLexically`), and the rename
+ * attack turns on the difference: `mv .qwen .qwen-real` from inside the outer
+ * mount leaves the live cwd's stale spelling matching the marker while the
+ * mount stops answering, so a memo keyed on "no mount root" recorded TRUSTED
+ * for a spelling inside the review temp dir — and served it to whatever tree
+ * the same spelling was later stood back up over, filter-carrying gitfile
+ * included. A spelling that carries the marker is therefore NEVER memoized:
+ * inside a review temp dir the question is RE-ASKED on every call.
+ *
+ * The rename attack's premise is worth naming precisely: after an ancestor
+ * rename, `process.cwd()` serves the PRE-rename spelling not because of any
+ * kernel property — Linux `getcwd(2)` follows renames — but because Node
+ * caches the cwd (`cachedCwd`) until an in-process `chdir` invalidates it.
+ * So the one thing that re-opens the window on every platform is a future
+ * `process.chdir` in this process while the outer phase holds the mount:
+ * today no production review code chdirs after startup (grep it before
+ * adding one), and the canary pins the premise by asserting the stale
+ * spelling right after the rename. That is not the TOCTOU residual this
+ * design documents and does not close, which is about a pointer rewritten
+ * between a check and its own use: here the OUTER review's containerized
+ * build/test phase holds the directory read-write for the length of a whole
+ * command, so it rewrites the pointer BETWEEN calls, and a verdict memoized
+ * for the process served the first clean answer to every later wrapper —
+ * `status` refreshing the plant's index and running its clean filter, `show
+ * <base>:<path>` handing the plant's content back as this review's own
+ * rules. `fetch-pr` asks twice for the same reason; this asks every time,
+ * and the spawn it costs exists only in the one geometry where the gate
+ * speaks.
+ */
+let trustedLaunchDir: string | null = null;
+
+/**
+ * Where the KERNEL reports this process standing, as opposed to the spelling
+ * Node's `process.cwd()` serves from its cache.
+ *
+ * The two diverge exactly once an ancestor is renamed: the kernel's answer
+ * follows the inode to the renamed path, while Node's cache holds the
+ * pre-rename spelling until an in-process `chdir`. The gate's subject is the
+ * KERNEL's answer — every wrapper below spawns with no `cwd`, so the child
+ * inherits it — because the rename attack works by splitting the two: judged
+ * on the cached spelling (re-stood-up as an honest symlink target), executed
+ * in the renamed directory (the plant). POSIX only: Windows has no
+ * `/bin/pwd`, and there containment cannot exist so the gate is silent.
+ */
+function kernelCwd(): string | null {
+  try {
+    const r = spawnSync('/bin/pwd', ['-P'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      env: sanitizedGitEnv(),
+    });
+    if (r.error || r.status !== 0 || !r.stdout) return null;
+    return r.stdout.replace(/\n$/, '');
+  } catch {
+    return null;
+  }
+}
+
+/** Why this process must not run git from where it stands, or null. */
+function launchDirRefusal(): string | null {
+  const cwd = process.cwd();
+  if (trustedLaunchDir === cwd) return null;
+  if (!insideReviewTmpLexically(cwd)) {
+    // The pure no-marker string scan, memoized: an ordinary checkout never
+    // pays for this gate, and no filesystem answer was consulted to spoil.
+    trustedLaunchDir = cwd;
+    return null;
+  }
+  // Inside the spelling, judge where the KERNEL stands — that is where every
+  // wrapper's spawn lands — never the cached spelling. When they diverge, an
+  // ancestor was renamed mid-run; judge the kernel's answer, which the rename
+  // cannot dress up. Windows keeps the cached-spelling judgement: no
+  // `/bin/pwd` there, and no containment to protect either.
+  if (process.platform !== 'win32') {
+    const kernel = kernelCwd();
+    if (kernel === null) {
+      return (
+        `the kernel-resolved working directory could not be determined ` +
+        `(cwd ${cwd}), so where a command run from here would land is ` +
+        `unmeasured`
+      );
+    }
+    if (!insideReviewTmpLexically(kernel)) {
+      // The kernel stands OUTSIDE the review temp dir while the spelling the
+      // process answered to is inside it: a rename moved this process's
+      // directory, and the spawn lands wherever the kernel says.
+      return (
+        `the process's working directory was renamed mid-run: the spelling ` +
+        `${cwd} is inside the review temp dir but the kernel reports ` +
+        `${kernel} — where every command would actually run`
+      );
+    }
+    // Divergence within the mount is the plant's exact shape; agreement is
+    // the ordinary case. Judge the kernel's spelling either way.
+    let cachedReal: string | null;
+    try {
+      cachedReal = realpathSync(cwd);
+    } catch {
+      cachedReal = null;
+    }
+    if (cachedReal !== kernel) {
+      return (
+        `the process's working directory spelling ${cwd} resolves to ` +
+        `${cachedReal ?? 'a path that no longer exists'} while the kernel ` +
+        `reports ${kernel}: a rename mid-run split them, and every command ` +
+        `runs at the kernel's answer`
+      );
+    }
+    return untrustedRepositoryFrom(kernel);
+  }
+  return untrustedRepositoryFrom(cwd);
+}
+
+function assertTrustedLaunchDir(): void {
+  const refusal = launchDirRefusal();
+  if (refusal !== null) {
+    throw new Error(
+      `refusing to run git from this directory: ${refusal}. ` +
+        `The command would resolve through that pointer and act on whatever ` +
+        `repository it names. Run the review from a checkout outside the ` +
+        `review temp dir.`,
+    );
+  }
+}
+
 /** Run `git` with args. Returns stdout, trimmed and CRLF-normalised. */
 export function git(...args: string[]): string {
+  assertTrustedLaunchDir();
   return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8' })
     .replace(/\r\n/g, '\n')
     .trim();
@@ -78,6 +236,7 @@ export function gitWithInput(input: Buffer, args: string[]): string {
  * identity exists to track goes invisible.
  */
 export function gitWithInputRaw(input: Buffer, args: string[]): string {
+  assertTrustedLaunchDir();
   return execFileSync('git', args, {
     ...gitOpts(),
     encoding: 'utf8',
@@ -122,12 +281,29 @@ export function gitOpt(...args: string[]): string | null {
  * `{status: null, signal: 'SIGTERM'}`. A timeout is therefore a null status,
  * not a high one; both route to the same "surface unavailable" handling, but
  * the distinction matters to anyone reading this to predict a value.
+ *
+ * A launch directory this process must not resolve through lands in the same
+ * `status: null` — the command genuinely could not be run — but it is the one
+ * case with a reason a caller can hand to a user, so it also comes back in
+ * `refusal`. Callers that REPORT rather than retry need the split: reading a
+ * null `out` as git's answer made `releaseWorktree` certify a release whose
+ * registration and branch both survived, and `load-rules` write an empty rules
+ * file into every agent brief while printing "no review rules found".
  */
 export function gitProbe(...args: string[]): {
   out: string | null;
   status: number | null;
+  refusal: string | null;
 } {
   try {
+    // INSIDE the try, which is where the spawn's own failures land. The
+    // pre-check reads `process.cwd()`, and a cwd deleted out from under this
+    // process makes that throw ENOENT — the same "git could not be run" the
+    // catch already answers, and one this probe must answer rather than throw:
+    // `releaseWorktree`'s never-throws contract and every degradation route
+    // built on a null `out` go through here.
+    const refusal = launchDirRefusal();
+    if (refusal !== null) return { out: null, status: null, refusal };
     return {
       out: execFileSync('git', args, {
         ...gitOpts(),
@@ -137,10 +313,15 @@ export function gitProbe(...args: string[]): {
         .replace(/\r\n/g, '\n')
         .trim(),
       status: 0,
+      refusal: null,
     };
   } catch (err) {
     const status = (err as { status?: unknown }).status;
-    return { out: null, status: typeof status === 'number' ? status : null };
+    return {
+      out: null,
+      status: typeof status === 'number' ? status : null,
+      refusal: null,
+    };
   }
 }
 
@@ -232,7 +413,22 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
   // `dirname`, because the LEAF is the branch below: a link AT the path is
   // unlinked rather than refused, which is what clears it out of the next
   // `worktree add`'s way.
-  const redirected = redirectedAncestor(dirname(resolve(worktreePath)));
+  //
+  // In its own try, because the never-throws contract starts HERE, before any
+  // `gitProbe` call: `resolve` reads the cwd for the RELATIVE path production
+  // callers pass (`worktreePath()` returns `.qwen/tmp/review-pr-<n>`), and so
+  // does `redirectedAncestor`'s default `stopAt = process.cwd()` — evaluated
+  // at the call, outside that function's own try. A cwd deleted out from
+  // under the process (an operator `rm -rf` mid-run, the nested geometry's
+  // outer sweep) throws `uv_cwd` ENOENT on both reads, and this function
+  // degrades through the result the way the probe does: `existed`, not freed,
+  // and the errno as the reason.
+  let redirected: string | null;
+  try {
+    redirected = redirectedAncestor(dirname(resolve(worktreePath)));
+  } catch (err) {
+    return worktreeReleaseResult(true, true, err);
+  }
   if (redirected !== null) {
     // `existed`/`stillThere` both true: the contract's `reason` is only carried
     // when something is still there, and a refusal is exactly that — the
@@ -265,8 +461,10 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
       }
       // prune still runs: a registration whose tree once stood at this
       // path must not wedge the next `worktree add` or hold the branch
-      // checked out.
-      gitOpt('worktree', 'prune');
+      // checked out. `{status: null, refusal: null}` — spawn failure,
+      // timeout kill — is git never ASKED, so the registration may survive:
+      // that is not freed, keyed the same way the main path below keys it.
+      const pruned = gitProbe('worktree', 'prune');
       let stillThere = false;
       try {
         lstatSync(worktreePath);
@@ -274,15 +472,30 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
       } catch {
         // The link is gone — freed.
       }
-      return worktreeReleaseResult(true, stillThere, removeError);
+      return worktreeReleaseResult(
+        true,
+        stillThere || pruned.refusal !== null || pruned.status === null,
+        removeError ??
+          refusalError(pruned.refusal) ??
+          (pruned.status === null ? couldNotRunError() : undefined),
+      );
     }
   } catch {
     // Nothing at the path: the `existsSync` below answers that case.
   }
   const existed = existsSync(worktreePath);
   let removeError: unknown;
+  // `status === null` is "the command could not be run at all"; git answers a
+  // path it does not know with 128. So a null is never "nothing to remove" —
+  // and reading it that way let the `rmSync` below delete the DIRECTORY while
+  // the registration under `<repo>/.git/worktrees/` and the branch both
+  // survived, reporting `freed: true` over a path the next `worktree add`
+  // still refuses with "missing but already registered": the exact wedge this
+  // function's docstring exists to prevent, reported as fixed.
+  const removed = existed
+    ? gitProbe('worktree', 'remove', worktreePath, '--force')
+    : null;
   if (existed) {
-    gitOpt('worktree', 'remove', worktreePath, '--force');
     // `worktree remove` only clears a tree git still tracks. A directory left at
     // the path after metadata loss or a partial cleanup is reported "not a
     // working tree" and left in place — and a non-empty one then blocks the next
@@ -302,8 +515,77 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
       removeError = e;
     }
   }
-  gitOpt('worktree', 'prune');
-  return worktreeReleaseResult(existed, existsSync(worktreePath), removeError);
+  const pruned = gitProbe('worktree', 'prune');
+  const refusal = removed?.refusal ?? pruned.refusal;
+  // `{status: null, refusal: null}` is the third shape a probe answers: git
+  // could not be run AT ALL (spawn ENOENT, the timeout kill, a cwd deleted
+  // underneath). The registration survives only when NEITHER arm cleared it:
+  // a `remove` that answered 0 cleared it itself, and a `prune` that answered
+  // at all ran over the already-rmSync'd path and cleared whatever stale
+  // registration remained. So the alarm keys on the prune alone, gated on the
+  // remove NOT having succeeded — keying it on the remove's null published
+  // `freed: false` over a release the follow-up prune had actually completed
+  // (measured: registration gone, branch deletable, the next `worktree add`
+  // succeeding), with a reason text asserting the opposite of the ground
+  // truth; keying it on the prune's null alone negated a release the remove
+  // had already completed. `status === 128` stays on the rmSync-fallback path
+  // above (git answered, the answer was "not a working tree", and the
+  // fallback owns it); a null prune means nobody answered.
+  //
+  // A refusal is one of those nulls, not a fourth shape: `gitProbe` answers a
+  // refused launch directory with `{status: null, refusal}`, so it is already
+  // inside `couldNotRun` for the arm it landed on. What it must NOT do is
+  // speak for the OTHER arm. Each probe re-asks `launchDirRefusal()` from
+  // scratch, so the two can disagree — `kernelCwd()`'s `/bin/pwd` spawn
+  // hitting EAGAIN or its own timeout on one call and not the other is
+  // enough — and an ungated `refusal !== null` disjunct then published
+  // `freed: false` over a release the other arm had completed: a `remove`
+  // that answered 0 with a refused prune, or a refused `remove` whose
+  // follow-up prune cleared the stale registration over the rmSync'd path.
+  // That is the same miskeying the paragraph above records as measured and
+  // fixed for the null-status arm, on the refusal arm. So the refusal only
+  // ever supplies the REASON for a `couldNotRun` verdict; it never makes one.
+  const couldNotRun = removed?.status !== 0 && pruned.status === null;
+  const stillThere = existsSync(worktreePath);
+  // A path that IS gone but a release that did not happen: git never ran, so
+  // the registration and the branch survive. `stillThere` is how the result
+  // says "not freed", and the reason must be set or cleanup prints `Failed to
+  // remove worktree <path>: undefined`.
+  return worktreeReleaseResult(
+    existed,
+    stillThere || (existed && couldNotRun),
+    removeError ??
+      (couldNotRun ? (refusalError(refusal) ?? couldNotRunError()) : undefined),
+  );
+}
+
+/**
+ * The `reason` for a release whose prune git was never even asked to make: a
+ * spawn failure or the timeout kill, so the registration and the branch
+ * survive — however the directory itself fared. Keys on the PRUNE because
+ * that is the arm whose absence leaves no proof the registration is gone: a
+ * `worktree remove` that answered 0 cleared it without the prune, and a
+ * `remove` that never ran is cleared by the prune over the rmSync'd path.
+ */
+function couldNotRunError(): Error {
+  return new Error(
+    'the `git worktree prune` that frees the registration and the branch ' +
+      'could not be run at all (a spawn failure or the timeout kill), so ' +
+      'both survive — the next `git worktree add` over the path will still ' +
+      'fail with "missing but already registered". Re-run `qwen review ' +
+      'cleanup`.',
+  );
+}
+
+/** The `reason` for a release git was refused, or undefined when it was not. */
+function refusalError(refusal: string | null): Error | undefined {
+  if (refusal === null) return undefined;
+  return new Error(
+    `git could not run from this directory — ${refusal}. The directory is ` +
+      `cleared but this worktree's registration and branch were not, so the ` +
+      `next \`git worktree add\` over it will still fail. Run \`qwen review ` +
+      `cleanup\` from a checkout outside the review temp dir.`,
+  );
 }
 
 /**
@@ -316,6 +598,7 @@ export function releaseWorktree(worktreePath: string): WorktreeRelease {
  * ENOBUFS rather than returning a short read. Diff capture uses this instead.
  */
 export function gitRaw(...args: string[]): Buffer {
+  assertTrustedLaunchDir();
   return execFileSync('git', args, {
     ...gitOpts(),
     maxBuffer: 512 * 1024 * 1024,

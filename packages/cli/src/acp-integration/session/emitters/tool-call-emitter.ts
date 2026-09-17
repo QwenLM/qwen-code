@@ -144,6 +144,9 @@ export class ToolCallEmitter extends BaseEmitter {
         asUpdate: updatesPreparedCall,
         extra: {
           ...(params.phase ? { phase: params.phase } : {}),
+          ...(params.toolName === ToolNames.AGENT && !params.subagentMeta
+            ? { subagentSessionReady: false }
+            : {}),
           ...params.subagentMeta,
           provenance: provenance.provenance,
           ...(provenance.serverId ? { serverId: provenance.serverId } : {}),

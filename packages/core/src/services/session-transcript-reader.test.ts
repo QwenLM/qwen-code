@@ -13,6 +13,7 @@ const { mockDebugLogger, mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockDebugLogger: {
     debug: vi.fn(),
     warn: vi.fn(),
+    error: vi.fn(),
   },
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
@@ -45,7 +46,17 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 import { Storage } from '../config/storage.js';
-import type { ChatRecord } from './chatRecordingService.js';
+import type { Config } from '../config/config.js';
+import { CompressionStatus } from '../core/turn.js';
+import {
+  SessionSourceService,
+  type SessionSourcesSnapshot,
+} from './session-sources.js';
+import {
+  ChatRecordingService,
+  type ChatRecord,
+} from './chatRecordingService.js';
+import { buildSessionHistoryFromConversation } from './session-api-history.js';
 import {
   buildApiHistoryFromConversation,
   getResumeTokenCounts,
@@ -117,6 +128,364 @@ describe('SessionTranscriptReader', () => {
     );
     return filePath;
   }
+
+  it('round-trips a recorded Goal turn end through selective restore, fork, and rewind', async () => {
+    const config = {
+      storage: new Storage(workspaceDir),
+      getSessionId: () => sessionId,
+      getProjectRoot: () => workspaceDir,
+      getCliVersion: () => 'test',
+      getResumedSessionData: () => undefined,
+    } as unknown as Config;
+    const recorder = new ChatRecordingService(config, undefined, false);
+    const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+    recorder.recordUserMessage([{ text: 'complete the Goal' }]);
+    recorder.recordAssistantTurn({
+      model: 'test',
+      goalContext: permit,
+      message: [{ functionCall: { id: 'finish', name: 'update_goal' } }],
+    });
+    recorder.recordToolResult(
+      [
+        {
+          functionResponse: {
+            id: 'finish',
+            name: 'update_goal',
+            response: { readyForVerification: true },
+          },
+        },
+      ],
+      undefined,
+      { goalContext: permit, provenance: 'goal_runtime' },
+    );
+    await recorder.recordGoalTurnEnd('finish', permit);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const loaded = await service.loadSession(sessionId);
+    const legacy = buildSessionHistoryFromConversation(loaded!.conversation);
+    const projection = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(projection?.runtime.completedToolCallIds).toEqual(['finish']);
+    expect(projection?.runtime.apiHistory).toEqual(legacy.apiHistory);
+    expect(legacy.completedToolCallIds).toEqual(['finish']);
+    expect(legacy.apiHistory).toHaveLength(3);
+    expect(legacy.apiHistory.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
+      'finish',
+    );
+
+    const secondPermit = { ...permit, turnId: 'second-turn' };
+    recorder.recordUserMessage([{ text: 'another Goal turn' }]);
+    recorder.recordAssistantTurn({
+      model: 'test',
+      goalContext: secondPermit,
+      message: [{ functionCall: { id: 'finish-2', name: 'update_goal' } }],
+    });
+    recorder.recordToolResult(
+      [
+        {
+          functionResponse: {
+            id: 'finish-2',
+            name: 'update_goal',
+            response: { readyForVerification: true },
+          },
+        },
+      ],
+      undefined,
+      { goalContext: secondPermit, provenance: 'goal_runtime' },
+    );
+    await recorder.recordGoalTurnEnd('finish-2', secondPermit);
+
+    const forkId = '660e8400-e29b-41d4-a716-446655440001';
+    await service.forkSession(sessionId, forkId);
+    const fork = await service.readRestoreProjection(forkId, {
+      replay: { kind: 'none' },
+    });
+    expect(fork?.runtime.completedToolCallIds).toEqual(['finish', 'finish-2']);
+
+    recorder.recordMidTurnUserMessage(
+      [{ text: 'next request' }],
+      'next request',
+    );
+    await recorder.flush();
+    const next = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(next?.runtime.completedToolCallIds).toEqual(['finish', 'finish-2']);
+    expect(next?.runtime.apiHistory).toHaveLength(7);
+    expect(next?.runtime.apiHistory.at(-1)).toEqual({
+      role: 'user',
+      parts: [{ text: 'next request' }],
+    });
+
+    recorder.rewindRecording(1, { truncatedCount: 4 });
+    await recorder.flush();
+    const earlier = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(earlier?.runtime.completedToolCallIds).toEqual(['finish']);
+    expect(earlier?.runtime.apiHistory).toEqual(legacy.apiHistory);
+
+    recorder.rewindRecording(0, { truncatedCount: 3 });
+    await recorder.flush();
+    const rewound = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(rewound?.runtime.completedToolCallIds).toBeUndefined();
+    expect(rewound?.runtime.apiHistory).toEqual([]);
+  });
+
+  it('restores the latest session sources across rewind and compression without changing model history', async () => {
+    const persisted: SessionSourcesSnapshot[] = [];
+    const sources = new SessionSourceService({
+      sessionId,
+      workspaceCwd: () => workspaceDir,
+      load: async () => ({}),
+      persist: async (snapshot) => {
+        persisted.push(snapshot);
+      },
+    });
+    const added = await sources.upsert({
+      title: 'Requirements',
+      locator: { type: 'workspace_file', workspacePath: 'requirements.md' },
+    });
+    await sources.remove(added.source.id);
+    const first = record('u1', null, 'original prompt');
+    const answer = record('a1', 'u1', 'answer');
+    const metadata = (
+      snapshot: SessionSourcesSnapshot,
+      index: number,
+    ): ChatRecord => ({
+      ...record(`sources-${index}`, 'a1', ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: snapshot,
+    });
+    const rewind: ChatRecord = {
+      ...record('rewind', null, ''),
+      type: 'system',
+      subtype: 'rewind',
+      message: undefined,
+      systemPayload: { truncatedCount: 2 },
+    };
+    const current = record('u2', 'rewind', 'replacement prompt');
+    const compression: ChatRecord = {
+      ...record('compression', 'u2', ''),
+      type: 'system',
+      subtype: 'chat_compression',
+      message: undefined,
+      systemPayload: {
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 10,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+      },
+    };
+    const records = [
+      first,
+      answer,
+      metadata(persisted[0]!, 0),
+      metadata(persisted[1]!, 1),
+      rewind,
+      current,
+      compression,
+    ];
+    await writeRecords(records);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const loaded = await service.loadSession(sessionId);
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [loaded, restored?.runtime, live])
+      expect(state?.sourcesSnapshot).toEqual({
+        version: 1,
+        revision: 2,
+        sources: [],
+      });
+    expect(buildApiHistoryFromConversation(loaded!.conversation)).toEqual(
+      restored?.runtime.apiHistory,
+    );
+    expect(JSON.stringify(restored?.runtime.apiHistory)).not.toContain(
+      'Requirements',
+    );
+    expect(loaded?.lastCompletedUuid).toBe('compression');
+  });
+
+  it('reads source metadata before the first conversation turn and never treats read failures as an empty list', async () => {
+    const metadata: ChatRecord = {
+      ...record('sources-only', null, ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: { version: 1, revision: 1, sources: [] },
+    };
+    const filePath = await writeRecords([metadata]);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    expect(await service.readSessionSources(sessionId)).toEqual({
+      sourcesSnapshot: { version: 1, revision: 1, sources: [] },
+    });
+    await fs.appendFile(
+      filePath,
+      JSON.stringify(record('first-turn', null, 'prompt')) + '\n',
+    );
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(restored?.runtime.sourcesSnapshot).toEqual(metadata.systemPayload);
+    expect(live?.sourcesSnapshot).toEqual(metadata.systemPayload);
+    await fs.unlink(filePath);
+    await fs.mkdir(filePath);
+    await expect(service.readSessionSources(sessionId)).resolves.toEqual({
+      sourcesUnavailable: true,
+    });
+  });
+
+  it('marks source projections unavailable after an identity-invalid physical record', async () => {
+    const filePath = await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('sources', 'u1', ''),
+        type: 'system',
+        subtype: 'session_sources_snapshot',
+        message: undefined,
+        systemPayload: { version: 1, revision: 1, sources: [] },
+      },
+    ]);
+    await fs.appendFile(
+      filePath,
+      JSON.stringify({
+        type: 'system',
+        subtype: 'session_sources_snapshot',
+        sessionId,
+        cwd: workspaceDir,
+        systemPayload: { version: 1, revision: 2, sources: [] },
+      }) + '\n',
+    );
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [restored?.runtime, live]) {
+      expect(state?.sourcesUnavailable).toBe(true);
+      expect(state?.sourcesSnapshot).toBeUndefined();
+    }
+    expect(
+      (await service.loadSession(sessionId))?.conversation.messages.map(
+        ({ uuid }) => uuid,
+      ),
+    ).toEqual(['u1']);
+  });
+
+  it('never resurrects an earlier source list after a truncated last snapshot', async () => {
+    let snapshot: SessionSourcesSnapshot = {
+      version: 1,
+      revision: 0,
+      sources: [],
+    };
+    const sourceService = new SessionSourceService({
+      sessionId,
+      workspaceCwd: () => workspaceDir,
+      load: async () => ({}),
+      persist: async (next) => {
+        snapshot = next;
+      },
+    });
+    await sourceService.upsert({
+      title: 'Old reference',
+      locator: { type: 'url', url: 'https://example.com/removed' },
+    });
+    const first: ChatRecord = {
+      ...record('source-1', 'a1', ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: snapshot,
+    };
+    const filePath = await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      first,
+    ]);
+    await fs.appendFile(
+      filePath,
+      '{"type":"system","subtype":"session_sources_snapshot","systemPayload":{"version":1,"revision":2,"sources":',
+    );
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const strict = await service.readSessionSources(sessionId);
+    const loaded = await service.loadSession(sessionId);
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [strict, loaded, restored?.runtime, live]) {
+      expect(state?.sourcesUnavailable).toBe(true);
+      expect(state?.sourcesSnapshot).toBeUndefined();
+    }
+    expect(loaded?.conversation.messages.map(({ uuid }) => uuid)).toEqual([
+      'u1',
+      'a1',
+    ]);
+  });
+
+  it('keeps conversation loading available when the last source snapshot is unsupported', async () => {
+    const malformed: ChatRecord = {
+      ...record('sources', 'a1', ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: {
+        version: 9,
+        revision: 2,
+        sources: [],
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      malformed,
+    ]);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const loaded = await service.loadSession(sessionId);
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [loaded, restored?.runtime, live]) {
+      expect(state?.sourcesUnavailable).toBe(true);
+      expect(state?.sourcesSnapshot).toBeUndefined();
+    }
+    expect(loaded?.conversation.messages.map(({ uuid }) => uuid)).toEqual([
+      'u1',
+      'a1',
+    ]);
+  });
 
   async function writeRawTranscript(content: string): Promise<string> {
     const chatsDir = path.join(

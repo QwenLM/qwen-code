@@ -1,8 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { LightbulbIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
+import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import {
@@ -30,6 +33,8 @@ interface AssistantMessageProps {
   showBranchAction?: boolean;
   isLocateFlashing?: boolean;
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -41,6 +46,8 @@ export const AssistantMessage = memo(function AssistantMessage({
   showBranchAction = false,
   isLocateFlashing = false,
   customFooterInfo,
+  turnSources,
+  onSourceOpen,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
@@ -48,7 +55,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
   const showFooter =
-    !!content && !isStreaming && showFooterActions && !documentMode;
+    !!content &&
+    !isStreaming &&
+    (showFooterActions || (turnSources?.length ?? 0) > 0) &&
+    !documentMode;
   const customFooter = useMemo(
     () =>
       customFooterInfo
@@ -96,16 +106,18 @@ export const AssistantMessage = memo(function AssistantMessage({
       )}
       {showFooter && (
         <div className={styles.messageFooter}>
-          <button
-            type="button"
-            className={styles.copyButton}
-            title={t('assistant.copy')}
-            aria-label={t('assistant.copy')}
-            onClick={handleCopy}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
-          {showBranchAction && onBranchSession && (
+          {showFooterActions && (
+            <button
+              type="button"
+              className={styles.copyButton}
+              title={t('assistant.copy')}
+              aria-label={t('assistant.copy')}
+              onClick={handleCopy}
+            >
+              {copied ? <CheckIcon /> : <CopyIcon />}
+            </button>
+          )}
+          {showFooterActions && showBranchAction && onBranchSession && (
             <button
               type="button"
               className={styles.copyButton}
@@ -117,7 +129,10 @@ export const AssistantMessage = memo(function AssistantMessage({
               <BranchIcon />
             </button>
           )}
-          {timestamp !== undefined && (
+          {turnSources?.length ? (
+            <TurnSources sources={turnSources} onOpen={onSourceOpen} />
+          ) : null}
+          {showFooterActions && timestamp !== undefined && (
             <span className={styles.footerTime} aria-hidden="true">
               {formatTimestamp(timestamp)}
             </span>
@@ -436,12 +451,14 @@ interface ThinkingTranslateButtonProps {
   content: string;
   generateContent?: SessionContentGenerator;
   className?: string;
+  mode?: 'translate' | 'explain-shell';
 }
 
 export function ThinkingTranslateButton({
   content,
   generateContent,
   className,
+  mode = 'translate',
 }: ThinkingTranslateButtonProps) {
   const { language, t } = useI18n();
   const [translationOpen, setTranslationOpen] = useState(false);
@@ -461,7 +478,7 @@ export function ThinkingTranslateButton({
   const translate = useCallback(
     async (force = false) => {
       if (!generateContent || (translationLoading && !force)) return;
-      const cacheKey = `${language}:${content}`;
+      const cacheKey = `${mode}:${language}:${content}`;
       const cached = thinkingTranslationCache.get(cacheKey);
       if (cached && !force) {
         cacheThinkingTranslation(cacheKey, cached);
@@ -482,7 +499,10 @@ export function ThinkingTranslateButton({
       try {
         const targetLanguage =
           language === 'zh-CN' ? 'Simplified Chinese' : 'English';
-        const prompt = `Translate the following model reasoning into ${targetLanguage}. Preserve its meaning and Markdown formatting. Output only the translation.\n\n${content}`;
+        const prompt =
+          mode === 'explain-shell'
+            ? `Explain the following shell command in ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``
+            : `Translate the following model reasoning into ${targetLanguage}. Preserve its meaning and Markdown formatting. Output only the translation.\n\n${content}`;
         for await (const event of generateContent(prompt, {
           signal: controller.signal,
         })) {
@@ -518,7 +538,7 @@ export function ThinkingTranslateButton({
         }
       }
     },
-    [content, generateContent, language, translationLoading],
+    [content, generateContent, language, mode, translationLoading],
   );
 
   const handleTranslationOpenChange = useCallback(
@@ -544,19 +564,45 @@ export function ThinkingTranslateButton({
         <button
           type="button"
           className={className}
-          title={t('thinking.translate')}
+          title={t(
+            mode === 'explain-shell'
+              ? 'approval.explain'
+              : 'thinking.translate',
+          )}
+          data-approval-shortcuts-ignore={
+            mode === 'explain-shell' && translationOpen ? '' : undefined
+          }
           onClick={(event) => event.stopPropagation()}
         >
-          {t('thinking.translate')}
+          {mode === 'explain-shell' && <LightbulbIcon aria-hidden="true" />}
+          {t(
+            mode === 'explain-shell'
+              ? 'approval.explain'
+              : 'thinking.translate',
+          )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className={styles.translationPopover}>
+      <PopoverContent
+        align="start"
+        className={styles.translationPopover}
+        data-approval-shortcuts-ignore={
+          mode === 'explain-shell' ? '' : undefined
+        }
+      >
         <div className={styles.translationTitle}>
-          {t('thinking.translation')}
+          {t(
+            mode === 'explain-shell'
+              ? 'approval.explanation'
+              : 'thinking.translation',
+          )}
         </div>
         {translationError ? (
           <div className={styles.translationError}>
-            {t('thinking.translationFailed')}
+            {t(
+              mode === 'explain-shell'
+                ? 'approval.explanationFailed'
+                : 'thinking.translationFailed',
+            )}
           </div>
         ) : translation?.text ? (
           <div
@@ -564,7 +610,7 @@ export function ThinkingTranslateButton({
           >
             <Markdown
               content={translation.text}
-              source="thinking"
+              source={mode === 'explain-shell' ? 'assistant' : 'thinking'}
               isStreaming={translationLoading}
             />
           </div>
@@ -572,8 +618,12 @@ export function ThinkingTranslateButton({
           <div className={styles.translationPending}>
             {t(
               translationThinking
-                ? 'thinking.translationThinking'
-                : 'thinking.translating',
+                ? mode === 'explain-shell'
+                  ? 'approval.explanationThinking'
+                  : 'thinking.translationThinking'
+                : mode === 'explain-shell'
+                  ? 'approval.explaining'
+                  : 'thinking.translating',
             )}
           </div>
         )}
@@ -601,7 +651,11 @@ export function ThinkingTranslateButton({
               size="xs"
               onClick={() => void translate(true)}
             >
-              {t('thinking.retranslate')}
+              {t(
+                mode === 'explain-shell'
+                  ? 'approval.reExplain'
+                  : 'thinking.retranslate',
+              )}
             </Button>
             <Button
               type="button"

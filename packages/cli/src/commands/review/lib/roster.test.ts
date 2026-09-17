@@ -68,6 +68,11 @@ describe('the topology gate', () => {
 });
 
 describe('requiredAgents — Step 3A', () => {
+  it('uses one reviewer only for the captured navigation profile', () => {
+    expect(keys({ ...PR, reviewProfile: 'docs-nav' })).toEqual(['docs-nav']);
+    expect(keys({ ...PR, reviewProfile: 'unknown' })).toContain('2');
+    expect(keys(PR)).toContain('6a');
+  });
   it('demands every dimension, because every dimension walks the whole diff', () => {
     expect(keys(PR)).toEqual(
       expect.arrayContaining([

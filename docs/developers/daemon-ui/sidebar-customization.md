@@ -54,12 +54,19 @@ interface WebShellSidebarBranding {
 }
 ```
 
-| Value                            | Effect                                            |
-| -------------------------------- | ------------------------------------------------- |
-| `undefined` (default)            | Qwen logo + "Qwen Code" text                      |
-| `false`                          | Branding row hidden entirely                      |
-| `{ render: () => <MyHeader /> }` | Full replacement with custom content              |
-| `{ hideWhenCompact: false }`     | Keep branding visible in collapsed icon-rail mode |
+| Value                            | Effect                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------ |
+| `undefined` (default)            | Resolved brand: `brand` prop → daemon `GET /brand` → built-in Qwen logo + "Qwen Code" text |
+| `false`                          | Branding row hidden entirely                                                               |
+| `{ render: () => <MyHeader /> }` | Full replacement with custom content                                                       |
+| `{ hideWhenCompact: false }`     | Keep branding visible in collapsed icon-rail mode                                          |
+
+The default row is data-driven, not fixed: a daemon that serves a `ui.brand`
+configuration renames the text and swaps the mark, and an embedding host can
+override both with the shell component's `brand` prop (`onBrandResolved` reports
+the outcome for the host's own chrome). `branding.render` stays the
+highest-precedence override — it wins over the prop and the daemon-resolved
+value, exactly as before.
 
 ```tsx
 sidebar={{
@@ -176,6 +183,7 @@ interface WebShellSidebarOptions {
   defaultCollapsed?: boolean; // initial collapsed state (persisted in localStorage)
   showCompactToggle?: boolean; // show the collapse button in the chat area (default: true)
   showSessionSourceSwitch?: boolean; // show the Tasks/Channels switch (default: true)
+  showLive?: boolean; // show daemon-owned Live conversations (default: false)
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
   hideProjectHeader?: boolean; // hide "Projects" header row (default: false = shown)
@@ -198,6 +206,20 @@ sidebar={{
 This removes the Tasks/Channels switch and fixes every active, archived, primary,
 and secondary session query to `sourceType: "default"`. Omitting the option keeps
 the current switch and channel-session access unchanged.
+
+### Live conversations — `showLive`
+
+Live conversations are hidden from embedded hosts by default. Opt in when the
+host should expose the daemon-owned Live group:
+
+Previous releases displayed this group without an explicit option, so hosts
+that rely on it must set `showLive: true` when upgrading.
+
+```tsx
+sidebar={{
+  showLive: true,
+}}
+```
 
 ### ③ Project Header — `hideProjectHeader`
 
@@ -320,11 +342,11 @@ desktop collapse preference.
 
 ## Source locations
 
-| Component           | File                                                                      |
-| ------------------- | ------------------------------------------------------------------------- |
-| WebShellSidebar     | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`        |
-| SessionGroupSection | `packages/web-shell/client/components/sidebar/SessionGroupSection.tsx`    |
-| WorkspaceSection    | `packages/web-shell/client/components/sidebar/WorkspaceSection.tsx`       |
-| Sidebar styles      | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css` |
-| App integration     | `packages/web-shell/client/App.tsx` (search `WebShellSidebar`)            |
-| Entry point (dev)   | `packages/web-shell/client/main.tsx` (`sidebar: true`)                    |
+| Component           | File                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| WebShellSidebar     | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                  |
+| SessionGroupSection | `packages/web-shell/client/components/sidebar/SessionGroupSection.tsx`              |
+| WorkspaceSection    | `packages/web-shell/client/components/sidebar/WorkspaceSection.tsx`                 |
+| Sidebar styles      | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`           |
+| App integration     | `packages/web-shell/client/App.tsx` (search `WebShellSidebar`)                      |
+| Entry point (dev)   | `packages/web-shell/client/main.tsx` (`sidebar: { enabled: true, showLive: true }`) |

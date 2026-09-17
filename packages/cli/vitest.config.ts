@@ -19,6 +19,10 @@ const toAliases = (map: Record<string, string>) =>
 export default defineConfig({
   resolve: {
     alias: [
+      {
+        find: /^@qwen-code\/qwen-code-core\/omni$/,
+        replacement: path.resolve(__dirname, '../core/src/omni/index.ts'),
+      },
       // Named core subpaths. None of these targets can be derived from the
       // specifier (noFollowOpen lives at utils/no-follow-open.ts), so they
       // have to be matched ahead of the wildcard below. A new named subpath
@@ -26,6 +30,10 @@ export default defineConfig({
       // the wildcard, or the wildcard will claim it and point at a file
       // that does not exist.
       ...toAliases({
+        '@qwen-code/qwen-code-core/omniPolicyCollection': path.resolve(
+          __dirname,
+          '../core/src/omni/policy/model-call-collection.ts',
+        ),
         '@qwen-code/qwen-code-core/noFollowOpen': path.resolve(
           __dirname,
           '../core/src/utils/no-follow-open.ts',
@@ -73,6 +81,10 @@ export default defineConfig({
         '@qwen-code/qwen-code-core/conversationsRuntimeMarker': path.resolve(
           __dirname,
           '../core/src/utils/conversations-runtime-marker.ts',
+        ),
+        '@qwen-code/qwen-code-core/subagentRuntime': path.resolve(
+          __dirname,
+          '../core/src/subagent-runtime.ts',
         ),
       }),
       // Mirrors `"@qwen-code/qwen-code-core/*": ["../core/src/*"]` from
