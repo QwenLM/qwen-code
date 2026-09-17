@@ -566,7 +566,12 @@ export type GoalBlockerKind =
 export interface GoalTerminalProposal {
   status: 'complete' | 'blocked';
   reason: string;
-  evidenceRefs: string[];
+  /**
+   * Retired. The verifier reads the transcript tail and nothing cites
+   * catalog entries any more; the field stays optional so recorded
+   * proposals from before the change still parse.
+   */
+  evidenceRefs?: string[];
   blockerKind?: GoalBlockerKind;
 }
 
@@ -674,6 +679,22 @@ function truncateGoalPauseReason(reason: string): string {
   return codePoints.length <= GOAL_PAUSE_REASON_MAX_CHARACTERS
     ? reason
     : `${codePoints.slice(0, GOAL_PAUSE_REASON_MAX_CHARACTERS - 1).join('')}\u2026`;
+}
+
+/**
+ * The pause reason for a terminal proposal whose verification could not run:
+ * the verifier timed out, the side query failed, or the transcript could not
+ * be read. Nothing was judged, so the Goal waits rather than stops; resuming
+ * hands the model a fresh turn to propose again. Runtime-emitted and
+ * headless-reachable, so it names no slash command.
+ */
+export function goalPauseReasonForVerifierFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The Goal proposal could not be verified: ${detail}. Resume the Goal to propose again.`
+      : 'The Goal proposal could not be verified. Resume the Goal to propose again.',
+  );
 }
 
 /** The pause reason for a Goal turn that failed rather than being stopped. */

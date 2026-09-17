@@ -232,10 +232,7 @@ import {
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
+import { GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS } from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
@@ -10196,9 +10193,6 @@ export class Config {
       // are recorded rather than reconstructed from session totals.
       ledger: recorder,
       verifier: createGoalVerifier(this),
-      checkpointVerifier: createGoalCheckpointVerifier(this, {
-        timeoutMs: this.goalCheckpointTimeoutMs,
-      }),
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
@@ -10225,10 +10219,7 @@ export class Config {
     // migrated goal is dropped and goal persistence is bricked for the
     // whole resumed session. Wait for the writer instead.
     if (restoreRuntime) {
-      const preparation = runtime.prepareRestore(
-        records ?? [],
-        restoreRuntime.goalCheckpointWindow,
-      );
+      const preparation = runtime.prepareRestore(records ?? []);
       let resolveActivation!: () => void;
       let rejectActivation!: (reason?: unknown) => void;
       const activation = new Promise<void>((resolve, reject) => {

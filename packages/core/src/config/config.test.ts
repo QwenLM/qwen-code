@@ -40,10 +40,7 @@ import {
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
+import { GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS } from '../goals/goal-checkpoint-verifier.js';
 import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -4655,25 +4652,6 @@ describe('Server Config (config.ts)', () => {
           process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
         }
       }
-    });
-
-    it('arms the checkpoint verifier with the configured timeout', () => {
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalCheckpointTimeoutSeconds: 45,
-      });
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
-
-      config.getGoalRuntime();
-
-      // Assert the call, not only the getter: the options argument is the
-      // one line that carries the setting into the verifier, and the
-      // getter-only checks above stay green if it is dropped.
-      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.[0]).toBe(config);
-      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
     });
 
     it('caps the checkpoint ceiling at a wait the default wire honours', () => {

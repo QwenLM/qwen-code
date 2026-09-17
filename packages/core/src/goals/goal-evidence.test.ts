@@ -14,9 +14,12 @@ import type {
 import {
   buildGoalEvidenceCheckpointWindow,
   buildGoalEvidenceCatalog,
+  buildGoalVerifierWindow,
+  cutMiddleBytes,
   EvidenceSourceUnavailableError,
   InvalidGoalEvidenceReferenceError,
   validateGoalEvidenceReferences,
+  VERIFIER_MIDDLE_TRUNCATION_MARKER,
   type GoalEvidenceProvenance,
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
@@ -1210,5 +1213,200 @@ describe('Goal evidence errors', () => {
         'missing',
       ),
     ).toBeInstanceOf(InvalidGoalEvidenceReferenceError);
+  });
+});
+
+describe('buildGoalVerifierWindow', () => {
+  const bytes = (value: unknown) =>
+    Buffer.byteLength(JSON.stringify(value), 'utf8');
+  const assistant = (uuid: string, turnId: string, text: string) =>
+    record(uuid, 'assistant', { provenance: 'assistant_output', turnId, text });
+  const tool = (uuid: string, turnId: string, output: string) =>
+    record(uuid, 'tool_result', {
+      provenance: 'tool_result',
+      turnId,
+      toolResponse: { output },
+    });
+  const user = (uuid: string, turnId: string, text: string) =>
+    record(uuid, 'user', { provenance: 'real_user', turnId, text });
+  const chain = () => [
+    record('before-cursor', 'assistant', {
+      provenance: 'assistant_output',
+      turnId: 'turn-0',
+      text: 'Before the Goal',
+    }),
+    record('cursor', 'system'),
+    user('ask', 'turn-1', 'Please ship it'),
+    tool('probe-1', 'turn-1', 'first attempt failed'),
+    tool('probe-3', 'turn-3', '18 tests passed'),
+    assistant('closing', 'turn-3', 'Done.'),
+  ];
+
+  it('takes the tail newest first and names the turns it reaches', () => {
+    const window = buildGoalVerifierWindow(
+      { records: chain(), goal: goal(), permit: permit() },
+      { budgetBytes: 100_000 },
+    );
+
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual([
+      'closing',
+      'probe-3',
+      'probe-1',
+      'ask',
+    ]);
+    expect(window.evidence[0]).toEqual({
+      uuid: 'closing',
+      provenance: 'assistant_output',
+      turnId: 'turn-3',
+      proofKind: 'delivered_output',
+      content: 'Done.',
+    });
+    expect(window.evidence[3]).toMatchObject({
+      proofKind: 'user_input',
+      content: 'Please ship it',
+    });
+    expect(window.evidence[1]!.content).toContain('18 tests passed');
+    expect(window.turnIds).toEqual(['turn-1', 'turn-3']);
+    expect(window.omitted).toBe(0);
+  });
+
+  it('ends at the first record that does not fit and counts the rest as omitted', () => {
+    const records = [
+      record('cursor', 'system'),
+      assistant('tiny-old', 'turn-1', 'ok'),
+      assistant('big-old', 'turn-1', 'x'.repeat(3_000)),
+      assistant('newest', 'turn-3', 'y'.repeat(1_000)),
+    ];
+    const newestBytes = bytes({
+      uuid: 'newest',
+      provenance: 'assistant_output',
+      turnId: 'turn-3',
+      proofKind: 'delivered_output',
+      content: 'y'.repeat(1_000),
+    });
+    const window = buildGoalVerifierWindow(
+      { records, goal: goal(), permit: permit() },
+      // Room for the newest record and its turn id, not for the big one;
+      // the tiny record behind it would fit but the tail stays contiguous.
+      { budgetBytes: newestBytes + 1 + bytes('turn-3') + 1 + 500 },
+    );
+
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual(['newest']);
+    expect(window.turnIds).toEqual(['turn-3']);
+    expect(window.omitted).toBe(2);
+  });
+
+  it('keeps the serialized arrays within the budget it was given', () => {
+    const records = [
+      record('cursor', 'system'),
+      ...Array.from({ length: 40 }, (_, index) =>
+        assistant(
+          `r-${index}`,
+          index < 20 ? 'turn-1' : 'turn-3',
+          '"\\\u00e9'.repeat(400),
+        ),
+      ),
+    ];
+    for (const budget of [1, 5_000, 20_000, 65_000]) {
+      const window = buildGoalVerifierWindow(
+        { records, goal: goal(), permit: permit() },
+        { budgetBytes: budget },
+      );
+      // The two arrays' own brackets are part of the request envelope the
+      // runtime measures, not of the budget; everything inside them is.
+      const used = bytes(window.evidence) + bytes(window.turnIds) - 4;
+      expect(used).toBeLessThanOrEqual(budget);
+      expect(window.evidence.length + window.omitted).toBe(40);
+    }
+  });
+
+  it('skips records that are not evidence without counting them as omitted', () => {
+    const records = [
+      record('cursor', 'system'),
+      record('bookkeeping', 'tool_result', {
+        provenance: 'goal_runtime',
+        turnId: 'turn-3',
+        toolResponse: { active: true },
+      }),
+      record('thinking', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        thought: 'private',
+      }),
+      record('other-revision', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        revision: 1,
+        text: 'from an earlier revision',
+      }),
+      record('unstamped', 'assistant', {
+        provenance: 'assistant_output',
+        text: 'no goal context',
+      }),
+      record('system', 'system', { turnId: 'turn-3', text: 'reminder' }),
+      assistant('closing', 'turn-3', 'Done.'),
+    ];
+    const window = buildGoalVerifierWindow(
+      { records, goal: goal(), permit: permit() },
+      { budgetBytes: 1 },
+    );
+
+    expect(window.evidence).toEqual([]);
+    expect(window.turnIds).toEqual([]);
+    expect(window.omitted).toBe(1);
+  });
+
+  it('cuts long content in the middle so the command and the result survive', () => {
+    const output = `HEAD ${'x'.repeat(20_000)} TAIL`;
+    const window = buildGoalVerifierWindow(
+      {
+        records: [record('cursor', 'system'), tool('big', 'turn-3', output)],
+        goal: goal(),
+        permit: permit(),
+      },
+      { budgetBytes: 100_000 },
+    );
+
+    const content = window.evidence[0]!.content;
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(8_000);
+    expect(content).toContain(VERIFIER_MIDDLE_TRUNCATION_MARKER);
+    expect(
+      content.startsWith('{"name":"shell","response":{"output":"HEAD '),
+    ).toBe(true);
+    expect(content.endsWith(' TAIL"}}')).toBe(true);
+  });
+
+  it('cuts on code point boundaries', () => {
+    const cut = cutMiddleBytes('界'.repeat(6_000), 8_000);
+    expect(Buffer.byteLength(cut, 'utf8')).toBeLessThanOrEqual(8_000);
+    expect(cut).not.toContain('\ufffd');
+    expect(cut.replace(VERIFIER_MIDDLE_TRUNCATION_MARKER, '')).toMatch(/^界+$/);
+    expect(cutMiddleBytes('short', 8_000)).toBe('short');
+  });
+
+  it('treats a budget that is not a positive finite number as empty', () => {
+    for (const budgetBytes of [Number.NaN, -1, Number.NEGATIVE_INFINITY]) {
+      const window = buildGoalVerifierWindow(
+        { records: chain(), goal: goal(), permit: permit() },
+        { budgetBytes },
+      );
+      expect(window.evidence).toEqual([]);
+      expect(window.omitted).toBe(4);
+    }
+  });
+
+  it('refuses a transcript the permit may not read', () => {
+    expect(() =>
+      buildGoalVerifierWindow(
+        { records: chain(), goal: goal('missing'), permit: permit() },
+        { budgetBytes: 1_000 },
+      ),
+    ).toThrow(EvidenceSourceUnavailableError);
+    expect(() =>
+      buildGoalVerifierWindow(
+        { records: chain(), goal: goal(), permit: permit('turn-1') },
+        { budgetBytes: 1_000 },
+      ),
+    ).toThrow(/tail of the active transcript lineage/);
   });
 });

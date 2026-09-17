@@ -24,7 +24,7 @@ An active Goal is re-fed to the model every turn, and its completion is judged b
 - A claim that the user confirmed, chose, or approved something needs a real user message as evidence; otherwise the completion proposal is rejected.
 - Vague, subjective, or open-ended conditions never accumulate enough evidence; the loop then runs until a limit is hit.
 
-So a good objective makes the agent PRODUCE evidence: run the named check and paste the decisive output line.
+So a good objective makes the agent PRODUCE evidence: run the named check and paste the decisive output line. The verifier reads the newest part of the transcript first and only as much as fits, so the check has to be run in the turn that proposes completion, not remembered from an earlier one.
 
 ## Step 0 — should this be a Goal at all?
 

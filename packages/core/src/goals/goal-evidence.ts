@@ -583,7 +583,7 @@ export function buildGoalEvidenceCheckpointWindow(
 export function validateGoalEvidenceReferences(
   input: GoalEvidenceValidationInput,
 ): ValidatedGoalEvidence {
-  const references = input.proposal.evidenceRefs;
+  const references = input.proposal.evidenceRefs ?? [];
   if (references.length === 0) {
     throw new InvalidGoalEvidenceReferenceError(
       'no_evidence_references',
@@ -640,7 +640,21 @@ export function validateGoalEvidenceReferences(
   };
 }
 
-function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
+interface GoalTranscriptAnchor {
+  cursorIndex: number;
+  indexByUuid: Map<string, number>;
+  lineageTurnIds: string[];
+}
+
+/**
+ * Locates the Goal's cursor in the active transcript chain and checks the
+ * chain is one this permit may read: the permit names the Goal revision, the
+ * cursor is set and present, no record uuid repeats, and the permit's turn
+ * is the newest Goal turn in the lineage.
+ */
+function anchorGoalTranscript(
+  input: GoalEvidenceContext,
+): GoalTranscriptAnchor {
   if (
     input.permit.goalId !== input.goal.goalId ||
     input.permit.revision !== input.goal.revision ||
@@ -687,6 +701,166 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
       'The current Goal permit is not the tail of the active transcript lineage.',
     );
   }
+  return { cursorIndex, indexByUuid, lineageTurnIds };
+}
+
+// ── verifier window ─────────────────────────────────────────────────────────
+
+/**
+ * What one transcript record may add to a verifier request. Content past
+ * this is cut in the middle, so both the command a tool result opens with and
+ * the result it ends with survive; the verifier is told where the cut was.
+ */
+const VERIFIER_RECORD_CONTENT_BYTE_LIMIT = 8_000;
+const VERIFIER_RECORD_HEAD_BYTES = 5_000;
+export const VERIFIER_MIDDLE_TRUNCATION_MARKER =
+  '\n\u2026[middle truncated]\u2026\n';
+
+export interface GoalVerifierEvidenceRecord {
+  uuid: string;
+  provenance: GoalEvidenceProvenance;
+  turnId: string;
+  proofKind: GoalEvidenceProofKind;
+  content: string;
+}
+
+export interface GoalVerifierWindow {
+  /** The transcript tail the verifier judges from, newest record first. */
+  evidence: GoalVerifierEvidenceRecord[];
+  /** The Goal turns the tail reaches, oldest first. */
+  turnIds: string[];
+  /** Records after the cursor, older than the tail, that did not fit. */
+  omitted: number;
+}
+
+export interface BuildGoalVerifierWindowOptions {
+  /**
+   * Bytes the serialized `evidence` and `turnIds` arrays may take together,
+   * commas included: the verifier request limit less the rest of the request.
+   */
+  budgetBytes: number;
+}
+
+/**
+ * The tail of the Goal's transcript, as the verifier sees it.
+ *
+ * Every record after the cursor that belongs to this Goal revision and
+ * carries a coherent evidence provenance is a candidate. They are taken
+ * newest first until the budget is spent; the first one that does not fit
+ * ends the window, and it and every older candidate are counted as omitted,
+ * so the window is always a contiguous suffix of the transcript. No slot is
+ * reserved for any kind of record: the closing turn's records are the newest,
+ * and a Goal whose proof lies further back than the budget reaches is told
+ * so through `omitted` and judged accordingly.
+ */
+export function buildGoalVerifierWindow(
+  input: GoalEvidenceContext,
+  options: BuildGoalVerifierWindowOptions,
+): GoalVerifierWindow {
+  const { cursorIndex, lineageTurnIds } = anchorGoalTranscript(input);
+  const budget = Number.isFinite(options.budgetBytes)
+    ? Math.max(0, Math.floor(options.budgetBytes))
+    : 0;
+  const evidence: GoalVerifierEvidenceRecord[] = [];
+  const turnIds = new Set<string>();
+  let bytes = 0;
+  let omitted = 0;
+  let full = false;
+  for (let index = input.records.length - 1; index > cursorIndex; index -= 1) {
+    const entry = verifierEvidence(input.records[index]!, input);
+    if (!entry) continue;
+    if (full) {
+      omitted += 1;
+      continue;
+    }
+    const entryBytes =
+      Buffer.byteLength(JSON.stringify(entry), 'utf8') +
+      1 +
+      (turnIds.has(entry.turnId)
+        ? 0
+        : Buffer.byteLength(JSON.stringify(entry.turnId), 'utf8') + 1);
+    if (bytes + entryBytes > budget) {
+      full = true;
+      omitted += 1;
+      continue;
+    }
+    bytes += entryBytes;
+    evidence.push(entry);
+    turnIds.add(entry.turnId);
+  }
+  return {
+    evidence,
+    turnIds: lineageTurnIds.filter((turnId) => turnIds.has(turnId)),
+    omitted,
+  };
+}
+
+function verifierEvidence(
+  record: GoalEvidenceRecord,
+  input: GoalEvidenceContext,
+): GoalVerifierEvidenceRecord | undefined {
+  const provenance = coherentEvidenceProvenance(record);
+  if (!provenance) return undefined;
+  const context = parseGoalContext(record.goalContext);
+  if (
+    !context ||
+    context.goalId !== input.goal.goalId ||
+    context.revision !== input.goal.revision
+  ) {
+    return undefined;
+  }
+  const content = evidenceContent(record, provenance);
+  if (!content) return undefined;
+  return {
+    uuid: record.uuid,
+    provenance,
+    turnId: context.turnId,
+    proofKind: proofKindOf(provenance),
+    content: cutMiddleBytes(content, VERIFIER_RECORD_CONTENT_BYTE_LIMIT),
+  };
+}
+
+/**
+ * Cut `content` to at most `limit` UTF-8 bytes by removing its middle,
+ * never splitting a code point. The head keeps up to
+ * `VERIFIER_RECORD_HEAD_BYTES`; the marker and the tail take the rest.
+ */
+export function cutMiddleBytes(content: string, limit: number): string {
+  const bytes = Buffer.from(content, 'utf8');
+  if (bytes.length <= limit) return content;
+  const markerBytes = Buffer.byteLength(
+    VERIFIER_MIDDLE_TRUNCATION_MARKER,
+    'utf8',
+  );
+  const headBytes = Math.max(
+    0,
+    Math.min(VERIFIER_RECORD_HEAD_BYTES, limit - markerBytes),
+  );
+  const tailBytes = Math.max(0, limit - markerBytes - headBytes);
+  return `${leadingBytes(bytes, headBytes)}${VERIFIER_MIDDLE_TRUNCATION_MARKER}${trailingBytes(bytes, tailBytes)}`;
+}
+
+function leadingBytes(bytes: Buffer, count: number): string {
+  let end = Math.min(count, bytes.length);
+  while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+function trailingBytes(bytes: Buffer, count: number): string {
+  let start = Math.max(0, bytes.length - count);
+  while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) {
+    start += 1;
+  }
+  return bytes.subarray(start).toString('utf8');
+}
+
+// ── evidence catalog (retired: nothing reads it after the window landed) ────
+
+function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
+  const { cursorIndex, indexByUuid, lineageTurnIds } =
+    anchorGoalTranscript(input);
 
   const checkpointEntries = checkpointCatalogEntries(input.goal);
   const selectedEvidence: GoalEvidenceCatalogEntry[] = [];
