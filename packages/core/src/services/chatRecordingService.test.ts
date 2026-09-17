@@ -485,6 +485,37 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
     });
 
+    it('writes original resource links on an attachment-only user record', async () => {
+      const resourceLinks = [
+        {
+          type: 'resource_link' as const,
+          uri: 'transit://resource-a',
+          name: 'notes.md',
+          mimeType: 'text/markdown',
+          size: 0,
+          description: 'Original reference',
+          annotations: { audience: ['user' as const], priority: 0.5 },
+          _meta: { preview: { version: 1 } },
+        },
+      ];
+      chatRecordingService.recordUserMessage(
+        '',
+        undefined,
+        { displayText: '', hookContext: '', resourceLinks },
+        'resource-prompt',
+      );
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('user');
+      expect(record.daemonPromptId).toBe('resource-prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: '',
+        resourceLinks,
+      });
+    });
+
     it('records mid-turn attachment references without inline bytes', async () => {
       const attachmentReferences = [
         {
