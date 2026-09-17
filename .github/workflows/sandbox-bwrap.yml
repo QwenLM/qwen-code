@@ -43,11 +43,7 @@ jobs:
         with:
           bun-version: '1.3.14'
       - name: 'Install and probe Linux prerequisites'
-        run: |-
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap tmux git
-          bwrap --version
-          bwrap --die-with-parent --unshare-user --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev -- /bin/true
+        run: 'bash scripts/sandbox-public/prepare-runner.sh "${RUNNER_TEMP}/bwrap-preflight"'
       - name: 'Install dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
@@ -67,6 +63,7 @@ jobs:
         with:
           name: 'bwrap-${{ matrix.runner }}-${{ github.run_attempt }}'
           path: |
+            ${{ runner.temp }}/bwrap-preflight/
             ${{ runner.temp }}/bwrap-evidence/reports/
             ${{ runner.temp }}/bwrap-evidence/logs/
             ${{ runner.temp }}/bwrap-evidence/fixtures/
