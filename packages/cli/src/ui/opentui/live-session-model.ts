@@ -30,6 +30,23 @@ export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
   confirm?: ToolConfirmState;
+  /** confirmationDetails.type while the call awaits approval: the pending
+   * card prices itself against the dialog's body (pendingCardMaxRows), and
+   * only the type says whether that body can expand. */
+  confirmType?: string;
+  /** The dialog's body text for the plain-text-body confirmations
+   * (info's prompt, plan's plan, exec's command) — and edit's raw diff,
+   * whose tail-windowed lines the card prices by painted height. */
+  confirmBody?: string;
+  /** Rows the dialog renders outside the body window (info's urls block,
+   * exec's warnings, edit's fileName row and warnings, ask_user_question's
+   * opening question block) — charged in addition to the windowed body. */
+  confirmExtra?: string;
+  /** ask_user_question's candidate question blocks: the flow paints one
+   * block at a time and the wrap decides which paints tallest at the
+   * dialog's columns, so the pending card's price takes the max of the
+   * candidates (R10-1). */
+  confirmExtras?: string[];
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
   diff?: { fileDiff: string; fileName: string };
@@ -352,7 +369,15 @@ export function foldLiveEvent(
       const i = findToolIndex(items, ev.id);
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
-        items[i] = { ...t, title: ev.title, confirm: 'pending' };
+        items[i] = {
+          ...t,
+          title: ev.title,
+          confirm: 'pending',
+          confirmType: ev.confirmType,
+          confirmBody: ev.confirmBody,
+          confirmExtra: ev.confirmExtra,
+          confirmExtras: ev.confirmExtras,
+        };
         return items;
       }
       if (last?.kind === 'assistant' && last.streaming)
@@ -365,6 +390,10 @@ export function foldLiveEvent(
         output: '',
         done: false,
         confirm: 'pending',
+        confirmType: ev.confirmType,
+        confirmBody: ev.confirmBody,
+        confirmExtra: ev.confirmExtra,
+        confirmExtras: ev.confirmExtras,
       });
       return items;
     }

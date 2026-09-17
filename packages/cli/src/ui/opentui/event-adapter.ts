@@ -34,6 +34,165 @@ import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 
+/** The ask_user_question questions the mounted flow paints, shape-checked. */
+interface AskQuestionLike {
+  question: string;
+  header: string;
+  options: Array<{ label: string }>;
+  multiSelect?: boolean;
+}
+
+/** Version-skew guard: one malformed question fails the whole extra back. */
+function isAskQuestion(value: unknown): value is AskQuestionLike {
+  if (typeof value !== 'object' || value === null) return false;
+  const question = value as Record<string, unknown>;
+  return (
+    typeof question['question'] === 'string' &&
+    typeof question['header'] === 'string' &&
+    Array.isArray(question['options']) &&
+    (question['options'] as unknown[]).every(
+      (option) =>
+        typeof option === 'object' &&
+        option !== null &&
+        typeof (option as Record<string, unknown>)['label'] === 'string',
+    )
+  );
+}
+
+/**
+ * What a confirmation dialog paints, split the way dialogs-confirm's
+ * ConfirmationBody render switch lays it out: `body` is the windowed text
+ * (an info confirmation's prompt, a plan confirmation's plan, an exec
+ * confirmation's command — the exec dialog renders it in full, with no
+ * collapsed window), and `extra` is the rows the dialog renders OUTSIDE
+ * that window — info's `URLs to fetch:` block (a margin row, a header row
+ * and one row per URL, gated by the same displayUrls predicate) and exec's
+ * one row per warning. mcp shows two fixed lines and carries nothing.
+ * edit's windowed body is a tail-windowed diff: the diff travels as `body`
+ * so the card prices the windowed lines at their painted (wrapping) height
+ * (R10-1), and the rows painted ABOVE the diff window — the fileName row
+ * plus one ⚠ row per warning (a PreToolUse 'ask' bounce can prepend
+ * hook-authored text of arbitrary length there) — ride as the extra.
+ * ask_user_question has no window at all — the flow paints one block per
+ * question (header, question text, option labels) — so the candidate
+ * blocks ride as `extras` and the block the flow opens with as the extra:
+ * the card's static price must cover whichever step paints TALLEST, the
+ * wrap decides that at the dialog's columns (knowledge this module does
+ * not have), and summing every block would charge rows the dialog never
+ * paints together (R10-1). The fields feed
+ * the pending card's dialog-body measure (pendingCardMaxRows),
+ * which charges the outside-window rows IN ADDITION to the windowed body —
+ * the same split the render makes, so a body filling the collapsed window
+ * can never swallow the block's rows. This lives here, not in
+ * dialogs-confirm, so this module stays free of UI-runtime imports.
+ */
+export function confirmationDialogBody(details: {
+  type?: string;
+  prompt?: unknown;
+  plan?: unknown;
+  command?: unknown;
+  urls?: unknown;
+  warnings?: unknown;
+  fileName?: unknown;
+  fileDiff?: unknown;
+  questions?: unknown;
+}): { body?: string; extra?: string; extras?: string[] } | undefined {
+  // Version-skew guard: a field present in an unexpected shape fails the
+  // whole body back to undefined, so the card keeps its payload proxy.
+  const skewedStrings = (v: unknown): v is string[] =>
+    Array.isArray(v) && v.every((e) => typeof e === 'string');
+  if (details.type === 'info') {
+    if (typeof details.prompt !== 'string') return undefined;
+    if (details.urls !== undefined && !skewedStrings(details.urls)) {
+      return undefined;
+    }
+    const urls = details.urls;
+    // dialogs-confirm's displayUrls: a single URL identical to the prompt
+    // would be listed twice.
+    const displayUrls =
+      urls !== undefined &&
+      urls.length > 0 &&
+      !(urls.length === 1 && urls[0] === details.prompt);
+    return {
+      body: details.prompt,
+      extra: displayUrls
+        ? ['', 'URLs to fetch:', ...urls.map((url) => ` - ${url}`)].join('\n')
+        : undefined,
+    };
+  }
+  if (details.type === 'plan') {
+    return typeof details.plan === 'string'
+      ? { body: details.plan }
+      : undefined;
+  }
+  if (details.type === 'exec') {
+    if (typeof details.command !== 'string') return undefined;
+    if (details.warnings !== undefined && !skewedStrings(details.warnings)) {
+      return undefined;
+    }
+    const warnings = details.warnings;
+    return {
+      body: details.command,
+      extra: warnings?.length
+        ? warnings.map((warning) => `⚠ ${warning}`).join('\n')
+        : undefined,
+    };
+  }
+  if (details.type === 'edit') {
+    if (typeof details.fileName !== 'string') return undefined;
+    if (details.warnings !== undefined && !skewedStrings(details.warnings)) {
+      return undefined;
+    }
+    const fileDiff = details.fileDiff;
+    if (fileDiff !== undefined && typeof fileDiff !== 'string') {
+      return undefined;
+    }
+    // The edit dialog tail-windows the diff BELOW the fileName row and one
+    // ⚠ row per warning: the diff travels as the body so the pending card
+    // prices the windowed lines at their painted (wrapping) height (R10-1),
+    // and the rows above the window ride as the extra (R7-1).
+    return {
+      body: fileDiff,
+      extra: [
+        details.fileName,
+        ...(details.warnings ?? []).map((warning) => `⚠ ${warning}`),
+      ].join('\n'),
+    };
+  }
+  if (details.type === 'ask_user_question') {
+    const questions = details.questions;
+    if (
+      !Array.isArray(questions) ||
+      !questions.every(isAskQuestion) ||
+      questions.length === 0
+    ) {
+      return undefined;
+    }
+    // The flow paints one question block at a time — header, question
+    // text, option labels — and the card's static price must cover
+    // whichever step paints TALLEST, which the wrap decides at the
+    // dialog's columns: a block with fewer lines but a long wrapping
+    // question paints taller than a many-option block, and this module has
+    // no columns to measure that with. So every candidate block rides as
+    // the extras and the pricing site takes the painted max (R10-1);
+    // `extra` keeps the block the flow opens with. The footer and title
+    // stay in the chrome reserve.
+    const blocks = questions.map((question, index) =>
+      [
+        '',
+        `${question.header} (${index + 1}/${questions.length})`,
+        question.question,
+        '',
+        ...question.options.map((option) =>
+          question.multiSelect === true ? `[ ] ${option.label}` : option.label,
+        ),
+      ].join('\n'),
+    );
+    return { extra: blocks[0], extras: blocks };
+  }
+  return undefined;
+}
+
 /**
  * Neutral-model union extension: tool detail events the backend folds into
  * tool cards (args preview, result content, approval state), plus turn
@@ -72,7 +231,29 @@ export type OpenTuiStreamEvent =
        * machine via the vision model. */
       visionBridgeNotice?: string;
     }
-  | { type: 'confirm'; id: string; tool: string; title: string }
+  | {
+      type: 'confirm';
+      id: string;
+      tool: string;
+      title: string;
+      /** confirmationDetails.type — the card prices itself against the
+       * dialog's body (LiveToolItem.confirmType). */
+      confirmType?: string;
+      /** The dialog's body text (info's prompt, plan's plan, exec's
+       * command — and edit's raw diff, priced by its windowed lines'
+       * painted height). */
+      confirmBody?: string;
+      /** Rows the dialog renders outside the body window: info's urls
+       * block, exec's warnings, edit's fileName row and warnings,
+       * ask_user_question's opening question block
+       * (LiveToolItem.confirmExtra). */
+      confirmExtra?: string;
+      /** ask_user_question's candidate question blocks: the flow paints
+       * one at a time and the wrap decides which paints tallest, so the
+       * pending card's price takes the max at the dialog's columns
+       * (LiveToolItem.confirmExtras). */
+      confirmExtras?: string[];
+    }
   /** The call left awaiting_approval (approved, declined, or bounced):
    * releases the transcript card's pending marker and records how it left
    * — 'rejected' when the scheduler cancelled the call (No/Esc), otherwise
@@ -515,14 +696,27 @@ export function createEventMapper(
             name: string;
             args?: Record<string, unknown>;
           };
-          details: { title?: string };
+          details: {
+            title?: string;
+            type?: string;
+            prompt?: unknown;
+            plan?: unknown;
+            command?: unknown;
+            urls?: unknown;
+            warnings?: unknown;
+          };
         };
         const id = v.request.callId ?? `tool-${++toolSeq}`;
+        const dialogBody = confirmationDialogBody(v.details);
         out.push({
           type: 'confirm',
           id,
           tool: v.request.name,
           title: v.details.title ?? v.request.name,
+          confirmType: v.details.type,
+          confirmBody: dialogBody?.body,
+          confirmExtra: dialogBody?.extra,
+          confirmExtras: dialogBody?.extras,
         });
         const args = formatToolArgs(v.request.args);
         if (args) out.push({ type: 'tool-args', id, args });

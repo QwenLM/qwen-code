@@ -169,7 +169,7 @@ export const getCachedStringWidth = (str: string): number => {
   return width;
 };
 
-const graphemeSegmenter = new Intl.Segmenter(undefined, {
+export const graphemeSegmenter = new Intl.Segmenter(undefined, {
   granularity: 'grapheme',
 });
 

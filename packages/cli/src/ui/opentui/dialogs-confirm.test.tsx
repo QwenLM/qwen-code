@@ -479,6 +479,73 @@ describe('OpenTuiToolConfirmation', () => {
     expect(expanded).not.toContain('Press ctrl-s to show more lines');
   });
 
+  it('offers ctrl-s for a tab-indented body that overflows once painted (R5-1)', () => {
+    // String widths count TAB as 0 columns while the renderer advances it
+    // exactly 2: 15 lines of TAB + 107 columns measure 15 rows (fitting the
+    // 20-row collapsed window) but paint 45 (the detabbed indent ends the
+    // first word-wrapped row and the 107-column token takes two more), so
+    // the window must count the detabbed rows or no hidden-tail label /
+    // ctrl-s affordance appears while rows sit off the viewport. The
+    // 60-row height gives the expanded tail window a 40-row budget: the
+    // affordance is offered because expansion genuinely gains rows (5
+    // hidden vs 26), not from the head/tail budget asymmetry (R15-1).
+    mocks.state.dimensions = { width: 110, height: 60 };
+    const prompt = Array.from(
+      { length: 15 },
+      () => '\t' + 'x'.repeat(107),
+    ).join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'hook_gate',
+          confirmationDetails: {
+            type: 'info',
+            title: 'Approve this call?',
+            prompt,
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('... last 26 lines hidden ...');
+    expect(text).toContain('Press ctrl-s to show more lines');
+  });
+
+  it("windows the body at the frame's painted columns, so an overflowing head gets its label (R6-2)", () => {
+    // The confirmation dialog is a full-width DialogFrame: border and
+    // padding spend 4 columns, so the body paints at width - 4 (106 at a
+    // 110-column terminal). Windowing at width - 2 measures each
+    // 107-column line as one row — the 20-line body "fits" the 20-row
+    // window while painting 40 rows, and no hidden-tail label appears
+    // while rows sit off the viewport. At the painted basis each line is
+    // two rows and the window reports the overflow: 19 content rows of 40
+    // stay, 21 hide.
+    mocks.state.dimensions = { width: 110, height: 30 };
+    const prompt = Array.from({ length: 20 }, () => 'x'.repeat(107)).join('\n');
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'hook_gate',
+          confirmationDetails: {
+            type: 'info',
+            title: 'Approve this call?',
+            prompt,
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        config={trustedConfig}
+        onSettled={() => {}}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('... last 21 lines hidden ...');
+  });
+
   it('ignores ctrl-s on a body that already fits', () => {
     // At height 24 the expanded tail window caps at 4 rows — smaller than
     // this fitting body — so ctrl-s must do nothing instead of dropping the

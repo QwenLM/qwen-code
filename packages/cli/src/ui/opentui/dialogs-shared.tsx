@@ -65,13 +65,25 @@ export function dialogAreaWidth(terminalWidth: number): number {
 }
 
 /**
+ * Columns a `DialogFrame`'s chrome spends: one column of border and one of
+ * padding on each side. The confirmation dialogs mount full-width (outside
+ * the capped dialog area), so their body text wraps at the terminal width
+ * minus this — the basis dialogs-confirm's TextBody windows on and
+ * messages.tsx's dialog-body price measures on.
+ */
+export const DIALOG_FRAME_CHROME_COLUMNS = 4;
+
+/**
  * Columns available inside a `DialogFrame` at the given terminal width: the
- * popup area minus one column of border and one of padding on each side. A
- * full-width rule has to be spelled out to this many characters because
- * OpenTUI has no single-sided border to draw one with.
+ * popup area minus the frame chrome. A full-width rule has to be spelled
+ * out to this many characters because OpenTUI has no single-sided border to
+ * draw one with.
  */
 export function dialogContentWidth(terminalWidth: number): number {
-  return Math.max(0, dialogAreaWidth(terminalWidth) - 4);
+  return Math.max(
+    0,
+    dialogAreaWidth(terminalWidth) - DIALOG_FRAME_CHROME_COLUMNS,
+  );
 }
 
 /**

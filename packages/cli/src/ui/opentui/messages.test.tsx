@@ -12,6 +12,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -23,6 +26,7 @@ vi.mock('@opentui/core', () => ({
 import {
   GENERIC_TOOL_SUMMARIES,
   MAX_RESULT_DISPLAY_CHARACTERS,
+  MCP_PENDING_CARD_MIN_ROWS,
   TOOL_CARD_DESCRIPTION_ROWS,
   assistantMessageMeta,
   capToolCardDescription,
@@ -31,6 +35,7 @@ import {
   hiddenTailLinesLabel,
   maxHistoryItemRows,
   pendingCardMaxRows,
+  physicalRowsTotal,
   tailWindow,
   tailWindowPhysical,
   thinkingMeta,
@@ -44,7 +49,7 @@ import {
   userMessageMeta,
   STATUS_INDICATOR_WIDTH,
 } from './messages.js';
-import { toCodePoints } from '../utils/textUtils.js';
+import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
 import { TOOL_STATUS } from '../constants.js';
 import { C } from './theme.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
@@ -140,6 +145,13 @@ describe('toolCardText (card one-liner sanitize, R1-105)', () => {
     );
     expect(toolCardText('a\u0007b')).toBe('a\\u0007b');
   });
+
+  it('detabs TAB to the two columns the renderer advances it (R11-2)', () => {
+    // The cap slices this same string by display width while the painted
+    // card row advances TAB 2 columns — the detab must live in the text
+    // itself or the slice and the painted row disagree.
+    expect(toolCardText('a\tb')).toBe('a  b');
+  });
 });
 
 describe('toolCardSummarySuffix (status format parity)', () => {
@@ -174,19 +186,563 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     // the payload the dialog renders expanded: a hook-forced confirmation
     // duplicates the card's description in its body, so a wide payload
     // shrinks the card or ctrl-s expansion pushes the dialog off screen
-    // (mem0 e2e regression).
+    // (mem0 e2e regression). The collapsed bound prices the region above
+    // the card plus the dialog chrome (the 26-row reserve) plus the
+    // collapsed body, converted to budget rows by the 0.7 wrap ratio — a
+    // budget row renders ~1/0.7 physical rows, so spending physical rows
+    // directly as budget rows over-budgets the card by ~1.37x.
     expect(maxHistoryItemRows(80)).toBe(320);
-    // No payload: the collapsed-dialog bound (80 - 46) is the tight one.
-    expect(pendingCardMaxRows(80, 0, 110)).toBe(34);
-    expect(pendingCardMaxRows(100, 0, 110)).toBe(51);
+    // No payload, unknown dialog: the collapsed-dialog bound charges the
+    // full collapsed body window — (80 - 26 - 20) * 0.7 = 23.
+    expect(pendingCardMaxRows(80, 0, 110)).toBe(23);
+    expect(pendingCardMaxRows(100, 0, 110)).toBe(37);
     // A ~3.9k-char payload wraps to ~37 dialog rows at 110 columns; the
     // expanded-dialog bound leaves (80 - 26 - 37) * 0.7 = 11 card rows.
     expect(pendingCardMaxRows(80, 3900, 110)).toBe(11);
+    // Boundary: the expanded-payload bound meets the collapsed price at the
+    // 20-row collapsed window and binds tighter past it. At h=80 the two
+    // coincide; h=81 separates them — a 20-row payload prices
+    // (81-26-20)*0.7 = 24 while a 21-row payload drops to
+    // (81-26-21)*0.7 = 23. (2160/2268 are exact multiples of the
+    // 110-2=108-column divisor.)
+    expect(pendingCardMaxRows(81, 2160, 110)).toBe(24);
+    expect(pendingCardMaxRows(81, 2268, 110)).toBe(23);
+    // A mid-range payload inside the collapsed window keeps the
+    // collapsed-dialog budget even on tall terminals (the PR's
+    // small-payload claim).
+    expect(pendingCardMaxRows(100, 1080, 110)).toBe(37);
+    // An mcp dialog shows two fixed lines and cannot expand: the card is the
+    // only surface carrying the arguments (R5-9), so it keeps the
+    // collapsed-footprint budget no matter how wide the args payload is.
+    // The region converts at the card's own wrap ratio: an mcp card renders
+    // its raw mcp__server__tool name (42 columns here), so a budget row
+    // buys 66 of the 108 wrap columns and the bound is
+    // (80 - 26 - 5) * 66/108 = 29.
+    const mcpNameCols = 'mcp__github_enterprise__create_repository'.length + 1;
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, mcpNameCols),
+    ).toBe(29);
+    // ...but N pending siblings share the transcript region: two parked mcp
+    // calls halve the collapsed bound after charging the second card's
+    // hidden-tail and awaiting rows ((80 - 26 - 5 - 2) * 66/108 / 2 = 14),
+    // so two 45-row cards cannot push the first call's dialog off an 80-row
+    // alt screen.
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2, mcpNameCols),
+    ).toBe(14);
+    // A hook-bounced info confirmation whose reason exactly fills the
+    // collapsed window prices the collapsed dialog's real 20-row body
+    // ((80 - 26 - 20) * 0.7 = 23); an unconverted physical-row term would
+    // hand back 34 budget rows, which paint ~45 physical rows and push the
+    // dialog's question row and outcome list off the viewport.
+    const hookReason = Array.from({ length: 20 }, () => 'x'.repeat(10)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'info', body: hookReason }),
+    ).toBe(23);
+    // A many-short-line body folds to ~3 card rows but fills 25 dialog rows:
+    // the expandable TextBody charges each logical row, so the card yields
+    // ((80-26-25)*0.7 = 20) even though the folded width sits under the
+    // gate. An info body measures identically.
+    const planBody = Array.from({ length: 25 }, () => 'x'.repeat(10)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 259, 110, { type: 'plan', body: planBody }),
+    ).toBe(20);
+    expect(
+      pendingCardMaxRows(80, 259, 110, { type: 'info', body: planBody }),
+    ).toBe(20);
+    // The body measure is taken on the dialog's own column basis — the
+    // terminal width minus the frame's 4 columns of border and padding,
+    // which start-opentui-ui's availableWidth = width - 4 makes width
+    // itself: 12 lines of 106 columns are 12 collapsed rows there (no
+    // ctrl-s offered), so both bounds coincide at ((80 - 26 - 12) * 0.7 =
+    // 29). On the card's narrower 104-column basis the same body would
+    // miscount 24 rows and wrongly bind the expanded bound.
+    const dialogFits = Array.from({ length: 12 }, () => 'x'.repeat(106)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 0, 106, { type: 'plan', body: dialogFits }),
+    ).toBe(29);
+    // The band just past the dialog's content width: a 107-column line
+    // paints 2 rows at the dialog's 106 columns, so 12 lines charge a
+    // 24-row body and the expanded bound binds — (80 - 26 - 24) * 0.7 = 21.
+    // A measure priced 2 columns wider than the painted surface charges 12
+    // rows and hands back 29.
+    const bandBody = Array.from({ length: 12 }, () => 'x'.repeat(107)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 0, 106, { type: 'plan', body: bandBody }),
+    ).toBe(21);
+    // The renderer advances TAB exactly 2 columns while string widths count
+    // it as 0, so the measure detabs before counting: 20 lines of
+    // TAB + 105 columns are 107-column lines — 2 rows each at the dialog's
+    // 106 columns, a 40-row body ((80 - 26 - 40) * 0.7 = 9) — priced
+    // identically to their detabbed selves.
+    const tabbed = Array.from(
+      { length: 20 },
+      () => '\t' + 'x'.repeat(105),
+    ).join('\n');
+    const detabbed = Array.from(
+      { length: 20 },
+      () => '  ' + 'x'.repeat(105),
+    ).join('\n');
+    expect(pendingCardMaxRows(80, 0, 106, { type: 'info', body: tabbed })).toBe(
+      9,
+    );
+    expect(pendingCardMaxRows(80, 0, 106, { type: 'info', body: tabbed })).toBe(
+      pendingCardMaxRows(80, 0, 106, { type: 'info', body: detabbed }),
+    );
+    // The body measure keeps the same collapsed-window boundary: a 20-row
+    // body fits the window and both bounds coincide ((81-26-20)*0.7 = 24);
+    // a 21-row body overflows and the expanded bound binds tighter
+    // ((81-26-21)*0.7 = 23).
+    const fits = Array.from({ length: 20 }, () => 'x'.repeat(10)).join('\n');
+    expect(pendingCardMaxRows(81, 0, 110, { type: 'plan', body: fits })).toBe(
+      24,
+    );
+    expect(
+      pendingCardMaxRows(81, 0, 110, { type: 'plan', body: fits + '\nx' }),
+    ).toBe(23);
+    // An exec confirmation whose command never arrived keeps the
+    // folded-payload proxy, and so does any type this module does not know
+    // — a future ToolCallConfirmationDetails variant or a version-skewed
+    // wire event fails safe toward yielding, not toward keeping the full
+    // budget.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'exec' })).toBe(11);
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'some_future_type' }),
+    ).toBe(11);
+    // ...but when the command arrives as the dialog body it is measured
+    // newline-aware: the exec dialog renders it in full with no collapsed
+    // window, so a 42-line command is 42 body rows ((80-26-42)*0.7 = 8),
+    // not the ~22 folded card rows the payload proxy would charge.
+    const command = Array.from({ length: 42 }, () => 'x'.repeat(55)).join('\n');
+    expect(
+      pendingCardMaxRows(80, 2300, 110, { type: 'exec', body: command }),
+    ).toBe(8);
+    // Parked siblings share BOTH dialog bounds: with two pending cards the
+    // expanded bound halves too — a 30-row info body prices
+    // (80-26-30-2)*0.7/2 = 7 (the second card's chrome rows charged before
+    // dividing), not the undivided 16.
+    const sharedBody = Array.from({ length: 30 }, () => 'x'.repeat(10)).join(
+      '\n',
+    );
+    expect(
+      pendingCardMaxRows(80, 3900, 110, { type: 'info', body: sharedBody }, 2),
+    ).toBe(7);
+  });
+
+  it("converts the shared region with the card's own name width (R6-1)", () => {
+    // mcp cards never appear in TOOL_DISPLAY_BY_NAME, so they render the raw
+    // mcp__<server>__<tool> name — the longest names of any arm. A budget
+    // row buys only (cols - name) of the card's wrap columns: at a
+    // 42-column name the fixed 0.7 ratio hands back 34 budget rows that
+    // paint ~54 physical rows against the 49-row region, and the mounted
+    // dialog's outcome list leaves the alt screen (the mem0 regression
+    // shape). The name-aware conversion caps the budget at 29.
+    const nameCols = 'mcp__github_enterprise__create_repository'.length + 1;
+    const budget = pendingCardMaxRows(
+      80,
+      3900,
+      110,
+      { type: 'mcp' },
+      1,
+      nameCols,
+    );
+    expect(budget).toBeLessThanOrEqual(30);
+    expect(budget).toBe(29);
+    // A short display name keeps the measured 0.7 ceiling — the tightening
+    // only bites names too wide for that ceiling to hold.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6)).toBe(34);
+  });
+
+  it('charges the rows a dialog renders outside its body window (R4-1)', () => {
+    // An info dialog's urls block (a margin row, a header row and one row
+    // per URL) and an exec dialog's warnings render OUTSIDE the windowed
+    // body, so they charge in addition to it: a 20-row prompt alone prices
+    // (80 - 26 - 20) * 0.7 = 23, and the same prompt with a 3-row urls
+    // block prices (80 - 26 - 23) * 0.7 = 21.
+    const prompt = Array.from({ length: 20 }, () => 'x'.repeat(10)).join('\n');
+    expect(pendingCardMaxRows(80, 0, 110, { type: 'info', body: prompt })).toBe(
+      23,
+    );
+    expect(
+      pendingCardMaxRows(80, 0, 110, {
+        type: 'info',
+        body: prompt,
+        extra: '\nURLs to fetch:\n - https://example.com/x',
+      }),
+    ).toBe(21);
+    // exec renders its command in full plus one row per warning:
+    // (80 - 26 - 3) * 0.7 = 35; without the two warnings it would be 37.
+    expect(
+      pendingCardMaxRows(80, 0, 110, {
+        type: 'exec',
+        body: 'echo hi',
+        extra: '⚠ one\n⚠ two',
+      }),
+    ).toBe(35);
+  });
+
+  it('charges the edit and ask_user_question rows painted outside the collapsed window (R7-1)', () => {
+    // The edit dialog paints the fileName row and one row per warning ABOVE
+    // its tail-windowed diff, so they charge in addition to the body. A
+    // 3-row extra drops the fixed-body price from (80-26-20)*0.7 = 23 to
+    // (80-26-23)*0.7 = 21 (the strict drop is the pin: both calls would
+    // otherwise return the identical number).
+    const extra = '⚠ a\n⚠ b\n⚠ c';
+    expect(pendingCardMaxRows(80, 2000, 108, { type: 'edit' }, 1)).toBe(23);
+    expect(pendingCardMaxRows(80, 2000, 108, { type: 'edit', extra }, 1)).toBe(
+      21,
+    );
+    // The ask flow paints one question block at a time and ConfirmationBody
+    // renders NO windowed body for it, so the block alone is the price:
+    // (80-26-0)*0.7 = 37 without one, (80-26-3)*0.7 = 35 with a 3-row
+    // block — charging it the collapsed 20-row window would shrink the card
+    // by rows the dialog never paints (R10-1).
+    expect(
+      pendingCardMaxRows(80, 2000, 108, { type: 'ask_user_question' }, 1),
+    ).toBe(37);
+    expect(
+      pendingCardMaxRows(
+        80,
+        2000,
+        108,
+        { type: 'ask_user_question', extra },
+        1,
+      ),
+    ).toBe(35);
+    // mcp renders no outside-window rows and its price must not move:
+    // (80-26-5)*0.7 = 34 with or without the extra term wired.
+    expect(pendingCardMaxRows(80, 2000, 108, { type: 'mcp' }, 1)).toBe(34);
+  });
+
+  it('prices an ask_user_question dialog by the painted-tallest candidate block (R10-1)', () => {
+    // The flow paints one question block at a time, so the card's static
+    // price must cover the block that paints TALLEST at the dialog's
+    // columns — and the wrap decides which, knowledge the event producer
+    // does not have: the candidates arrive as the extras and the max is
+    // taken here. The opening block below paints 5 rows and the second 14,
+    // so the collapsed charge is 14 and the bound (80-26-14)*0.7 = 28;
+    // charging the opening block alone would hand back 34.
+    const opening = ['', 'Scope (1/2)', 'Which scope?', '', 'This file'].join(
+      '\n',
+    );
+    const taller = [
+      '',
+      'Details (2/2)',
+      'Sure?',
+      '',
+      ...Array.from({ length: 10 }, (_, i) => `option ${i}`),
+    ].join('\n');
+    expect(
+      pendingCardMaxRows(
+        80,
+        0,
+        108,
+        {
+          type: 'ask_user_question',
+          extra: opening,
+          extras: [opening, taller],
+        },
+        1,
+      ),
+    ).toBe(28);
+    // A wire that predates the candidates keeps the single-extra charge:
+    // (80-26-5)*0.7 = 34.
+    expect(
+      pendingCardMaxRows(
+        80,
+        0,
+        108,
+        { type: 'ask_user_question', extra: opening },
+        1,
+      ),
+    ).toBe(34);
+  });
+
+  it('prices an edit dialog body by the windowed diff’s painted rows (R10-1)', () => {
+    // DiffBody tail-windows the diff's LOGICAL lines and those lines wrap —
+    // WORD-wrapped: the renderer breaks after the last fitting delimiter,
+    // so a rendered '1 xxxx …' line of four 54-column tokens paints 4 rows
+    // (one per token: the prefix and first token share a row, each later
+    // token moves whole to its own) where the character estimate priced
+    // ceil(221/106) = 3 — so the wrapping diff must leave the card a
+    // strictly smaller budget than one whose windowed lines each paint a
+    // single row.
+    const wrapping =
+      '@@ -0,0 +1,8 @@\n' +
+      Array.from(
+        { length: 8 },
+        () => '+' + Array.from({ length: 4 }, () => 'x'.repeat(54)).join(' '),
+      ).join('\n');
+    const fitting =
+      '@@ -0,0 +1,20 @@\n' +
+      Array.from({ length: 20 }, () => '+' + 'x'.repeat(60)).join('\n');
+    const budget = (body: string) =>
+      pendingCardMaxRows(80, 0, 106, { type: 'edit', body, extra: 'a.ts' }, 2);
+    expect(budget(wrapping)).toBeLessThan(budget(fitting));
+    // The exact pins: 8 windowed lines at 4 painted rows charge 32 plus the
+    // 'a.ts' fileName row — (80-26-33-2)*0.7/2 floors to 6 (the character
+    // estimate would charge 8*3+1 = 25 rows and hand back 9) — against
+    // (80-26-21-2)*0.7/2 = 10.
+    expect(budget(wrapping)).toBe(6);
+    expect(budget(fitting)).toBe(10);
+  });
+
+  it('counts TAB at the two columns the renderer advances it (R11-2)', () => {
+    // String widths count TAB as 0 columns, so a raw measure under-counts a
+    // tabbed line: 60 TABs + 60 columns paint 180 columns — 2 rows at 108.
+    expect(physicalRowsTotal(['\t'.repeat(60) + 'x'.repeat(60)], 108)).toBe(2);
+  });
+
+  describe('physicalRowsTotal word wrap (R10-1)', () => {
+    // The renderer's <text> rows word-wrap (opentui's default WrapMode.word):
+    // a row breaks after its last fitting delimiter and hard-splits only
+    // where no break fits, so long unbroken tokens paint one row PER token
+    // where the character estimate priced one row per `cols` columns. Every
+    // count below was verified against the native TextBufferView's
+    // virtual-line count (setWrapWidth / setWrapMode('word') /
+    // getVirtualLineCount); the character estimate is noted where it
+    // diverges.
+    it('prices long unbroken tokens one row per token', () => {
+      // 6 lines x 4 x 54-column tokens (219 columns a line): the character
+      // estimate charged 18 rows; the word wrap paints 24.
+      const tokens54 = Array.from({ length: 6 }, () =>
+        Array.from({ length: 4 }, () => 'a'.repeat(54)).join(' '),
+      );
+      expect(physicalRowsTotal(tokens54, 106)).toBe(24);
+      // 30-column words pack 3 to a 106-column row (a fourth never fits):
+      // the estimate charged 18, the word wrap paints 24.
+      const words30 = Array.from({ length: 6 }, () =>
+        Array.from({ length: 10 }, () => 'w'.repeat(30)).join(' '),
+      );
+      expect(physicalRowsTotal(words30, 106)).toBe(24);
+      // Hex digests (a plan section, a hook reason payload): the estimate
+      // charged 12, the word wrap paints 18.
+      const hex = Array.from({ length: 6 }, () =>
+        Array.from({ length: 3 }, () => '0123456789abcdef'.repeat(4)).join(' '),
+      );
+      expect(physicalRowsTotal(hex, 106)).toBe(18);
+    });
+
+    it('keeps the character count for prose, paths, URLs and snake_case', () => {
+      // Dense break opportunities (space, '/', '.', '-' ...) let the word
+      // wrap fill every row — the two measures agree exactly.
+      expect(
+        physicalRowsTotal(
+          Array.from(
+            { length: 6 },
+            () => 'the quick brown fox jumps over the lazy dog and runs',
+          ),
+          106,
+        ),
+      ).toBe(6);
+      expect(
+        physicalRowsTotal(
+          Array.from(
+            { length: 6 },
+            () => '/home/user/some/deeply/nested/path/to/a/file/name.txt',
+          ),
+          40,
+        ),
+      ).toBe(12);
+      expect(
+        physicalRowsTotal(
+          Array.from(
+            { length: 4 },
+            () => 'https://example.com/some/path?query=value&other=123#frag',
+          ),
+          40,
+        ),
+      ).toBe(8);
+      expect(
+        physicalRowsTotal(
+          Array.from({ length: 6 }, () =>
+            Array.from({ length: 5 }, () => 'foo_bar_baz').join('_'),
+          ),
+          40,
+        ),
+      ).toBe(12);
+    });
+
+    it('treats dash but not underscore as a break opportunity', () => {
+      // '_' joins the word (snake_case stays one token): 3x60 hard-split.
+      expect(
+        physicalRowsTotal(
+          [Array.from({ length: 3 }, () => 'a'.repeat(60)).join('_')],
+          106,
+        ),
+      ).toBe(2);
+      // '-' breaks: 3x60 + 2 dashes paint one row per token.
+      expect(
+        physicalRowsTotal(
+          [Array.from({ length: 3 }, () => 'a'.repeat(60)).join('-')],
+          106,
+        ),
+      ).toBe(3);
+    });
+
+    it('hard-splits only where no break fits', () => {
+      // A single unbroken 250-column token char-splits: ceil(250/106) = 3.
+      expect(physicalRowsTotal(['a'.repeat(250)], 106)).toBe(3);
+      // An exact fill stays one row whether or not it carries a break.
+      expect(physicalRowsTotal(['ab cd'], 5)).toBe(1);
+      expect(physicalRowsTotal(['abcde'], 5)).toBe(1);
+      // One column over: 'ab ' + 'cde'.
+      expect(physicalRowsTotal(['ab cde'], 5)).toBe(2);
+    });
+
+    it('tracks the word class per grapheme cluster, not per codepoint (R14-1)', () => {
+      // The native classifies a grapheme cluster by its FIRST codepoint:
+      // NFD 'e\u0301' keeps the ASCII word class through the combining
+      // mark, so the CJK transition break opens and the row paints 3 like
+      // the native renderer; per-codepoint tracking lets the combining
+      // mark reset the class to 0 and deletes that break (2 — an
+      // under-count).
+      expect(physicalRowsTotal(['e\u0301' + '你'.repeat(54)], 106)).toBe(3);
+      // The NFC sibling U+00E9 is class 0 (not an ASCII word codepoint), so
+      // NO transition break opens — the fix must not widen the word class
+      // to all non-ASCII to pass the first case.
+      expect(physicalRowsTotal(['\u00e9' + '你'.repeat(54)], 106)).toBe(2);
+    });
+
+    it('pins the break tables to the installed @opentui/core version (R14-1)', () => {
+      // The WORD_WRAP_* tables in messages.tsx were transcribed from the
+      // native renderer's findWrapBreaks at @opentui/core 0.5.8, and the
+      // native rules move between releases (0.5.11 changed the CJK<->ASCII
+      // transition itself). A dependency bump must re-transcribe and
+      // re-verify the tables against the new native, so it turns this
+      // guard red. The version is read from the installed package itself —
+      // the package.json pin is exact, so the installed copy is the one
+      // the renderer paints with.
+      const entry = createRequire(import.meta.url).resolve('@opentui/core');
+      const { version } = JSON.parse(
+        readFileSync(join(dirname(entry), 'package.json'), 'utf8'),
+      ) as { version: string };
+      expect(version).toBe('0.5.8');
+    });
+
+    it('breaks between CJK and ASCII word runs', () => {
+      // 3 + 30 + 3 = 36 columns: the character estimate charged 2 rows, the
+      // word wrap paints 3 (the CJK run moves whole past the break).
+      expect(physicalRowsTotal(['abc' + '你'.repeat(15) + 'def'], 20)).toBe(3);
+    });
+
+    it('windows the dialog body by the word-wrapped height', () => {
+      // The R10-1 chain: a 24-row body against the 20-row collapsed window
+      // must surface the hidden-rows label and the ctrl-s hint — the
+      // character estimate priced 18 rows and painted all 24 with neither.
+      const rows = Array.from({ length: 6 }, () =>
+        Array.from({ length: 4 }, () => 'a'.repeat(54)).join(' '),
+      );
+      const win = headWindowPhysical(rows, 108, 20);
+      // 4 whole rows (16 painted) plus the sliced fifth: slicing the
+      // 219-column row to the 3-row remainder's 318 columns keeps all 4 of
+      // its painted rows, so the slice shrinks to the 113 columns that
+      // paint 2 — 18 of the 19-row budget charged, 6 rows hidden (R15-1).
+      expect(win.hiddenRows).toBe(6);
+      expect(win.visible).toHaveLength(5);
+      // R15-1: the window's visible rows must paint inside the 19-row
+      // content budget it certifies.
+      expect(physicalRowsTotal(win.visible, 106)).toBeLessThanOrEqual(19);
+    });
+  });
+
+  it('keeps the sibling sum inside the shared region when the divided bound drops below the settled cap (R4-8, R4-1)', () => {
+    // The settled 5-row floor must not lift the divided bound back up, and
+    // each sibling past the first spends its hidden-tail and awaiting rows
+    // (2 per card — the reserve charges one card's) from the region before
+    // it is divided: at N=8, mcp dialogs priced at the raw 42-column name
+    // (wrap ratio 66/108) floor((80-26-5-14)*(66/108)/8) = 2, and eight
+    // cards paint 8*2*(108/66) + 14 ≈ 40.2 physical rows against the
+    // 80-26-5 = 49-row region. A floor-lifted 5-row budget would paint
+    // 8*5*(108/66) + 14 ≈ 79.5 — the mounted dialog leaves the alt screen.
+    // The tall-body dialogs (collapsed body 20, short name, ratio 0.7)
+    // cross one batch size earlier: floor((80-26-20-8)*0.7/5) = 3 and
+    // 5*3/0.7 + 8 ≈ 29.4 <= 34, where 5*5/0.7 + 8 ≈ 43.7 would not.
+    const mcpNameCols = 'mcp__github_enterprise__create_repository'.length + 1;
+    const mcp = pendingCardMaxRows(
+      80,
+      3900,
+      110,
+      { type: 'mcp' },
+      8,
+      mcpNameCols,
+    );
+    expect(mcp).toBe(2);
+    expect(
+      (8 * mcp * 108) / (108 - mcpNameCols) + 2 * (8 - 1),
+    ).toBeLessThanOrEqual(80 - 26 - 5);
+    const tall = pendingCardMaxRows(80, 0, 110, undefined, 5);
+    expect((5 * tall) / 0.7 + 2 * (5 - 1)).toBeLessThanOrEqual(80 - 26 - 20);
+  });
+
+  it('shrinks the pending budget as the transcript above the card grows (R2-2)', () => {
+    // The reserve prices the region above the card at its FRESH-session
+    // height (the ≈ 5 transcript rows of startup notices and the prompt
+    // echo), so counts at or below it leave the price alone...
+    expect(pendingCardMaxRows(80, 0, 110, undefined, 1, 0, 5)).toBe(23);
+    expect(pendingCardMaxRows(80, 0, 110, undefined, 1, 0, 0)).toBe(23);
+    // ...but a grown session paints more above the card, and those rows
+    // spend from the same region: 25 painted rows charge the 20-row
+    // overage, so the collapsed bound drops from (80-26-20)*0.7 = 23 to
+    // (80-26-20-20)*0.7 = 9.
+    expect(pendingCardMaxRows(80, 0, 110, undefined, 1, 0, 25)).toBe(9);
+    // Both dialog bounds charge the overage: the fixed-body mcp arm goes
+    // from (80-26-5)*0.7 = 34 to (80-26-5-20)*0.7 = 20, and parked
+    // siblings divide what the overage leaves --
+    // floor((80-26-5-20-2)*0.7/2) = 9.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 25)).toBe(
+      20,
+    );
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2, 6, 25)).toBe(
+      9,
+    );
+    // A transcript that floods the viewport on its own drops siblings to
+    // the one-row floor; a lone card keeps the settled-cap floor (the
+    // short-terminal fallback) -- card yielding alone cannot repair a
+    // transcript that already overruns the screen.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 2, 6, 200)).toBe(
+      1,
+    );
+    expect(pendingCardMaxRows(80, 3900, 110, undefined, 1, 6, 200)).toBe(
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    // ...unless the lone card's dialog is mcp AND the collapsed bound has
+    // bottomed out: that dialog shows only the server and tool names and is
+    // off the alt screen past saturation whatever the card yields, so
+    // dropping the card to the settled cap only deletes the head of the
+    // payload being approved (R12-1). At rowsAbove 48 the region price
+    // floor((80-26-5-43)*0.7) = 4 is still POSITIVE — yielding still buys
+    // the dialog rows — so the settled cap, not the mcp floor, binds:
+    // max(5, 4) = 5. Only once the bound goes non-positive
+    // (floor((80-26-5-195)*0.7) = -103 at rowsAbove 200) does the
+    // args-surface floor lift.
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 48)).toBe(
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    expect(pendingCardMaxRows(80, 3900, 110, { type: 'mcp' }, 1, 6, 200)).toBe(
+      MCP_PENDING_CARD_MIN_ROWS,
+    );
   });
 
   it('falls back to the settled cap on short terminals', () => {
     expect(pendingCardMaxRows(24, 3900, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
     expect(pendingCardMaxRows(46, 0, 110)).toBe(TOOL_CARD_DESCRIPTION_ROWS);
+    // An mcp card whose collapsed bound is still POSITIVE keeps that bound:
+    // the floor keys on saturation (bound <= 0), not the dialog type alone
+    // (R12-1) — (40-26-5)*0.7 = 6 budget rows against the 9-row region,
+    // where the ungated floor's 11 would paint the mounted dialog's
+    // outcome list off the alt screen.
+    expect(pendingCardMaxRows(40, 3900, 110, { type: 'mcp' }, 1, 20, 0)).toBe(
+      6,
+    );
   });
 
   it('keeps everything when the content fits', () => {
@@ -293,6 +849,18 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(win.hiddenRows).toBe(4);
   });
 
+  it("charges the tail window's sliced row the height it paints (R15-1)", () => {
+    // The word-wrap mirror of the dialog-body fixture: 4x54-column tokens
+    // paint one row PER token, so slicing the over-budget row to
+    // `remaining * cols` columns keeps more painted rows than the budget
+    // certifies — the slice must shrink until it fits.
+    const rows = Array.from({ length: 6 }, () =>
+      Array.from({ length: 4 }, () => 'a'.repeat(54)).join(' '),
+    );
+    const tw = tailWindowPhysical(rows, 108, 19);
+    expect(physicalRowsTotal(tw.visible, 106)).toBeLessThanOrEqual(19);
+  });
+
   it('truncates over-long results to the trailing characters', () => {
     const short = 'short output';
     expect(truncateResultDisplayChars(short)).toBe(short);
@@ -318,32 +886,60 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
 
   it('keeps the head of an over-long description and counts the hidden rows', () => {
     const desc = 'x'.repeat(1000);
-    const cols = 110 - STATUS_INDICATOR_WIDTH;
     const cap = capToolCardDescription(
       desc,
       'mcp__mem0',
       110,
       TOOL_CARD_DESCRIPTION_ROWS,
     );
-    // The label row shares the budget: 4 description rows, the first one
-    // hosting the name inline.
-    const rows = Math.ceil(('mcp__mem0'.length + 1 + desc.length) / cols);
-    expect(cap.description).toBe('x'.repeat(4 * cols - 'mcp__mem0'.length - 1));
-    expect(cap.hiddenRows).toBe(rows - 4);
-    expect(cap.hiddenRows).toBeGreaterThan(0);
+    // The label row shares the budget: 4 description rows at the name-aware
+    // 98 columns (108 minus the 10-column name) — 11 painted rows total, 7
+    // hidden.
+    expect(cap.description).toBe('x'.repeat(4 * 98));
+    expect(cap.hiddenRows).toBe(7);
   });
 
   it('measures wide-character descriptions in display columns', () => {
-    // 1000 Han characters span 2000 columns: 19 rows at 108 cols, not the
-    // 10 rows a UTF-16 length estimate would model.
+    // 1000 Han characters span 2000 columns: 21 rows at the name-aware 98
+    // columns (49 Han per row), not the 10 rows a UTF-16 length estimate
+    // would model.
     const cap = capToolCardDescription(
       '汉'.repeat(1000),
       'mcp__mem0',
       110,
       TOOL_CARD_DESCRIPTION_ROWS,
     );
-    expect(toCodePoints(cap.description)).toHaveLength(211);
-    expect(cap.hiddenRows).toBe(15);
+    expect(toCodePoints(cap.description)).toHaveLength(196);
+    expect(cap.hiddenRows).toBe(17);
+  });
+
+  it('bounds the description by painted rows, not a column estimate (R14-1)', () => {
+    // Eight 54-column space-separated tokens at the name-aware 98 columns:
+    // the word wrap paints one row PER token (a second never fits), so the
+    // column estimate's ceil(449/108) = 5 rows left all eight tokens to
+    // paint 8 rows against the 5-row bound — the transcript-column flood
+    // the cap exists to prevent, with no hidden-tail label.
+    const cap = capToolCardDescription(
+      Array.from({ length: 8 }, () => 'x'.repeat(54)).join(' '),
+      'mcp__mem0',
+      110,
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    expect(physicalRowsTotal([cap.description], 98)).toBeLessThanOrEqual(4);
+    expect(cap.hiddenRows).toBeGreaterThan(0);
+  });
+
+  it('keeps a one-row budget to one painted row when the name fits (R11-1)', () => {
+    // The one-row floor exists for a name that alone exhausts the row
+    // (descRows * cols - nameCols <= 0); applied unconditionally it
+    // overrides a positive slice and the card paints name + a full-row
+    // description — 2 physical rows against a budget that certified 1. At
+    // descRows = 1 the unconditional floor fired for every name width.
+    const name = 'n'.repeat(40);
+    const cap = capToolCardDescription('d'.repeat(300), name, 110, 1);
+    expect(
+      getCachedStringWidth(cap.description) + getCachedStringWidth(name) + 1,
+    ).toBeLessThanOrEqual(110 - STATUS_INDICATOR_WIDTH);
   });
 });
 
