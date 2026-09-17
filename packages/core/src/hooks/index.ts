@@ -19,6 +19,7 @@ export { buildHooksListing, describeHookConfig } from './hooks-listing.js';
 export type {
   HooksListing,
   HooksListingConfig,
+  HooksListingDisabledReason,
   HooksListingOrigin,
   HooksListingRow,
 } from './hooks-listing.js';
