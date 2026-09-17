@@ -620,6 +620,44 @@ describe('toolResultDisplayCompaction', () => {
       'truncated for saved session preview',
     );
   });
+
+  // `toolResult` is unbounded at the producer (`content[].data` base64,
+  // `structuredContent`) and the record is the only full copy once the
+  // transcript offload drops `persistedOutputFiles`, so an over-budget payload
+  // must not be persisted verbatim. Removing the bound reds this test.
+  it('drops an oversized MCP App toolResult when recording', () => {
+    const marker = 'PROBE_MCP_APP_TOOL_RESULT_UNIQUE_MARKER';
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: '<main>PROBE_MCP_APP_HTML_UNIQUE_MARKER</main>',
+      toolResult: {
+        content: [
+          {
+            type: 'text',
+            text: `${marker}${'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS)}`,
+          },
+        ],
+        structuredContent: {
+          rows: 'y'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS),
+        },
+      },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.toolResult).toEqual({});
+    expect(JSON.stringify(compacted)).not.toContain(marker);
+    // The mounted iframe only needs `html`, which the producer already caps at
+    // 1 MiB, so replay can still render the app.
+    expect(compacted.html).toBe(display.html);
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS * 2,
+    );
+  });
 });
 
 describe('compactString limit', () => {
