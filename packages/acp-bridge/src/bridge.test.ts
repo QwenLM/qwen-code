@@ -30,7 +30,6 @@ import {
   BranchWhilePromptActiveError,
   InvalidClientIdError,
   BridgeChannelQuarantinedError,
-  BridgeRuntimeRecyclingError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
@@ -33050,9 +33049,12 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('rolls a recycle target back to active when the generation cap refuses the replacement', async () => {
+    it('moves fresh work to the replacement generation and rolls the condemnation back when that spawn fails', async () => {
+      let gen1SessionCount = 0;
       const gen1 = makeChannel({
-        newSessionImpl: async () => ({ sessionId: 'sess-gen1' }),
+        newSessionImpl: async () => ({
+          sessionId: `sess-gen1-${++gen1SessionCount}`,
+        }),
       });
       let gen2SessionCount = 0;
       const gen2 = makeChannel({
@@ -33061,33 +33063,35 @@ describe('createAcpSessionBridge', () => {
         }),
       });
       let channelSpawns = 0;
+      let refuseSpawn = false;
       const bridge = makeBridge({
-        channelFactory: async () =>
-          channelSpawns++ === 0 ? gen1.channel : gen2.channel,
+        channelFactory: async () => {
+          if (refuseSpawn) throw new Error('replacement spawn refused');
+          return channelSpawns++ === 0 ? gen1.channel : gen2.channel;
+        },
         sessionScope: 'thread',
       });
 
       const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      expect(first.sessionId).toBe('sess-gen1');
+      expect(first.sessionId).toBe('sess-gen1-1');
 
-      // Recycle the first session: gen1 drains, recovery spawns gen2 (active).
+      // Recycle the first session: gen1 drains, and the replacement gen2 is
+      // spawned so the hand-off has somewhere to send fresh work.
       await bridge.requestRuntimeRecycle!(first.sessionId);
       expect(channelSpawns).toBe(2);
 
-      // A fresh session attaches to the active gen2.
+      // Fresh work lands on the replacement, not on the draining generation.
       const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(second.sessionId).toBe('sess-gen2-1');
 
-      // Recycling gen2's session leaves both generations draining, so the
-      // replacement hits the two-generation cap. The recycle must reject and
-      // roll gen2 back to active rather than stranding the workspace with no
-      // active generation.
+      // A recycle whose replacement cannot be spawned must reject and leave
+      // its target usable rather than stranding the workspace with no active
+      // generation: gen1 is still live, so gen2 keeps taking fresh work.
+      refuseSpawn = true;
       await expect(
         bridge.requestRuntimeRecycle!(second.sessionId),
-      ).rejects.toBeInstanceOf(BridgeRuntimeRecyclingError);
+      ).rejects.toThrow('replacement spawn refused');
 
-      // gen2 rolled back to active: a third session attaches without spawning
-      // a third generation.
       const third = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(third.sessionId).toBe('sess-gen2-2');
       expect(channelSpawns).toBe(2);
