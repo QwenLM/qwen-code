@@ -835,6 +835,44 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     ).toMatchObject({ subtitle: '2 turns · 1m 1s' });
   });
 
+  it.each([
+    [3, 20, 723_000, 1_800_000, '3/20 turns · 12m 3s/30m'],
+    [1, 20, 0, undefined, '1/20 turns'],
+    [1, 1, 0, undefined, '1/1 turn'],
+    [3, undefined, 723_000, undefined, '3 turns · 12m 3s'],
+  ])(
+    'shows turn and active-time budgets (%s/%s)',
+    (turnCount, turnBudget, activeTimeMs, activeTimeBudgetMs, expected) => {
+      expect(
+        describeGoalCard(
+          snap({
+            objective: 'o',
+            status: 'paused',
+            turnCount,
+            turnBudget,
+            activeTimeMs,
+            activeTimeBudgetMs,
+          }),
+        ),
+      ).toMatchObject({ subtitle: expected });
+    },
+  );
+
+  it('hides unused turn and active-time budgets', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: null });
+  });
+
   it('carries spend in the subtitle, matching the ink card', () => {
     expect(
       describeGoalCard(

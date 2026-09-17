@@ -394,6 +394,65 @@ describe('navigateToDaemon', () => {
     const assigned = new URL(assign.mock.calls[0]![0] as string);
     expect(assigned.searchParams.get('daemon')).toBeNull();
   });
+
+  // Boot keeps a fragment token on the invalid-target path for recovery, and
+  // this escape hatch is the only recovery it offers — but the URL it assigns
+  // clears the hash, so the credential has to be persisted before the page
+  // turns over or the operator lands locked out of their own daemon.
+  it('salvages a URL credential when the escape hatch returns to the page origin', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?daemon=ftp%3A%2F%2Fdaemon.example#token=url-secret',
+    );
+    const mod = await import('./daemon');
+    expect(mod.navigateToDaemon('http://localhost:5173')).toBe(true);
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBe(
+      'url-secret',
+    );
+    const assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('token')).toBeNull();
+    expect(assigned.hash).toBe('');
+  });
+
+  // The salvage is for a URL credential that belongs to the page's own daemon.
+  // While a valid `?daemon=` names someone else, the URL token is theirs, and
+  // switching back must not file it under the page origin's key.
+  it('does not salvage a URL token that belongs to another daemon', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example#token=remote-secret',
+    );
+    const mod = await import('./daemon');
+    expect(mod.navigateToDaemon('http://localhost:5173')).toBe(true);
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBeNull();
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
+  // A target switch carries the credential in storage alone. With the write
+  // refused the landed page would hold nothing for the new target while the
+  // dialog read the switch as successful.
+  it('reports a blocked switch when the new target keeps no credential', async () => {
+    const { assign, reload } = setupPage('http://localhost:5173/app');
+    const original = window.sessionStorage;
+    Object.defineProperty(window, 'sessionStorage', {
+      get() {
+        throw new Error('storage disabled');
+      },
+      configurable: true,
+    });
+    try {
+      const mod = await import('./daemon');
+      expect(
+        mod.navigateToDaemon('http://remote.example:4170', 'remote-token'),
+      ).toBe(false);
+      expect(assign).not.toHaveBeenCalled();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
 });
 
 describe('getDaemonToken', () => {

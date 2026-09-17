@@ -175,9 +175,9 @@ export function goalCheckpointHealthLine(
  * tokens on the `tokensUsed` metric (`totalTokenCount` summed per model call,
  * so a call's full input context counts every time it is sent).
  *
- * The meter bills Goal-turn model calls only -- per-turn side queries and
- * checkpoint-verifier calls are unmetered -- so real provider spend at a
- * stop runs above this window.
+ * The meter includes Goal-turn model calls, direct foreground subagents, and
+ * the Goal's verifier and checkpoint checks. Nested/background agents and
+ * unrelated side queries, cron and notification turns are not included.
  *
  * This is an authorization quantum, not a cost estimate: it bounds how much
  * autonomous continuation one explicit user action (create, or a later
@@ -381,8 +381,9 @@ export interface GoalRecord {
   /**
    * Model tokens billed to this Goal so far, summed across its turn windows.
    *
-   * Measured from the same session token source as `/stats`. Verification and
-   * checkpoint side queries run between turn windows and are not included.
+   * Includes Goal-turn model calls, direct foreground subagents, and the Goal's
+   * verifier and checkpoint checks. Nested/background agents, other side
+   * queries, cron and notification turns are excluded.
    * Zero on Goals recovered from a transcript written before the field existed.
    */
   tokensUsed: number;
