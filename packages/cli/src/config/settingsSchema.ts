@@ -374,7 +374,7 @@ const SETTINGS_SCHEMA = {
     },
   },
 
-  // Model providers configuration grouped by authType
+  // Model providers configuration grouped by provider id
   modelProviders: {
     type: 'object',
     label: 'Model Providers',
@@ -382,7 +382,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: {} as ModelProvidersConfig,
     description:
-      'Model providers configuration keyed by provider id (a built-in AuthType such as "openai" or "gemini", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.',
+      'Model providers configuration keyed by provider id (a built-in provider protocol such as "openai" or "gemini", or a custom id mapped via providerProtocol). Each entry is an array of model configurations. OpenAI-compatible models can select wireApi: "chat-completions" or "responses"; omitting wireApi keeps the declared protocol (Chat Completions under openai). Released openai-responses declarations remain readable; new setup writes openai plus wireApi.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },
@@ -395,7 +395,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as ProviderProtocolConfig,
     description:
-      'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.',
+      'Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {"idealab": "openai"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry. New OpenAI configurations map to openai and select wireApi per model; released openai-responses mappings remain readable.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
   },
@@ -3130,6 +3130,18 @@ const SETTINGS_SCHEMA = {
           { value: 'large', label: 'Large (under 50 agents)' },
           { value: 'unrestricted', label: 'Unrestricted (no guideline)' },
         ],
+      },
+      workflowNameOnly: {
+        type: 'boolean',
+        label: 'Named Workflows Only',
+        category: 'Tools',
+        // The Workflow tool builds its description and parameter schema from
+        // this once, while the tool registry is built.
+        requiresRestart: true,
+        default: false,
+        description:
+          'Restrict the model to running named workflows: saved workflows and the workflows extensions ship, called by name. The model cannot run an inline script or a script path, and a running script cannot nest one by path, so every run the model starts can be matched by a Workflow(name:...) permission rule. It does not replace an approval policy: the model can still save a new workflow file and run it by name, which an approval rule scoped to specific names or script digests will ask about. Runs a host starts over ACP (run-saved, run-script, retry, rerun) are not restricted. QWEN_CODE_WORKFLOW_NAME_ONLY=1 turns it on too. A workspace may set this to true only.',
+        showInDialog: true,
       },
       truncateToolOutputThreshold: {
         type: 'number',
