@@ -7,11 +7,36 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import type { ValidatedGoalEvidenceRecord } from './goal-evidence.js';
-import type { GoalTerminalProposal } from './goal-protocol.js';
+import type { GoalEvidenceProvenance } from './goal-evidence.js';
+import type {
+  GoalEvidenceProofKind,
+  GoalTerminalProposal,
+} from './goal-protocol.js';
 
 const GOAL_VERIFIER_TIMEOUT_MS = 30_000;
-const GOAL_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
+export const GOAL_VERIFIER_REQUEST_BYTE_LIMIT = 256_000;
+
+/**
+ * How the verifier's timeout should grow with its request: the base covers
+ * a small request, and each further 32 kB buys more time, up to the
+ * streamed side query's own lifetime. A window of a hundred tool results is
+ * a sixty-thousand-token prompt, and thirty seconds is not enough for every
+ * model to read it. Not applied by {@link createGoalVerifier} yet; the
+ * runtime adopts it together with the evidence window.
+ */
+const GOAL_VERIFIER_TIMEOUT_STEP_BYTES = 32_768;
+const GOAL_VERIFIER_TIMEOUT_STEP_MS = 15_000;
+const GOAL_VERIFIER_TIMEOUT_MAX_MS = 180_000;
+
+/** The timeout a request of `byteLength` bytes should get when none is configured. */
+export function goalVerifierTimeoutMs(byteLength: number): number {
+  return Math.min(
+    GOAL_VERIFIER_TIMEOUT_MAX_MS,
+    GOAL_VERIFIER_TIMEOUT_MS +
+      Math.ceil(byteLength / GOAL_VERIFIER_TIMEOUT_STEP_BYTES) *
+        GOAL_VERIFIER_TIMEOUT_STEP_MS,
+  );
+}
 const MAX_VERIFIER_REASON_LENGTH = 2_000;
 
 const GOAL_VERIFIER_SCHEMA = {
@@ -40,7 +65,17 @@ The runtime sends this request only after successfully executing update_goal and
 
 Return exactly one JSON object with keys "decision" and "reason". decision must be "accept" or "reject". Include no markdown fence, preamble, extra key, or commentary.`;
 
-export type GoalVerifierEvidenceRecord = ValidatedGoalEvidenceRecord;
+/**
+ * One transcript record as the verifier receives it. A catalog record
+ * (`ValidatedGoalEvidenceRecord`) satisfies it; its preview is never sent.
+ */
+export interface GoalVerifierEvidenceRecord {
+  uuid: string;
+  provenance: GoalEvidenceProvenance;
+  turnId: string;
+  proofKind: GoalEvidenceProofKind;
+  content: string;
+}
 
 interface GoalVerifierInputBase {
   goal: {
@@ -51,6 +86,10 @@ interface GoalVerifierInputBase {
   currentTurnId?: string;
   evidence: readonly GoalVerifierEvidenceRecord[];
   currentDeliveredOutput?: readonly string[];
+  /** The Goal turns `evidence` was drawn from, oldest first (window input). */
+  evidenceTurnIds?: readonly string[];
+  /** Eligible records the window's byte budget left out (window input). */
+  omitted?: number;
 }
 
 export type GoalVerifierInput = GoalVerifierInputBase &
@@ -88,8 +127,32 @@ export class GoalVerifierInputTooLargeError extends Error {
   }
 }
 
+/**
+ * Serialized bytes of the request everything but the evidence occupies, so
+ * a caller can size the evidence window to what is actually left of
+ * {@link GOAL_VERIFIER_REQUEST_BYTE_LIMIT}. Measured on the real payload,
+ * escaping included, with the evidence array empty.
+ */
+export function measureGoalVerifierEnvelopeBytes(
+  input: GoalVerifierInput,
+): number {
+  return Buffer.byteLength(
+    JSON.stringify(verifierPayload({ ...input, evidence: [] })),
+    'utf8',
+  );
+}
+
 function verifierContents(input: GoalVerifierInput): Content[] {
-  const payload = {
+  const text = JSON.stringify(verifierPayload(input));
+  const byteLength = Buffer.byteLength(text, 'utf8');
+  if (byteLength > GOAL_VERIFIER_REQUEST_BYTE_LIMIT) {
+    throw new GoalVerifierInputTooLargeError(byteLength);
+  }
+  return [{ role: 'user', parts: [{ text }] }];
+}
+
+function verifierPayload(input: GoalVerifierInput) {
+  return {
     goal: {
       goalId: input.goal.goalId,
       revision: input.goal.revision,
@@ -114,16 +177,14 @@ function verifierContents(input: GoalVerifierInput): Content[] {
     ...(!input.currentTurnId && input.currentDeliveredOutput
       ? { currentDeliveredOutput: [...input.currentDeliveredOutput] }
       : {}),
+    ...(input.evidenceTurnIds
+      ? { evidenceTurnIds: [...input.evidenceTurnIds] }
+      : {}),
+    ...(input.omitted ? { omitted: input.omitted } : {}),
     ...(input.proposal.status === 'blocked'
       ? { blockedPolicy: input.blockedPolicy }
       : {}),
   };
-  const text = JSON.stringify(payload);
-  const byteLength = Buffer.byteLength(text, 'utf8');
-  if (byteLength > GOAL_VERIFIER_REQUEST_BYTE_LIMIT) {
-    throw new GoalVerifierInputTooLargeError(byteLength);
-  }
-  return [{ role: 'user', parts: [{ text }] }];
 }
 
 export function parseGoalVerifierText(text: string): GoalVerificationResult {

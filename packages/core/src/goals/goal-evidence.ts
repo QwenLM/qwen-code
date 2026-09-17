@@ -165,7 +165,7 @@ interface EvidenceAnalysis {
   catalogBytes: number;
 }
 
-interface ParsedGoalContext {
+export interface ParsedGoalContext {
   goalId: string;
   revision: number;
   turnId: string;
@@ -737,7 +737,7 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
   };
 }
 
-function collectLineageTurnIds(
+export function collectLineageTurnIds(
   input: GoalEvidenceContext,
   cursorIndex: number,
 ): string[] {
@@ -1042,7 +1042,7 @@ function catalogEvidence(
   };
 }
 
-function coherentEvidenceProvenance(
+export function coherentEvidenceProvenance(
   record: GoalEvidenceRecord,
 ): GoalEvidenceProvenance | undefined {
   if (record.type === 'system') return undefined;
@@ -1121,7 +1121,7 @@ function capCheckpointContent(content: string): string {
   return `${content.slice(0, cutoff)}${CHECKPOINT_CONTENT_TRUNCATION_MARKER}`;
 }
 
-function evidenceContent(
+export function evidenceContent(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
 ): string {
@@ -1250,7 +1250,7 @@ function summarizeJsonValue(
   );
 }
 
-function proofKindOf(
+export function proofKindOf(
   provenance: GoalEvidenceProvenance,
 ): GoalEvidenceProofKind {
   if (provenance === 'real_user') return 'user_input';
@@ -1258,7 +1258,9 @@ function proofKindOf(
   return 'external_fact';
 }
 
-function parseGoalContext(value: unknown): ParsedGoalContext | undefined {
+export function parseGoalContext(
+  value: unknown,
+): ParsedGoalContext | undefined {
   if (!isRecord(value)) return undefined;
   if (
     !hasOnlyKeys(value, ['goalId', 'revision', 'turnId']) ||
@@ -1277,7 +1279,7 @@ function parseGoalContext(value: unknown): ParsedGoalContext | undefined {
   };
 }
 
-function claimsGoalRevision(value: unknown, goal: GoalRecord): boolean {
+export function claimsGoalRevision(value: unknown, goal: GoalRecord): boolean {
   if (!isRecord(value)) return false;
   return value['goalId'] === goal.goalId && value['revision'] === goal.revision;
 }
