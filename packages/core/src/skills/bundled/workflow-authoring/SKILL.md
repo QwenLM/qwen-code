@@ -87,7 +87,7 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
+`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools?, tools? })`
 
 - `stepId` (string, ≤128 chars) — optional caller node ID; does not affect caching. Also accepted in `workflow()` options.
 - `label` (string) — display name in run views and failures.
@@ -167,13 +167,25 @@ say explicitly what each one should read and whether it may edit files.
   because it would have no way to return its result. The resume cache key
   depends on which tools are denied, not on their order or duplicates, and not
   on whether a built-in tool is named by its tool name or its display name.
+- `tools` (string[]) — the only tools this agent may be given; it narrows and
+  never brings back a tool the floor below or a deny takes away. Name tools
+  exactly: a built-in by tool or display name, an MCP tool by the name the model
+  sees (`mcp__<server>__<tool>`). Patterns (`'*'`, `mcp__<server>`,
+  `mcp__<server>__*`), `exec` and an empty list reject the call; in code mode
+  the agent keeps `exec`, which can call only the listed tools. An entry that
+  names no tool, such as `'Bash'`, resolves the call to null with the reason
+  recorded, and so does a list that shares no tool with the `agentType`'s own
+  allowlist or whose every tool is denied. A `schema` agent is also given
+  `structured_output`. A correctly named tool this session does not have is
+  simply not given, as with an `agentType` allowlist. Built-in spellings, order
+  and duplicates do not change the resume key; other spellings do.
 
 Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
-EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType`. A
-subagent therefore cannot fan out further and cannot ask anyone anything: the
-script owns all fan-out, and every ambiguity has to be resolved in the prompt
-it is given. Never ask a subagent to spawn its own verifiers — dispatch them
-from the script.
+EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType` or
+their `tools`. A subagent therefore cannot fan out further and cannot ask anyone
+anything: the script owns all fan-out, and every ambiguity has to be resolved in
+the prompt it is given. Never ask a subagent to spawn its own verifiers —
+dispatch them from the script.
 
 ## What agent() returns
 

@@ -202,13 +202,31 @@ describe('bundled workflow-authoring skill', () => {
     ['A different effort is a different resume cache key'],
     // disallowedTools only narrows, names what it accepts, and a schema agent
     // cannot deny its answer.
-    ['stallMs?, disallowedTools? })'],
+    ['stallMs?, disallowedTools?, tools? })'],
     ['never re-enable one'],
     ['`mcp__<server>__*`'],
     ["such as `'Bash'`, resolves the call to null"],
     ['include `structured_output` resolves to null'],
     ['not on their order or duplicates'],
     ['named by its tool name or its display name'],
+    // tools narrows to exact names, refuses patterns and exec, and fails the
+    // call rather than dispatching an agent that could only spend its turn.
+    ['never brings back a tool the floor below or a deny takes away'],
+    ['an MCP tool by the name the model sees'],
+    [
+      "Patterns (`'*'`, `mcp__<server>`, `mcp__<server>__*`), `exec` and an empty list reject the call",
+    ],
+    ['the agent keeps `exec`, which can call only the listed tools'],
+    ["An entry that names no tool, such as `'Bash'`"],
+    [
+      "shares no tool with the `agentType`'s own allowlist or whose every tool is denied",
+    ],
+    ['also given `structured_output`'],
+    ['is simply not given, as with an `agentType` allowlist'],
+    [
+      'Built-in spellings, order and duplicates do not change the resume key; other spellings do',
+    ],
+    ['whatever their `agentType` or their `tools`'],
     // What the disallowed-tool floor means for a script. The tools themselves
     // are checked against the orchestrator's own list below.
     ['cannot fan out further'],
