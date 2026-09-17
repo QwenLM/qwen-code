@@ -236,6 +236,59 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.workflowName).toBe('audit');
   });
 
+  // tools.workflowNameOnly reaches a running script: nesting by path is
+  // refused like a scriptPath call, and nesting by name still resolves.
+  it('refuses a nested workflow({scriptPath}) in a name-only session', async () => {
+    for (const nameOnly of [true, false]) {
+      const { config, registry } = configWithRegistry();
+      Object.assign(config, { isWorkflowNameOnly: () => nameOnly });
+      stubStorage(config, await makeStorageRoot());
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue({
+        name: 'audit',
+        scriptPath: '/saved/audit.js',
+        script: "return 'nested';",
+        savedWorkflowName: 'audit',
+      });
+
+      const byPath = await WorkflowRunner.start({
+        config,
+        script: "return await workflow({ scriptPath: '/saved/audit.js' });",
+        args: undefined,
+        signal: new AbortController().signal,
+        dispatch: async () => 'unused',
+      });
+      const pathSettlement = await byPath.completion;
+      if (nameOnly) {
+        expect(pathSettlement.ok).toBe(false);
+        expect(!pathSettlement.ok && pathSettlement.message).toContain(
+          "workflow({scriptPath}): this session restricts workflows to named workflows (tools.workflowNameOnly) — nest with workflow('<name>') instead.",
+        );
+        expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+        expect(registry.get(byPath.runId)?.nameOnly).toBe(true);
+      } else {
+        expect(pathSettlement.ok && pathSettlement.outcome.result).toBe(
+          'nested',
+        );
+        expect(registry.get(byPath.runId)).not.toHaveProperty('nameOnly');
+      }
+
+      const byName = await WorkflowRunner.start({
+        config,
+        script: "return await workflow('audit');",
+        args: undefined,
+        signal: new AbortController().signal,
+        dispatch: async () => 'unused',
+      });
+      const nameSettlement = await byName.completion;
+      expect(nameSettlement.ok && nameSettlement.outcome.result).toBe('nested');
+      expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledWith(
+        'audit',
+        config,
+      );
+    }
+  });
+
   async function generatedReview(script: string) {
     const { config, registry } = configWithRegistry();
     const root = await makeStorageRoot();

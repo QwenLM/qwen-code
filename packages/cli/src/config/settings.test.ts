@@ -3806,6 +3806,54 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('named-workflows-only lock scope handling', () => {
+    it('honors a workspace that turns the lock on', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowNameOnly: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(false);
+    });
+
+    it('drops, with a warning, a workspace that would turn an operator lock off', () => {
+      // A cloned repository must not let the model run scripts in a session
+      // its operator locked to named workflows.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowNameOnly: true } });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              tools: { workflowNameOnly: false, useRipgrep: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      // ...while other workspace tool settings still merge.
+      expect(settings.merged.tools?.useRipgrep).toBe(false);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe('cross-session settings scope handling', () => {
     it('should honor the cross-session keys from user scope', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);

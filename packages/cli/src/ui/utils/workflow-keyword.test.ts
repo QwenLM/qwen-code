@@ -27,6 +27,10 @@ interface StubOptions {
   recordedSurface?: WorkflowAuthoringSurface;
   /** What a live re-derivation would say now. */
   skillEnabledNow?: boolean;
+  /** What the Workflow tool instance recorded about the name-only lock. */
+  recordedNameOnly?: boolean;
+  /** What the config says about the lock now. */
+  nameOnlyNow?: boolean;
 }
 
 function stubConfig(options: StubOptions = {}): Config {
@@ -35,8 +39,11 @@ function stubConfig(options: StubOptions = {}): Config {
     deferred = [],
     recordedSurface,
     skillEnabledNow = true,
+    recordedNameOnly,
+    nameOnlyNow = false,
   } = options;
   return {
+    isWorkflowNameOnly: () => nameOnlyNow,
     getSkillManager: () => ({}),
     getDisabledSkillLevels: () => new Set(),
     isSkillEnabled: () => skillEnabledNow,
@@ -47,7 +54,12 @@ function stubConfig(options: StubOptions = {}): Config {
       isDeferredToolRevealed: () => false,
       getTool: (name: string) =>
         name === ToolNames.WORKFLOW && recordedSurface
-          ? { authoringSurface: recordedSurface }
+          ? {
+              authoringSurface: recordedSurface,
+              ...(recordedNameOnly !== undefined
+                ? { nameOnly: recordedNameOnly }
+                : {}),
+            }
           : undefined,
     }),
   } as unknown as Config;
@@ -217,6 +229,42 @@ describe('buildWorkflowKeywordPrefix', () => {
       }
     },
   );
+
+  // In a name-only session the model cannot run a script it writes, so the
+  // reminder must not tell it to author one — and, like the shape, the lock is
+  // read from the Workflow tool that was built, falling back to the config.
+  it.each([
+    [
+      'recorded by the tool',
+      { recordedSurface: 'withheld', recordedNameOnly: true },
+    ],
+    ['from the config before the tool exists', { nameOnlyNow: true }],
+  ] as const)(
+    'steers toward a named workflow in a name-only session: %s',
+    (_case, options) => {
+      const prefix = buildWorkflowKeywordPrefix(
+        stubConfig(options),
+        'run a workflow',
+      );
+      expect(prefix).toContain(
+        'This session runs named workflows only: if a saved or extension workflow fits this request, run it with the Workflow tool as { name, args }, and do not write a workflow script.',
+      );
+      expect(prefix).not.toContain('author a script');
+      expect(prefix).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
+    },
+  );
+
+  it('keeps the authoring notice when the recorded tool is unlocked', () => {
+    const prefix = buildWorkflowKeywordPrefix(
+      stubConfig({
+        recordedSurface: 'pointer',
+        recordedNameOnly: false,
+        nameOnlyNow: true,
+      }),
+      'run a workflow',
+    );
+    expect(prefix).toContain('author a script');
+  });
 
   it('derives the shape when the Workflow tool is not instantiated yet', () => {
     const prefix = buildWorkflowKeywordPrefix(stubConfig(), 'run a workflow');

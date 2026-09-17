@@ -89,6 +89,9 @@ export function buildWorkflowSteeringNotice(
   if (options.revealWorkflowTool) {
     parts.push(toolSearchRevealSentence(ToolDisplayNames.WORKFLOW));
   }
+  // No script is written in a name-only session, so there is no reference to
+  // load, whatever shape the description would otherwise have.
+  if (options.nameOnly) return parts.join(' ');
   if (surface === 'pointer' || surface === 'pointer-via-tool-search') {
     parts.push(
       `Before writing a script, load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` ` +

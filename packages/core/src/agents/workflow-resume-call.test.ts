@@ -40,6 +40,41 @@ describe('workflow resume call', () => {
     expect(serializeResumeArgs(undefined)).toBeNull();
   });
 
+  // A name-only session refuses `scriptPath`, so the call the model is handed
+  // has to name the workflow — and a run with no name has no call to hand it.
+  it('names the workflow in a name-only session, and offers nothing without a name', () => {
+    const target = {
+      runId: 'wf_0123',
+      scriptPath: '/proj/.qwen/workflows/audit.js',
+      workflowName: 'gcp:audit',
+      args: { scope: 'src' },
+    };
+
+    expect(buildResumeCall({ ...target, nameOnly: true })).toBe(
+      'Workflow({ name: "gcp:audit", resumeFromRunId: "wf_0123", args: {"scope":"src"} })',
+    );
+    expect(
+      buildResumeCall({ ...target, workflowName: undefined, nameOnly: true }),
+    ).toBeNull();
+    // Outside the lock the name is not used, even when the run has one: a
+    // grant written for the path keeps matching the resume.
+    expect(buildResumeCall(target)).toBe(
+      'Workflow({ scriptPath: "/proj/.qwen/workflows/audit.js", resumeFromRunId: "wf_0123", args: {"scope":"src"} })',
+    );
+  });
+
+  it('keeps a name-only resume call on one sanitized line', () => {
+    const call = buildResumeCall({
+      runId: 'wf_0123',
+      workflowName: 'audit\n\u001b[31m',
+      nameOnly: true,
+    });
+
+    expect(call).toBe(
+      'Workflow({ name: "audit", resumeFromRunId: "wf_0123" })',
+    );
+  });
+
   it('preserves background mode only when requested by the surface', () => {
     const call = buildResumeCall({
       runId: 'wf_0123',

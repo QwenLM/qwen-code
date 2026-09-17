@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildWorkflowToolDescription, WorkflowTool } from './workflow.js';
+import {
+  buildWorkflowToolDescription,
+  WORKFLOW_NAME_ONLY_SECTION,
+  WorkflowTool,
+} from './workflow.js';
 import {
   buildWorkflowSizeGuidelineParagraph,
   resolveWorkflowSizeGuidelineSetting,
@@ -2913,6 +2917,158 @@ describe('WorkflowTool — extension workflow labels', () => {
 
 // The size guideline is part of what the model plans a run around, so every
 // description shape carries it — and none does when the user removed it.
+// `tools.workflowNameOnly`: the model may run named workflows only. The lock
+// sits on `build`, the entry every model and client call takes, and not on the
+// parameter validation the host's own runs share.
+describe('WorkflowTool — name-only sessions', () => {
+  function lockedConfig(extra: Record<string, unknown> = {}): Config {
+    return {
+      ...fakeConfig(),
+      isWorkflowNameOnly: () => true,
+      ...extra,
+    } as unknown as Config;
+  }
+
+  it.each([
+    [{ script: 'return 1' }, 'script'],
+    [{ scriptPath: '/proj/.qwen/workflows/audit.js' }, 'scriptPath'],
+    [{ script: 'return 1', resumeFromRunId: 'wf_0123' }, 'script'],
+    [{ script: '' }, 'script'],
+    [{ name: 'audit', scriptPath: '/w/a.js' }, 'scriptPath'],
+  ])('refuses %j, naming %s', (params, field) => {
+    const tool = new WorkflowTool(lockedConfig());
+    let message = '';
+    try {
+      tool.build(params as never);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(
+      `WorkflowTool: this session restricts the Workflow tool to named workflows (tools.workflowNameOnly). Not allowed here: ${field}. Invoke as {name, args} only.`,
+    );
+  });
+
+  it('names both fields when a call carries both', () => {
+    expect(() =>
+      new WorkflowTool(lockedConfig()).build({
+        script: 'return 1',
+        scriptPath: '/w/a.js',
+      } as never),
+    ).toThrow('Not allowed here: script, scriptPath.');
+  });
+
+  it('accepts a name, and a name resuming a run', () => {
+    const tool = new WorkflowTool(lockedConfig());
+    expect(tool.build({ name: 'audit' }).getDescription()).toBe(
+      'Run saved workflow (audit)',
+    );
+    expect(() =>
+      tool.build({ name: 'audit', resumeFromRunId: 'wf_0123' }),
+    ).not.toThrow();
+  });
+
+  it('gives the model a schema without script or scriptPath, and name not required', () => {
+    const tool = new WorkflowTool(lockedConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: Record<string, { description?: string }>;
+      required?: string[];
+    };
+    expect(schema.properties).not.toHaveProperty('script');
+    expect(schema.properties).not.toHaveProperty('scriptPath');
+    expect(schema.required).toBeUndefined();
+    expect(paramDescription(tool, 'name')).toContain(
+      'This session runs named workflows only',
+    );
+    expect(paramDescription(tool, 'resumeFromRunId')).toContain(
+      'pass the same `name` and `args`',
+    );
+    expect(paramDescription(tool, 'resumeFromRunId')).not.toContain(
+      'scriptPath',
+    );
+  });
+
+  it('describes the lock and points at no authoring reference', () => {
+    const tool = new WorkflowTool(lockedConfig());
+    expect(tool.nameOnly).toBe(true);
+    expect(tool.authoringSurface).toBe('withheld');
+    expect(tool.description).toContain(WORKFLOW_NAME_ONLY_SECTION);
+    expect(tool.description).toContain('**Only on an explicit request**');
+    expect(tool.description).toContain('**Runtime**');
+    expect(tool.description).not.toContain(
+      `load the \`${WORKFLOW_AUTHORING_SKILL_NAME}\` skill`,
+    );
+    // The lock follows the decision and comes before the runtime facts.
+    expect(tool.description.indexOf(WORKFLOW_NAME_ONLY_SECTION)).toBeLessThan(
+      tool.description.indexOf('**Runtime**'),
+    );
+    // Every surface collapses to the same text under the lock.
+    for (const surface of [
+      'pointer',
+      'pointer-via-tool-search',
+      'withheld',
+      'inline',
+    ] as const) {
+      expect(
+        buildWorkflowToolDescription(surface, undefined, null, {
+          nameOnly: true,
+        }),
+      ).toBe(
+        buildWorkflowToolDescription('withheld', undefined, null, {
+          nameOnly: true,
+        }),
+      );
+    }
+  });
+
+  it('leaves an unlocked session exactly as it was', () => {
+    const unlocked = new WorkflowTool({
+      ...fakeConfig(),
+      isWorkflowNameOnly: () => false,
+    } as unknown as Config);
+    const baseline = new WorkflowTool(fakeConfig());
+    expect(unlocked.nameOnly).toBe(false);
+    expect(unlocked.description).toBe(baseline.description);
+    expect(unlocked.schema).toEqual(baseline.schema);
+    expect(unlocked.authoringSurface).toBe(baseline.authoringSurface);
+    expect(() => unlocked.build({ script: 'return 1' })).not.toThrow();
+  });
+
+  // The host is not the model: ACP run-script, run-saved, retry and rerun go
+  // through buildSessionOwnedBackground and must keep working under the lock.
+  it("runs the host's own script-backed runs", async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'workflow-name-only-host-'),
+    );
+    const registry = new WorkflowRunRegistry();
+    registry.setCompletionCallback(vi.fn());
+    const config = lockedConfig({
+      storage: new Storage(path.join(runtimeDir, 'project'), runtimeDir),
+      isInteractive: () => false,
+      getWorkflowRunRegistry: () => registry,
+      getSkipWorkflowUsageWarning: () => true,
+    });
+
+    try {
+      const tool = new WorkflowTool(config, { dispatch: async () => 'unused' });
+      expect(() =>
+        tool.buildSessionOwnedBackground({ scriptPath: '/w/a.js' }),
+      ).not.toThrow();
+      const result = await tool
+        .buildSessionOwnedBackground({ script: `return { status: 'ready' };` })
+        .execute(new AbortController().signal);
+
+      expect(result.workflowRunId).toMatch(/^wf_[0-9a-f]+$/);
+      await vi.waitFor(() =>
+        expect(registry.get(result.workflowRunId!)?.status).toBe('completed'),
+      );
+      expect(registry.get(result.workflowRunId!)?.nameOnly).toBe(true);
+      await registry.getHandle(result.workflowRunId!)?.completion;
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('WorkflowTool size guideline', () => {
   it('states the default guideline after the runtime facts', () => {
     const { description } = new WorkflowTool(fakeConfig());
@@ -3075,6 +3231,32 @@ describe('WorkflowTool — saved workflows by name', () => {
     expect(details.prompt).toContain(
       '  parallel, 2 agent() call sites — "audit src", "audit docs"',
     );
+  });
+
+  it('hands back a resume call by name in a name-only session', async () => {
+    await saveWorkflow('nightly-audit', APPROVED);
+    for (const nameOnly of [true, false]) {
+      const invocation = new WorkflowTool(
+        Object.assign(nameConfig(), {
+          isWorkflowNameOnly: () => nameOnly,
+        }),
+      ).build({ name: 'nightly-audit' });
+      await invocation.getDefaultPermission();
+      const result = await invocation.execute(new AbortController().signal);
+      const trailer = (result.llmContent as Array<{ text: string }>)
+        .map((part) => part.text)
+        .join('\n');
+      if (nameOnly) {
+        expect(trailer).toMatch(
+          /resume: Workflow\(\{ name: "nightly-audit", resumeFromRunId: "wf_[0-9a-f]+" \}\)/,
+        );
+        expect(trailer).not.toContain('resume: Workflow({ scriptPath');
+      } else {
+        expect(trailer).toContain(
+          `resume: Workflow({ scriptPath: ${JSON.stringify(result.scriptPath)}, resumeFromRunId: "`,
+        );
+      }
+    }
   });
 
   it('runs the content that was approved, not a later edit', async () => {

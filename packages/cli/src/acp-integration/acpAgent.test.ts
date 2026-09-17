@@ -13240,6 +13240,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         workflowStepId: true,
         runSavedArgs: true,
         runScript: true,
+        nameOnly: false,
       },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
@@ -13353,6 +13354,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       lastSessionMock?.buildAvailableCommandsSnapshot,
     ).toHaveBeenCalledOnce();
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
+
+    // A host reads the lock from here to know the model is restricted while
+    // its own run-script still starts runs.
+    Object.assign(innerConfig, { isWorkflowNameOnly: () => true });
+    mockListSavedWorkflows.mockResolvedValueOnce([]);
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSupportedCommands, {
+        sessionId,
+      }),
+    ).resolves.toMatchObject({
+      workflowToolFeatures: { runScript: true, nameOnly: true },
+    });
 
     dateNowSpy.mockRestore();
     mockConnectionState.resolve();
