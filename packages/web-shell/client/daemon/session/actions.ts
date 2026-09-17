@@ -34,6 +34,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   DaemonHttpError,
+  parseDaemonBackgroundTurn,
   DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
@@ -41,7 +42,11 @@ import {
   isStaleBranchPointError,
   type PromptResult,
 } from '@qwen-code/sdk/daemon';
-import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
+import {
+  extractHttpStatus,
+  isInvalidClientIdError,
+  isAcpChildCapacityError,
+} from './httpErrors.js';
 import {
   getPlanExecutionMode,
   mapProviderStatus,
@@ -225,6 +230,7 @@ export interface CreateDaemonSessionActionsArgs {
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getConnection: () => DaemonConnectionState;
+  getEventDetailMode: () => 'full' | 'summary';
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
   restartEventStream: (sessionId: string) => void;
@@ -327,6 +333,9 @@ export function getConnectionAfterSessionClear(
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
+    delete next.backgroundTurn;
+    delete next.finishedBackgroundTurnId;
+    delete next.backgroundTurnObservedAt;
     delete next.standaloneSession;
     // Drop the session-scoped raw snapshots (both carry the cleared
     // sessionId), which also makes the effect's canReuseSessionMetadata
@@ -398,6 +407,7 @@ export function createDaemonSessionActions({
   createDetachedStandaloneSession,
   getDefaultSessionContext,
   getConnection,
+  getEventDetailMode,
   hasSessionActivePrompt,
   resetCurrentSessionActivePrompt,
   restartEventStream,
@@ -988,6 +998,9 @@ export function createDaemonSessionActions({
           clientId: undefined,
           displayName: undefined,
           titleSource: undefined,
+          backgroundTurn: undefined,
+          finishedBackgroundTurnId: undefined,
+          backgroundTurnObservedAt: undefined,
           goalState: undefined,
           error: undefined,
           errorStatus: undefined,
@@ -1043,10 +1056,46 @@ export function createDaemonSessionActions({
         workspaceCwd: sessionRef.current?.workspaceCwd,
         sessionId: sessionRef.current?.sessionId,
       },
+      backgroundTurn,
+      requestStartedAt,
     ) {
+      backgroundTurn = parseDaemonBackgroundTurn(backgroundTurn);
+      const connection = getConnection();
+      const backstopSession = sessionRef.current;
+      if (
+        connection.sessionId === owner.sessionId &&
+        backstopSession?.sessionId === owner.sessionId &&
+        backstopSession?.workspaceCwd === owner.workspaceCwd &&
+        requestStartedAt !== undefined &&
+        requestStartedAt <= (connection.backgroundTurnObservedAt ?? -Infinity)
+      )
+        return;
       const previous = daemonActivePromptRef.current;
       daemonActivePromptRef.current = { active, ...owner };
-      const backstopSession = sessionRef.current;
+      if (
+        active !== undefined &&
+        backstopSession?.sessionId === owner.sessionId &&
+        backstopSession?.workspaceCwd === owner.workspaceCwd
+      ) {
+        setConnection((current) => {
+          const nextBackgroundTurn =
+            current.finishedBackgroundTurnId === backgroundTurn?.turnId
+              ? undefined
+              : backgroundTurn;
+          return current.backgroundTurn === nextBackgroundTurn
+            ? current
+            : {
+                ...current,
+                backgroundTurn: nextBackgroundTurn,
+                backgroundTurnObservedAt:
+                  requestStartedAt ?? current.backgroundTurnObservedAt,
+                finishedBackgroundTurnId:
+                  current.backgroundTurn && !nextBackgroundTurn
+                    ? current.backgroundTurn.turnId
+                    : current.finishedBackgroundTurnId,
+              };
+        });
+      }
       // A fresh `false` is a settle signal even when this provider has not seen
       // the preceding `true`; that is how a restored prompt is released after
       // the first post-attach live-state poll. The bridge withholds cached
@@ -1088,7 +1137,12 @@ export function createDaemonSessionActions({
         return;
       }
       const settledRestoredPrompt = settleRestoredActivePrompt();
-      if (!lostAuthority && !settledRestoredPrompt) return;
+      if (
+        !lostAuthority &&
+        !settledRestoredPrompt &&
+        !connection.backgroundTurn
+      )
+        return;
       // Commit the buffered batch before reading the store. Without this the
       // read races the 16ms window: a chunk burst still buffered at flip time
       // lands *after* the `assistant.done` below, and the reducer mints a fresh
@@ -1133,7 +1187,10 @@ export function createDaemonSessionActions({
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       setPromptStatus('waiting');
       const ctrl = new AbortController();
-      activePromptsRef.current.set(sessionId, { controller: ctrl });
+      activePromptsRef.current.set(sessionId, {
+        controller: ctrl,
+        replayedTurnEvents: new Map(),
+      });
       try {
         // Normalize images once and pass the same array to both calls
         const normalizedImages: Array<{ data: string; mimeType: string }> = (
@@ -1218,6 +1275,7 @@ export function createDaemonSessionActions({
         }
         const promptRequest: Record<string, unknown> = {
           prompt: uploaded.content,
+          eventDetailMode: getEventDetailMode(),
         };
         options?.onAdmissionStarted?.();
         if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
@@ -1268,6 +1326,8 @@ export function createDaemonSessionActions({
             optimisticBlockId = store.getSnapshot().blocks.at(-1)?.id;
           }
         }
+        const active = activePromptsRef.current.get(sessionId);
+        if (active?.controller === ctrl) active.promptId = accepted.promptId;
         onPromptAdmitted?.(session, {
           promptId: accepted.promptId,
           label: text,
@@ -1537,6 +1597,7 @@ export function createDaemonSessionActions({
       }
       const promptRequest: Record<string, unknown> = {
         prompt: uploaded.content,
+        eventDetailMode: getEventDetailMode(),
       };
       if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
         promptRequest['_meta'] = {
@@ -2192,6 +2253,9 @@ export function createDaemonSessionActions({
             status: 'connected',
             sessionId: nextSession.sessionId,
             sessionContext: createdSessionContext,
+            backgroundTurn: undefined,
+            finishedBackgroundTurnId: undefined,
+            backgroundTurnObservedAt: undefined,
             goalState: undefined,
             ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
             workspaceCwd:
@@ -2307,6 +2371,9 @@ export function createDaemonSessionActions({
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
+        backgroundTurn: undefined,
+        finishedBackgroundTurnId: undefined,
+        backgroundTurnObservedAt: undefined,
         goalState: undefined,
         missingSession: false,
         error: undefined,
@@ -2742,10 +2809,10 @@ export function createDaemonSessionActions({
       try {
         const { onAdmissionStarted, ...requestOptions } = opts ?? {};
         onAdmissionStarted?.();
-        return await session.enqueueMidTurnMessage(
-          message,
-          opts ? requestOptions : undefined,
-        );
+        return await session.enqueueMidTurnMessage(message, {
+          ...requestOptions,
+          eventDetailMode: getEventDetailMode(),
+        });
       } catch (err) {
         if (opts?.messageId) throw err;
         // An abort is the designed settle-time cancel (the message stays in the
@@ -3483,7 +3550,9 @@ function dispatchActionError(
       severity: 'error',
       category: 'user_action',
       operation,
-      code: `daemon.${operation}.failed`,
+      code: isAcpChildCapacityError(error)
+        ? 'acp_child_capacity_exhausted'
+        : `daemon.${operation}.failed`,
       message: `${action}: ${message}`,
       debugMessage: message,
       recoverable: true,

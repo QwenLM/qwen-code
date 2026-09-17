@@ -1,4 +1,6 @@
 import './styles/globals.css';
+import { getSourceEntries } from './components/sources/sourceEntries';
+import { openSourceEntry } from './components/panels/SourcesSection';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
 import { TurnNotificationNavigationContext } from './daemon/session/turn-notification-context';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
@@ -240,6 +242,11 @@ import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { McpAppHostContext } from './mcpAppHostContext';
+import {
+  isItemExcluded,
+  isSettingExcluded,
+  type WebShellSettingsOptions,
+} from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -297,6 +304,7 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from './i18n';
+import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
@@ -396,6 +404,9 @@ import {
   type WebShellComposerApi,
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
+  type WebShellSource,
+  type WebShellSourceIconResolver,
+  type WebShellSourceReference,
   type ToolHeaderExtraRenderer,
   type UserMessageContentRenderer,
   type UserMessageContentParser,
@@ -1115,6 +1126,8 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Native settings-page presentation. Does not restrict commands or daemon access. */
+  settings?: WebShellSettingsOptions;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -1135,10 +1148,26 @@ export interface WebShellProps {
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
   onThemeChange?: (theme: WebShellTheme) => void;
+  /**
+   * Called when no `theme` prop was provided and the shell resolved a theme
+   * from the daemon's effective `ui.theme` setting. Unlike `onThemeChange`
+   * this is not a user action: a host that mirrors the theme onto document
+   * chrome (html class, `theme-color` meta) should follow it without
+   * persisting the value as its own preference, or the next settings edit
+   * would be shadowed by the stale copy.
+   */
+  onThemeResolved?: (theme: WebShellTheme) => void;
   /** UI language for the web-shell. Defaults to `?language=` or browser language. */
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
+  /**
+   * Called when no `language` prop was provided and the effective UI language
+   * changes without becoming a host opinion, including settings resolution and
+   * optimistic changes or rollbacks. Hosts may mirror document chrome but must
+   * not persist this value.
+   */
+  onLanguageResolved?: (language: WebShellLanguage) => void;
   /**
    * Product branding for the embedded shell. Replaces the daemon-resolved brand
    * wholesale when provided: a host that sets `brand` owns both the name and the
@@ -1193,6 +1222,8 @@ export interface WebShellProps {
   onWorkspaceFileOpen?: (path: string) => void;
   /** Open a completed Insight report in a host-native surface. */
   onInsightReportOpen?: (path: string) => void;
+  /** Open context usage details in the host instead of the built-in panel. */
+  onContextUsageOpen?: (sessionId: string) => void;
   /**
    * Controls which turn output cards appear below messages. Defaults to all.
    */
@@ -1337,6 +1368,8 @@ export interface WebShellProps {
   onComposerTagClick?: ComposerTagClickHandler;
   /** Custom renderer displayed after the final assistant message of each turn. */
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  sourceReferences?: readonly WebShellSourceReference[];
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
@@ -2991,8 +3024,10 @@ export function App({
   onSessionCreated,
   theme: providedTheme,
   onThemeChange,
+  onThemeResolved,
   language: providedLanguage,
   onLanguageChange,
+  onLanguageResolved,
   brand: providedBrand,
   onBrandResolved,
   className: externalClassName,
@@ -3022,6 +3057,8 @@ export function App({
   renderComposerTagTooltip,
   onComposerTagClick,
   renderAssistantTurnFooter,
+  getAssistantSourcesIcon,
+  sourceReferences,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
@@ -3032,6 +3069,7 @@ export function App({
   bottomStatusItems,
   chatMaxWidth,
   sidebar,
+  settings: settingsPresentation,
   header,
   rightPanel,
   environmentPanel,
@@ -3042,6 +3080,7 @@ export function App({
   onFileReviewOpen,
   onWorkspaceFileOpen,
   onInsightReportOpen,
+  onContextUsageOpen,
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
@@ -3289,6 +3328,8 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      getAssistantSourcesIcon,
+      sourceReferences,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -3319,6 +3360,8 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      getAssistantSourcesIcon,
+      sourceReferences,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
       renderComposerToolbarRight,
@@ -3444,13 +3487,15 @@ export function App({
         : undefined
       : connection.workspaceCwd;
   const {
-    hasActivePrompt: sessionHasActivePrompt,
+    hasActivePrompt: daemonHasActivePrompt,
     activeWorkState: sessionActiveWorkState,
   } = useDaemonSessionActivityBridge(
     workspace.client,
     activePromptWorkspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePrompt =
+    daemonHasActivePrompt || !!connection.backgroundTurn;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const trustedPrimaryWorkspaceCwd = useMemo(
@@ -4406,29 +4451,22 @@ export function App({
   const sessionAttachmentsRequestIdRef = useRef(0);
   const attachmentRetryCountRef = useRef(new Map<string, number>());
   const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
-  // Uploaded sources come from the daemon attachment store. Refresh on
-  // transcript updates while the panel is open, throttled during streaming.
+  // The source panel and turn footers share the attachment inventory.
+  // Refresh on transcript updates, throttled during streaming.
   const transcriptRevision = blockChangeSummary?.revision ?? 0;
   const sessionAttachmentsRequestEligibleRef = useRef(false);
   sessionAttachmentsRequestEligibleRef.current =
-    environmentPanelReachable &&
-    environmentSourcesEnabled &&
-    environmentPanelOpen &&
     connection.status === 'connected' &&
     Boolean(connection.sessionId && logicalSessionKey) &&
     connection.capabilities?.features.includes(
       SESSION_ATTACHMENT_LIST_FEATURE,
     ) === true;
   useEffect(() => {
-    const attachmentsSectionEnabled =
-      environmentPanelReachable && environmentSourcesEnabled;
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
       ) === true;
     if (
-      !attachmentsSectionEnabled ||
-      !environmentPanelOpen ||
       connection.status !== 'connected' ||
       !connection.sessionId ||
       !logicalSessionKey
@@ -4541,13 +4579,10 @@ export function App({
     connection.status,
     attachmentRefreshNonce,
     environmentPanelOpen,
-    environmentPanelReachable,
-    environmentPanelItems,
     logicalSessionKey,
     transcriptRevision,
     sessionActions,
     sessionAttachmentsOwner,
-    environmentSourcesEnabled,
     t,
   ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
@@ -5394,6 +5429,10 @@ export function App({
       sourceSessionActions?: DaemonSessionActions,
       closeWithPane = false,
     ) => {
+      if (onContextUsageOpen) {
+        onContextUsageOpen(sourceSessionId);
+        return;
+      }
       const tab: ArtifactPanelTab = {
         id: `context-usage:${sourceSessionId}`,
         kind: 'context_usage',
@@ -5415,7 +5454,16 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [getDefaultReviewPanelWidth, onContextUsageOpen, t],
+  );
+  const openCurrentContextUsagePanel = useCallback(() => {
+    if (connection.sessionId)
+      openContextUsagePanel(connection.sessionId, sessionActions);
+  }, [connection.sessionId, openContextUsagePanel, sessionActions]);
+  const openPaneContextUsagePanel = useCallback(
+    (sessionId: string, actions: DaemonSessionActions) =>
+      openContextUsagePanel(sessionId, actions, true),
+    [openContextUsagePanel],
   );
   const openAttachmentPanel = useCallback(
     (
@@ -5423,6 +5471,7 @@ export function App({
       workspaceCwd = connection.workspaceCwd,
       sourceSessionId = connection.sessionId,
       sourcePreview = false,
+      silentUnavailable = false,
     ) => {
       if (
         onWorkspaceFileOpen &&
@@ -5468,7 +5517,11 @@ export function App({
         };
         setArtifactPanelTabs((tabs) =>
           tabs.some((item) => item.id === tab.id)
-            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            ? tabs.map((item) =>
+                item.id === tab.id && item.kind === 'file'
+                  ? { ...tab, previewVersion: (item.previewVersion ?? 0) + 1 }
+                  : item,
+              )
             : [tab, ...tabs],
         );
         setActiveArtifactPanelTabId(tab.id);
@@ -5518,7 +5571,8 @@ export function App({
           })
           .catch((error: unknown) => {
             if (!owner.isCurrent()) return;
-            pushToast('error', formatError(error, 'Failed to preview file'));
+            if (!silentUnavailable)
+              pushToast('error', formatError(error, 'Failed to preview file'));
           });
         return;
       }
@@ -5811,6 +5865,29 @@ export function App({
                 workspaceCwd: tab.workspaceCwd,
               };
             }
+          }
+        }
+        if (!restored && tab.targetKind === 'subagent' && tab.taskId) {
+          const snapshot = await workspace.client.sessionTasks(
+            tab.sourceSessionId,
+          );
+          const task =
+            snapshot.sessionId === tab.sourceSessionId
+              ? snapshot.tasks.find(
+                  (item) => item.kind === 'agent' && item.id === tab.taskId,
+                )
+              : undefined;
+          if (task?.kind === 'agent') {
+            const rootTool = agentTaskAsToolCall(task);
+            restored = {
+              id: tab.id,
+              kind: 'subagent',
+              title: tab.title,
+              sessionId: tab.sourceSessionId,
+              rootToolCallId: rootTool.callId,
+              rootTool,
+              workspaceCwd: tab.workspaceCwd,
+            };
           }
         }
         if (!restored) {
@@ -6516,6 +6593,44 @@ export function App({
         onRightPanelOpen(request);
         return;
       }
+      if (request.kind === 'background_task') {
+        if (!request.sourceSessionId) return;
+        const turn = request.backgroundTurn;
+        const tab: ArtifactPanelTab =
+          turn.kind === 'workflow'
+            ? {
+                id: `workflow:${request.sourceSessionId}`,
+                kind: 'workflow',
+                title: request.title,
+                sessionId: request.sourceSessionId,
+              }
+            : {
+                id: request.id,
+                kind: 'pending',
+                title: request.title,
+                targetKind: turn.kind === 'agent' ? 'subagent' : turn.kind,
+                sourceSessionId: request.sourceSessionId,
+                rootToolCallId: turn.toolUseId,
+                taskId: turn.taskId,
+                workspaceCwd: request.workspaceCwd,
+              };
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+        if (tab.kind === 'pending') {
+          const existing = artifactPanelTabsRef.current.find(
+            (item) => item.id === tab.id,
+          );
+          if (!existing || existing.kind === 'pending')
+            void hydratePendingArtifactPanelTab(tab);
+        }
+        return;
+      }
       if (request.kind === 'review') {
         openReviewPanel(
           request.changes,
@@ -6571,6 +6686,8 @@ export function App({
           },
           request.workspaceCwd,
           request.sourceSessionId,
+          false,
+          request.silentUnavailable,
         );
         return;
       }
@@ -6664,6 +6781,7 @@ export function App({
     },
     [
       getDefaultReviewPanelWidth,
+      hydratePendingArtifactPanelTab,
       onFileReviewOpen,
       onRightPanelOpen,
       openReviewPanel,
@@ -7494,6 +7612,7 @@ export function App({
   }
   previousStreamingStateRef.current = streamingState;
   const activeTurnStartedAt = useMemo(() => {
+    if (connection.backgroundTurn) return connection.backgroundTurn.startedAt;
     if (streamingState === 'idle') return undefined;
     for (let i = displayMessages.length - 1; i >= 0; i--) {
       const message = displayMessages[i];
@@ -7502,7 +7621,7 @@ export function App({
       }
     }
     return localStreamingStartedAtRef.current;
-  }, [displayMessages, streamingState]);
+  }, [displayMessages, streamingState, connection.backgroundTurn]);
   const lastSubmittedPromptRef = useRef<string>('');
   const lastSubmittedImagesRef = useRef<PromptImage[] | undefined>(undefined);
   const lastSubmittedFilesRef = useRef<PromptFile[] | undefined>(undefined);
@@ -8211,6 +8330,9 @@ export function App({
   const [modelSettingScope, setModelSettingScope] = useState<
     'workspace' | 'user'
   >('workspace');
+  const settingsDialogKeyRef = useRef<string | undefined>(undefined);
+  const settingsPresentationRef = useRef(settingsPresentation);
+  settingsPresentationRef.current = settingsPresentation;
   const [showFallbacksDialog, setShowFallbacksDialog] = useState(false);
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
@@ -9854,11 +9976,13 @@ export function App({
       if (isAlreadyDispatched(error)) {
         return;
       }
-      const message = formatError(error, fallback);
+      const message = isAcpChildCapacityError(error)
+        ? t('daemon.capacity.exhausted')
+        : formatError(error, fallback);
       console.error('[web-shell]', message, error);
       pushToast('error', message);
     },
-    [pushToast],
+    [pushToast, t],
   );
   const sendPrompt = useCallback(
     async (
@@ -10796,13 +10920,18 @@ export function App({
         );
       }
       if (shouldToastNotice(notice)) {
-        pushToast(toastToneFromNotice(notice), notice.message);
+        pushToast(
+          toastToneFromNotice(notice),
+          notice.code === 'acp_child_capacity_exhausted'
+            ? t('daemon.capacity.exhausted')
+            : notice.message,
+        );
       } else if (notice.category !== 'lifecycle') {
         console.warn('[web-shell] daemon notice', notice);
       }
       dismissNotice(notice.id);
     }
-  }, [dismissNotice, notices, pushToast]);
+  }, [dismissNotice, notices, pushToast, t]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -10817,26 +10946,71 @@ export function App({
     lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId, connection.workspaceCwd]);
 
+  // A recap is one local annotation shared by both triggers: the latest request
+  // owns it, so a newer recap replaces the previous one instead of accumulating
+  // in the transcript. Each request writes under the generation it was issued
+  // with, so a slow answer cannot replace a newer recap.
+  const recapRequestRef = useRef(0);
+
+  const showRecapMessage = useCallback(
+    (
+      requestId: number,
+      content: string,
+      anchor?: {
+        messageId: string;
+        anchorAfterId?: string;
+        anchorIndex: number;
+      },
+    ) => {
+      // A superseded request must not write, but it must still drop the row it
+      // owns: an answer that never lands would otherwise strand the manual
+      // path's "Generating recap" placeholder in the transcript.
+      const ownMessageId = anchor?.messageId;
+      if (requestId !== recapRequestRef.current) {
+        if (ownMessageId) {
+          setRecapMessage((previous) =>
+            previous?.message.id === ownMessageId ? null : previous,
+          );
+        }
+        return;
+      }
+      const currentMessages = messagesRef.current;
+      setRecapMessage({
+        anchorAfterId: anchor
+          ? anchor.anchorAfterId
+          : currentMessages.at(-1)?.id,
+        anchorIndex: anchor ? anchor.anchorIndex : currentMessages.length,
+        message: {
+          id: ownMessageId ?? `local-recap-${nextRecapMessageIdRef.current++}`,
+          role: 'system',
+          content,
+          variant: 'info',
+          source: 'recap',
+        },
+      });
+    },
+    [],
+  );
+
   const runVisibleRecap = useCallback(() => {
     if (sessionWriteBlocked) return;
     if (!requireActiveSessionForLocalCommand()) return;
+    recapRequestRef.current += 1;
+    const requestId = recapRequestRef.current;
     const messageId = `local-recap-${nextRecapMessageIdRef.current++}`;
     const currentMessages = messagesRef.current;
-    const anchorIndex = currentMessages.length;
-    const anchorAfterId = currentMessages.at(-1)?.id;
+    const anchor = {
+      messageId,
+      anchorIndex: currentMessages.length,
+      anchorAfterId: currentMessages.at(-1)?.id,
+    };
     const sessionId = connection.sessionId;
     const workspaceCwd = connection.workspaceCwd;
-    setRecapMessage({
-      anchorAfterId,
-      anchorIndex,
-      message: {
-        id: messageId,
-        role: 'system',
-        content: `※ ${t('recap.label')}: ${t('recap.loading')}`,
-        variant: 'info',
-        source: 'recap',
-      },
-    });
+    showRecapMessage(
+      requestId,
+      `※ ${t('recap.label')}: ${t('recap.loading')}`,
+      anchor,
+    );
     sessionActions.recapSession().then(
       (result) => {
         if (
@@ -10844,19 +11018,13 @@ export function App({
           connectionRef.current.workspaceCwd !== workspaceCwd
         )
           return;
-        setRecapMessage({
-          anchorAfterId,
-          anchorIndex,
-          message: {
-            id: messageId,
-            role: 'system',
-            content: result.recap
-              ? `※ ${t('recap.label')}: ${result.recap}`
-              : t('recap.empty'),
-            variant: 'info',
-            source: 'recap',
-          },
-        });
+        showRecapMessage(
+          requestId,
+          result.recap
+            ? `※ ${t('recap.label')}: ${result.recap}`
+            : t('recap.empty'),
+          anchor,
+        );
       },
       (error: unknown) => {
         if (
@@ -10864,7 +11032,8 @@ export function App({
           connectionRef.current.workspaceCwd !== workspaceCwd
         )
           return;
-        setRecapMessage(null);
+        // A stale failure must not clear a newer recap.
+        if (requestId === recapRequestRef.current) setRecapMessage(null);
         if (!isAbortError(error) && !isAlreadyDispatched(error)) {
           console.warn('[web-shell] unhandled recap failure', error);
         }
@@ -10876,6 +11045,7 @@ export function App({
     requireActiveSessionForLocalCommand,
     sessionWriteBlocked,
     sessionActions,
+    showRecapMessage,
     t,
   ]);
 
@@ -10957,6 +11127,12 @@ export function App({
   useEffect(() => {
     const onBtwShortcut = (e: KeyboardEvent) => {
       if (interactionBlocked || pendingApproval || isWebTerminalTarget(e))
+        return;
+      const target = e.composedPath()[0] ?? e.target;
+      if (
+        target instanceof Element &&
+        target.closest('[data-web-shell-context-popover]')
+      )
         return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
@@ -11478,7 +11654,8 @@ export function App({
           voiceFeaturesRef.current,
         ) &&
         (source === 'settings'
-          ? activePanelRef.current === 'settings'
+          ? activePanelRef.current === 'settings' &&
+            !isSettingExcluded('voiceModel', settingsPresentationRef.current)
           : activePanelRef.current === null) &&
         mainViewRef.current === 'chat' &&
         modelDialogModeRef.current === null &&
@@ -11587,6 +11764,14 @@ export function App({
     return options;
   }, [connection.models]);
 
+  // Settings-resolved values are reported to the host through refs, keyed on
+  // the setting value itself — an inline host handler must not re-fire the
+  // effect on every render (same loop hazard as onBrandResolved below).
+  const onThemeResolvedRef = useRef(onThemeResolved);
+  onThemeResolvedRef.current = onThemeResolved;
+  const onLanguageResolvedRef = useRef(onLanguageResolved);
+  onLanguageResolvedRef.current = onLanguageResolved;
+
   useEffect(() => {
     if (providedTheme) {
       setSelectedTheme(providedTheme);
@@ -11597,6 +11782,9 @@ export function App({
     );
     if (settingTheme) {
       setSelectedTheme(settingTheme);
+      // Let the host steer document chrome (html class, theme-color meta)
+      // without handing it a new opinion — the value stays settings-owned.
+      onThemeResolvedRef.current?.(settingTheme);
     }
   }, [providedTheme, themeSetting?.values.effective]);
 
@@ -11610,6 +11798,7 @@ export function App({
     );
     if (settingLanguage) {
       setSelectedLanguage(settingLanguage);
+      onLanguageResolvedRef.current?.(settingLanguage);
     }
   }, [providedLanguage, languageSetting?.values.effective]);
 
@@ -11668,7 +11857,6 @@ export function App({
       // which a plain scoped settings write wouldn't do.
       const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
       const command = `/language ui ${nextLanguage}${scopeFlag}`;
-      handleLanguageChange(nextLanguage);
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
         await Promise.all([
@@ -11681,15 +11869,38 @@ export function App({
         sessionHasActivePromptRef.current ||
         isGoalGateBlocked()
       ) {
-        handleLanguageChange(previousLanguage);
         blockCommand();
         return;
       }
+      // Switch optimistically only when settings own the language. An explicit
+      // host prop remains authoritative while a workspace value is persisted.
+      // onLanguageChange persists an accepted user-scoped choice as a new host
+      // opinion; the observe-only channel keeps settings-derived values from
+      // shadowing later settings.json edits (#11955).
+      const hostControlsLanguage = providedLanguage !== undefined;
+      if (!hostControlsLanguage) {
+        setSelectedLanguage(nextLanguage);
+        onLanguageResolvedRef.current?.(nextLanguage);
+      }
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
-        .then(refreshSettings)
+        .then(() => {
+          if (!owner.current.isCurrent()) return;
+          if (scope === 'user') {
+            // A user-scoped choice becomes the host's persisted opinion. A
+            // workspace choice remains settings-owned for that workspace.
+            handleLanguageChange(nextLanguage);
+          }
+          return refreshSettings().catch((error: unknown) => {
+            if (!owner.current.isCurrent()) return;
+            reportError(error, 'Failed to refresh settings after /language');
+          });
+        })
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
-          handleLanguageChange(previousLanguage);
+          if (!hostControlsLanguage) {
+            setSelectedLanguage(previousLanguage);
+            onLanguageResolvedRef.current?.(previousLanguage);
+          }
           reportError(error, 'Failed to sync /language command');
         });
     },
@@ -11698,6 +11909,7 @@ export function App({
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
+      providedLanguage,
       sessionWriteBlocked,
       sendPrompt,
       selectedLanguage,
@@ -11713,6 +11925,10 @@ export function App({
       return;
     }
     autoRecapVersionRef.current += 1;
+    // Clearing the screen wipes the transcript, so it also drops every recap:
+    // the one on screen and any request still in flight.
+    recapRequestRef.current += 1;
+    setRecapMessage(null);
     lastRecapBlockCountRef.current = 0;
     store.reset();
   }, [store, t]);
@@ -12350,6 +12566,8 @@ export function App({
       // Local-only commands also append user blocks. Treat any new visible user
       // activity as invalidating the recap rather than risk placing it too late.
       const userBlockId = getLatestUserBlockId(store.getSnapshot().blocks);
+      recapRequestRef.current += 1;
+      const recapRequestId = recapRequestRef.current;
       sessionActions.recapSession().then(
         (result) => {
           const currentUserBlockId = getLatestUserBlockId(
@@ -12379,13 +12597,10 @@ export function App({
             return;
           }
           if (result.recap) {
-            store.dispatch([
-              {
-                type: 'status',
-                text: `※ ${t('recap.label')}: ${result.recap}`,
-                source: 'recap',
-              },
-            ]);
+            showRecapMessage(
+              recapRequestId,
+              `※ ${t('recap.label')}: ${result.recap}`,
+            );
           }
         },
         (error: unknown) => {
@@ -12401,6 +12616,7 @@ export function App({
     sessionActions,
     sessionOwnerGuard,
     sessionWriteBlocked,
+    showRecapMessage,
     store,
     t,
   ]);
@@ -14520,8 +14736,13 @@ export function App({
     [pushToast, t],
   );
 
+  const goalSessionCreationInFlightRef = useRef(false);
   const handleGoalSlashCommand = useCallback(
-    (text: string, hasAttachments: boolean) => {
+    (
+      text: string,
+      hasAttachments: boolean,
+      commitComposerAccepted?: () => void,
+    ) => {
       if (hasAttachments) {
         pushToast('error', t('goals.error.attachmentsUnsupported'));
         return false;
@@ -14549,11 +14770,16 @@ export function App({
       // composer has no disabled state, so it has to refuse here. Two controls
       // read the same snapshot and stamp the same `expectedGoalId`/
       // `expectedRevision`, and the daemon rejects the loser with a 409.
-      if (goalControlOwnerRef.current) {
+      if (
+        goalControlOwnerRef.current ||
+        goalSessionCreationInFlightRef.current
+      ) {
         pushToast('error', t('goals.error.controlBusy'));
         return false;
       }
 
+      const needsSession = !connectionRef.current.sessionId;
+      goalSessionCreationInFlightRef.current = needsSession;
       void (async () => {
         const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
@@ -14582,6 +14808,10 @@ export function App({
         if (!connectionRef.current.sessionId && !allocatedSessionId) {
           throw new Error(t('localCommand.noSession'));
         }
+        if (needsSession) {
+          if (commitComposerAccepted) commitComposerAccepted();
+          else editorRef.current?.clear();
+        }
         store.appendLocalUserMessage(text);
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
@@ -14596,10 +14826,14 @@ export function App({
         } else {
           await controlCurrentGoal(action, objective);
         }
-      })().catch((error: unknown) => {
-        reportError(error, `Failed to ${operation.kind} /goal`);
-      });
-      return true;
+      })()
+        .catch((error: unknown) => {
+          reportError(error, `Failed to ${operation.kind} /goal`);
+        })
+        .finally(() => {
+          goalSessionCreationInFlightRef.current = false;
+        });
+      return !needsSession;
     },
     [
       controlCurrentGoal,
@@ -14941,6 +15175,7 @@ export function App({
               (images?.length ?? 0) > 0 ||
                 (files?.length ?? 0) > 0 ||
                 (metadata?.inputAnnotations?.length ?? 0) > 0,
+              commitComposerAccepted,
             );
           }
           if (cmd === 'theme') {
@@ -15002,13 +15237,17 @@ export function App({
               }
               const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
+              const previousLanguage = selectedLanguage;
               // The daemon sync is what keeps the agent answering in the
               // language the chrome just switched to, so when it cannot run
               // (turn in flight, or a Goal owning the session) refuse the
               // command instead of switching the UI alone — the language
               // picker treats the identical condition the same way.
               if (commandBlocked) return blockCommand();
-              handleLanguageChange(nextLanguage);
+              setSelectedLanguage(nextLanguage);
+              if (providedLanguage === undefined) {
+                onLanguageResolvedRef.current?.(nextLanguage);
+              }
               {
                 const deferComposerCommit =
                   Boolean(
@@ -15030,10 +15269,23 @@ export function App({
                 )
                   .then(() => {
                     if (!owner.current.isCurrent()) return;
-                    return sessionActions.refreshCommands();
+                    handleLanguageChange(nextLanguage);
+                    return sessionActions
+                      .refreshCommands()
+                      .catch((error: unknown) => {
+                        if (!owner.current.isCurrent()) return;
+                        reportError(
+                          error,
+                          'Failed to refresh commands after /language',
+                        );
+                      });
                   })
                   .catch((error: unknown) => {
                     if (!owner.current.isCurrent()) return;
+                    setSelectedLanguage(previousLanguage);
+                    if (providedLanguage === undefined) {
+                      onLanguageResolvedRef.current?.(previousLanguage);
+                    }
                     reportError(error, 'Failed to sync /language command');
                   });
                 return clearComposerOnPromptStart ? false : true;
@@ -15108,6 +15360,12 @@ export function App({
             return true;
           }
           if (cmd === 'auth') {
+            // Take over only the surface this command owns: clearing an
+            // unrelated settings-launched key would disarm its exclusion
+            // force-close.
+            if (settingsDialogKeyRef.current === 'builtin:model-management') {
+              settingsDialogKeyRef.current = undefined;
+            }
             setShowAuthDialog(true);
             return true;
           }
@@ -15121,6 +15379,9 @@ export function App({
               return true;
             }
             if (modelArg === '--fast') {
+              if (settingsDialogKeyRef.current === 'fastModel') {
+                settingsDialogKeyRef.current = undefined;
+              }
               setModelDialogMode('fast');
               return true;
             }
@@ -15149,6 +15410,9 @@ export function App({
               return true;
             }
             if (modelArg === '--vision') {
+              if (settingsDialogKeyRef.current === 'visionModel') {
+                settingsDialogKeyRef.current = undefined;
+              }
               setModelDialogMode('vision');
               return true;
             }
@@ -15911,6 +16175,7 @@ export function App({
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
       resumeChatBottomFollow,
+      providedLanguage,
       selectedLanguage,
       setPendingModel,
       selectWelcomeModel,
@@ -16917,6 +17182,61 @@ export function App({
     }
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
+  useEffect(() => {
+    const key = settingsDialogKeyRef.current;
+    if (!key) return;
+    const excluded =
+      key === 'builtin:model-management'
+        ? isItemExcluded(key, settingsPresentation)
+        : isSettingExcluded(key, settingsPresentation);
+    if (excluded) {
+      if (pendingVoicePickerSourceRef.current === 'settings') {
+        voicePickerRequestRef.current++;
+        pendingVoicePickerSourceRef.current = undefined;
+      }
+      // Close only the dialog the held key owns: a stale key left over from a
+      // settings launch must not close a surface a command or the status bar
+      // opened afterwards.
+      if (key === 'modelFallbacks') {
+        setShowFallbacksDialog(false);
+      } else if (key === 'builtin:model-management') {
+        handleCloseAuthDialog();
+      } else {
+        const ownedMode =
+          key === 'fastModel'
+            ? 'fast'
+            : key === 'visionModel'
+              ? 'vision'
+              : key === 'advisorModel'
+                ? 'advisor'
+                : key === 'imageModel'
+                  ? 'image'
+                  : key === 'voiceModel'
+                    ? 'voice'
+                    : null;
+        if (ownedMode) {
+          setModelDialogMode((cur) => (cur === ownedMode ? null : cur));
+        }
+      }
+      settingsDialogKeyRef.current = undefined;
+    } else if (
+      !modelDialogMode &&
+      !showFallbacksDialog &&
+      !showApprovalModeDialog &&
+      !showAuthDialog &&
+      pendingVoicePickerSourceRef.current !== 'settings'
+    ) {
+      settingsDialogKeyRef.current = undefined;
+    }
+  }, [
+    settingsPresentation,
+    showAuthDialog,
+    handleCloseAuthDialog,
+    modelDialogMode,
+    showFallbacksDialog,
+    showApprovalModeDialog,
+  ]);
+
   const useWorkspaceSkillSnapshot =
     workspaceContextActive &&
     loadedSkillsReady &&
@@ -17534,6 +17854,9 @@ export function App({
         .catch(() => undefined);
     }
   }, [primaryContextControls, paneContextControls, compressionResults]);
+  const reconciledContextControls = useRef(
+    new WeakMap<ContextUsageControls, ContextUsageControls>(),
+  );
   const contextUsageControls = useMemo(() => {
     const live =
       primaryContextControls &&
@@ -17545,18 +17868,21 @@ export function App({
           }
         : paneContextControls;
     return Object.fromEntries(
-      Object.entries(live).map(([id, controls]) => [
-        id,
-        {
-          ...controls,
-          result: controls.compressing
-            ? undefined
-            : controls.result &&
-                !observedCompressionResults.current.has(controls.result)
-              ? controls.result
-              : (compressionResults[id] ?? controls.result),
-        },
-      ]),
+      Object.entries(live).map(([id, controls]) => {
+        const result = controls.compressing
+          ? undefined
+          : controls.result &&
+              !observedCompressionResults.current.has(controls.result)
+            ? controls.result
+            : (compressionResults[id] ?? controls.result);
+        const previous = reconciledContextControls.current.get(controls);
+        const reconciled =
+          previous && previous.result === result
+            ? previous
+            : { ...controls, result };
+        reconciledContextControls.current.set(controls, reconciled);
+        return [id, reconciled];
+      }),
     );
   }, [
     mainView,
@@ -17625,6 +17951,52 @@ export function App({
     onToggleFullscreen: toggleArtifactPanelFullscreen,
   };
   const environmentPanelOwner = sessionOwnerGuard.capture();
+  const panelAttachments = logicalSessionKey
+    ? sessionAttachmentsBySessionRef.current.get(logicalSessionKey)
+    : undefined;
+  const sourceEntries = useMemo(
+    () =>
+      getSourceEntries(
+        sourcesState.supported ? sourcesState.sources : [],
+        panelAttachments ?? [],
+      ),
+    [sourcesState.supported, sourcesState.sources, panelAttachments],
+  );
+  const openTurnSource = useCallback(
+    (entry: WebShellSource) => {
+      const owner = sourcesState.owner;
+      if (!owner.isCurrent()) return;
+      openSourceEntry(entry, {
+        onOpen: openSourcePanel,
+        onReadImage: readSessionImage,
+        onImagePreview: (src, alt, source) => {
+          if (owner.isCurrent()) openImagePanel(src, alt, source);
+        },
+        onAttachmentPreview: (file) => {
+          if (owner.isCurrent())
+            openAttachmentPanel(file, undefined, undefined, true);
+        },
+        onAttachmentPreviewError: (error) => {
+          if (owner.isCurrent())
+            pushToast(
+              'error',
+              t('rightPanel.attachmentLoadFailed', {
+                error: formatError(error, t('environment.unavailable')),
+              }),
+            );
+        },
+      });
+    },
+    [
+      sourcesState.owner,
+      openSourcePanel,
+      readSessionImage,
+      openImagePanel,
+      openAttachmentPanel,
+      pushToast,
+      t,
+    ],
+  );
 
   // BrandProvider sits above I18nProvider so portals and every pane see it. The
   // prettier-ignore keeps adding it from re-indenting the whole subtree, the
@@ -17938,7 +18310,10 @@ export function App({
               onAdd={handleAddWorkspace}
               onSuggest={workspaceActions.suggestWorkspacePaths}
               onPick={
-                nativeDirectoryPickerSupported
+                nativeDirectoryPickerSupported &&
+                (!workspace.baseUrl ||
+                  new URL(workspace.baseUrl, window.location.origin).origin ===
+                    window.location.origin)
                   ? async () => {
                       const result =
                         await workspaceActions.pickWorkspaceDirectory();
@@ -18562,6 +18937,7 @@ export function App({
                       {activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={targetedWorkspaceSettingsState}
+                        presentation={settingsPresentation}
                         embedded
                         initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
@@ -18582,9 +18958,22 @@ export function App({
                           busy: modelActionBusy,
                           onSelectModel: handleModelSelect,
                           onDeleteModel: handleDeleteModel,
-                          onAddModel: () => setShowAuthDialog(true),
+                          onAddModel: () => {
+                            if (
+                              isItemExcluded(
+                                'builtin:model-management',
+                                settingsPresentation,
+                              )
+                            )
+                              return;
+                            settingsDialogKeyRef.current =
+                              'builtin:model-management';
+                            setShowAuthDialog(true);
+                          },
                         }}
                         onSubDialog={(key, scope) => {
+                          if (isSettingExcluded(key, settingsPresentation)) return;
+                          settingsDialogKeyRef.current = key;
                           // Record the persist scope only for model settings —
                           // the reset effect is gated on the dialog/fallback/auth
                           // flags, so it never runs for the approvalMode dialog
@@ -19070,6 +19459,7 @@ export function App({
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         registerContextUsageControls={registerContextUsageControls}
                         onBeforeContextCompress={preparePaneContextCompression}
+                        onOpenContextUsage={openPaneContextUsagePanel}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
@@ -19252,6 +19642,9 @@ export function App({
                                     ? fileChangesByTurn
                                     : undefined
                                 }
+                                sourceEntries={sourceEntries}
+                                sourceSessionId={connection.sessionId}
+                                onSourceOpen={openTurnSource}
                                 turnArtifacts={
                                   visibleTurnOutputKinds.has('artifact')
                                     ? artifactsByTurn
@@ -19287,6 +19680,18 @@ export function App({
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
+                                onOpenBackground={(turn) => {
+                                  if (!connection.sessionId) return;
+                                  handleTurnOutputOpen({
+                                    id: `background:${connection.sessionId}:${turn.taskId}`,
+                                    kind: 'background_task',
+                                    title: turn.label ?? turn.kind,
+                                    turnId: turn.turnId,
+                                    backgroundTurn: turn,
+                                    sourceSessionId: connection.sessionId,
+                                    workspaceCwd: connection.workspaceCwd,
+                                  });
+                                }}
                               >
                                 {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
@@ -19606,6 +20011,10 @@ export function App({
                                 activeTurnStartedAt
                               }
                               hasActivePrompt={sessionHasActivePrompt}
+                              backgroundLabel={
+                                connection.backgroundTurn?.label ??
+                                connection.backgroundTurn?.kind
+                              }
                             />
                           )
                         ) : newSessionSuggestion ? (
@@ -19881,6 +20290,14 @@ export function App({
                           }
                           onShowContextUsage={
                             contextUsageAvailable ? handleShowContextUsage : undefined
+                          }
+                          contextUsageControls={
+                            connection.sessionId
+                              ? contextUsageControls[connection.sessionId]
+                              : undefined
+                          }
+                          onOpenContextUsage={
+                            contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}

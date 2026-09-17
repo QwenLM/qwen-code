@@ -95,6 +95,15 @@ function groupSummary(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('ParallelAgentsGroup activity rendering', () => {
+  it('keeps failure status while showing results awaiting processing', () => {
+    const container = renderExpandedGroup([
+      agent({ status: 'failed', backgroundResultPending: true }),
+    ]);
+    expect(container.textContent).toContain('Awaiting processing');
+    expect(
+      container.querySelector('[data-agent-status="failed"]'),
+    ).not.toBeNull();
+  });
   it('renders every agent detail without toggles in document mode', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

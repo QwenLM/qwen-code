@@ -809,6 +809,18 @@ describe('serve fast path argument parsing', () => {
     ).toEqual({ kind: 'fallback' });
   });
 
+  it('parses opt-in child count admission in both flag forms', () => {
+    for (const args of [
+      ['--child-heap-mode', 'admit'],
+      ['--child-heap-mode=admit'],
+    ]) {
+      expect(parseServeFastPathArgs(['serve', ...args])).toMatchObject({
+        kind: 'serve',
+        options: { childHeapMode: 'admit' },
+      });
+    }
+  });
+
   it('parses --child-heap-mode and falls back on an unknown value', () => {
     for (const argv of [
       ['serve', '--child-heap-mode', 'off'],

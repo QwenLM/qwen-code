@@ -22,6 +22,7 @@ import type { Response } from 'express';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
@@ -396,8 +397,9 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof StandaloneSessionServiceError) {
-    const status =
-      err.code === 'invalid_request'
+    const status = err.capacity
+      ? 503
+      : err.code === 'invalid_request'
         ? 400
         : err.code === 'standalone_session_not_found'
           ? 404
@@ -410,12 +412,13 @@ export function sendBridgeError(
             ? 500
             : 409;
     if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
-    if (err.retryable) res.set('Retry-After', '5');
+    if (err.retryable && !err.capacity) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,
       code: err.code,
       errorKind: err.code,
       retryable: err.retryable,
+      ...(err.capacity ? { capacity: err.capacity } : {}),
       ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
     });
     return;
@@ -427,6 +430,19 @@ export function sendBridgeError(
     res.status(503).json({
       error: err.message,
       code: 'runtime_still_starting',
+    });
+    return;
+  }
+  const capacityError =
+    err instanceof WorkspaceRuntimeInitializationError ? err.cause : err;
+  if (capacityError instanceof AcpChildCapacityExceededError) {
+    recordExpectedBridgeError(capacityError, ctx, daemonLog);
+    res.status(503).json({
+      error: capacityError.message,
+      code: capacityError.code,
+      errorKind: capacityError.code,
+      maxConcurrentChildren: capacityError.maxConcurrentChildren,
+      committedAcpChildren: capacityError.committedAcpChildren,
     });
     return;
   }
@@ -922,6 +938,13 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'workflow_invalid_params') {
+        res.status(400).json({
+          error: errorMessage(err),
+          code: kind,
+        });
+        return;
+      }
       if (kind === 'session_busy') {
         res.set('Retry-After', '5');
         res.status(409).json({
