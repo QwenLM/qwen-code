@@ -10,6 +10,7 @@ import { getPty } from '../utils/getPty.js';
 import { spawn as cpSpawn, spawnSync } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
+import path from 'node:path';
 import type { IPty } from '@lydell/node-pty';
 import type { Terminal } from '@xterm/headless';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
@@ -161,6 +162,30 @@ export function isSignalTermination(
   signal: number | NodeJS.Signals | null,
 ): boolean {
   return signal !== null && signal !== 0;
+}
+
+export interface ProcessLaunch {
+  executable: string;
+  args: readonly string[];
+  cwd: string;
+  env: Readonly<Record<string, string>>;
+  stdin?: string | Buffer;
+}
+
+function launchCommand(input: string | ProcessLaunch) {
+  if (typeof input !== 'string') {
+    return {
+      executable: input.executable,
+      args: [...input.args],
+      shell: undefined,
+    };
+  }
+  const { executable, argsPrefix, shell } = getShellConfiguration();
+  return {
+    executable,
+    args: [...argsPrefix, applyUtf8Prefix(input, shell)],
+    shell,
+  };
 }
 
 /** A structured result from a shell command execution. */
@@ -363,6 +388,7 @@ export type ShellOutputEvent =
       type: 'data';
       /** The decoded string chunk. */
       chunk: string | AnsiOutput;
+      stream?: 'stdout' | 'stderr';
     }
   | {
       /** Signals that the output stream has been identified as binary. */
@@ -714,6 +740,88 @@ export class ShellExecutionService {
     shellExecutionConfig: ShellExecutionConfig,
     options: ShellExecuteOptions = {},
   ): Promise<ShellExecutionHandle> {
+    return this.executeInternal(
+      commandToExecute,
+      cwd,
+      onOutputEvent,
+      abortSignal,
+      shouldUseNodePty,
+      shellExecutionConfig,
+      options,
+    );
+  }
+
+  static async executeLaunch(
+    launch: ProcessLaunch,
+    onOutputEvent: (event: ShellOutputEvent) => void,
+    abortSignal: AbortSignal,
+    shouldUseNodePty: boolean,
+    shellExecutionConfig: ShellExecutionConfig,
+    options: ShellExecuteOptions = {},
+  ): Promise<ShellExecutionHandle> {
+    const snapshot: ProcessLaunch = {
+      executable: launch.executable,
+      args: [...launch.args],
+      cwd: launch.cwd,
+      env: { ...launch.env },
+      stdin: Buffer.isBuffer(launch.stdin)
+        ? Buffer.from(launch.stdin)
+        : launch.stdin,
+    };
+    if (
+      !path.isAbsolute(snapshot.executable) ||
+      !path.isAbsolute(snapshot.cwd)
+    ) {
+      throw new Error('Process executable and cwd must be absolute.');
+    }
+    if (
+      [
+        snapshot.executable,
+        snapshot.cwd,
+        ...snapshot.args,
+        ...Object.values(snapshot.env),
+      ].some((value) => value.includes('\0')) ||
+      Object.keys(snapshot.env).some(
+        (key) => !key || key.includes('=') || key.includes('\0'),
+      )
+    ) {
+      throw new Error('Invalid process launch argument or environment.');
+    }
+    if (shouldUseNodePty && snapshot.stdin !== undefined) {
+      throw new Error('Process stdin requires pipe execution.');
+    }
+    if (shouldUseNodePty && !snapshot.env['TERM']) {
+      throw new Error(
+        'PTY launch requires an explicit TERM environment value.',
+      );
+    }
+    if (
+      shouldUseNodePty &&
+      os.platform() !== 'win32' &&
+      snapshot.env['PWD'] !== snapshot.cwd
+    ) {
+      throw new Error('PTY launch requires PWD to match cwd.');
+    }
+    return this.executeInternal(
+      snapshot,
+      snapshot.cwd,
+      onOutputEvent,
+      abortSignal,
+      shouldUseNodePty,
+      shellExecutionConfig,
+      options,
+    );
+  }
+
+  private static async executeInternal(
+    commandToExecute: string | ProcessLaunch,
+    cwd: string,
+    onOutputEvent: (event: ShellOutputEvent) => void,
+    abortSignal: AbortSignal,
+    shouldUseNodePty: boolean,
+    shellExecutionConfig: ShellExecutionConfig,
+    options: ShellExecuteOptions,
+  ): Promise<ShellExecutionHandle> {
     if (abortSignal.aborted) {
       return createPreSpawnAbortedHandle();
     }
@@ -767,6 +875,7 @@ export class ShellExecutionService {
       }
     }
 
+    if (abortSignal.aborted) return createPreSpawnAbortedHandle();
     return this.childProcessFallback(
       commandToExecute,
       cwd,
@@ -781,7 +890,7 @@ export class ShellExecutionService {
   }
 
   private static childProcessFallback(
-    commandToExecute: string,
+    commandToExecute: string | ProcessLaunch,
     cwd: string,
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
@@ -793,9 +902,13 @@ export class ShellExecutionService {
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
-      const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
-      const shellArgs = [...argsPrefix, commandToExecute];
+      const launch =
+        typeof commandToExecute === 'string' ? undefined : commandToExecute;
+      const {
+        executable,
+        args: shellArgs,
+        shell,
+      } = launchCommand(commandToExecute);
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
       // This is intentional - CLI tool executes user-provided shell commands.
@@ -806,20 +919,26 @@ export class ShellExecutionService {
       // round-trip correctly through CommandLineToArgvW.
       const child = cpSpawn(executable, shellArgs, {
         cwd,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [
+          launch?.stdin === undefined ? 'ignore' : 'pipe',
+          'pipe',
+          'pipe',
+        ],
         windowsVerbatimArguments: isWindows && shell === 'cmd',
         detached: !isWindows,
         windowsHide: isWindows,
-        env: {
-          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
-          QWEN_CODE: '1',
-          TERM: 'xterm-256color',
-          ...getShellPagerEnv(pager, {
-            includeGitPager: false,
-            platform: os.platform(),
-          }),
-          ...getShellContextEnvVars(),
-        },
+        env: launch
+          ? { ...launch.env }
+          : {
+              ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+              QWEN_CODE: '1',
+              TERM: 'xterm-256color',
+              ...getShellPagerEnv(pager, {
+                includeGitPager: false,
+                platform: os.platform(),
+              }),
+              ...getShellContextEnvVars(),
+            },
       });
 
       const result = new Promise<ShellExecutionResult>((resolve) => {
@@ -942,7 +1061,7 @@ export class ShellExecutionService {
             // accumulation. (Up to ~4KB may already have been emitted
             // before binary detection trips — bounded, acceptable.)
             const decodedChunk = decoder.decode(data, { stream: true });
-            onOutputEvent({ type: 'data', chunk: decodedChunk });
+            onOutputEvent({ type: 'data', chunk: decodedChunk, stream });
             return;
           }
 
@@ -1042,8 +1161,8 @@ export class ShellExecutionService {
           handleExit(code, signal);
         };
 
-        child.stdout.on('data', stdoutHandler);
-        child.stderr.on('data', stderrHandler);
+        child.stdout?.on('data', stdoutHandler);
+        child.stderr?.on('data', stderrHandler);
         child.on('error', errorHandler);
 
         const detachServiceListeners = () => {
@@ -1051,6 +1170,7 @@ export class ShellExecutionService {
           child.stderr?.off('data', stderrHandler);
           child.off('error', errorHandler);
           child.off('exit', exitHandler);
+          child.off('close', exitHandler);
         };
 
         const performBackgroundPromote = (): void => {
@@ -1453,7 +1573,13 @@ export class ShellExecutionService {
           this.activeChildProcesses.add(child.pid);
         }
 
-        child.on('exit', exitHandler);
+        child.on(streamStdout ? 'close' : 'exit', exitHandler);
+        if (launch?.stdin !== undefined && child.stdin) {
+          child.stdin.on('error', (err: Error) => {
+            error = err;
+          });
+          child.stdin.end(launch.stdin);
+        }
 
         function cleanup() {
           exited = true;
@@ -1461,13 +1587,25 @@ export class ShellExecutionService {
           if (stdoutDecoder) {
             const remaining = stdoutDecoder.decode();
             if (remaining) {
-              stdout += remaining;
+              if (streamStdout)
+                onOutputEvent({
+                  type: 'data',
+                  chunk: remaining,
+                  stream: 'stdout',
+                });
+              else stdout += remaining;
             }
           }
           if (stderrDecoder) {
             const remaining = stderrDecoder.decode();
             if (remaining) {
-              stderr += remaining;
+              if (streamStdout)
+                onOutputEvent({
+                  type: 'data',
+                  chunk: remaining,
+                  stream: 'stderr',
+                });
+              else stderr += remaining;
             }
           }
 
@@ -1497,7 +1635,7 @@ export class ShellExecutionService {
   }
 
   private static executeWithPty(
-    commandToExecute: string,
+    commandToExecute: string | ProcessLaunch,
     cwd: string,
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
@@ -1519,8 +1657,13 @@ export class ShellExecutionService {
     try {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
-      const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
+      const launch =
+        typeof commandToExecute === 'string' ? undefined : commandToExecute;
+      const {
+        executable,
+        args: launchArgs,
+        shell,
+      } = launchCommand(commandToExecute);
 
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements
@@ -1534,24 +1677,26 @@ export class ShellExecutionService {
       // because CommandLineToArgvW treats \" as an escaped quote.
       const args: string[] | string =
         os.platform() === 'win32' && shell === 'cmd'
-          ? [...argsPrefix, commandToExecute].join(' ')
-          : [...argsPrefix, commandToExecute];
+          ? launchArgs.join(' ')
+          : launchArgs;
 
       const ptyProcess = ptyInfo.module.spawn(executable, args, {
         cwd,
-        name: 'xterm',
+        name: launch?.env['TERM'] ?? 'xterm',
         cols,
         rows,
-        env: {
-          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
-          QWEN_CODE: '1',
-          TERM: 'xterm-256color',
-          ...getShellPagerEnv(shellExecutionConfig.pager, {
-            includeGitPager: true,
-            platform: os.platform(),
-          }),
-          ...getShellContextEnvVars(),
-        },
+        env: launch
+          ? { ...launch.env }
+          : {
+              ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
+              QWEN_CODE: '1',
+              TERM: 'xterm-256color',
+              ...getShellPagerEnv(shellExecutionConfig.pager, {
+                includeGitPager: true,
+                platform: os.platform(),
+              }),
+              ...getShellContextEnvVars(),
+            },
         handleFlowControl: true,
         // Windows: with the inbox ConPTY backend a natural shell exit orphans
         // the `conhost.exe --headless` that backend spawned — the native exit
@@ -2552,7 +2697,22 @@ export class ShellExecutionService {
         abortSignal.addEventListener('abort', abortHandler, { once: true });
       });
 
-      return { pid: ptyProcess.pid, result };
+      return {
+        pid: ptyProcess.pid,
+        result: result.catch((error: unknown) => {
+          // An initialization exception can occur after spawn. Kill that process;
+          // the caller must never retry it through another transport.
+          try {
+            if (os.platform() === 'win32') ptyProcess.kill();
+            else process.kill(-ptyProcess.pid, 'SIGKILL');
+          } catch {
+            /* Process may already have exited. */
+          }
+          this.activePtys.get(ptyProcess.pid)?.headlessTerminal.dispose();
+          this.activePtys.delete(ptyProcess.pid);
+          throw error;
+        }),
+      };
     } catch (e) {
       const error = e as Error;
       if (!ptySpawned && useBundledConpty) {
@@ -2572,7 +2732,7 @@ export class ShellExecutionService {
         );
         throw e;
       }
-      if (error.message.includes('posix_spawnp failed')) {
+      if (!ptySpawned && error.message.includes('posix_spawnp failed')) {
         onOutputEvent({
           type: 'data',
           chunk:
