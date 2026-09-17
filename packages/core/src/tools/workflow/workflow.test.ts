@@ -3350,6 +3350,26 @@ describe('WorkflowTool — saved workflows by name', () => {
     }
   });
 
+  // The run executes the approved read, but a resume would look the name up
+  // again. When the name no longer leads back to that script, the trailer
+  // must not offer it.
+  it('offers no resume by name once the name stops leading to the script that ran', async () => {
+    const scriptPath = await saveWorkflow('nightly-audit', APPROVED);
+    const invocation = new WorkflowTool(
+      Object.assign(nameConfig(), { isWorkflowNameOnly: () => true }),
+    ).build({ name: 'nightly-audit' });
+    await invocation.getDefaultPermission();
+    await fs.rm(scriptPath);
+
+    const result = await invocation.execute(new AbortController().signal);
+    const trailer = (result.llmContent as Array<{ text: string }>)
+      .map((part) => part.text)
+      .join('\n');
+    expect(trailer).toContain('approved-v1');
+    expect(trailer).toContain('runId: wf_');
+    expect(trailer).not.toContain('resume:');
+  });
+
   // The lock reaches a nested call only when the model started the run.
   it('refuses a nested workflow({scriptPath}) in a run the model started by name', async () => {
     const inner = await saveWorkflow('inner', "return 'inner-ran';");
