@@ -1208,6 +1208,26 @@ describe('Logger', () => {
       current.close();
     });
 
+    it('stops hiding a session once its purge has failed', async () => {
+      // A failed purge leaves its rows on disk. If its id stayed pending, the next
+      // purge would still filter those rows out of the cache it adopts.
+      await logPromptAs('doomed-a', 'ssh root@prod-db');
+      await logPromptAs('doomed-b', 'cat ~/.aws/credentials');
+      const current = await currentSessionLogger();
+
+      vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('Disk full'));
+      expect(await current.removeSessionMessages('doomed-a')).toBe(false);
+      expect(await current.removeSessionMessages('doomed-b')).toBe(true);
+
+      expect(await current.getPreviousUserMessages()).toEqual([
+        'ssh root@prod-db',
+      ]);
+      expect((await readLogFile()).map((e) => e.message)).toEqual([
+        'ssh root@prod-db',
+      ]);
+      current.close();
+    });
+
     it('purges rows this logger has never seen on disk', async () => {
       // The helper above initializes the purging logger AFTER the writes, so its cache
       // is warm. The multi-instance shape is the one where the purge is the only thing
