@@ -121,8 +121,14 @@ function storeTheme(theme: WebShellTheme): void {
   }
 }
 
-function getInitialTheme(): WebShellTheme {
-  return getThemeFromUrl() ?? readStoredTheme() ?? WebShellThemeId.Dark;
+/**
+ * The standalone entry's own opinion on the theme: an explicit `?theme=`
+ * param or a value the user previously chose in-app. `undefined` means "no
+ * opinion" — App then resolves the daemon's effective `ui.theme` setting
+ * instead of being shadowed by a built-in default (#11955).
+ */
+function getInitialTheme(): WebShellTheme | undefined {
+  return getThemeFromUrl() ?? readStoredTheme();
 }
 
 function readStoredLanguage(): WebShellLanguage | undefined {
@@ -142,11 +148,16 @@ function storeLanguage(language: WebShellLanguage): void {
   }
 }
 
-function getInitialLanguage(): WebShellLanguage {
+/**
+ * Same "no opinion" contract as getInitialTheme(): only an explicit
+ * `?language=`/`?lang=` param or a stored in-app choice counts. Without one,
+ * App falls through to the daemon's effective `general.language` setting.
+ */
+function getInitialLanguage(): WebShellLanguage | undefined {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get('language') ?? params.get('lang');
   if (raw) return normalizeLanguage(raw);
-  return normalizeLanguage(readStoredLanguage() ?? navigator.language);
+  return readStoredLanguage();
 }
 
 function getSessionIdFromUrl(): string | undefined {
@@ -199,9 +210,25 @@ function replaceStandaloneSessionUrl(
 }
 
 export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
-  const [theme, setTheme] = useState<WebShellTheme>(() => getInitialTheme());
-  const [language, setLanguage] = useState<WebShellLanguage>(() =>
+  // The entry's own opinion — an explicit URL param or a stored in-app
+  // choice. Passed down as the `theme`/`language` host props; `undefined`
+  // lets App resolve the daemon's effective settings instead (#11955).
+  const [theme, setTheme] = useState<WebShellTheme | undefined>(() =>
+    getInitialTheme(),
+  );
+  const [language, setLanguage] = useState<WebShellLanguage | undefined>(() =>
     getInitialLanguage(),
+  );
+  // What document chrome (html class, theme-color, notifications, error
+  // copy) should render with: the entry's own opinion when it has one, else
+  // the value App resolved from settings and reports through
+  // onThemeResolved/onLanguageResolved. Kept out of the props so a
+  // settings-derived value never latches as a host override.
+  const [documentTheme, setDocumentTheme] = useState<WebShellTheme>(
+    () => theme ?? WebShellThemeId.Dark,
+  );
+  const [documentLanguage, setDocumentLanguage] = useState<WebShellLanguage>(
+    () => language ?? normalizeLanguage(navigator.language),
   );
   const [sessionId, setSessionId] = useState<string | undefined>(() =>
     getSessionIdFromUrl(),
@@ -228,26 +255,46 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     }
   }, []);
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
-  // the React theme so mobile status bars / overscroll backgrounds stay
-  // consistent when the user toggles or when ?theme= lands via URL.
+  // the effective theme so mobile status bars / overscroll backgrounds stay
+  // consistent when the user toggles or when ?theme= lands via URL. While
+  // settings have not resolved yet, retain index.html's pre-paint default.
   useEffect(() => {
     const root = document.documentElement;
     root.classList.remove('theme-dark', 'theme-light', 'dark');
-    root.classList.add(`theme-${theme}`);
-    root.classList.toggle('dark', theme === WebShellThemeId.Dark);
+    root.classList.add(`theme-${documentTheme}`);
+    root.classList.toggle('dark', documentTheme === WebShellThemeId.Dark);
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
-      meta.setAttribute('content', theme === 'light' ? '#ffffff' : '#0d0d0d');
+      meta.setAttribute(
+        'content',
+        documentTheme === 'light' ? '#ffffff' : '#0d0d0d',
+      );
     }
-  }, [theme]);
+  }, [documentTheme]);
+  // A user's in-app choice becomes the entry's own opinion: it overrides
+  // settings on later loads and is persisted for the pre-paint script.
   const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {
     setTheme(nextTheme);
+    setDocumentTheme(nextTheme);
     storeTheme(nextTheme);
   }, []);
   const handleLanguageChange = useCallback((nextLanguage: WebShellLanguage) => {
     setLanguage(nextLanguage);
+    setDocumentLanguage(nextLanguage);
     storeLanguage(nextLanguage);
   }, []);
+  // A settings-derived value only steers document chrome — it must not
+  // become the entry's opinion (no prop, no localStorage), or the next
+  // settings.json edit would be shadowed by the stale copy.
+  const handleThemeResolved = useCallback((nextTheme: WebShellTheme) => {
+    setDocumentTheme(nextTheme);
+  }, []);
+  const handleLanguageResolved = useCallback(
+    (nextLanguage: WebShellLanguage) => {
+      setDocumentLanguage(nextLanguage);
+    },
+    [],
+  );
   const handleBrandResolved = useCallback((brand: WebShellResolvedBrand) => {
     applyBrandToDocument(brand);
   }, []);
@@ -298,21 +345,24 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               }
               // Session switches strip the one-shot theme/language params
               // from the URL; carry the live values so the reloaded page
-              // comes back as the user had it.
+              // comes back as the user had it. Only the entry's own opinion
+              // is carried — a settings-derived value is left out so the
+              // reloaded page keeps following settings.json.
               const url = new URL(window.location.href);
-              url.searchParams.set('theme', theme);
-              url.searchParams.set('language', language);
+              if (theme !== undefined) url.searchParams.set('theme', theme);
+              if (language !== undefined)
+                url.searchParams.set('language', language);
               window.history.replaceState(null, '', url);
               window.location.reload();
             }}
             retryMode={canReload ? 'reload' : 'reset'}
-            language={language}
+            language={documentLanguage}
           />
         );
       }}
     >
       <BrowserTurnNotifications
-        language={language}
+        language={documentLanguage}
         options={{ defaultEnabled: true }}
       >
         <StandaloneContext.Provider value={true}>
@@ -321,11 +371,15 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               sessionId={sessionId}
               workspaceId={workspaceId}
               sessionContext={sessionContext}
+              chromeTheme={documentTheme}
+              chromeLanguage={documentLanguage}
               webShellProps={{
                 theme,
                 onThemeChange: handleThemeChange,
+                onThemeResolved: handleThemeResolved,
                 language,
                 onLanguageChange: handleLanguageChange,
+                onLanguageResolved: handleLanguageResolved,
                 onBrandResolved: handleBrandResolved,
                 onSessionIdChange: handleSessionIdChange,
                 sidebar: { enabled: true, showLive: true },
@@ -399,8 +453,11 @@ async function main() {
       <StandaloneAuth
         baseUrl={baseUrl}
         initialToken={daemonToken}
+        // The auth gate renders before settings are reachable, so it keeps
+        // the browser-locale default; the app itself now receives "no
+        // opinion" (undefined) and lets the daemon's settings win.
+        language={getInitialLanguage() ?? normalizeLanguage(navigator.language)}
         initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
-        language={getInitialLanguage()}
         theme={getInitialTheme()}
         invalidTarget={INVALID_DAEMON_TARGET}
         unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}

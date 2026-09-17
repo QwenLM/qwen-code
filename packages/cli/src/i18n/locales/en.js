@@ -230,6 +230,24 @@ export default {
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
   'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   'toolDisplayName.ImageGen': 'toolDisplayName.ImageGen',
+  'toolDisplayName.DownsampleImage': 'toolDisplayName.DownsampleImage',
+  'toolDisplayName.DownscaleVideo': 'toolDisplayName.DownscaleVideo',
+  'toolDisplayName.DownsampleAudio': 'toolDisplayName.DownsampleAudio',
+  'toolDisplayName.ExtractKeyframes': 'toolDisplayName.ExtractKeyframes',
+  'toolDisplayName.ExtractAudio': 'toolDisplayName.ExtractAudio',
+  'toolDisplayName.ClipVideo': 'toolDisplayName.ClipVideo',
+  'toolDisplayName.ClipImage': 'toolDisplayName.ClipImage',
+  'toolDisplayName.ClipAudio': 'toolDisplayName.ClipAudio',
+  'toolDisplayName.CaptionImage': 'toolDisplayName.CaptionImage',
+  'toolDisplayName.CaptionAudio': 'toolDisplayName.CaptionAudio',
+  'toolDisplayName.OcrImage': 'toolDisplayName.OcrImage',
+  'toolDisplayName.UnderstandVideoSegments':
+    'toolDisplayName.UnderstandVideoSegments',
+  'toolDisplayName.ConvertImage': 'toolDisplayName.ConvertImage',
+  'toolDisplayName.TranscribeAudio': 'toolDisplayName.TranscribeAudio',
+  'toolDisplayName.RecallMediaMemory': 'toolDisplayName.RecallMediaMemory',
+  '[fixed-only: runs via media policies, not the model]':
+    '[fixed-only: runs via media policies, not the model]',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
