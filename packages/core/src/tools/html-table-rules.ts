@@ -81,18 +81,39 @@ export function addTableRules(service: TurndownLike): void {
   });
 }
 
-/** Turndown has already escaped the cell's backslashes, so only the pipe is left. */
 function cellText(content: string): string {
   // Turndown writes a <br> as two spaces and a newline; the whole break folds
   // into one space, because a newline would end the row halfway through. This
   // splits instead of matching `\s*\n\s*`, which backtracks quadratically over
   // a long run of &nbsp; that no newline follows.
-  return content
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .join(' ')
-    .replace(/\|/g, '\\|')
-    .trim();
+  return escapePipes(
+    content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .join(' ')
+      .trim(),
+  );
+}
+
+/**
+ * A GFM row splits at a pipe preceded by an even number of backslashes, so
+ * every pipe is left with an odd number. In text Turndown has already doubled
+ * each backslash, so that is always one more; inside a code span it has not,
+ * and `a\|b` there already has one.
+ */
+function escapePipes(text: string): string {
+  const parts = text.split('|');
+  for (let index = 0; index < parts.length - 1; index++) {
+    const part = parts[index];
+    let run = 0;
+    while (run < part.length && part[part.length - 1 - run] === '\\') {
+      run++;
+    }
+    if (run % 2 === 0) {
+      parts[index] = `${part}\\`;
+    }
+  }
+  return parts.join('|');
 }
 
 function tableOf(node: Node): HTMLElement | null {

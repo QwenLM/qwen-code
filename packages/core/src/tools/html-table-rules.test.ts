@@ -90,6 +90,19 @@ describe('addTableRules', () => {
     expect(tableRows(service(true).turndown(html))[2]).toEqual(['a\\|b']);
   });
 
+  it('keeps a pipe inside a code span from splitting the cell', () => {
+    // Turndown leaves a code span's backslashes alone, so `a\|b` there already
+    // has one; adding a second made it an even run, and a GFM row splits at a
+    // pipe after an even run.
+    const html =
+      '<table><tr><th>Regex</th><th>Use</th></tr>' +
+      '<tr><td><code>a\\|b</code></td><td>alt</td></tr></table>';
+
+    expect(service(true).turndown(html).split('\n')[2]).toBe(
+      '| `a\\|b` | alt |',
+    );
+  });
+
   it('folds a line break inside a cell into a space', () => {
     const html =
       '<table><tr><th>Hours</th></tr><tr><td>Mon<br>Fri</td></tr></table>';
