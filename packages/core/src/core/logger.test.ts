@@ -1228,6 +1228,21 @@ describe('Logger', () => {
       current.close();
     });
 
+    it('keeps a queued purge applied when the purge ahead of it finds nothing', async () => {
+      await logPromptAs('doomed-b', 'ssh root@prod-db');
+      const current = await currentSessionLogger();
+
+      const first = current.removeSessionMessages('never-logged');
+      const second = current.removeSessionMessages('doomed-b');
+
+      expect(await first).toBe(false);
+      // The first op adopted a disk snapshot that still holds doomed-b's row.
+      expect(await current.getPreviousUserMessages()).toEqual([]);
+      expect(await second).toBe(true);
+      expect(await readLogFile()).toEqual([]);
+      current.close();
+    });
+
     it('purges rows this logger has never seen on disk', async () => {
       // The helper above initializes the purging logger AFTER the writes, so its cache
       // is warm. The multi-instance shape is the one where the purge is the only thing
