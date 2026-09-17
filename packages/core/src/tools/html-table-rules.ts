@@ -205,6 +205,7 @@ function layOut(
   const colspan = new Map<Element, number>();
   const widths: number[] = [];
   const taken = new Set<string>();
+  const groupEnds = rowGroupEnds(rows);
   let width = 0;
   const realCells = cells.reduce(
     (total, rowCells) => total + rowCells.length,
@@ -227,8 +228,13 @@ function layOut(
     };
     for (const cell of cells[rowIndex]) {
       before.set(cell, free());
-      const across = spanOf(cell, 'colspan', MAX_COLSPAN);
-      const down = spanOf(cell, 'rowspan', rows.length - rowIndex);
+      const across = spanOf(cell, 'colspan', 1, MAX_COLSPAN);
+      const down = spanOf(
+        cell,
+        'rowspan',
+        groupEnds[rowIndex] - rowIndex,
+        rows.length - rowIndex,
+      );
       if (taken.size + across * down > budget) {
         return null;
       }
@@ -263,11 +269,36 @@ function cellsOf(row: Element): Element[] {
   );
 }
 
+/**
+ * For each row, the index one past the last row of its row group, so a
+ * rowspan="0" cell knows where to stop. A row's group is the thead, tbody or
+ * tfoot it sits in; a page that writes none gets the tbody the parser adds.
+ */
+function rowGroupEnds(rows: Element[]): number[] {
+  const ends: number[] = [];
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const sameGroup =
+      index + 1 < rows.length &&
+      rows[index + 1].parentNode === rows[index].parentNode;
+    ends[index] = sameGroup ? ends[index + 1] : index + 1;
+  }
+  return ends;
+}
+
+/**
+ * The columns or rows a span covers, clamped to `max`. A span of 0 is `zero`:
+ * HTML5 dropped colspan="0" and a browser reads it as one column, while
+ * rowspan="0" still covers every remaining row of the cell's row group.
+ */
 function spanOf(
   cell: Element,
   attribute: 'colspan' | 'rowspan',
+  zero: number,
   max: number,
 ): number {
   const value = Number.parseInt(cell.getAttribute(attribute) ?? '', 10);
-  return Number.isFinite(value) && value > 0 ? Math.min(value, max) : 1;
+  if (!Number.isFinite(value) || value < 0) {
+    return 1;
+  }
+  return Math.min(value === 0 ? zero : value, max);
 }

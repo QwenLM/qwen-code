@@ -158,6 +158,51 @@ describe('addTableRules', () => {
     ]);
   });
 
+  it('gives a rowspan="0" cell the rest of its row group', () => {
+    // rowspan="0" is as tall as the rest of the group, so the rows under it
+    // start one column in. Reading it as one row moved "2 m" into Product.
+    const body = (span: string) =>
+      '<table><thead><tr><th>Product</th><th>Variant</th><th>Price</th></tr></thead>' +
+      `<tbody><tr><td rowspan="${span}">Cable</td><td>1 m</td><td>9 EUR</td></tr>` +
+      '<tr><td>2 m</td><td>12 EUR</td></tr>' +
+      '<tr><td>3 m</td><td>15 EUR</td></tr></tbody></table>';
+
+    expect(tableRows(service(true).turndown(body('0')))).toEqual([
+      ['Product', 'Variant', 'Price'],
+      ['---', '---', '---'],
+      ['Cable', '1 m', '9 EUR'],
+      ['', '2 m', '12 EUR'],
+      ['', '3 m', '15 EUR'],
+    ]);
+    // A browser lays the zero span out exactly like the span it stands for.
+    expect(service(true).turndown(body('0'))).toBe(
+      service(true).turndown(body('3')),
+    );
+  });
+
+  it('stops a rowspan="0" at the end of its row group', () => {
+    // The group is the thead, so the cell covers its own row and no more.
+    const html =
+      '<table><thead><tr><th rowspan="0">Group</th><th>A</th></tr></thead>' +
+      '<tbody><tr><td>1</td><td>2</td></tr><tr><td>3</td><td>4</td></tr></tbody></table>';
+
+    expect(tableRows(service(true).turndown(html))).toEqual([
+      ['Group', 'A'],
+      ['---', '---'],
+      ['1', '2'],
+      ['3', '4'],
+    ]);
+  });
+
+  it('reads colspan="0" as one column', () => {
+    // HTML5 dropped colspan="0"; a browser reports colSpan === 1 for it.
+    const html =
+      '<table><tr><th>A</th><th>B</th></tr>' +
+      '<tr><td colspan="0">x</td><td>y</td></tr></table>';
+
+    expect(tableRows(service(true).turndown(html))[2]).toEqual(['x', 'y']);
+  });
+
   it('counts the header columns by their spans', () => {
     const html =
       '<table><tr><th colspan="2">Size</th><th>Price</th></tr>' +
