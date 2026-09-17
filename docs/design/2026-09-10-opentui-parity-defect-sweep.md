@@ -1587,10 +1587,11 @@ the screen with no paste anywhere in it. That remainder is recorded under Follow
 
 The answer row now draws inside a window of its own — fifty cells, less the label the
 row prints in front of it, on the width the dialog has — and the caret cell is part of
-that: past the window it has nowhere to go, exactly as in ink's fixed-width input. The collapsed echo of the same value is bounded the same way,
-since what it prints is the value a paste can make arbitrarily long. The bound is on the
-drawing alone. Submission reads the stored value, so the answer keeps every character,
-including the line breaks a pasted paragraph carries.
+that: past the window it has nowhere to go, exactly as in ink's fixed-width input. The
+collapsed echo of the same value is bounded the same way, since what it prints is the
+value a paste can make arbitrarily long. The bound is on the drawing alone. Submission
+reads the stored value, so the answer keeps every character, including the line breaks
+a pasted paragraph carries.
 
 A bracketed paste is one event with no keypress per character, and the handler that took
 it asked the render which drew the row whether the cursor was on it, while writing under
@@ -1692,12 +1693,15 @@ when the counter moves, never whether it moves on the step that failed — a rej
 and an install that saved service models and no conversation model both still hand their own
 step's field back, which is what the two tests Decision 39 pins.
 
-Decision 37 stopped the free-text row's insert branch on an answer the pause was holding, and
-Decision 39 asked the same of the paste path. The row's editing branch as a whole was still
-open, and it is not only an insert: the shared line model writes the value on a Backspace, a
-Delete and a word-erase as well. On a multi-select the answer is re-assembled from the checked
-set and the typed value when the review tab submits, so letters typed inside the pause widened
-an answer Enter had already recorded. The branch now asks the lock, and asks it only on a
+Decision 37 put the answer lock on the two branches that report an answer — a digit on the
+option branch, and the Space a multi-select rebuilds its answer from — and Decision 39 asked
+the same of the paste path. The row's editing branch was left to the field's own latch, which
+arms only on an Enter that moved the dialog: an answer recorded by an Enter on the option row
+arms the pause without arming that latch, so the branch stayed open for the whole of it. And
+it is not only an insert — the shared line model writes the value on a Backspace, a Delete and
+a word-erase as well. On a multi-select the answer is re-assembled from the checked set and
+the typed value when the review tab submits, so letters typed inside the pause widened an
+answer Enter had already recorded. The branch now asks the lock, and asks it only on a
 multi-select: a single-select field whose submit the pause rejected stays editable, which is
 Decision 39's fourth item and what its own test pins.
 
