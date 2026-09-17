@@ -1,4 +1,4 @@
-import { fork, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -16,6 +16,10 @@ import {
   fakeToolCall,
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
+import {
+  readManagedWorkerReadyRecord,
+  type ManagedWorkerFileBoot,
+} from '../packages/cli/src/serve/managed-runtime-worker-bootstrap.js';
 
 const root = process.cwd();
 const argumentsList = process.argv.slice(2);
@@ -57,6 +61,8 @@ const activeCancelDelayedWrite = path.join(
   workspace,
   'active-cancel-delayed.txt',
 );
+const runtimeBootConfig = path.join(runtimeOutput, 'boot.json');
+const runtimeReadyRecord = path.join(runtimeOutput, 'ready.json');
 const workspaceId = createHash('sha256')
   .update(workspace)
   .digest('hex')
@@ -276,6 +282,70 @@ async function waitUntil(timestamp: number): Promise<void> {
   ]);
 }
 
+async function verifyInvalidFileBootRejected(): Promise<void> {
+  writeFileSync(runtimeBootConfig, 'x'.repeat(32_769), { mode: 0o600 });
+  let stderr = '';
+  const worker = register(
+    spawn(
+      process.execPath,
+      [
+        runtimeWorker,
+        '--boot-config',
+        runtimeBootConfig,
+        '--ready-record',
+        runtimeReadyRecord,
+      ],
+      {
+        cwd: root,
+        detached: process.platform !== 'win32',
+        env: commonEnvironment,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      },
+    ),
+    'Invalid Managed Runtime worker',
+  );
+  worker.stderr?.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+  const code = await waitForExit(
+    worker,
+    'Invalid Managed Runtime worker',
+    5_000,
+  );
+  if (code !== 1 || existsSync(runtimeReadyRecord)) {
+    throw new Error(
+      `Managed Runtime worker accepted an invalid boot config (code=${code})\n${stderr}`,
+    );
+  }
+}
+
+async function waitForManagedWorkerReady(
+  worker: ChildProcess,
+  boot: ManagedWorkerFileBoot,
+  stderr: () => string,
+): Promise<Awaited<ReturnType<typeof readManagedWorkerReadyRecord>>> {
+  const workerFailure = new Promise<never>((_resolve, reject) => {
+    worker.once('error', reject);
+    worker.once('exit', (code) => {
+      reject(new Error(`Managed Runtime exited with ${code}\n${stderr()}`));
+    });
+  });
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      return await readManagedWorkerReadyRecord(runtimeReadyRecord, boot);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await Promise.race([
+      new Promise((resolve) => setTimeout(resolve, 50)),
+      workerFailure,
+      signalFailure,
+    ]);
+  }
+  throw new Error(`Managed Runtime startup timed out\n${stderr()}`);
+}
+
 async function startBrokerResponseLossProxy(
   targetOrigin: string,
   dropFirstExecutionResponse: boolean,
@@ -370,6 +440,9 @@ let brokerProxy:
   | undefined;
 let runFailure: unknown;
 try {
+  if (!cancelBeforeReady && !cancelAfterStart && !twoSessions) {
+    await verifyInvalidFileBootRejected();
+  }
   fake = await startFakeOpenAIServer(({ body }) => {
     const messages = Array.isArray(body['messages']) ? body['messages'] : [];
     const serializedMessages = JSON.stringify(messages);
@@ -569,58 +642,10 @@ try {
     );
     await waitUntil(provisionStartedAt + runtimeDelayMs);
 
-    const runtime = register(
-      fork(runtimeWorker, [], {
-        cwd: root,
-        detached: process.platform !== 'win32',
-        env: {
-          ...commonEnvironment,
-          HOME: runtimeHome,
-          QWEN_HOME: path.join(runtimeHome, '.qwen'),
-          QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFolders,
-        },
-        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      }),
-      'Managed Runtime worker',
-    );
-    runtime.stderr?.on('data', (chunk) => {
-      runtimeStderr += chunk.toString();
-    });
-    const runtimeReadyPromise = Promise.race([
-      new Promise<Record<string, unknown>>((resolve, reject) => {
-        const timer = setTimeout(
-          () =>
-            reject(
-              new Error(`Managed Runtime startup timed out\n${runtimeStderr}`),
-            ),
-          30_000,
-        );
-        runtime.on('message', (message: unknown) => {
-          if (
-            message &&
-            typeof message === 'object' &&
-            (message as Record<string, unknown>)['type'] === 'ready'
-          ) {
-            clearTimeout(timer);
-            resolve(message as Record<string, unknown>);
-          }
-        });
-        runtime.once('error', (error) => {
-          clearTimeout(timer);
-          reject(error);
-        });
-        runtime.once('exit', (code) => {
-          clearTimeout(timer);
-          reject(
-            new Error(`Managed Runtime exited with ${code}\n${runtimeStderr}`),
-          );
-        });
-      }),
-      signalFailure,
-    ]);
-    runtime.send({
+    const boot: ManagedWorkerFileBoot = {
       type: 'boot',
       version: 1,
+      runtimeInstanceId: randomUUID(),
       gatewayIncarnation: randomUUID(),
       leaseId,
       epoch: 1,
@@ -630,12 +655,41 @@ try {
       token: runtimeToken,
       outputRoot: runtimeOutput,
       cliEntry: cliBundle,
+    };
+    writeFileSync(runtimeBootConfig, JSON.stringify(boot), { mode: 0o600 });
+    const runtime = register(
+      spawn(
+        process.execPath,
+        [
+          runtimeWorker,
+          '--boot-config',
+          runtimeBootConfig,
+          '--ready-record',
+          runtimeReadyRecord,
+        ],
+        {
+          cwd: root,
+          detached: process.platform !== 'win32',
+          env: {
+            ...commonEnvironment,
+            HOME: runtimeHome,
+            QWEN_HOME: path.join(runtimeHome, '.qwen'),
+            QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFolders,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      ),
+      'Managed Runtime worker',
+    );
+    runtime.stderr?.on('data', (chunk) => {
+      runtimeStderr += chunk.toString();
     });
-    const runtimeReady = await runtimeReadyPromise;
-    const runtimeUrl = runtimeReady['url'];
-    if (typeof runtimeUrl !== 'string') {
-      throw new Error('Managed Runtime ready message omitted its URL');
-    }
+    const runtimeReady = await waitForManagedWorkerReady(
+      runtime,
+      boot,
+      () => runtimeStderr,
+    );
+    const runtimeUrl = runtimeReady.url;
     const response = await fetch(
       new URL('/fixture/runtime-ready', controlUrl),
       {

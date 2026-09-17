@@ -1,8 +1,8 @@
 # Managed Agent Java 自有 Runtime 生命周期执行方案
 
-状态：待实施
+状态：执行中（P5a 已完成）
 
-更新日期：2026-09-17
+更新日期：2026-09-18
 
 上游方案：[Managed Agent Hosted Runtime 可执行技术方案](./2026-09-17-managed-agent-hosted-runtime-execution.md)
 
@@ -23,11 +23,11 @@ Java Runtime Broker
 
 本阶段只实现 Local Process Provisioner。Kubernetes、数据库恢复、跨机器迁移和 Windows 支持不进入 P5。
 
-## 2. 当前差距
+## 2. P5 开工时差距
 
-当前实现已经具备 Hosted Harness、Java Broker、Runtime HTTP transport、执行幂等和真实进程 E2E，但物理 Runtime 仍由 `scripts/run-managed-hosted-runtime-e2e.ts` 手工启动并通过测试控制接口注入 endpoint。
+P5 开工时已经具备 Hosted Harness、Java Broker、Runtime HTTP transport、执行幂等和真实进程 E2E，但物理 Runtime 仍由 `scripts/run-managed-hosted-runtime-e2e.ts` 手工启动并通过测试控制接口注入 endpoint。
 
-必须补齐的差距：
+P5 必须补齐的差距：
 
 1. `managed-runtime-worker` 只接受 Node IPC boot message，Java 无法使用稳定的独立进程协议启动它。
 2. `RuntimeProvisioner` 只接收 `RuntimeScope`。当 `isolationClass=session` 时，不包含 Harness Session 隔离键，真实 Provisioner 可能错误复用进程。
@@ -224,16 +224,17 @@ Provisioner 以 `RuntimeProvisionRequest` 为 key 管理 generation，并持有�
 
 ## 7. 实施切片与提交边界
 
-### P5a：独立 worker boot 协议
+### P5a：独立 worker boot 协议（已完成）
 
 改动：
 
-- `packages/cli/src/serve/managed-runtime-activator.ts`
 - `packages/cli/src/serve/managed-runtime-worker-entry.ts`
 - 新增纯解析/文件握手模块及其单测
-- 更新现有 LocalProcessRuntimeActivator fixture
+- 保持现有 LocalProcessRuntimeActivator IPC 契约，并用回归测试证明兼容
 
 验收：IPC 模式无回归；合法文件 boot 能启动真实 worker；boot 超长、字段不符、ready 写入失败均 fail closed；ready record 不含 token。
+
+2026-09-18 证据：新增精确字段、大小、owner-only 权限、loopback endpoint 和身份匹配校验；超长 boot config 的真实 worker 进程以 code 1 退出且不生成 ready record；四个 Java/Harness/Runtime E2E 均已改走文件握手并通过，最终产物复验的正常冷启动首模型事件 272 ms、Runtime ready 15,781 ms、physical execute 1。
 
 提交：`feat(cli): add standalone managed runtime boot protocol`
 

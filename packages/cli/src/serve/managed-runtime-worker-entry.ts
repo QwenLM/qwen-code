@@ -5,11 +5,25 @@
  */
 import path from 'node:path';
 import type { ManagedWorkerBoot } from './managed-runtime-activator.js';
+import {
+  createManagedWorkerReadyRecord,
+  isManagedWorkerBoot,
+  parseManagedWorkerStartup,
+  readManagedWorkerBootConfig,
+  writeManagedWorkerReadyRecord,
+  type ManagedWorkerFileBoot,
+} from './managed-runtime-worker-bootstrap.js';
 import type { RunHandle } from './run-qwen-serve.js';
 
 let handle: RunHandle | undefined;
 let starting: Promise<void> | undefined;
 let closing = false;
+let startup: ReturnType<typeof parseManagedWorkerStartup>;
+try {
+  startup = parseManagedWorkerStartup(process.argv.slice(2));
+} catch {
+  process.exit(1);
+}
 const bootTimer = setTimeout(() => {
   void close();
 }, 30_000);
@@ -40,41 +54,53 @@ process.once('SIGINT', () => {
 process.once('error', () => {
   void close();
 });
-process.on('message', (message: unknown) => {
-  if ((message as { type?: unknown })?.type === 'shutdown') {
-    void close();
-    return;
-  }
-  if (starting || closing || !validBoot(message)) {
+async function start(
+  boot: ManagedWorkerBoot,
+  publishReady: (url: string) => Promise<void>,
+): Promise<void> {
+  clearTimeout(bootTimer);
+  process.env['QWEN_RUNTIME_DIR'] = boot.outputRoot;
+  process.env['QWEN_CLI_ENTRY'] = boot.cliEntry;
+  const { runQwenServe } = await import('./run-qwen-serve.js');
+  if (closing) return;
+  handle = await runQwenServe(
+    {
+      mode: 'http-bridge',
+      hostname: '127.0.0.1',
+      port: 0,
+      workspace: boot.workspaceCwd,
+      token: boot.token,
+      requireAuth: true,
+      serveWebShell: false,
+      experimentalManagedRuntimeWorker: true,
+    },
+    {
+      ownedManagedRuntime: boot,
+      preheatBridge: false,
+      daemonLogBaseDir: path.join(boot.outputRoot, 'debug'),
+    },
+  );
+  await handle.runtimeReady;
+  if (closing) return;
+  await publishReady(handle.url);
+}
+
+function begin(
+  boot: ManagedWorkerBoot,
+  publishReady: (url: string) => Promise<void>,
+): void {
+  if (starting || closing) {
     void close(1);
     return;
   }
-  clearTimeout(bootTimer);
-  const boot = message;
-  starting = (async () => {
-    process.env['QWEN_RUNTIME_DIR'] = boot.outputRoot;
-    process.env['QWEN_CLI_ENTRY'] = boot.cliEntry;
-    const { runQwenServe } = await import('./run-qwen-serve.js');
-    if (closing || !process.connected) return;
-    handle = await runQwenServe(
-      {
-        mode: 'http-bridge',
-        hostname: '127.0.0.1',
-        port: 0,
-        workspace: boot.workspaceCwd,
-        token: boot.token,
-        requireAuth: true,
-        serveWebShell: false,
-        experimentalManagedRuntimeWorker: true,
-      },
-      {
-        ownedManagedRuntime: boot,
-        preheatBridge: false,
-        daemonLogBaseDir: path.join(boot.outputRoot, 'debug'),
-      },
-    );
-    await handle.runtimeReady;
-    if (closing || !process.connected) return;
+  starting = start(boot, publishReady);
+  void starting.catch(() => {
+    void close(1);
+  });
+}
+
+function ipcReady(boot: ManagedWorkerBoot, url: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
     process.send?.(
       {
         type: 'ready',
@@ -85,48 +111,45 @@ process.on('message', (message: unknown) => {
         tenantId: boot.tenantId,
         workspaceId: boot.workspaceId,
         workspaceCwd: boot.workspaceCwd,
-        url: handle.url,
+        url,
       },
       (error) => {
-        if (error) void close();
+        if (error) reject(error);
+        else resolve();
       },
     );
-  })();
-  void starting.catch(() => {
-    void close(1);
+    if (!process.send) reject(new Error('Managed Runtime IPC is unavailable.'));
   });
-});
-if (!process.connected) void close(1);
+}
 
-function validBoot(value: unknown): value is ManagedWorkerBoot {
-  if (
-    !value ||
-    typeof value !== 'object' ||
-    JSON.stringify(value).length > 32_768
-  )
-    return false;
-  const boot = value as Record<string, unknown>;
-  const strings = [
-    'gatewayIncarnation',
-    'leaseId',
-    'tenantId',
-    'workspaceId',
-    'workspaceCwd',
-    'token',
-    'outputRoot',
-    'cliEntry',
-  ];
-  return (
-    Object.keys(boot).length === strings.length + 3 &&
-    boot['type'] === 'boot' &&
-    boot['version'] === 1 &&
-    Number.isSafeInteger(boot['epoch']) &&
-    (boot['epoch'] as number) > 0 &&
-    strings.every(
-      (k) => typeof boot[k] === 'string' && (boot[k] as string).length > 0,
-    ) &&
-    ['workspaceCwd', 'outputRoot', 'cliEntry'].every((k) =>
-      path.isAbsolute(boot[k] as string),
-    )
-  );
+async function fileReady(
+  boot: ManagedWorkerFileBoot,
+  readyRecordPath: string,
+  url: string,
+): Promise<void> {
+  const ready = createManagedWorkerReadyRecord(boot, url);
+  await writeManagedWorkerReadyRecord(readyRecordPath, ready);
+}
+
+if (startup.kind === 'ipc') {
+  process.on('message', (message: unknown) => {
+    if ((message as { type?: unknown })?.type === 'shutdown') {
+      void close();
+      return;
+    }
+    if (!isManagedWorkerBoot(message)) {
+      void close(1);
+      return;
+    }
+    begin(message, (url) => ipcReady(message, url));
+  });
+  if (!process.connected) void close(1);
+} else if (process.connected) {
+  void close(1);
+} else {
+  void readManagedWorkerBootConfig(startup.bootConfigPath)
+    .then((boot) => {
+      begin(boot, (url) => fileReady(boot, startup.readyRecordPath, url));
+    })
+    .catch(() => close(1));
 }

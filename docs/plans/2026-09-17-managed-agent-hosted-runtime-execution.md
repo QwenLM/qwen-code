@@ -2,13 +2,11 @@
 
 状态：执行中
 
-更新日期：2026-09-17
+更新日期：2026-09-18
 
 设计依据：[Java Runtime Broker MVP](../design/2026-09-17-managed-agent-java-runtime-broker-mvp.zh-CN.md)
 
-当前提交链已覆盖 P1、P2 和 P4；本阶段提交完成 P4b 的执行中取消与多 Session 隔离验收。
-
-当前完成范围：P1、P2 和 P4；Hosted Harness、Java Broker 以及冷启动、幂等、取消、多 Session 隔离均已有真实进程证据。
+当前完成范围：P1、P2、P4 和 P5a；Hosted Harness、Java Broker 以及冷启动、幂等、取消、多 Session 隔离、独立 worker 文件握手均已有真实进程证据。
 
 ## 1. 结论
 
