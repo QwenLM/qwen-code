@@ -382,13 +382,13 @@ describe('REST integration documentation contract', () => {
     );
 
     const headings = protocolHeadings();
-    const routeLinks = [
-      ...guide.matchAll(
-        /\[`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`\]\(([^)\s]+)\)/g,
-      ),
-    ];
+    const routePattern = new RegExp('^' + ROUTE_METHODS + ' /[^`]+$');
+    const routeLinks = [...guide.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)];
     for (const link of routeLinks) {
-      const operation = link[1];
+      const operation = link[1].replace(/^`([^`]+)`$/, '$1');
+      if (!routePattern.test(operation)) {
+        continue;
+      }
       const ownHeadings = headings.filter((heading) =>
         heading.startsWith(`\`${operation}\``),
       );
