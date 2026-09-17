@@ -37,6 +37,8 @@ import {
   WorkflowAgentCapExceededError,
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
+import { DISPATCH_AFFECTING_AGENT_OPTS } from './workflow-journal.js';
+import { resolveBuiltinToolName } from '../../tools/tool-names.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -769,7 +771,7 @@ describe('WorkflowOrchestrator', () => {
     // Cross-realm: the sandbox wraps the host error in a vm-realm Error
     // (per T1/T8/T14 defense). The dispatch is never invoked because the
     // gate short-circuits before scheduler.run.
-    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('token budget exceeded');
     expect(String(caught)).toContain('1000');
     expect(dispatchCalls).toBe(0);
   });
@@ -796,7 +798,7 @@ describe('WorkflowOrchestrator', () => {
     }
     // q1 = 60/100, q2 = 120/100 (overshoot), q3 = gate refuses
     expect(dispatchCalls).toBe(2);
-    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('token budget exceeded');
     expect(budget.spent()).toBe(120);
   });
 
@@ -869,7 +871,7 @@ describe('WorkflowOrchestrator', () => {
           agentCompleted: () => completed++,
         },
       }),
-    ).rejects.toThrow(/exceeded the token budget/);
+    ).rejects.toThrow(/token budget exceeded/);
     // ASSERT it doesn't reach 10 (the without-fix overshoot value):
     // with the scheduler pinned to limit 1, slot-acquire re-checks are
     // serialized, so exactly 3 dispatches pass (spent 0/40/80 at acquire;
@@ -916,7 +918,7 @@ describe('WorkflowOrchestrator', () => {
         resumeReplay: buildReplay(priorEntries),
         emitter: { resumeRespawn: (line) => respawns.push(line) },
       }),
-    ).rejects.toThrow(/exceeded the token budget/);
+    ).rejects.toThrow(/token budget exceeded/);
 
     expect(dispatchCalls).toBe(3);
     expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(3);
@@ -947,7 +949,7 @@ describe('WorkflowOrchestrator', () => {
         emitter: { resumeRespawn: (line) => respawns.push(line) },
       });
       if (round < 3) {
-        await expect(run).rejects.toThrow(/exceeded the token budget/);
+        await expect(run).rejects.toThrow(/token budget exceeded/);
       } else {
         await expect(run).resolves.toMatchObject({
           result: Array.from({ length: 10 }, (_, i) => `slot${i}`),
@@ -973,6 +975,43 @@ describe('WorkflowOrchestrator', () => {
   // sites); no dedicated test — debugLogger has its own enable/disable
   // gating and a spy here would be brittle. Manual verification path:
   // run with DEBUG=WORKFLOW=1 and trigger a budget-exhausted dispatch.
+
+  // A turn target is gated on the whole turn's spend — the main loop and
+  // every other run included — while the registry keeps mirroring this run
+  // alone: its own spend, and no cap, since the target is not this run's.
+  it('gates a turn target on the turn spend and reports only the run to the registry', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    let turnSpent = 499_999;
+    const budget = new WorkflowBudgetImpl(500_000, {
+      source: 'directive',
+      turnSpent: () => turnSpent,
+    });
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      // Tokens spent elsewhere in the turn while this agent ran.
+      turnSpent += 10;
+      return 'ok';
+    });
+    const budgetUpdates: Array<{ spent: number; total: number | null }> = [];
+    const caught = await orchestrator
+      .run({
+        script: `await agent('q1'); await agent('q2'); return 'done';`,
+        args: undefined,
+        budget,
+        emitter: {
+          budgetUpdated: (spent, total) => budgetUpdates.push({ spent, total }),
+        },
+      })
+      .catch((e: unknown) => e);
+
+    expect(dispatchCalls).toBe(1);
+    expect(String(caught)).toContain(
+      'token budget exceeded (500009 / 500000 output tokens)',
+    );
+    expect(budget.runSpent()).toBe(0);
+    expect(budgetUpdates).toEqual([{ spent: 0, total: null }]);
+  });
 
   // ── P5 T4: budgetUpdated emitter event ─────────────────────────────────
 
@@ -1281,7 +1320,7 @@ describe('WorkflowOrchestrator', () => {
 
     scheduler.resume();
     await expect(run).resolves.toMatchObject({
-      result: expect.stringContaining('exceeded the token budget'),
+      result: expect.stringContaining('token budget exceeded'),
     });
     expect(dispatchCalls).toBe(0);
   });
@@ -1375,7 +1414,7 @@ describe('WorkflowOrchestrator', () => {
     controller.abort();
 
     await expect(run).resolves.toMatchObject({
-      result: expect.stringContaining('exceeded the token budget'),
+      result: expect.stringContaining('token budget exceeded'),
     });
   });
 
@@ -1449,7 +1488,7 @@ describe('WorkflowOrchestrator', () => {
       caught = e;
     }
     // parent p1 spends 60; nested n1 spends 60 (total 120); nested n2 gated.
-    expect(String(caught)).toMatch(/exceeded the token budget/);
+    expect(String(caught)).toMatch(/token budget exceeded/);
     expect(budget.spent()).toBe(120);
   });
 
@@ -1578,6 +1617,45 @@ describe('WorkflowOrchestrator', () => {
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
     return { journal, entries };
   }
+
+  // The sandbox normalizes effort and disallowedTools before the resume key is
+  // derived: spelling the same request differently must replay, and a
+  // genuinely different request must not.
+  it('derives one resume key for equivalent effort and disallowedTools spellings', async () => {
+    const keyFor = async (opts: string): Promise<string> => {
+      const { journal, entries } = memoryJournal();
+      await new WorkflowOrchestrator(async () => 'ok').run({
+        script: `return await agent('scan', ${opts});`,
+        args: undefined,
+        journal,
+      });
+      const started = entries.find((e) => e.type === 'started');
+      return (started as { key: string }).key;
+    };
+
+    const medium = await keyFor(
+      `{ effort: 'medium', disallowedTools: ['write_file', 'edit'] }`,
+    );
+    expect(
+      await keyFor(
+        `{ effort: 'MED', disallowedTools: ['edit', 'write_file', 'edit'] }`,
+      ),
+    ).toBe(medium);
+    expect(
+      await keyFor(
+        `{ effort: 'high', disallowedTools: ['edit', 'write_file'] }`,
+      ),
+    ).not.toBe(medium);
+    expect(
+      await keyFor(`{ effort: 'medium', disallowedTools: ['edit'] }`),
+    ).not.toBe(medium);
+    // A built-in tool named by its display name is the same deny.
+    expect(
+      await keyFor(
+        `{ effort: 'medium', disallowedTools: ['WriteFile', 'Edit'] }`,
+      ),
+    ).toBe(medium);
+  });
 
   it('settles a sequential agent() to null when the agent itself failed', async () => {
     const { journal, entries } = memoryJournal();
@@ -1850,7 +1928,9 @@ describe('WorkflowOrchestrator', () => {
 
       expect(dispatch).toHaveBeenCalledOnce();
       expect(entries.map((entry) => entry.type)).toEqual(['started', 'result']);
-      expect(entries.some((entry) => entry.key === keyB)).toBe(false);
+      expect(
+        entries.some((entry) => entry.type !== 'source' && entry.key === keyB),
+      ).toBe(false);
       expect(respawns).toEqual([]);
     } finally {
       if (previous === undefined) {
@@ -2909,7 +2989,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
           args: undefined,
           budget,
         }),
-      ).rejects.toThrow(/exceeded the token budget/);
+      ).rejects.toThrow(/token budget exceeded/);
 
       const capOrchestrator = new WorkflowOrchestrator(async () => {
         throw new WorkflowAgentCapExceededError(1000);
@@ -3418,7 +3498,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   type StubSubagentCall = {
-    config: { name?: string; model?: string; disallowedTools?: string[] };
+    config: {
+      name?: string;
+      model?: string;
+      disallowedTools?: string[];
+      tools?: string[];
+    };
     runtimeContextSame: boolean;
     /** The exact Config the dispatch handed to the runtime agent. */
     runtimeContext: Config;
@@ -3427,6 +3512,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeIgnoreFiles?: string;
     options?: {
       runConfigOverrides?: unknown;
+      modelConfigOverrides?: unknown;
       taskName?: string;
       subagentId?: string;
     };
@@ -3436,6 +3522,17 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   function fakeConfigWithMgr(opts: {
     transcriptDir?: string;
+    /**
+     * Tools this session's registry holds beyond the built-ins, such as MCP
+     * tools. Built-in tools always count as known, registered here or not,
+     * the way the real manager treats them.
+     */
+    registeredTools?: Array<{ name: string; displayName?: string }>;
+    /**
+     * Tools that background MCP discovery registers: absent from the registry
+     * until `waitForMcpReady` settles.
+     */
+    discoveredTools?: Array<{ name: string; displayName?: string }>;
     findSubagentByName?: (name: string) => Promise<{
       name: string;
       description: string;
@@ -3444,6 +3541,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       tools?: string[];
       disallowedTools?: string[];
       model?: string;
+      mcpServers?: Record<string, unknown>;
     } | null>;
     onCreate?: (
       call: StubSubagentCall,
@@ -3475,6 +3573,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     // The override carries the result. We don't care about the registry contents in unit
     // tests — only that the override flow doesn't crash on the missing methods — so the
     // stub registry just answers the API surface those helpers call.
+    const registered = [...(opts.registeredTools ?? [])];
     const fakeRegistry = {
       copyDiscoveredToolsFrom: () => {},
       registerTool: () => {},
@@ -3482,6 +3581,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      waitForMcpReady: vi.fn(async () => {
+        registered.push(...(opts.discoveredTools ?? []));
+      }),
       // Session Workflow plan-revision state mirroring Config's shape: an
       // own field mutated by methods that assign `this.<field>` (config.ts
       // set/clearSessionWorkflowPlanRevision). On an un-shimmed
@@ -3521,6 +3623,34 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
+        // Mirrors the real manager over a session registry of the built-ins
+        // plus `registeredTools`: MCP entries are exempt unless the caller
+        // asks for them to be checked, built-in tools match, and anything else
+        // matches only a registered name or display name. The schema-deny
+        // refusal resolves names itself and does not use this.
+        findUnmatchedToolNames: async (
+          names: string[],
+          options: { checkMcpNames?: boolean } = {},
+        ) =>
+          names.filter(
+            (name) =>
+              (options.checkMcpNames === true || !name.startsWith('mcp__')) &&
+              resolveBuiltinToolName(name) === undefined &&
+              !registered.some(
+                (tool) => tool.name === name || tool.displayName === name,
+              ),
+          ),
+        // Same registry: a registered name or display name becomes the tool
+        // name, a built-in spelling its tool name, anything else as given.
+        resolveToolNames: async (names: string[]) =>
+          names.map(
+            (name) =>
+              registered.find(
+                (tool) => tool.name === name || tool.displayName === name,
+              )?.name ??
+              resolveBuiltinToolName(name) ??
+              name,
+          ),
         createAgentHeadless: async (
           subagentConfig: {
             name?: string;
@@ -3531,6 +3661,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           options?: {
             eventEmitter?: unknown;
             runConfigOverrides?: unknown;
+            modelConfigOverrides?: unknown;
             taskName?: string;
             subagentId?: string;
           },
@@ -3545,6 +3676,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               .getQwenIgnoreFileNamesDisplay(),
             options: {
               runConfigOverrides: options?.runConfigOverrides,
+              modelConfigOverrides: options?.modelConfigOverrides,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -4204,6 +4336,583 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       ]),
     );
   });
+
+  // effort needs the agent's own content-generator config, which only the
+  // override path builds: it has to leave the fast path and reach the manager
+  // as a per-agent model-config override, never as a session change.
+  it('routes effort through the override path as a per-agent model override', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    const result = await createProductionDispatch(config)('hi', {
+      effort: 'low',
+    });
+
+    expect(result).toBe('done');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.options?.modelConfigOverrides).toEqual({
+      reasoningEffort: 'low',
+    });
+    expect(calls[0]!.config.model).toBeUndefined();
+  });
+
+  it('sends no model-config override when effort is omitted', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('hi', { model: 'qwen3-max' });
+
+    expect(calls[0]!.options?.modelConfigOverrides).toBeUndefined();
+  });
+
+  // The sandbox normalizes effort before it crosses; a host caller that
+  // dispatches directly gets the same normalization and the same refusal.
+  it('normalizes a host-supplied effort alias and refuses an unknown tier', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+
+    await dispatch('hi', { effort: 'X-High' as unknown as 'xhigh' });
+    expect(calls[0]!.options?.modelConfigOverrides).toEqual({
+      reasoningEffort: 'xhigh',
+    });
+
+    await expect(
+      dispatch('hi', { effort: 'turbo' as unknown as 'low' }),
+    ).rejects.toThrow(/agent\(\{effort\}\): unknown effort tier "turbo"/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('unions per-call disallowedTools with the agentType denies and the floor', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Scanner',
+        description: 'read-only scan',
+        systemPrompt: 'scan prompt',
+        level: 'project',
+        disallowedTools: ['Foo'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      agentType: 'Scanner',
+      disallowedTools: ['Shell', 'write_file'],
+    });
+
+    const disallowed = calls[0]!.config.disallowedTools ?? [];
+    // The built-in display name arrives as its tool name.
+    expect(disallowed).toEqual(
+      expect.arrayContaining([
+        'Foo',
+        'run_shell_command',
+        'write_file',
+        'ask_user_question',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
+    );
+    expect(new Set(disallowed).size).toBe(disallowed.length);
+  });
+
+  it('routes disallowedTools alone through the override path', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      disallowedTools: ['edit'],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.disallowedTools).toEqual(
+      expect.arrayContaining(['edit', 'agent', 'ask_user_question']),
+    );
+  });
+
+  // A schema agent answers only through structured_output. Denying it must be
+  // refused before anything spawns, by display name as well as by tool name,
+  // with no help from the tool registry (the stub above does not resolve it).
+  it.each([['structured_output'], ['StructuredOutput']])(
+    'refuses a schema agent that denies %s before spawning',
+    async (name) => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('extract', {
+          schema: { type: 'object' },
+          disallowedTools: [name],
+        }),
+      ).rejects.toThrow(
+        /schema mode needs the structured_output tool, but disallowedTools deny it/,
+      );
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it('refuses a schema agent whose agent type denies structured_output', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Scanner',
+        description: 'scan',
+        systemPrompt: 'scan prompt',
+        level: 'project',
+        disallowedTools: ['StructuredOutput'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('extract', {
+        agentType: 'Scanner',
+        schema: { type: 'object' },
+      }),
+    ).rejects.toThrow(/schema mode needs the structured_output tool/);
+    expect(calls).toHaveLength(0);
+  });
+
+  // A deny that matches no tool would leave the agent that very tool while
+  // the script believes it narrowed it.
+  it('refuses a deny entry that matches no tool before spawning', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('scan', {
+        disallowedTools: ['Bash', 'edit'],
+      }),
+    ).rejects.toThrow(/"Bash" matches no tool/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('accepts MCP deny patterns', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      disallowedTools: ['mcp__github', 'mcp__slack__*'],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.disallowedTools).toEqual(
+      expect.arrayContaining(['mcp__github', 'mcp__slack__*']),
+    );
+  });
+
+  // The host re-checks the deny list's shape for callers that bypass the
+  // sandbox: a bare string would otherwise spread into single characters and a
+  // padded name would deny nothing.
+  it.each([
+    ['a bare string', 'write_file'],
+    ['a padded name', [' edit']],
+  ])(
+    'refuses a host-supplied deny list that is %s before spawning',
+    async (_label, disallowedTools) => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          disallowedTools: disallowedTools as unknown as string[],
+        }),
+      ).rejects.toThrow(/must be an array of non-empty tool-name strings/);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  describe('tools allowlist', () => {
+    const warehouse = [
+      {
+        name: 'mcp__warehouse__query',
+        displayName: 'query (warehouse MCP Server)',
+      },
+    ];
+    const ok = async () => ({ finalText: 'ok', terminateMode: 'GOAL' });
+
+    it('narrows the agent to the named tools and leaves execution to its declarations', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await createProductionDispatch(config)('scan', {
+        tools: ['run_shell_command', 'ReadFile'],
+      });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.config.tools).toEqual([
+        'run_shell_command',
+        'read_file',
+      ]);
+      expect(calls[0]!.config).not.toHaveProperty('executionAllowedTools');
+    });
+
+    // Denies apply after the allowlist, so a floor tool stays out.
+    it('never brings back a floor tool', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await createProductionDispatch(config)('scan', {
+        tools: ['agent', 'ask_user_question', 'read_file'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['read_file']);
+      expect(calls[0]!.config.disallowedTools).toEqual(
+        expect.arrayContaining(['agent', 'ask_user_question']),
+      );
+    });
+
+    it('bounds the list by the agent type allowlist, each side named by display name', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        findSubagentByName: async () => ({
+          name: 'Analyst',
+          description: 'analysis',
+          systemPrompt: 'analyse',
+          level: 'project',
+          tools: ['ReadFile', 'query (warehouse MCP Server)'],
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('analyse', {
+        agentType: 'Analyst',
+        tools: ['read_file', 'Shell', 'mcp__warehouse__query'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual([
+        'read_file',
+        'mcp__warehouse__query',
+      ]);
+    });
+
+    it('accepts an MCP tool by display name and hands the agent its tool name', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('analyse', {
+        tools: ['query (warehouse MCP Server)'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['mcp__warehouse__query']);
+    });
+
+    // An agent type that lists no tools, or lists '*', inherits every tool,
+    // so it does not bound the call's list.
+    it.each([
+      ['no allowlist', undefined],
+      ['an empty allowlist', []],
+      ['a wildcard allowlist', ['*']],
+    ])(
+      'does not bound the list by an agent type with %s',
+      async (_label, agentTypeTools) => {
+        const { config, calls } = fakeConfigWithMgr({
+          findSubagentByName: async () => ({
+            name: 'Open',
+            description: 'inherits',
+            systemPrompt: 'open',
+            level: 'project',
+            ...(agentTypeTools !== undefined ? { tools: agentTypeTools } : {}),
+          }),
+          onCreate: ok,
+        });
+
+        await createProductionDispatch(config)('scan', {
+          agentType: 'Open',
+          tools: ['read_file'],
+        });
+
+        expect(calls[0]!.config.tools).toEqual(['read_file']);
+      },
+    );
+
+    // The agent type's list is definition-authored and echoed in the refusal.
+    it('strips control characters from the lists a refusal echoes', async () => {
+      const { config } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Reader',
+          description: 'read-only',
+          systemPrompt: 'read',
+          level: 'project',
+          tools: ['Read\u0085File'],
+        }),
+        onCreate: ok,
+      });
+
+      const error = (await createProductionDispatch(config)('scan', {
+        agentType: 'Reader',
+        tools: ['run_shell_command'],
+      }).catch((e: unknown) => e)) as Error;
+
+      expect(error.message).toContain('("ReadFile")');
+      expect(error.message).not.toMatch(/[\u007f-\u009f]/);
+    });
+
+    // MCP discovery runs in the background; a correct MCP name must not be
+    // refused because the dispatch came before discovery settled.
+    it.each([['mcp__warehouse__query'], ['query (warehouse MCP Server)']])(
+      'waits for MCP discovery before judging %s',
+      async (name) => {
+        const { config, calls } = fakeConfigWithMgr({
+          discoveredTools: warehouse,
+          onCreate: ok,
+        });
+
+        await createProductionDispatch(config)('analyse', { tools: [name] });
+
+        expect(config.waitForMcpReady).toHaveBeenCalledOnce();
+        expect(calls[0]!.config.tools).toEqual(['mcp__warehouse__query']);
+      },
+    );
+
+    it('refuses an MCP name discovery did not register, after waiting for it', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await expect(
+        createProductionDispatch(config)('analyse', {
+          tools: ['mcp__warehouse__query'],
+        }),
+      ).rejects.toThrow(/"mcp__warehouse__query" names no tool/);
+      expect(config.waitForMcpReady).toHaveBeenCalledOnce();
+      expect(calls).toHaveLength(0);
+    });
+
+    it('does not wait for discovery when every entry is a built-in tool', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await createProductionDispatch(config)('scan', {
+        tools: ['Shell', 'read_file'],
+      });
+
+      expect(config.waitForMcpReady).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+    });
+
+    // The agent's own servers are judged by its own registry, so their names
+    // give this session's discovery nothing to wait for.
+    it('does not wait for discovery for names its agent type serves itself', async () => {
+      const { config } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Db',
+          description: 'db agent',
+          systemPrompt: 'db',
+          level: 'project',
+          mcpServers: { agentdb: { command: 'agentdb' } },
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('query', {
+        agentType: 'Db',
+        tools: ['mcp__agentdb__query'],
+      });
+
+      expect(config.waitForMcpReady).not.toHaveBeenCalled();
+    });
+
+    it('refuses a list that shares no tool with the agent type, naming both as written', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Reader',
+          description: 'read-only',
+          systemPrompt: 'read',
+          level: 'project',
+          tools: ['ReadFile'],
+        }),
+        onCreate: ok,
+      });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          agentType: 'Reader',
+          tools: ['run_shell_command'],
+        }),
+      ).rejects.toThrow(
+        'agent({tools, agentType}): none of "run_shell_command" is among the tools the agent type allows ("ReadFile").',
+      );
+      expect(calls).toHaveLength(0);
+    });
+
+    it.each([
+      ['a name no tool has', ['Bash', 'read_file'], /"Bash" names no tool/],
+      [
+        'an MCP tool this session does not register',
+        ['mcp__warehouse__drop'],
+        /"mcp__warehouse__drop" names no tool/,
+      ],
+    ])('refuses %s before spawning', async (_label, tools, message) => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        onCreate: ok,
+      });
+
+      await expect(
+        createProductionDispatch(config)('scan', { tools }),
+      ).rejects.toThrow(message);
+      expect(calls).toHaveLength(0);
+    });
+
+    // Its own servers' tools exist only in the registry built for the agent,
+    // so this session's registry cannot judge those names.
+    it('leaves mcp__ names to the agent when its type brings its own MCP servers', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Db',
+          description: 'db agent',
+          systemPrompt: 'db',
+          level: 'project',
+          mcpServers: { agentdb: { command: 'agentdb' } },
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('query', {
+        agentType: 'Db',
+        tools: ['mcp__agentdb__query'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['mcp__agentdb__query']);
+    });
+
+    // A deny is resolved the way the agent's own config resolves it, so a
+    // display name in the agent type's denies removes that tool here too.
+    it('removes a tool the agent type denies by display name', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        findSubagentByName: async () => ({
+          name: 'Analyst',
+          description: 'analysis',
+          systemPrompt: 'analyse',
+          level: 'project',
+          disallowedTools: ['query (warehouse MCP Server)'],
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('analyse', {
+        agentType: 'Analyst',
+        tools: ['mcp__warehouse__query', 'read_file'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['read_file']);
+    });
+
+    it('refuses a list whose every tool is denied', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          tools: ['WriteFile'],
+          disallowedTools: ['write_file'],
+        }),
+      ).rejects.toThrow(/every tool in "write_file" is denied for this agent/);
+      expect(calls).toHaveLength(0);
+    });
+
+    it('gives a schema agent structured_output', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: '', terminateMode: 'CANCELLED' }),
+      });
+
+      await createProductionDispatch(config)('extract', {
+        schema: { type: 'object' },
+        tools: ['read_file'],
+      }).catch(() => undefined);
+
+      expect(calls[0]!.config.tools).toEqual([
+        'read_file',
+        'structured_output',
+      ]);
+    });
+
+    // The host re-checks what the sandbox refuses, for a caller that reaches
+    // the dispatch directly.
+    it.each([
+      [
+        'a bare string',
+        'read_file',
+        /must be a non-empty array of tool-name strings/,
+      ],
+      ['an empty list', [], /must be a non-empty array of tool-name strings/],
+      ['a wildcard', ['*'], /"\*" is a pattern/],
+      ['an MCP server', ['mcp__warehouse'], /names a whole MCP server/],
+      ['exec', ['exec'], /is the code-mode surface/],
+    ])(
+      'refuses a host-supplied allowlist that is %s before spawning',
+      async (_label, tools, message) => {
+        const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+        await expect(
+          createProductionDispatch(config)('scan', {
+            tools: tools as unknown as string[],
+          }),
+        ).rejects.toThrow(message);
+        expect(calls).toHaveLength(0);
+      },
+    );
+
+    // Name refusals are decided before any worktree is provisioned.
+    it.each([
+      ['an unknown name', { tools: ['Bash'] }],
+      ['a fully denied list', { tools: ['edit'], disallowedTools: ['edit'] }],
+    ])('refuses %s before provisioning a worktree', async (_label, extra) => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          isolation: 'worktree',
+          ...extra,
+        }),
+      ).rejects.toThrow(/agent\(\{tools\}\)/);
+      expect(worktreeStubs.instances).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  // Every option the resume key projects must also keep a dispatch off the
+  // fast path. The guard is driven by the same list, so an option added there
+  // cannot be silently dropped by a fast path that ignores it.
+  it.each(DISPATCH_AFFECTING_AGENT_OPTS.map((key) => [key]))(
+    'keeps a dispatch that sets only %s off the fast path',
+    async (key) => {
+      const samples: Record<string, unknown> = {
+        schema: { type: 'object' },
+        model: 'qwen3-max',
+        effort: 'low',
+        isolation: 'worktree',
+        agentType: 'Scanner',
+        workingDir: '/nonexistent/worktree',
+        disallowedTools: ['edit'],
+        tools: ['read_file'],
+      };
+      expect(samples).toHaveProperty(key);
+      const { config } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Scanner',
+          description: 'scan',
+          systemPrompt: 'scan prompt',
+          level: 'project',
+        }),
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      const fastPathAgentsBefore = created.length;
+
+      await createProductionDispatch(config)('probe', {
+        [key]: samples[key],
+      }).catch(() => undefined);
+
+      expect(created.length).toBe(fastPathAgentsBefore);
+    },
+  );
 
   it('schema-mode: subagent calls structured_output successfully → returns validated args', async () => {
     const { config } = fakeConfigWithMgr({

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from 'react';
+import { act, createRef, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonWorkspaceGitStatus,
@@ -370,7 +370,11 @@ afterEach(() => {
   latestComposerCoreOptions.current = null;
 });
 
-interface ChatEditorRenderProps {
+interface ChatEditorRenderProps
+  extends Pick<
+    ComponentProps<typeof ChatEditor>,
+    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+  > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
   pastedFiles?: Array<{
@@ -418,6 +422,10 @@ interface ChatEditorRenderProps {
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
+  onSkillsOpenChange?: (open: boolean) => void;
+  skillsLoading?: boolean;
+  skillsLoadError?: boolean;
+  skillsLoaded?: boolean;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
@@ -960,6 +968,70 @@ describe('ChatEditor context usage ring', () => {
     expect(ring(noWindow)).toBeNull();
   });
 
+  it('discards a pending hover when the owning session changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        sessionId: 'session-a',
+        tokenCount: 100,
+        contextWindow: 1000,
+        onShowContextUsage: vi.fn(),
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        ring(container)!.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true }),
+        ),
+      );
+      rerenderChatEditor(container, { ...props, sessionId: 'session-b' });
+      expect(ring(container)).not.toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(350));
+      expect(
+        document.querySelector('[data-web-shell-context-popover]'),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps live hover actions available for an always-visible ring with unknown counts', async () => {
+    const compress = vi.fn().mockResolvedValue(undefined);
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const getContextUsage = vi.fn();
+    const container = renderChatEditor({
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage,
+      onShowContextUsage,
+      contextUsageControls: {
+        sessionId: 'session-1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage,
+      },
+    });
+    await act(async () => ring(container)!.focus());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')).toBeNull();
+    expect(ring(container)!.hasAttribute('aria-describedby')).toBe(false);
+    expect(container.querySelector('[id$="-description"]')).toBeNull();
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const compression = buttons.find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compression.disabled).toBe(false);
+    await act(async () => compression.click());
+    expect(compress).toHaveBeenCalledOnce();
+    await act(async () =>
+      buttons.find((button) => button.textContent === 'View details')!.click(),
+    );
+    expect(onOpenContextUsage).toHaveBeenCalledOnce();
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+  });
+
   it('opens the context breakdown when clicked', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
@@ -977,7 +1049,7 @@ describe('ChatEditor context usage ring', () => {
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
   });
 
-  it('shows the used/total detail in a tooltip on focus', async () => {
+  it('shows the used/total detail in the hover card on focus', async () => {
     const container = renderChatEditor({
       tokenCount: 53_600,
       contextWindow: 1_000_000,
@@ -988,11 +1060,12 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
 
-    const tooltip = document.querySelector('[data-slot="tooltip-content"]')!;
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
     expect(tooltip.textContent).toContain('Context Usage');
     expect(tooltip.textContent).toContain('5.4%');
     expect(tooltip.textContent).toContain('53,600 tokens');
     expect(tooltip.textContent).toContain('1,000,000 tokens');
+    expect(tooltip.textContent).toContain('Remaining946,400 tokens');
     expect(tooltip.textContent).toContain(
       'Click to view the breakdown in the conversation.',
     );
@@ -1000,20 +1073,29 @@ describe('ChatEditor context usage ring', () => {
       tooltip.querySelector<HTMLElement>('[data-level]')?.style.width,
     ).toBe('5.36%');
     expect(
+      document
+        .getElementById(ring(container)!.getAttribute('aria-controls')!)
+        ?.getAttribute('aria-label'),
+    ).toBe('Context Usage');
+    expect(
       document.getElementById(
         ring(container)!.getAttribute('aria-describedby')!,
       )?.textContent,
     ).toBe('53,600 of 1,000,000 tokens used');
-    const arrow = document.querySelector<SVGElement>(
-      '[data-slot="tooltip-arrow"]',
-    );
-    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
-    expect(arrow?.style.transform).toBe(
-      'translateY(var(--floating-arrow-offset))',
-    );
+  });
+
+  it('shows zero remaining capacity when usage exceeds the context window', async () => {
+    const container = renderChatEditor({
+      tokenCount: 120_000,
+      contextWindow: 100_000,
+      onShowContextUsage: vi.fn(),
+    });
+    await act(async () => {
+      ring(container)!.focus();
+    });
     expect(
-      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
-    ).toContain('[--floating-arrow-offset:-1px]');
+      document.querySelector('[data-web-shell-context-popover]')?.textContent,
+    ).toContain('Remaining0 tokens');
   });
 
   it.each([
@@ -1039,7 +1121,7 @@ describe('ChatEditor context usage ring', () => {
       ).toBe(level);
       expect(
         document
-          .querySelector('[data-slot="tooltip-content"] [data-level]')
+          .querySelector('[data-web-shell-context-popover] [data-level]')
           ?.getAttribute('data-level'),
       ).toBe(level);
     },
@@ -2320,6 +2402,75 @@ describe('ChatEditor toolbar popovers', () => {
 });
 
 describe('ChatEditor slash command popovers', () => {
+  it('keeps Skill status messages out of populated local command menus', () => {
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 3,
+      query: 'th',
+      selectedIndex: 0,
+      items: [{ id: 'theme', label: '/theme', apply: '/theme ' }],
+    };
+    const container = renderChatEditor({ skillsLoading: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('/theme');
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Loading skills...');
+    rerenderChatEditor(container, { skillsLoadError: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).not.toContain('Failed to load results');
+  });
+
+  it('requests Skills when slash suggestions open and shows loading and failure states', () => {
+    const onSkillsOpenChange = vi.fn();
+    const props = { onSkillsOpenChange, skillsLoading: true };
+    const container = renderChatEditor(props);
+    expect(onSkillsOpenChange).not.toHaveBeenCalledWith(true);
+    composerCoreState.slashMenu = {
+      kind: 'command',
+      from: 0,
+      to: 7,
+      query: 'review',
+      selectedIndex: 0,
+      items: [],
+    };
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(true);
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Loading...');
+    expect(
+      document
+        .querySelector('[data-web-shell-slash-menu]')
+        ?.getAttribute('role'),
+    ).toBeNull();
+    rerenderChatEditor(container, {
+      ...props,
+      skillsLoading: false,
+      skillsLoadError: true,
+    });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu]')?.textContent,
+    ).toContain('Failed to load results');
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: false });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    // A settled catalog renders no status row: the composed app closes an
+    // empty panel via allowEmptySlashMenu, so a "no results" arm would only
+    // ever flash for one frame.
+    rerenderChatEditor(container, { onSkillsOpenChange, skillsLoaded: true });
+    expect(
+      document.querySelector('[data-web-shell-slash-menu] [role="status"]'),
+    ).toBeNull();
+    composerCoreState.slashMenu = null;
+    rerenderChatEditor(container, props);
+    expect(onSkillsOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('uses shadcn popovers for the command panel and hover detail', () => {
     composerCoreState.slashMenu = {
       kind: 'command',

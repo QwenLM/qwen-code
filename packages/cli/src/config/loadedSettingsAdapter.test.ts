@@ -4,20 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLoadedSettingsAdapter } from './loadedSettingsAdapter.js';
-import { SettingScope } from './settings.js';
+import { SettingScope, loadSettings } from './settings.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  AuthType,
+  applyProviderInstallPlan,
+  buildInstallPlan,
+  customProvider,
+  generateCustomEnvKey,
+} from '@qwen-code/qwen-code-core';
 
-// settingsUtils makes real fs calls in backup/restore — stub them out so the
-// tests can focus on adapter behavior without touching disk.
-vi.mock('./settingsUtils.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./settingsUtils.js')>();
-  return {
-    ...actual,
-    backupSettingsFile: vi.fn(),
-    restoreSettingsFromBackup: vi.fn(),
-    cleanupSettingsBackup: vi.fn(),
-  };
+const temporaryRoots: string[] = [];
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0))
+    fs.rmSync(root, { recursive: true, force: true });
 });
 
 // Named shape so dot-access on the known keys (`env`, `modelProviders`) is not
@@ -37,10 +41,12 @@ interface MutableSettingsFile {
 }
 
 function makeSettings(initial: SettingsShape = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-adapter-'));
+  temporaryRoots.push(root);
   const file: MutableSettingsFile = {
     settings: structuredClone(initial),
     originalSettings: structuredClone(initial),
-    path: '/tmp/qwen-test-settings.json',
+    path: path.join(root, 'settings.json'),
   };
   const setValue = vi.fn(
     (_scope: SettingScope, key: string, value: unknown) => {
@@ -89,6 +95,149 @@ function makeSettings(initial: SettingsShape = {}) {
 }
 
 describe('createLoadedSettingsAdapter', () => {
+  it.each([true, false])(
+    'restores actual file contents or absence after a shadowed install (existing: %s)',
+    async (existingFile) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-rollback-'));
+      const workspace = path.join(root, 'workspace');
+      const userHome = path.join(root, 'home');
+      fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+      fs.mkdirSync(userHome);
+      vi.stubEnv('QWEN_HOME', userHome);
+      const userFile = path.join(userHome, 'settings.json');
+      const workspaceFile = path.join(workspace, '.qwen', 'settings.json');
+      const originalUser =
+        '{"$version":4,"modelProviders":{"openai":[{"id":"old-user"}]}}\n';
+      const originalWorkspace = JSON.stringify({
+        $version: 4,
+        modelProviders: { openai: [{ id: 'workspace-chat' }] },
+      });
+      if (existingFile) fs.writeFileSync(userFile, originalUser);
+      fs.writeFileSync(workspaceFile, originalWorkspace);
+      try {
+        const loaded = loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          workspaceTrusted: true,
+        });
+        const before = structuredClone(loaded.merged);
+        const plan = buildInstallPlan(
+          customProvider,
+          {
+            baseUrl: 'https://rollback.example/v1',
+            apiKey: 'test-only',
+            modelIds: ['new-model'],
+          },
+          loaded.merged.modelProviders?.['openai'],
+        );
+        const envKey = Object.keys(plan.env!)[0]!;
+        const originalEnv = process.env[envKey];
+        await expect(
+          applyProviderInstallPlan(plan, {
+            settings: createLoadedSettingsAdapter(loaded, SettingScope.User),
+            doRefreshAuth: false,
+          }),
+        ).rejects.toThrow('higher-precedence');
+        expect(fs.existsSync(userFile)).toBe(existingFile);
+        if (existingFile)
+          expect(fs.readFileSync(userFile, 'utf8')).toBe(originalUser);
+        expect(fs.readFileSync(workspaceFile, 'utf8')).toBe(originalWorkspace);
+        expect(loaded.merged).toEqual(before);
+        expect(process.env[envKey]).toBe(originalEnv);
+        expect(fs.existsSync(userFile + '.orig')).toBe(false);
+        await applyProviderInstallPlan(plan, {
+          settings: createLoadedSettingsAdapter(loaded, SettingScope.Workspace),
+          doRefreshAuth: false,
+        });
+        expect(loaded.merged.model?.name).toBe('new-model');
+        expect(loaded.merged.modelProviders?.['openai']?.[0]?.id).toBe(
+          'new-model',
+        );
+        expect(fs.existsSync(workspaceFile + '.orig')).toBe(false);
+        if (originalEnv === undefined) delete process.env[envKey];
+        else process.env[envKey] = originalEnv;
+      } finally {
+        vi.unstubAllEnvs();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([SettingScope.User, SettingScope.Workspace])(
+    'preserves placeholders on disk and resolved runtime values during service reconnect (%s)',
+    async (scope) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-raw-'));
+      const workspace = path.join(root, 'workspace');
+      const userHome = path.join(root, 'home');
+      fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+      fs.mkdirSync(userHome);
+      vi.stubEnv('QWEN_HOME', userHome);
+      vi.stubEnv('RECONNECT_TEST_TOKEN', 'resolved-private-token');
+      vi.stubEnv('RECONNECT_TEST_ID', 'image-model');
+      vi.stubEnv('RECONNECT_TEST_URL', 'https://media.example/v1');
+      const envKey = `${generateCustomEnvKey(AuthType.USE_OPENAI, 'https://media.example/v1')}_IMAGE`;
+      vi.stubEnv(envKey, 'old-service-key');
+      const filename = path.join(
+        scope === SettingScope.User ? userHome : path.join(workspace, '.qwen'),
+        'settings.json',
+      );
+      const raw = {
+        id: '${RECONNECT_TEST_ID}',
+        baseUrl: '${RECONNECT_TEST_URL}',
+        envKey,
+        imageOnly: true,
+        generationConfig: {
+          contextWindowSize: 65536,
+          customHeaders: {
+            Authorization: '${RECONNECT_TEST_TOKEN}',
+            'X-Rotated': 'Bearer ${' + envKey + '}',
+          },
+        },
+      };
+      fs.writeFileSync(
+        filename,
+        JSON.stringify({ $version: 4, modelProviders: { openai: [raw] } }),
+      );
+      try {
+        const loaded = loadSettings(workspace, {
+          skipLoadEnvironment: true,
+          workspaceTrusted: true,
+        });
+        const plan = buildInstallPlan(
+          customProvider,
+          {
+            baseUrl: 'https://media.example/v1',
+            apiKey: 'new-service-key',
+            modelIds: ['image-model'],
+          },
+          loaded.merged.modelProviders?.['openai'],
+        );
+        const result = await applyProviderInstallPlan(plan, {
+          settings: createLoadedSettingsAdapter(loaded, scope),
+        });
+        const saved = JSON.parse(fs.readFileSync(filename, 'utf8'));
+        expect(saved.modelProviders.openai[0]).toMatchObject(raw);
+        expect(JSON.stringify(saved)).not.toContain('resolved-private-token');
+        expect(saved.env[envKey]).toBe('new-service-key');
+        expect(loaded.merged.modelProviders?.['openai']?.[0]).toMatchObject({
+          id: 'image-model',
+          baseUrl: 'https://media.example/v1',
+          generationConfig: {
+            customHeaders: {
+              Authorization: 'resolved-private-token',
+              'X-Rotated': 'Bearer new-service-key',
+            },
+          },
+        });
+        expect(result.updatedModelProviders['openai']).toEqual(
+          loaded.merged.modelProviders?.['openai'],
+        );
+      } finally {
+        vi.unstubAllEnvs();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('forwards setValue to LoadedSettings.setValue with the resolved scope', () => {
     const { settings, setValue } = makeSettings();
     const adapter = createLoadedSettingsAdapter(

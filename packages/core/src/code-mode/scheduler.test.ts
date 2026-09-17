@@ -280,6 +280,17 @@ describe('CodeModeOnly scheduler dispatch', () => {
   it('passes the Qwen image_gen result to generatedImage()', async () => {
     const config = makeFakeConfig({
       codeModeOnly: true,
+      imageModel: 'openai:qwen-image-2.0',
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'qwen-image-2.0',
+            baseUrl: 'https://images.example/v1',
+            envKey: 'TEST_IMAGE_API_KEY',
+            imageOnly: true,
+          },
+        ],
+      },
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',

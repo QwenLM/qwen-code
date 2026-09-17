@@ -26,6 +26,11 @@ import {
   removePeerController,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
+import {
+  crossSessionMessagingOffScope,
+  type CrossSessionMessagingOffScope,
+  isCrossSessionMessagingEnabled,
+} from '../../peerMessaging/enabled.js';
 import { t } from '../../i18n/index.js';
 import { CommandKind } from './types.js';
 
@@ -302,17 +307,46 @@ export const peersCommand: SlashCommand = {
       // setting they already enabled sends them nowhere: the inbox is also
       // absent when the session failed to register or the socket failed to
       // bind (path too long, unwritable runtime dir).
-      const enabled =
-        context.services.config?.isCrossSessionMessagingEnabled() === true;
-      const failure = enabled ? getLastPeerInboxFailure() : null;
+      const settings = context.services.settings;
+      const settingsEnabled = isCrossSessionMessagingEnabled(settings?.merged);
+      // The setting is not the whole gate: `--bare` and `--safe-mode` turn
+      // messaging off for the session whatever it says, and the same
+      // effective answer is what interactive startup binds the inbox on.
+      // Reading settings alone would call a deliberately off session "on,
+      // no inbox" and hand it a bind failure to explain.
+      const effective =
+        settingsEnabled &&
+        (context.services.config?.isCrossSessionMessagingEnabled() ?? true);
+      if (!effective) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: settingsEnabled
+            ? 'Cross-session messaging is off: this session runs with --bare or --safe-mode, which turns it off whatever the setting says.'
+            : describeMessagingOff(
+                settings ? crossSessionMessagingOffScope(settings) : undefined,
+              ),
+        };
+      }
+      const failure = getLastPeerInboxFailure();
+      // A platform with no inbox transport is not a fault in this session,
+      // and the switch is on by default, so most people who see this never
+      // turned anything on: say what is true, as information, without the
+      // failure's own advice to disable a setting they never enabled.
+      if (failure?.cause === 'unsupported_platform') {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content:
+            'Cross-session messaging is not available on this platform, so this session has no inbox and other sessions cannot reach it.',
+        };
+      }
       return {
         type: 'message',
-        messageType: enabled ? 'error' : 'info',
-        content: !enabled
-          ? 'Cross-session messaging is off. Enable it with "agents.crossSessionMessaging": true in settings.json, then restart.'
-          : failure
-            ? `Cross-session messaging is on, but this session has no inbox — it failed to bind its socket: ${describePeerInboxFailure(failure)}`
-            : 'Cross-session messaging is on, but this session has no inbox: it failed to register in the session registry, or the inbox is still starting. Re-run with DEBUG=1 to see the registration error.',
+        messageType: 'error',
+        content: failure
+          ? `Cross-session messaging is on, but this session has no inbox — it failed to bind its socket: ${describePeerInboxFailure(failure)}`
+          : 'Cross-session messaging is on, but this session has no inbox: it failed to register in the session registry, or the inbox is still starting. Re-run with DEBUG=1 to see the registration error.',
       };
     }
 
@@ -458,3 +492,26 @@ export const peersCommand: SlashCommand = {
     };
   },
 };
+
+/**
+ * Why messaging is off, with the remedy that works for the scope that
+ * turned it off. Never states the value itself: anything but `true` or an
+ * unset key reads as off, so "set to false" would be a claim about a file
+ * the user may open and find something else in.
+ */
+function describeMessagingOff(
+  scope: CrossSessionMessagingOffScope | undefined,
+): string {
+  switch (scope) {
+    case 'workspace':
+      return 'Cross-session messaging is off: this repository\'s .qwen/settings.json turns "agents.crossSessionMessaging" off. A workspace may only make that setting stricter, so your user settings cannot turn it back on here. Remove the entry from that file, then restart.';
+    case 'system':
+      return 'Cross-session messaging is off: system settings set "agents.crossSessionMessaging", and system settings override every other scope. Whoever manages them can remove the entry.';
+    case 'system-defaults':
+      return 'Cross-session messaging is off: the system defaults turn "agents.crossSessionMessaging" off. Set it to true in your user settings, then restart.';
+    case 'user':
+      return 'Cross-session messaging is off: your user settings turn "agents.crossSessionMessaging" off (only true, or leaving it unset, turns it on). Remove that entry, then restart.';
+    default:
+      return 'Cross-session messaging is off because of the "agents.crossSessionMessaging" setting (only true, or leaving it unset, turns it on). Remove that entry, then restart.';
+  }
+}

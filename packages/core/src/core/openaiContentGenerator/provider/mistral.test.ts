@@ -69,6 +69,31 @@ describe('Mistral provider outbound compatibility filtering', () => {
     ).toBe('User asked for a short response.');
   });
 
+  it('preserves declared DeepSeek history on a Mistral-named gateway alias', () => {
+    const config = createCliConfig();
+    config.getResolvedModelConfig = vi.fn().mockReturnValue({
+      capabilities: {
+        reasoning: {
+          profile: 'deepseek-openai',
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+        },
+      },
+    });
+    const provider = determineProvider(
+      createProviderConfig({
+        model: 'mistral-large-latest',
+        baseUrl: 'https://gateway.example/v1',
+        authType: 'openai' as ContentGeneratorConfig['authType'],
+      }),
+      config,
+    );
+    const original = createReasoningRequest();
+    expect(provider.buildRequest(original, 'prompt').messages[1]).toEqual(
+      original.messages[1],
+    );
+  });
+
   it('also strips reasoning_content when a Mistral model is served behind a custom base URL', () => {
     const originalRequest = createReasoningRequest();
     const provider = determineProvider(

@@ -197,4 +197,16 @@ describe('parseEditCommit', () => {
     expect(parseEditCommit('general.maxInitEvents', 'number', '')).toBeNull();
     expect(parseEditCommit('general.maxInitEvents', 'number', 'x')).toBeNull();
   });
+
+  it('parses integer settings as numbers instead of leaving them uneditable', () => {
+    expect(
+      parseEditCommit('tools.webSearch.maxPerSession', 'integer', ' 12 '),
+    ).toBe(12);
+    expect(
+      parseEditCommit('tools.webSearch.maxPerSession', 'integer', ''),
+    ).toBeNull();
+    expect(
+      parseEditCommit('tools.webSearch.maxPerSession', 'integer', 'x'),
+    ).toBeNull();
+  });
 });

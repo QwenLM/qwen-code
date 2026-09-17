@@ -1446,6 +1446,13 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "app_context": {
+            "description": "Use the compact macOS application observation with contextual menus.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "include_screenshot": {
             "description": "Default true. Set false to skip the screenshot and return the tree only.",
             "type": "boolean"
