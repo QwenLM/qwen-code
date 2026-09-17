@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer, type Server } from 'node:http';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -236,7 +237,94 @@ async function waitUntil(timestamp: number): Promise<void> {
   ]);
 }
 
+async function startBrokerResponseLossProxy(targetOrigin: string): Promise<{
+  baseUrl: string;
+  didDropExecutionResponse: () => boolean;
+  server: Server;
+}> {
+  let droppedExecutionResponse = false;
+  const server = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const target = new URL(request.url ?? '/', targetOrigin);
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (
+          value === undefined ||
+          [
+            'connection',
+            'content-length',
+            'host',
+            'transfer-encoding',
+          ].includes(name)
+        ) {
+          continue;
+        }
+        headers.set(name, Array.isArray(value) ? value.join(', ') : value);
+      }
+      const method = request.method ?? 'GET';
+      const body = Buffer.concat(chunks);
+      const upstream = await fetch(target, {
+        method,
+        headers,
+        ...(['GET', 'HEAD'].includes(method) ? {} : { body }),
+      });
+      const responseBody = Buffer.from(await upstream.arrayBuffer());
+      if (
+        !droppedExecutionResponse &&
+        method === 'POST' &&
+        target.pathname.endsWith('/executions')
+      ) {
+        droppedExecutionResponse = true;
+        request.socket.destroy();
+        return;
+      }
+      const responseHeaders: Record<string, string> = {};
+      upstream.headers.forEach((value, name) => {
+        if (
+          ![
+            'connection',
+            'content-encoding',
+            'content-length',
+            'transfer-encoding',
+          ].includes(name)
+        ) {
+          responseHeaders[name] = value;
+        }
+      });
+      response.writeHead(upstream.status, responseHeaders);
+      response.end(responseBody);
+    })().catch((error: unknown) => {
+      if (!response.headersSent) response.writeHead(502);
+      response.end(String(error));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    server.close();
+    throw new Error('Runtime Broker response-loss proxy omitted its address');
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    didDropExecutionResponse: () => droppedExecutionResponse,
+    server,
+  };
+}
+
 let fake: Awaited<ReturnType<typeof startFakeOpenAIServer>> | undefined;
+let brokerProxy:
+  | Awaited<ReturnType<typeof startBrokerResponseLossProxy>>
+  | undefined;
 let runFailure: unknown;
 try {
   fake = await startFakeOpenAIServer(({ body }) => {
@@ -306,6 +394,7 @@ try {
   if (typeof brokerUrl !== 'string' || typeof controlUrl !== 'string') {
     throw new Error('Java Runtime Broker fixture omitted its URLs');
   }
+  brokerProxy = await startBrokerResponseLossProxy(brokerUrl);
 
   let harnessStderr = '';
   const harness = register(
@@ -338,7 +427,7 @@ try {
           OPENAI_MODEL: 'fake-model',
           QWEN_MODEL: 'fake-model',
           QWEN_SERVER_TOKEN: harnessToken,
-          QWEN_RUNTIME_BROKER_URL: brokerUrl,
+          QWEN_RUNTIME_BROKER_URL: brokerProxy.baseUrl,
           QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -505,8 +594,11 @@ try {
       `Managed Hosted Java E2E made only ${fake.requests.length} model request(s)`,
     );
   }
+  if (!brokerProxy.didDropExecutionResponse()) {
+    throw new Error('Managed Hosted Runtime E2E did not drop a response');
+  }
   console.log(
-    `Managed Hosted Runtime E2E passed with ${fake.requests.length} model requests.`,
+    `Managed Hosted Runtime E2E recovered one dropped execution response and passed with ${fake.requests.length} model requests.`,
   );
 } catch (error) {
   runFailure = error;
@@ -516,6 +608,18 @@ const cleanupFailures: unknown[] = [];
 for (const { child, name } of children.reverse()) {
   try {
     await stopChild(child, name);
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+}
+if (brokerProxy !== undefined) {
+  try {
+    await new Promise<void>((resolve, reject) => {
+      brokerProxy?.server.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
   } catch (error) {
     cleanupFailures.push(error);
   }

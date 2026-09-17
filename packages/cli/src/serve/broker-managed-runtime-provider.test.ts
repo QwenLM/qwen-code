@@ -102,8 +102,9 @@ describe('BrokerManagedRuntimeProvider', () => {
     expect(bodies[0]).not.toHaveProperty('workspaceCwd');
   });
 
-  it('routes typed control and durable execution identities through the Broker', async () => {
+  it('retries a durable execution identity after response loss', async () => {
     const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+    let droppedExecutionResponse = false;
     const settled = {
       state: 'settled',
       cancelRequested: false,
@@ -143,6 +144,10 @@ describe('BrokerManagedRuntimeProvider', () => {
         );
       }
       if (url.endsWith('/executions')) {
+        if (!droppedExecutionResponse) {
+          droppedExecutionResponse = true;
+          throw new TypeError('response connection closed');
+        }
         return json(
           envelope({ executionCallId: 'execution-1', status: executing }),
         );
@@ -186,7 +191,7 @@ describe('BrokerManagedRuntimeProvider', () => {
       operation: { kind: 'manifest' },
     });
     const executions = calls.filter((call) => call.url.endsWith('/executions'));
-    expect(executions).toHaveLength(1);
+    expect(executions).toHaveLength(2);
     expect(executions[0].body).toMatchObject({
       harnessSessionId,
       runtimeSessionId,
@@ -195,6 +200,7 @@ describe('BrokerManagedRuntimeProvider', () => {
       requestDigest: 'b'.repeat(64),
       idempotencyKey: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(executions[1].body).toEqual(executions[0].body);
     const status = calls.find((call) =>
       call.url.includes('/executions/execution-1?'),
     );

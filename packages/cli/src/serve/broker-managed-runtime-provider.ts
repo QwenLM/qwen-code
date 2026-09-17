@@ -299,22 +299,29 @@ export class ManagedRuntimeBrokerClient {
     reference: ManagedToolInvocationReference,
     signal: AbortSignal,
   ): Promise<{ executionCallId: string; status: ManagedToolInvocationStatus }> {
-    const response = await this.requestJson(
-      'POST',
-      'executions',
-      {
-        protocolVersion: MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
-        requestId: randomUUID(),
-        idempotencyKey: executionIdempotencyKey(harnessSessionId, reference),
-        harnessSessionId,
-        runtimeSessionId,
-        turnId: reference.promptId,
-        toolCallId: reference.callId,
-        requestDigest: reference.argsDigest,
-        reference,
-      },
-      signal,
-    );
+    const body = {
+      protocolVersion: MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION,
+      requestId: randomUUID(),
+      idempotencyKey: executionIdempotencyKey(harnessSessionId, reference),
+      harnessSessionId,
+      runtimeSessionId,
+      turnId: reference.promptId,
+      toolCallId: reference.callId,
+      requestDigest: reference.argsDigest,
+      reference,
+    };
+    let response: unknown;
+    try {
+      response = await this.requestJson('POST', 'executions', body, signal);
+    } catch (error) {
+      if (
+        signal.aborted ||
+        (error instanceof BrokerResponseError && error.status < 500)
+      ) {
+        throw error;
+      }
+      response = await this.requestJson('POST', 'executions', body, signal);
+    }
     const envelope = this.parseEnvelope(
       response,
       harnessSessionId,
