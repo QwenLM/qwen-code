@@ -892,6 +892,18 @@ export class SubagentManager {
       subagentId?: string;
     },
   ): Promise<{ subagent: SubagentExecutor; dispose: () => Promise<void> }> {
+    if (
+      runtimeContext.getShellExecutionSandbox?.() &&
+      (config.executor !== undefined ||
+        Object.keys(config.mcpServers ?? {}).length > 0 ||
+        Object.keys(config.hooks ?? {}).length > 0)
+    ) {
+      throw new SubagentError(
+        'Tool execution sandbox does not support agent executors, MCP servers or hooks.',
+        SubagentErrorCode.INVALID_CONFIG,
+        config.name,
+      );
+    }
     // Track per-spawn cleanup callbacks declared outside the inner
     // `try/catch` so the catch can fire them on a constructor failure
     // before the caller ever receives the return value. The successful

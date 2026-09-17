@@ -86,6 +86,11 @@ import {
 } from './top-level-options.js';
 import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
+import {
+  BWRAP_MIGRATION_MESSAGE,
+  validateExecutionSandboxSelection,
+} from './execution-sandbox-settings.js';
+import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
@@ -756,6 +761,21 @@ export async function parseArguments(): Promise<CliArgs> {
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
+          const optionArgs = rawArgv.slice(
+            0,
+            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
+          );
+          if (
+            optionArgs.some(
+              (arg, index) =>
+                arg === '--sandbox=bwrap' ||
+                arg === '-s=bwrap' ||
+                ((arg === '--sandbox' || arg === '-s') &&
+                  optionArgs[index + 1] === 'bwrap'),
+            )
+          ) {
+            return BWRAP_MIGRATION_MESSAGE;
+          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -1629,6 +1649,7 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    shellExecutionSandbox?: ConfigParameters['shellExecutionSandbox'];
     /** Host-managed session whose exact private cwd is bound after bootstrap. */
     provisionalWorkspace?: true;
     sessionRestore?: {
@@ -1646,6 +1667,34 @@ export async function loadCliConfig(
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
   }
   const bareMode = isBareMode(argv.bare);
+  const executionSandboxSettings = validateExecutionSandboxSelection(
+    settings,
+    argv,
+  );
+  const sandboxEnabled = Boolean(
+    executionSandboxSettings || hostPolicy?.shellExecutionSandbox,
+  );
+  if (executionSandboxSettings && hostPolicy?.shellExecutionSandbox) {
+    throw new Error(
+      'Choose operator settings or a programmatic execution sandbox policy, not both.',
+    );
+  }
+  if (
+    sandboxEnabled &&
+    (argv.acp ||
+      argv.experimentalAcp ||
+      argv.worktree !== undefined ||
+      argv.experimentalLsp ||
+      argv.mcpConfig ||
+      argv.extensions?.length ||
+      overrideExtensions?.length ||
+      Object.keys(sessionMcpServers ?? {}).length ||
+      provisionalWorkspace)
+  ) {
+    throw new Error(
+      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
+    );
+  }
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
 
@@ -1684,8 +1733,13 @@ export async function loadCliConfig(
   if (!Storage.hasRuntimeBaseDirContext()) {
     Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
   }
+  const shellExecutionSandbox =
+    hostPolicy?.shellExecutionSandbox ??
+    (executionSandboxSettings
+      ? createExecutionSandboxPolicy(executionSandboxSettings, cwd)
+      : undefined);
 
-  const ideMode = settings.ide?.enabled ?? false;
+  const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
   const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
@@ -2102,6 +2156,11 @@ export async function loadCliConfig(
     bareMode || safeMode ? ({} as Settings) : settings,
     argv,
   );
+  if (shellExecutionSandbox && sandboxConfig) {
+    throw new Error(
+      'Tool execution sandbox cannot be combined with a whole-CLI sandbox.',
+    );
+  }
   const screenReader =
     argv.screenReader !== undefined
       ? argv.screenReader
@@ -2257,7 +2316,7 @@ export async function loadCliConfig(
   // servers are an explicit, per-invocation argument from the caller (ACP
   // `session/new`, `--mcp-config`), not ambient local state, so they survive.
   const mcpServers =
-    bareMode || safeMode
+    bareMode || safeMode || sandboxEnabled
       ? { ...topTierMcpServers }
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
   // Top-tier servers are never gated (#4615, see the comment above), so this
@@ -2267,7 +2326,7 @@ export async function loadCliConfig(
   // state at all, not even a read with no behavioral effect. Revisit if a
   // future gated top-tier source needs this to run under safe mode too.
   const pendingMcpServers =
-    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
+    bareMode || safeMode || sandboxEnabled || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
@@ -2357,6 +2416,7 @@ export async function loadCliConfig(
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
+    shellExecutionSandbox,
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
       const currentSettings = loadSettings(cwd);
@@ -2372,11 +2432,17 @@ export async function loadCliConfig(
       }
     },
     toolDiscoveryCommand:
-      bareMode || safeMode ? undefined : settings.tools?.discoveryCommand,
+      bareMode || safeMode || sandboxEnabled
+        ? undefined
+        : settings.tools?.discoveryCommand,
     toolCallCommand:
-      bareMode || safeMode ? undefined : settings.tools?.callCommand,
+      bareMode || safeMode || sandboxEnabled
+        ? undefined
+        : settings.tools?.callCommand,
     mcpServerCommand:
-      bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
+      bareMode || safeMode || sandboxEnabled
+        ? undefined
+        : settings.mcp?.serverCommand,
     mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
@@ -2605,7 +2671,9 @@ export async function loadCliConfig(
       bareMode || safeMode,
     ),
     disableAllHooks:
-      bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
+      bareMode || safeMode || sandboxEnabled
+        ? true
+        : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
       bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
     channel: argv.channel,

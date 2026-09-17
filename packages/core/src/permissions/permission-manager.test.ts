@@ -1755,6 +1755,17 @@ function makeConfig(
 describe('PermissionManager', () => {
   let pm: PermissionManager;
 
+  it('does not implicitly allow read-only shell commands under internal sandbox policy', async () => {
+    const manager = new PermissionManager({
+      ...makeConfig(),
+      getShellExecutionSandbox: () => ({}),
+    });
+    manager.initialize();
+    expect(await manager.isCommandAllowed('git status && ls', '/project')).toBe(
+      'ask',
+    );
+  });
+
   describe('basic rule evaluation', () => {
     beforeEach(() => {
       pm = new PermissionManager(

@@ -1640,6 +1640,10 @@ export class LlmClient {
   }
 
   private getCachedGitStatus(): string | null {
+    if (this.config.getShellExecutionSandbox?.()) {
+      // Even git status can execute repository-configured filters on the host.
+      return null;
+    }
     if (this.cachedGitStatus === undefined) {
       // Mirror claude-code: append git status (branch + recent commits) to the
       // system prompt so the main agent treats version history as authoritative

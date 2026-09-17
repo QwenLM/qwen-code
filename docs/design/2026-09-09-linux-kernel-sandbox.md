@@ -2,6 +2,8 @@
 
 [English](2026-09-09-linux-kernel-sandbox.md) | [简体中文](2026-09-09-linux-kernel-sandbox.zh-CN.md)
 
+> Design update (2026-09-16): the [unified tool-execution sandbox design](2026-09-16-tool-execution-sandbox.md) is the current implementation direction. It replaces whole-CLI bwrap with tool execution, without a retained bwrap compatibility mode, and adds Landlock at that same boundary. The whole-CLI decisions below and the [withdrawn whole-CLI Landlock proposal](2026-09-16-landlock-backend.md) are historical context. Production code has not yet migrated; the replacement design defines configuration migration and test updates.
+
 Internal design document for giving qwen-code kernel-level isolation on Linux
 hosts that have no container runtime — closing the gap where today
 `--sandbox` on Linux means "docker/podman or nothing", and

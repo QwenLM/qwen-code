@@ -288,6 +288,29 @@ describe('AgentTool', () => {
     vi.useRealTimers();
   });
 
+  it.each<Partial<AgentParams>>([
+    { isolation: 'worktree' },
+    { working_dir: '/another/workspace' },
+    { name: 'teammate' },
+  ])(
+    'rejects unsupported sandbox agent entry %j before execution',
+    async (overrides) => {
+      config.getShellExecutionSandbox = vi.fn().mockReturnValue({});
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Sandbox agent',
+        prompt: 'inspect the project',
+        subagent_type: 'file-search',
+        ...overrides,
+      });
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.llmContent).toContain('same-workspace in-process agents');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    },
+  );
+
   describe('initialization', () => {
     it('should initialize with correct name and properties', () => {
       expect(agentTool.name).toBe('agent');
