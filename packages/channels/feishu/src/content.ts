@@ -57,6 +57,16 @@ const ATX_OR_HR_LINE_RE =
  *  open — with none, the same line is ordinary paragraph text. */
 const SETEXT_LINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
 
+/**
+ * A line that starts an HTML block (comment, processing instruction,
+ * declaration, or a tag-open line) — a block type this grammar does not
+ * model, so harvesting around it would guess. The platform's own
+ * `<at user_id=…>` mention tags are excepted: they appear at line starts in
+ * real posts and are handled by the mention grammar.
+ */
+const HTML_BLOCK_START_RE =
+  /^ {0,3}<(?:!--|\?|!|\/?(?!at[\s/>])[a-zA-Z][a-zA-Z0-9-]*[\s/>])/;
+
 interface FenceState {
   char: string;
   length: number;
@@ -105,8 +115,16 @@ const canonicalBq = (bqPrefix: string) => bqPrefix.replace(/ {0,3}> ?/g, '>');
 function scanFenceLines(
   text: string,
   onKeptLine?: (line: string) => void,
-): FenceState | undefined {
+): { fence: FenceState | undefined; unsafe: boolean } {
   let fence: FenceState | undefined;
+  // True once the scan meets a construct this grammar provably mis-reads —
+  // a list marker whose content starts with a tab (tabs advance to 4-column
+  // stops, which the literal-space prefix comparisons below do not
+  // reproduce), an HTML block start, or a backtick fence whose info string
+  // carries a backtick (a paragraph per CommonMark, a fence here).
+  // Harvesting from such a node would guess, so callers skip it and rely on
+  // the legacy img/media nodes.
+  let unsafe = false;
   // Open list items as a stack of content-indent widths (markers nest), plus
   // the blockquote prefix of the context they opened in.
   const listStack: number[] = [];
@@ -210,12 +228,24 @@ function scanFenceLines(
       }
     }
 
+    if (
+      /^ {0,3}(?:[-*+]|\d+[.)])\t/.test(rest) ||
+      HTML_BLOCK_START_RE.test(rest)
+    ) {
+      unsafe = true;
+    }
     const leadingWhitespace = /^[ \t]*/.exec(rest)![0];
     let leadingColumns = 0;
     for (const ch of leadingWhitespace)
       leadingColumns += ch === '\t' ? 4 - (leadingColumns % 4) : 1;
     const open = /^ {0,3}(`{3,}|~{3,})/.exec(rest);
     if (open && leadingColumns <= 3) {
+      if (
+        open[1]!.charAt(0) === '`' &&
+        rest.slice(open[0].length).includes('`')
+      ) {
+        unsafe = true;
+      }
       fence = {
         char: open[1]!.charAt(0),
         length: open[1]!.length,
@@ -238,19 +268,26 @@ function scanFenceLines(
       (paragraphOpen && SETEXT_LINE_RE.test(rest))
     );
     // A list marker outside a fence opens a nested list whose content lines
-    // carry the accumulated marker widths as extra indentation.
+    // carry the accumulated marker widths as extra indentation. A thematic
+    // break ('- - -') is never a list marker — treating it as one measures
+    // every following line's indent two columns short.
     const listMarker = /^ {0,3}(?:[-*+]|\d+[.)]) /.exec(rest);
-    if (listMarker) {
+    if (listMarker && !ATX_OR_HR_LINE_RE.test(rest)) {
       listStack.push(listMarker[0].length);
       listIndent += listMarker[0].length;
       listBq = bqContext;
       // A fence opened on the marker line itself sits at the item's content
       // indent; re-test the remainder, or its closer reads as a fresh opener
       // and code/prose inverts for the rest of the item.
-      const markerFence = /^ {0,3}(`{3,}|~{3,})/.exec(
-        rest.slice(listMarker[0].length),
-      );
+      const markerRest = rest.slice(listMarker[0].length);
+      const markerFence = /^ {0,3}(`{3,}|~{3,})/.exec(markerRest);
       if (markerFence) {
+        if (
+          markerFence[1]!.charAt(0) === '`' &&
+          markerRest.slice(markerFence[0].length).includes('`')
+        ) {
+          unsafe = true;
+        }
         fence = {
           char: markerFence[1]!.charAt(0),
           length: markerFence[1]!.length,
@@ -261,15 +298,15 @@ function scanFenceLines(
       }
     }
   }
-  return fence;
+  return { fence, unsafe };
 }
 
 const INDENTED_CODE_SPACES = 4;
 
-function stripFencedCode(text: string): string {
+function stripFencedCode(text: string): { prose: string; unsafe: boolean } {
   const kept: string[] = [];
-  scanFenceLines(text, (line) => kept.push(line));
-  return kept.join('\n');
+  const { unsafe } = scanFenceLines(text, (line) => kept.push(line));
+  return { prose: kept.join('\n'), unsafe };
 }
 
 /**
@@ -279,9 +316,12 @@ function stripFencedCode(text: string): string {
  * opening a fresh top-level fence.
  */
 export function closeOpenFence(text: string): string {
-  const open = scanFenceLines(text);
-  return open
-    ? `${text}\n${open.prefix}${open.char.repeat(open.length)}`
+  const { fence, unsafe } = scanFenceLines(text);
+  // An unsafe scan may be holding a fence that is not one (or missing the
+  // real boundary): appending a closer on a guess can OPEN a fence that
+  // swallows the text appended after it, so untrusted scans close nothing.
+  return fence && !unsafe
+    ? `${text}\n${fence.prefix}${fence.char.repeat(fence.length)}`
     : text;
 }
 
@@ -439,7 +479,12 @@ function parsePostContent(
   ) => {
     if (typeof key === 'string' && key) {
       const id = `${type}:${key}`;
-      if (!positions.has(id)) positions.set(id, position);
+      // A key's position is its EARLIEST citation: the loose citation sweep
+      // can re-match a key past the tight harvest's first sighting (a
+      // nested-paren citation hides the inner form from the sweep), so the
+      // smaller offset wins and pass order cannot demote a first-cited key.
+      const prev = positions.get(id);
+      if (prev === undefined || position < prev) positions.set(id, position);
       if (!resourceById.has(id)) {
         resourceById.set(id, {
           type,
@@ -508,27 +553,39 @@ function parsePostContent(
       }
       case 'md': {
         // Code examples are not resource references, so keys are harvested
-        // from fence-stripped prose. Remote URLs are never fetched.
-        const prose = stripFencedCode(text);
-        // Reference-style definitions resolve `[ref]: img_key`. Both sweeps
-        // run over the same prose, so a match index is one document position
-        // for both; and a prose index never exceeds the raw text's length,
-        // so positions stay ordered across nodes as well.
-        const definitions = new Map<string, string>();
-        for (const def of prose.matchAll(MD_REFERENCE_DEFINITION_G_RE)) {
-          definitions.set(def[1]!, def[2]!);
-        }
-        for (const citation of prose.matchAll(MD_IMAGE_CITATION_G_RE)) {
-          const key =
-            citation[1] !== undefined
-              ? definitions.get(citation[1])
-              : /^<?(img_[A-Za-z0-9_.:-]{1,200})/.exec(citation[2]!)?.[1];
-          if (key && !positions.has(`image:${key}`)) {
-            positions.set(`image:${key}`, base + citation.index);
+        // from fence-stripped prose. Remote URLs are never fetched. When the
+        // scan met a construct it provably mis-reads (a backtick in a
+        // backtick fence's info string, a tab after a list marker, an HTML
+        // block start), its block structure is untrustworthy: skip the
+        // harvest for this node and let the legacy `content` rescue below
+        // carry the node's img/media keys.
+        const { prose, unsafe } = stripFencedCode(text);
+        if (!unsafe) {
+          // Reference-style definitions resolve `[ref]: img_key`. Both
+          // sweeps run over the same prose, so a match index is one document
+          // position for both; and a prose index never exceeds the raw
+          // text's length, so positions stay ordered across nodes as well.
+          const definitions = new Map<string, string>();
+          for (const def of prose.matchAll(MD_REFERENCE_DEFINITION_G_RE)) {
+            definitions.set(def[1]!, def[2]!);
           }
-        }
-        for (const match of prose.matchAll(mdImageRe())) {
-          addAtPosition('image', match[1], undefined, base + match.index);
+          for (const citation of prose.matchAll(MD_IMAGE_CITATION_G_RE)) {
+            const key =
+              citation[1] !== undefined
+                ? definitions.get(citation[1])
+                : /^<?(img_[A-Za-z0-9_.:-]{1,200})/.exec(citation[2]!)?.[1];
+            if (key) {
+              const id = `image:${key}`;
+              const position = base + citation.index;
+              const prev = positions.get(id);
+              if (prev === undefined || position < prev) {
+                positions.set(id, position);
+              }
+            }
+          }
+          for (const match of prose.matchAll(mdImageRe())) {
+            addAtPosition('image', match[1], undefined, base + match.index);
+          }
         }
         // Authorship is judged on the RETURNED text (minus image references
         // and at-tags), not on the harvest-stripped variant.

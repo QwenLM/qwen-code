@@ -892,6 +892,40 @@ describe('parseFeishuContent (#11554)', () => {
     ]);
   });
 
+  it('keeps a re-cited key at its earliest citation under the cap', () => {
+    // The loose citation sweep consumes the outer nested-paren form up to
+    // its first ')' and only re-sees img_INNER at the trailing re-citation;
+    // the tight harvest saw it first. The earliest offset must claim the
+    // key, or the cap evicts the first-cited image.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_INNER' }],
+          ...Array.from({ length: 8 }, (_, i) => [
+            { tag: 'img', image_key: `img_H${i}` },
+          ]),
+        ],
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: `![a](nope ![b](img_INNER)) ${Array.from(
+                { length: 8 },
+                (_, i) => `![h${i}](img_H${i})`,
+              ).join(' ')} and again ![z](img_INNER)`,
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual([
+      'img_INNER',
+      ...Array.from({ length: 7 }, (_, i) => `img_H${i}`),
+    ]);
+    expect(result.droppedResourceCount).toBe(1);
+  });
+
   it('keeps a first-cited key whose destination overflows the citation grammar', () => {
     // A 353-char destination is inside the harvest grammar's bound but past
     // the citation sweep's, so only the text offset keeps the first-cited
@@ -925,5 +959,118 @@ describe('parseFeishuContent (#11554)', () => {
       ...Array.from({ length: 7 }, (_, i) => `img_H${i}`),
     ]);
     expect(result.droppedResourceCount).toBe(1);
+  });
+
+  it('harvests nothing from a node whose fence opener carries a backtick', () => {
+    // '```use `kubectl get pods`' is a paragraph per CommonMark — a backtick
+    // fence's info string cannot contain a backtick — so the grammar's block
+    // structure for this node is untrustworthy and the harvest skips it.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '```use `kubectl get pods`\n![a](img_111)\n![b](img_222)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([]);
+    // The text itself still renders.
+    expect(result.text).toContain('kubectl get pods');
+  });
+
+  it('rescues an unharvestable node through the legacy img nodes', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content: [
+          [{ tag: 'img', image_key: 'img_111' }],
+          [{ tag: 'img', image_key: 'img_222' }],
+        ],
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '```use `kubectl get pods`\n![a](img_111)\n![b](img_222)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources.map((r) => r.key)).toEqual(['img_111', 'img_222']);
+  });
+
+  it('harvests nothing from a node whose list marker is followed by a tab', () => {
+    // '-\t```js' is a list item holding indented code per CommonMark (the
+    // tab advances to a 4-column stop), so the image is code, not a
+    // reference; the literal-space prefix comparisons desync on the tab, so
+    // the harvest fails closed for the whole node.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [{ tag: 'md', text: '-\t```js\n\t![alt](img_bbb)\n\t```\n' }],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([]);
+  });
+
+  it.each(['<pre>\n![a](img_pre)\n</pre>', '<div>\n![a](img_div)\n</div>'])(
+    'harvests nothing from a node with an HTML block start: %s',
+    (text) => {
+      const result = parseFeishuContent(
+        'post',
+        JSON.stringify({ content_v2: [[{ tag: 'md', text }]] }),
+      );
+      expect(result.resources).toEqual([]);
+    },
+  );
+
+  it('still harvests when a line starts with the platform at-tag', () => {
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [
+          [
+            {
+              tag: 'md',
+              text: '<at user_id="ou_a">Alice</at> look ![x](img_at)',
+            },
+          ],
+        ],
+      }),
+    );
+    expect(result.resources).toEqual([{ type: 'image', key: 'img_at' }]);
+  });
+
+  it('treats a spaced-out dash run as a thematic break, not a list marker', () => {
+    // After a thematic break the 4-column line is an indented code block;
+    // reading '- - -' as a list marker measures the indent two columns
+    // short and would harvest code.
+    const result = parseFeishuContent(
+      'post',
+      JSON.stringify({
+        content_v2: [[{ tag: 'md', text: '- - -\n    ![a](img_1)' }]],
+      }),
+    );
+    expect(result.resources).toEqual([]);
+  });
+
+  it('closeOpenFence appends no closer to text it cannot trust', () => {
+    // The line is a paragraph per CommonMark, so nothing is open; an
+    // appended closer would OPEN a fence swallowing whatever follows.
+    const text = '```use `kubectl get pods`\nsee ![a](img_111)';
+    expect(closeOpenFence(text)).toBe(text);
+  });
+
+  it('closeOpenFence still closes a container-held fence it can trust', () => {
+    expect(closeOpenFence('> - ```\n ```\n> - x')).toBe(
+      '> - ```\n ```\n> - x\n```',
+    );
   });
 });
