@@ -18,6 +18,16 @@ import {
 } from '../integration-tests/fake-openai-server.js';
 
 const root = process.cwd();
+const argumentsList = process.argv.slice(2);
+if (
+  argumentsList.some((argument) => argument !== '--cancel-before-ready') ||
+  argumentsList.length > 1
+) {
+  throw new Error(
+    'Usage: run-managed-hosted-runtime-e2e.ts [--cancel-before-ready]',
+  );
+}
+const cancelBeforeReady = argumentsList.includes('--cancel-before-ready');
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const runtimeWorker = path.join(root, 'dist', 'managed-runtime-worker.js');
 if (!existsSync(cliBundle) || !existsSync(runtimeWorker)) {
@@ -458,7 +468,11 @@ try {
         '--no-transfer-progress',
         '-Dgpg.skip=true',
         '-Dgroups=managed-hosted-integration',
-        '-Dtest=ManagedHostedRuntimeE2ETest',
+        `-Dtest=ManagedHostedRuntimeE2ETest#${
+          cancelBeforeReady
+            ? 'cancellationBeforeRuntimeReadinessHasNoPhysicalSideEffect'
+            : 'firstModelEventPrecedesColdRuntimeAndSameTurnContinues'
+        }`,
         'test',
       ],
       {
@@ -589,17 +603,24 @@ try {
       `Managed Hosted Java E2E failed with ${result}; fake requests=${fake.requests.length}\n${harnessStderr}\n${brokerStderr}\n${runtimeStderr}\n${harnessLog}`,
     );
   }
-  if (fake.requests.length < 2) {
+  const minimumModelRequests = cancelBeforeReady ? 1 : 2;
+  if (fake.requests.length < minimumModelRequests) {
     throw new Error(
       `Managed Hosted Java E2E made only ${fake.requests.length} model request(s)`,
     );
   }
-  if (!brokerProxy.didDropExecutionResponse()) {
+  if (!cancelBeforeReady && !brokerProxy.didDropExecutionResponse()) {
     throw new Error('Managed Hosted Runtime E2E did not drop a response');
   }
-  console.log(
-    `Managed Hosted Runtime E2E recovered one dropped execution response and passed with ${fake.requests.length} model requests.`,
-  );
+  if (cancelBeforeReady) {
+    console.log(
+      `Managed Hosted Runtime cancellation E2E passed with ${fake.requests.length} model request(s).`,
+    );
+  } else {
+    console.log(
+      `Managed Hosted Runtime E2E recovered one dropped execution response and passed with ${fake.requests.length} model requests.`,
+    );
+  }
 } catch (error) {
   runFailure = error;
 }

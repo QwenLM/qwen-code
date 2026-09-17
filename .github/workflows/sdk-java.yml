@@ -271,4 +271,6 @@ jobs:
       - name: 'Run Managed Hosted Runtime E2E'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: 'npx tsx scripts/run-managed-hosted-runtime-e2e.ts'
+        run: |-
+          npx tsx scripts/run-managed-hosted-runtime-e2e.ts
+          npx tsx scripts/run-managed-hosted-runtime-e2e.ts --cancel-before-ready
