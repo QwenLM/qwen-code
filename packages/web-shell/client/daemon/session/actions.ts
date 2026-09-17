@@ -2106,6 +2106,7 @@ export function createDaemonSessionActions({
       try {
         manualSessionClearRef.current = false;
         const currentConnection = getConnection();
+        const connectionSessionIdAtStart = currentConnection.sessionId;
         targetSessionContext = resolveActionSessionContext(
           options?.sessionContext,
           options?.workspaceCwd,
@@ -2222,7 +2223,10 @@ export function createDaemonSessionActions({
                 'Create session timed out',
                 CREATE_WATCHDOG_TIMEOUT_MS,
               );
-        if (manualSessionClearRef.current) {
+        const userMovedAway =
+          getConnection().sessionId !== connectionSessionIdAtStart &&
+          getConnection().sessionId !== nextSession.sessionId;
+        if (manualSessionClearRef.current || userMovedAway) {
           try {
             await withActionTimeout(
               nextSession.detach(),

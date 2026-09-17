@@ -2130,6 +2130,43 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('does not replace navigation after a slow detached create', async () => {
+    vi.useFakeTimers();
+    try {
+      const nextSession = createMockSession('session-b');
+      const deferred = createDeferred<DaemonSessionClient>();
+      const manualSessionClearRef = { current: false };
+      const { actions, sessionRef, getConnection, replaceConnection } =
+        createActionsHarness({
+          connection: { status: 'connected' },
+          createDetachedSession: vi.fn(() => deferred.promise),
+          manualSessionClearRef,
+        });
+      const outcome = actions.createSession().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_001);
+      const navigatedConnection: DaemonConnectionState = {
+        status: 'connecting',
+        sessionId: 'session-c',
+        sessionContext: { kind: 'workspace', cwd: '/other-workspace' },
+      };
+      replaceConnection(navigatedConnection);
+      await vi.advanceTimersByTimeAsync(9_999);
+      deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+      expect(await outcome).toMatchObject({
+        name: 'AbortError',
+        message: 'Session creation interrupted',
+      });
+      expect(manualSessionClearRef.current).toBe(false);
+      expect(nextSession.detach).toHaveBeenCalledOnce();
+      expect(getConnection()).toBe(navigatedConnection);
+      expect(sessionRef.current).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not restore a detached session after the session was cleared', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
