@@ -18,7 +18,7 @@
  */
 
 import { useState } from 'react';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
@@ -31,6 +31,7 @@ import {
   DialogFrame,
   DialogSelect,
   FooterHint,
+  dialogContentWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
@@ -254,6 +255,8 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
 
   const isAuxMode = mode !== 'primary';
   const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
+  const { width: terminalWidth } = useTerminalDimensions();
+  const ruleWidth = dialogContentWidth(terminalWidth);
 
   const initialIndex = initialKey
     ? Math.max(
@@ -337,7 +340,10 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
               )
             }
             renderLabel={(item, { titleColor }) => (
-              <text fg={titleColor}>{formatModelOptionLabel(item)}</text>
+              <box flexDirection="column">
+                <text fg={titleColor}>{formatModelOptionLabel(item)}</text>
+                {item.description && <text fg={C.dim}>{item.description}</text>}
+              </box>
             )}
           />
         </box>
@@ -345,7 +351,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
 
       {highlightedEntry && (
         <box flexDirection="column" marginTop={1}>
-          <text fg={C.dim}>{'─'.repeat(20)}</text>
+          <text fg={C.dim}>{'─'.repeat(ruleWidth)}</text>
           {highlightedEntry.isQwenOAuth && !highlightedEntry.isRuntime && (
             <box marginTop={1}>
               <text fg={C.yellow}>

@@ -13,7 +13,6 @@
 // The command is idempotent — missing files / branches are silent OK.
 
 import type { CommandModule } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
@@ -28,15 +27,15 @@ import {
   clearReviewWorktreeLease,
   isReviewLeaseFile,
   readReviewWorktreeLease,
+  readReviewWorktreeLeaseAt,
   reviewLeaseHeldByAnotherSession,
-  reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { redirectedAncestor, sanitizedGitEnv } from './lib/worktree.js';
+import { redirectedAncestor } from './lib/worktree.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptCommentIds, parseReceiptIds } from './lib/receipt.js';
 import { detectPlatformKind } from './lib/platform/registry.js';
 import { a1Json, aoneWhoamiAccount } from './lib/platform/aone-client.js';
-import { refExists, releaseWorktree } from './lib/git.js';
+import { git, gitProbe, releaseWorktree } from './lib/git.js';
 import { readBudgetStopUnfenced } from './lib/deadline.js';
 import { promptRecordDir, runEpochMs } from './lib/prompt-record.js';
 import {
@@ -640,12 +639,19 @@ function auditAoneMrWrites(target: string, window: AuditWindow): void {
  * review's own `<worktree>-scratch-` prefix is a much narrower thing than any
  * string that matches a glob.
  */
-function scratchWorktreesOf(worktree: string): {
+function scratchWorktreesOf(
+  worktree: string,
+  stopAt: string,
+): {
   paths: string[];
   failed: boolean;
 } {
   const prefix = scratchWorktreePrefix(worktree);
-  const parent = dirname(resolve(worktree));
+  // Anchored at the captured root, never at the live cwd: `resolve(worktree)`
+  // against the process cwd and `redirectedAncestor`'s default stop both read
+  // it, and a cwd deleted mid-run threw uv_cwd out of the sweep here — past
+  // the entry guard that exists to catch exactly that.
+  const parent = dirname(resolve(stopAt, worktree));
   let entries: string[];
   try {
     entries = readdirSync(parent);
@@ -670,7 +676,7 @@ function scratchWorktreesOf(worktree: string): {
   // probes, `git worktree remove`, `releaseWorktree`'s recursive `rmSync` —
   // would run inside wherever that link points. Refusing the whole family is the
   // only answer that scopes: one entry cannot be trusted more than its parent.
-  if (redirectedAncestor(parent) !== null) {
+  if (redirectedAncestor(parent, stopAt) !== null) {
     return { paths: [], failed: true };
   }
   return {
@@ -684,6 +690,7 @@ function scratchWorktreesOf(worktree: string): {
 
 /**
  * Clear registrations whose worktree directory is gone. A no-op when none are.
+ * Returns why git could not be run at all, or null when it ran.
  *
  * `releaseWorktree` runs this after its own unlink and says why: a
  * registration whose tree once stood at a path wedges the next
@@ -691,15 +698,30 @@ function scratchWorktreesOf(worktree: string): {
  * out against `branch -D`. Best-effort like every other step on the cleanup
  * path — a prune that fails must not mask the error that got us here.
  */
-function pruneWorktrees(): void {
-  try {
-    execFileSync('git', ['worktree', 'prune'], {
-      stdio: 'pipe',
-      env: sanitizedGitEnv(),
-    });
-  } catch {
-    // Reported by the next `worktree add` if it mattered.
+function pruneWorktrees(): string | null {
+  // Through `lib/git`'s wrapper, not a direct spawn: `worktree prune` finds its
+  // repository from `process.cwd()`, and a launch directory inside a review
+  // temp dir is one the reviewed code can point elsewhere — a `core.hooksPath`
+  // in the plant's config then runs on the host. The sweep this exists to
+  // provide is not what the gate costs: measured from a poisoned launch
+  // directory, an ungated prune clears the PLANT's registrations and leaves the
+  // real stale one standing, so it was never sweeping the repository the
+  // registration belongs to. `rmSync` — the half that does clear the path — is
+  // not a git call and still runs. A genuine prune failure stays swallowed —
+  // it must not mask the error that got us here — but a refusal is the one
+  // cause a user can act on, and `gitOpt` answered null for both.
+  const probe = gitProbe('worktree', 'prune');
+  if (probe.refusal !== null) return probe.refusal;
+  // `{out: null, status: null, refusal: null}` is the probe's third shape:
+  // git could not be run AT ALL (a spawn failure, the timeout kill, a deleted
+  // cwd), so the prune did not happen and the registration outlives the link
+  // — while the caller above announced "Removed ... link" and released the
+  // lease, and the next `worktree add` met "missing but already registered"
+  // with nobody told why. Only a genuine non-zero exit stays swallowed.
+  if (probe.status === null) {
+    return 'git could not be run at all (a spawn failure or the timeout kill)';
   }
+  return null;
 }
 
 export function runCleanup(target: string): void {
@@ -719,11 +741,31 @@ export function runCleanup(target: string): void {
     process.exitCode = 1;
     return;
   }
+  // Capture the root once, at entry, and hand it to the walks below as an
+  // explicit stopAt: `redirectedAncestor`'s default stop reads process.cwd()
+  // in the CALLER's frame — outside the walk's own try — and REVIEW_TMP_DIR
+  // is a relative spelling, so a launch directory deleted out from under the
+  // process (an operator `rm -rf` mid-review, the nested geometry) threw
+  // uv_cwd out of this best-effort sweep before any degradation could run.
+  // With no live cwd the relative root cannot be resolved at all, so degrade
+  // with an explanation rather than sweeping.
+  let repositoryRoot: string;
+  try {
+    repositoryRoot = process.cwd();
+  } catch (err) {
+    writeStderrLine(
+      `Refusing to clean: the working directory no longer exists ` +
+        `(${(err as Error).message}), and ${REVIEW_TMP_DIR} is resolved ` +
+        `against it. Re-run from a live directory.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   // Before anything is deleted: the whole temp dir hangs off one path, and a
   // symlink anywhere above it redirects EVERY sweep below — the scratch family,
   // the base-tree lock, the side files. The scratch sweep alone used to answer
   // this, which announced the hazard and then kept deleting under it.
-  const redirected = redirectedAncestor(REVIEW_TMP_DIR);
+  const redirected = redirectedAncestor(REVIEW_TMP_DIR, repositoryRoot);
   if (redirected !== null) {
     writeStderrLine(
       `Refusing to clean: ${redirected} is a symlink, so every delete under ` +
@@ -759,12 +801,12 @@ export function runCleanup(target: string): void {
     // receipts it never wrote. Skip the whole target: worktree, siblings,
     // branch, side files, audit, and the lease itself all belong to the
     // holder until its own cleanup releases them.
-    const holder = readReviewWorktreeLease(process.cwd(), target);
-    if (reviewLeaseHeldByAnotherSession(holder)) {
+    const holder = readReviewWorktreeLeaseAt(repositoryRoot, target);
+    if (holder && reviewLeaseHeldByAnotherSession(holder.lease)) {
       writeStdoutLine(
         `note: skipped cleanup for "${target}" — another review session ` +
-          `(session ${holder.sessionId}) still holds the worktree lease at ` +
-          `${reviewLeasePath(process.cwd(), target)}. Its own cleanup ` +
+          `(session ${holder.lease.sessionId}) still holds the worktree lease at ` +
+          `${holder.path}. Its own cleanup ` +
           `releases the lease when it finishes; if that session is gone, ` +
           `delete the lease file and re-run to force cleanup.`,
       );
@@ -779,7 +821,10 @@ export function runCleanup(target: string): void {
     // of this function ran BEFORE it. A link that appears at any component of
     // the temp path during that window redirects every delete below it, so the
     // same refusal is re-taken here rather than assumed to still hold.
-    const redirectedAfterAudit = redirectedAncestor(REVIEW_TMP_DIR);
+    const redirectedAfterAudit = redirectedAncestor(
+      REVIEW_TMP_DIR,
+      repositoryRoot,
+    );
     if (redirectedAfterAudit !== null) {
       writeStderrLine(
         `Refusing to clean: ${redirectedAfterAudit} became a symlink during ` +
@@ -793,7 +838,7 @@ export function runCleanup(target: string): void {
     // A lease can appear during the same window (a review that started after
     // the gate above read none). Re-check before destroying anything and take
     // the same skip path (#9205).
-    const holderAfterAudit = readReviewWorktreeLease(process.cwd(), target);
+    const holderAfterAudit = readReviewWorktreeLease(repositoryRoot, target);
     if (reviewLeaseHeldByAnotherSession(holderAfterAudit)) {
       writeStdoutLine(
         `note: skipped cleanup for "${target}" — a review session ` +
@@ -835,9 +880,20 @@ export function runCleanup(target: string): void {
           // reaching it, so the family paths were unlinked and reported swept
           // while their admin entries stayed behind. It is the only prune in
           // this function, and a no-op when nothing is stale.
-          pruneWorktrees();
+          const refusal = pruneWorktrees();
           writeStdoutLine(`Removed ${label} link: ${path}`);
           removedAny = true;
+          if (refusal !== null) {
+            // The link IS gone, so the announcement above is true — but the
+            // registration it left behind is not, and a prune git never ran is
+            // not the swallowed best-effort case this function documents.
+            writeStderrLine(
+              `Failed to prune after removing ${label} link ${path}: git ` +
+                `could not run from this directory — ${refusal}`,
+            );
+            failedAny = true;
+            failedDestruction = true;
+          }
         } catch (err) {
           // `force` suppresses ENOENT, not EACCES/EBUSY — and a link left at a
           // family path still wedges the next review's `worktree add`, which is
@@ -887,7 +943,7 @@ export function runCleanup(target: string): void {
     // `<wt>-scratch-*` is matched against real entries, never expanded into a
     // path that does not exist, and nothing outside the review's own temp dir
     // can match the prefix.
-    const scratch = scratchWorktreesOf(wt);
+    const scratch = scratchWorktreesOf(wt, repositoryRoot);
     if (scratch.failed) {
       failedAny = true;
       // A family that could not even be LISTED means whole checkouts may still
@@ -914,15 +970,27 @@ export function runCleanup(target: string): void {
     }
 
     const branch = reviewBranch(prNumber);
-    if (refExists(branch)) {
+    // The probe, not `refExists`: a launch-dir refusal answers "no such
+    // branch" there, so this leg was skipped silently, the lease was released
+    // over a surviving branch, and the run still printed "Nothing to clean" —
+    // a success report over a destruction that never ran.
+    const branchProbe = gitProbe('rev-parse', '--verify', '--quiet', branch);
+    if (branchProbe.refusal !== null) {
+      writeStderrLine(
+        `Failed to delete branch ${branch}: git could not run from this ` +
+          `directory — ${branchProbe.refusal}`,
+      );
+      failedAny = true;
+      failedDestruction = true;
+    } else if (branchProbe.status === 0) {
       try {
-        execFileSync('git', ['branch', '-D', branch], {
-          stdio: 'pipe',
-          // The CHECK that gates this delete resolves the real repository
-          // (`refExists` goes through the sanitized helpers); an exported
-          // `GIT_DIR` here would verify one repo and delete in another.
-          env: sanitizedGitEnv(),
-        });
+        // The throwing wrapper, not a direct spawn: `branch -D` is a
+        // reference-transaction hook channel and finds its repository from
+        // `process.cwd()`, so an ungated delete from a poisoned launch
+        // directory executes the plant's hooks. A pointer rewritten between
+        // the probe and this call lands in the catch below as a failed
+        // destruction — the branch survives and the lease stays held.
+        git('branch', '-D', branch);
         writeStdoutLine(`Deleted ref: ${branch}`);
         removedAny = true;
       } catch (err) {
@@ -932,6 +1000,21 @@ export function runCleanup(target: string): void {
         failedAny = true;
         failedDestruction = true;
       }
+    } else if (branchProbe.status !== 1) {
+      // With `--verify --quiet`, exit 1 is the ONLY genuine absence — and it
+      // stays silent, per the idempotency contract at the top of this file.
+      // Every other non-answer — the probe's null status ("the command could
+      // not be run at all": spawn ENOENT, the timeout kill), a 128 fatal
+      // from a corrupt .git — used to fall through this chain exactly like
+      // the exit-1 case: the delete was silently skipped, the lease released,
+      // and "Nothing to clean" printed over a surviving branch. Name the
+      // non-answer and hold the lease, the same as a refused probe.
+      writeStderrLine(
+        `Failed to delete branch ${branch}: git could not answer whether ` +
+          `it exists (exit ${branchProbe.status})`,
+      );
+      failedAny = true;
+      failedDestruction = true;
     }
   }
 
@@ -1055,7 +1138,7 @@ export function runCleanup(target: string): void {
   }
 
   if (!failedDestruction) {
-    clearReviewWorktreeLease(process.cwd(), target);
+    clearReviewWorktreeLease(repositoryRoot, target);
   }
 
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It

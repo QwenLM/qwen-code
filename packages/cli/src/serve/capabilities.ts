@@ -69,6 +69,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -118,6 +119,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
   workspace_agent_generate: { since: 'v1' },
+  // Persistent workspace Agents collaborating on shared task threads
+  // (`/workspaces/:workspace/agent/*`). Conditional on the
+  // `experimental.agentCollaboration` opt-in, resolved once at daemon
+  // startup: when it is off the routes are never mounted, so a client that
+  // sees this tag absent must not render the collaboration surface rather
+  // than render it and let the calls 404. Distinct from `workspace_agents`
+  // above, which is unconditional subagent-definition CRUD.
+  agent_collaboration_v1: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
@@ -210,7 +219,16 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_skill_settings_toggle: { since: 'v1' },
   workspace_skill_settings_batch_toggle: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
+  // Extension activation commits do not refresh active sessions. Clients that
+  // need immediate runtime application must submit the independent refresh
+  // operation after the activation operation commits.
+  extension_activation_explicit_refresh: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // `GET /brand` — the Web Shell's product name and logo, resolved from the
+  // operator settings scopes. Unconditional because the route is registered
+  // unconditionally. Advertised so a host can preflight rather than issue the
+  // request and swallow a 404 from a daemon too old to have it.
+  web_shell_brand: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -451,6 +469,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Worktree-backed session create/load responses are durably persisted and
   // carry per-response `persisted-v1` attestation.
   session_worktree_persistence_v1: { since: 'v1' },
+  // Worktree ownership transfer: `POST /session/:id/worktree-reset` moves a
+  // session's checkout ownership to a fresh replacement session, and the
+  // restore surface reports the superseded / interrupted / missing-marker
+  // classifications as typed 409s.
+  session_worktree_reset_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -506,6 +529,12 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  */
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
+  /**
+   * Whether the daemon mounted the workspace-agent collaboration routes
+   * (`agent_collaboration_v1`). Resolved from `experimental.agentCollaboration`
+   * once at daemon startup, so it does not change over a daemon's lifetime.
+   */
+  agentCollaborationEnabled?: boolean;
   mcpPoolActive?: boolean;
   externalToolGuardActive?: boolean;
   allowOriginActive?: boolean;
@@ -600,6 +629,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
   [
+    'agent_collaboration_v1',
+    (toggles) => toggles.agentCollaborationEnabled === true,
+  ],
+  [
     'standalone_sessions_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
   ],
@@ -639,6 +672,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'session_artifacts_persistence',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'session_sources',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [

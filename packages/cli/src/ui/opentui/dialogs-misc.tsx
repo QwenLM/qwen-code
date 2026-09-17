@@ -8,7 +8,7 @@
 
 /**
  * Compact native OpenTUI dialogs for the remaining long-tail commands
- * (M3, #8677): editor/auth/trust/delete/resume/branch/hooks/rewind/diff/
+ * (M3, #8677): editor/auth/trust/delete/resume/branch/rewind/diff/
  * arena/subagent_create/subagent_list. Each mounts a real panel (info or
  * confirm) instead of "unsupported". Heavy ones (diff/resume/arena/subagents/
  * editor) are compact here and get fidelity passes in M4.
@@ -22,6 +22,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
+import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
@@ -30,6 +31,7 @@ import {
   checkHasEditorType,
   isEditorAvailable,
 } from '@qwen-code/qwen-code-core/utils/editor.js';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   EDITOR_DISPLAY_NAMES,
@@ -241,7 +243,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
                 {editors.map((e, i) => (
                   <box key={e.type} flexDirection="row">
                     <text fg={i === sel ? C.accent : C.dim}>
-                      {i === sel ? '● ' : '○ '}
+                      {i === sel ? '› ' : '  '}
                     </text>
                     <text
                       fg={e.disabled ? C.dim : i === sel ? C.text : C.dim}
@@ -262,7 +264,7 @@ export function OpenTuiEditorDialog({ settings, onClose, notify }: P) {
                 {scopeItems.map((s, i) => (
                   <box key={s.value} flexDirection="row">
                     <text fg={i === scopeSel ? C.accent : C.dim}>
-                      {i === scopeSel ? '● ' : '○ '}
+                      {i === scopeSel ? '› ' : '  '}
                     </text>
                     <text fg={i === scopeSel ? C.text : C.dim}>{s.label}</text>
                   </box>
@@ -468,7 +470,10 @@ export function OpenTuiResumeDialog({
       return;
     }
     svc
-      .listSessions({ size: 10 })
+      .listSessions({
+        size: 10,
+        excludeSourceType: AGENT_HOST_SESSION_SOURCE_TYPE,
+      })
       .then((res) => {
         if (!alive) return;
         setRows(res.items ?? []);
@@ -567,21 +572,6 @@ export function readHooksEnabled(
       );
 }
 
-export function OpenTuiHooksDialog({ config, settings, onClose }: P) {
-  useEsc(onClose);
-  const enabled = readHooksEnabled(config, settings);
-  return (
-    <Shell title="Hooks" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <Row label="Hooks enabled:" value={enabled ? 'yes' : 'no'} />
-        <text fg={C.dim}>
-          {'Lifecycle hooks run around tool/session events.'}
-        </text>
-      </box>
-    </Shell>
-  );
-}
-
 export function OpenTuiRewindDialog({ onClose }: P) {
   useEsc(onClose);
   return (
@@ -604,7 +594,13 @@ export function OpenTuiDiffDialog({ onClose }: P) {
       .then(({ execFile }) => {
         execFile(
           'git',
-          ['diff', '--color=never'],
+          [
+            ...NO_EXEC_CONFIG,
+            'diff',
+            '--no-ext-diff',
+            '--no-textconv',
+            '--color=never',
+          ],
           { maxBuffer: 1024 * 1024 * 8 },
           (_err, stdout) => {
             if (alive)

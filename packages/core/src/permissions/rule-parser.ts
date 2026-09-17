@@ -47,6 +47,11 @@ import type {
  * Covers all built-in tools plus common aliases (including Claude Code's "Bash").
  */
 export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  // Exec tool
+  exec: 'exec',
+  Exec: 'exec',
+  ExecTool: 'exec',
+
   // Shell tool
   run_shell_command: 'run_shell_command',
   Shell: 'run_shell_command',
@@ -228,6 +233,38 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ImageGen: 'image_gen',
   ImageGenTool: 'image_gen',
 
+  // Omni media tools
+  omni_downsample_image: 'omni_downsample_image',
+  DownsampleImage: 'omni_downsample_image',
+  omni_downscale_video: 'omni_downscale_video',
+  DownscaleVideo: 'omni_downscale_video',
+  omni_downsample_audio: 'omni_downsample_audio',
+  DownsampleAudio: 'omni_downsample_audio',
+  omni_extract_keyframes: 'omni_extract_keyframes',
+  ExtractKeyframes: 'omni_extract_keyframes',
+  omni_extract_audio: 'omni_extract_audio',
+  ExtractAudio: 'omni_extract_audio',
+  omni_clip_video: 'omni_clip_video',
+  ClipVideo: 'omni_clip_video',
+  omni_convert_image: 'omni_convert_image',
+  ConvertImage: 'omni_convert_image',
+  omni_transcribe_audio: 'omni_transcribe_audio',
+  TranscribeAudio: 'omni_transcribe_audio',
+  omni_clip_image: 'omni_clip_image',
+  ClipImage: 'omni_clip_image',
+  omni_clip_audio: 'omni_clip_audio',
+  ClipAudio: 'omni_clip_audio',
+  omni_caption_image: 'omni_caption_image',
+  CaptionImage: 'omni_caption_image',
+  omni_caption_audio: 'omni_caption_audio',
+  CaptionAudio: 'omni_caption_audio',
+  omni_ocr_image: 'omni_ocr_image',
+  OcrImage: 'omni_ocr_image',
+  omni_understand_video_segments: 'omni_understand_video_segments',
+  UnderstandVideoSegments: 'omni_understand_video_segments',
+  omni_recall_media_memory: 'omni_recall_media_memory',
+  RecallMediaMemory: 'omni_recall_media_memory',
+
   // Tool search tool
   tool_search: 'tool_search',
   ToolSearch: 'tool_search',
@@ -249,6 +286,8 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   artifact: 'artifact',
   Artifact: 'artifact',
   record_artifact: 'record_artifact',
+  record_source: 'record_source',
+  RecordSource: 'record_source',
   RecordArtifact: 'record_artifact',
 
   // Report Findings tool
@@ -261,6 +300,19 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   // Display image tool
   display_image: 'display_image',
   DisplayImage: 'display_image',
+
+  thread_post: 'thread_post',
+  ThreadPost: 'thread_post',
+  thread_wait: 'thread_wait',
+  ThreadWait: 'thread_wait',
+  thread_block: 'thread_block',
+  ThreadBlock: 'thread_block',
+  thread_review: 'thread_review',
+  ThreadReview: 'thread_review',
+  thread_create: 'thread_create',
+  ThreadCreate: 'thread_create',
+  thread_read: 'thread_read',
+  ThreadRead: 'thread_read',
 
   // Legacy edit tool name
   replace: 'edit',
@@ -313,6 +365,32 @@ export function resolveToolName(rawName: string): string {
   return Object.hasOwn(TOOL_NAME_ALIASES, rawName)
     ? TOOL_NAME_ALIASES[rawName]!
     : rawName;
+}
+
+const TOOL_NAME_ALIASES_BY_CANONICAL: ReadonlyMap<string, readonly string[]> =
+  (() => {
+    const byCanonical = new Map<string, string[]>();
+    for (const [alias, canonical] of Object.entries(TOOL_NAME_ALIASES)) {
+      const aliases = byCanonical.get(canonical);
+      if (aliases) {
+        aliases.push(alias);
+      } else {
+        byCanonical.set(canonical, [alias]);
+      }
+    }
+    return byCanonical;
+  })();
+
+/**
+ * Every name that {@link resolveToolName} resolves to the given canonical tool
+ * name, including Claude Code's names (`Bash`, `Read`, `Write`). Exact names
+ * only: the meta-categories applied by {@link toolMatchesRuleToolName} (a
+ * `Read` rule also covering `grep_search`, a `Bash` rule also covering
+ * `monitor`) are not expanded here. Empty for a name the table does not know,
+ * such as an MCP tool.
+ */
+export function getToolNameAliases(canonicalName: string): readonly string[] {
+  return TOOL_NAME_ALIASES_BY_CANONICAL.get(canonicalName) ?? [];
 }
 
 /**

@@ -322,6 +322,39 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot();
   });
 
+  it('describes the bwrap filesystem boundary and distinguishes ordinary permissions', () => {
+    vi.stubEnv('SANDBOX', 'bwrap');
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain('# Kernel Sandbox (bwrap)');
+    expect(prompt).toContain(
+      'repository Git metadata, including config and hooks, remains writable',
+    );
+    expect(prompt).toContain('later unconfined Git commands');
+    expect(prompt).toContain("'Read-only file system' (EROFS)");
+    expect(prompt).toContain(
+      "'Permission denied' (EACCES) can instead come from ordinary file permissions",
+    );
+    expect(prompt).toContain(
+      'Host services reached through Unix sockets remain outside this filesystem boundary',
+    );
+    expect(prompt).toContain('changing the writable roots requires restarting');
+    // /dev is a fresh minimal devtmpfs, so host device nodes are absent
+    // (ENOENT), not read-only — the remedy is an argv change, not a root grant.
+    expect(prompt).toContain('minimal synthetic device tree');
+    expect(prompt).toContain('QWEN_SANDBOX=bwrap qwen sandbox');
+    // The inspection remedy is addressed to the user, from the project
+    // directory, with the settings-derived scope of the report named.
+    expect(prompt).toContain(
+      'tell the user to run it from this project directory on the host',
+    );
+    expect(prompt).toContain('Do NOT work around a refusal');
+    expect(prompt).not.toContain("(EROFS) or 'Permission denied'");
+    expect(prompt).not.toContain('You are running in a sandbox container');
+    expect(prompt).not.toContain('# Outside of Sandbox');
+    expect(prompt).not.toContain('# macOS Seatbelt');
+    expect(prompt).toMatchSnapshot();
+  });
+
   it('should include non-sandbox instructions when SANDBOX env var is not set', () => {
     vi.stubEnv('SANDBOX', undefined); // Ensure it's not set
     const prompt = getCoreSystemPrompt();
@@ -833,12 +866,14 @@ describe('main-session style: reminder decision matches prompt section', () => {
   const makeConfig = (opts: {
     customPrompt?: string;
     style?: OutputStyleDefinition;
+    codeModeOnly?: boolean;
     interactive: boolean;
     acp: boolean;
   }) => ({
     getSystemPrompt: () => opts.customPrompt,
     getModel: () => 'test-model',
     getOutputStyle: () => opts.style,
+    getCodeModeOnly: () => opts.codeModeOnly ?? false,
     getExperimentalZedIntegration: () => opts.acp,
     getInputFormat: () => InputFormat.TEXT,
     isInteractive: () => opts.interactive,
@@ -939,6 +974,18 @@ describe('main-session style: reminder decision matches prompt section', () => {
     );
   });
 
+  it('forwards CodeModeOnly to the base prompt', () => {
+    const config = makeConfig({
+      interactive: true,
+      acp: false,
+      codeModeOnly: true,
+    });
+
+    expect(getMainSessionBaseSystemPrompt(config)).toContain(
+      "Ordinary tools exist only inside 'exec'",
+    );
+  });
+
   it('forwards the todo_write setting to the base prompt', () => {
     const config = {
       ...makeConfig({ interactive: false, acp: false }),
@@ -966,6 +1013,7 @@ describe('main-session style: project trust gate', () => {
   const makeConfig = (style: OutputStyleDefinition, trusted?: boolean) => ({
     getSystemPrompt: () => undefined,
     getModel: () => 'test-model',
+    getCodeModeOnly: () => false,
     getOutputStyle: () => style,
     getExperimentalZedIntegration: () => false,
     getInputFormat: () => InputFormat.TEXT,
@@ -1194,6 +1242,100 @@ describe('Model-specific tool call formats', () => {
 
     expect(prompt).toContain('<|tool_call>call:run_shell_command');
     expect(prompt).not.toContain('[tool_call: run_shell_command for');
+  });
+});
+
+describe('CodeModeOnly tool guidance', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(false);
+  });
+
+  const codeModePrompt = (model = 'gpt-4') =>
+    getCoreSystemPrompt(
+      undefined,
+      model,
+      undefined,
+      'interactive',
+      undefined,
+      false,
+      true,
+    );
+
+  it('points the dedicated-tool guidance at tools.<name>', () => {
+    const prompt = codeModePrompt();
+
+    expect(prompt).toContain('as `tools.<name>(args)`');
+    expect(prompt).toContain('To read files use `tools.read_file`');
+    expect(prompt).not.toContain("To read files use 'read_file'");
+  });
+
+  it('does not advertise todo_write when it is disabled', () => {
+    expect(codeModePrompt()).not.toContain('todo_write');
+  });
+
+  it('advertises todo_write when it is enabled', () => {
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      'gpt-4',
+      undefined,
+      'interactive',
+      undefined,
+      true,
+      true,
+    );
+
+    expect(prompt).toContain('todo_write');
+    expect(prompt).toContain('# Task Management');
+  });
+
+  it('replaces multi-tool parallelism with batching inside one exec program', () => {
+    const prompt = codeModePrompt();
+
+    expect(prompt).toContain('**Batch Into One Program:**');
+    expect(prompt).toContain('await them together with `Promise.all`');
+    expect(prompt).not.toContain(
+      'You can call multiple tools in a single response',
+    );
+  });
+
+  it('says the direct controls are not reachable through tools', () => {
+    const prompt = codeModePrompt();
+
+    expect(prompt).toContain(
+      'is called directly and is not reachable through `tools`',
+    );
+  });
+
+  it('uses the same exec examples for every model family', () => {
+    const execExample =
+      "[tool_call: exec with source: await tools.run_shell_command({ command: 'node server.js', is_background: true });]";
+
+    expect(codeModePrompt()).toContain(execExample);
+    expect(codeModePrompt('qwen3-coder-14b')).toContain(execExample);
+    expect(codeModePrompt('qwen3-coder-14b')).not.toContain(
+      '<function=run_shell_command>',
+    );
+    expect(codeModePrompt('qwen-vl-plus')).not.toContain(
+      '{"name": "run_shell_command"',
+    );
+  });
+
+  it('leaves Direct mode guidance and examples untouched', () => {
+    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
+
+    expect(prompt).toContain("To read files use 'read_file'");
+    expect(prompt).toContain(
+      'You can call multiple tools in a single response',
+    );
+    expect(prompt).toContain('[tool_call: run_shell_command for');
+    expect(prompt).not.toContain('tools.<name>(args)');
+    expect(prompt).not.toContain('**Batch Into One Program:**');
   });
 });
 

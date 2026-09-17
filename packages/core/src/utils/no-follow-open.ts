@@ -96,8 +96,8 @@ function noFollowRejection(
  */
 function assertSameIdentity(
   filePath: string,
-  before: fs.Stats,
-  after: fs.Stats,
+  before: { dev: number | bigint; ino: number | bigint },
+  after: { dev: number | bigint; ino: number | bigint },
 ): void {
   if (!hasVerifiableInode(before.ino)) {
     throw noFollowRejection(
@@ -107,7 +107,10 @@ function assertSameIdentity(
       UNVERIFIABLE_IDENTITY_CODE,
     );
   }
-  if (before.dev !== after.dev || before.ino !== after.ino) {
+  if (
+    BigInt(before.dev) !== BigInt(after.dev) ||
+    BigInt(before.ino) !== BigInt(after.ino)
+  ) {
     throw noFollowRejection(
       filePath,
       'the file identity changed between the pre-open check and the open ' +
@@ -137,13 +140,13 @@ export function openSyncNoFollow(filePath: string): number {
     return fs.openSync(filePath, baseFlags | noFollowFlag);
   }
 
-  const before = fs.lstatSync(filePath);
+  const before = fs.lstatSync(filePath, { bigint: true });
   if (before.isSymbolicLink()) {
     throw noFollowRejection(filePath, 'the path is a symlink');
   }
   const fd = fs.openSync(filePath, baseFlags);
   try {
-    assertSameIdentity(filePath, before, fs.fstatSync(fd));
+    assertSameIdentity(filePath, before, fs.fstatSync(fd, { bigint: true }));
   } catch (error) {
     try {
       fs.closeSync(fd);
@@ -180,13 +183,13 @@ export async function openNoFollow(filePath: string): Promise<FileHandle> {
     return fs.promises.open(filePath, baseFlags | noFollowFlag);
   }
 
-  const before = await fs.promises.lstat(filePath);
+  const before = await fs.promises.lstat(filePath, { bigint: true });
   if (before.isSymbolicLink()) {
     throw noFollowRejection(filePath, 'the path is a symlink');
   }
   const handle = await fs.promises.open(filePath, baseFlags);
   try {
-    assertSameIdentity(filePath, before, await handle.stat());
+    assertSameIdentity(filePath, before, await handle.stat({ bigint: true }));
   } catch (error) {
     await handle.close().catch(() => {
       // The rejection below is the primary error; closing is best-effort.

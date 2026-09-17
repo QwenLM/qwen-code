@@ -224,25 +224,31 @@ export function useProviderSetupFlow(
     [goNext],
   );
 
-  const submitBaseUrl = useCallback((): boolean => {
-    // Empty input falls back to the placeholder default so the visible hint
-    // matches what gets written.
-    const effective = baseUrl.trim() || baseUrlPlaceholder.trim();
-    if (!effective) {
-      setBaseUrlError(t('Base URL cannot be empty.'));
-      return false;
-    }
-    if (!/^https?:\/\//i.test(effective)) {
-      setBaseUrlError(t('Base URL must start with http:// or https://.'));
-      return false;
-    }
-    if (!baseUrl.trim()) {
-      setBaseUrl(effective);
-    }
-    setBaseUrlError(null);
-    goNext();
-    return true;
-  }, [baseUrl, baseUrlPlaceholder, goNext]);
+  const submitBaseUrl = useCallback(
+    (valueOverride?: string): boolean => {
+      // The caller's live field text, when it has one: a keystroke burst can leave
+      // `baseUrl` a whole batch behind.
+      const current = valueOverride ?? baseUrl;
+      // Empty input falls back to the placeholder default so the visible hint
+      // matches what gets written.
+      const effective = current.trim() || baseUrlPlaceholder.trim();
+      if (!effective) {
+        setBaseUrlError(t('Base URL cannot be empty.'));
+        return false;
+      }
+      if (!/^https?:\/\//i.test(effective)) {
+        setBaseUrlError(t('Base URL must start with http:// or https://.'));
+        return false;
+      }
+      if (!current.trim()) {
+        setBaseUrl(effective);
+      }
+      setBaseUrlError(null);
+      goNext();
+      return true;
+    },
+    [baseUrl, baseUrlPlaceholder, goNext],
+  );
 
   const changeBaseUrl = useCallback((value: string) => {
     setBaseUrl(value);
@@ -426,7 +432,19 @@ export function useProviderSetupFlow(
     const masked = maskApiKey(apiKey);
 
     const genConfig: Record<string, unknown> = {};
-    if (thinkingEnabled) genConfig['extra_body'] = { enable_thinking: true };
+    if (thinkingEnabled) {
+      // The review screen states that this exact JSON is what gets saved, so
+      // it has to show the shape provider persistence actually writes.
+      // `extra_body.enable_thinking` is a DashScope/Qwen wire knob with no
+      // meaning on the Responses API, and buildAdvancedGenerationConfig
+      // (core providers/provider-config.ts) normalizes it to the unified
+      // reasoning ladder for that protocol.
+      if (protocol === AuthType.USE_OPENAI_RESPONSES) {
+        genConfig['reasoning'] = { effort: 'medium' };
+      } else {
+        genConfig['extra_body'] = { enable_thinking: true };
+      }
+    }
     if (modalityEnabled) {
       const mod: Record<string, boolean> = {};
       if (modalityImage) mod['image'] = true;

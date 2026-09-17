@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   canOpenWorkspaceArtifact,
-  getArtifactFormatIcon,
   getArtifactPreviewContent,
   getFileChangePreviewContent,
   getWorkspaceArtifactOpenBlockReason,
@@ -12,16 +11,7 @@ import {
   visibleTurnOutputs,
   type TurnOutputFileChange,
 } from './TurnOutputs';
-import {
-  FileAudioIcon,
-  FileCode2Icon,
-  FileIcon,
-  FileImageIcon,
-  FileTextIcon,
-  FileVideoIcon,
-  LinkIcon,
-  NotebookTabsIcon,
-} from 'lucide-react';
+import { getArtifactIconKind } from './ArtifactIcon';
 
 describe('TurnOutputs helpers', () => {
   it('caps collapsed turn outputs at three items', () => {
@@ -116,25 +106,36 @@ describe('TurnOutputs helpers', () => {
   });
 
   it.each([
-    ['file', FileIcon],
-    ['link', LinkIcon],
-    ['html', FileCode2Icon],
-    ['image', FileImageIcon],
-    ['video', FileVideoIcon],
-    ['audio', FileAudioIcon],
-    ['pdf', FileTextIcon],
-    ['notebook', NotebookTabsIcon],
-    ['document', FileTextIcon],
-  ])('selects the Lucide icon for %s artifacts', (kind, icon) => {
-    expect(getArtifactFormatIcon(kind)).toBe(icon);
-  });
+    ['link', 'result', undefined, 'link'],
+    ['html', 'result', undefined, 'html'],
+    ['file', 'notes.md', undefined, 'md'],
+    ['file', 'data.csv', undefined, 'csv'],
+    ['document', 'report.docx', undefined, 'word'],
+    ['file', 'budget.xlsx', undefined, 'spreadsheet'],
+    ['pdf', 'report', undefined, 'pdf'],
+    ['file', 'result', 'image/png', 'image'],
+    ['file', 'result', 'video/mp4', 'video'],
+    ['file', 'result', 'text/markdown; charset=utf-8', 'md'],
+    ['html', 'notes.md', undefined, 'md'],
+    ['file', 'report.docm', undefined, 'word'],
+    ['file', 'budget.xlsm', undefined, 'spreadsheet'],
+    ['file', 'photo.gif', undefined, 'image'],
+    ['other', 'result', undefined, 'file'],
+  ])(
+    'selects the %s artifact icon for %s',
+    (kind, workspacePath, mimeType, expected) => {
+      expect(
+        getArtifactIconKind({
+          kind,
+          workspacePath,
+          mimeType,
+          title: workspacePath,
+        } as DaemonSessionArtifact),
+      ).toBe(expected);
+    },
+  );
 
-  it('uses the existing document icon for unsupported artifact kinds', () => {
-    expect(getArtifactFormatIcon('other')).toBeUndefined();
-    expect(getArtifactFormatIcon('future-format')).toBeUndefined();
-  });
-
-  it('disables opening missing workspace artifacts and names the recorded path', () => {
+  it('disables opening missing workspace artifacts', () => {
     const missing = {
       id: 'missing-1',
       kind: 'file',
