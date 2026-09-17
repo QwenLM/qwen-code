@@ -128,6 +128,17 @@ describe('measureGoalVerifierEnvelopeBytes', () => {
       ),
     });
     expect(bytes).toBe(Buffer.byteLength(withoutEvidence, 'utf8'));
+    // Before the window exists its own fields are unknown; they are counted
+    // at their largest so a window built at the remaining budget still fits.
+    const unknown = measureGoalVerifierEnvelopeBytes(input());
+    expect(unknown).toBe(
+      measureGoalVerifierEnvelopeBytes({
+        ...input(),
+        evidenceTurnIds: ['turn-3', 'turn-3', 'turn-3'],
+        omitted: Number.MAX_SAFE_INTEGER,
+      }),
+    );
+    expect(unknown).toBeGreaterThan(bytes);
     // A quote in the objective costs its escape.
     const escaped = measureGoalVerifierEnvelopeBytes({
       ...value,
@@ -356,11 +367,10 @@ describe('createGoalVerifier', () => {
       proposal,
       blockedPolicy: 'p'.repeat(1_500),
     };
+    // Measured before the window exists, with none of its fields supplied.
     const envelopeBytes = measureGoalVerifierEnvelopeBytes({
       ...base,
       evidence: [],
-      evidenceTurnIds: [turnId, turnId, turnId],
-      omitted: Number.MAX_SAFE_INTEGER,
     });
     const window = buildGoalVerifierEvidenceWindow(
       {

@@ -131,16 +131,30 @@ export class GoalVerifierInputTooLargeError extends Error {
  * Serialized bytes of the request everything but the evidence occupies, so
  * a caller can size the evidence window to what is actually left of
  * {@link GOAL_VERIFIER_REQUEST_BYTE_LIMIT}. Measured on the real payload,
- * escaping included, with the evidence array empty.
+ * escaping included, with the evidence array empty and, when the caller has
+ * not built the window yet, the window's own fields at their largest: three
+ * turn ids and the widest omitted count. A window built at the budget this
+ * leaves therefore always fits, whatever those fields turn out to be.
  */
 export function measureGoalVerifierEnvelopeBytes(
   input: GoalVerifierInput,
 ): number {
+  const turnId = input.currentTurnId ?? WIDEST_TURN_ID;
   return Buffer.byteLength(
-    JSON.stringify(verifierPayload({ ...input, evidence: [] })),
+    JSON.stringify(
+      verifierPayload({
+        ...input,
+        evidence: [],
+        evidenceTurnIds: input.evidenceTurnIds ?? [turnId, turnId, turnId],
+        omitted: input.omitted ?? Number.MAX_SAFE_INTEGER,
+      }),
+    ),
     'utf8',
   );
 }
+
+/** A Goal turn id is a UUID; this stands in when the caller has none yet. */
+const WIDEST_TURN_ID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';
 
 function verifierContents(input: GoalVerifierInput): Content[] {
   const text = JSON.stringify(verifierPayload(input));

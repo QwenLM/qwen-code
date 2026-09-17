@@ -165,6 +165,7 @@ interface EvidenceAnalysis {
   catalogBytes: number;
 }
 
+/** @internal */
 export interface ParsedGoalContext {
   goalId: string;
   revision: number;
@@ -640,7 +641,20 @@ export function validateGoalEvidenceReferences(
   };
 }
 
-function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
+/**
+ * Anchors a transcript to a Goal permit: checks the permit against the Goal
+ * revision, finds the evidence cursor in a chain with no repeated uuid, and
+ * collects the Goal turns recorded after it. Whether the current turn has
+ * to be at the lineage's tail is the caller's rule: the catalog requires
+ * it, the verifier window allows a current turn that has recorded nothing.
+ *
+ * @internal Shared with the verifier window; not part of the package API.
+ */
+export function anchorGoalTranscript(input: GoalEvidenceContext): {
+  cursorIndex: number;
+  indexByUuid: Map<string, number>;
+  lineageTurnIds: string[];
+} {
   if (
     input.permit.goalId !== input.goal.goalId ||
     input.permit.revision !== input.goal.revision ||
@@ -680,7 +694,53 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     );
   }
 
-  const lineageTurnIds = collectLineageTurnIds(input, cursorIndex);
+  return {
+    cursorIndex,
+    indexByUuid,
+    lineageTurnIds: collectLineageTurnIds(input, cursorIndex),
+  };
+}
+
+/**
+ * Whether a record would render to any evidence content at all, decided
+ * from the shape of its parts without serializing a tool response: a
+ * non-blank text part that is not a thought, or a tool response that is
+ * present. A record that would not is neither evidence nor an omission.
+ *
+ * @internal Shared with the verifier window; not part of the package API.
+ */
+export function recordHasEvidenceContent(
+  record: GoalEvidenceRecord,
+  provenance: GoalEvidenceProvenance,
+): boolean {
+  if (provenance === 'real_user') {
+    const projection = projectUserTranscriptForDisplay(record);
+    if (projection?.displayText !== undefined) {
+      return projection.displayText.trim().length > 0;
+    }
+  }
+  for (const part of record.message?.parts ?? []) {
+    if (
+      part.thought !== true &&
+      typeof part.text === 'string' &&
+      part.text.trim()
+    ) {
+      return true;
+    }
+    if (
+      provenance === 'tool_result' &&
+      part.functionResponse &&
+      part.functionResponse.response !== undefined
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
+  const { cursorIndex, indexByUuid, lineageTurnIds } =
+    anchorGoalTranscript(input);
   if (lineageTurnIds.at(-1) !== input.permit.turnId) {
     throw new EvidenceSourceUnavailableError(
       'current_turn_not_tail',
@@ -737,6 +797,7 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
   };
 }
 
+/** @internal Shared with the verifier window; not part of the package API. */
 export function collectLineageTurnIds(
   input: GoalEvidenceContext,
   cursorIndex: number,
@@ -1042,6 +1103,7 @@ function catalogEvidence(
   };
 }
 
+/** @internal Shared with the verifier window; not part of the package API. */
 export function coherentEvidenceProvenance(
   record: GoalEvidenceRecord,
 ): GoalEvidenceProvenance | undefined {
@@ -1121,6 +1183,7 @@ function capCheckpointContent(content: string): string {
   return `${content.slice(0, cutoff)}${CHECKPOINT_CONTENT_TRUNCATION_MARKER}`;
 }
 
+/** @internal Shared with the verifier window; not part of the package API. */
 export function evidenceContent(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
@@ -1250,6 +1313,7 @@ function summarizeJsonValue(
   );
 }
 
+/** @internal Shared with the verifier window; not part of the package API. */
 export function proofKindOf(
   provenance: GoalEvidenceProvenance,
 ): GoalEvidenceProofKind {
@@ -1258,6 +1322,7 @@ export function proofKindOf(
   return 'external_fact';
 }
 
+/** @internal Shared with the verifier window; not part of the package API. */
 export function parseGoalContext(
   value: unknown,
 ): ParsedGoalContext | undefined {
@@ -1279,7 +1344,7 @@ export function parseGoalContext(
   };
 }
 
-export function claimsGoalRevision(value: unknown, goal: GoalRecord): boolean {
+function claimsGoalRevision(value: unknown, goal: GoalRecord): boolean {
   if (!isRecord(value)) return false;
   return value['goalId'] === goal.goalId && value['revision'] === goal.revision;
 }

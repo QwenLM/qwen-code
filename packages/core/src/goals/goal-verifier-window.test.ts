@@ -19,9 +19,11 @@ import {
 import {
   buildGoalVerifierEvidenceWindow,
   GoalVerifierCoverageError,
+  GoalVerifierWindowBudgetError,
   USER_MESSAGE_OUTSIDE_GOAL_TURN,
   validateGoalVerifierCoverage,
   VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT,
+  VERIFIER_EVIDENCE_WINDOW_MIN_BYTES,
 } from './goal-verifier-window.js';
 
 const GOAL_ID = 'goal-1';
@@ -403,6 +405,23 @@ describe('buildGoalVerifierEvidenceWindow', () => {
     expect(
       buildGoalVerifierEvidenceWindow(input).evidence.map((e) => e.uuid),
     ).toEqual(['shipped', 'old-approval']);
+    // A message before the cursor with no Goal context, or stamped for
+    // another Goal or revision, may be consent to something else: not taken.
+    expect(
+      buildGoalVerifierEvidenceWindow({
+        ...input,
+        records: [
+          userMessage('pre-goal', '/goal set ship it'),
+          record('other-revision', 'user', {
+            provenance: 'real_user',
+            text: 'approved (for the old objective)',
+            revision: REVISION - 1,
+            turnId: 'turn-0',
+          }),
+          ...records,
+        ],
+      }).evidence.map((e) => e.uuid),
+    ).toEqual(['shipped', 'old-approval']);
     expect(() =>
       buildGoalVerifierEvidenceWindow({
         ...input,
@@ -415,6 +434,107 @@ describe('buildGoalVerifierEvidenceWindow', () => {
     expect(() =>
       buildGoalVerifierEvidenceWindow({ ...input, goal: goal(null) }),
     ).toThrow(expect.objectContaining({ code: 'cursor_unset' }));
+  });
+
+  it('counts as omitted only records that would have been evidence', () => {
+    const records = [
+      record('call-only', 'assistant', {
+        turnId: 'turn-3',
+        goalContext: { goalId: GOAL_ID, revision: REVISION, turnId: 'turn-3' },
+      }),
+      record('no-response', 'tool_result', { turnId: 'turn-3' }),
+      record('thought-only', 'assistant', {
+        turnId: 'turn-3',
+        thought: 'hidden',
+      }),
+      userMessage('blank', '   ', 'turn-3'),
+      ...Array.from({ length: 60 }, (_, index) =>
+        tool(`t-${index}`, 'turn-3', 'x'.repeat(2_000)),
+      ),
+    ];
+    records[0]!.message = {
+      parts: [{ functionCall: { name: 'shell', args: {} } }],
+    };
+
+    const window = build(records, complete, permit(), 64_000);
+
+    expect(window.evidence.length).toBeGreaterThan(20);
+    expect(window.omitted).toBe(60 - window.evidence.length);
+    expect(
+      window.evidence.some((entry) =>
+        ['call-only', 'no-response', 'thought-only', 'blank'].includes(
+          entry.uuid,
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("admits a user message inside a preceding turn as that turn's evidence", () => {
+    const big = (uuid: string, turnId: string) =>
+      tool(uuid, turnId, 'x'.repeat(17_000));
+    const records = [
+      text('t2-prose', 'turn-2', 'still blocked'),
+      userMessage('t2-user', 'still no access from my side', 'turn-2'),
+      ...Array.from({ length: 6 }, (_, i) => big(`t3-${i}`, 'turn-3')),
+      ...Array.from({ length: 6 }, (_, i) => big(`t4-${i}`, 'turn-4')),
+    ];
+
+    const window = build(
+      records,
+      blocked('repeated'),
+      permit('turn-4'),
+      64_000,
+    );
+
+    const uuids = window.evidence.map((entry) => entry.uuid);
+    expect(uuids).toContain('t2-user');
+    expect(uuids.filter((uuid) => uuid === 't2-user')).toHaveLength(1);
+    expect(() =>
+      coverage(records, blocked('repeated'), permit('turn-4')),
+    ).not.toThrow();
+  });
+
+  it('stops the recency pass after a run of records that do not fit', () => {
+    const records = [
+      text('tiny-but-old', 'turn-3', 'ok'),
+      ...Array.from({ length: 12 }, (_, i) =>
+        tool(`big-${i}`, 'turn-3', 'y'.repeat(25_000)),
+      ),
+    ];
+
+    const window = build(records, complete, permit(), 64_000);
+
+    // Three capped records fill the window; the next eight do not fit and
+    // end the pass, so the tiny record behind them is left out rather than
+    // every remaining response being serialized to find it.
+    expect(window.evidence.map((e) => e.uuid)).toEqual([
+      'big-11',
+      'big-10',
+      'big-9',
+    ]);
+    expect(window.omitted).toBe(10);
+  });
+
+  it('refuses a budget that is not a finite number or too small to judge anything', () => {
+    const records = [tool('run', 'turn-3', 'ok')];
+
+    expect(() => build(records, complete, permit(), Number.NaN)).toThrow(
+      expect.objectContaining({ code: 'budget_invalid' }),
+    );
+    expect(() =>
+      build(records, complete, permit(), Number.POSITIVE_INFINITY),
+    ).toThrow(GoalVerifierWindowBudgetError);
+    expect(() =>
+      build(
+        records,
+        complete,
+        permit(),
+        VERIFIER_EVIDENCE_WINDOW_MIN_BYTES - 1,
+      ),
+    ).toThrow(expect.objectContaining({ code: 'budget_too_small' }));
+    expect(() =>
+      build(records, complete, permit(), VERIFIER_EVIDENCE_WINDOW_MIN_BYTES),
+    ).not.toThrow();
   });
 
   it('refuses a chain that repeats a record uuid', () => {
@@ -478,10 +598,36 @@ describe('validateGoalVerifierCoverage', () => {
     ).not.toThrow();
   });
 
-  it('requires a user message or a tool result for an immediate blocker', () => {
+  it('requires a user message during the Goal or a tool result for an immediate blocker', () => {
     for (const kind of ['authority', 'external'] as const) {
       expect(() =>
         coverage([proseOnly[2]!], blocked(kind), permit('turn-4')),
+      ).toThrow(
+        expect.objectContaining({
+          code: 'immediate_blocker_external_evidence_required',
+        }),
+      );
+      // The message that created the Goal sits before the cursor and must
+      // not satisfy the Goal's own blocker; neither may a blank one or one
+      // stamped for another revision.
+      expect(() =>
+        validateGoalVerifierCoverage({
+          records: [
+            userMessage('create', '/goal set ship it'),
+            cursor(),
+            record('old-rev', 'user', {
+              provenance: 'real_user',
+              text: 'approved',
+              revision: REVISION - 1,
+              turnId: 'turn-0',
+            }),
+            userMessage('blank', '  ', 'turn-4'),
+            proseOnly[2]!,
+          ],
+          goal: goal(),
+          permit: permit('turn-4'),
+          proposal: blocked(kind),
+        }),
       ).toThrow(
         expect.objectContaining({
           code: 'immediate_blocker_external_evidence_required',
@@ -497,6 +643,14 @@ describe('validateGoalVerifierCoverage', () => {
       expect(() =>
         coverage([withFacts[2]!], blocked(kind), permit('turn-4')),
       ).not.toThrow();
+      // A tool result with no response is not evidence of anything.
+      expect(() =>
+        coverage(
+          [record('no-response', 'tool_result', { turnId: 'turn-4' })],
+          blocked(kind),
+          permit('turn-4'),
+        ),
+      ).toThrow(GoalVerifierCoverageError);
     }
   });
 

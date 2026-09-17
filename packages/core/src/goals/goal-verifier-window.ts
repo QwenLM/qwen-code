@@ -5,14 +5,14 @@
  */
 
 import {
+  anchorGoalTranscript,
   capPreviewBytes,
   coherentEvidenceProvenance,
-  collectLineageTurnIds,
   EvidenceSourceUnavailableError,
   evidenceContent,
   parseGoalContext,
   proofKindOf,
-  type GoalEvidenceContext,
+  recordHasEvidenceContent,
   type GoalEvidenceProvenance,
   type GoalEvidenceRecord,
   type GoalEvidenceValidationInput,
@@ -27,15 +27,17 @@ import type { GoalVerifierEvidenceRecord } from './goal-verifier.js';
  * A completion is judged from the Goal turn that proposed it, so the
  * decisive checks have to run in that turn. A blocked proposal is judged
  * from the current turn and the two lineage turns before it, the span the
- * repeated-blocker policy names. The one thing carried over from anywhere
- * else in the session is the user's own messages: a claim about what the
- * user asked, chose or approved can only be proven by one of those, the
+ * repeated-blocker policy names. The one thing carried over from outside
+ * those turns is the user's own messages: a claim about what the user
+ * asked, chose or approved can only be proven by one of those, and the
  * answer usually arrived turns before the work that depends on it finished,
- * and it may have been given while the Goal was paused or blocked or before
- * it was edited, so those messages are taken with or without Goal turn
- * context. Nothing else older is sent: the deliverable is in the workspace
- * and the check that proves it can be run again, which is cheaper and more
- * reliable than keeping a citable ledger of everything a long Goal did.
+ * sometimes while the Goal was paused or blocked and so without Goal turn
+ * context. Only messages this objective can have prompted are taken: those
+ * recorded after the evidence cursor, and those stamped for this Goal
+ * revision wherever they sit. Nothing else older is sent: the deliverable is
+ * in the workspace and the check that proves it can be run again, which is
+ * cheaper and more reliable than a citable ledger of everything a long Goal
+ * did.
  */
 
 /**
@@ -51,14 +53,15 @@ export const VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT = 224_000;
  * Below this budget the window cannot carry a couple of full records next
  * to the envelope (a 16 000-byte record can double under JSON escaping), so
  * the proposal cannot be judged at all: the objective or the proposal
- * reason is the problem, not the evidence.
+ * reason is the problem, not the evidence. The builder refuses such a
+ * budget rather than returning a window that could not prove anything.
  */
 export const VERIFIER_EVIDENCE_WINDOW_MIN_BYTES = 64_000;
 
 /**
  * The `turnId` a user message carries when it was sent while no Goal turn
- * was running -- an answer given while the Goal was paused or blocked, or
- * before it was edited -- and so has no Goal turn context.
+ * was running -- an answer given while the Goal was paused or blocked -- and
+ * so has no Goal turn context.
  */
 export const USER_MESSAGE_OUTSIDE_GOAL_TURN = 'outside_goal_turn';
 
@@ -86,15 +89,29 @@ const USER_MESSAGE_BUDGET_FRACTION = 8;
 /** A record with one byte of content still costs its keys and ids. */
 const MIN_ENTRY_BYTES = 96;
 
+/**
+ * How many rendered records in a row may fail to fit before the final,
+ * recency-ordered pass gives up. The records it would go on to render are
+ * older and, past a full window, mostly the same size; rendering a
+ * multi-megabyte tool response only to count it is the cost this bounds.
+ */
+const CONSECUTIVE_MISS_LIMIT = 8;
+
 export interface GoalVerifierEvidenceWindow {
   /** Newest record first, by transcript position. */
   evidence: GoalVerifierEvidenceRecord[];
-  /** The Goal turns the window covers, oldest first; the current turn is last. */
+  /**
+   * The Goal turns whose records the window draws from, oldest first; the
+   * current turn is last. The user's messages are the exception and may
+   * carry another turn id of this Goal revision, or
+   * {@link USER_MESSAGE_OUTSIDE_GOAL_TURN}.
+   */
   turnIds: string[];
   /**
-   * Eligible records left out because they did not fit the byte budget.
-   * Newer records are tried first, and a record that does not fit is skipped
-   * so a smaller, older one still can.
+   * Records with evidence content that did not fit the byte budget. Newer
+   * records are tried first, and a record that does not fit is skipped so a
+   * smaller, older one still can. Records that would render to nothing are
+   * neither evidence nor omissions.
    */
   omitted: number;
 }
@@ -102,16 +119,29 @@ export interface GoalVerifierEvidenceWindow {
 export interface BuildGoalVerifierEvidenceWindowOptions {
   /**
    * Serialized bytes the verifier request has left for evidence once its
-   * envelope is counted. Capped at {@link VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT},
-   * which is also the default.
+   * envelope is counted. Must be a finite number of at least
+   * {@link VERIFIER_EVIDENCE_WINDOW_MIN_BYTES}; capped at
+   * {@link VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT}, which is also the default.
    */
   budgetBytes?: number;
+}
+
+export class GoalVerifierWindowBudgetError extends Error {
+  constructor(
+    readonly code: 'budget_invalid' | 'budget_too_small',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'GoalVerifierWindowBudgetError';
+  }
 }
 
 /**
  * Builds the evidence window a terminal proposal is verified against.
  *
- * Throws {@link EvidenceSourceUnavailableError} when the transcript cannot be
+ * Throws {@link GoalVerifierWindowBudgetError} for a budget that is not a
+ * finite number or is too small to judge anything, and
+ * {@link EvidenceSourceUnavailableError} when the transcript cannot be
  * attributed to this permit: a permit that does not match the Goal revision,
  * a missing or duplicated evidence cursor, a Goal-owned record after the
  * cursor with malformed turn context, a turn that re-enters the lineage, or
@@ -126,24 +156,27 @@ export function buildGoalVerifierEvidenceWindow(
   input: GoalEvidenceValidationInput,
   options: BuildGoalVerifierEvidenceWindowOptions = {},
 ): GoalVerifierEvidenceWindow {
+  const budget = resolveBudget(options.budgetBytes);
   const { cursorIndex, lineageTurnIds } = attributeTranscript(input);
   const currentTurnId = input.permit.turnId;
-  const currentIndex = lineageTurnIds.indexOf(currentTurnId);
   const priorTurnIds =
-    currentIndex === -1 ? lineageTurnIds : lineageTurnIds.slice(0, -1);
+    lineageTurnIds.at(-1) === currentTurnId
+      ? lineageTurnIds.slice(0, -1)
+      : lineageTurnIds;
   const priorWindowTurnIds =
     input.proposal.status === 'blocked' ? priorTurnIds.slice(-2) : [];
   const turnIds = [...priorWindowTurnIds, currentTurnId];
 
   // Candidates newest first, rendered only when a pass reaches them: most of
   // a long turn never fits, and rendering a tool response that will be
-  // counted rather than sent is wasted work.
+  // counted rather than sent is wasted work. A record that would render to
+  // nothing is not a candidate at all.
   interface Candidate {
     index: number;
     record: GoalEvidenceRecord;
     provenance: GoalEvidenceProvenance;
     turnId: string;
-    rendered?: { entry: GoalVerifierEvidenceRecord; bytes: number } | null;
+    rendered?: { entry: GoalVerifierEvidenceRecord; bytes: number };
   }
   const current: Candidate[] = [];
   const user: Candidate[] = [];
@@ -153,44 +186,48 @@ export function buildGoalVerifierEvidenceWindow(
   for (let index = input.records.length - 1; index >= 0; index -= 1) {
     const record = input.records[index]!;
     const provenance = coherentEvidenceProvenance(record);
-    if (!provenance) continue;
+    if (!provenance || !recordHasEvidenceContent(record, provenance)) {
+      continue;
+    }
     const context = parseGoalContext(record.goalContext);
+    const ownContext =
+      context !== undefined &&
+      context.goalId === input.goal.goalId &&
+      context.revision === input.goal.revision;
     if (provenance === 'real_user') {
-      user.push({
+      // Only a message this objective can have prompted: recorded after the
+      // cursor, or stamped for this revision wherever it sits. A message
+      // stamped for another Goal or an earlier revision may be the user's
+      // consent to something else.
+      if (index <= cursorIndex && !ownContext) continue;
+      if (context !== undefined && !ownContext) continue;
+      const candidate = {
         index,
         record,
         provenance,
         turnId: context?.turnId ?? USER_MESSAGE_OUTSIDE_GOAL_TURN,
-      });
+      };
+      user.push(candidate);
+      // A user message inside a preceding window turn is also that turn's
+      // evidence, exactly as the coverage rule counts it.
+      if (context) prior.get(context.turnId)?.push(candidate);
       continue;
     }
-    if (
-      index <= cursorIndex ||
-      !context ||
-      context.goalId !== input.goal.goalId ||
-      context.revision !== input.goal.revision
-    ) {
-      continue;
-    }
+    if (index <= cursorIndex || !ownContext) continue;
     const group =
       context.turnId === currentTurnId ? current : prior.get(context.turnId);
     group?.push({ index, record, provenance, turnId: context.turnId });
   }
   const render = (candidate: Candidate) => {
-    if (candidate.rendered !== undefined) return candidate.rendered;
-    const content = capRecordContent(
-      evidenceContent(candidate.record, candidate.provenance),
-    );
-    if (!content) {
-      candidate.rendered = null;
-      return null;
-    }
+    if (candidate.rendered) return candidate.rendered;
     const entry: GoalVerifierEvidenceRecord = {
       uuid: candidate.record.uuid,
       provenance: candidate.provenance,
       turnId: candidate.turnId,
       proofKind: proofKindOf(candidate.provenance),
-      content,
+      content: capRecordContent(
+        evidenceContent(candidate.record, candidate.provenance),
+      ),
     };
     candidate.rendered = {
       entry,
@@ -200,33 +237,46 @@ export function buildGoalVerifierEvidenceWindow(
     return candidate.rendered;
   };
 
-  const budget = Math.max(
-    0,
-    Math.min(
-      VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT,
-      options.budgetBytes ?? VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT,
-    ),
-  );
   const admitted = new Set<number>();
   let used = 0;
   // Admits records of `group`, newest first, at most `count` of them and at
   // most `share` bytes on this pass. A record that does not fit is skipped,
   // not the end of the pass, so a short, older message can still make it in
-  // behind a long one; the pass stops once nothing could fit at all.
+  // behind a long one. The pass stops once nothing could fit at all, or once
+  // `missLimit` rendered records in a row have failed to fit.
   const admit = (
     group: readonly Candidate[],
-    count = Number.POSITIVE_INFINITY,
-    share = Number.POSITIVE_INFINITY,
-    accept: (candidate: Candidate) => boolean = () => true,
+    {
+      count = Number.POSITIVE_INFINITY,
+      share = Number.POSITIVE_INFINITY,
+      missLimit = Number.POSITIVE_INFINITY,
+      accept = () => true,
+    }: {
+      count?: number;
+      share?: number;
+      missLimit?: number;
+      accept?: (candidate: Candidate) => boolean;
+    } = {},
   ): void => {
     let taken = 0;
     let spent = 0;
+    let misses = 0;
     for (const candidate of group) {
-      if (taken >= count || budget - used < MIN_ENTRY_BYTES) break;
+      if (
+        taken >= count ||
+        misses >= missLimit ||
+        budget - used < MIN_ENTRY_BYTES
+      ) {
+        break;
+      }
       if (admitted.has(candidate.index) || !accept(candidate)) continue;
+      // The text parts alone bound the entry from below; a record that
+      // cannot fit on that bound is skipped without serializing its tool
+      // response.
+      if (used + leastBytes(candidate.record) > budget) continue;
       const rendered = render(candidate);
-      if (!rendered) continue;
       if (spent + rendered.bytes > share || used + rendered.bytes > budget) {
+        misses += 1;
         continue;
       }
       admitted.add(candidate.index);
@@ -239,37 +289,30 @@ export function buildGoalVerifierEvidenceWindow(
   // its own turn produced. Then one record the model did not merely write
   // from each preceding turn a blocked policy reads, then the user's newest
   // messages, then the user's share, then everything else by recency.
-  admit(current, 1);
+  admit(current, { count: 1 });
   for (const group of prior.values()) {
-    admit(
-      group,
-      1,
-      Number.POSITIVE_INFINITY,
-      (candidate) => candidate.provenance !== 'assistant_output',
-    );
+    admit(group, {
+      count: 1,
+      accept: (candidate) => candidate.provenance !== 'assistant_output',
+    });
   }
-  admit(user, USER_MESSAGE_GUARANTEED_COUNT);
-  admit(
-    user,
-    Number.POSITIVE_INFINITY,
-    Math.floor(budget / USER_MESSAGE_BUDGET_FRACTION),
-  );
+  admit(user, { count: USER_MESSAGE_GUARANTEED_COUNT });
+  admit(user, { share: Math.floor(budget / USER_MESSAGE_BUDGET_FRACTION) });
+  const seen = new Set<number>();
   const rest = [...current, ...user, ...prior.values()]
     .flat()
+    .filter((candidate) => {
+      if (seen.has(candidate.index)) return false;
+      seen.add(candidate.index);
+      return true;
+    })
     .sort((left, right) => right.index - left.index);
-  admit(rest);
+  admit(rest, { missLimit: CONSECUTIVE_MISS_LIMIT });
 
   const evidence = rest
     .filter((candidate) => admitted.has(candidate.index))
     .map((candidate) => candidate.rendered!.entry);
-  return {
-    evidence,
-    turnIds,
-    omitted: rest.filter(
-      (candidate) =>
-        !admitted.has(candidate.index) && candidate.rendered !== null,
-    ).length,
-  };
+  return { evidence, turnIds, omitted: rest.length - evidence.length };
 }
 
 export class GoalVerifierCoverageError extends Error {
@@ -287,13 +330,20 @@ export class GoalVerifierCoverageError extends Error {
 
 /**
  * The deterministic half of the blocked-proposal policy, decided on the
- * lineage records rather than on the packed window so that a tight budget
- * cannot turn a well-evidenced blocker into a refusal: an infeasible
- * blocker needs a tool result in the current turn, an immediate one needs a
- * user message anywhere or a tool result in the current turn, and a
- * repeated one needs at least three lineage turns with a tool result or a
- * user message in each of the last three. A verifier prompt can restate
- * these rules; only code can refuse a proposal that breaks them every time.
+ * transcript rather than on the packed window so that a tight budget cannot
+ * turn a well-evidenced blocker into a refusal. Only records with evidence
+ * content count, and a user message counts only when this objective can
+ * have prompted it (after the cursor, or stamped for this revision): the
+ * message that created the Goal must not satisfy its own blocker.
+ *
+ * An infeasible blocker needs a tool result in the current turn; an
+ * authority or external blocker needs such a user message or a tool result
+ * in the current turn; a repeated blocker needs at least three lineage turns
+ * with a tool result or a user message in each of the last three. A
+ * verifier prompt can restate these rules; only code can refuse a proposal
+ * that breaks them every time. The newest records are what the window sends
+ * first, so contradictory newer evidence cannot be left out the way a cited
+ * list could.
  */
 export function validateGoalVerifierCoverage(
   input: GoalEvidenceValidationInput,
@@ -303,24 +353,33 @@ export function validateGoalVerifierCoverage(
   const { cursorIndex, lineageTurnIds } = attributeTranscript(input);
   const currentTurnId = input.permit.turnId;
   const kindsByTurn = new Map<string, Set<'tool' | 'user'>>();
-  let userAnywhere = false;
+  let userMessage = false;
   for (let index = 0; index < input.records.length; index += 1) {
     const record = input.records[index]!;
     const provenance = coherentEvidenceProvenance(record);
-    if (!provenance || provenance === 'assistant_output') continue;
-    if (provenance === 'real_user') userAnywhere = true;
-    if (index <= cursorIndex) continue;
-    const context = parseGoalContext(record.goalContext);
     if (
-      !context ||
-      context.goalId !== input.goal.goalId ||
-      context.revision !== input.goal.revision
+      !provenance ||
+      provenance === 'assistant_output' ||
+      !recordHasEvidenceContent(record, provenance)
     ) {
       continue;
     }
-    const kinds = kindsByTurn.get(context.turnId) ?? new Set();
+    const context = parseGoalContext(record.goalContext);
+    const ownContext =
+      context !== undefined &&
+      context.goalId === input.goal.goalId &&
+      context.revision === input.goal.revision;
+    if (provenance === 'real_user') {
+      if (index <= cursorIndex && !ownContext) continue;
+      if (context !== undefined && !ownContext) continue;
+      userMessage = true;
+      if (!context) continue;
+    } else if (index <= cursorIndex || !ownContext) {
+      continue;
+    }
+    const kinds = kindsByTurn.get(context!.turnId) ?? new Set();
     kinds.add(provenance === 'real_user' ? 'user' : 'tool');
-    kindsByTurn.set(context.turnId, kinds);
+    kindsByTurn.set(context!.turnId, kinds);
   }
   const has = (turnId: string, kind: 'tool' | 'user') =>
     kindsByTurn.get(turnId)?.has(kind) ?? false;
@@ -332,10 +391,10 @@ export function validateGoalVerifierCoverage(
     );
   }
   if (!isRepeatedBlockerProposal(proposal)) {
-    if (!userAnywhere && !has(currentTurnId, 'tool')) {
+    if (!userMessage && !has(currentTurnId, 'tool')) {
       throw new GoalVerifierCoverageError(
         'immediate_blocker_external_evidence_required',
-        'An immediate blocker requires a message from the user or a tool result in this turn as evidence.',
+        'An immediate blocker requires a message from the user during this Goal or a tool result in this turn as evidence.',
       );
     }
     return;
@@ -353,52 +412,33 @@ export function validateGoalVerifierCoverage(
   }
 }
 
+function resolveBudget(budgetBytes: number | undefined): number {
+  if (budgetBytes === undefined) return VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT;
+  if (!Number.isFinite(budgetBytes)) {
+    throw new GoalVerifierWindowBudgetError(
+      'budget_invalid',
+      `The verifier evidence window budget must be a finite number of bytes; got ${String(budgetBytes)}.`,
+    );
+  }
+  if (budgetBytes < VERIFIER_EVIDENCE_WINDOW_MIN_BYTES) {
+    throw new GoalVerifierWindowBudgetError(
+      'budget_too_small',
+      `The verifier request leaves ${Math.floor(budgetBytes)} bytes for evidence, under the ${VERIFIER_EVIDENCE_WINDOW_MIN_BYTES} a proposal can be judged from.`,
+    );
+  }
+  return Math.min(VERIFIER_EVIDENCE_WINDOW_BYTE_LIMIT, Math.floor(budgetBytes));
+}
+
 /**
- * Anchors the transcript to this permit: the cursor's position in a chain
- * with no repeated uuid, and the Goal turns recorded after it. The current
- * turn may be absent (nothing recorded yet) but, if present, must be last.
+ * Anchors the transcript to this permit and checks the one rule the window
+ * adds to the shared anchor: the current turn may be absent (nothing
+ * recorded yet) but, if present, must be the lineage's tail.
  */
-function attributeTranscript(input: GoalEvidenceContext): {
+function attributeTranscript(input: GoalEvidenceValidationInput): {
   cursorIndex: number;
   lineageTurnIds: string[];
 } {
-  if (
-    input.permit.goalId !== input.goal.goalId ||
-    input.permit.revision !== input.goal.revision ||
-    !input.permit.turnId.trim()
-  ) {
-    throw new EvidenceSourceUnavailableError(
-      'permit_goal_mismatch',
-      'The current Goal permit does not match the Goal evidence revision.',
-    );
-  }
-  const cursorId = input.goal.evidenceCursor.recordId;
-  if (cursorId === null) {
-    throw new EvidenceSourceUnavailableError(
-      'cursor_unset',
-      'The Goal evidence cursor is not available.',
-    );
-  }
-  const seen = new Set<string>();
-  let cursorIndex = -1;
-  for (let index = 0; index < input.records.length; index += 1) {
-    const uuid = input.records[index]!.uuid;
-    if (seen.has(uuid)) {
-      throw new EvidenceSourceUnavailableError(
-        'duplicate_record_uuid',
-        `The active transcript chain contains duplicate record UUID ${uuid}.`,
-      );
-    }
-    seen.add(uuid);
-    if (uuid === cursorId) cursorIndex = index;
-  }
-  if (cursorIndex === -1) {
-    throw new EvidenceSourceUnavailableError(
-      'cursor_not_found',
-      `The Goal evidence cursor ${cursorId} is not in the active transcript chain.`,
-    );
-  }
-  const lineageTurnIds = collectLineageTurnIds(input, cursorIndex);
+  const { cursorIndex, lineageTurnIds } = anchorGoalTranscript(input);
   const currentIndex = lineageTurnIds.indexOf(input.permit.turnId);
   if (currentIndex !== -1 && currentIndex !== lineageTurnIds.length - 1) {
     throw new EvidenceSourceUnavailableError(
@@ -407,6 +447,20 @@ function attributeTranscript(input: GoalEvidenceContext): {
     );
   }
   return { cursorIndex, lineageTurnIds };
+}
+
+/**
+ * A lower bound on a record's serialized entry from its text parts alone,
+ * cheap enough to decide "cannot fit" without serializing a tool response.
+ */
+function leastBytes(record: GoalEvidenceRecord): number {
+  let text = 0;
+  for (const part of record.message?.parts ?? []) {
+    if (part.thought !== true && typeof part.text === 'string') {
+      text += part.text.length;
+    }
+  }
+  return MIN_ENTRY_BYTES + Math.min(text, RECORD_CONTENT_BYTE_LIMIT);
 }
 
 /**
