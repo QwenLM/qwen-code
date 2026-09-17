@@ -72,6 +72,19 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
 };
 
 /**
+ * A projected segment that ends in a heredoc marker, i.e. the head of a command
+ * whose body `stripHeredocBodies` removed. `<<'EOF'`, `<<"EOF"` and the `<<-`
+ * form all count; a `<<` inside a quoted word (`echo '<<EOF'`) does not, and
+ * neither does a marker with anything after it (`cat <<EOF && rm -rf /`).
+ */
+const HEREDOC_MARKER_HEAD =
+  /(?:^|[\s;|&(])<<-?\s*['"]?[A-Za-z0-9_./-]+['"]?\s*$/;
+
+function isHeredocMarkerHead(segment: string): boolean {
+  return HEREDOC_MARKER_HEAD.test(segment);
+}
+
+/**
  * Minimal interface for the parts of Config used by PermissionManager.
  * Keeps the dependency explicit and avoids a circular import on the
  * full Config class.
@@ -598,10 +611,20 @@ export class PermissionManager {
 
       // Resolve 'default' to actual permission using AST analysis
       // (same logic as ShellToolInvocation.getDefaultPermission)
+      //
+      // A segment that is only a heredoc marker head is not the whole command:
+      // the body the projection dropped is what makes
+      // `cat <<'EOF'\ncd /app\nEOF\necho started` read-only to the AST
+      // classifier, so classifying the truncated head alone turns an allow into
+      // a prompt. That one segment keeps seeing the RAW text, the rule the
+      // single-segment branch applies in `evaluate()`. Every other segment
+      // keeps its own projection, so a read-only head is never classified
+      // together with a dangerous tail.
+      const classifyRaw = changesDirectory || isHeredocMarkerHead(subCmd);
       const decision: ResolvedDecision =
         rawDecision === 'default'
           ? await this.resolveDefaultPermission(
-              changesDirectory ? ctx.command! : subCmd,
+              classifyRaw ? ctx.command! : subCmd,
               ctx.cwd ?? this.config.getCwd?.(),
             )
           : (rawDecision as ResolvedDecision);

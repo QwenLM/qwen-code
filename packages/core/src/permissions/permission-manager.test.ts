@@ -887,6 +887,59 @@ describe('splitCompoundCommand', () => {
     ).toEqual(['echo hi # note <<EOF', 'rm -rf /tmp/x']);
   });
 
+  // A `<<EOF` inside a string bash is still reading at the newline is text, not
+  // a heredoc operator, so the quote state has to survive the physical line.
+  // With a fresh state per line the marker registered, the trailing `EOF`
+  // satisfied it, the unsatisfied-delimiter refusal never fired, and the strip
+  // deleted the `rm` bash really runs: `bash -c` over the five lines below
+  // deletes ./scratch and exits 127 on `EOF: command not found`.
+  it('does not register a heredoc marker inside a multi-line quoted string', async () => {
+    const command =
+      "echo 'Note: use\ncat <<EOF\nto feed input.'\nrm -rf ./scratch\nEOF";
+    expect(stripHeredocBodies(command)).toBe(command);
+    expect(splitCompoundCommand(stripHeredocBodies(command))).toContain(
+      'rm -rf ./scratch',
+    );
+  });
+
+  // An unquoted delimiter still expands: bash runs the body's `$( … )` and
+  // backticks (`bash -xc $'cat <<EOF\n`touch ./RAN`\nEOF'` traces
+  // `++ touch ./RAN`), so those spans stay in the projection and the data
+  // around them goes. Stripping them like a quoted body deleted executed text
+  // from every rule check.
+  it('keeps the expansions bash runs in an unquoted heredoc body', async () => {
+    expect(
+      stripHeredocBodies('cat <<EOF\nhi $(touch ./RAN) there\nEOF\necho done'),
+    ).toBe('cat <<EOF\n$(touch ./RAN)\necho done');
+    expect(stripHeredocBodies('cat <<EOF\n`rm -rf /tmp/x`\nEOF')).toBe(
+      'cat <<EOF\n`rm -rf /tmp/x`',
+    );
+  });
+
+  // …while a quoted delimiter makes the whole body data, expansions included:
+  // `bash -xc $'cat <<\'EOF\'\n`touch ./RAN`\nEOF'` creates nothing.
+  it('drops a quoted-delimiter heredoc body including its expansions', async () => {
+    expect(stripHeredocBodies("cat <<'EOF'\n$(rm -rf /tmp/x)\nEOF")).toBe(
+      "cat <<'EOF'",
+    );
+  });
+
+  // A plain `${ … }` runs no command, so keeping it would prompt on every
+  // ordinary templated body — the false prompt #11815 exists to remove.
+  it('does not keep a bare parameter expansion from a heredoc body', async () => {
+    expect(stripHeredocBodies('cat <<EOF\nHello ${name}\nEOF')).toBe(
+      'cat <<EOF',
+    );
+  });
+
+  // bash carries an expansion past the body's newline and runs every line until
+  // the closer, so those lines are shell text and stay verbatim.
+  it('keeps every line of an expansion that spans body lines', async () => {
+    expect(stripHeredocBodies('cat <<EOF\n$(rm -rf\n/tmp/x)\nEOF')).toBe(
+      'cat <<EOF\n$(rm -rf\n/tmp/x)',
+    );
+  });
+
   // A marker line ending in `\<newline>` is not finished: bash deletes the pair
   // and continues the logical line, so the body does not start at the next
   // physical line — that line is still command text bash runs
@@ -2992,6 +3045,103 @@ describe('PermissionManager', () => {
         await pm.evaluate({
           toolName: 'run_shell_command',
           command: 'cat <<EOF\n# hi ; rm -rf /\nEOF',
+        }),
+      ).toBe('allow');
+    });
+
+    // The row above holds because bash hands an unquoted body to `cat` as data —
+    // but only up to the expansions it still performs. `bash -xc` over
+    // `cat <<EOF` / "`rm -rf /tmp/x`" / `EOF` traces `+ cat` AND
+    // `++ rm -rf /tmp/x`, so a projection that drops the whole body certifies
+    // that command as read-only and a configured deny never sees the text bash
+    // runs. Measured before the fix: `allow` with no prompt.
+    it('backtick in an unquoted heredoc body: never allow', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      const decision = await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cat <<EOF\n`rm -rf /tmp/x`\nEOF',
+      });
+      expect(decision).not.toBe('allow');
+      // The kept expansion is a command substitution, which resolves to ask —
+      // the user still decides. Name it so a future fail-open is a real
+      // verdict change rather than a silent one.
+      expect(decision).toBe('ask');
+    });
+
+    // Same hole in the write channel: bash really writes the file, so the
+    // virtual-op walk has to see it and a `Write` deny has to fire. Measured
+    // before the fix: no write op at all, verdict `ask`.
+    it('command substitution in an unquoted heredoc body: Write deny fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Write(./.qwen/settings.json)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cat <<EOF\n$(echo '{}' > .qwen/settings.json)\nEOF",
+        }),
+      ).toBe('deny');
+    });
+
+    // The mirror control: with a QUOTED delimiter bash performs no expansion,
+    // the body is pure data, and the read-only `cat` must not prompt.
+    it('expansion in a quoted-delimiter heredoc body: still allow', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cat <<'EOF'\n`rm -rf /tmp/x`\nEOF",
+        }),
+      ).toBe('allow');
+    });
+
+    // A `<<EOF` inside a string bash is still reading registers no heredoc, so
+    // the strip must hand the whole text back: `bash -c` over these five lines
+    // deletes ./scratch (and then fails on `EOF: command not found`). A fresh
+    // quote state per line projected it to `echo 'Note: use\ncat <<EOF`,
+    // `Bash(*)` covered that single segment and the verdict was `allow`.
+    it('heredoc marker inside a multi-line quoted string: deny still fires', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(*)'],
+          permissionsDeny: ['Bash(rm *)'],
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command:
+            "echo 'Note: use\ncat <<EOF\nto feed input.'\nrm -rf ./scratch\nEOF",
+        }),
+      ).toBe('deny');
+    });
+
+    // The compound path gets the same raw-text rule the single-segment branch
+    // has: the projected head `cat <<'EOF'` is not read-only on its own, so
+    // classifying it instead of the raw command turned a read-only heredoc
+    // followed by an ordinary `echo` into a prompt, while the heredoc alone
+    // stays `allow` (row above the `xargs` case).
+    it('read-only heredoc followed by another command: allow, not ask', async () => {
+      pm = new PermissionManager(makeConfig({}));
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cat <<'EOF'\ncd /app\nEOF\necho started",
         }),
       ).toBe('allow');
     });

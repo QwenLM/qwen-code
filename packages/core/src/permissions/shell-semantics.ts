@@ -2177,30 +2177,81 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
   return ops;
 }
 
+/** Quote state carried across physical lines by the heredoc marker scan. */
+interface HeredocQuoteState {
+  inSingle: boolean;
+  inDouble: boolean;
+}
+
+/** A heredoc delimiter registered from a marker line. */
+interface HeredocDelimiter {
+  /** The delimiter word, without its quotes and without the `<<-` dash. */
+  word: string;
+  /**
+   * Whether the marker quoted the word. bash performs no expansion in a
+   * quoted-delimiter body, so that body is pure data; an unquoted one still
+   * runs its `$( … )` and backtick expansions.
+   */
+  quoted: boolean;
+}
+
+/** The expansion an unquoted heredoc body line ended inside, if any. */
+type OpenBodyExpansion = 'substitution' | 'backtick' | null;
+
 /**
  * Remove heredoc body lines (and their delimiter lines) so text bash hands to
  * the reading command as data is not scanned as shell. Shared by
  * `walkCompoundCommand` and by the Bash-rule paths in permission-manager.ts,
  * which must not let body text drive the splitter's comment/quote state.
+ *
+ * A body is only data up to the expansions bash still performs in it: with an
+ * UNQUOTED delimiter bash runs the body's `$( … )` and backtick expansions
+ * (`bash -xc $'cat <<EOF\n`touch ./RAN`\nEOF'` traces `++ touch ./RAN`), so
+ * those spans are kept as their own lines and the text around them is dropped.
+ * A quoted delimiter (`<<'EOF'`, `<<"EOF"`) suppresses expansion, so that body
+ * disappears entirely.
  */
 export function stripHeredocBodies(command: string): string {
   const lines = command.split('\n');
   const kept: string[] = [];
-  const pendingDelimiters: string[] = [];
+  const pendingDelimiters: HeredocDelimiter[] = [];
   // Whether a line that registered a delimiter was itself continued onto the
   // next physical line. See the fail-closed note below.
   let continuedMarker = false;
+  // Quote state survives the physical newline: a `<<WORD` inside a string bash
+  // is still reading is text, not a heredoc operator. Scanning every line from
+  // a fresh state registered a phantom delimiter there, and because a later
+  // line satisfied it the unsatisfied-delimiter refusal below never fired — the
+  // strip deleted commands bash really runs (#11821, R6-1).
+  let quoteState: HeredocQuoteState = { inSingle: false, inDouble: false };
+  // Expansion bash carries past a body line's newline. While it is open every
+  // body line is kept verbatim, because bash runs all of it.
+  let openExpansion: OpenBodyExpansion = null;
 
   for (const line of lines) {
-    if (pendingDelimiters.length > 0) {
-      if (line.trim() === pendingDelimiters[0]) {
+    const pending = pendingDelimiters[0];
+    if (pending !== undefined) {
+      if (line.trim() === pending.word) {
         pendingDelimiters.shift();
+        openExpansion = null;
+      } else if (!pending.quoted) {
+        const body = keepBodyExpansions(line, openExpansion);
+        openExpansion = body.open;
+        if (body.kept !== '') {
+          kept.push(body.kept);
+        }
       }
       continue;
     }
 
     kept.push(line);
-    const { delimiters: registered, codeEnd } = getHeredocDelimiters(line);
+    const {
+      delimiters: registered,
+      codeEnd,
+      inSingle,
+      inDouble,
+    } = getHeredocDelimiters(line, quoteState);
+    quoteState = { inSingle, inDouble };
     // Only the code before a `#` can continue the line: bash discards a
     // comment at the physical newline, escape included, so a backslash inside
     // one leaves the marker line complete and the body still starts at the next
@@ -2251,18 +2302,108 @@ function endsWithLineContinuation(line: string): boolean {
   return backslashes % 2 === 1;
 }
 
-function getHeredocDelimiters(line: string): {
-  delimiters: string[];
+/**
+ * Keep only the shell text of an UNQUOTED heredoc body line: its `$( … )` and
+ * backtick expansions, which bash really runs. Everything else in the body is
+ * data for the reading command and is dropped.
+ *
+ * A plain `${ … }` is not kept — it runs no command and would drag an ordinary
+ * body (`cat <<EOF\nHello ${name}\nEOF`) into a prompt — but the scan walks
+ * through it, so an expansion nested inside one is still found.
+ *
+ * `open` is the expansion a previous body line ended inside: bash continues it
+ * past the newline and runs every line until the closer, so those lines are
+ * kept verbatim. Dropping them would hide executed text from the rules.
+ */
+function keepBodyExpansions(
+  line: string,
+  open: OpenBodyExpansion,
+): { kept: string; open: OpenBodyExpansion } {
+  const spans: string[] = [];
+  let kind: OpenBodyExpansion = open;
+  // Start of the span being collected, or -1 while outside an expansion.
+  let spanStart = open === null ? -1 : 0;
+  let depth = open === 'substitution' ? 1 : 0;
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    // In an unquoted body bash deletes `\` before `$`, a backtick, `\` and the
+    // newline, so an escaped opener is literal text and starts no expansion.
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+
+    if (kind === 'backtick') {
+      if (ch === '`') {
+        spans.push(line.slice(spanStart, i + 1));
+        kind = null;
+        spanStart = -1;
+      }
+      continue;
+    }
+
+    if (kind === 'substitution') {
+      if (inSingle) {
+        if (ch === "'") inSingle = false;
+        continue;
+      }
+      if (inDouble) {
+        if (ch === '"') inDouble = false;
+        continue;
+      }
+      if (ch === "'") {
+        inSingle = true;
+      } else if (ch === '"') {
+        inDouble = true;
+      } else if (ch === '(') {
+        depth++;
+      } else if (ch === ')' && --depth === 0) {
+        spans.push(line.slice(spanStart, i + 1));
+        kind = null;
+        spanStart = -1;
+      }
+      continue;
+    }
+
+    if (ch === '`') {
+      kind = 'backtick';
+      spanStart = i;
+    } else if (ch === '$' && line[i + 1] === '(') {
+      kind = 'substitution';
+      spanStart = i;
+      depth = 1;
+      i++;
+    }
+  }
+
+  // Still open at the newline: bash keeps reading the expansion on the next
+  // body line, so this line's tail is shell text too.
+  if (kind !== null && spanStart >= 0) {
+    spans.push(line.slice(spanStart));
+  }
+  return { kept: spans.join(' '), open: kind };
+}
+
+function getHeredocDelimiters(
+  line: string,
+  initialQuoteState: HeredocQuoteState,
+): {
+  delimiters: HeredocDelimiter[];
   /**
    * Index of the `#` that ended the scan, or `line.length` when the whole line
    * is code. Text from here on is a comment bash discards, so it can hold no
    * heredoc operator — and no line continuation either.
    */
   codeEnd: number;
+  /** Quote state at the end of the line, to carry into the next physical one. */
+  inSingle: boolean;
+  inDouble: boolean;
 } {
-  const delimiters: string[] = [];
-  let inSingle = false;
-  let inDouble = false;
+  const delimiters: HeredocDelimiter[] = [];
+  let { inSingle, inDouble } = initialQuoteState;
   let escaped = false;
   // Nesting depth of `$(( … ))` arithmetic. bash reads `<<` there as the
   // left-shift operator, not as a heredoc, so `echo $((1 << 3))` opens no
@@ -2316,7 +2457,7 @@ function getHeredocDelimiters(line: string): {
       ch === '#' &&
       (i === 0 || ' \t;&|'.includes(line[i - 1]!))
     ) {
-      return { delimiters, codeEnd: i };
+      return { delimiters, codeEnd: i, inSingle, inDouble };
     }
     if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
       continue;
@@ -2346,11 +2487,15 @@ function getHeredocDelimiters(line: string): {
     }
 
     if (wordEnd > wordStart) {
-      delimiters.push(line.slice(wordStart, wordEnd));
+      // The quoting decides whether bash expands the body, so it has to travel
+      // with the word: dropping it here stripped an unquoted body — where bash
+      // does run `$( … )` and backticks — exactly like a quoted one, and the
+      // executed text never reached a rule check (#11821, R6-2).
+      delimiters.push({ word: line.slice(wordStart, wordEnd), quoted });
     }
     i = wordEnd;
   }
-  return { delimiters, codeEnd: line.length };
+  return { delimiters, codeEnd: line.length, inSingle, inDouble };
 }
 
 function walkCompoundCommand(
