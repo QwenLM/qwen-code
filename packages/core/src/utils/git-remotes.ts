@@ -503,9 +503,13 @@ export async function gitRemoteRemove(
     // (invalid refspec) and where the converge arm's keys still stand
     // or the snapshot is empty. A wedged repo pays the restore read's
     // timeout before the refusal surfaces — rollback outranks latency
-    // here, and a killed restore read rethrows rather than letting the
-    // original error surface un-rolled-back.
-    await restoreLocalUpstreamBackups(cwd, pointed, name, env);
+    // here, and a killed restore CONFIG read rethrows rather than
+    // letting the original error surface un-rolled-back (a killed gate
+    // PROBE answers no-discount inside the gate — the safe direction —
+    // rather than aborting the loop ahead of the merge arm).
+    await restoreLocalUpstreamBackups(cwd, pointed, name, env, () =>
+      discountGate(cwd, name, env),
+    );
     const detail = execDetail(removeError);
     // git echoes a config-chosen refspec value verbatim inside its fatal
     // line, and that value can carry a real newline — so the completion
@@ -520,15 +524,18 @@ export async function gitRemoteRemove(
     if (!completed) {
       if (
         /^(?:error|fatal): No such remote: /m.test(detail) &&
-        // A sectionless upstream VALUE that skips the probes (`.`, a
-        // URL, a scp-like `host:path`) is admitted by the lenient name
-        // predicate, and a repo whose branch tracks such a value holds
-        // LIVE config a value-matched sweep would destroy over a 404;
-        // colon-less values (bare words, path shapes) reach the probes
-        // and refuse there when dangling. The skip trades away one
-        // residual: git accepts a colon-bearing SECTION name too, so a
-        // hand-made sectionless-named remote whose first-attempt
-        // cleanup died mid-sweep converges nothing on retry — accepted
+        // A sectionless NAME that skips the probes (`.` or a scp-like
+        // colon-before-slash spelling — the name predicate excludes
+        // `/`, so the URL and colon-after-slash shapes arise only as
+        // upstream VALUES, in the unmask gate) is admitted by the
+        // lenient name predicate, and a repo whose branch tracks such a
+        // value holds LIVE config a value-matched sweep would destroy
+        // over a 404; bare words and dotted names reach the probes and
+        // refuse there when dangling. The skip trades away one
+        // residual: git accepts a scp-like SECTION name (colon before
+        // the first slash) too, so a hand-made sectionless-named remote
+        // of that shape whose first-attempt cleanup died mid-sweep
+        // converges nothing on retry — accepted
         // because the two states (never-sectioned live upstream vs
         // orphaned-by-failed-removal) are indistinguishable once the
         // section is gone, and sweeping risks the live one.
@@ -539,11 +546,17 @@ export async function gitRemoteRemove(
         // Bare words are distinguishable post-hoc: a name git still
         // RESOLVES without any config section (an insteadOf alias —
         // probed to fail no-such-remote with nothing touched) is a live
-        // upstream too — the sweep must not run over git's 404. (A legacy
-        // `$GIT_DIR/remotes|branches` file resolves the same probe but
-        // never reaches this arm: git's own rm fails it with "Could not
-        // remove config section".) Fail-closed: a blind resolver read
-        // throws rather than sweeping.
+        // upstream too — the sweep must not run over git's 404. The
+        // resolver leg here covers insteadOf-aliased names (they probe
+        // to no-such-remote with nothing touched, so the sweep is safe
+        // to skip); a legacy `$GIT_DIR/remotes|branches` file never
+        // reaches this arm — with the file alone git's rm dies "Could
+        // not remove config section" (409) on every attempt, and with
+        // a section plus the file the first attempt's certification
+        // gate is where the leg skips destruction over the live
+        // upstream (git's behavior, mirrored — outside the converge
+        // arm, as both design docs state). Fail-closed: a blind
+        // resolver read throws rather than sweeping.
         !(await remoteStillResolves(cwd, name, env)) &&
         // A bare word naming a DIRECTORY repo inside the worktree is a
         // live local-path upstream (git resolves the path transport),
@@ -595,6 +608,26 @@ export async function gitRemoteRemove(
         if (await sweptUpstreamResolving(cwd, pointed, name, env)) {
           throw new Error('remote still configured after removal');
         }
+        // Only the snapshot-scoped unmask half applies here: the sweep
+        // unsets the same shadowing keys the certify path does, so a
+        // dangling record the sweep just unshadowed must refuse — but a
+        // surviving record naming the removed remote is PRE-EXISTING
+        // state on this arm (the sweep only UNSETS editable shadows, so
+        // it cannot surface one the snapshot never pointed at). Three
+        // refusal sources remain besides the unmask half: an inherited
+        // record naming the removed name that the sweep unshadowed on a
+        // snapshot-pointed branch, or an inherited `remote.pushDefault`
+        // naming it (the resolve check's arms), and the sweep's own
+        // re-verify; an inherited BRANCH-key survivor the snapshot
+        // never pointed at leaves both resolve arms silent and falls
+        // through to git's 404 — the answer the client's stale-row
+        // convergence keys on.
+        const upstreamCtx = await readUpstreamContext(cwd, env);
+        if (
+          await unmaskedPointedUpstream(cwd, pointed, name, env, upstreamCtx)
+        ) {
+          throw new Error('remote still configured after removal');
+        }
       }
       throw removeError;
     }
@@ -608,15 +641,29 @@ export async function gitRemoteRemove(
   // the rollback of git's own collateral damage (the restored values
   // name surviving remotes, so no downstream gate or sweep can claim
   // them).
-  await restoreLocalUpstreamBackups(cwd, pointed, name, env);
+  await restoreLocalUpstreamBackups(cwd, pointed, name, env, () =>
+    discountGate(cwd, name, env),
+  );
   let remotes = await fetchGitRemotes(cwd, env);
+  let completedHalf = false;
   if (remotes.some((remote) => remote.name === name)) {
     // git exited 0 over a split section (an included config file, or a
     // worktree half): finish the worktree half when that is where the
     // survivor lives, then verify again.
     if (await removeWorktreeScopeSection(cwd, name, env)) {
+      completedHalf = true;
       remotes = await fetchGitRemotes(cwd, env);
     }
+  }
+  if (completedHalf) {
+    // The restore above ran while the worktree half still stood, so the
+    // discount gate saw a section this very block removed: restore once
+    // more (only missing keys are rewritten, so the pair is idempotent)
+    // or the destroyed local survivor copy is never written back over
+    // the include-held residue.
+    await restoreLocalUpstreamBackups(cwd, pointed, name, env, () =>
+      discountGate(cwd, name, env),
+    );
   }
   if (remotes.some((remote) => remote.name === name)) {
     // No name in the message: sendGitError classifies on message text, and
@@ -659,7 +706,11 @@ export async function gitRemoteRemove(
   // config.worktree survive every removal (not just worktree-section
   // ones) into a dangling `branch.<b>.remote = <gone>` the next pull
   // fatals on. Clear them now that the removal is certified — a refused
-  // removal above never reaches this point.
+  // removal above never reaches this point. Recorded residual (both
+  // design docs): a refusal that lands BELOW this cleanup (the
+  // swept-resolving re-verify, the sibling sweep, the surviving-keys
+  // gate) can re-sweep a merge key the rollback just restored over an
+  // include-held residue naming the removed name on a pointed branch.
   await unsetUpstreamKeys(cwd, pointed, name, env);
   // Re-verify by RESOLUTION, not presence: an entry that survived the
   // sweep (a lock, an include-held file) refuses only when it still
@@ -771,7 +822,9 @@ async function repoTopLevel(
 //   records has no repository half to destroy, so it falls through to
 //   git's own no-such-remote 404 — the answer the client's stale-row
 //   convergence keys on (a phantom row after an out-of-band removal
-//   re-reads and clears; a 409 would stick).
+//   re-reads and clears on either answer — `remote_still_configured`
+//   is in the panel's stale-list re-read set — so the 404/409 choice is
+//   doctrine and message accuracy, not row stickiness).
 // - 'included': a repository-scope record's ORIGIN is a file other than
 //   the two a removal can edit — which only an include.path'd file
 //   produces (it is scope-labeled `local`, so the scope field cannot
@@ -781,7 +834,7 @@ async function repoTopLevel(
 // the `rev-parse` probes inside editableConfigSpellings throw there
 // BEFORE any record is inspected, so git's canonical not-a-repository
 // answer keeps winning over these refusals (the add path pins the same
-// ordering at git-remotes.test.ts:411).
+// ordering at its not-a-repo ordering witness in git-remotes.test.ts).
 async function remoteSectionRemovalBlock(
   cwd: string,
   name: string,
@@ -887,10 +940,15 @@ async function bareWordResolvesAsRepoPath(
   // `--resolve-git-dir` model misses bundles (git sniffs the bundle
   // magic, extension-independent) and needs the base by hand. No
   // `--exit-code`: a ref-less repo exits 2 and would read as
-  // unresolved. Colon-bearing values skip this probe at every call site
-  // via isSectionlessUpstream (they would put `ls-remote` on the
-  // network), so only bare words and colon-less path shapes reach it —
-  // local transports only — and insteadOf aliases are answered by the
+  // unresolved. Values isSectionlessUpstream short-circuits (the local
+  // repository `.`, URLs, scp-like spellings with the colon BEFORE the
+  // first slash, and — on win32 — UNC spellings in both separator
+  // styles plus drive-letter urls whose tail NTFS rejects, which git
+  // routes to ssh/SMB) skip this probe at every call site, so what
+  // reaches it is bare words and local path shapes — a colon AFTER
+  // the first slash is a local transport by git's own rule, and on
+  // win32 an NTFS-valid drive-letter path is local too — local
+  // transports only — and insteadOf aliases are answered by the
   // resolver probes ahead of it.
   // Fail-closed: a kill rethrows stripped; any other failure is false.
   try {
@@ -954,10 +1012,16 @@ function pushInsteadOfAliasesFromRaw(
 // in both polarities: a URL-less section (a bare `[remote "foo"] proxy =
 // …`) puts the name in the record set while resolving NOTHING, and a
 // legacy `$GIT_DIR/remotes/<name>` file resolves with no record at all.
-// Only bare words and colon-less path shapes reach this probe — `.`
-// and colon-bearing values (URLs, scp-like) short-circuit through
-// isSectionlessUpstream first; an EXISTING path resolves here (the
-// certification side), a dangling one counts as unresolved (refusal).
+// Only bare words and local path shapes reach this probe — `.`, URLs
+// and scp-like spellings (colon before the first slash) short-circuit
+// through isSectionlessUpstream first (on win32, UNC spellings and
+// NTFS-invalid drive-letter urls join them, while NTFS-valid
+// drive-letter paths reach this probe as local transports), while a
+// colon-after-slash path is a local transport and reaches it like a
+// bare word; an EXISTING
+// path is separated from a dangling one by the path probe beside this
+// resolver (the certification side) — `--get-url` alone echoes any
+// path verbatim — and a dangling one counts as unresolved (refusal).
 // Fail-closed toward refusal: a read that cannot answer (other than a
 // kill, which propagates) counts as unresolved.
 async function remoteNameResolves(
@@ -1648,8 +1712,9 @@ async function sweepSiblingWorktreeKeys(
 // include.path'd file's records `local` too — a bare `--local` (includes
 // off) would read an include-held survivor as absent and re-add it to
 // .git/config, duplicating the key and permanently shadowing the
-// include (a `--add` appends at EOF, past the include directive, and
-// wins last-value resolution).
+// include (a `--add` for an ABSENT key creates its section at EOF, past
+// the include directive, and wins last-value resolution; an in-section
+// insert keeps a later include-held record effective).
 async function localBranchKeyValues(
   cwd: string,
   key: string,
@@ -1679,21 +1744,85 @@ async function localBranchKeyValues(
 // [branch <b>] section. Only absent keys are rewritten — a surviving
 // key (a multi-valued one git skipped, swept by value above) or an
 // include-held one (the presence check reads with includes on) is never
-// duplicated. Fail-closed: a restore that cannot run refuses the
-// certification rather than leaving the branch silently untracked.
+// duplicated. A present value EQUAL to the removed name is discounted
+// ONLY when the remote.<name> section is gone from every scope of the
+// INVOKING worktree's scope chain (a sibling worktree's per-worktree
+// section stays invisible to this read, as to every read here until the
+// sibling sweep — the recorded residual) AND the name no longer
+// resolves at all — the resolver probe (a legacy
+// `$GIT_DIR/remotes/<name>` file, an insteadOf alias) plus the
+// local-path probe (a same-named directory repo or bundle file: git's
+// transport answers those with no config record, and `--get-url` never
+// consults the filesystem): then the value is dangling residue, and
+// discounting it is what lets the destroyed local copy be written back
+// at all (the recreated section — when git deleted the whole
+// [branch <b>] section — lands at EOF, past the include directive, and
+// shadows the residue). While the section still stands (git can die
+// AFTER unsetting the branch keys — a stale ref lock — leaving the
+// section live), or the name still resolves, an
+// include-held value equal to the name is the STILL-EFFECTIVE
+// upstream, and discounting it would let the rollback silently
+// re-point the branch while the removal refuses. A SURVIVING section
+// takes an in-section insert instead, so a later include-held record
+// can still win effective order and the removal refuses (fail-closed,
+// as before this fix). Recorded residual: when git's rm leaves the
+// [branch <b>] section standing for an unrelated reason (a
+// `rebase`/`description`-class key it does not touch) and an [include]
+// directive sits AFTER it, the in-section insert lands ahead of the
+// directive, the residue keeps effective order, and the removal
+// refuses permanently — the discount the gate granted is swallowed
+// (fail-closed: HEAD refused those shapes too, losing strictly more).
+// Fail-closed: a restore that cannot run refuses the certification
+// rather than leaving the branch silently untracked.
 async function restoreLocalUpstreamBackups(
   cwd: string,
   pointed: PointingBranches,
   name: string,
-  env?: Readonly<Record<string, string | undefined>>,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  sectionGone: () => Promise<boolean>,
 ): Promise<void> {
+  // The gate's answer cannot change inside one restore pass (the
+  // loop's own writes are branch/pushDefault keys, which neither the
+  // section read nor the resolver probes consult), so pay its spawns
+  // once per pass instead of per pointed branch plus pushDefault.
+  // Latency-only guard, recorded as deferred: no behavioral witness
+  // exists for it (discriminating it would need a >=2-pointed-branch
+  // spawn-counting harness for zero behavioral gain), because the
+  // memo can only change spawn COUNT, never an outcome.
+  let gateMemo: boolean | undefined;
+  const sectionGoneOnce = async (): Promise<boolean> => {
+    if (gateMemo === undefined) gateMemo = await sectionGone();
+    return gateMemo;
+  };
   for (const [branch, backup] of pointed.localBackup) {
-    const remoteNow = await localBranchKeyValues(
+    const remoteNowRaw = await localBranchKeyValues(
       cwd,
       `branch.${branch}.remote`,
       env,
     );
     const remoteRestore = (backup.remote ?? []).filter((v) => v !== name);
+    const pushNowRaw = await localBranchKeyValues(
+      cwd,
+      `branch.${branch}.pushremote`,
+      env,
+    );
+    const pushRestore = (backup.pushremote ?? []).filter((v) => v !== name);
+    // One gate decision per pass (the memo above): the discount is
+    // safe only once the remote.<name> section is gone from every
+    // scope of the invoking chain and the name stops resolving — while
+    // the section stands (git can die AFTER unsetting
+    // the branch keys), or a legacy file, an alias or a same-named
+    // directory repo keeps the name live, an include-held value equal
+    // to the name is the still-effective upstream and discounting it
+    // would let the rollback silently re-point the branch.
+    const sectionGoneNow =
+      (remoteNowRaw.includes(name) && remoteRestore.length > 0) ||
+      (pushNowRaw.includes(name) && pushRestore.length > 0)
+        ? await sectionGoneOnce()
+        : true;
+    const remoteNow = sectionGoneNow
+      ? remoteNowRaw.filter((v) => v !== name)
+      : remoteNowRaw;
     const remoteRestored = remoteNow.length === 0 && remoteRestore.length > 0;
     if (remoteRestored) {
       for (const value of remoteRestore) {
@@ -1705,9 +1834,12 @@ async function restoreLocalUpstreamBackups(
       }
     }
     // The merge key pairs with the branch's upstream — restore it when
-    // the remote was restored here OR survived (a multi-valued remote
-    // key git's rm skips while still deleting the merge).
-    if (remoteRestored || remoteNow.length > 0) {
+    // the remote was restored here OR a remote record still stands for
+    // the branch, discounted or not (a multi-valued all-name remote key
+    // git's rm skips while still deleting the merge): the merge
+    // question is "does a remote record stand?", not "is the residue
+    // discountable".
+    if (remoteRestored || remoteNowRaw.length > 0) {
       const mergeNow = await localBranchKeyValues(
         cwd,
         `branch.${branch}.merge`,
@@ -1723,12 +1855,9 @@ async function restoreLocalUpstreamBackups(
         }
       }
     }
-    const pushNow = await localBranchKeyValues(
-      cwd,
-      `branch.${branch}.pushremote`,
-      env,
-    );
-    const pushRestore = (backup.pushremote ?? []).filter((v) => v !== name);
+    const pushNow = sectionGoneNow
+      ? pushNowRaw.filter((v) => v !== name)
+      : pushNowRaw;
     if (pushNow.length === 0 && pushRestore.length > 0) {
       for (const value of pushRestore) {
         await runGit(
@@ -1744,7 +1873,12 @@ async function restoreLocalUpstreamBackups(
   // survivor goes with it. Restore the non-name values.
   const pdRestore = (pointed.pushDefaultBackup ?? []).filter((v) => v !== name);
   if (pdRestore.length > 0) {
-    const pdNow = await localBranchKeyValues(cwd, 'remote.pushdefault', env);
+    const pdNowRaw = await localBranchKeyValues(cwd, 'remote.pushdefault', env);
+    const pdNow = pdNowRaw.includes(name)
+      ? (await sectionGoneOnce())
+        ? pdNowRaw.filter((v) => v !== name)
+        : pdNowRaw
+      : pdNowRaw;
     if (pdNow.length === 0) {
       for (const value of pdRestore) {
         await runGit(
@@ -1757,31 +1891,61 @@ async function restoreLocalUpstreamBackups(
   }
 }
 
-// Whether any upstream key still RESOLVES to the removed remote after
-// the certified removal. Records are folded with git's own effective
-// semantics — the dump is in scope order and the last value wins — so a
-// record shadowed by a higher-precedence scope pointing at a SURVIVING
-// remote never refuses, while an include-held (scope-local) or inherited
-// (global/system) record that nothing shadows does. Both live in files
-// this module will not edit, so refusal is the only answer. Merge keys
-// are ignored: a merge-only survivor resolves to "." and is inert.
-//
-// The pointed snapshot also gates the UNMASK case: git's rm unsets the
-// editable record a pointed branch resolved through, so a shadowed
-// inherited record surfaces — and when THAT names a remote with no
-// section anywhere (removed earlier, or never existed here), the branch
-// is left dangling all the same. Only snapshot-pointed entries are
-// checked: the snapshot proves their value WAS the removed remote
-// (branches AND the pushDefault resolution), so a changed value is the
-// removal's doing; a pre-existing dangling upstream elsewhere (or a
-// dangling pushDefault the removal never shadowed) is not this
-// removal's to refuse.
-async function survivingUpstreamKeys(
+// The discount gate all three restore call sites share (failure path,
+// main path, and the completedHalf second pass): the remote.<name>
+// section is gone from every scope of the invoking worktree's scope
+// chain (remoteSectionScopes folds that chain's dump; a sibling
+// worktree's per-worktree section is invisible here — the recorded
+// residual beside the merge-churn residual recorded at the
+// post-certification cleanup below) AND the name no longer resolves
+// at all — the resolver probe (a legacy `$GIT_DIR/remotes/<name>` or
+// `branches/<name>` file, an insteadOf alias) plus the local-path
+// probe (a same-named directory repo or bundle file: git's transport
+// answers those with no config record, while `--get-url` never
+// consults the filesystem). A sectionless name (`.` or a scp-like
+// spelling) short-circuits to no-discount on the string test alone —
+// the path probe would put the scp-like shape on the network. Unlike
+// the name-keyed CERTIFICATION gate, this gate MAY ask the path probe:
+// it decides whether an rm-surviving record may be shadowed, not whether
+// the remote is removable — a coincidental same-named directory only
+// matters when a surviving record equals the name. A probe that cannot
+// answer (a kill, a wedged resolver) answers NO-discount — the safe
+// direction — rather than aborting the rollback loop ahead of the merge
+// arm and the later branches; the certification gates downstream still
+// fail closed on the same read.
+async function discountGate(
   cwd: string,
   name: string,
-  pointed: PointingBranches,
-  env?: Readonly<Record<string, string | undefined>>,
+  env: Readonly<Record<string, string | undefined>> | undefined,
 ): Promise<boolean> {
+  if ((await remoteSectionScopes(cwd, name, env)).size > 0) return false;
+  // A sectionless NAME (`.` or a scp-like colon-before-slash spelling)
+  // resolves through git's transport with no config record, and the
+  // probe for the path leg would put the scp-like shape on the network
+  // — the string test answers it: such a name is LIVE, no discount.
+  if (isSectionlessUpstream(name)) return false;
+  try {
+    return (
+      !(await remoteStillResolves(cwd, name, env)) &&
+      !(await bareWordResolvesAsRepoPath(cwd, name, env))
+    );
+  } catch {
+    return false;
+  }
+}
+
+interface UpstreamContext {
+  lastValue: Map<string, string>;
+  pushurlSections: Set<string>;
+  pushAliasMatches: (value: string) => boolean;
+}
+
+// The all-scope dump folded the way the unmask gates read it: last value
+// per key, pushurl-carrying sections, and push-side alias prefixes.
+async function readUpstreamContext(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<UpstreamContext> {
   let raw: string;
   try {
     raw = await runGit(cwd, ['config', '--list', '--show-scope', '-z'], env);
@@ -1817,9 +1981,30 @@ async function survivingUpstreamKeys(
     const rest = record.key.slice('remote.'.length, -'.pushurl'.length);
     if (rest.length > 0) pushurlSections.add(rest);
   }
-  const pushAliasMatches = (value: string) =>
-    pushAliases.some((alias) => value.startsWith(alias));
-  for (const [key, value] of lastValue) {
+  return {
+    lastValue,
+    pushurlSections,
+    pushAliasMatches: (value: string) =>
+      pushAliases.some((alias) => value.startsWith(alias)),
+  };
+}
+
+// Whether any upstream key still RESOLVES to the removed remote after
+// the certified removal. Records are folded with git's own effective
+// semantics — the dump is in scope order and the last value wins — so a
+// record shadowed by a higher-precedence scope pointing at a SURVIVING
+// remote never refuses, while an include-held (scope-local) or inherited
+// (global/system) record that nothing shadows does. Both live in files
+// this module will not edit, so refusal is the only answer. Merge keys
+// are ignored: a merge-only survivor resolves to "." and is inert.
+async function survivingUpstreamKeys(
+  cwd: string,
+  name: string,
+  pointed: PointingBranches,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const ctx = await readUpstreamContext(cwd, env);
+  for (const [key, value] of ctx.lastValue) {
     if (value !== name) continue;
     if (key === 'remote.pushdefault') return true;
     if (!key.startsWith('branch.')) continue;
@@ -1829,6 +2014,29 @@ async function survivingUpstreamKeys(
     const sub = rest.slice(dot + 1);
     if (sub === 'remote' || sub === 'pushremote') return true;
   }
+  return unmaskedPointedUpstream(cwd, pointed, name, env, ctx);
+}
+
+// The snapshot-scoped UNMASK half: git's rm or the converge sweep unsets
+// the editable record a pointed branch resolved through, so a shadowed
+// inherited record surfaces — and when THAT names a remote with no
+// section anywhere (removed earlier, or never existed here), the branch
+// is left dangling all the same. Only snapshot-pointed entries are
+// checked: the snapshot proves their value WAS the removed remote
+// (branches AND the pushDefault resolution), so a changed value is the
+// removal's doing; a pre-existing dangling upstream elsewhere (or a
+// dangling pushDefault the removal never shadowed) is not this
+// removal's to refuse — which is why the converge arm runs THIS half
+// alone (its sweep unsets the same shadows, but nothing on that arm
+// certifies a removal).
+async function unmaskedPointedUpstream(
+  cwd: string,
+  pointed: PointingBranches,
+  name: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  ctx: UpstreamContext,
+): Promise<boolean> {
+  const { lastValue, pushurlSections, pushAliasMatches } = ctx;
   for (const branch of pointed.fetch) {
     const value = lastValue.get(`branch.${branch}.remote`);
     if (
@@ -1877,25 +2085,108 @@ async function survivingUpstreamKeys(
 }
 
 // Values git resolves WITHOUT a remote section: the local repository
-// (`.`) and anything carrying a `:` — a URL (`https:…`, `ssh:…`) or the
+// (`.`) and the network spellings — a URL (`https:…`, `ssh:…`) or the
 // scp-like `[user@]host:path` — those are the shapes a probe would put
-// on the network, so they skip it. Every colon-less value (bare word
-// OR path-shaped) falls through to the resolver + path probes: an
-// EXISTING path resolves (valid upstream, no refusal) while a
-// dangling slashed value (`ghost/fork`, a relative path that does not
-// exist) must refuse — the unmask gate fails open for exactly that
-// class if the shape alone short-circuits it. The one win32 exception:
-// a UNC path (`\\server\share`) IS a network transport, so probing it
-// would block up to the git timeout on an offline share (and refuse on
-// the timeout); drive-letter paths carry their `:` above, and
-// backslash-relative paths probe locally. On POSIX a backslash is an
-// ordinary name character — the probes decide.
-function isSectionlessUpstream(value: string): boolean {
-  return (
-    value === '.' ||
-    value.includes(':') ||
-    (process.platform === 'win32' && value.startsWith('\\\\'))
-  );
+// on the network, so they skip it. Git reads the scp-like spelling ONLY
+// when the colon precedes the first slash: `/srv/mirrors/app:1` is a
+// LOCAL path, and short-circuiting it would fail the unmask gate open
+// over a dangling upstream (the exact class this predicate exists to
+// refuse). Every value git reads as a local transport — bare words,
+// colon-less path shapes, AND colon-after-slash paths — falls through
+// to the resolver + path probes: an EXISTING path resolves (valid
+// upstream, no refusal) while a dangling slashed value (`ghost/fork`,
+// a relative path that does not exist) must refuse.
+
+// git's has_dos_drive_prefix (compat/win32/path-utils.c): any non-NUL
+// ASCII character — or one whole non-ASCII code point — plus a colon,
+// not just a letter; returns the prefix length (0 when absent).
+function dosDrivePrefixLength(value: string): number {
+  const first = value.codePointAt(0);
+  if (first === undefined || first === 0) return 0;
+  if (first < 0x80) return value[1] === ':' ? 2 : 0;
+  const lead = [...value][0]?.length ?? 1;
+  return value[lead] === ':' ? lead + 1 : 0;
+}
+
+// git's is_valid_win32_path (compat/mingw.c) for the tail after a
+// drive prefix — the conjunct url_is_local_not_ssh adds to
+// has_dos_drive_prefix: NTFS-forbidden characters, reserved device
+// names, and segments ending in a space or period make the path
+// invalid, and git then routes the url to SSH instead of the local
+// transport.
+// eslint-disable-next-line no-control-regex -- NTFS forbids control characters in paths; matching them is the point.
+const WIN32_FORBIDDEN_CHAR = /[:<>"|?*\x00-\x1f]/;
+// git matches a reserved name as a PREFIX terminated by end-of-string,
+// `.`, `:`, or a directory separator (after an optional run of spaces)
+// — `aux.txt` and `lpt0` are reserved too — and the LPT arm accepts
+// ANY digit while the COM arm is 1-9.
+const WIN32_RESERVED_PREFIX =
+  /^(?:conin\$|conout\$|con|aux|com[1-9]|lpt[0-9]|nul|prn)/i;
+function win32SegmentIsInvalid(segment: string): boolean {
+  const reserved = WIN32_RESERVED_PREFIX.exec(segment);
+  if (reserved) {
+    let i = reserved[0].length;
+    while (segment[i] === ' ') i++;
+    const c = segment[i];
+    if (c === undefined || c === '.' || c === ':' || /[\\/]/.test(c)) {
+      return true;
+    }
+  }
+  const periods = /\.+$/.exec(segment)?.[0].length ?? 0;
+  if (segment.endsWith(' ')) return true;
+  // git exempts all-period segments of length <= 2 (`.` and `..`);
+  // any other trailing space/period run is invalid.
+  if (periods > 0 && !(segment.length === periods && periods <= 2)) {
+    return true;
+  }
+  return false;
+}
+function win32DriveTailIsLocalPath(tail: string): boolean {
+  if (WIN32_FORBIDDEN_CHAR.test(tail)) return false;
+  for (const segment of tail.split(/[\\/]/)) {
+    if (win32SegmentIsInvalid(segment)) return false;
+  }
+  return true;
+}
+
+// The win32 shapes a probe would block on or reach over the wire: UNC
+// spellings in ANY mix of the two separators (SMB), and drive-letter urls
+// whose tail NTFS rejects — git routes those to ssh with the drive
+// letter as host, so probing them would spawn ssh from a config
+// string. A drive-letter url with an NTFS-valid tail IS a local
+// transport on win32 and must reach the probes; on POSIX every
+// drive-letter shape is scp-like ssh (host `C` — traced), so the
+// colon-before-first-slash rule below answers it sectionless and
+// keeps every probe off the wire. On POSIX a backslash is an ordinary
+// name character — the probes decide. Exported for unit tests: the
+// win32 legs are not executable off-win32.
+export function isSectionlessUpstream(value: string): boolean {
+  if (value === '.') return true;
+  // Deliberate over-approximation (fail-safe for the discount gate):
+  // UNC spellings are git-LOCAL (no colon) but probing them blocks on
+  // SMB, so they stay sectionless on win32. git's UNC test accepts ANY
+  // mix of the two separators (is_dir_sep on both leading chars), so
+  // `\\/srv/share` and `/\\srv\\share` are UNC too.
+  const lead0 = value[0];
+  const lead1 = value[1];
+  if (
+    process.platform === 'win32' &&
+    (lead0 === '\\' || lead0 === '/') &&
+    (lead1 === '\\' || lead1 === '/')
+  ) {
+    return true;
+  }
+  // git's expression order: the colon/slash legs answer LOCAL before
+  // the drive prefix is consulted (`/::` has slash 0 < colon 1).
+  const colon = value.indexOf(':');
+  if (colon < 0) return false;
+  const slash = value.indexOf('/');
+  if (slash !== -1 && slash < colon) return false;
+  if (process.platform === 'win32') {
+    const prefix = dosDrivePrefixLength(value);
+    if (prefix > 0) return !win32DriveTailIsLocalPath(value.slice(prefix));
+  }
+  return true;
 }
 
 // Whether any upstream key still RESOLVES to the removed name after the

@@ -485,6 +485,12 @@ export function BranchPickerPopover({
   // blurs the armed one, and success unmounts its row, so focus is
   // restored once the mutation settles (back button if the row is gone).
   const removeFocusRestoreRef = useRef<string | null>(null);
+  // The in-content element (by testid) that held focus when the mutation
+  // started: the settle effect skips its restore when the user re-lent
+  // focus to a DIFFERENT in-content element mid-flight (the search box
+  // stays enabled during a mutation), so a settle never yanks focus out
+  // of a control the user moved to on purpose.
+  const mutationStartFocusRef = useRef<string | null>(null);
   const requestIdRef = useRef(0);
   // Separate from requestIdRef: handleRemoteRemove calls fetchBranches,
   // which would otherwise invalidate the remotes request it is paired with.
@@ -961,6 +967,7 @@ export function BranchPickerPopover({
       // drop the refs so a later re-entry cannot consume them stale.
       addFocusRestoreRef.current = null;
       removeFocusRestoreRef.current = null;
+      mutationStartFocusRef.current = null;
       return;
     }
     if (busyAction !== null) return;
@@ -968,6 +975,25 @@ export function BranchPickerPopover({
     // lookup would fall back to the whole document — and could steal
     // focus into ANOTHER popover instance's remotes view.
     if (!contentRef.current) {
+      addFocusRestoreRef.current = null;
+      removeFocusRestoreRef.current = null;
+      mutationStartFocusRef.current = null;
+      return;
+    }
+    // The user may have re-lent focus mid-flight (the search box never
+    // disables): restoring then would yank it out of the control they
+    // moved to on purpose. Skip when settle-time focus is an in-content
+    // element that is neither the mutation-start element nor the
+    // content root/body (a real-browser blur on disable lands on body).
+    const startTestId = mutationStartFocusRef.current;
+    mutationStartFocusRef.current = null;
+    const activeAtSettle = getShadowAwareActiveElement(contentRef.current);
+    if (
+      activeAtSettle instanceof HTMLElement &&
+      activeAtSettle !== contentRef.current &&
+      contentRef.current.contains(activeAtSettle) &&
+      (activeAtSettle.dataset.testid ?? null) !== startTestId
+    ) {
       addFocusRestoreRef.current = null;
       removeFocusRestoreRef.current = null;
       return;
@@ -1026,6 +1052,8 @@ export function BranchPickerPopover({
     const requestId = remotesRequestIdRef.current;
     setConfirmRemove(null);
     const active = getShadowAwareActiveElement(contentRef.current);
+    mutationStartFocusRef.current =
+      active instanceof HTMLElement ? (active.dataset.testid ?? null) : null;
     addFocusRestoreRef.current =
       active instanceof HTMLElement &&
       (active.dataset.testid === 'remote-add-name' ||
@@ -1092,6 +1120,8 @@ export function BranchPickerPopover({
       // triggers, the row button never held focus, so there is nothing to
       // restore and the settle effect must not yank focus elsewhere.
       const active = getShadowAwareActiveElement(contentRef.current);
+      mutationStartFocusRef.current =
+        active instanceof HTMLElement ? (active.dataset.testid ?? null) : null;
       removeFocusRestoreRef.current =
         active instanceof HTMLElement &&
         active.dataset.testid === `remote-remove-${name}`
@@ -1281,12 +1311,18 @@ export function BranchPickerPopover({
       }
     >();
     for (const r of remotes ?? []) {
-      // The group key is the CASEFOLDED skeleton: the fold itself stays
-      // case-sensitive (its table hits `I`→`l` ahead of any casefold,
-      // which the search's three case forms rely on), but a collision
+      // The group key folds the SANITIZED name — the same value the
+      // search memo's fold arm uses — so one invisible character cannot
+      // split a genuine collision group into singletons (whitespace-only
+      // variance: TAB/CR/LF are stripped by the sanitizer and merge,
+      // while U+0020 survives it and stays split — the row's collapse
+      // is display-only).
+      // The fold itself stays case-SENSITIVE (`['I','l']` exists,
+      // `['i','l']` does not); the key casefolds because a collision
       // group is a case-insensitive class — `0rigin` beside `origin`
       // must collide even though their skeletons differ by case.
-      const skeletonKey = remoteNameSkeleton(r.name).toLowerCase();
+      const member = sanitizeRemoteDisplay(r.name);
+      const skeletonKey = remoteNameSkeleton(member).toLowerCase();
       const group = groups.get(skeletonKey) ?? {
         count: 0,
         allAscii: true,
@@ -1295,7 +1331,10 @@ export function BranchPickerPopover({
         caseTwins: new Map<string, number>(),
       };
       group.count += 1;
-      if (/[^ -~]/.test(r.name)) group.allAscii = false;
+      // Member flags read the SANITIZED name, matching the group key:
+      // an invisible character in one member must not disarm the
+      // all-ASCII/canonical/case-twin evidence for its clean twins.
+      if (/[^ -~]/.test(member)) group.allAscii = false;
       // A member whose NFC form IS the group key (casefold space)
       // varies only canonically (NFD/NFC twins); a table fold leaves
       // the NFC form different from the key, so allCanonical stays true
@@ -1304,16 +1343,19 @@ export function BranchPickerPopover({
       // prototype-script twin (`öö` beside `ةة`) flips it and marks
       // both. Case-only prototype pairs (`ẞ`/`ß`) read canonical here;
       // arm 3 (caseTwins) owns them.
-      if (r.name.normalize('NFC').toLowerCase() !== skeletonKey)
+      if (member.normalize('NFC').toLowerCase() !== skeletonKey)
         group.allCanonical = false;
-      // caseTwins: raw names sharing one casefolded spelling within
-      // the group (`café` beside `CAFÉ`, `ẞ` beside `ß`) are a
+      // caseTwins: sanitized names sharing one casefolded spelling
+      // within the group (`café` beside `CAFÉ`, `ẞ` beside `ß`) are a
       // case-only pair: neither row carries visible evidence, the same
       // evidentiary failure as the all-ASCII arm, at any script (arm
       // 3 below). Per-PAIR, not per-group: an unrelated third member
       // (`οrigin` joining `origin`/`Origin`) must not disarm the pair.
-      const lowerRaw = r.name.toLowerCase();
-      group.caseTwins.set(lowerRaw, (group.caseTwins.get(lowerRaw) ?? 0) + 1);
+      const lowerMember = member.toLowerCase();
+      group.caseTwins.set(
+        lowerMember,
+        (group.caseTwins.get(lowerMember) ?? 0) + 1,
+      );
       groups.set(skeletonKey, group);
     }
     return groups;
@@ -2041,7 +2083,12 @@ function RemotesView({
               // ≠ skeleton — keeping the house polarity: the canonical
               // sibling row stays plain.
               const skeleton = remoteNameSkeleton(r.name);
-              const group = skeletonGroups.get(skeleton.toLowerCase());
+              // Lookup mirrors the group key (sanitized fold); `skeleton`
+              // above stays RAW because the polarity arm compares it to
+              // the raw name.
+              const group = skeletonGroups.get(
+                remoteNameSkeleton(displayName).toLowerCase(),
+              );
               // For an all-printable-ASCII group the "raw ≠ skeleton"
               // test carries no evidence about which spelling is the
               // impostor (the table's `m → rn` expansion makes the
@@ -2062,7 +2109,7 @@ function RemotesView({
                 (group?.count ?? 0) > 1 &&
                 (skeleton.toLowerCase() !== r.name.toLowerCase() ||
                   (group?.allAscii ?? false) ||
-                  (group?.caseTwins?.get(r.name.toLowerCase()) ?? 0) > 1 ||
+                  (group?.caseTwins?.get(displayName.toLowerCase()) ?? 0) > 1 ||
                   (!(group?.skeletonAscii ?? true) &&
                     !(group?.allCanonical ?? false)));
               const nameUnusual =

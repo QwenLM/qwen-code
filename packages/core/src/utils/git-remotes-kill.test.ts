@@ -436,9 +436,9 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
       ) // snapshot: feat pointed (worktree), local copy survives-named
       .mockResolvedValueOnce('') // git remote remove
       .mockResolvedValueOnce('') // restore: branch.feat.remote read (absent)
+      .mockResolvedValueOnce('') // restore: pushremote read (absent)
       .mockResolvedValueOnce('') // restore: the --add write
       .mockResolvedValueOnce('') // restore: merge read (absent)
-      .mockResolvedValueOnce('') // restore: pushremote read (absent)
       .mockRejectedValueOnce(killedDumpError()); // rev-parse probe
     // Slice from this test's own start: the mock is module-level and
     // accumulates across tests, so an earlier test's `remote remove`
@@ -460,6 +460,137 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect(rmAt).toBeGreaterThan(-1);
     expect(addAt).toBeGreaterThan(rmAt);
     expect(addAt).toBeLessThan(calls.length - 1);
+  });
+
+  it('never puts a scp-like removed name on the network via the discount gate', async () => {
+    // The discount gate's path leg probes `ls-remote -- <name>`; a
+    // scp-like NAME (colon before the first slash) is a network
+    // transport git resolves with no config record, so the gate must
+    // answer it on the string test (no discount) and never spawn the
+    // probe — the include-held residue then refuses through the
+    // swept-resolving re-verify, exactly as the bare-word twin does.
+    runGit
+      .mockResolvedValueOnce(
+        'local\u0000file:.git/config\u0000remote.h:p.url\nhttps://example.com/h\u0000',
+      ) // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce(
+        'local\u0000branch.feat.remote\nsurvivor\u0000worktree\u0000branch.feat.remote\nh:p\u0000',
+      ) // snapshot: feat pointed (worktree value), local survivor backup
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('h:p\u0000') // restore remote presence read (include-held residue; --get-all frames values bare)
+      .mockResolvedValueOnce('') // restore pushremote presence read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // gate scope read (no section)
+      .mockResolvedValueOnce('h:p\n') // fixed: the merge read; a mutant without the sectionless skip spends this on the gate resolver echo and then spawns the path probe
+      .mockResolvedValueOnce('.git\n') // listing probe
+      .mockResolvedValueOnce('') // listing read: the row is gone
+      .mockResolvedValueOnce('') // union gate scope read
+      .mockResolvedValueOnce('h:p\n') // union gate resolver echo
+      .mockResolvedValueOnce('') // tracking-refs sweep: for-each-ref
+      .mockResolvedValueOnce('') // tracking-refs sweep: git remote
+      .mockResolvedValueOnce('') // tracking-refs sweep: fetch dest namespaces
+      .mockResolvedValueOnce('') // tracking-refs re-verify: for-each-ref
+      .mockResolvedValueOnce('') // tracking-refs re-verify: git remote
+      .mockResolvedValueOnce('') // tracking-refs re-verify: fetch dest namespaces
+      .mockResolvedValueOnce('local\u0000branch.feat.remote\nh:p\u0000') // sweep dump
+      .mockResolvedValueOnce('') // the fixed-value unset
+      .mockResolvedValueOnce('local\u0000branch.feat.remote\nh:p\u0000'); // swept-resolving re-verify: the residue stands
+    const base = runGit.mock.calls.length;
+    await expect(gitRemoteRemove('/repo', 'h:p')).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    const calls = runGit.mock.calls
+      .slice(base)
+      .map((c) => (c[1] as string[]).join(' '));
+    // Drain discipline: a mutant that spends extra spawns here would
+    // otherwise leak its unconsumed queue into the next witness.
+    runGit.mockReset();
+    expect(calls).not.toContain('ls-remote -- h:p');
+  });
+
+  it('swallows a killed gate probe into no-discount and lets a later gate surface the kill', async () => {
+    // The discount gate's probe legs answer no-discount on ANY failure
+    // (a kill included) instead of aborting the rollback loop: the kill
+    // must still surface — the union gate re-runs the same resolver
+    // read and rethrows it there — and the swallowed kill must not have
+    // discounted the residue (no survivor write-back lands).
+    runGit
+      .mockResolvedValueOnce(
+        'local\u0000file:.git/config\u0000remote.gone.url\nhttps://example.com/g\u0000',
+      ) // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce(
+        'local\u0000branch.feat.remote\nsurvivor\u0000worktree\u0000branch.feat.remote\ngone\u0000',
+      ) // snapshot: feat pointed (worktree value), local survivor backup
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('gone\u0000') // restore remote presence read (include-held residue)
+      .mockResolvedValueOnce('') // restore pushremote presence read
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // gate scope read: the section is gone
+      .mockRejectedValueOnce(killError()) // gate resolver probe: killed -> no-discount inside the gate
+      .mockResolvedValueOnce('') // restore merge read
+      .mockResolvedValueOnce('.git\n') // listing probe
+      .mockResolvedValueOnce('') // listing read: the row is gone
+      .mockResolvedValueOnce('') // union gate scope read
+      .mockRejectedValueOnce(killError()); // union gate resolver probe: the kill surfaces here
+    const base = runGit.mock.calls.length;
+    const err = await gitRemoteRemove('/repo', 'gone').catch((e: unknown) => e);
+    expect(err).toMatchObject({ killed: true });
+    const calls = runGit.mock.calls
+      .slice(base)
+      .map((c) => (c[1] as string[]).join(' '));
+    runGit.mockReset();
+    expect(calls).not.toContain(
+      'config --local --add branch.feat.remote survivor',
+    );
+    // The rollback loop ran past the swallowed kill (a gate that
+    // rethrew it would have aborted before the merge arm).
+    expect(calls).toContain(
+      'config --local --includes --get-all -z branch.feat.merge',
+    );
+  });
+
+  it('rethrows a killed gate scope read before any destructive cleanup', async () => {
+    // The discount gate's SCOPE leg sits outside its try on purpose: a
+    // killed config read there aborts the whole removal BEFORE the
+    // destructive certified-removal cleanup, while a killed PROBE leg
+    // answers no-discount inside the gate (witnessed beside this one).
+    // Moving the scope leg into the try would swallow the kill and run
+    // the merge arm, the listing, the union gate and — with a non-empty
+    // downstream queue — the tracking-ref sweep and upstream-key unset
+    // on a host condition the pristine code treats as stop-everything.
+    runGit
+      .mockResolvedValueOnce(
+        'local\u0000file:.git/config\u0000remote.gone.url\nhttps://example.com/g\u0000',
+      ) // origin pre-flight read
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce(
+        'local\u0000branch.feat.remote\nsurvivor\u0000worktree\u0000branch.feat.remote\ngone\u0000',
+      ) // snapshot: feat pointed (worktree value), local survivor backup
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('gone\u0000') // restore remote presence read (include-held residue)
+      .mockResolvedValueOnce('') // restore pushremote presence read
+      .mockRejectedValueOnce(killError()); // gate SCOPE read: killed -> rethrow, stop everything
+    const base = runGit.mock.calls.length;
+    const err = await gitRemoteRemove('/repo', 'gone').catch((e: unknown) => e);
+    expect(err).toMatchObject({ killed: true });
+    const calls = runGit.mock.calls
+      .slice(base)
+      .map((c) => (c[1] as string[]).join(' '));
+    runGit.mockReset();
+    // Neither the rollback loop nor any destructive cleanup ran past
+    // the killed scope read.
+    expect(calls).not.toContain(
+      'config --local --includes --get-all -z branch.feat.merge',
+    );
+    expect(calls).not.toContain(
+      'for-each-ref --format=%(refname) refs/remotes/',
+    );
   });
 
   it('fails the removal closed on a killed restore read', async () => {

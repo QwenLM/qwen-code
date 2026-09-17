@@ -22,6 +22,7 @@ import {
   gitRemoteAdd,
   gitRemoteRemove,
   isRemovableRemoteName,
+  isSectionlessUpstream,
   isValidRemoteName,
   isValidRemoteUrl,
 } from './git-remotes.js';
@@ -154,7 +155,7 @@ beforeAll(() => {
   }
   if (/^remote\./m.test(systemList)) {
     throw new Error(
-      'host /etc/gitconfig defines a [remote] section — the inherited-scope assertions are not hermetic on this host',
+      'host /etc/gitconfig defines remote.* config (a [remote] section or pushDefault) — the inherited-scope assertions are not hermetic on this host',
     );
   }
 });
@@ -1218,6 +1219,281 @@ describe('repository-scope listing and removal', () => {
     );
   });
 
+  it('does not re-point a branch while a ref-locked removal leaves the section live', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    // Included AFTER the local section: the branch effectively tracks
+    // `gone`, so git rm unsets the local survivor copy on its way to
+    // dying on the ref lock — with the section STILL LIVE. The
+    // include-held value equal to the name is the still-effective
+    // upstream there, not residue: the rollback must not discount it
+    // and silently re-point the branch while the removal refuses.
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    git(dir, 'update-ref', 'refs/remotes/gone/main', 'HEAD');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'refs', 'remotes', 'gone', 'main.lock'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow();
+    // Faithful rollback: the destroyed merge key is rewritten, and no
+    // survivor value is inserted over the still-effective residue.
+    expect(git(dir, 'config', '--local', '--get', 'branch.foo.merge')).toBe(
+      'refs/heads/foo\n',
+    );
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.foo.remote=',
+    );
+  });
+
+  it('does not re-point a push upstream while a ref-locked removal leaves the section live', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.pushremote', 'survivor');
+    // Include at EOF (after the branch section): the include-held
+    // pushRemote is the still-effective upstream, and the ref lock
+    // makes git rm die after unsetting the branch keys with the
+    // section live — the rollback must not discount the residue and
+    // silently re-point the push upstream over it.
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tpushremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    git(dir, 'update-ref', 'refs/remotes/gone/main', 'HEAD');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'refs', 'remotes', 'gone', 'main.lock'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow();
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.foo.pushremote=',
+    );
+  });
+
+  it('writes back a destroyed pushRemote over an include-held residue once the name stops resolving', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.pushremote', 'survivor');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tpushremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // The pushRemote presence read shares the branch arm's gate
+    // decision: section gone, name unresolving — the destroyed local
+    // pushRemote copy is written back over the residue; the local
+    // survivor record then shadows the include-held residue (the
+    // shadowed-survivor doctrine), so the removal certifies.
+    const remotes = await gitRemoteRemove(dir, 'gone', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['survivor']);
+    expect(
+      git(dir, 'config', '--local', '--get', 'branch.foo.pushremote'),
+    ).toBe('survivor\n');
+  });
+
+  it('does not re-point a branch while a ref-locked removal leaves a pushurl-only section live', async () => {
+    const dir = makeRepo();
+    git(
+      dir,
+      'config',
+      '--local',
+      'remote.gone.pushurl',
+      'https://example.com/g/r.git',
+    );
+    git(
+      dir,
+      'config',
+      '--local',
+      'remote.gone.fetch',
+      '+refs/heads/*:refs/remotes/gone/*',
+    );
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // A pushurl-only section is push-side LIVE while the fetch-side
+    // resolver probe echoes the name (it cannot see pushurl records)
+    // and the path probe fails: the gate's SECTION leg is the only
+    // read that sees the section stand, so it alone keeps the rollback
+    // from re-pointing the branch under the ref-lock refusal.
+    git(dir, 'update-ref', 'refs/remotes/gone/main', 'HEAD');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'refs', 'remotes', 'gone', 'main.lock'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow();
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.foo.remote=',
+    );
+    expect(git(dir, 'config', '--local', '--get', 'branch.foo.merge')).toBe(
+      'refs/heads/foo\n',
+    );
+  });
+
+  it('restores a destroyed merge key when a multi-valued all-name remote key survives a refused removal', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'config', '--local', '--add', 'branch.foo.remote', 'gone');
+    git(dir, 'config', '--local', '--add', 'branch.foo.remote', 'gone');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    // git skips multi-valued keys on removal but still deletes the
+    // merge key, then dies on the ref lock with the section live: the
+    // refused removal must roll the merge key back even though every
+    // present remote value equals the removed name (nothing to
+    // write back, but the merge question is "does a record stand?").
+    git(dir, 'update-ref', 'refs/remotes/gone/main', 'HEAD');
+    fs.writeFileSync(
+      path.join(dir, '.git', 'refs', 'remotes', 'gone', 'main.lock'),
+      '0000000000000000000000000000000000000000\n',
+    );
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow();
+    expect(git(dir, 'config', '--local', '--get', 'branch.foo.merge')).toBe(
+      'refs/heads/foo\n',
+    );
+  });
+
+  it('does not re-point a branch when a legacy file keeps the removed name resolving', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // A legacy $GIT_DIR/remotes/<name> file keeps the name resolving
+    // with NO section: the include-held value equal to the name is then
+    // a LIVE upstream, not residue — the rollback must not discount it
+    // and shadow it with a rewritten local copy under the 409.
+    fs.mkdirSync(path.join(dir, '.git', 'remotes'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.git', 'remotes', 'gone'),
+      'URL: https://example.com/legacy/r.git\n',
+    );
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.foo.remote=',
+    );
+    expect(git(dir, 'config', '--local', '--get', 'branch.foo.merge')).toBe(
+      'refs/heads/foo\n',
+    );
+  });
+
+  it('does not re-point a branch when a same-named directory repo keeps the removed name resolving', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'fork', 'https://example.com/f/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = fork\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // A same-named directory repo at the toplevel keeps the bare word
+    // resolving through git's path transport with NO config record —
+    // and `--get-url` never consults the filesystem, so the gate needs
+    // the path leg or the rollback discounts a LIVE upstream.
+    git(dir, 'init', 'fork');
+    await expect(gitRemoteRemove(dir, 'fork', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.foo.remote=',
+    );
+  });
+
+  it('does not re-point a branch when a same-named bundle file keeps the removed name resolving', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'fork.bundle', 'https://example.com/f/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = fork.bundle\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // git's transport magic-sniffs the bundle: the name resolves with
+    // no config record, exactly like the directory-repo shape.
+    git(dir, 'bundle', 'create', 'fork.bundle', '--all');
+    await expect(
+      gitRemoteRemove(dir, 'fork.bundle', fixtureEnv),
+    ).rejects.toThrow(/remote still configured after removal/i);
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.foo.remote=',
+    );
+  });
+
+  it('restores the destroyed merge key when the discount gate probe cannot answer', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // An empty-base insteadOf makes the resolver probe exit 128: the
+    // gate must answer no-discount (the safe direction) INSIDE itself,
+    // not abort the rollback ahead of the merge arm — the certification
+    // gate downstream still fails closed on the same read.
+    git(dir, 'config', '--local', 'url..insteadOf', 'gone');
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow();
+    expect(git(dir, 'config', '--local', '--get', 'branch.foo.merge')).toBe(
+      'refs/heads/foo\n',
+    );
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'branch.foo.remote=',
+    );
+  });
+
+  it('writes back a destroyed pushDefault over an include-held residue once the name stops resolving', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'config', '--local', 'remote.pushDefault', 'survivor');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[remote]\n\tpushDefault = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // The rollback discounts the include-held residue (section gone,
+    // name unresolving) and writes the destroyed local pushDefault
+    // copy back at EOF, past the include directive — shadowing the
+    // residue. The removal then refuses on the unmask pushDefault arm:
+    // the written-back value names a remote with no section in this
+    // fixture, so the snapshot-pointed pushDefault resolution surfaces
+    // a dangling value (with a resolvable survivor the removal
+    // certifies, as the pushRemote twin witness shows).
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--local', '--get', 'remote.pushdefault')).toBe(
+      'survivor\n',
+    );
+  });
+
+  it('does not re-point pushDefault when a legacy file keeps the removed name resolving', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'config', '--local', 'remote.pushDefault', 'survivor');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[remote]\n\tpushDefault = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    fs.mkdirSync(path.join(dir, '.git', 'remotes'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.git', 'remotes', 'gone'),
+      'URL: https://example.com/legacy/r.git\n',
+    );
+    await expect(gitRemoteRemove(dir, 'gone', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--local', '--list')).not.toContain(
+      'remote.pushdefault=',
+    );
+  });
+
   it('restores a shadowed local pushDefault naming a surviving remote', async () => {
     const dir = makeRepo();
     git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
@@ -1678,6 +1954,41 @@ describe('repository-scope listing and removal', () => {
       /no such remote/i,
     );
     expect(git(wt, 'config', '--list')).not.toContain('branch.feat.remote');
+  });
+
+  it('refuses a converged retry whose sweep unshadows a dangling inherited upstream', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'foo', 'https://example.com/f/r.git');
+    git(dir, 'config', '--global', 'branch.main.remote', 'ghost');
+    git(dir, 'config', '--local', 'branch.main.remote', 'foo');
+    git(dir, 'config', '--local', 'branch.main.merge', 'refs/heads/main');
+    // Out-of-band destruction: the retry takes the converge arm, whose
+    // sweep unsets the local shadow — the inherited `ghost` (no section
+    // anywhere) surfaces dangling, and a converged 404 would clear the
+    // client row over a branch left dangling.
+    git(dir, 'config', '--local', '--remove-section', 'remote.foo');
+    await expect(gitRemoteRemove(dir, 'foo', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/i,
+    );
+    expect(git(dir, 'config', '--global', '--get', 'branch.main.remote')).toBe(
+      'ghost\n',
+    );
+  });
+
+  it('keeps the no-such-remote doctrine for an inherited upstream key the sweep never touched', async () => {
+    const dir = makeRepo();
+    // An inherited BRANCH-key survivor the snapshot never pointed at
+    // leaves both resolve arms silent (they need a snapshot-pointed
+    // branch or pushDefault), so git's 404 stays the answer the
+    // client's stale-row convergence keys on (the certify path's
+    // all-scope surviving-keys half owns the mutated case).
+    git(dir, 'config', '--global', 'branch.main.remote', 'foo');
+    await expect(gitRemoteRemove(dir, 'foo', fixtureEnv)).rejects.toThrow(
+      /no such remote/i,
+    );
+    expect(git(dir, 'config', '--global', '--get', 'branch.main.remote')).toBe(
+      'foo\n',
+    );
   });
 
   it('answers no-such-remote for a sectionless value without sweeping its live tracking config', async () => {
@@ -2519,6 +2830,55 @@ describe('repository-scope listing and removal', () => {
     );
   });
 
+  it('refuses an unmasked dangling colon-after-slash upstream value', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+    // Git reads the scp-like spelling only when the colon precedes the
+    // FIRST slash: this is a LOCAL path shape (nonexistent, so dangling
+    // once unmasked). A bare colon test short-circuited it as a network
+    // transport and certified the dangling upstream (fail-open); the
+    // scp-like control beside it still certifies.
+    git(dir, 'config', '--global', 'branch.main.remote', '../old:sibling');
+    git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+    await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+  });
+
+  it('answers the drive-letter upstream shape per platform', async () => {
+    const probe = (dir: string, value: string) => {
+      git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
+      git(dir, 'config', '--global', 'branch.main.remote', value);
+      git(dir, 'config', '--local', 'branch.main.remote', 'origin');
+      return gitRemoteRemove(dir, 'origin', fixtureEnv);
+    };
+    if (process.platform === 'win32') {
+      // A drive-letter value is a LOCAL path on win32 (git's
+      // has_dos_drive_prefix: any non-NUL ASCII character — or one
+      // whole non-ASCII code point — plus a colon, no separator
+      // required): nonexistent here, so dangling once unmasked, and
+      // the probes decide it locally.
+      await expect(probe(makeRepo(), 'C:/old-sibling')).rejects.toThrow(
+        /remote still configured after removal/,
+      );
+      await expect(probe(makeRepo(), 'C:\\old-sibling')).rejects.toThrow(
+        /remote still configured after removal/,
+      );
+      await expect(probe(makeRepo(), 'C:old-sibling')).rejects.toThrow(
+        /remote still configured after removal/,
+      );
+    } else {
+      // POSIX git reads the drive-letter shape as scp-like ssh (host
+      // `C`), a network transport: the predicate answers it sectionless
+      // and every probe stays off the wire, so the unmask arm stays
+      // silent and the removal certifies (HEAD's polarity). Probing it
+      // would spawn ssh from a config string.
+      expect(await probe(makeRepo(), 'C:/old-sibling')).toEqual([]);
+      expect(await probe(makeRepo(), 'C:\\old-sibling')).toEqual([]);
+      expect(await probe(makeRepo(), 'C:old-sibling')).toEqual([]);
+    }
+  });
+
   it('certifies an unmasked upstream naming a local path, not a section', async () => {
     const dir = makeRepo();
     git(dir, 'remote', 'add', 'origin', 'https://example.com/o/r.git');
@@ -2613,6 +2973,36 @@ describe('repository-scope listing and removal', () => {
     git(dir, 'config', '--local', 'branch.main.remote', 'origin');
     await expect(gitRemoteRemove(dir, 'origin', fixtureEnv)).rejects.toThrow(
       /remote still configured after removal/,
+    );
+  });
+
+  it('restores a local upstream copy an include-held record naming the removed remote shadowed', async () => {
+    const dir = makeRepo();
+    git(dir, 'remote', 'add', 'gone', 'https://example.com/g/r.git');
+    git(dir, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(dir, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(dir, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    // Included AFTER the local section: pre-removal its record wins the
+    // effective value (pointing the branch at `gone`), and it survives
+    // the rm. The restore's presence check must discount a present
+    // value equal to the removed name (dangling residue, not a
+    // surviving key) or the destroyed local survivor copy is never
+    // written back — permanent loss plus a 409 the write-back would
+    // have avoided when the [branch] section is gone outright (the
+    // recreated section lands at EOF, past the include directive; a
+    // SURVIVING section takes an in-section insert instead, and a later
+    // include-held record can still win effective order — fail-closed,
+    // as before this fix).
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = gone\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    const remotes = await gitRemoteRemove(dir, 'gone', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['survivor']);
+    expect(
+      git(dir, 'config', '--local', '--get-all', 'branch.foo.remote'),
+    ).toBe('survivor\n');
+    expect(git(dir, 'config', '--local', '--get', 'branch.foo.merge')).toBe(
+      'refs/heads/foo\n',
     );
   });
 
@@ -3037,6 +3427,40 @@ describe('repository-scope listing and removal', () => {
     expect(git(wt, 'config', '--list')).not.toContain('remote.dup.url');
   });
 
+  it('writes back a destroyed upstream copy when the split-section completion removes the last half', async () => {
+    const dir = makeRepo();
+    git(dir, 'config', '--local', 'extensions.worktreeConfig', 'true');
+    const wt = path.join(path.dirname(dir), `${path.basename(dir)}-wt`);
+    tmpRoots.push(wt);
+    git(dir, 'worktree', 'add', '--detach', wt);
+    git(wt, 'remote', 'add', 'dup', 'https://example.com/d/r.git');
+    git(
+      wt,
+      'config',
+      '--worktree',
+      'remote.dup.url',
+      'https://example.com/wt.git',
+    );
+    git(wt, 'remote', 'add', 'survivor', 'https://example.com/s/r.git');
+    git(wt, 'config', '--local', 'branch.foo.remote', 'survivor');
+    git(wt, 'config', '--local', 'branch.foo.merge', 'refs/heads/foo');
+    const include = path.join(dir, 'extra.cfg');
+    fs.writeFileSync(include, '[branch "foo"]\n\tremote = dup\n');
+    git(dir, 'config', '--local', 'include.path', include);
+    // The discount gate must not see the worktree half the exit-0
+    // completion removes right after: the restore runs AFTER it, or the
+    // destroyed local survivor copy is never written back over the
+    // include-held residue.
+    const remotes = await gitRemoteRemove(wt, 'dup', fixtureEnv);
+    expect(remotes.map((r) => r.name)).toEqual(['survivor']);
+    expect(git(wt, 'config', '--local', '--get', 'branch.foo.remote')).toBe(
+      'survivor\n',
+    );
+    expect(git(wt, 'config', '--local', '--get', 'branch.foo.merge')).toBe(
+      'refs/heads/foo\n',
+    );
+  });
+
   it('refuses up front when an inherited-scope survivor would keep resolving', async () => {
     const dir = makeRepo();
     // Same name in local AND global: the inherited-scope pre-flight
@@ -3170,4 +3594,115 @@ describe('gitRemoteAdd predicate-legal round trip', () => {
       expect(remotes[0]?.fetchUrl).toBe('https://example.com/o/r.git');
     },
   );
+});
+
+describe('isSectionlessUpstream mirrors git url_is_local_not_ssh (over-approximating UNC on win32)', () => {
+  // The win32 legs are not executable off-win32, so the predicate is
+  // unit-tested under a stubbed platform; restore the ORIGINAL
+  // property descriptor so later suites (and win32 CI) see the real
+  // platform, not the last stub's value.
+  const originalDescriptor = Object.getOwnPropertyDescriptor(
+    process,
+    'platform',
+  );
+  const setPlatform = (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, 'platform', { value: platform });
+  };
+  afterEach(() => setPlatform(originalDescriptor?.value));
+  afterAll(() => {
+    if (originalDescriptor) {
+      Object.defineProperty(process, 'platform', originalDescriptor);
+    }
+  });
+
+  it('classifies win32 local transports as probeable', () => {
+    setPlatform('win32');
+    for (const value of [
+      'C:/repos/mine',
+      'C:\\repos\\mine',
+      'C:repos',
+      'C:/',
+      'C:/..',
+      'C:/.',
+      '/::',
+      '/:a:b',
+      '1:/foo',
+      '_:/x',
+      'ä:/repo',
+      'bare',
+      'rel/path',
+      'a/b:c',
+    ]) {
+      expect(`${value} -> ${isSectionlessUpstream(value)}`).toBe(
+        `${value} -> false`,
+      );
+    }
+  });
+
+  it('classifies win32 network shapes as sectionless', () => {
+    setPlatform('win32');
+    for (const value of [
+      '\\\\srv\\share',
+      '//srv/share',
+      '\\/srv/share',
+      '/\\srv\\share',
+      'C:/CON',
+      'C:\\NUL',
+      'C:/aux',
+      'C:/COM1',
+      'C:/lpt1',
+      'C:/a:b',
+      'C:/a<b',
+      'C:/a*b',
+      'C:/a?b',
+      'C:/repo.',
+      'C:/repo ',
+      'C:/a\tb',
+      'C:/...',
+      'C:aux.txt',
+      'C:con.txt',
+      'C:com1.txt',
+      'C:lpt0',
+      'C:nul.dat',
+      'C:prn.x',
+      'C:aux .txt',
+      'host:path',
+      'https://x/y',
+      'rel:after/slash',
+    ]) {
+      expect(`${value} -> ${isSectionlessUpstream(value)}`).toBe(
+        `${value} -> true`,
+      );
+    }
+  });
+
+  it('keeps every drive-letter shape sectionless off-win32', () => {
+    setPlatform('linux');
+    for (const value of [
+      'C:/repos/mine',
+      'C:\\repos\\mine',
+      'C:repos',
+      'C:/CON',
+      'C:/..',
+      'host:path',
+      'https://x/y',
+      'rel:after/slash',
+    ]) {
+      expect(`${value} -> ${isSectionlessUpstream(value)}`).toBe(
+        `${value} -> true`,
+      );
+    }
+    for (const value of [
+      'bare',
+      'rel/path',
+      'a/b:c',
+      '../old:sibling',
+      '//srv/share',
+      '/::',
+    ]) {
+      expect(`${value} -> ${isSectionlessUpstream(value)}`).toBe(
+        `${value} -> false`,
+      );
+    }
+  });
 });

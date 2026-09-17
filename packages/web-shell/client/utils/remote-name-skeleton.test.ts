@@ -36,18 +36,29 @@ describe('remoteNameSkeleton closure', () => {
 // One remote name, two spellings: NFC and NFD are the same name to a
 // user and render the same in the picker, so they must land in the same
 // collision group — otherwise neither row gets marked and the confusable
-// the fold exists to surface walks through. The decomposed spelling
-// never offers the composed code point to the table's direct branch, so
-// its parts decide the class and the generator has to resolve every
-// prototype in that same space.
+// the fold exists to surface walks through. The entrance NFC recomposes
+// canonical spellings, so both offer the same code points to the table,
+// and the generator resolves every prototype under that same runtime
+// fold.
 describe('remoteNameSkeleton canonical equivalence', () => {
   it('folds a precomposed char and its decomposed spelling alike in a name', () => {
-    // `ņ` is a table key; `n` + U+0326 is not, and U+0326 is not in the
-    // table either — the composed spelling used to answer `ɲ` while the
-    // decomposed one answered `n̦`, so `infra` spelled either way sat in
-    // two groups and neither was marked.
+    // `ņ`'s canonical decomposition is `n` + U+0327: the entrance NFC
+    // recomposes it, so both spellings offer the composed code point to
+    // the table. (The comma-below spelling U+0326 is a DIFFERENT name
+    // and folds differently; the old parts-based table value used to
+    // blur that distinction. The narrowing is the correct side of a
+    // real trade: six formerly-unified ink classes — `ņ`/`n̦` among
+    // them — now sit in separate skeletons, so near-identical names of
+    // that shape go unmarked; over-merging is the safe direction for a
+    // homoglyph marker, but the canonical-equivalence splits the old
+    // fold produced — 21 of the 4853 key+mark combinations whose NFC
+    // and NFD spellings differ (every table key × U+0300–U+036F),
+    // comparing the fold of the NFC spelling against the fold of the
+    // NFD spelling; zero under the new fold — were the larger defect,
+    // and the new fold closes all of them with zero regressions in
+    // that corpus.)
     expect(remoteNameSkeleton('i\u0146fra')).toBe(
-      remoteNameSkeleton('in\u0326fra'),
+      remoteNameSkeleton('in\u0327fra'),
     );
   });
 
@@ -59,6 +70,57 @@ describe('remoteNameSkeleton canonical equivalence', () => {
     expect(remoteNameSkeleton('\u1E9B')).toBe(
       remoteNameSkeleton('\u017F\u0307'),
     );
+  });
+
+  it('is invariant under canonical equivalence for multi-code-point names', () => {
+    // A mark arriving inside a precomposed char's prototype stays
+    // glued to its base in a positional walk, while canonical ordering
+    // moves it first in a decomposed spelling — the closing NFC then
+    // recomposes different stacks and the pair splits collision
+    // groups. Entrance NFC closes the class; each pair below split
+    // before it.
+    for (const name of ['Ȧ\u309A', 'İ\u0652', 'Ő\u05B9']) {
+      expect(remoteNameSkeleton(name)).toBe(
+        remoteNameSkeleton(name.normalize('NFD')),
+      );
+    }
+  });
+
+  it('keeps the table first for a composed base fused with a mark', () => {
+    // Entrance NFC fuses ö + U+0304 into U+022B, which is not a table
+    // key; the longest-decomposed-prefix rule still offers the ö unit
+    // to the table, so the pair shares the prototype-script group.
+    expect(remoteNameSkeleton('\u00F6\u0304')).toBe(
+      remoteNameSkeleton('\u0629\u0304'),
+    );
+  });
+
+  it('is invariant under NFD for table bases plus swept combining marks', () => {
+    // The single-code-point sweep cannot see a split that needs a mark
+    // to land inside a precomposed char's prototype: build two-code-
+    // point names from a table base plus a swept mark.
+    const marks = [
+      0x0300, 0x0301, 0x0303, 0x0304, 0x0305, 0x0307, 0x0327, 0x05ae, 0x05b4,
+      0x064b, 0x064e, 0x309a,
+    ];
+    const bases = ['Ȧ', 'İ', 'Ő', 'o', 'A', 'n'];
+    const splits: string[] = [];
+    let swept = 0;
+    for (const base of bases) {
+      for (const mark of marks) {
+        const name = base + String.fromCodePoint(mark);
+        swept++;
+        if (
+          remoteNameSkeleton(name) !==
+            remoteNameSkeleton(name.normalize('NFD')) &&
+          splits.length < 10
+        ) {
+          splits.push(name);
+        }
+      }
+    }
+    expect(swept).toBeGreaterThan(60);
+    expect(splits).toEqual([]);
   });
 
   it('is invariant under NFD for every canonically decomposable code point', () => {

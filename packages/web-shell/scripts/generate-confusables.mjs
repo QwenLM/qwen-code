@@ -109,42 +109,47 @@ for (const [src, targets] of raw) {
 }
 
 // The consumer fold IS the runtime fold (`remoteNameSkeleton`): the
-// table answers first on the composed code point, a table-absent code
-// point falls back to its canonical parts (each with its own table
-// chance) and then to NFKD for the compatibility shapes, and the pass
-// repeats to a fixed point under a closing NFC. Every emitted entry has
-// to satisfy one equation in it:
+// input is canonicalized at the entrance to NFC (a canonical function,
+// so every canonical spelling enters the same representative), the
+// table answers first on the composed code point — including, for a
+// code point the entrance NFC fused out of a table base plus a mark,
+// the longest decomposed prefix whose recomposition IS a table key — a
+// table-absent code point falls back to its canonical parts (each with
+// its own table chance) and then to NFKD for the compatibility shapes,
+// and the pass repeats to a fixed point under a closing NFC. Every
+// emitted entry has to satisfy one equation in it:
 //
-//   value === runtimeFold(key.normalize('NFD'))
+//   value === runtimeFold(key)
 //
 // Three failures collapse into that equation. A value that is not a fold
 // fixed point puts one ink-identical class in two skeletons: a name
 // holding the source char and a name holding the value verbatim land
 // apart (`%` -> `º/₀`, whose parts decompose to `o/0` and lift the `0`
-// to `O`). A value that is not what the key's OWN decomposed spelling
-// folds to makes the skeleton depend on which canonical spelling a
-// remote name happens to use (`i\u0146fra` vs `in\u0326fra`): the
-// decomposed spelling never offers the composed code point to the direct
-// branch, so its parts decide the class and the composed spelling has to
-// arrive at the same one. And a fold that cycles never reaches a fixed
-// point at all, so what the runtime returns depends on its pass cap's
-// parity (`Ț` -> `Ţ`, whose own parts decompose back to `Ț`). Solving
-// the equation for the NFD spelling solves the first two — and where
-// NFD(key) recomposes to the key, as it does for most entries, it
-// degenerates to the plain fixed-point closure, so no class moves that
-// need not.
+// to `O`). A value that is not what the key itself folds to would make
+// the skeleton depend on which canonical spelling a remote name happens
+// to use — but the entrance NFC is a canonical function, so every
+// canonical spelling of the key enters the same representative and the
+// equation needs no decomposed argument: for NFC-stable keys it is the
+// plain fixed-point closure, and for the rest (composition exclusions —
+// canonical composites the closing NFC never recomposes, like the
+// Hebrew presentation forms) it constrains the value to the fold of
+// the key's NFC recomposition. And a fold that cycles never reaches a
+// fixed point at all, so what the runtime returns depends on its pass
+// cap's parity (`Ț` -> `Ţ`, whose own parts decompose back to `Ț`).
 
-// Solving it in NFD space can leave a value that renders exactly like
-// its key (`אָ` -> `אָ`): the Hebrew presentation forms are composition
-// exclusions, so the closing NFC never recomposes them. That is not a
-// self-map — the arm below compares code points, not ink.
+// The entrance NFC makes the phenomenon the old NFD-space solve named
+// systematic rather than incidental: 1010 of the 6564 emitted values
+// are canonically equivalent to their key — composition exclusions
+// like U+FB30 -> U+05D0 U+05BC render exactly like their key because
+// the closing NFC never recomposes them. That is not a self-map — the
+// arm below compares code points, not ink.
 
 // Mirrors `remoteNameSkeleton`'s own cap: a value that only settles past
 // it is one the runtime never reaches. Returns undefined when the fold
 // did not settle inside it.
 const FOLD_PASSES = 8;
 const runtimeFold = (value, table) => {
-  let out = value;
+  let out = value.normalize('NFC');
   for (let pass = 0; pass < FOLD_PASSES; pass++) {
     let next = '';
     for (const ch of out) {
@@ -153,7 +158,18 @@ const runtimeFold = (value, table) => {
         next += direct;
         continue;
       }
-      for (const part of ch.normalize('NFD')) {
+      const parts = [...ch.normalize('NFD')];
+      let consumed = 0;
+      for (let len = parts.length - 1; len > 1; len--) {
+        const hit = table.get(parts.slice(0, len).join('').normalize('NFC'));
+        if (hit !== undefined) {
+          next += hit;
+          consumed = len;
+          break;
+        }
+      }
+      for (let i = consumed; i < parts.length; i++) {
+        const part = parts[i];
         const partDirect = table.get(part);
         if (partDirect !== undefined) {
           next += partDirect;
@@ -173,7 +189,7 @@ const runtimeFold = (value, table) => {
 for (let pass = 0; ; pass++) {
   let changed = false;
   for (const [src, value] of closed) {
-    const folded = runtimeFold(src.normalize('NFD'), closed);
+    const folded = runtimeFold(src, closed);
     if (folded === undefined || folded === src) {
       // The entry cannot stand — the fold either cycled or collapsed
       // the value onto its own source char (a self-map is a semantic
@@ -206,7 +222,7 @@ for (let pass = 0; ; pass++) {
 for (const [src, value] of closed) {
   if (
     runtimeFold(value, closed) !== value ||
-    runtimeFold(src.normalize('NFD'), closed) !== value
+    runtimeFold(src, closed) !== value
   ) {
     // Code point, not the raw char: a U+2028/U+2029-class source would
     // otherwise print mangled text into the diagnostic.
@@ -219,6 +235,11 @@ for (const [src, value] of closed) {
   }
 }
 
+// Recorded deferred (behavior-preserving to fix): under the entrance
+// NFC, keys that are not NFC fixed points (1024 of 6564 at 17.0.0 —
+// U+2126, the CJK-compatibility block, …) are unreachable by
+// construction at every lookup site, so emitting them is dead weight
+// (~15 KB); dropping them changes no fold result.
 const entries = [...closed];
 entries.sort((a, b) => a[0].codePointAt(0) - b[0].codePointAt(0));
 

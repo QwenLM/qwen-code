@@ -64,6 +64,10 @@ vi.mock('./ui/popover', async () => {
       'div',
       {
         'data-test-popover-content': '',
+        // Like Radix's FocusScope (asChild), the content node carries
+        // tabIndex=-1: Chromium focuses it on a mousedown onto inert
+        // chrome, which the settle focus guard must tolerate.
+        tabIndex: -1,
         ref,
       },
       children,
@@ -3389,6 +3393,160 @@ describe('BranchPickerPopover remotes view', () => {
     expect(aria).not.toContain('rnain rnain');
   });
 
+  it('marks the clean twin when an invisible char hides inside its collision partner', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('main'), remote('rn\u200bain')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // A ZWSP inside the partner used to split the ink collision into
+    // singleton groups (the group key folded the RAW name while the row
+    // displays and the search folds the sanitized one), disarming the
+    // marker on the clean twin even though typing `main` returns both
+    // rows as ink-identical.
+    expect(rowOf('main')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('rn\u200bain')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('keeps the clean twin marked when an invisible char joins a three-row collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('main'), remote('rnain'), remote('rn\u200bain')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The group's member flags read the sanitized name: an invisible
+    // character in one member must not flip allAscii and disarm the
+    // all-ASCII evidence for the clean twins sharing its group.
+    expect(rowOf('main')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('rnain')?.textContent).toContain('(lookalike name)');
+    expect(rowOf('rn\u200bain')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('marks the clean twin when only the all-ASCII member flag sees the collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('rnain'), remote('main\u200b')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The clean `rnain` row's skeleton equals its raw name (disjunct 1
+    // silent), its casefolded sanitized spelling is unique (disjunct 3
+    // silent) and its skeleton is ASCII with canonical members
+    // (disjunct 4 silent): only the group's all-ASCII flag — true
+    // because the ZWSP row SANITIZES to plain `main` — marks it. Raw
+    // member flags would read the invisible char and silence it.
+    expect(rowOf('rnain')?.textContent).toContain('(lookalike name)');
+  });
+
+  it('marks the clean twin when only the case-twin member flag sees the collision', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('café'), remote('caf\u200bé')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // `é` is not a table key, so both sanitized members fold to
+    // `café`: the all-ASCII flag is false either way (disjunct 2
+    // silent), the skeleton is non-ASCII with canonical members
+    // (disjunct 4 silent) and the clean row's skeleton equals its raw
+    // name (disjunct 1 silent): only the case-twin count over
+    // SANITIZED members (two `café`) marks the clean row. Raw member
+    // flags would read two distinct spellings and silence it.
+    expect(rowOf('café')?.textContent).toContain('(hidden characters)');
+  });
+
+  it('spells the fold-covered code point in an invisible-char collision row tail', async () => {
+    const remote = (name: string) => ({
+      name,
+      fetchUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      pushUrl: `https://example.com/${encodeURIComponent(name)}/r.git`,
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    });
+    workspaceGitRemotes.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      remotes: [remote('main'), remote('m\u200bain')],
+    });
+    await openRemotesView();
+    const rowOf = (name: string) =>
+      document.body.querySelector(`[data-testid="remote-remove-${name}"]`)
+        ?.parentElement;
+    // The render lookup mirrors the SANITIZED group key: the ZWSP row
+    // shares the `main` group, so its collision tail uses the skeleton
+    // escape, which spells the fold-covered `m` as \u{6d}; a lookup on
+    // the RAW skeleton would miss the group (count 1, no collision)
+    // and fall back to the plain invisible-char escape `m\u{200b}ain`.
+    expect(rowOf('main')?.textContent).toContain('(lookalike name)');
+    expect(
+      document.body
+        .querySelector('[data-testid="remote-remove-m\u200bain"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Remove main (hidden characters) \\u{6d}\\u{200b}ain');
+  });
+
   it('finds table-only ink twins by the text they ink as', async () => {
     const remote = (name: string) => ({
       name,
@@ -3684,11 +3842,14 @@ describe('BranchPickerPopover remotes view', () => {
       mirrorUrl?.getAttribute('title'),
     );
 
+    // The clean twin carries the collision marker too: an invisible
+    // character in its lookalike must not disarm the evidence on the
+    // row a mistyped click would actually hit.
     expect(
       document.body
         .querySelector('[data-testid="remote-remove-origin"]')
         ?.getAttribute('aria-label'),
-    ).toBe('Remove origin');
+    ).toBe('Remove origin (lookalike name)');
     expect(
       document.body
         .querySelector('[data-testid="remote-remove-ori\u200bgin"]')
@@ -3940,6 +4101,108 @@ describe('BranchPickerPopover remotes view', () => {
     // Programmatic/Safari-style activation never moved focus onto the row
     // button, so the settle effect must not move it anywhere either.
     expect(document.activeElement).toBe(search);
+  });
+
+  it('leaves search focus alone when the user re-lent it mid-flight', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // jsdom never blurs a control when it becomes disabled, unlike real
+    // browsers: simulate the in-flight blur, then move focus where a
+    // user would — the search box never disables during a mutation.
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    act(() => {
+      search?.focus();
+    });
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    // The settle restore must not yank focus out of the search box.
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('leaves search focus alone when the user re-lent it during an add', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteAdd.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    const search = document.body.querySelector<HTMLInputElement>(
+      'input[placeholder="Search remotes"]',
+    );
+    setInput('remote-add-name', 'fork');
+    setInput('remote-add-url', 'https://example.com/f/r.git');
+    const urlInput = document.body.querySelector<HTMLInputElement>(
+      'input[data-testid="remote-add-url"]',
+    );
+    act(() => {
+      urlInput?.focus();
+    });
+    clickTestId('remote-add-submit');
+    await flush();
+    act(() => {
+      (document.activeElement as HTMLElement | null)?.blur();
+    });
+    act(() => {
+      search?.focus();
+    });
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('restores focus when the user focused inert popover chrome mid-flight', async () => {
+    let release: ((value: unknown) => void) | undefined;
+    workspaceGitRemoteRemove.mockImplementation(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await openRemotesView();
+    const button = document.body.querySelector<HTMLButtonElement>(
+      '[data-testid="remote-remove-origin"]',
+    );
+    act(() => {
+      button?.focus();
+    });
+    clickTestId('remote-remove-origin');
+    clickTestId('remote-remove-origin');
+    await flush();
+    // Chromium focuses the dialog container on a mousedown onto inert
+    // chrome (Radix FocusScope gives it tabIndex=-1): that is not a
+    // control the user re-lent focus to, so the settle restore must
+    // still run — the back button once the row unmounts.
+    const chrome = document.body.querySelector<HTMLElement>(
+      '[data-test-popover-content]',
+    );
+    act(() => {
+      chrome?.focus();
+    });
+    expect(document.activeElement).toBe(chrome);
+    await act(async () => {
+      release?.({ v: 1, workspaceCwd: '/repo', remotes: [] });
+    });
+    await flush();
+    expect(document.activeElement).toBe(
+      document.body.querySelector('[data-testid="remotes-back"]'),
+    );
   });
 
   it('resets the remotes view and restores no focus after a workspace switch', async () => {

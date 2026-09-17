@@ -44,6 +44,44 @@ const tmpRoots: string[] = [];
 let fixtureEnv: NodeJS.ProcessEnv;
 let tmpHome: string;
 
+// A named `[remote "<name>"]` section record is three components
+// (`remote.<name>.<subkey>`): a dot must precede the `=`. The scan
+// stops at the `=` so a two-component `remote.pushDefault` — plain,
+// followed by any dotted key, or carrying a dot in its VALUE — never
+// reads as a section (which would skip the whole suite on hosts whose
+// ambient config merely sets pushDefault); the component class ALSO
+// excludes NEWLINE because `git config --global --list` is not
+// NUL-framed: a multi-line VALUE's continuation line could otherwise
+// start a false match. Residual, recorded: a section whose NAME
+// contains `=` (`[remote "a=b"]`, a legal name) lists as
+// `remote.a=b.url=…` and no longer matches — on such a host the
+// env-passthrough witness silently stops discriminating; the
+// pushDefault false-positive this rule removes is the common shape.
+function ambientDefinesRemoteSection(list: string): boolean {
+  return /^remote\.[^=\n]*\./m.test(list);
+}
+
+it('reads the ambient remote-section guard without crossing lines', () => {
+  expect(
+    ambientDefinesRemoteSection('remote.pushdefault=fork\ncore.x=y\n'),
+  ).toBe(false);
+  expect(ambientDefinesRemoteSection('remote.pushdefault=fork')).toBe(false);
+  expect(ambientDefinesRemoteSection('remote.pushdefault=my.fork\n')).toBe(
+    false,
+  );
+  // A multi-line value's continuation line must not start a match: the
+  // `=` stop alone would let `[^=]*` cross the newline.
+  expect(ambientDefinesRemoteSection('a.b=x\nremote.y\nz.w=1\n')).toBe(false);
+  expect(ambientDefinesRemoteSection('core.x=y\nremote.foo.url=z\n')).toBe(
+    true,
+  );
+  expect(ambientDefinesRemoteSection('remote.a.b.url=z\n')).toBe(true);
+  expect(
+    ambientDefinesRemoteSection('remote.origin.url=https://x/y.git\n'),
+  ).toBe(true);
+  expect(ambientDefinesRemoteSection('')).toBe(false);
+});
+
 // gitEnv strips GIT_CONFIG_NOSYSTEM before the code under test spawns
 // git, so a host /etc/gitconfig remote section would decide the
 // inherited-scope assertions — fail loudly HERE, not as unrelated red
@@ -58,9 +96,15 @@ beforeAll(() => {
   } catch {
     // No readable system config file: the hermetic precondition holds.
   }
+  // The system guard stays BROAD on purpose: an inherited
+  // `remote.pushDefault` (a two-component key, no [remote] section)
+  // whose value equals the removed name is a refusal trigger in the
+  // certify path's all-scope surviving-keys half, so it must fail
+  // loudly here too. Only the GLOBAL guard uses the three-component
+  // shape below.
   if (/^remote\./m.test(systemList)) {
     throw new Error(
-      'host /etc/gitconfig defines a [remote] section — the inherited-scope assertions are not hermetic on this host',
+      'host /etc/gitconfig defines remote.* config (a [remote] section or pushDefault) — the inherited-scope assertions are not hermetic on this host',
     );
   }
   // The env-passthrough witness seeds the shadow at the fixture's global
@@ -76,7 +120,7 @@ beforeAll(() => {
   } catch {
     // No readable global config: the discrimination premise holds.
   }
-  if (/^remote\.[^.]+\./m.test(ambientGlobal)) {
+  if (ambientDefinesRemoteSection(ambientGlobal)) {
     throw new Error(
       'host ~/.gitconfig defines a [remote] section — the env-passthrough witness is not discriminating on this host',
     );
