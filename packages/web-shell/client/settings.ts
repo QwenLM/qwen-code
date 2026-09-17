@@ -56,6 +56,7 @@ const SETTING_KEYS = {
   'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
   'setting:voice-model': 'voiceModel',
   'setting:image-model': 'imageModel',
+  'setting:omni': 'omni.enabled',
 } as const;
 
 const BUILTIN_IDS = [

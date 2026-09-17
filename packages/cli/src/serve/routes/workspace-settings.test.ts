@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
@@ -1009,3 +1012,63 @@ it.each(['failed', 'deferred', 'rejected', 'closed'] as const)(
     else expect(response.body.requiresRestart).toBe(status !== 'deferred');
   },
 );
+
+// The web shell settings panel (`packages/web-shell/client`) hides rows behind
+// the stable public aliases in client/settings.ts, while the served key set
+// drifts whenever the schema gains a showInDialog key — omni.enabled shipped
+// days without an alias (#11975). Compare the live route output against the
+// alias table so the next missing alias reddens CI instead of shipping.
+describe('web-shell settings alias drift', () => {
+  const webShellClientDir = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../../web-shell/client',
+  );
+
+  function parseKeySet(source: string, name: string): Set<string> {
+    const match = source.match(
+      new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\)`),
+    );
+    if (!match) throw new Error(`${name} not found`);
+    return new Set(
+      [...match[1].replace(/\/\/[^\n]*/g, '').matchAll(/'([^']+)'/g)].map(
+        (m) => m[1]!,
+      ),
+    );
+  }
+
+  it('aliases every rendered row and serves every published alias', async () => {
+    const { app } = makeApp();
+    const res = await request(app).get('/workspace/settings');
+    expect(res.status).toBe(200);
+    const servedKeys = (res.body.settings as Array<{ key: string }>).map(
+      (setting) => setting.key,
+    );
+
+    // The panel drops HIDDEN/LIVE keys before rendering; parse both sets from
+    // the component so a change on either side is caught here.
+    const panelSource = readFileSync(
+      join(webShellClientDir, 'components/messages/SettingsMessage.tsx'),
+      'utf8',
+    );
+    const hidden = parseKeySet(panelSource, 'HIDDEN_SETTING_KEYS');
+    const live = parseKeySet(panelSource, 'LIVE_SETTING_KEYS');
+    const rendered = servedKeys.filter(
+      (key) => !hidden.has(key) && !live.has(key),
+    );
+
+    const aliasSource = readFileSync(
+      join(webShellClientDir, 'settings.ts'),
+      'utf8',
+    );
+    const table = aliasSource.match(
+      /const SETTING_KEYS = \{([\s\S]*?)\} as const/,
+    );
+    if (!table) throw new Error('SETTING_KEYS not found in settings.ts');
+    const aliased = [...table[1].matchAll(/'[^']+':\s*'([^']+)'/g)].map(
+      (m) => m[1]!,
+    );
+
+    expect(rendered.filter((key) => !aliased.includes(key))).toEqual([]);
+    expect(aliased.filter((key) => !rendered.includes(key))).toEqual([]);
+  });
+});

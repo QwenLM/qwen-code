@@ -27,6 +27,12 @@ describe('settings presentation aliases', () => {
       }),
     ).toBe(false);
   });
+  it('aliases the omni media delivery row', () => {
+    expect(
+      isSettingExcluded('omni.enabled', { excludeItems: ['setting:omni'] }),
+    ).toBe(true);
+    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:omni');
+  });
   it('matches published builtin ids by direct membership', () => {
     expect(
       isItemExcluded('builtin:model-management', {

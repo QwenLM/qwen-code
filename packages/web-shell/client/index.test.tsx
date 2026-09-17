@@ -80,7 +80,11 @@ vi.mock('./components/WebShellTranscript', async () => {
 // A variable specifier loads the TSX library entry without requiring
 // allowImportingTsExtensions in this test configuration.
 const indexEntry = './index.tsx';
-const { WebShellTranscript, WebShellWithProviders } = await import(indexEntry);
+const {
+  WEB_SHELL_SETTING_ITEM_IDS,
+  WebShellTranscript,
+  WebShellWithProviders,
+} = await import(indexEntry);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -128,6 +132,12 @@ it('forwards settings presentation through the public provider wrapper', async (
     root.render(<WebShellWithProviders settings={settings} />);
   });
   expect(appProps.at(-1)?.settings).toBe(settings);
+});
+
+it('re-exports the published setting item ids from the public entry', async () => {
+  const { WEB_SHELL_SETTING_ITEM_IDS: direct } = await import('./settings');
+  expect(WEB_SHELL_SETTING_ITEM_IDS).toBe(direct);
+  expect(WEB_SHELL_SETTING_ITEM_IDS.length).toBeGreaterThan(0);
 });
 
 describe('WebShellWithProviders top-level boundary', () => {

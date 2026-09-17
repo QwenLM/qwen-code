@@ -15360,7 +15360,12 @@ export function App({
             return true;
           }
           if (cmd === 'auth') {
-            settingsDialogKeyRef.current = undefined;
+            // Take over only the surface this command owns: clearing an
+            // unrelated settings-launched key would disarm its exclusion
+            // force-close.
+            if (settingsDialogKeyRef.current === 'builtin:model-management') {
+              settingsDialogKeyRef.current = undefined;
+            }
             setShowAuthDialog(true);
             return true;
           }
@@ -15374,7 +15379,9 @@ export function App({
               return true;
             }
             if (modelArg === '--fast') {
-              settingsDialogKeyRef.current = undefined;
+              if (settingsDialogKeyRef.current === 'fastModel') {
+                settingsDialogKeyRef.current = undefined;
+              }
               setModelDialogMode('fast');
               return true;
             }
@@ -15392,7 +15399,6 @@ export function App({
             }
             if (modelArg === '--voice') {
               if (echoOrDeferLocalCommand(text, images)) return true;
-              settingsDialogKeyRef.current = undefined;
               void openVoiceModelPicker('workspace', 'command');
               return true;
             }
@@ -15404,7 +15410,9 @@ export function App({
               return true;
             }
             if (modelArg === '--vision') {
-              settingsDialogKeyRef.current = undefined;
+              if (settingsDialogKeyRef.current === 'visionModel') {
+                settingsDialogKeyRef.current = undefined;
+              }
               setModelDialogMode('vision');
               return true;
             }
@@ -15446,7 +15454,6 @@ export function App({
                 pushToast('info', t('model.unavailable'));
                 return true;
               }
-              settingsDialogKeyRef.current = undefined;
               setModelDialogMode('main');
             }
             return true;

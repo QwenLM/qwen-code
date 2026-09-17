@@ -516,7 +516,7 @@ export function SettingsMessage({
         items: [{ type: 'local-control' }],
       });
     }
-    if (modelManagement) {
+    if (modelManagement && !showInitialLoading) {
       const model = groups.find((group) => group.id === 'Model');
       if (model) model.items.push({ type: 'model-management' });
       else
@@ -547,7 +547,15 @@ export function SettingsMessage({
         }),
       }))
       .filter((group) => group.items.length > 0);
-  }, [liveSetup, settings, t, hasNotifications, modelManagement, presentation]);
+  }, [
+    liveSetup,
+    settings,
+    t,
+    hasNotifications,
+    modelManagement,
+    presentation,
+    showInitialLoading,
+  ]);
 
   useEffect(() => {
     if (categories.length === 0) return;

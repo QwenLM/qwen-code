@@ -205,7 +205,16 @@ async function gotoSettingsHarness(
   await expect(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
-  await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
+  // The harness paints the <html> theme class from the same ?theme= param, so
+  // it cannot mislabel. The shell's own theme must agree with the filename:
+  // the app root carries a plain `dark` literal only in the dark theme. The
+  // last bare root is the app; the session provider's loading placeholder is
+  // also a bare [data-web-shell-root].
+  const rootClass = await page
+    .locator('[data-web-shell-root]:not([data-web-shell-gate])')
+    .last()
+    .getAttribute('class');
+  expect(rootClass?.split(/\s+/).includes('dark')).toBe(theme === 'dark');
   await completeReplay(
     page,
     daemon,

@@ -10,6 +10,7 @@ import type {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   WEB_SHELL_SETTING_ITEM_IDS,
+  type WebShellSettingItemId,
   type WebShellSettingsOptions,
 } from '../../settings';
 import { I18nProvider } from '../../i18n';
@@ -37,6 +38,19 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
   };
 });
 
+// The browser-notifications row exists only when the hook returns a value;
+// individual tests opt in by assigning the stub.
+const browserNotificationsStub = vi.hoisted(() => ({
+  current: undefined as
+    | ReturnType<
+        typeof import('../../browser-turn-notifications').useBrowserNotificationSettings
+      >
+    | undefined,
+}));
+vi.mock('../../browser-turn-notifications', () => ({
+  useBrowserNotificationSettings: () => browserNotificationsStub.current,
+}));
+
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -44,6 +58,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
 afterEach(() => {
+  browserNotificationsStub.current = undefined;
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -715,6 +730,10 @@ describe('SettingsMessage user-scope editing', () => {
     const block = container.querySelector('[data-testid="model-management"]');
     expect(block).toBeTruthy();
     expect(block?.textContent).toContain('GPT-4o');
+    // Ordinary rows exist, so the category card renders above the block with
+    // the paired mt-4 spacing.
+    expect(container.querySelector('[data-slot="card"]')).toBeTruthy();
+    expect(block?.parentElement?.className).toContain('mt-4');
   });
   it('keeps the model list and selection when ordinary Model fields are excluded', () => {
     const modelManagement = makeModelManagement();
@@ -758,7 +777,9 @@ describe('SettingsMessage user-scope editing', () => {
       container.querySelector('[aria-current="page"]')?.textContent,
     ).toContain('UI');
     clickUserTab(container);
-    expect(container.textContent).not.toContain('Fast Model');
+    // The nav must stay filtered on the User tab too: an exclusion dropped
+    // from the user-scope path would return the Model category there.
+    expect(container.querySelector('nav')?.textContent).not.toContain('Model');
   });
 
   it('shows an empty state when every available item is excluded', () => {
@@ -797,11 +818,127 @@ describe('SettingsMessage user-scope editing', () => {
       initialCategory: 'Model',
       modelManagement: makeModelManagement(),
     });
-    expect(
-      container.querySelector('[data-testid="model-management"]'),
-    ).toBeTruthy();
+    const block = container.querySelector('[data-testid="model-management"]');
+    expect(block).toBeTruthy();
     expect(
       container.querySelector('[aria-current="page"]')?.textContent,
     ).toContain('1');
+    // With zero ordinary rows the category card is skipped entirely, and the
+    // block loses the mt-4 offset that separates it from the card.
+    expect(container.querySelector('[data-slot="card"]')).toBeNull();
+    expect(block?.parentElement?.className ?? '').not.toContain('mt-4');
   });
+
+  it('does not invent a Model category during the initial settings load', () => {
+    const state: SettingsMessageSettingsState = {
+      status: undefined,
+      settings: [],
+      loading: true,
+      error: undefined,
+      reload: vi.fn(async () => undefined),
+      setValue: vi.fn(),
+    };
+    const container = renderPanel(state, {
+      modelManagement: makeModelManagement(),
+    });
+    const navLabels = Array.from(container.querySelectorAll('nav button')).map(
+      (button) => button.textContent,
+    );
+    expect(navLabels.some((text) => text?.includes('Model'))).toBe(false);
+  });
+
+  it('counts only ordinary rows in the Model nav badge', () => {
+    const modelFallbacksSetting: DaemonSettingDescriptor = {
+      key: 'modelFallbacks',
+      type: 'string',
+      label: 'Model Fallbacks',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    };
+    const container = renderPanel(
+      makeState([subDialogSetting(), modelFallbacksSetting], vi.fn()),
+      { modelManagement: makeModelManagement() },
+    );
+    const modelNav = Array.from(container.querySelectorAll('nav button')).find(
+      (button) => button.textContent?.includes('Model'),
+    );
+    // Two ordinary Model rows plus the management card: the badge reads 2.
+    expect(modelNav?.textContent).toContain('2');
+  });
+
+  it('confines the model-management block to the Model category', () => {
+    const container = renderPanel(
+      makeState([boolSetting(), subDialogSetting()], vi.fn()),
+      { modelManagement: makeModelManagement(), initialCategory: 'Model' },
+    );
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeTruthy();
+
+    const clickCategory = (label: string) => {
+      const button = Array.from(
+        container.querySelectorAll<HTMLButtonElement>('nav button'),
+      ).find((b) => b.textContent?.includes(label));
+      if (!button) throw new Error(`category ${label} not found`);
+      act(() => {
+        button.click();
+      });
+    };
+    clickCategory('General');
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeNull();
+    clickCategory('Model');
+    expect(
+      container.querySelector('[data-testid="model-management"]'),
+    ).toBeTruthy();
+  });
+
+  it.each([
+    ['builtin:chat-width', 'UI', 'Chat width', 'Browser task notifications'],
+    [
+      'builtin:browser-notifications',
+      'UI',
+      'Browser task notifications',
+      'Chat width',
+    ],
+    ['builtin:live-setup', 'Experimental', 'Qwen Live', undefined],
+    ['builtin:local-control', 'Daemon', 'Local Control', undefined],
+    ['builtin:model-management', 'Model', 'model-management', undefined],
+  ] as const)(
+    'excludes only %s while the sibling builtins remain',
+    (id, category, label, uiSibling) => {
+      browserNotificationsStub.current = {
+        enabled: true,
+        permission: 'granted',
+        pending: false,
+        persistent: true,
+        error: false,
+        setEnabled: vi.fn(async () => {}),
+        refreshPermission: vi.fn(),
+        syncLanguage: vi.fn(),
+      };
+      const container = renderPanel(makeState([], vi.fn(), liveSetup(false)), {
+        modelManagement: makeModelManagement(),
+        presentation: { excludeItems: [id as WebShellSettingItemId] },
+      });
+      const navText = container.querySelector('nav')?.textContent ?? '';
+      if (category === 'UI') {
+        // UI stays active by default; the excluded row is gone and the
+        // sibling row in the same category remains.
+        expect(container.textContent).not.toContain(label);
+        expect(container.textContent).toContain(uiSibling ?? '');
+        expect(navText).toContain('UI');
+      } else {
+        // The excluded item was the category's only row, so the category
+        // itself leaves the nav.
+        expect(navText).not.toContain(category);
+      }
+      for (const other of ['UI', 'Experimental', 'Daemon', 'Model']) {
+        if (other !== category) expect(navText).toContain(other);
+      }
+    },
+  );
 });
