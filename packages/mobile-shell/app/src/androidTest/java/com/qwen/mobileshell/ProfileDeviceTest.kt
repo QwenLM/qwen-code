@@ -5,6 +5,7 @@ import android.webkit.WebView
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.webkit.ProfileStore
+import androidx.webkit.WebStorageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import java.io.File
@@ -70,14 +71,16 @@ class ProfileDeviceTest {
     }
 
     @Test fun namedBrowserProfilesSeparateCookiesAndLocalStorageAtSameOrigin() {
-        val supported = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+        val supported = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)
         if (InstrumentationRegistry.getArguments().getString("requireProfileIsolation") == "true") {
-            assertTrue("This acceptance lane requires a provider with MULTI_PROFILE", supported)
+            assertTrue("This acceptance lane requires MULTI_PROFILE and DELETE_BROWSING_DATA", supported)
         }
         assumeTrue(supported)
         val names = listOf("test-${UUID.randomUUID()}", "test-${UUID.randomUUID()}")
         val views = mutableListOf<WebView>()
         try {
+            names.forEach(::clearProfile)
             instrumentation.runOnMainSync {
                 names.forEach { name ->
                     views.add(WebView(instrumentation.targetContext).apply {
@@ -113,6 +116,57 @@ class ProfileDeviceTest {
                 }
             }
         }
+    }
+
+    @Test fun completedProfileClearRemovesOldDataWithoutClearingOtherProfile() {
+        assumeTrue(WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA))
+        val names = List(2) { "test-${UUID.randomUUID()}" }
+        val views = mutableListOf<WebView>()
+        fun load(name: String): WebView {
+            val ready = CountDownLatch(1)
+            lateinit var view: WebView
+            instrumentation.runOnMainSync {
+                view = WebView(context).apply {
+                    WebViewCompat.setProfile(this, name)
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    webViewClient = object : android.webkit.WebViewClient() {
+                        override fun onPageFinished(view: WebView, url: String) { ready.countDown() }
+                    }
+                    loadDataWithBaseURL("https://profile-test.example/", "<html>Clear fixture</html>", "text/html", "UTF-8", null)
+                }
+                views.add(view)
+            }
+            assertTrue(ready.await(15, TimeUnit.SECONDS))
+            return view
+        }
+        try {
+            names.forEach(::clearProfile)
+            val a = load(names[0])
+            val b = load(names[1])
+            assertEquals("\"A\"", evaluate(a, "localStorage.setItem('identity','A'); document.cookie='identity=A; path=/'; localStorage.getItem('identity')"))
+            assertEquals("\"identity=A\"", evaluate(a, "document.cookie"))
+            assertEquals("\"B\"", evaluate(b, "localStorage.setItem('identity','B'); document.cookie='identity=B; path=/'; localStorage.getItem('identity')"))
+            assertEquals("\"identity=B\"", evaluate(b, "document.cookie"))
+            instrumentation.runOnMainSync { a.destroy(); views.remove(a) }
+            clearProfile(names[0])
+            val reset = load(names[0])
+            assertEquals("null", evaluate(reset, "localStorage.getItem('identity')"))
+            assertEquals("\"\"", evaluate(reset, "document.cookie"))
+            assertEquals("\"B\"", evaluate(b, "localStorage.getItem('identity')"))
+            assertEquals("\"identity=B\"", evaluate(b, "document.cookie"))
+        } finally {
+            instrumentation.runOnMainSync { views.forEach { it.destroy() } }
+        }
+    }
+
+    private fun clearProfile(name: String) {
+        val cleared = CountDownLatch(1)
+        instrumentation.runOnMainSync {
+            WebStorageCompat.deleteBrowsingData(ProfileStore.getInstance().getOrCreateProfile(name).webStorage) { cleared.countDown() }
+        }
+        assertTrue("Browser storage clear did not complete", cleared.await(15, TimeUnit.SECONDS))
     }
 
     private fun evaluate(view: WebView, script: String): String {

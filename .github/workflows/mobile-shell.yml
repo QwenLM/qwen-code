@@ -58,7 +58,7 @@ jobs:
           - api-level: 26
             arch: x86
             require-profiles: 'false'
-          - api-level: 35
+          - api-level: 36
             arch: x86_64
             require-profiles: 'true'
     steps:

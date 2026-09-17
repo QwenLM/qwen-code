@@ -8,6 +8,7 @@ internal data class ConnectionProfile(
     val origin: String,
     val token: String?,
     val browserId: String,
+    val browserInitialized: Boolean = false,
 ) {
     companion object {
         fun create(name: String, origin: String, token: String?, previous: ConnectionProfile? = null): ConnectionProfile {
@@ -24,11 +25,15 @@ internal data class ConnectionProfile(
             return ConnectionProfile(
                 previous?.id ?: UUID.randomUUID().toString(), label, root, credential,
                 if (sameConnection) previous!!.browserId else UUID.randomUUID().toString(),
+                sameConnection && previous!!.browserInitialized,
             )
         }
     }
 
     val browserName: String get() = "qwen-$browserId"
+
+    fun needsBrowserInitialization(knownNames: Collection<String>): Boolean =
+        !browserInitialized || browserName !in knownNames
 
     override fun toString(): String = "ConnectionProfile(id=$id)"
 }

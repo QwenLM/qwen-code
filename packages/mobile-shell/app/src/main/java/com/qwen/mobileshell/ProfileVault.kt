@@ -86,8 +86,16 @@ internal class ProfileVault(
         return next
     }
 
+    fun setBrowserInitialized(state: ProfileState, profile: ConnectionProfile, initialized: Boolean): ProfileState {
+        val current = state.profiles.find { it.id == profile.id && it.browserId == profile.browserId }
+            ?: throw IOException("The connection changed during browser initialization.")
+        if (current.browserInitialized == initialized) return state
+        return upsert(state, current.copy(browserInitialized = initialized))
+    }
+
     companion object {
-        private const val MAGIC = 0x51575032
+        private const val LEGACY_MAGIC = 0x51575032
+        private const val MAGIC = 0x51575033
 
         internal fun encode(state: ProfileState): ByteArray = ByteArrayOutputStream().use { bytes ->
             DataOutputStream(bytes).use { output ->
@@ -99,6 +107,7 @@ internal class ProfileVault(
                     output.writeUTF(profile.origin)
                     output.writeUTF(profile.token.orEmpty())
                     output.writeUTF(profile.browserId)
+                    output.writeBoolean(profile.browserInitialized)
                 }
                 output.writeInt(state.retiredBrowsers.size)
                 state.retiredBrowsers.forEach(output::writeUTF)
@@ -108,7 +117,7 @@ internal class ProfileVault(
 
         internal fun decode(bytes: ByteArray): ProfileState = try {
             DataInputStream(ByteArrayInputStream(bytes)).use { input ->
-                require(input.readInt() == MAGIC)
+                val format = input.readInt().also { require(it == MAGIC || it == LEGACY_MAGIC) }
                 val count = input.readInt().also { require(it in 0..64) }
                 val profiles = List(count) {
                     val id = input.readUTF().also { require(UUID.fromString(it).toString() == it) }
@@ -116,9 +125,10 @@ internal class ProfileVault(
                     val origin = input.readUTF()
                     val token = input.readUTF().ifEmpty { null }
                     val browserId = input.readUTF().also { require(UUID.fromString(it).toString() == it) }
+                    val initialized = format == MAGIC && input.readUnsignedByte().also { require(it in 0..1) } == 1
                     val validated = ConnectionProfile.create(name, origin, token)
                     require(validated.name == name && validated.origin == origin)
-                    ConnectionProfile(id, name, origin, token, browserId)
+                    ConnectionProfile(id, name, origin, token, browserId, initialized)
                 }
                 require(profiles.map { it.id }.toSet().size == profiles.size)
                 require(profiles.map { it.browserId }.toSet().size == profiles.size)

@@ -26,11 +26,11 @@ The native home screen lists profiles and offers Add, Connect, Edit and Delete. 
 
 Each connection constructs a fresh WebView, sets its named AndroidX profile before navigation, and preserves the existing origin policy. Named profiles separate cookies, web storage and service-worker data, including for connections on the same origin. Switching destroys the old WebView and its pending JS confirmation before constructing the next. Callback handlers verify their WebView is still current. No WebView instance or saved WebView state is restored across profiles.
 
-This requires `WebViewFeature.MULTI_PROFILE`, provided through the existing AndroidX WebKit dependency. If the installed provider lacks it, profile management remains usable but Connect shows a native update message. The Web Shell's browser floor remains 111; the Android connection feature additionally requires this provider capability. There is no fallback to shared browser storage. Delete/edit retires obsolete named profiles when the provider permits it; IDs are never reused. Keystore encryption does not replace daemon-side revocation.
+This requires `WebViewFeature.MULTI_PROFILE`. New, migrated or provider-missing profiles additionally require `DELETE_BROWSING_DATA` and a completed profile-scoped clear before loading. The [initialization guard](mobile-profile-initialization.md) addresses observed provider directory reuse after rapid process termination; a random new name alone is not proof of empty storage. Unsupported providers retain native profile management but Connect shows an update message. The Web Shell's browser floor remains 111; native safety additionally requires these capabilities. There is no shared-storage fallback. Delete/edit retires obsolete profiles when the provider permits it; IDs are never reused. Keystore encryption does not replace daemon-side revocation.
 
 ## Files and dependencies
 
-Production changes are confined to `packages/mobile-shell`: vault/cipher and profile management classes, `MainActivity`, resources, backup rules and focused tests. The existing Gradle, Kotlin and production AndroidX versions remain pinned; instrumented tests add pinned AndroidX test dependencies. The mobile CI workflow runs device tests on API 26 and 35, requiring profile isolation support on the API 35 lane. English/Chinese design documents and the package README describe actual behavior and the feature gate.
+Production changes are confined to `packages/mobile-shell`: vault/cipher and profile management classes, `MainActivity`, resources, backup rules and focused tests. Gradle, Kotlin and AndroidX versions remain pinned; the initialization guard updates AndroidX WebKit to 1.13.0 for its supported complete-clearing API. Instrumented tests use pinned AndroidX test dependencies. Mobile CI runs API 26 and 36, requiring profile isolation and complete clearing on API 36. English/Chinese designs and the README describe actual behavior and feature gates.
 
 ## Acceptance
 
@@ -38,7 +38,7 @@ Production changes are confined to `packages/mobile-shell`: vault/cipher and pro
 2. Migration preserves an existing valid connection, removes the legacy token only after persistence succeeds, and safely retries interrupted operations.
 3. Corrupt ciphertext, a missing key and failed storage writes show recovery instead of an unauthenticated connection or silent data loss.
 4. Two profiles on the same origin retain isolated cookies/localStorage and never inherit another token. Switching rejects stale callbacks; changing credentials uses a new browser profile.
-5. Missing/old WebView providers display native guidance. A provider lacking MULTI_PROFILE does not connect through a shared fallback.
+5. Missing/old WebView providers display native guidance. A provider lacking MULTI_PROFILE, or lacking DELETE_BROWSING_DATA when initialization is required, never connects through a shared fallback.
 6. Existing origin checks, JS confirmations, Retry, back navigation and renderer cleanup continue to work.
 
 Verification uses JVM tests for serialization, migration/fault paths and authenticated encryption, plus Android instrumentation for the real Keystore and profile isolation where the provider supports it. Record unsupported scenarios as skipped, not passed. Use synthetic credentials and local fixtures; this does not require model calls. Actual device/TLS/backup acceptance remains explicitly reported rather than inferred from builds.

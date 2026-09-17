@@ -26,11 +26,11 @@
 
 每次连接创建全新 WebView，在导航前设置 AndroidX 命名 profile，并保留现有 origin 策略。命名 profile 隔离 Cookie、Web 存储和 service worker 数据，同源连接也互相隔离。切换时先销毁旧 WebView 并取消待处理的 JS 确认，再创建新视图；回调确认对应 WebView 仍是当前视图。跨配置不复用 WebView 实例或恢复其保存状态。
 
-此功能需要现有 AndroidX WebKit 依赖提供的 `WebViewFeature.MULTI_PROFILE`。若提供方不支持，仍可管理配置，但连接时显示原生更新提示。Web Shell 的浏览器版本下限仍是 111；Android 连接功能另外要求该提供方能力。不会回退到共享浏览器存储。删除/编辑后，在提供方允许时清理废弃命名 profile；ID 永不复用。Keystore 加密不能替代服务器撤销。
+此功能需要 `WebViewFeature.MULTI_PROFILE`。新配置、迁移配置或提供程序中名称缺失的配置，还要求 `DELETE_BROWSING_DATA`，且必须完成配置级清除后才能加载。[初始化保护](mobile-profile-initialization.zh-CN.md) 处理已复现的快速终止进程后目录复用；随机新名称本身不能证明存储为空。不支持时仍可管理配置，但连接显示更新提示。Web Shell 的浏览器下限仍为 111，原生安全另外要求这些能力。不回退到共享存储。删除/编辑后在提供方允许时清理废弃配置；ID 永不复用。Keystore 加密不能替代服务器撤销。
 
 ## 文件与依赖
 
-生产代码改动限定在 `packages/mobile-shell`：vault/加密及配置管理类、`MainActivity`、资源、备份规则和定向测试。现有 Gradle、Kotlin、生产 AndroidX 版本保持固定；设备测试新增固定版本的 AndroidX 测试依赖。移动端 CI 在 API 26 和 35 上运行设备测试，并要求 API 35 通道必须支持配置隔离。英中设计文档与包 README 说明实际行为和能力门槛。
+生产代码改动限定在 `packages/mobile-shell`：vault/加密及配置管理类、`MainActivity`、资源、备份规则和定向测试。Gradle、Kotlin 和 AndroidX 版本保持固定；初始化保护将 AndroidX WebKit 更新至 1.13.0，以使用受支持的完整清除 API。设备测试使用固定 AndroidX 测试依赖。移动端 CI 运行 API 26 和 36，并要求 API 36 支持配置隔离及完整清除。英中设计文档与 README 说明实际行为和能力门槛。
 
 ## 验收
 
@@ -38,7 +38,7 @@
 2. 迁移保留有效连接，仅在持久化成功后删除旧 token，可安全重试中断操作。
 3. 密文损坏、密钥缺失、存储写入失败时提供恢复，不进行未认证连接或静默丢失数据。
 4. 同 origin 两个配置的 Cookie/localStorage 相互隔离，token 不串用。切换忽略旧回调，凭据修改使用新浏览器 profile。
-5. WebView 缺失或过旧时显示原生提示。不支持 MULTI_PROFILE 时不使用共享存储回退连接。
+5. WebView 缺失或过旧时显示原生提示。不支持 MULTI_PROFILE，或需要初始化但不支持 DELETE_BROWSING_DATA 时，绝不回退到共享存储连接。
 6. 原有 origin 校验、JS 确认、重试、返回导航与 renderer 清理继续有效。
 
 JVM 测试覆盖序列化、迁移/故障路径和认证加密；Android instrumentation 验证真实 Keystore，并在提供方支持时验证 profile 隔离。不支持的场景记为跳过而非通过。使用合成凭据和本地 fixture，无需模型调用。真机、TLS、备份验收必须明确记录，不能由构建成功推断。

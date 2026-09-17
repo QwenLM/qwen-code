@@ -1,6 +1,8 @@
 package com.qwen.mobileshell
 
 import java.io.IOException
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import javax.crypto.KeyGenerator
 import org.junit.Assert.*
 import org.junit.Test
@@ -99,10 +101,11 @@ class ProfileVaultTest {
     }
 
     @Test fun renamePreservesIdentityButOriginAndCredentialChangesRotateBrowserState() {
-        val original = ConnectionProfile.create("A", "https://example.com", "a")
+        val original = ConnectionProfile.create("A", "https://example.com", "a").copy(browserInitialized = true)
         val rename = ConnectionProfile.create("Renamed", original.origin, "a", original)
         assertEquals(original.id, rename.id)
         assertEquals(original.browserId, rename.browserId)
+        assertTrue(rename.browserInitialized)
         for (changed in listOf(
             ConnectionProfile.create("B", "https://other.example", "a", original),
             ConnectionProfile.create("B", original.origin, "b", original),
@@ -110,10 +113,68 @@ class ProfileVaultTest {
         )) {
             assertEquals(original.id, changed.id)
             assertNotEquals(original.browserId, changed.browserId)
+            assertFalse(changed.browserInitialized)
             val next = vault.upsert(ProfileState(listOf(original)), changed)
             assertTrue(original.browserName in next.retiredBrowsers)
             assertEquals(next, vault.load())
         }
+    }
+
+    @Test fun previousVaultFormatKeepsCredentialsButRequiresBrowserInitialization() {
+        val profile = ConnectionProfile.create("A", "https://example.com", "synthetic-token")
+        val old = ByteArrayOutputStream().use { bytes ->
+            DataOutputStream(bytes).use {
+                it.writeInt(0x51575032)
+                it.writeInt(1)
+                it.writeUTF(profile.id)
+                it.writeUTF(profile.name)
+                it.writeUTF(profile.origin)
+                it.writeUTF(profile.token!!)
+                it.writeUTF(profile.browserId)
+                it.writeInt(0)
+            }
+            bytes.toByteArray()
+        }
+        storage.saved = cipher.encrypt(old)
+        val migrated = vault.load()
+        assertEquals(profile, migrated.profiles.single())
+        assertTrue(profile.needsBrowserInitialization(setOf(profile.browserName)))
+        val ready = vault.setBrowserInitialized(migrated, profile, true)
+        assertTrue(vault.load().profiles.single().browserInitialized)
+        assertEquals(ready, vault.load())
+    }
+
+    @Test fun missingProviderNameRequiresDurableReinitializationAndFailedWritesCannotAdvance() {
+        val profile = ConnectionProfile.create("A", "https://example.com", "synthetic-token")
+        var state = vault.upsert(ProfileState(), profile)
+        storage.fail = true
+        assertThrows(IOException::class.java) { vault.setBrowserInitialized(state, profile, true) }
+        assertFalse(vault.load().profiles.single().browserInitialized)
+        storage.fail = false
+        state = vault.setBrowserInitialized(state, profile, true)
+        val ready = state.profiles.single()
+        assertFalse(ready.needsBrowserInitialization(setOf(ready.browserName)))
+        assertTrue(ready.needsBrowserInitialization(emptySet()))
+        storage.fail = true
+        assertThrows(IOException::class.java) { vault.setBrowserInitialized(state, ready, false) }
+        assertTrue(vault.load().profiles.single().browserInitialized)
+        storage.fail = false
+        state = vault.setBrowserInitialized(state, ready, false)
+        assertFalse(vault.load().profiles.single().browserInitialized)
+        assertEquals(state, vault.load())
+    }
+
+    @Test fun staleInitializationCannotRestoreDeletedOrRotatedProfilesOrOverwriteRename() {
+        val original = ConnectionProfile.create("A", "https://example.com", "a")
+        val initial = vault.upsert(ProfileState(), original)
+        val renamed = vault.upsert(initial, ConnectionProfile.create("Renamed", original.origin, "a", original))
+        assertEquals("Renamed", vault.setBrowserInitialized(renamed, original, true).profiles.single().name)
+        val rotated = vault.upsert(renamed, ConnectionProfile.create("B", original.origin, "b", original))
+        assertThrows(IOException::class.java) { vault.setBrowserInitialized(rotated, original, true) }
+        assertEquals(rotated, vault.load())
+        val removed = vault.remove(rotated, rotated.profiles.single())
+        assertThrows(IOException::class.java) { vault.setBrowserInitialized(removed, original, true) }
+        assertEquals(removed, vault.load())
     }
 
     @Test fun deletePersistsRetiredBrowserAndDoesNotChangeOtherProfile() {

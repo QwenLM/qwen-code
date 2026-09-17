@@ -28,6 +28,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.webkit.ProfileStore
+import androidx.webkit.WebStorageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 
@@ -38,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private var activeProfile: ConnectionProfile? = null
     private var activeDialog: AlertDialog? = null
     private var activeJsResult: JsResult? = null
+    private var connectionAttempt = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -178,14 +180,63 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     private fun connect(profile: ConnectionProfile) {
         destroyConnection()
+        try { state = store!!.vault.load() }
+        catch (_: Exception) { showStorageError(); return }
+        val current = state.profiles.find { it.id == profile.id && it.browserId == profile.browserId }
+            ?: return showProfiles()
         val major = WebViewCompat.getCurrentWebViewPackage(this)?.versionName?.substringBefore('.')?.toIntOrNull()
         if (major == null || major < 111) {
             showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
             return
         }
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+            try {
+                val profiles = ProfileStore.getInstance()
+                if (BrowserProfilePreparation.isPending(current.browserName)) {
+                    activeProfile = current
+                    showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current) }
+                    return
+                }
+                if (!current.needsBrowserInitialization(profiles.allProfileNames)) {
+                    openConnection(current)
+                    return
+                }
+                state = store!!.vault.setBrowserInitialized(state, current, false)
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)) {
+                    activeProfile = current
+                    if (!BrowserProfilePreparation.reserve(current.browserName)) {
+                        showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint)) { connect(current) }
+                        return
+                    }
+                    val attempt = connectionAttempt
+                    showMessage(getString(R.string.preparing_browser), getString(R.string.preparing_browser_hint))
+                    try {
+                        WebStorageCompat.deleteBrowsingData(profiles.getOrCreateProfile(current.browserName).webStorage) {
+                            BrowserProfilePreparation.release(current.browserName)
+                            if (attempt != connectionAttempt || isDestroyed || isFinishing) return@deleteBrowsingData
+                            try {
+                                state = store!!.vault.load()
+                                if (state.profiles.none { it.id == current.id && it.browserId == current.browserId }) {
+                                    showProfiles()
+                                    return@deleteBrowsingData
+                                }
+                                state = store!!.vault.setBrowserInitialized(state, current, true)
+                                openConnection(state.profiles.first { it.id == current.id && it.browserId == current.browserId })
+                            } catch (_: Exception) { showStorageError() }
+                        }
+                    } catch (_: Exception) {
+                        BrowserProfilePreparation.release(current.browserName)
+                        showMessage(getString(R.string.browser_preparation_failed), getString(R.string.preparing_browser_hint)) { connect(current) }
+                    }
+                } else showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
+            } catch (_: Exception) { showStorageError() }
+        } else showMessage(getString(R.string.provider_update), getString(R.string.provider_requirement))
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun openConnection(profile: ConnectionProfile) {
         val view = WebView(this)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
             WebViewCompat.setProfile(view, profile.browserName)
@@ -320,6 +371,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun destroyConnection() {
+        connectionAttempt++
         cancelDialog()
         val previous = webView
         webView = null

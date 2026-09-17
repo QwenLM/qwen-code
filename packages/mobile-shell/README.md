@@ -34,7 +34,9 @@ The token is passed to the H5 in an encoded URL fragment, absent from the naviga
 
 ## Runtime Requirements
 
-Android API 26+ and Android System WebView 111+ with the AndroidX `MULTI_PROFILE` capability. Version 111 alone is not sufficient for isolated profiles: the installed provider must expose that feature. Profile management works without it, but Connect displays a native update message. The app never falls back to sharing one browser profile. Each connection receives an isolated named profile; changing its origin or credential retires its old browser data for cleanup on a later app launch.
+Android API 26+ and Android System WebView 111+ with the AndroidX `MULTI_PROFILE` capability. New, migrated or recovered browser profiles also require `DELETE_BROWSING_DATA`. Version 111 or `MULTI_PROFILE` alone is insufficient: WebView 124 can reuse old storage for a fresh name after rapid process termination and lacks the complete-clearing capability. Profile management remains usable, but Connect displays an update message when safe initialization is unavailable. There is no shared-profile fallback.
+
+Before first use, the app clears the connection's complete browser storage through the official completion callback and durably records initialization before loading any page or token. Updating from the previous vault format preserves native credentials but clears existing browser sessions/cache once. A name missing from the provider's registry requires another clear even if the native flag was saved. Known initialized profiles retain browser state; changing origin or credential starts with a new uninitialized identity. Returning to Connections or destroying the Activity cancels preparation. See the [initialization guard design](../../docs/design/mobile-profile-initialization.md).
 
 Use HTTPS for remote daemons. Cleartext is disabled except for explicit loopback entries; LAN HTTP hosts need explicit network-security configuration. Secure web APIs require HTTPS or a trustworthy loopback origin.
 
