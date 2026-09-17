@@ -6,7 +6,9 @@
 
 设计依据：[Java Runtime Broker MVP](../design/2026-09-17-managed-agent-java-runtime-broker-mvp.zh-CN.md)
 
-当前代码基线：`65a6adf882bc8cf543d691ef6850c49b64b3718d`
+当前已提交基线：`eca8c0a8f7`（P1 Hosted Harness + P2 Java Runtime Broker）
+
+当前完成范围：P4a 真实冷 Runtime 进程 E2E。
 
 ## 1. 结论
 
@@ -193,7 +195,7 @@ ACCEPTED -> WAITING_RUNTIME -> DISPATCHED -> STARTED
 
 验收：Provider 契约、身份隔离、失败关闭、普通 REST Managed 入口测试通过。
 
-### P2：可嵌入 Java Runtime Broker（当前切片）
+### P2：可嵌入 Java Runtime Broker（已完成，`eca8c0a8f7`）
 
 改动范围：`packages/sdk-java/runtime-broker`、Java CI、设计与计划文档。
 
@@ -214,7 +216,7 @@ ACCEPTED -> WAITING_RUNTIME -> DISPATCHED -> STARTED
 - Runtime ready 前取消不会产生 execute/cancel 副作用；
 - Java 模块不依赖 Spring、Kubernetes SDK 或具体数据库。
 
-### P3：接入真实 Java Prompt 服务（下一阶段）
+### P3：接入真实 Java Prompt 服务（产品接入关键路径）
 
 Java 产品仓改动：
 
@@ -237,18 +239,26 @@ GET  /v1/agent-sessions/{sessionId}/turns/{turnId}
 
 完成门槛：真实产品服务中第一条 Prompt 会触发一次异步 `warm()`；SSE 首事件不等待 `warm()` 完成；无 Tool Turn 可以在 Runtime 未 ready 时完成。
 
-### P4：15 秒冷启动双进程 E2E
+### P4：15 秒冷启动进程 E2E（P4a 已完成）
 
-测试拓扑：真实 Java Broker HTTP Server + 真实 Hosted Harness + 可控 Fake Runtime，禁止类内 mock 代替进程边界。
+测试拓扑：Fake OpenAI Server + 真实 Hosted Harness 进程 + 真实 Java Broker 进程 + 真实 Managed Runtime worker 进程。进程边界不使用类内 mock。
 
-场景：
+P4a 已自动化并接入 Java CI：
 
-1. Fake Runtime 延迟 15 秒 ready。
+1. Broker 进入 provisioning 后等待 15 秒，再真正启动 Runtime worker 并取得 lease。
 2. 模型立即流出文本，然后发 Tool Call。
 3. 断言首个 model event 在 Runtime ready 前到达。
 4. 断言 Tool Call 等待原 binding，ready 后只执行一次并在同一 Turn 继续。
-5. 重复提交同一 execution，断言 physical execute 计数仍为 1。
-6. Runtime ready 前取消，断言没有工具进程和文件写入。
+5. 断言真实 Runtime 写入目标文件，Broker 只发生一次 provision 和一次 physical execute。
+
+2026-09-17 本机证据：Prompt accepted 11 ms，首个模型事件 303 ms，Runtime 冷启动并 ready 16,733 ms，工具等待 Runtime 16,429 ms，Turn 完成 19,129 ms，physical execute count 为 1。
+
+P4b 尚待补齐：
+
+1. 丢弃首次执行响应后，以同一幂等键重试，断言 physical execute 计数仍为 1。
+2. Runtime ready 前取消，断言没有 physical execute 和文件写入。
+3. physical execute 已开始后取消，断言工具根进程和后代退出，取消后无延迟写入。
+4. 一个 Harness 进程并发运行两个 Session，断言身份、Context、Tool Result 和事件不串流。
 
 必须输出指标：`prompt_accepted_ms`、`first_model_event_ms`、`runtime_ready_ms`、`tool_wait_runtime_ms`、`turn_completed_ms`、physical execute count。
 
@@ -297,11 +307,12 @@ GET  /v1/agent-sessions/{sessionId}/turns/{turnId}
 
 1. `feat(java): add embeddable runtime broker`：P2，仅 Java Broker、CI 和文档。
 2. 产品服务 PR：P3 的 Prompt admission、HarnessClient、事件投影和 SSE。
-3. `test(managed): add cold runtime process e2e`：P4，不混入生产功能。
-4. `feat(java): own local runtime lifecycle`：P5，包含 standalone boot contract。
-5. 产品服务 PR：P6 持久化与恢复。
-6. API PR：P7 公共 Agent API Adapter。
-7. 收敛 PR：P8 灰度默认与旧实验面删除。
+3. `test(managed): prove cold runtime hosted flow`：P4a 真实进程链路，只包含 E2E 所需的最小协议修正。
+4. `test(managed): prove idempotency and cancellation`：P4b 响应丢失、取消和多 Session 隔离。
+5. `feat(java): own local runtime lifecycle`：P5，包含 standalone boot contract。
+6. 产品服务 PR：P6 持久化与恢复。
+7. API PR：P7 公共 Agent API Adapter。
+8. 收敛 PR：P8 灰度默认与旧实验面删除。
 
 每个 PR 都必须可以独立回滚，不能同时修改公共 API、Runtime 生命周期和持久化 schema。
 
@@ -337,11 +348,12 @@ GET  /v1/agent-sessions/{sessionId}/turns/{turnId}
 
 ## 12. 紧接着执行的工作
 
-当前 P2 完成后，不继续扩展 Broker 抽象，直接进入 P3/P4：
+P1、P2 和 P4a 已经闭环。下一条产品关键路径是 P3，同时在 qwen-code 内补齐 P4b：
 
-1. 在真实 Java 产品服务定位 Prompt admission 事务和 SSE 事件存储接缝。
-2. 用 `StaticRuntimeProvisioner` 接通 Java -> Harness -> Java Broker -> Fake Runtime。
-3. 加入 15 秒 delayed-ready 进程 E2E，先证明 TTFT 和同轮 Tool continuation。
-4. E2E 通过后才实现 `LocalProcessRuntimeProvisioner`，避免在链路尚未闭环时先做 Kubernetes 或 worker pool。
+1. 在真实 Java 产品服务定位 Prompt admission 事务、Session owner 表和 SSE event store 接缝。
+2. 实现 `ManagedAgentCoordinator`：事务提交后并行调用 `runtimeBroker.warm()` 与 `harnessClient.submitPrompt()`，禁止串行等待 Runtime。
+3. 把 Harness event 投影为带单调 `eventSequence` 的公共事件，并实现 `Last-Event-ID` 重连。
+4. 在 qwen-code 补 P4b 的响应丢失幂等、Runtime ready 前取消、进程树取消和双 Session 隔离。
+5. P3/P4b 通过后再实现 P5 `LocalProcessRuntimeProvisioner`；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
 
-这四步是当前唯一关键路径。持久化、Agent API 兼容和 Kubernetes 调度都不应阻塞第一次端到端证明。
+P3 的最小上线判断只有三个：首个模型事件不等待 Runtime、同 Turn 的工具只执行一次、Java/Harness/Runtime 任一失败都不回落 Legacy。持久化 schema、Kubernetes 调度和完整 Agent API 兼容不能阻塞这三个判断的第一次产品验证。

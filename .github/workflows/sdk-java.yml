@@ -18,6 +18,7 @@ on:
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-hosted-runtime-e2e.ts'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -37,6 +38,7 @@ on:
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-hosted-runtime-e2e.ts'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -238,7 +240,9 @@ jobs:
           distribution: 'temurin'
           java-version: '11'
           cache: 'maven'
-          cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/sdk-java/runtime-broker/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Set up Maven (self-hosted)'
@@ -263,3 +267,8 @@ jobs:
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'npx tsx scripts/run-java-daemon-sdk-e2e.ts'
+
+      - name: 'Run Managed Hosted Runtime E2E'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'npx tsx scripts/run-managed-hosted-runtime-e2e.ts'
