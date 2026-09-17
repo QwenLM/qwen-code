@@ -92,13 +92,13 @@ class MainActivity : AppCompatActivity() {
         setPadding(padding, padding, padding, padding)
     }
 
-    private fun LinearLayout.label(value: String, heading: Boolean = false) {
-        addView(TextView(context).apply { text = value; textSize = if (heading) 22f else 16f })
-    }
+    private fun LinearLayout.label(value: String, heading: Boolean = false): TextView =
+        TextView(context).apply { text = value; textSize = if (heading) 22f else 16f }
+            .also { addView(it) }
 
-    private fun LinearLayout.button(value: String, action: () -> Unit) {
-        addView(Button(context).apply { text = value; setOnClickListener { action() } })
-    }
+    private fun LinearLayout.button(value: String, action: () -> Unit): Button =
+        Button(context).apply { text = value; setOnClickListener { action() } }
+            .also { addView(it) }
 
     private fun showProfiles() {
         destroyConnection()
@@ -110,7 +110,9 @@ class MainActivity : AppCompatActivity() {
                 label(profile.name, true)
                 label(profile.origin)
                 button(getString(R.string.connect)) { connect(profile) }
+                    .contentDescription = getString(R.string.connect_profile, profile.name)
                 button(getString(R.string.edit)) { editProfile(profile) }
+                    .contentDescription = getString(R.string.edit_named_profile, profile.name)
                 button(getString(R.string.delete)) {
                     activeDialog = AlertDialog.Builder(this@MainActivity)
                         .setTitle(R.string.delete_profile)
@@ -122,7 +124,7 @@ class MainActivity : AppCompatActivity() {
                                 showProfiles()
                             } catch (_: Exception) { showStorageError() }
                         }.show()
-                }
+                }.contentDescription = getString(R.string.delete_named_profile, profile.name)
             }
             button(getString(R.string.add_profile)) { editProfile(null) }
         }
@@ -132,8 +134,10 @@ class MainActivity : AppCompatActivity() {
     private fun editProfile(previous: ConnectionProfile?) {
         val form = column().apply { importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS }
         fun field(label: Int, value: String, type: Int): EditText {
-            form.label(getString(label))
+            val caption = form.label(getString(label))
             return EditText(this).apply {
+                id = View.generateViewId()
+                caption.labelFor = id
                 hint = getString(label)
                 setText(value)
                 isSingleLine = true
@@ -153,7 +157,8 @@ class MainActivity : AppCompatActivity() {
             form.addView(this)
         }
         form.label(getString(R.string.credential_hint))
-        val error = TextView(this).also { form.addView(it) }
+        val error = TextView(this).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
+            .also { form.addView(it) }
         val dialog = AlertDialog.Builder(this)
             .setTitle(if (previous == null) R.string.add_profile else R.string.edit_profile)
             .setView(ScrollView(this).apply { addView(form) })
@@ -341,9 +346,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun showStorageError() {
         destroyConnection()
-        setContentView(column().apply {
+        val content = column().apply {
             label(getString(R.string.storage_unavailable), true)
             label(getString(R.string.storage_unavailable_hint))
+                .accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             button(getString(R.string.retry)) { loadProfiles() }
             button(getString(R.string.reset_profiles)) {
                 activeDialog = AlertDialog.Builder(this@MainActivity)
@@ -358,7 +364,8 @@ class MainActivity : AppCompatActivity() {
                         } catch (_: Exception) { showStorageError() }
                     }.show()
             }
-        })
+        }
+        setContentView(ScrollView(this).apply { addView(content) })
     }
 
     private fun cancelDialog() {

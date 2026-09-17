@@ -6,6 +6,9 @@
     <string name="development_notice">Development client. Per-device credential revocation is not yet available.</string>
     <string name="no_profiles">Add a daemon connection to get started.</string>
     <string name="connect">Connect</string>
+    <string name="connect_profile">Connect to %1$s</string>
+    <string name="edit_named_profile">Edit %1$s</string>
+    <string name="delete_named_profile">Delete %1$s</string>
     <string name="edit">Edit</string>
     <string name="delete">Delete</string>
     <string name="save">Save</string>
