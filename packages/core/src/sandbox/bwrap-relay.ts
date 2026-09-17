@@ -44,10 +44,13 @@ child.on('error', () => {
 });
 child.on('close', (code, signal) => {
   clearInterval(parentWatch);
+  // A spawn/transport failure of bwrap itself (failed=true) means the
+  // payload provably never ran — attest that explicitly so the finalizer
+  // can clean up instead of retaining the dirs for inspection.
   const status = signal
     ? { state: 'interrupted' }
     : failed
-      ? { state: 'unconfirmed' }
+      ? { state: 'unconfirmed', payloadExitObserved: false }
       : parseBwrapStatus(wire, code);
   writeFileSync(fd, JSON.stringify(status));
   closeSync(fd);

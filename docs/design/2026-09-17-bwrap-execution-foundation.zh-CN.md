@@ -22,7 +22,7 @@ Shell 服务当前通过 shell 启动命令字符串。沙箱适配器需要字�
 
 Relay 读取 payload 不继承的 bwrap 专用状态 FD，将有大小限制的结果写入受保护控制目录中以独占创建、禁止跟随符号链接、权限 0600 打开的普通文件。最终有效的 bwrap 退出记录确认 payload 已执行及其退出码；初始 child PID 不证明成功 exec。证据缺失或损坏保持 `unconfirmed`。信号/取消产生 `interrupted`；提升到后台的进程在独立结算 promise 完成前为 `running`。这些状态都不授权自动重试或脱离 bwrap 执行。
 
-Relay 在 spawn 前检查父进程身份，并每 100 ms 检查父进程存活。Relay 退出后，bwrap 的父进程死亡处理终止私有 namespace。Scratch/control 资源在后台提升后继续保留，最终结算时删除。终止尚未确认的错误会保留资源用于检查。崩溃可能遗留目录；本层不实现恢复或垃圾回收。
+Relay 在 spawn 前检查父进程身份，并每 100 ms 检查父进程存活。Relay 退出后，bwrap 的父进程死亡处理终止私有 namespace。Scratch/control 资源在后台提升后继续保留，最终结算时删除。用于检查的保留范围收窄到真正的 exec 后不确定：回执证明 payload 有退出记录，或回执文件存在但不可读（relay 在创建文件之后死亡）。payload exec 之前的 setup 失败——未安装 bubblewrap 或 payload 二进制——由回执明确证明，正常清理，且其错误信息读作"未运行"而非含糊的未确认措辞。崩溃可能遗留目录；本层不实现恢复或垃圾回收。一个流式细节：在退出后排空窗口内到达的取消会以 `aborted: true` 结算，而持有管道的游离孙进程仍然存活——`aborted` 不再意味着整棵进程树已被清理。
 
 ## 受约束的文件 worker
 

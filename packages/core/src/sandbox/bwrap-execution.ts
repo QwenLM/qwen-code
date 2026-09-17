@@ -237,13 +237,20 @@ export async function executeBwrap(
     }) =>
       (finalizing ??= (async () => {
         let status: BwrapStatus = { state: 'unconfirmed' };
+        // The relay creates the receipt file (O_EXCL) before spawning bwrap,
+        // so its existence attests the relay got as far as the spawn call.
+        let receiptExisted = false;
+        let receiptParsed = false;
         if (info.aborted || isSignalTermination(info.signal))
           status = { state: 'interrupted' };
         else {
           try {
-            const record = JSON.parse(
-              await readFile(statusPath, 'utf8'),
-            ) as Record<string, unknown>;
+            const text = await readFile(statusPath, 'utf8');
+            // The file existing at all attests the relay got past its
+            // O_EXCL create — i.e. as far as the bwrap spawn call.
+            receiptExisted = true;
+            const record = JSON.parse(text) as Record<string, unknown>;
+            receiptParsed = true;
             if (
               !info.error &&
               record['state'] === 'confirmed' &&
@@ -256,16 +263,28 @@ export async function executeBwrap(
               status = { state: 'confirmed', exitCode: record['exitCode'] };
             else if (record['state'] === 'interrupted')
               status = { state: 'interrupted' };
+            else
+              status = {
+                state: 'unconfirmed',
+                payloadExitObserved: record['payloadExitObserved'] === true,
+              };
           } catch {
             /* Missing/partial receipt never proves that the payload did not run. */
           }
         }
-        // Retention keys on the finalized status, not on the transport
-        // error/exit-code combination: pipe-transport failures report a
-        // numeric exit code, so keying on `info.error && exitCode === null`
-        // never retains a genuinely unconfirmed run and would retain a
-        // definitively interrupted one (PR #12067 review).
-        if (status.state === 'unconfirmed') {
+        // Retain the dirs only when the payload may genuinely have run:
+        // either the receipt attests a payload exit record (payload past
+        // exec, correlation failed), or the receipt exists but is
+        // unreadable (relay died mid-payload). A missing receipt means the
+        // relay died before spawning bwrap, and an attested no-exec
+        // unconfirmed means setup failed before exec — a missing bwrap or
+        // payload binary — so both clean up (PR #12067 review: retaining
+        // those leaked a dir pair per invocation).
+        const retain =
+          status.state === 'unconfirmed' &&
+          receiptExisted &&
+          (!receiptParsed || status.payloadExitObserved === true);
+        if (retain) {
           debugLogger.warn(
             'Sandbox termination is unconfirmed; retaining temporary directories',
             { control, scratch },
