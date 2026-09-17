@@ -319,8 +319,12 @@ describe('AddWorkspaceDialog', () => {
 
       expect(input().value).toBe('/home/me/');
       expect(listbox()).not.toBeNull();
+      // The computer is named in the dialog chrome, not buried in the hint.
       expect(document.body.textContent).toContain(
         'Folder on https://remote.example:4170',
+      );
+      expect(document.body.textContent).toContain(
+        'Choose a folder below, or type an absolute path.',
       );
       expect(submitButton().textContent).toBe('Add this folder');
 
@@ -328,7 +332,7 @@ describe('AddWorkspaceDialog', () => {
       expect(listbox()).not.toBeNull();
     });
 
-    it('navigates to the parent directory without submitting', async () => {
+    it('navigates to an ancestor from the breadcrumb without submitting', async () => {
       const onAdd = vi.fn();
       const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
@@ -341,12 +345,40 @@ describe('AddWorkspaceDialog', () => {
         />,
       );
 
+      const crumbs = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          'nav[aria-label="Directory path"] button',
+        ),
+      );
+      expect(crumbs.map((crumb) => crumb.textContent)).toEqual([
+        '/',
+        'home',
+        'me',
+      ]);
+
+      act(() => crumbs[2].click());
+
+      expect(input().value).toBe('/home/me/');
+      expect(onAdd).not.toHaveBeenCalled();
+    });
+
+    it('opens the typed directory on Enter instead of registering it', async () => {
+      const onAdd = vi.fn();
+      const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me"
+          onClose={vi.fn()}
+          onAdd={onAdd}
+          onSuggest={onSuggest}
+        />,
+      );
+
       act(() => {
-        document
-          .querySelector<HTMLButtonElement>(
-            'button[aria-label="Parent folder"]',
-          )!
-          .click();
+        input().dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
       });
 
       expect(input().value).toBe('/home/me/');

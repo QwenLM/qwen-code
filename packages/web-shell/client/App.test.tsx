@@ -231,6 +231,8 @@ type AddWorkspaceDialogTestProps = {
 
 type AddRemoteWorkspaceDialogTestProps = {
   onClose: () => void;
+  onContinueHere: () => void;
+  onConnectComputer: () => void;
 };
 
 function voiceSetting(effective: string): DaemonSettingDescriptor {
@@ -17775,6 +17777,12 @@ describe('App session callbacks', () => {
   });
 
   it('opens and resumes the standalone Add workspace location flow', async () => {
+    // The location step is only offered when there is a second computer to
+    // choose; with none, the folder browser opens straight away.
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify(['https://remote.example']),
+    );
     const connectorView = renderApp({}, undefined, true);
     await flush();
 
@@ -17788,6 +17796,20 @@ describe('App session callbacks', () => {
         '[data-testid="add-remote-workspace-dialog"]',
       ),
     ).not.toBeNull();
+
+    // The daemon this tab already talks to continues in place: the chooser
+    // hands over to the folder step without a navigation marker.
+    act(() => {
+      testState.latestAddRemoteWorkspaceDialogProps?.onContinueHere();
+    });
+    expect(
+      connectorView.container.querySelector(
+        '[data-testid="add-remote-workspace-dialog"]',
+      ),
+    ).toBeNull();
+    expect(
+      new URLSearchParams(window.location.search).has('addRemoteWorkspace'),
+    ).toBe(false);
     connectorView.unmount();
 
     mockWorkspace.capabilities =
@@ -17839,7 +17861,9 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
     expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
       browseDirectories: true,
-      daemonAddress: window.location.origin,
+      // Undefined for the page's own daemon: the subtitle says "this computer"
+      // rather than echoing the address back.
+      daemonAddress: undefined,
       persistenceSupported: true,
       displayNameEnabled: true,
     });
@@ -17849,6 +17873,7 @@ describe('App session callbacks', () => {
     expect(
       new URLSearchParams(window.location.search).has('addRemoteWorkspace'),
     ).toBe(false);
+    window.localStorage.removeItem('qwen-remote-connections');
   });
 
   it('keeps the add workspace entry out of an embedded shell without the capability', async () => {
@@ -17866,8 +17891,8 @@ describe('App session callbacks', () => {
     const { container } = renderApp();
     await flush();
 
-    // The standalone location flow is the only reason this PR widens the
-    // entry's visibility; an embedded shell must still hide it.
+    // The standalone location flow is the only reason this widens the entry's
+    // visibility; an embedded shell must still hide it.
     expect(
       container
         .querySelector('[data-testid="open-add-workspace"]')

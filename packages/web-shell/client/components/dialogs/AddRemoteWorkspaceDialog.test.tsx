@@ -14,22 +14,31 @@ vi.mock('../../config/remote-workspace-add', () => ({
 }));
 
 vi.mock('../../config/remote-connections', () => ({
-  readRemoteConnections: config.connections,
+  listRemoteComputers: config.connections,
+  formatOriginHost: (origin: string) => new URL(origin).host,
 }));
 
 const { AddRemoteWorkspaceDialog } = await import('./AddRemoteWorkspaceDialog');
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
+let onContinueHere: ReturnType<typeof vi.fn>;
+let onConnectComputer: ReturnType<typeof vi.fn>;
 
 function mount(): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  onContinueHere = vi.fn();
+  onConnectComputer = vi.fn();
   act(() => {
     root!.render(
       <I18nProvider language="en">
-        <AddRemoteWorkspaceDialog onClose={vi.fn()} />
+        <AddRemoteWorkspaceDialog
+          onClose={vi.fn()}
+          onContinueHere={onContinueHere}
+          onConnectComputer={onConnectComputer}
+        />
       </I18nProvider>,
     );
   });
@@ -44,7 +53,7 @@ afterEach(() => {
 });
 
 describe('AddRemoteWorkspaceDialog', () => {
-  it('defaults Add Workspace to this computer', () => {
+  it('continues to the folder step in place for this computer', () => {
     config.start.mockReturnValue(true);
     config.connections.mockReturnValue(['https://remote.example:4170']);
     mount();
@@ -59,10 +68,9 @@ describe('AddRemoteWorkspaceDialog', () => {
         .querySelector<HTMLButtonElement>('button[type="submit"]')!
         .click();
     });
-    expect(config.start).toHaveBeenCalledWith(
-      window.location.origin,
-      undefined,
-    );
+    // The page's own daemon needs no handover, so the shell is not reloaded.
+    expect(onContinueHere).toHaveBeenCalledTimes(1);
+    expect(config.start).not.toHaveBeenCalled();
   });
 
   it('starts the folder flow on a previously connected computer', () => {
@@ -98,5 +106,12 @@ describe('AddRemoteWorkspaceDialog', () => {
     expect(document.body.textContent).toContain(
       'Connect a computer in Daemon Status first.',
     );
+
+    // The requirement comes with a way to satisfy it.
+    const connect = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Connect a computer');
+    act(() => connect!.click());
+    expect(onConnectComputer).toHaveBeenCalledTimes(1);
   });
 });

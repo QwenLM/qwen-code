@@ -884,17 +884,21 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
-  it('marks workspaces from a cross-origin daemon as remote', () => {
+  it('names the daemon host once above the workspace list', () => {
     workspace.baseUrl = 'https://remote.example.com';
 
     renderSidebar();
 
-    expect(
-      container.querySelectorAll('[data-testid="remote-workspace-indicator"]'),
-    ).toHaveLength(capabilities.workspaces.length);
+    // One daemon serves every row, so the fact is stated once rather than
+    // repeated as a badge on each workspace.
+    const indicators = container.querySelectorAll(
+      '[data-testid="remote-workspace-indicator"]',
+    );
+    expect(indicators).toHaveLength(1);
+    expect(indicators[0].textContent).toContain('remote.example.com');
   });
 
-  it('keeps same-origin workspace folders unbadged', () => {
+  it('leaves the header unmarked for the page origin daemon', () => {
     workspace.baseUrl = window.location.origin;
 
     renderSidebar();

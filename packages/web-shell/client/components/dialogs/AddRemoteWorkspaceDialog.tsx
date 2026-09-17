@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import { getDaemonBaseUrl, getDaemonToken } from '../../config/daemon';
-import { readRemoteConnections } from '../../config/remote-connections';
+import {
+  formatOriginHost,
+  listRemoteComputers,
+} from '../../config/remote-connections';
 import { startRemoteWorkspaceAdd } from '../../config/remote-workspace-add';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
 import { Field, FieldError, FieldGroup, FieldLabel } from '../ui/field';
-import { LaptopIcon, ServerIcon } from 'lucide-react';
+import { CheckIcon, LaptopIcon, ServerIcon } from 'lucide-react';
 import {
   Select,
   SelectContent,
@@ -15,17 +18,24 @@ import {
   SelectValue,
 } from '../ui/select';
 
-export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
+export function AddRemoteWorkspaceDialog({
+  onClose,
+  onContinueHere,
+  onConnectComputer,
+}: {
+  onClose: () => void;
+  /**
+   * Continue to the folder step without leaving the page. Used whenever the
+   * chosen computer is the one this tab already talks to.
+   */
+  onContinueHere: () => void;
+  onConnectComputer: () => void;
+}) {
   const { t } = useI18n();
-  const [connections] = useState(() => {
-    const current = getDaemonBaseUrl();
-    return Array.from(
-      new Set([
-        ...readRemoteConnections(),
-        ...(current && current !== window.location.origin ? [current] : []),
-      ]),
-    );
-  });
+  const [connections] = useState(listRemoteComputers);
+  const [currentOrigin] = useState(
+    () => getDaemonBaseUrl() || window.location.origin,
+  );
   const [kind, setKind] = useState<'local' | 'remote'>('local');
   const [remoteOrigin, setRemoteOrigin] = useState(connections[0] ?? '');
   const [error, setError] = useState('');
@@ -33,6 +43,7 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogShell
       title={t('sidebar.addWorkspaceTitle')}
+      subtitle={t('workspaceHost.locationSubtitle')}
       onClose={onClose}
       size="md"
     >
@@ -45,6 +56,13 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
             kind === 'local' ? window.location.origin : remoteOrigin;
           if (!origin) {
             setError(t('workspaceHost.noRemoteConnections'));
+            return;
+          }
+          // Only a different computer needs the full-page handover. Reloading
+          // the shell to browse folders on the daemon it is already connected
+          // to would drop the open session, its socket and the composer draft.
+          if (origin === currentOrigin) {
+            onContinueHere();
             return;
           }
           if (!startRemoteWorkspaceAdd(origin, getDaemonToken(origin))) {
@@ -61,16 +79,17 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
               {(['local', 'remote'] as const).map((value) => {
                 const Icon = value === 'local' ? LaptopIcon : ServerIcon;
                 const disabled = value === 'remote' && connections.length === 0;
+                const selected = kind === value;
                 return (
                   <label
                     key={value}
-                    className={`flex items-start gap-3 rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-ring/50 ${
+                    className={`relative flex items-start gap-3 rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-ring/50 ${
                       disabled
-                        ? 'cursor-not-allowed opacity-50'
+                        ? 'cursor-not-allowed opacity-60'
                         : 'cursor-pointer'
                     } ${
-                      kind === value
-                        ? 'border-primary bg-accent'
+                      selected
+                        ? 'border-primary bg-accent ring-1 ring-primary'
                         : 'border-border hover:bg-accent/50'
                     }`}
                   >
@@ -78,7 +97,7 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
                       type="radio"
                       name="workspace-host-kind"
                       value={value}
-                      checked={kind === value}
+                      checked={selected}
                       disabled={disabled}
                       onChange={() => {
                         setKind(value);
@@ -87,7 +106,9 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
                       className="sr-only"
                     />
                     <Icon
-                      className="mt-0.5 size-5 shrink-0 text-muted-foreground"
+                      className={`mt-0.5 size-5 shrink-0 ${
+                        selected ? 'text-foreground' : 'text-muted-foreground'
+                      }`}
                       aria-hidden="true"
                     />
                     <span className="flex min-w-0 flex-col gap-1">
@@ -102,10 +123,29 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
                         )}
                       </span>
                     </span>
+                    {selected && (
+                      <CheckIcon
+                        className="absolute top-2 right-2 size-4 text-primary"
+                        aria-hidden="true"
+                      />
+                    )}
                   </label>
                 );
               })}
             </div>
+            {connections.length === 0 && (
+              // The disabled card states the requirement; this is the way out
+              // of it, so it is a control rather than another line of prose.
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="mt-2 h-auto px-0"
+                onClick={onConnectComputer}
+              >
+                {t('workspaceHost.connectComputer')}
+              </Button>
+            )}
           </fieldset>
           {kind === 'remote' && connections.length > 0 && (
             <Field>
@@ -123,7 +163,7 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
                   {connections.map((origin) => (
                     <SelectItem key={origin} value={origin}>
                       <ServerIcon aria-hidden="true" />
-                      {new URL(origin).host}
+                      {formatOriginHost(origin)}
                     </SelectItem>
                   ))}
                 </SelectContent>

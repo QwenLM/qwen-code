@@ -125,7 +125,6 @@ let container: HTMLDivElement;
 function renderSection(
   overrides: Partial<{
     workspace: DaemonWorkspaceCapability;
-    remote: boolean;
     client: DaemonClient;
     reloadToken: number;
     expanded: boolean;
@@ -162,7 +161,6 @@ function renderSection(
       <I18nProvider language="en">
         <WorkspaceSection
           workspace={overrides.workspace ?? trustedWorkspace}
-          remote={overrides.remote}
           client={overrides.client ?? makeClient()}
           reloadToken={overrides.reloadToken ?? 0}
           expanded={overrides.expanded}
@@ -300,24 +298,6 @@ afterEach(() => {
 });
 
 describe('WorkspaceSection label', () => {
-  it('marks remote workspaces with a globe badge', () => {
-    renderSection({ remote: true });
-
-    expect(
-      container
-        .querySelector('[data-testid="remote-workspace-indicator"]')
-        ?.getAttribute('aria-label'),
-    ).toBe('Remote');
-  });
-
-  it('keeps local workspace folders unbadged', () => {
-    renderSection();
-
-    expect(
-      container.querySelector('[data-testid="remote-workspace-indicator"]'),
-    ).toBeNull();
-  });
-
   it('prefers the workspace display name over the cwd basename', () => {
     renderSection({
       workspace: {

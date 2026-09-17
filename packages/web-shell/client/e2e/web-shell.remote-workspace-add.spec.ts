@@ -98,7 +98,7 @@ async function chooseRemoteHost(page: Page): Promise<void> {
   // The input is sr-only, so the label is the click target.
   await dialog.getByText('Remote', { exact: true }).click();
   await expect(dialog.getByRole('radio', { name: 'Remote' })).toBeChecked();
-  await dialog.getByRole('button', { name: 'Next: choose folder' }).click();
+  await dialog.getByRole('button', { name: 'Choose folder' }).click();
 }
 
 async function waitForRequest(
@@ -249,7 +249,7 @@ test('changing the computer reopens the chooser on the source tab @smoke', async
   ).toBeVisible();
 
   await addWorkspaceDialog(page)
-    .getByRole('button', { name: 'Change computer', exact: true })
+    .getByRole('button', { name: 'Change location', exact: true })
     .click();
 
   // The chooser is back on the source tab, and the shell is not gated behind
@@ -264,7 +264,50 @@ test('changing the computer reopens the chooser on the source tab @smoke', async
   expect(new URL(page.url()).origin).toBe(sourceOrigin);
 });
 
-test('the local choice browses folders on the page origin @smoke', async ({
+test('the local choice browses folders without reloading the shell @smoke', async ({
+  page,
+}, testInfo) => {
+  const local = await installHost(
+    page,
+    hostScenario(LOCAL_CWD, { '/srv': [LOCAL_FOLDER] }),
+    testInfo,
+  );
+  await installHost(
+    page,
+    hostScenario(REMOTE_CWD, { '/srv': [REMOTE_FOLDER] }),
+    testInfo,
+    REMOTE_ORIGIN,
+  );
+  await seedConnectedComputer(page);
+  const loads: string[] = [];
+  page.on('load', () => loads.push(page.url()));
+
+  await gotoSourceShell(page);
+  const sourceUrl = page.url();
+  await openHostChooser(page);
+  const dialog = addWorkspaceDialog(page);
+  await expect(dialog.getByRole('radio', { name: 'Local' })).toBeChecked();
+  await dialog.getByRole('button', { name: 'Choose folder' }).click();
+
+  // The daemon this tab already talks to needs no handover, so the shell is
+  // never reloaded — the open session and its socket survive the add.
+  await expect(
+    dialog.getByRole('option', { name: LOCAL_FOLDER }),
+  ).toBeVisible();
+  expect(new URL(page.url()).origin).toBe(new URL(sourceUrl).origin);
+  expect(new URL(page.url()).searchParams.has('addRemoteWorkspace')).toBe(
+    false,
+  );
+  expect(loads).toHaveLength(1);
+  await waitForRequest(
+    local,
+    (request) =>
+      request.method === 'GET' &&
+      request.path === '/workspace-path-suggestions',
+  );
+});
+
+test('with no connected computer the folder browser opens directly @smoke', async ({
   page,
 }, testInfo) => {
   const local = await installHost(
@@ -276,22 +319,20 @@ test('the local choice browses folders on the page origin @smoke', async ({
   page.on('load', () => loads.push(page.url()));
 
   await gotoSourceShell(page);
-  const sourceUrl = page.url();
-  await openHostChooser(page);
-  const dialog = addWorkspaceDialog(page);
-  await expect(dialog.getByRole('radio', { name: 'Local' })).toBeChecked();
-  await dialog.getByRole('button', { name: 'Next: choose folder' }).click();
+  await page
+    .getByRole('button', { name: 'Add workspace', exact: true })
+    .click();
 
-  // The browse step is reached in place — one reload to carry the marker, and
-  // no navigation onto another origin.
+  // Nothing to choose between, so the location step is skipped entirely.
+  const dialog = addWorkspaceDialog(page);
   await expect(
     dialog.getByRole('option', { name: LOCAL_FOLDER }),
   ).toBeVisible();
-  expect(new URL(page.url()).origin).toBe(new URL(sourceUrl).origin);
-  expect(new URL(page.url()).searchParams.has('addRemoteWorkspace')).toBe(
-    false,
-  );
-  expect(loads).toHaveLength(2);
+  await expect(dialog.getByRole('radio', { name: 'Local' })).toHaveCount(0);
+  await expect(
+    dialog.getByRole('button', { name: 'Change location' }),
+  ).toHaveCount(0);
+  expect(loads).toHaveLength(1);
   await waitForRequest(
     local,
     (request) =>

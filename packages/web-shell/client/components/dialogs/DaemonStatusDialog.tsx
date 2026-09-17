@@ -23,6 +23,7 @@ import {
 } from '../../config/daemon';
 import {
   forgetRemoteConnection,
+  formatOriginHost,
   readRemoteConnections,
   rememberRemoteConnection,
 } from '../../config/remote-connections';
@@ -758,7 +759,7 @@ function DaemonStatusDialogInner({
             title={origin}
             onClick={() => onChangeTarget(origin, getDaemonToken(origin))}
           >
-            {new URL(origin).host}
+            {formatOriginHost(origin)}
           </Button>
           <Button
             type="button"

@@ -22,7 +22,6 @@ import {
   CalendarClockIcon,
   FolderClosedIcon,
   FolderOpenIcon,
-  GlobeIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatDateTime } from '../../utils/formatDateTime';
@@ -86,35 +85,15 @@ function getSessionLabel(session: DaemonSessionSummary): string {
   return displayName || session.sessionId.slice(0, 8);
 }
 
-function WorkspaceFolderIcon({
-  open,
-  remote,
-  remoteLabel,
-}: {
-  open: boolean;
-  remote: boolean;
-  remoteLabel: string;
-}) {
+function WorkspaceFolderIcon({ open }: { open: boolean }) {
   const Icon = open ? FolderOpenIcon : FolderClosedIcon;
   return (
-    <span className={styles.folderIconFrame}>
-      <Icon
-        className={styles.folderIcon}
-        size={14}
-        strokeWidth={1.4}
-        aria-hidden="true"
-      />
-      {remote && (
-        <span
-          className={styles.remoteFolderBadge}
-          role="img"
-          aria-label={remoteLabel}
-          data-testid="remote-workspace-indicator"
-        >
-          <GlobeIcon size={8} strokeWidth={2} aria-hidden="true" />
-        </span>
-      )}
-    </span>
+    <Icon
+      className={styles.folderIcon}
+      size={14}
+      strokeWidth={1.4}
+      aria-hidden="true"
+    />
   );
 }
 
@@ -126,7 +105,6 @@ export interface WorkspaceHeaderActionsContext {
 
 interface WorkspaceSectionProps {
   workspace: DaemonWorkspaceCapability;
-  remote?: boolean;
   renderHeader?: (expanded: boolean) => ReactNode;
   client: DaemonClient;
   reloadToken: number;
@@ -232,7 +210,6 @@ interface WorkspaceSectionProps {
 
 export function WorkspaceSection({
   workspace,
-  remote = false,
   renderHeader,
   client,
   reloadToken,
@@ -805,11 +782,7 @@ export function WorkspaceSection({
             <span
               className={cx(styles.chevron, expanded && styles.chevronOpen)}
             >
-              <WorkspaceFolderIcon
-                open={expanded}
-                remote={remote}
-                remoteLabel={t('workspaceHost.remote')}
-              />
+              <WorkspaceFolderIcon open={expanded} />
             </span>
             <span className={styles.headerContent}>
               <span className={styles.name} title={workspace.cwd}>
