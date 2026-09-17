@@ -20,14 +20,21 @@ import {
 const root = process.cwd();
 const argumentsList = process.argv.slice(2);
 if (
-  argumentsList.some((argument) => argument !== '--cancel-before-ready') ||
+  argumentsList.some(
+    (argument) =>
+      argument !== '--cancel-before-ready' &&
+      argument !== '--cancel-after-start' &&
+      argument !== '--two-sessions',
+  ) ||
   argumentsList.length > 1
 ) {
   throw new Error(
-    'Usage: run-managed-hosted-runtime-e2e.ts [--cancel-before-ready]',
+    'Usage: run-managed-hosted-runtime-e2e.ts [--cancel-before-ready|--cancel-after-start|--two-sessions]',
   );
 }
 const cancelBeforeReady = argumentsList.includes('--cancel-before-ready');
+const cancelAfterStart = argumentsList.includes('--cancel-after-start');
+const twoSessions = argumentsList.includes('--two-sessions');
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const runtimeWorker = path.join(root, 'dist', 'managed-runtime-worker.js');
 if (!existsSync(cliBundle) || !existsSync(runtimeWorker)) {
@@ -44,6 +51,12 @@ const harnessHome = path.join(temporary, 'harness-home');
 const runtimeHome = path.join(temporary, 'runtime-home');
 const runtimeOutput = path.join(temporary, 'runtime-output');
 const trustedFolders = path.join(temporary, 'trusted-folders.json');
+const activeCancelScript = path.join(workspace, 'active-cancel.cjs');
+const activeCancelStarted = path.join(workspace, 'active-cancel-started.json');
+const activeCancelDelayedWrite = path.join(
+  workspace,
+  'active-cancel-delayed.txt',
+);
 const workspaceId = createHash('sha256')
   .update(workspace)
   .digest('hex')
@@ -51,7 +64,7 @@ const workspaceId = createHash('sha256')
 const firstChunk = 'model output before Runtime readiness';
 const finalText = 'managed hosted runtime e2e complete';
 const runtimeFileContent = 'written after cold Runtime readiness';
-const runtimeDelayMs = 15_000;
+const runtimeDelayMs = cancelAfterStart || twoSessions ? 0 : 15_000;
 const harnessToken = 'managed-hosted-harness-token';
 const brokerToken = 'managed-hosted-broker-token';
 const controlToken = 'managed-hosted-control-token';
@@ -61,6 +74,18 @@ mkdirSync(workspace, { recursive: true });
 mkdirSync(path.join(harnessHome, '.qwen'), { recursive: true });
 mkdirSync(path.join(runtimeHome, '.qwen'), { recursive: true });
 mkdirSync(runtimeOutput, { recursive: true });
+writeFileSync(
+  activeCancelScript,
+  `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const [startedPath, delayedPath] = process.argv.slice(2);
+const childProgram = "const { writeFileSync } = require('node:fs'); setTimeout(() => writeFileSync(process.argv[1], 'late write'), 4000); setInterval(() => {}, 1000);";
+const child = spawn(process.execPath, ['-e', childProgram, delayedPath], { stdio: 'ignore' });
+if (!child.pid) throw new Error('child process did not start');
+writeFileSync(startedPath, JSON.stringify({ rootPid: process.pid, childPid: child.pid, startedAtEpochMillis: Date.now() }));
+setInterval(() => {}, 1000);
+`,
+);
 writeFileSync(
   path.join(harnessHome, '.qwen', 'settings.json'),
   JSON.stringify({ ui: { enableFollowupSuggestions: false } }),
@@ -86,6 +111,10 @@ const commonEnvironment = {
   NO_PROXY: '127.0.0.1,localhost',
   no_proxy: '127.0.0.1,localhost',
 };
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
 
 const children: Array<{ child: ChildProcess; name: string }> = [];
 let receivedSignal: NodeJS.Signals | undefined;
@@ -247,7 +276,10 @@ async function waitUntil(timestamp: number): Promise<void> {
   ]);
 }
 
-async function startBrokerResponseLossProxy(targetOrigin: string): Promise<{
+async function startBrokerResponseLossProxy(
+  targetOrigin: string,
+  dropFirstExecutionResponse: boolean,
+): Promise<{
   baseUrl: string;
   didDropExecutionResponse: () => boolean;
   server: Server;
@@ -284,6 +316,7 @@ async function startBrokerResponseLossProxy(targetOrigin: string): Promise<{
       });
       const responseBody = Buffer.from(await upstream.arrayBuffer());
       if (
+        dropFirstExecutionResponse &&
         !droppedExecutionResponse &&
         method === 'POST' &&
         target.pathname.endsWith('/executions')
@@ -339,14 +372,39 @@ let runFailure: unknown;
 try {
   fake = await startFakeOpenAIServer(({ body }) => {
     const messages = Array.isArray(body['messages']) ? body['messages'] : [];
-    if (!JSON.stringify(messages).includes('"role":"tool"')) {
+    const serializedMessages = JSON.stringify(messages);
+    if (twoSessions) {
+      const alpha = serializedMessages.includes('managed-session-alpha');
+      const beta = serializedMessages.includes('managed-session-beta');
+      if (alpha && beta) return { content: 'managed session context leaked' };
+      const label = alpha ? 'alpha' : beta ? 'beta' : undefined;
+      if (label !== undefined) {
+        if (!serializedMessages.includes('"role":"tool"')) {
+          return {
+            toolCalls: [
+              fakeToolCall('write_file', {
+                file_path: path.join(workspace, `${label}.txt`),
+                content: `${label} isolated content`,
+              }),
+            ],
+          };
+        }
+        return { content: `managed session ${label} complete` };
+      }
+    }
+    if (!serializedMessages.includes('"role":"tool"')) {
       return {
         contentChunks: [firstChunk],
         toolCalls: [
-          fakeToolCall('write_file', {
-            file_path: path.join(workspace, 'managed-e2e.txt'),
-            content: runtimeFileContent,
-          }),
+          cancelAfterStart
+            ? fakeToolCall('run_shell_command', {
+                command: `${shellQuote(process.execPath)} ${shellQuote(activeCancelScript)} ${shellQuote(activeCancelStarted)} ${shellQuote(activeCancelDelayedWrite)}`,
+                is_background: false,
+              })
+            : fakeToolCall('write_file', {
+                file_path: path.join(workspace, 'managed-e2e.txt'),
+                content: runtimeFileContent,
+              }),
         ],
       };
     }
@@ -404,7 +462,10 @@ try {
   if (typeof brokerUrl !== 'string' || typeof controlUrl !== 'string') {
     throw new Error('Java Runtime Broker fixture omitted its URLs');
   }
-  brokerProxy = await startBrokerResponseLossProxy(brokerUrl);
+  brokerProxy = await startBrokerResponseLossProxy(
+    brokerUrl,
+    !cancelBeforeReady && !cancelAfterStart && !twoSessions,
+  );
 
   let harnessStderr = '';
   const harness = register(
@@ -471,7 +532,11 @@ try {
         `-Dtest=ManagedHostedRuntimeE2ETest#${
           cancelBeforeReady
             ? 'cancellationBeforeRuntimeReadinessHasNoPhysicalSideEffect'
-            : 'firstModelEventPrecedesColdRuntimeAndSameTurnContinues'
+            : cancelAfterStart
+              ? 'cancellationAfterPhysicalStartStopsProcessTree'
+              : twoSessions
+                ? 'twoHostedSessionsStayIsolated'
+                : 'firstModelEventPrecedesColdRuntimeAndSameTurnContinues'
         }`,
         'test',
       ],
@@ -488,6 +553,9 @@ try {
           QWEN_MANAGED_HOSTED_E2E_FIRST_CHUNK: firstChunk,
           QWEN_MANAGED_HOSTED_E2E_FINAL_TEXT: finalText,
           QWEN_MANAGED_HOSTED_E2E_DELAY_MS: String(runtimeDelayMs),
+          QWEN_MANAGED_HOSTED_E2E_ACTIVE_CANCEL_STARTED: activeCancelStarted,
+          QWEN_MANAGED_HOSTED_E2E_ACTIVE_CANCEL_DELAYED:
+            activeCancelDelayedWrite,
         },
         stdio: 'inherit',
       },
@@ -603,18 +671,28 @@ try {
       `Managed Hosted Java E2E failed with ${result}; fake requests=${fake.requests.length}\n${harnessStderr}\n${brokerStderr}\n${runtimeStderr}\n${harnessLog}`,
     );
   }
-  const minimumModelRequests = cancelBeforeReady ? 1 : 2;
+  const minimumModelRequests =
+    cancelBeforeReady || cancelAfterStart ? 1 : twoSessions ? 4 : 2;
   if (fake.requests.length < minimumModelRequests) {
     throw new Error(
       `Managed Hosted Java E2E made only ${fake.requests.length} model request(s)`,
     );
   }
-  if (!cancelBeforeReady && !brokerProxy.didDropExecutionResponse()) {
+  if (
+    !cancelBeforeReady &&
+    !cancelAfterStart &&
+    !twoSessions &&
+    !brokerProxy.didDropExecutionResponse()
+  ) {
     throw new Error('Managed Hosted Runtime E2E did not drop a response');
   }
-  if (cancelBeforeReady) {
+  if (twoSessions) {
     console.log(
-      `Managed Hosted Runtime cancellation E2E passed with ${fake.requests.length} model request(s).`,
+      `Managed Hosted Runtime two-Session isolation E2E passed with ${fake.requests.length} model requests.`,
+    );
+  } else if (cancelBeforeReady || cancelAfterStart) {
+    console.log(
+      `Managed Hosted Runtime ${cancelAfterStart ? 'active ' : ''}cancellation E2E passed with ${fake.requests.length} model request(s).`,
     );
   } else {
     console.log(

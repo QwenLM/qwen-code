@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -165,12 +166,7 @@ class ManagedHostedRuntimeE2ETest {
 
             PromptTerminal terminal = call.completionFuture()
                     .get(30, TimeUnit.SECONDS);
-            if (terminal.getKind() == PromptTerminal.Kind.COMPLETE) {
-                assertEquals("cancelled", terminal.getStopReason());
-            } else {
-                assertEquals("-32603", terminal.getCode());
-                assertEquals("Request was aborted.", terminal.getMessage());
-            }
+            assertCancelled(terminal);
             Map<String, Object> settled = waitForRuntimeAcquired();
             Thread.sleep(500);
             settled = brokerStatus();
@@ -201,6 +197,151 @@ class ManagedHostedRuntimeE2ETest {
         }
     }
 
+    @Test
+    void cancellationAfterPhysicalStartStopsProcessTree() throws Exception {
+        String workspace = requiredEnvironment(
+                "QWEN_MANAGED_HOSTED_E2E_WORKSPACE");
+        Path startedPath = Path.of(requiredEnvironment(
+                "QWEN_MANAGED_HOSTED_E2E_ACTIVE_CANCEL_STARTED"));
+        Path delayedPath = Path.of(requiredEnvironment(
+                "QWEN_MANAGED_HOSTED_E2E_ACTIVE_CANCEL_DELAYED"));
+        CountDownLatch toolRequested = new CountDownLatch(1);
+
+        try (DaemonClient daemon = newDaemonClient();
+                DaemonSessionClient session = createSession(daemon,
+                        workspace)) {
+            startWarmup(session.getSessionId());
+            long promptStartedAt = System.currentTimeMillis();
+            PromptCall call = session.startPrompt(PromptRequest.text(
+                    "Run the long process tree and wait for cancellation."),
+                    new PromptObserver() {
+                        @Override
+                        public void onTool(Map<String, Object> update,
+                                DaemonEvent event) {
+                            toolRequested.countDown();
+                        }
+                    });
+
+            call.acceptanceFuture().get(5, TimeUnit.SECONDS);
+            assertTrue(toolRequested.await(10, TimeUnit.SECONDS));
+            waitForFile(startedPath, Duration.ofSeconds(30));
+            Map<String, Object> running = waitForCount(
+                    "physicalExecutionCount", 1, Duration.ofSeconds(10));
+            Map<String, Object> processIds = JsonSupport.parseObject(
+                    Files.readString(startedPath, StandardCharsets.UTF_8),
+                    "active cancellation process ids");
+            long rootPid = requiredLong(processIds, "rootPid");
+            long childPid = requiredLong(processIds, "childPid");
+            long startedAt = requiredLong(processIds,
+                    "startedAtEpochMillis");
+            assertTrue(isProcessAlive(rootPid));
+            assertTrue(isProcessAlive(childPid));
+
+            long cancelledAt = System.currentTimeMillis();
+            session.cancelActivePrompt();
+            assertCancelled(call.completionFuture()
+                    .get(30, TimeUnit.SECONDS));
+            Map<String, Object> cancelled = waitForCount(
+                    "physicalCancelCount", 1, Duration.ofSeconds(15));
+            waitForProcessExit(rootPid, Duration.ofSeconds(10));
+            waitForProcessExit(childPid, Duration.ofSeconds(10));
+            waitUntil(startedAt + 5_000);
+
+            assertEquals(1, JsonSupport.requiredInt(running,
+                    "physicalExecutionCount", "fixture status"));
+            assertEquals(1, JsonSupport.requiredInt(cancelled,
+                    "physicalCancelCount", "fixture status"));
+            assertFalse(isProcessAlive(rootPid));
+            assertFalse(isProcessAlive(childPid));
+            assertFalse(Files.exists(delayedPath));
+            System.out.println("MANAGED_HOSTED_ACTIVE_CANCEL_E2E_METRICS "
+                    + JsonSupport.encode(Map.of(
+                            "execution_started_ms",
+                            startedAt - promptStartedAt,
+                            "cancel_requested_ms",
+                            cancelledAt - promptStartedAt,
+                            "physical_execute_count", 1,
+                            "physical_cancel_count", 1)));
+        }
+    }
+
+    @Test
+    void twoHostedSessionsStayIsolated() throws Exception {
+        String workspace = requiredEnvironment(
+                "QWEN_MANAGED_HOSTED_E2E_WORKSPACE");
+        StringBuilder alphaText = new StringBuilder();
+        StringBuilder betaText = new StringBuilder();
+        StringBuilder alphaToolUpdates = new StringBuilder();
+        StringBuilder betaToolUpdates = new StringBuilder();
+        AtomicInteger alphaTools = new AtomicInteger();
+        AtomicInteger betaTools = new AtomicInteger();
+
+        try (DaemonClient daemon = newDaemonClient();
+                DaemonSessionClient alpha = createSession(daemon, workspace);
+                DaemonSessionClient beta = createSession(daemon, workspace)) {
+            startWarmup(alpha.getSessionId());
+            startWarmup(beta.getSessionId());
+            PromptCall alphaCall = alpha.startPrompt(PromptRequest.text(
+                    "managed-session-alpha: write the alpha file."),
+                    collectingObserver(alphaText, alphaToolUpdates,
+                            alphaTools));
+            PromptCall betaCall = beta.startPrompt(PromptRequest.text(
+                    "managed-session-beta: write the beta file."),
+                    collectingObserver(betaText, betaToolUpdates,
+                            betaTools));
+
+            alphaCall.acceptanceFuture().get(5, TimeUnit.SECONDS);
+            betaCall.acceptanceFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(PromptTerminal.Kind.COMPLETE,
+                    alphaCall.completionFuture().get(30, TimeUnit.SECONDS)
+                            .getKind());
+            assertEquals(PromptTerminal.Kind.COMPLETE,
+                    betaCall.completionFuture().get(30, TimeUnit.SECONDS)
+                            .getKind());
+            Map<String, Object> status = waitForCount(
+                    "physicalExecutionCount", 2, Duration.ofSeconds(10));
+
+            assertTrue(alphaText.toString().contains(
+                    "managed session alpha complete"));
+            assertFalse(alphaText.toString().contains("beta"));
+            assertTrue(betaText.toString().contains(
+                    "managed session beta complete"));
+            assertFalse(betaText.toString().contains("alpha"));
+            assertTrue(alphaTools.get() > 0);
+            assertTrue(betaTools.get() > 0);
+            assertTrue(alphaToolUpdates.toString().contains("alpha.txt"));
+            assertFalse(alphaToolUpdates.toString().contains("beta.txt"));
+            assertTrue(betaToolUpdates.toString().contains("beta.txt"));
+            assertFalse(betaToolUpdates.toString().contains("alpha.txt"));
+            assertEquals("alpha isolated content", Files.readString(
+                    Path.of(workspace, "alpha.txt"), StandardCharsets.UTF_8));
+            assertEquals("beta isolated content", Files.readString(
+                    Path.of(workspace, "beta.txt"), StandardCharsets.UTF_8));
+            assertEquals(1, JsonSupport.requiredInt(status,
+                    "provisionCount", "fixture status"));
+            assertEquals(2, JsonSupport.requiredInt(status,
+                    "warmRequests", "fixture status"));
+            assertEquals(2, JsonSupport.requiredInt(status,
+                    "physicalAcquireCount", "fixture status"));
+            assertEquals(2, JsonSupport.requiredInt(status,
+                    "physicalExecutionCount", "fixture status"));
+            List<?> acquired = requiredList(status,
+                    "acquiredHarnessSessionIds");
+            List<?> executed = requiredList(status,
+                    "executedHarnessSessionIds");
+            assertTrue(acquired.contains(alpha.getSessionId()));
+            assertTrue(acquired.contains(beta.getSessionId()));
+            assertTrue(executed.contains(alpha.getSessionId()));
+            assertTrue(executed.contains(beta.getSessionId()));
+            System.out.println("MANAGED_HOSTED_ISOLATION_E2E_METRICS "
+                    + JsonSupport.encode(Map.of(
+                            "logical_session_count", 2,
+                            "physical_provision_count", 1,
+                            "physical_acquire_count", 2,
+                            "physical_execute_count", 2)));
+        }
+    }
+
     private static DaemonClient newDaemonClient() {
         return DaemonClient.builder()
                 .baseUri(URI.create(requiredEnvironment(
@@ -218,6 +359,23 @@ class ManagedHostedRuntimeE2ETest {
                 .workspaceCwd(workspace)
                 .approvalMode(DaemonApprovalMode.YOLO)
                 .build());
+    }
+
+    private static PromptObserver collectingObserver(StringBuilder text,
+            StringBuilder toolUpdates, AtomicInteger tools) {
+        return new PromptObserver() {
+            @Override
+            public void onText(String chunk, DaemonEvent event) {
+                text.append(chunk);
+            }
+
+            @Override
+            public void onTool(Map<String, Object> update,
+                    DaemonEvent event) {
+                tools.incrementAndGet();
+                toolUpdates.append(JsonSupport.encode(update));
+            }
+        };
     }
 
     private static void startWarmup(String harnessSessionId)
@@ -264,6 +422,66 @@ class ManagedHostedRuntimeE2ETest {
         throw new AssertionError("Runtime Session was not acquired");
     }
 
+    private static Map<String, Object> waitForCount(String field,
+            int expected, Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            Map<String, Object> status = brokerStatus();
+            if (JsonSupport.requiredInt(status, field,
+                    "fixture status") == expected) {
+                return status;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError(field + " did not become " + expected);
+    }
+
+    private static void waitForFile(Path path, Duration timeout)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            if (Files.exists(path)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("File did not appear: " + path);
+    }
+
+    private static void waitForProcessExit(long pid, Duration timeout)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            if (!isProcessAlive(pid)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("Process did not exit: " + pid);
+    }
+
+    private static void waitUntil(long epochMillis)
+            throws InterruptedException {
+        while (System.currentTimeMillis() < epochMillis) {
+            Thread.sleep(Math.min(50,
+                    epochMillis - System.currentTimeMillis()));
+        }
+    }
+
+    private static boolean isProcessAlive(long pid) {
+        return ProcessHandle.of(pid).map(ProcessHandle::isAlive)
+                .orElse(false);
+    }
+
+    private static void assertCancelled(PromptTerminal terminal) {
+        if (terminal.getKind() == PromptTerminal.Kind.COMPLETE) {
+            assertEquals("cancelled", terminal.getStopReason());
+        } else {
+            assertEquals("-32603", terminal.getCode());
+            assertEquals("Request was aborted.", terminal.getMessage());
+        }
+    }
+
     private static long requiredLong(Map<String, Object> input,
             String field) {
         Object value = input.get(field);
@@ -271,6 +489,15 @@ class ManagedHostedRuntimeE2ETest {
             throw new AssertionError(field + " is not numeric");
         }
         return ((Number) value).longValue();
+    }
+
+    private static List<?> requiredList(Map<String, Object> input,
+            String field) {
+        Object value = input.get(field);
+        if (!(value instanceof List)) {
+            throw new AssertionError(field + " is not a list");
+        }
+        return (List<?>) value;
     }
 
     private static URI controlUri(String path) {

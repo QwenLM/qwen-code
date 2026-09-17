@@ -8,9 +8,12 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -44,6 +47,11 @@ public final class RuntimeBrokerFixtureMain {
         AtomicInteger warmRequests = new AtomicInteger();
         AtomicInteger physicalAcquireCount = new AtomicInteger();
         AtomicInteger physicalExecutionCount = new AtomicInteger();
+        AtomicInteger physicalCancelCount = new AtomicInteger();
+        Set<String> acquiredHarnessSessionIds =
+                ConcurrentHashMap.newKeySet();
+        Set<String> executedHarnessSessionIds =
+                ConcurrentHashMap.newKeySet();
         AtomicLong provisionStartedAt = new AtomicLong(-1);
         AtomicLong runtimeReadyAt = new AtomicLong(-1);
 
@@ -52,7 +60,9 @@ public final class RuntimeBrokerFixtureMain {
                 ignored -> provision(runtimeReady, provisionCount,
                         provisionStartedAt),
                 observedTransport(new HttpRuntimeTransport(),
-                        physicalAcquireCount, physicalExecutionCount));
+                        physicalAcquireCount, physicalExecutionCount,
+                        physicalCancelCount, acquiredHarnessSessionIds,
+                        executedHarnessSessionIds));
         RuntimeBrokerHttpServer broker = new RuntimeBrokerHttpServer(
                 new InetSocketAddress("127.0.0.1", 0), brokerToken, service);
         HttpServer control = HttpServer.create(
@@ -69,6 +79,8 @@ public final class RuntimeBrokerFixtureMain {
         control.createContext("/fixture/status", exchange -> status(exchange,
                 expectedAuthorization, provisionCount, warmRequests,
                 physicalAcquireCount, physicalExecutionCount,
+                physicalCancelCount,
+                acquiredHarnessSessionIds, executedHarnessSessionIds,
                 provisionStartedAt, runtimeReadyAt));
 
         broker.start();
@@ -98,7 +110,10 @@ public final class RuntimeBrokerFixtureMain {
 
     private static RuntimeTransport observedTransport(
             RuntimeTransport delegate, AtomicInteger physicalAcquireCount,
-            AtomicInteger physicalExecutionCount) {
+            AtomicInteger physicalExecutionCount,
+            AtomicInteger physicalCancelCount,
+            Set<String> acquiredHarnessSessionIds,
+            Set<String> executedHarnessSessionIds) {
         return new RuntimeTransport() {
             @Override
             public CompletionStage<Void> acquire(RuntimeLease lease,
@@ -106,6 +121,8 @@ public final class RuntimeBrokerFixtureMain {
                 return observe("acquire", delegate.acquire(lease, session))
                         .thenApply(ignored -> {
                             physicalAcquireCount.incrementAndGet();
+                            acquiredHarnessSessionIds.add(
+                                    session.getHarnessSessionId());
                             return null;
                         });
             }
@@ -122,6 +139,8 @@ public final class RuntimeBrokerFixtureMain {
                     RuntimeLease lease, RuntimeSession session,
                     Map<String, Object> reference) {
                 physicalExecutionCount.incrementAndGet();
+                executedHarnessSessionIds.add(
+                        session.getHarnessSessionId());
                 return observe("execute", delegate.execute(lease, session,
                         reference));
             }
@@ -131,7 +150,10 @@ public final class RuntimeBrokerFixtureMain {
                     RuntimeLease lease, RuntimeSession session,
                     Map<String, Object> reference) {
                 return observe("cancel", delegate.cancel(lease, session,
-                        reference));
+                        reference)).thenApply(status -> {
+                            physicalCancelCount.incrementAndGet();
+                            return status;
+                        });
             }
 
             @Override
@@ -233,6 +255,9 @@ public final class RuntimeBrokerFixtureMain {
             byte[] expectedAuthorization, AtomicInteger provisionCount,
             AtomicInteger warmRequests, AtomicInteger physicalAcquireCount,
             AtomicInteger physicalExecutionCount,
+            AtomicInteger physicalCancelCount,
+            Set<String> acquiredHarnessSessionIds,
+            Set<String> executedHarnessSessionIds,
             AtomicLong provisionStartedAt, AtomicLong runtimeReadyAt)
             throws IOException {
         try {
@@ -246,6 +271,11 @@ public final class RuntimeBrokerFixtureMain {
             body.put("warmRequests", warmRequests.get());
             body.put("physicalAcquireCount", physicalAcquireCount.get());
             body.put("physicalExecutionCount", physicalExecutionCount.get());
+            body.put("physicalCancelCount", physicalCancelCount.get());
+            body.put("acquiredHarnessSessionIds",
+                    List.copyOf(acquiredHarnessSessionIds));
+            body.put("executedHarnessSessionIds",
+                    List.copyOf(executedHarnessSessionIds));
             body.put("provisionStartedAtEpochMillis",
                     provisionStartedAt.get());
             body.put("runtimeReadyAtEpochMillis", runtimeReadyAt.get());

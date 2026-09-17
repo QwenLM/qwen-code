@@ -6,9 +6,9 @@
 
 设计依据：[Java Runtime Broker MVP](../design/2026-09-17-managed-agent-java-runtime-broker-mvp.zh-CN.md)
 
-当前已提交基线：`8e90835df9`（P1、P2、P4a）
+当前提交链已覆盖 P1、P2 和 P4；本阶段提交完成 P4b 的执行中取消与多 Session 隔离验收。
 
-当前完成范围：P4a 真实冷 Runtime 进程 E2E，以及 P4b 响应丢失幂等恢复和 Runtime ready 前取消。
+当前完成范围：P1、P2 和 P4；Hosted Harness、Java Broker 以及冷启动、幂等、取消、多 Session 隔离均已有真实进程证据。
 
 ## 1. 结论
 
@@ -239,11 +239,11 @@ GET  /v1/agent-sessions/{sessionId}/turns/{turnId}
 
 完成门槛：真实产品服务中第一条 Prompt 会触发一次异步 `warm()`；SSE 首事件不等待 `warm()` 完成；无 Tool Turn 可以在 Runtime 未 ready 时完成。
 
-### P4：15 秒冷启动进程 E2E（P4a 已完成）
+### P4：15 秒冷启动进程 E2E（已完成）
 
 测试拓扑：Fake OpenAI Server + 真实 Hosted Harness 进程 + 真实 Java Broker 进程 + 真实 Managed Runtime worker 进程。进程边界不使用类内 mock。
 
-P4a 已自动化并接入 Java CI：
+P4 已自动化并接入 Java CI：
 
 1. Broker 进入 provisioning 后等待 15 秒，再真正启动 Runtime worker 并取得 lease。
 2. 模型立即流出文本，然后发 Tool Call。
@@ -252,15 +252,16 @@ P4a 已自动化并接入 Java CI：
 5. 断言真实 Runtime 写入目标文件，Broker 只发生一次 provision 和一次 physical execute。
 6. Broker 接受 execution 后主动丢弃首次 HTTP 响应；Harness 使用相同 `requestId + idempotencyKey` 重试，仍只发生一次 physical execute。
 7. Tool Call 已出现但 Runtime 尚未启动时取消 Turn；Runtime 随后仍完成启动，断言 physical execute 为 0 且文件不存在。
+8. physical execute 启动根进程和子进程后取消 Turn；断言 Broker 完成一次 physical cancel、两级进程均退出，且子进程的延迟写入未发生。
+9. 一个常驻 Harness 并发运行两个 Java Session，在同一个 workspace-isolated Runtime 上分别写入不同文件并返回不同答案；断言两套 Harness 身份、Context、Tool Result 和事件不串流。
 
 2026-09-17 本机证据：Prompt accepted 23 ms，首个模型事件 350 ms，Runtime 冷启动并 ready 17,403 ms，工具等待 Runtime 17,053 ms，Turn 完成 20,790 ms；首次 execution 响应被丢弃并恢复，physical execute count 仍为 1。
 
 取消场景本机证据：首个模型事件 258 ms，262 ms 发出取消，Runtime 16,851 ms 才 ready；Runtime Session 随后已真实 acquire，但最终 physical execute count 为 0，Workspace 无目标文件。
 
-P4b 尚待补齐：
+执行中取消本机证据：5,043 ms 观察到根进程和子进程已启动，5,087 ms 发出取消；physical execute 与 physical cancel 均为 1，两级 PID 均退出，4 秒延迟写入未发生。
 
-1. physical execute 已开始后取消，断言工具根进程和后代退出，取消后无延迟写入。
-2. 一个 Harness 进程并发运行两个 Session，断言身份、Context、Tool Result 和事件不串流。
+多 Session 本机证据：两个逻辑 Session 共享一次 physical provision，分别完成两次 acquire 和两次 execute；Broker 观察到两个不同 Harness Session ID，两个模型上下文、最终文本和文件内容均保持隔离。
 
 必须输出指标：`prompt_accepted_ms`、`first_model_event_ms`、`runtime_ready_ms`、`tool_wait_runtime_ms`、`turn_completed_ms`、physical execute count。
 
@@ -312,7 +313,7 @@ P4b 尚待补齐：
 3. `test(managed): prove cold runtime hosted flow`：P4a 真实进程链路，只包含 E2E 所需的最小协议修正。
 4. `fix(managed): retry ambiguous broker execution`：P4b 响应丢失幂等恢复。
 5. `test(managed): prove cold runtime cancellation`：P4b Runtime ready 前取消。
-6. `test(managed): prove active cancellation and isolation`：P4b 物理进程取消和多 Session 隔离。
+6. `test(managed): prove active cancellation and isolation`：完成 P4b 物理进程树取消和多 Session 隔离。
 7. `feat(java): own local runtime lifecycle`：P5，包含 standalone boot contract。
 8. 产品服务 PR：P6 持久化与恢复。
 9. API PR：P7 公共 Agent API Adapter。
@@ -352,12 +353,12 @@ P4b 尚待补齐：
 
 ## 12. 紧接着执行的工作
 
-P1、P2 和 P4a 已经闭环。下一条产品关键路径是 P3，同时在 qwen-code 内补齐 P4b：
+P1、P2 和 P4 已经闭环。下一条产品关键路径是 P3，同时在 qwen-code 内进入 P5：
 
 1. 在真实 Java 产品服务定位 Prompt admission 事务、Session owner 表和 SSE event store 接缝。
 2. 实现 `ManagedAgentCoordinator`：事务提交后并行调用 `runtimeBroker.warm()` 与 `harnessClient.submitPrompt()`，禁止串行等待 Runtime。
 3. 把 Harness event 投影为带单调 `eventSequence` 的公共事件，并实现 `Last-Event-ID` 重连。
-4. 在 qwen-code 补 P4b 的进程树取消和双 Session 隔离；响应丢失幂等和 Runtime ready 前取消已经由真实进程 E2E 覆盖。
-5. P3/P4b 通过后再实现 P5 `LocalProcessRuntimeProvisioner`；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
+4. 在 qwen-code 实现 P5 `LocalProcessRuntimeProvisioner`，由 Java 持有 worker 进程树、ready record、lease、health、drain 和 release。
+5. P3/P5 通过后再进入持久化恢复；Kubernetes provisioner、共享 Session Authority 和 Agent API Adapter 继续后置。
 
 P3 的最小上线判断只有三个：首个模型事件不等待 Runtime、同 Turn 的工具只执行一次、Java/Harness/Runtime 任一失败都不回落 Legacy。持久化 schema、Kubernetes 调度和完整 Agent API 兼容不能阻塞这三个判断的第一次产品验证。

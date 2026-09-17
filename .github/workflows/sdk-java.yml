@@ -274,3 +274,5 @@ jobs:
         run: |-
           npx tsx scripts/run-managed-hosted-runtime-e2e.ts
           npx tsx scripts/run-managed-hosted-runtime-e2e.ts --cancel-before-ready
+          npx tsx scripts/run-managed-hosted-runtime-e2e.ts --cancel-after-start
+          npx tsx scripts/run-managed-hosted-runtime-e2e.ts --two-sessions
