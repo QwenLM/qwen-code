@@ -405,8 +405,9 @@ describe('collectSessionData', () => {
         count: 2,
         turnIds: ['turn-1', 'turn-2'],
       };
-      (audited.systemPayload as Record<string, unknown>)['blockedAudit'] =
-        blockedAudit;
+      (audited.systemPayload as unknown as Record<string, unknown>)[
+        'blockedAudit'
+      ] = blockedAudit;
 
       const data = await collectSessionData(
         {
