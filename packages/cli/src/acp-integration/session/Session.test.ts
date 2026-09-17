@@ -4833,6 +4833,7 @@ describe('Session', () => {
       settingsApprovalMode: undefined,
       effectiveMode: ApprovalMode.DEFAULT,
       restricted: false,
+      revision: 0,
       expected: 'auto',
     },
     {
@@ -4840,6 +4841,7 @@ describe('Session', () => {
       settingsApprovalMode: 'plan',
       effectiveMode: ApprovalMode.PLAN,
       restricted: false,
+      revision: 0,
       expected: 'plan',
     },
     {
@@ -4847,6 +4849,23 @@ describe('Session', () => {
       settingsApprovalMode: 'default',
       effectiveMode: ApprovalMode.DEFAULT,
       restricted: false,
+      revision: 0,
+      expected: 'default',
+    },
+    {
+      name: 'plan pin despite live yolo',
+      settingsApprovalMode: 'plan',
+      effectiveMode: ApprovalMode.YOLO,
+      restricted: false,
+      revision: 1,
+      expected: 'plan',
+    },
+    {
+      name: 'explicit set_mode default',
+      settingsApprovalMode: undefined,
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: false,
+      revision: 1,
       expected: 'default',
     },
     {
@@ -4854,6 +4873,7 @@ describe('Session', () => {
       settingsApprovalMode: 'plan',
       effectiveMode: ApprovalMode.DEFAULT,
       restricted: true,
+      revision: 0,
       expected: 'default',
     },
   ])(
@@ -4862,6 +4882,7 @@ describe('Session', () => {
       settingsApprovalMode,
       effectiveMode,
       restricted,
+      revision,
       expected,
     }) => {
       const annotateRunSession = vi.fn().mockResolvedValue(undefined);
@@ -4894,12 +4915,16 @@ describe('Session', () => {
       mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
       mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(effectiveMode);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(revision);
       mockConfig.isSafeMode = vi.fn().mockReturnValue(restricted);
       mockConfig.getBareMode = vi.fn().mockReturnValue(false);
       if (settingsApprovalMode !== undefined) {
         Object.assign(mockSettings.merged, {
           tools: { approvalMode: settingsApprovalMode },
         });
+      } else {
+        // Ensure a prior case's pin does not leak into a later no-pin case.
+        Object.assign(mockSettings.merged, { tools: {} });
       }
       vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
         sessionId: 'child-session',

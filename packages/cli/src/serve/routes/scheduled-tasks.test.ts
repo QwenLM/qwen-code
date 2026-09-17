@@ -250,7 +250,10 @@ function restoreEnv(key: string, value: string | undefined): void {
 function isolateSettingsHome(scratch: string): void {
   const qwenHome = path.join(scratch, 'qwen-home');
   process.env['QWEN_HOME'] = qwenHome;
-  process.env['QWEN_RUNTIME_DIR'] = path.join(scratch, 'runtime');
+  // Point at scratch itself (not scratch/runtime): Storage.setRuntimeBaseDir(scratch)
+  // and the pinned runtime context share this base; a nested runtime/ dir makes
+  // seedTask and the route disagree on the durable tasks path (R3-2).
+  process.env['QWEN_RUNTIME_DIR'] = scratch;
   process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
     scratch,
     'system-settings.json',

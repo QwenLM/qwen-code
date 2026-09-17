@@ -11,7 +11,11 @@ import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   type AcpSessionBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
@@ -402,13 +406,13 @@ describe('sub-session launcher', () => {
     await launcher.launch({
       prompt: 'do the thing',
       completion: 'sent',
-      approvalMode: 'auto',
+      approvalMode: ApprovalMode.AUTO,
       callerSessionId: 'caller-1',
     });
 
     expect(fake.spawns[0]).toMatchObject({
       parentSessionId: 'caller-1',
-      approvalMode: 'auto',
+      approvalMode: ApprovalMode.AUTO,
     });
   });
 
@@ -902,14 +906,14 @@ describe('sub-session launcher', () => {
     await launcher.launch({
       prompt: 'standalone child task',
       completion: 'sent',
-      approvalMode: 'auto',
+      approvalMode: ApprovalMode.AUTO,
       callerSessionId: 'caller-standalone',
     });
 
     expect(createChildWithInitialPrompt).toHaveBeenCalledWith(
       expect.objectContaining({
         parentSessionId: 'caller-standalone',
-        approvalMode: 'auto',
+        approvalMode: ApprovalMode.AUTO,
         promptId: expect.any(String),
       }),
       'standalone child task',

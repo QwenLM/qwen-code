@@ -4,14 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  ApprovalMode,
-  APPROVAL_MODES,
-  isBareMode,
-  isSafeModeEnv,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { isSafeModeEnv } from '@qwen-code/qwen-code-core/utils/safe-mode.js';
 import { loadSettings } from '../config/settings.js';
-import { resolveUnattendedAcpChildApprovalMode } from '../runtime/unattended-acp-child-approval-mode.js';
+import {
+  resolveUnattendedAcpChildApprovalMode,
+  tryParseApprovalModePin,
+} from '../runtime/unattended-acp-child-approval-mode.js';
 
 /**
  * Workspace-derived approval mode for an unattended ACP child spawned by
@@ -21,6 +20,11 @@ import { resolveUnattendedAcpChildApprovalMode } from '../runtime/unattended-acp
  * do. Does not invent a separate default: ACP children boot DEFAULT when
  * `tools.approvalMode` is unset; this then applies the unattended policy
  * (honor pins / restricted DEFAULT / elevate implicit DEFAULT → AUTO).
+ *
+ * Note: bare mode (`QWEN_CODE_SIMPLE`) is intentionally NOT consulted —
+ * that env key is scrubbed from ACP children, so a daemon running bare
+ * would otherwise dispatch DEFAULT to a child that is not bare (R3-9).
+ * Safe mode is inherited by children and stays restricted.
  */
 export function resolveUnattendedAcpChildApprovalModeForWorkspace(
   workspaceCwd: string,
@@ -33,13 +37,16 @@ export function resolveUnattendedAcpChildApprovalModeForWorkspace(
       settingsApprovalMode = value;
     }
   } catch {
-    settingsApprovalMode = undefined;
+    // Settings-read failure: fail closed (no elevation). Treat as a present
+    // but unreadable pin so the shared resolver returns DEFAULT rather than
+    // silently escalating to AUTO (R3-7).
+    return ApprovalMode.DEFAULT;
   }
 
-  const restricted = isSafeModeEnv() || isBareMode();
+  const restricted = isSafeModeEnv();
   let effectiveMode = ApprovalMode.DEFAULT;
   if (!restricted && settingsApprovalMode) {
-    const parsed = parsePinnedApprovalMode(settingsApprovalMode);
+    const parsed = tryParseApprovalModePin(settingsApprovalMode);
     if (parsed !== undefined) {
       effectiveMode = parsed;
     }
@@ -50,15 +57,4 @@ export function resolveUnattendedAcpChildApprovalModeForWorkspace(
     settingsApprovalMode,
     restricted,
   );
-}
-
-function parsePinnedApprovalMode(value: string): ApprovalMode | undefined {
-  const normalized = value.trim().toLowerCase();
-  const canonical =
-    normalized === 'auto_edit' || normalized === 'autoedit'
-      ? ApprovalMode.AUTO_EDIT
-      : normalized;
-  return (APPROVAL_MODES as readonly string[]).includes(canonical)
-    ? (canonical as ApprovalMode)
-    : undefined;
 }

@@ -5148,7 +5148,7 @@ describe('AgentTool', () => {
       expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
         'file-search',
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         // Foreground subagents now run with a composed signal (so the
         // dialog can cancel just this child) — the hook receives the
         // composed signal, not the caller-supplied one.
@@ -5347,7 +5347,7 @@ describe('AgentTool', () => {
         '/test/transcript',
         'Task completed successfully',
         false,
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         // Foreground subagents now run with a composed signal.
         expect.any(AbortSignal),
       );
@@ -5418,7 +5418,7 @@ describe('AgentTool', () => {
         '/test/transcript',
         'Task completed successfully',
         true,
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         // Foreground subagents now run with a composed signal.
         expect.any(AbortSignal),
       );
@@ -6230,8 +6230,8 @@ describe('AgentTool', () => {
       ['codex', ApprovalMode.AUTO, 'yolo', ApprovalMode.YOLO],
       ['codex', ApprovalMode.AUTO, 'default', ApprovalMode.DEFAULT],
       ['codex', ApprovalMode.YOLO, 'default', ApprovalMode.YOLO],
-      ['acp', ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
-      [undefined, ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
+      ['acp', ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO],
+      [undefined, ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO],
     ] as const)(
       'resolves %s parent=%s override=%s to %s at the child runtime',
       async (kind, parentMode, approvalMode, expectedMode) => {
@@ -7284,7 +7284,7 @@ describe('AgentTool', () => {
         ),
         'Monitor done',
         false,
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         undefined,
       );
       expect(mockAgent.execute).not.toHaveBeenCalled();
@@ -7394,7 +7394,7 @@ describe('AgentTool', () => {
           ),
           'Monitor done',
           false,
-          PermissionMode.AutoEdit,
+          PermissionMode.Auto,
           expect.any(AbortSignal),
         );
       });
