@@ -473,19 +473,17 @@ describe('GetGoalTool', () => {
     expect(await read({ view: 'full' })).toEqual(payload);
   });
 
-  it('exposes the view parameter and nothing else', () => {
+  it('advertises no parameters, and still serves a call that sends the old one', () => {
     const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
     expect(tool.schema.parametersJsonSchema).toEqual({
       type: 'object',
-      properties: {
-        view: {
-          type: 'string',
-          enum: ['summary', 'full'],
-          description: expect.stringContaining('Deprecated and ignored'),
-        },
-      },
+      properties: {},
       additionalProperties: false,
     });
+    // `view` left the schema to stop paying for it on every request; a model
+    // that still sends it is served, where any other unknown key is refused.
+    expect(tool.validateToolParams({ view: 'full' })).toBeNull();
+    expect(tool.validateToolParams({ verbose: true } as never)).not.toBeNull();
   });
 });
 
@@ -511,52 +509,68 @@ describe('UpdateGoalTool', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
     const schema = tool.schema.parametersJsonSchema as {
       required: string[];
-      properties: {
-        reason: { maxLength?: number };
-        evidenceRefs: { description?: string };
-        blockerKind: { description?: string; enum?: string[] };
-      };
+      properties: Record<
+        string,
+        { description?: string; enum?: string[]; maxLength?: number }
+      >;
     };
 
     expect(tool.description).toContain(
-      "the most recent records of this Goal's transcript",
+      "only the most recent records of this Goal's transcript",
     );
     expect(tool.description).toContain(
       'run the checks that prove every objective condition immediately before calling',
     );
-    expect(tool.description).toContain('There is nothing to cite.');
+    expect(tool.description).toContain(
+      'Never tell the user the Goal is complete or blocked',
+    );
+    expect(tool.description).toContain(
+      'with no progress or completion commentary',
+    );
+    expect(tool.description).toContain('end the turn with no further text');
     expect(tool.description).not.toContain('evidenceCatalog');
-    expect(tool.description).not.toContain('checkpointRequired');
-    expect(tool.description).toContain(
-      'Do not tell the user the Goal is complete',
-    );
-    expect(tool.description).toContain(
-      'do not add progress or completion commentary',
-    );
-    expect(tool.description).toContain(
-      'end the turn without additional user-facing text',
-    );
+    expect(tool.description).not.toContain('cite');
+
     expect(schema.required).toEqual(['status', 'reason']);
-    expect(schema.properties.evidenceRefs.description).toContain(
-      'Deprecated and ignored',
-    );
-    expect(schema.properties.reason.maxLength).toBe(
+    expect(Object.keys(schema.properties)).toEqual([
+      'status',
+      'reason',
+      'blockerKind',
+    ]);
+    expect(schema.properties['reason']!.maxLength).toBe(
       GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
     );
-    expect(schema.properties.blockerKind.description).toContain(
-      'three consecutive Goal turns',
+    // The blocker rules live on the parameter they govern, once.
+    const blockerKind = schema.properties['blockerKind']!;
+    expect(blockerKind.enum).toContain('infeasible');
+    expect(blockerKind.description).toContain('three consecutive Goal turns');
+    expect(blockerKind.description).toContain('exact same reason text');
+    expect(blockerKind.description).toContain('cannot be satisfied as written');
+    expect(blockerKind.description).toContain(
+      'a tool result (not your own text)',
     );
-    expect(schema.properties.blockerKind.description).toContain(
-      'exact same reason text',
+    expect(blockerKind.description).toContain(
+      'never for difficulty, uncertainty, or information you could still obtain',
     );
-    expect(schema.properties.blockerKind.enum).toContain('infeasible');
-    expect(schema.properties.blockerKind.description).toContain(
-      'cannot be satisfied as written',
-    );
-    expect(tool.description).toContain('a tool result (not your own text)');
-    expect(tool.description).toContain(
-      'not for difficulty, uncertainty, information you could still obtain',
-    );
+    expect(tool.description).not.toContain('infeasible');
+  });
+
+  it('serves a proposal that still sends evidenceRefs, and refuses any other unknown key', () => {
+    const tool = new UpdateGoalTool(makeConfig({}));
+    expect(
+      tool.validateToolParams({
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['an-old-habit'],
+      }),
+    ).toBeNull();
+    expect(
+      tool.validateToolParams({
+        status: 'complete',
+        reason: 'Delivered',
+        citations: [],
+      } as never),
+    ).not.toBeNull();
   });
 
   it('records the proposal without references and without reading a catalog', async () => {
@@ -1215,6 +1229,26 @@ describe('ProposeGoalTool', () => {
       expect(message.split('\n').at(-1)).toBe(`/goal set ${objective}`);
       expect(message.match(/\/goal/g)).toHaveLength(1);
     }
+  });
+
+  it('keeps what the Goal tools cost every request inside a budget', () => {
+    // get_goal and update_goal are registered in every session, Goal or not,
+    // so their schemas ride along with every model request. The figure is
+    // what the three tools cost today plus room for a sentence; growing past
+    // it should be a decision, not drift.
+    const tools = [
+      new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
+      new UpdateGoalTool(makeConfig({})),
+      new ProposeGoalTool(proposeConfig(idleRuntime().runtime)),
+    ];
+    const advertised = tools
+      .map(
+        (tool) =>
+          tool.description + JSON.stringify(tool.schema.parametersJsonSchema),
+      )
+      .join('');
+
+    expect(advertised.length).toBeLessThan(3_600);
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {

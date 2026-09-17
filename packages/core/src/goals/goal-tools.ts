@@ -70,6 +70,22 @@ export interface UpdateGoalToolParams {
 
 export type GoalToolResult = ToolResult;
 
+/**
+ * Parameters the Goal tools used to take and no longer advertise. A model
+ * that learnt the older contract, or that sees its own earlier calls in the
+ * conversation, may still send them; they are dropped before the schema is
+ * checked, so the call is served rather than refused for an unknown key.
+ */
+function withoutDeprecatedParams<T extends object>(
+  params: T,
+  names: readonly string[],
+): T {
+  if (!names.some((name) => name in params)) return params;
+  return Object.fromEntries(
+    Object.entries(params).filter(([key]) => !names.includes(key)),
+  ) as T;
+}
+
 type LastGoalSummary = Pick<
   GoalRecord,
   | 'goalId'
@@ -144,21 +160,18 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      `Read the current Goal for this permitted Goal turn: its identity, objective, status, budget figures (tokens, turns, active time and their ceilings when set), and the independent verifier's feedback on the previous proposal when there is any. It returns no transcript history: the verifier reads the most recent transcript records by itself, so there is nothing to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget, turnBudget, activeTimeBudgetMs and lastReason when recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
+      'Read the current Goal during a permitted Goal turn: its objective, status, budget figures, and the verifier\'s feedback on the previous proposal when there is any. Outside a Goal turn it returns "active": false with "lastGoal", a summary of the session\'s most recent Goal. It never changes Goal state. Use the result silently; do not mention the retrieval to the user.',
       Kind.Read,
       {
         type: 'object',
-        properties: {
-          view: {
-            type: 'string',
-            enum: ['summary', 'full'],
-            description:
-              'Deprecated and ignored: get_goal returns no evidence catalog, so there is no view to choose.',
-          },
-        },
+        properties: {},
         additionalProperties: false,
       },
     );
+  }
+
+  override validateToolParams(params: GetGoalToolParams): string | null {
+    return super.validateToolParams(withoutDeprecatedParams(params, ['view']));
   }
 
   protected createInvocation(
@@ -316,7 +329,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      "Propose that the current Goal is complete or blocked. The independent verifier judges the proposal from the most recent records of this Goal's transcript (your visible output, tool results and the user's messages), newest first until its request is full, so run the checks that prove every objective condition immediately before calling: in a long Goal the oldest records are no longer seen. There is nothing to cite. If completion depends on user-facing content delivered in this turn, emit only the content required by the objective before calling update_goal, and do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns, and infeasible when a tool result (not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; infeasible is not for difficulty, uncertainty, information you could still obtain, or wanting to ask, and its reason must state what was checked and why no in-scope work could satisfy the objective. Omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.",
+      "Propose that the current Goal is complete or blocked. An independent verifier decides; this tool never changes the Goal's status. The verifier reads only the most recent records of this Goal's transcript (your visible output, tool results, the user's messages), so run the checks that prove every objective condition immediately before calling. If completion depends on content delivered in this turn, emit only what the objective requires first, with no progress or completion commentary. Never tell the user the Goal is complete or blocked: when the result reports readyForVerification, end the turn with no further text; otherwise keep working. The Goal status card reports the verdict.",
       Kind.Think,
       {
         type: 'object',
@@ -327,22 +340,22 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             minLength: 1,
             maxLength: GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
           },
-          evidenceRefs: {
-            type: 'array',
-            description:
-              'Deprecated and ignored: the verifier reads the transcript directly, so nothing needs to be cited.',
-            items: { type: 'string' },
-          },
           blockerKind: {
             type: 'string',
             enum: ['authority', 'external', 'repeated', 'infeasible'],
             description:
-              'authority: a user or maintainer decision or permission is required; external: an evidenced external resource or capability is unavailable; repeated: the same evidenced blocker with the exact same reason text across three consecutive Goal turns; infeasible: a tool result (external_fact) in this turn shows the objective cannot be satisfied as written (self-contradictory, names a target that verifiably does not exist, or needs an action no tool can perform) -- not difficulty, uncertainty, or obtainable information. Omission uses the repeated-blocker audit.',
+              'Set for a blocked proposal. authority: a user or maintainer decision or permission is required. external: an evidenced external resource or capability is unavailable. repeated: the same evidenced blocker, with the exact same reason text, across three consecutive Goal turns. infeasible: a tool result (not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; never for difficulty, uncertainty, or information you could still obtain, and the reason must state what was checked. Omitted: the repeated-blocker audit applies.',
           },
         },
         required: ['status', 'reason'],
         additionalProperties: false,
       },
+    );
+  }
+
+  override validateToolParams(params: UpdateGoalToolParams): string | null {
+    return super.validateToolParams(
+      withoutDeprecatedParams(params, ['evidenceRefs']),
     );
   }
 
@@ -821,7 +834,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     super(
       ProposeGoalTool.Name,
       ToolDisplayNames.PROPOSE_GOAL,
-      `Propose a session Goal for the user to approve. The user sees the objective in an approval dialog and decides; only their approval sets the Goal. This tool never sets one on its own, and no permission rule or approval mode skips the dialog. Propose only when the user asked for an outcome with a verifiable end state that spans multiple turns ("make the tests pass", "migrate every call site", or after /goal-draft produced an objective), and never to widen scope: the objective must follow from their request. Write the objective so an independent verifier can judge it from transcript evidence alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked. At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters, on one line. One Goal is active at a time: if a Goal is active this tool refuses and you must hand the user a \`/goal edit …\` or \`/goal set …\` line instead; a stopped Goal (paused, blocked, complete, usage-limited) is replaced on approval. If the user declines you will not be told why: do not ask about it and do not propose the same or a reworded objective again. After approval the Goal is set the moment the current turn ends: acknowledge it in one sentence and stop, without further tool calls; the Goal runtime starts the first Goal turn on its own. Unavailable in plan mode, in subagents, and in headless runs.`,
+      'Propose a session Goal. The user approves or declines it in a dialog that no permission rule or approval mode skips, and only approval sets it. Propose only when the user asked for an outcome with a verifiable end state that spans several turns, or /goal-draft produced an objective; never to widen their request. If a Goal is active this tool refuses: give the user a `/goal edit …` or `/goal set …` line instead. A stopped Goal is replaced on approval. If the user declines you are not told why: do not ask, and do not propose the same or a reworded objective again. After approval, acknowledge in one sentence and stop with no further tool calls; the Goal starts on its own when the turn ends.',
       Kind.Other,
       {
         type: 'object',
@@ -830,7 +843,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
             type: 'string',
             minLength: 1,
             maxLength: PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
-            description: `The objective to propose, written so the Goal verifier can judge it from the transcript (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: as model guidance, stop as blocked after 20 turns. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
+            description: `The objective, on one line, written so the verifier can judge it from the transcript alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: as model guidance, stop as blocked after 20 turns. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
           },
         },
         required: ['objective'],
