@@ -147,6 +147,8 @@ import {
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
+import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
+import { strandLocalRuns } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -312,6 +314,8 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
+import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -356,7 +360,16 @@ import {
   resolveLiveProviderCredential,
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
-import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import type {
+  ChildHeapPolicy,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import type { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import {
+  createIdleAcpReclaimer,
+  type IdleAcpReclaimer,
+} from './idle-acp-reclamation.js';
+import { readWorkspaceActivity } from './workspace-activity.js';
 import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
@@ -591,6 +604,11 @@ export interface ServeAppDeps {
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  managedChildProcesses?: {
+    registry: ProcessRegistry;
+    policy: ChildHeapPolicy;
+    ownsBridge?: (bridge: AcpSessionBridge) => boolean;
+  };
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -786,6 +804,12 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (
+    opts.childHeapMode === 'admit' &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== 'admit'
+  ) {
+    throw new TypeError('ACP admission requires managed child process wiring.');
+  }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
@@ -1027,6 +1051,13 @@ export function createServeApp(
     }
     return () => guard.assertOpen();
   };
+  // Resolved once, below, from the settings read at daemon startup — not per
+  // request and not per session. The collaboration surface includes work no
+  // session owns: a recovery scan, a 5s dispatch timer and the Host transport
+  // routes. A per-session read cannot govern those, so the setting carries
+  // `requiresRestart: true` and this value is fixed for the daemon's lifetime.
+  // `agentTeamEnabled` reads per session; this one deliberately does not.
+  let agentCollaborationEnabled = false;
   let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
@@ -1081,6 +1112,7 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () =>
         workspaceRegistry.listEntries().length > 1,
+      agentCollaborationEnabled: () => agentCollaborationEnabled,
       dynamicWorkspaceRegistrationAvailable:
         deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
@@ -1151,6 +1183,7 @@ export function createServeApp(
     createDaemonStatusProvider(
       primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
     );
+  let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
   const totalSessionAdmission =
     !deps.bridge && !injectedWorkspaceRegistry
@@ -1196,9 +1229,21 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs
+      ...(acpChildArgs || deps.managedChildProcesses
         ? {
             channelFactory: createSpawnChannelFactory({
+              processRegistry: deps.managedChildProcesses?.registry,
+              childHeapPolicy: deps.managedChildProcesses?.policy,
+              ...(deps.managedChildProcesses
+                ? {
+                    reclaimIdleChild: async (signal?: AbortSignal) => {
+                      await reclaimIdleAcp?.(
+                        hashDaemonWorkspace(boundWorkspace),
+                        signal,
+                      );
+                    },
+                  }
+                : {}),
               extraArgs: acpChildArgs,
             }),
           }
@@ -1437,6 +1482,14 @@ export function createServeApp(
       return undefined;
     }
   })();
+  // Read from the same boot snapshot as Live Voice. The env override matches
+  // `Config.isAgentCollaborationEnabled` so a daemon and the sessions it hosts
+  // cannot disagree about whether the feature is on.
+  agentCollaborationEnabled =
+    !opts.agentHostWorker &&
+    (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1' ||
+      liveSettingsAtBoot?.experimental?.agentCollaboration === true);
+
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
     : undefined;
@@ -2135,6 +2188,14 @@ export function createServeApp(
     });
   }
 
+  // Same opt-in. These routes carry Host enrollment and heartbeat; that they
+  // authenticate is not a substitute for the experiment gate, since an
+  // enrolled Host is exactly the outbound execution path the opt-in governs.
+  if (agentCollaborationEnabled) {
+    registerAgentHostTransportRoutes(app, workspaceRegistry);
+    registerA2ATransportRoutes(app, workspaceRegistry);
+  }
+
   // Credentials are a listener-scoped set, not one token: while Local Control
   // is on, the LAN listener accepts a revocable pairing token and rejects the
   // runtime token, and the primary listener does the reverse. With no Local
@@ -2278,7 +2339,14 @@ export function createServeApp(
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
-    getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+    getChildHeapPolicySnapshot: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.policy.snapshot()
+      : deps.getChildHeapPolicySnapshot,
+    getCommittedAcpChildCount: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.registry.committedProcessCount
+      : undefined,
+    childAdmissionEnforced:
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit',
   });
 
   if (conversationRuntimeManager) {
@@ -3177,6 +3245,54 @@ export function createServeApp(
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
+  // Gated on the opt-in, and gated by *not registering* rather than by
+  // refusing inside the handlers: `registerWorkspaceAgentRoutes` runs a
+  // `recover()` sweep and arms a 5s interval as a side effect of registration,
+  // so a handler-level refusal would still leave the scanner reading
+  // collaboration storage and re-dispatching booked runs on a daemon whose
+  // operator never opted in. Skipping the call leaves the routes 404, which is
+  // also what the absent `agent_collaboration_v1` capability tells clients.
+  if (agentCollaborationEnabled) {
+    registerWorkspaceAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      ...(deps.deliverChannelMessage
+        ? { deliverChannelMessage: deps.deliverChannelMessage }
+        : {}),
+    });
+  } else if (!opts.agentHostWorker) {
+    // Close out runs the switch left mid-flight (architecture §6). Recovery
+    // cannot tell "the daemon crashed" from "the operator turned this off"
+    // — both look like a live run whose body is gone — so if these were left
+    // as they are, opting back in would silently re-dispatch work nobody
+    // asked to resume. Marking them terminal here means recovery later finds
+    // a closed run, and a person decides whether the work happens again.
+    //
+    // A one-shot, not a scanner: no timer, no routes, nothing created in a
+    // workspace that never used collaboration, and untrusted workspaces are
+    // not touched at all. Failures are logged and dropped — this must never
+    // be able to stop a daemon whose operator opted out from starting.
+    void (async () => {
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (!runtime.trusted) continue;
+        try {
+          const { runsStranded } = await strandLocalRuns(runtime.workspaceCwd);
+          if (runsStranded > 0) {
+            writeStderrLine(
+              `qwen serve: agent collaboration is off; ${runsStranded} run(s) in ${runtime.workspaceCwd} marked stranded for review`,
+            );
+          }
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: could not close stranded agent runs in ${runtime.workspaceCwd}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    })();
+  }
+
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
   // manages every registered project's schedule against that project's own cron
   // file (and its own session bridge) rather than always the primary's. Each
@@ -3460,6 +3576,30 @@ export function createServeApp(
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
   }
+  if (deps.managedChildProcesses) {
+    reclaimIdleAcp = createIdleAcpReclaimer({
+      registry: workspaceRegistry,
+      processes: deps.managedChildProcesses.registry,
+      policy: deps.managedChildProcesses.policy,
+      ownsBridge:
+        deps.managedChildProcesses.ownsBridge ??
+        ((candidate) => candidate === defaultBridgeForAdmission),
+      getActivity: (runtime) => {
+        if (
+          !deps.workspaceRuntimeRemoval ||
+          !acpHandleRef.current ||
+          !supportsWorkspaceRuntimeLifecycle(runtime.bridge)
+        )
+          return undefined;
+        return readWorkspaceActivity(
+          runtime,
+          deps.workspaceRuntimeRemoval.getActivity(runtime),
+          acpHandleRef.current.getWorkspaceActivity(runtime.workspaceId),
+        );
+      },
+    });
+    app.locals['reclaimIdleAcp'] = reclaimIdleAcp;
+  }
 
   // Local Control: the LAN listener serves THIS app, so the service is built
   // here where the credential store and the CORS allowlist it has to mutate
@@ -3533,10 +3673,12 @@ export function createServeApp(
         stopScheduledTaskKeepalive?: () => void;
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
+        stopWorkspaceAgentRecovery?: () => void;
       };
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
+      stopAppResource(locals.stopWorkspaceAgentRecovery);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

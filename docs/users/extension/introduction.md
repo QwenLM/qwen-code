@@ -412,9 +412,24 @@ An extension named `gcp` with the following structure:
     └── deep-research.js
 ```
 
-provides one workflow when its script declares a static `meta` object with `name: 'deep-research'`, registered as `gcp:deep-research` — the extension's `name`, a colon, then `meta.name`. Run it with `/gcp:deep-research`, or call it from another workflow with `workflow('gcp:deep-research')`. Like an extension skill, an extension workflow always carries its owner, so it never shadows one of your project or user workflows. If the same extension also ships a skill with that name, the skill keeps `/gcp:deep-research` and the workflow's slash command is renamed to `/gcp.gcp:deep-research`, as for any colliding extension command; a `slashCommands.disabled` entry written as `gcp:deep-research` still removes both. A user or project custom command with the same name (for example `commands/gcp/deep-research.md`) loads last and takes the slash command, and the workflow then stays reachable through `workflow('gcp:deep-research')`.
+provides one workflow when its script declares a static `meta` object with `name: 'deep-research'`, registered as `gcp:deep-research` — the extension's `name`, a colon, then `meta.name`. Run it with `/gcp:deep-research`, call it from another workflow with `workflow('gcp:deep-research')`, or let the model run it by name with `Workflow({ name: 'gcp:deep-research' })`. Like an extension skill, an extension workflow always carries its owner, so it never shadows one of your project or user workflows. If the same extension also ships a skill with that name, the skill keeps `/gcp:deep-research` and the workflow's slash command is renamed to `/gcp.gcp:deep-research`, as for any colliding extension command; a `slashCommands.disabled` entry written as `gcp:deep-research` still removes both. A user or project custom command with the same name (for example `commands/gcp/deep-research.md`) loads last and takes the slash command, and the workflow then stays reachable through `workflow('gcp:deep-research')`.
 
 Each script must declare a static `export const meta = { name, description }` block. The `description` is shown in the install consent prompt and in the command list. The file name may differ from `meta.name`; calls always use the metadata name. If multiple scripts declare the same `meta.name`, the first discovered script is kept. A `description` longer than 500 characters is shortened wherever it is shown.
+
+A script can also declare `whenToUse`, a sentence saying when the workflow applies:
+
+```js
+export const meta = {
+  name: 'deep-research',
+  description: 'Researches a question across the codebase and the web',
+  whenToUse:
+    'When the user asks for a sourced, multi-angle answer to an open question',
+};
+```
+
+Only a workflow that declares `whenToUse` is listed for the model, together with its description, so the model can start it when a request matches; each run still goes through the workflow approval. Without it, the model does not see the workflow, which then runs when you invoke it, ask for it by name, or another workflow calls it. `whenToUse` is shortened past 500 characters, like `description`, and since it lives in the script, changing it makes the next update ask for consent again.
+
+In the interactive UI, `/gcp:deep-research` starts the workflow directly. In headless mode and over ACP, the same command asks the model to run it by name, and the approval follows.
 
 Discovery is deliberately narrow:
 
@@ -423,7 +438,7 @@ Discovery is deliberately narrow:
 - Every declared path must stay inside the extension directory. A linked extension (`qwen extensions link`) skips symlinked workflow files and directories; an installed extension is a copy in which each symlink has already been replaced by the file it points to.
 - Scripts larger than 256 KiB, or without a valid `meta` block, are skipped with a warning.
 
-Installing an extension lists its workflows in the consent prompt. An update asks again when it adds or removes a workflow or changes a workflow's name or description, but not when it only changes a script's code. Extension workflows follow the same rules as your own saved workflows: they are hidden in untrusted folders and in bare mode, and each run goes through the usual workflow approval. An "always allow" granted for an extension workflow's script path stays in effect after the extension updates, so review updates before relying on it.
+Installing an extension lists its workflows in the consent prompt. An update asks again when it adds or removes a workflow, changes a workflow's name or description, or changes a script's code; when only code changed, the prompt names the changed scripts. Extension workflows follow the same rules as your own saved workflows: they are hidden in untrusted folders and in bare mode, and each run goes through the usual workflow approval, which shows the start of the script. An "always allow" for a workflow run by name or path is saved as a rule pinned to the script's content, such as `Workflow(name:gcp:deep-research,sha256:3f2a9c1d0b4e5f67)`, so it stops applying once the script changes. A rule you write without `sha256`, such as `Workflow(name:gcp:deep-research)`, allows every version of the script.
 
 Edits to files in the default `workflows/` directory are picked up automatically. Changes under other declared paths take effect after `/reload-plugins` or a restart.
 

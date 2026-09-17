@@ -9365,6 +9365,42 @@ describe('formatGoalState', () => {
     },
   });
 
+  it('shows budgets on a stopped Goal in the usage order', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'paused',
+          turnCount: 3,
+          turnBudget: 20,
+          activeTimeMs: 723_000,
+          activeTimeBudgetMs: 1_800_000,
+          tokensUsed: 1234,
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal paused: ship the release notes\nUsage: 3 of 20 turns · 12m 3s of 30m active · 1,234 tokens',
+    );
+  });
+
+  it('does not add active time without a budget', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 1, activeTimeMs: 723_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 1 turn');
+  });
+
+  it('hides budgets before any usage', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnBudget: 20, activeTimeBudgetMs: 1_800_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes');
+  });
+
   it('reports turns and spend against the budget', () => {
     // Spelled out rather than abbreviated: this output is read in a terminal
     // and piped into scripts, neither of which is helped by `1.2k`.

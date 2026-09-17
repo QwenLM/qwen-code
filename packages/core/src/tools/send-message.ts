@@ -465,7 +465,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (!teamManager) {
       const msg = this.peerMessagingOff
-        ? `No active team and no task_id, and cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so "${to}" cannot be another session. ` +
+        ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
           'Create a team, pass `task_id` to message a background task, or use ' +
@@ -496,7 +496,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         // that the name it wants could belong to a session this setting
         // is hiding.
         errMsg += this.peerMessagingOff
-          ? ` Cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so another session could not have taken that name either.`
+          ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
           : ` No reachable session has that name either; use list_agents to see who is reachable.`;
       }
       return {

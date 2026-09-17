@@ -52,6 +52,7 @@ interface CreateServeFeaturesDeps {
   channelManagementAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
+  agentCollaborationEnabled: () => boolean;
   dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
@@ -92,6 +93,7 @@ export function createServeFeatures(
     channelManagementAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    agentCollaborationEnabled,
     dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
@@ -151,6 +153,7 @@ export function createServeFeatures(
         channelControlAvailable,
         channelManagementAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        agentCollaborationEnabled: agentCollaborationEnabled(),
         dynamicWorkspaceRegistrationAvailable,
         persistentWorkspaceRegistrationAvailable,
         scratchWorkspaceRegistrationAvailable:
