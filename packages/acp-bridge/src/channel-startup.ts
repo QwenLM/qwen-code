@@ -22,6 +22,7 @@ import type { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
 import { CHANNEL_LIVENESS_VERSION } from './bridgeTypes.js';
