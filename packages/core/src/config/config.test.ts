@@ -1058,9 +1058,16 @@ describe('Server Config (config.ts)', () => {
 
     it('handles a rejection from an async listener', async () => {
       const config = new Config({ ...baseParams });
-      const rejection = Promise.reject(new Error('async observer broke'));
-      const catchSpy = vi.spyOn(rejection, 'catch');
-      config.onMessageBusChange(() => rejection);
+      let catchSpy: ReturnType<typeof vi.fn> | undefined;
+      config.onMessageBusChange(() => {
+        // Created while notified, so the only chance to handle it is the
+        // caller's: nothing else attaches a handler before it settles.
+        const rejection = Promise.reject(new Error('async observer broke'));
+        catchSpy = vi.spyOn(rejection, 'catch') as unknown as ReturnType<
+          typeof vi.fn
+        >;
+        return rejection;
+      });
 
       await expect(config.initialize()).resolves.toBeUndefined();
 
