@@ -368,6 +368,72 @@ describe('goal runtime', () => {
     });
   });
 
+  it.each(['accept', 'reject'] as const)(
+    'persists %s verifier usage once and applies the budget gate',
+    async (decision) => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      let records: readonly RuntimeRecord[] = [];
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision,
+        reason: 'Checked the cited result',
+        usage: { totalTokenCount: 250 },
+      }));
+      const runtime = createGoalRuntime({
+        journal,
+        evidenceSource: fakeEvidenceSource(() => records),
+        verifier,
+        ledger: { takeGoalTurnTokens: () => 800 },
+        tokenBudgetGrant: 1_000,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      records = verifierEvidenceRecords(
+        permit,
+        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      );
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['assistant-evidence'],
+      });
+
+      await runtime.finishTurn(permit);
+
+      expect(verifier).toHaveBeenCalledOnce();
+      expect(
+        journal.appended.find(({ cause }) => cause === 'turn_finished')!
+          .snapshot.goal?.tokensUsed,
+      ).toBe(800);
+      expect(
+        journal.appended.find(({ cause }) => cause === `verifier_${decision}`)!
+          .snapshot.goal,
+      ).toMatchObject({ tokensUsed: 1_050, turnCount: 1 });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        tokensUsed: 1_050,
+        turnCount: 1,
+        status: decision === 'accept' ? 'complete' : 'active',
+      });
+      if (decision === 'reject') {
+        expect(host.inputs[1]).toMatchObject({ windDown: true });
+      } else {
+        expect(host.started).toHaveLength(1);
+        expect(journal.appended.at(-1)!.snapshot.goal?.tokensUsed).toBe(1_050);
+        const restored = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          evidenceSource: fakeEvidenceSource(() => records),
+          verifier,
+        });
+        await restored.restore(journal.records);
+        expect(restored.getSnapshot().goal?.tokensUsed).toBe(1_050);
+        expect(verifier).toHaveBeenCalledOnce();
+        restored.dispose();
+      }
+      runtime.dispose();
+    },
+  );
+
   it('asks the ledger for the finishing turn, not the session', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
@@ -1285,6 +1351,7 @@ describe('goal runtime', () => {
     const evidenceSource = fakeEvidenceSource(() => records);
     const verifier: GoalVerifier = vi.fn();
     const checkpointVerifier = vi.fn(async () => ({
+      usage: { totalTokenCount: 321 },
       claims: [
         {
           proofKind: 'delivered_output' as const,
@@ -1309,6 +1376,11 @@ describe('goal runtime', () => {
     await runtime.finishTurn(permit);
 
     expect(checkpointVerifier).toHaveBeenCalledOnce();
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      tokensUsed: 321,
+      turnCount: 1,
+    });
+    expect(journal.appended.at(-1)!.snapshot.goal?.tokensUsed).toBe(321);
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -2184,6 +2256,56 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
   });
 
+  it('preserves active time and billed tokens when a metered checkpoint reaches the stall limit', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(1_000);
+      const { journal, host, runtime, checkpointVerifier, setRecords } =
+        stallHarness();
+      checkpointVerifier.mockImplementation(async (input) => {
+        vi.setSystemTime(Date.now() + 60_000);
+        return { ...fullClaims(input), usage: { totalTokenCount: 7 } };
+      });
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+      let records: RuntimeRecord[] = [];
+      for (let stall = 1; stall <= GOAL_CHECKPOINT_STALL_LIMIT; stall++) {
+        records = await runCheckpointTurn(
+          runtime,
+          host,
+          setRecords,
+          records,
+          101,
+          `metered-window-${stall}`,
+        );
+      }
+
+      expect(batchSizes(checkpointVerifier)).toEqual([
+        100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
+      ]);
+      const expectedGoal = {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+        activeTimeMs: 600_000,
+        tokensUsed: 70,
+        updatedAt: 601_000,
+      };
+      expect(runtime.getSnapshot().goal).toMatchObject(expectedGoal);
+      expect(journal.appended.at(-1)).toMatchObject({
+        cause: 'usage_limited',
+        snapshot: { goal: expectedGoal },
+      });
+      const restored = createGoalRuntime({ journal: fakeGoalJournal() });
+      vi.setSystemTime(661_000);
+      await restored.restore(journal.records);
+      expect(restored.getSnapshot().goal).toMatchObject(expectedGoal);
+      expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('resets the stall streak when a checkpoint finds room to absorb', async () => {
     const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
@@ -2649,6 +2771,7 @@ describe('goal runtime', () => {
         }
         const carried = input.previousClaims[0];
         return {
+          usage: { totalTokenCount: input.evidence.length + 10 },
           claims: [
             ...(carried
               ? [
@@ -2703,6 +2826,8 @@ describe('goal runtime', () => {
     ).toEqual(Array.from({ length: 100 }, (_, index) => `second-${index + 1}`));
 
     const goal = runtime.getSnapshot().goal!;
+    expect(goal.tokensUsed).toBe(150);
+    expect(journal.appended.at(-1)!.snapshot.goal?.tokensUsed).toBe(150);
     const checkpointId = goal.evidenceCheckpoint!.checkpointId;
     // Each batch is given the claims the one before it folded, under an id
     // segment of its own, so none collides with the kept checkpoint's ids.
@@ -3159,6 +3284,7 @@ describe('goal runtime', () => {
     const restoredJournal = fakeGoalJournal();
     const restoredHost = fakeGoalTurnHost();
     const restoredCheckpointVerifier = vi.fn(async () => ({
+      usage: { totalTokenCount: 450 },
       claims: [
         {
           proofKind: 'delivered_output' as const,
@@ -3178,6 +3304,10 @@ describe('goal runtime', () => {
     await restored.restore(recoveryRecords);
 
     expect(restoredCheckpointVerifier).toHaveBeenCalledOnce();
+    expect(restored.getSnapshot().goal?.tokensUsed).toBe(450);
+    expect(restoredJournal.appended.at(-1)!.snapshot.goal?.tokensUsed).toBe(
+      450,
+    );
     expect(restoredJournal.appended.map((payload) => payload.cause)).toEqual([
       'checkpoint',
     ]);
@@ -3192,6 +3322,20 @@ describe('goal runtime', () => {
       restored.getSnapshot().goal!.evidenceCheckpoint!.checkpointId,
     );
     expect(restoredHost.started).toHaveLength(1);
+    const replayed = createGoalRuntime({
+      journal: fakeGoalJournal(),
+      evidenceSource: fakeEvidenceSource(() => [
+        ...recoveryRecords,
+        ...restoredJournal.records,
+      ]),
+      verifier: vi.fn(),
+      checkpointVerifier: restoredCheckpointVerifier,
+    });
+    await replayed.restore([...recoveryRecords, ...restoredJournal.records]);
+    expect(replayed.getSnapshot().goal?.tokensUsed).toBe(450);
+    expect(restoredCheckpointVerifier).toHaveBeenCalledOnce();
+    replayed.dispose();
+    restored.dispose();
   });
 
   it('keeps a restored goal serviceable when the recovery checkpoint write fails', async () => {

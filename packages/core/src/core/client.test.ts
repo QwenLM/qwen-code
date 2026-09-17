@@ -27,7 +27,12 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { LlmClient, SendMessageType, type SteerInput } from './client.js';
+import {
+  LlmClient,
+  SendMessageType,
+  MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
+  type SteerInput,
+} from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -58,6 +63,8 @@ import {
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
+import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
+import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
 
 type MockSessionStartProfiler = {
   time: Mock;
@@ -425,6 +432,15 @@ vi.mock(
   },
 );
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+
+// Only the selector itself is stubbed — the reminder the client injects is
+// formatted by the real omni module, so the assertions below match the
+// exact block a production passive recall would put on the wire.
+const runOmniMemorySideQueryMock = vi.hoisted(() => vi.fn());
+vi.mock('../omni/memory-side-query.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../omni/memory-side-query.js')>()),
+  runOmniMemorySideQuery: runOmniMemorySideQueryMock,
+}));
 
 /**
  * Array.fromAsync ponyfill, which will be available in es 2024.
@@ -2283,6 +2299,115 @@ describe('Gemini Client (client.ts)', () => {
         h.parts?.some((p) => p.functionResponse),
       );
       expect(hasAnyFunctionResponse).toBe(false);
+    });
+  });
+
+  describe('omni passive media-memory recall injection', () => {
+    /** Minimal materialized recall — the client neither builds nor reads
+     * this payload, it only has to get the formatted block onto the wire. */
+    const recallResult = {
+      status: 'hit',
+      files: [{ resourceId: 'media-1-abcdef01', mediaType: 'image' }],
+      entries: [{ entryId: 'e-1', kind: 'derived_media' }],
+      gaps: [],
+    } as unknown as MediaMemoryRecallResult;
+
+    function enableOmni(): void {
+      (
+        mockConfig as unknown as { isOmniEnabled: () => boolean }
+      ).isOmniEnabled = () => true;
+    }
+
+    async function runUserQuery(): Promise<unknown[]> {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        [{ text: 'what changed in this clip?' }],
+        new AbortController().signal,
+        'prompt-omni-recall',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+      return mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+    }
+
+    it('prepends the recalled block ahead of the user parts of the outgoing request', async () => {
+      // This is the ONLY place the sideQuery surface reaches a model
+      // request. The whole point of passive recall is that it lands
+      // BEFORE the main request is sent (M §9.3) — retrofitting it after
+      // the systemReminders spread, or dropping the call, leaves a
+      // pipeline that still selects and materializes entries and then
+      // throws them away, with no other symptom than the model behaving
+      // as if memory were empty.
+      enableOmni();
+      runOmniMemorySideQueryMock.mockResolvedValue({
+        result: recallResult,
+        resourceIds: ['media-1-abcdef01'],
+      });
+
+      const request = await runUserQuery();
+
+      const reminder = formatOmniMemorySideQueryReminder(recallResult);
+      expect(request).toContain(reminder);
+      // The user's own text has been flattened to a bare string by this
+      // point; the reminder block must sit ahead of it.
+      const userPartIndex = request.indexOf('what changed in this clip?');
+      expect(userPartIndex).toBeGreaterThanOrEqual(0);
+      expect(request.indexOf(reminder)).toBeLessThan(userPartIndex);
+
+      // The selector must see the request as it stands BEFORE injection —
+      // that text (and the media handles inside it) is the only thing
+      // scoping passive recall to what this request actually references.
+      const [params] = runOmniMemorySideQueryMock.mock.calls[0] as [
+        { requestParts: unknown[]; promptId?: string },
+      ];
+      expect(params.promptId).toBe('prompt-omni-recall');
+      expect(params.requestParts).toContain('what changed in this clip?');
+      expect(params.requestParts).not.toContain(reminder);
+    });
+
+    it('injects nothing when the selector declines', async () => {
+      // A null outcome is the normal path in active mode (where the recall
+      // TOOL is registered instead — see memory-side-query.test.ts for the
+      // D10 gate), and also covers a request with no handles, a selector
+      // timeout, and every other degraded case. None of them may put an
+      // empty 【媒体记忆】 shell in front of the user's question.
+      enableOmni();
+      runOmniMemorySideQueryMock.mockResolvedValue(null);
+
+      const request = await runUserQuery();
+
+      expect(runOmniMemorySideQueryMock).toHaveBeenCalledTimes(1);
+      expect(
+        request.filter(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            'text' in part &&
+            (part as { text?: string }).text?.includes('【媒体记忆】'),
+        ),
+      ).toEqual([]);
+    });
+
+    it('never consults the selector when omni is off', async () => {
+      // Omni is opt-in and experimental: a session without it must pay no
+      // recall latency and touch no memory store.
+      runOmniMemorySideQueryMock.mockResolvedValue({
+        result: recallResult,
+        resourceIds: [],
+      });
+
+      const request = await runUserQuery();
+
+      expect(runOmniMemorySideQueryMock).not.toHaveBeenCalled();
+      expect(request).not.toContain(
+        formatOmniMemorySideQueryReminder(recallResult),
+      );
     });
   });
 
@@ -12888,15 +13013,15 @@ Other open files:
           mockMessageBus.request.mock.calls
             .filter(([request]) => request.eventName === 'Stop')
             .map(([request]) => request.input.stop_hook_active);
-        // Run `toolRun` of the model returns a tool call; every run yields
+        // Selected model runs return a tool call; every run yields
         // plain content.
-        const mockRunsWithToolCallOn = (toolRun: number) => {
+        const mockRunsWithToolCallOn = (...toolRuns: number[]) => {
           let runs = 0;
           mockTurnRunFn.mockImplementation(function (this: {
             pendingToolCalls: unknown[];
           }) {
             runs++;
-            if (runs === toolRun) {
+            if (toolRuns.includes(runs)) {
               this.pendingToolCalls.push({
                 callId: 'tool-1',
                 name: 'read_file',
@@ -12918,6 +13043,155 @@ Other open files:
             },
           },
         ];
+
+        describe('Stop-hook consecutive-block cap across top-level sends', () => {
+          const blockAlways = () => {
+            const bus = blockOnceThenAllow();
+            bus.request.mockReset().mockResolvedValue({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            });
+            vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(2);
+            return bus;
+          };
+          const warning = {
+            type: LlmEventType.HookSystemMessage,
+            value:
+              'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+          };
+          const send = (
+            promptId: string,
+            type = SendMessageType.UserQuery,
+            isConcurrentSideQuery = false,
+          ) =>
+            fromAsync(
+              client.sendMessageStream(
+                type === SendMessageType.ToolResult
+                  ? toolResult
+                  : [{ text: 'Hi' }],
+                new AbortController().signal,
+                promptId,
+                { type, isConcurrentSideQuery },
+              ),
+            );
+
+          it('caps the second blocking decision after a tool round trip', async () => {
+            const bus = blockAlways();
+            const runs = mockRunsWithToolCallOn(2);
+            await send('main');
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, true]);
+            expect(events).toContainEqual(warning);
+            expect(runs()).toBe(3);
+            expect(client['stopHookChains'].size).toBe(0);
+          });
+
+          it('keeps a concurrent side question from resetting or advancing the main chain', async () => {
+            const bus = blockAlways();
+            const runs = mockRunsWithToolCallOn(2, 4);
+            await send('main');
+            const sideEvents = await send(
+              'side',
+              SendMessageType.UserQuery,
+              true,
+            );
+            expect(sideEvents).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')?.count).toBe(1);
+            expect(client['stopHookChains'].get('side')?.count).toBe(1);
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, false, true]);
+            expect(events).toContainEqual(warning);
+            expect(runs()).toBe(5);
+            expect(client['stopHookChains'].get('side')?.count).toBe(1);
+          });
+
+          it('starts the count again when retry reuses the prompt id', async () => {
+            const bus = blockAlways();
+            Object.assign(client['chat'] as object, {
+              getHistoryLength: vi.fn(() => 1),
+              stripOrphanedUserEntriesFromHistory: vi.fn(() => []),
+            });
+            mockRunsWithToolCallOn(2, 4);
+            await send('main');
+            const events = await send('main', SendMessageType.Retry);
+            expect(stopFlags(bus)).toEqual([false, false]);
+            expect(events).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')).toEqual({
+              count: 1,
+              reasons: ['Keep working'],
+            });
+          });
+
+          it('does not accumulate allowed stops across tool results', async () => {
+            const bus = blockAlways();
+            bus.request.mockResolvedValue({ output: undefined });
+            mockRunsWithToolCallOn(1, 2, 3, 4, 5);
+            const events = [...(await send('main'))];
+            for (let i = 0; i < 5; i++) {
+              events.push(...(await send('main', SendMessageType.ToolResult)));
+            }
+            expect(events).not.toContainEqual(warning);
+            expect(stopFlags(bus)).toEqual([false]);
+            expect(client['stopHookChains'].size).toBe(0);
+          });
+
+          it('retires both the count and reasons when a Stop is allowed', async () => {
+            const bus = blockAlways();
+            bus.request
+              .mockResolvedValueOnce({
+                output: { decision: 'block', reason: 'first chain' },
+                stopHookCount: 1,
+              })
+              .mockResolvedValueOnce({ output: undefined })
+              .mockResolvedValue({
+                output: { decision: 'block', reason: 'new chain' },
+                stopHookCount: 1,
+              });
+            mockRunsWithToolCallOn(2, 5);
+            await send('main');
+            await send('main', SendMessageType.ToolResult);
+            expect(client['stopHookChains'].size).toBe(0);
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, true, false]);
+            expect(events).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')).toEqual({
+              count: 1,
+              reasons: ['new chain'],
+            });
+          });
+
+          it('bounds tracked chains and refreshes the least-recently-used order', () => {
+            for (let i = 0; i <= MAX_STOP_HOOK_CHAIN_PROMPT_IDS; i++) {
+              client['recordStopHookBlock'](`p-${i}`, 1, ['r']);
+            }
+            const chains = client['stopHookChains'];
+            expect(chains.size).toBe(MAX_STOP_HOOK_CHAIN_PROMPT_IDS);
+            expect(chains.has('p-0')).toBe(false);
+            expect(chains.has(`p-${MAX_STOP_HOOK_CHAIN_PROMPT_IDS}`)).toBe(
+              true,
+            );
+            client['recordStopHookBlock']('p-5', 2, ['r', 'again']);
+            expect([...chains.keys()].at(-1)).toBe('p-5');
+            expect(chains.get('p-5')).toEqual({
+              count: 2,
+              reasons: ['r', 'again'],
+            });
+          });
+
+          it('starts a re-minted teammate prompt fresh without clearing the original chain', async () => {
+            const bus = blockAlways();
+            mockRunsWithToolCallOn(2, 4);
+            await send('p');
+            const teammateEvents = await send(
+              'p/teammate/1',
+              SendMessageType.Teammate,
+            );
+            expect(teammateEvents).not.toContainEqual(warning);
+            const events = await send('p', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, false, true]);
+            expect(events).toContainEqual(warning);
+          });
+        });
 
         it('keeps stop_hook_active across a tool round trip', async () => {
           const mockMessageBus = blockOnceThenAllow();

@@ -327,6 +327,38 @@ describe('DaemonStatusDialog', () => {
     expect(token.value).toBe('');
   });
 
+  // A switch whose credential cannot ride along is refused, and the operator
+  // has to be told: the shell would otherwise stay put while the form read as
+  // if the target had changed.
+  it('reports a refused target switch', () => {
+    const onChangeTarget = vi.fn(() => false);
+    mount('en', onChangeTarget);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example:4170/');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      address
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      undefined,
+    );
+    expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+      'could not be carried',
+    );
+  });
+
   it('shows the target but no switch form outside the standalone shell', () => {
     mount('en', vi.fn(), false);
     expect(container!.textContent).toContain('http://localhost:4170');
