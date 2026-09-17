@@ -314,7 +314,7 @@ function getFileChange(
   };
 }
 
-function getToolFilePath(tool: ACPToolCall): string | undefined {
+export function getToolFilePath(tool: ACPToolCall): string | undefined {
   const fromArgs = getStringContentField(
     tool.args,
     'file_path',

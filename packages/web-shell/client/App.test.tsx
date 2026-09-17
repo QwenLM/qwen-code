@@ -7152,6 +7152,85 @@ describe('artifact panel fullscreen', () => {
     ).toBeNull();
   });
 
+  it('reloads the current file when reopening its active tool preview tab', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'before external edit',
+      truncated: false,
+    });
+    const { container } = renderApp();
+    await flush();
+    const open = async () => {
+      await act(async () => {
+        testState.latestMessageListProps?.onTurnOutputOpen?.({
+          id: 'file:/tmp/project/notes.txt',
+          kind: 'attachment',
+          title: 'notes.txt',
+          turnId: 'read-1',
+          workspacePath: '/tmp/project/notes.txt',
+          workspaceCwd: '/tmp/project',
+          silentUnavailable: true,
+        });
+      });
+      await flush();
+    };
+    await open();
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledTimes(1);
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'after external edit',
+      truncated: false,
+    });
+    await open();
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelectorAll('button[title="notes.txt"]'),
+    ).toHaveLength(1);
+    expect(container.textContent).toContain('after external edit');
+    expect(container.textContent).not.toContain('before external edit');
+  });
+
+  it.each([false, true])(
+    'handles a missing tool preview file with silentUnavailable=%s',
+    async (silentUnavailable) => {
+      const onToast = vi.fn();
+      mockWorkspace.capabilities = {
+        workspaceCwd: '/tmp/project',
+        workspaces: [
+          { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      const { container } = renderApp({ onToast });
+      await flush();
+      mockWorkspaceActions.stat.mockRejectedValueOnce(
+        new Error('file deleted'),
+      );
+      await act(async () => {
+        testState.latestMessageListProps?.onTurnOutputOpen?.({
+          id: 'file:/tmp/project/notes.txt',
+          kind: 'attachment',
+          title: 'notes.txt',
+          turnId: 'read-1',
+          workspacePath: '/tmp/project/notes.txt',
+          workspaceCwd: '/tmp/project',
+          silentUnavailable,
+        });
+      });
+      expect(mockWorkspaceActions.stat).toHaveBeenCalledWith(
+        '/tmp/project/notes.txt',
+      );
+      expect(
+        container.querySelector('aside[aria-label="Right panel"]'),
+      ).toBeNull();
+      if (silentUnavailable) expect(onToast).not.toHaveBeenCalled();
+      else expect(onToast).toHaveBeenCalledWith('error', 'file deleted');
+    },
+  );
+
   it('loads a daemon attachment before opening its preview', async () => {
     const { container } = renderApp();
     await flush();
@@ -15056,6 +15135,74 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
       detail: false,
     });
+  });
+
+  it.each(['main', 'split'] as const)(
+    'delegates %s composer details to the host context usage callback',
+    async (entry) => {
+      const onContextUsageOpen = vi.fn();
+      renderApp({
+        header: { items: [] },
+        ...(entry === 'split' ? { splitSessionIds: ['s1'] } : {}),
+        onContextUsageOpen,
+      });
+      await flush();
+      await act(async () => {
+        if (entry === 'split') {
+          testState.latestSplitViewProps!.onOpenContextUsage!(
+            's1',
+            mockPaneSessionActions,
+          );
+        } else {
+          testState.latestChatEditorProps!.onOpenContextUsage!();
+        }
+      });
+      await flush();
+      expect(onContextUsageOpen).toHaveBeenCalledExactlyOnceWith(
+        entry === 'split' ? 's1' : 'session-1',
+      );
+      expect(mockSessionActions.getContextUsage).not.toHaveBeenCalled();
+      expect(mockPaneSessionActions.getContextUsage).not.toHaveBeenCalled();
+      expect(
+        document.body.querySelector('button[title="Context Usage"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('updates and removes the host context usage callback without changing snapshots', async () => {
+    const onContextUsageOpen = vi.fn();
+    const replacement = vi.fn();
+    const { rerender } = renderApp({ onContextUsageOpen });
+    await flush();
+    rerender({ onContextUsageOpen: replacement });
+    await flush();
+    await act(async () =>
+      testState.latestChatEditorProps!.onOpenContextUsage!(),
+    );
+    expect(replacement).toHaveBeenCalledExactlyOnceWith('session-1');
+    expect(onContextUsageOpen).not.toHaveBeenCalled();
+    await act(async () =>
+      testState.latestChatEditorProps!.onShowContextUsage!(),
+    );
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: false,
+    });
+    expect(replacement).toHaveBeenCalledTimes(1);
+    mockSessionActions.getContextUsage.mockClear();
+    rerender({});
+    await flush();
+    await act(async () =>
+      testState.latestChatEditorProps!.onOpenContextUsage!(),
+    );
+    await flush();
+    expect(replacement).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.getContextUsage).toHaveBeenCalledWith({
+      detail: true,
+      silent: true,
+    });
+    expect(
+      document.body.querySelector('button[title="Context Usage"]'),
+    ).not.toBeNull();
   });
 
   it('opens details and compresses through the composer with the header entry hidden', async () => {
@@ -35010,7 +35157,8 @@ describe('App session callbacks', () => {
   });
 
   it('sends /language ui --project for a workspace-scoped language change from Settings', async () => {
-    const { container } = renderApp();
+    const onLanguageChange = vi.fn();
+    const { container } = renderApp({ onLanguageChange });
     await flush();
     testState.prompt = '/settings';
     await clickSubmit(container);
@@ -35031,6 +35179,7 @@ describe('App session callbacks', () => {
         (c) => c[0] === '/language ui en --project',
       ),
     ).toBe(true);
+    expect(onLanguageChange).not.toHaveBeenCalled();
   });
 
   it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
@@ -40012,6 +40161,213 @@ describe('brand resolution', () => {
 
     expect(handler).toHaveBeenLastCalledWith({ name: 'Second' });
     expect(handler).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('settings-derived theme and language (#11955)', () => {
+  function themeSetting(effective: string): DaemonSettingDescriptor {
+    return {
+      key: 'ui.theme',
+      type: 'string',
+      label: 'Theme',
+      category: 'UI',
+      requiresRestart: false,
+      default: 'Qwen Dark',
+      values: { effective, user: effective },
+    };
+  }
+
+  function languageSetting(effective: string): DaemonSettingDescriptor {
+    return {
+      key: 'general.language',
+      type: 'enum',
+      label: 'Language: UI',
+      category: 'General',
+      requiresRestart: true,
+      default: 'auto',
+      values: { effective, user: effective },
+    };
+  }
+
+  it('resolves ui.theme from settings and notifies the host when no theme prop is passed', async () => {
+    // The standalone entry now passes "no opinion" when neither the URL nor
+    // localStorage holds a value; the settings branch must both apply the
+    // theme and report it so document chrome can follow (#11955).
+    testState.settings = [themeSetting('Qwen Light')];
+    const onThemeResolved = vi.fn();
+    const { container } = renderApp({ onThemeResolved });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-web-shell-root]')
+        ?.classList.contains('dark'),
+    ).toBe(false);
+    expect(onThemeResolved).toHaveBeenCalledWith('light');
+  });
+
+  it('lets an explicit theme prop win over ui.theme and skips the resolution callback', async () => {
+    // Host-override contract: an opinionated host (?theme=, stored choice,
+    // embedder) must not be disturbed by settings.
+    testState.settings = [themeSetting('Qwen Light')];
+    const onThemeResolved = vi.fn();
+    renderApp({ theme: 'dark', onThemeResolved });
+    await flush();
+
+    expect(onThemeResolved).not.toHaveBeenCalled();
+  });
+
+  it('resolves general.language from settings and normalizes it for the host', async () => {
+    testState.settings = [languageSetting('zh')];
+    const onLanguageResolved = vi.fn();
+    const { container } = renderApp({ onLanguageResolved });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('zh-CN');
+    expect(onLanguageResolved).toHaveBeenCalledWith('zh-CN');
+  });
+
+  it('lets an explicit language prop win over general.language', async () => {
+    testState.settings = [languageSetting('zh')];
+    const onLanguageResolved = vi.fn();
+    renderApp({ language: 'en', onLanguageResolved });
+    await flush();
+
+    expect(onLanguageResolved).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit language authoritative during a workspace language change', async () => {
+    testState.settings = [languageSetting('en')];
+    const onLanguageChange = vi.fn();
+    const onLanguageResolved = vi.fn();
+    const { container } = renderApp({
+      language: 'zh-CN',
+      onLanguageChange,
+      onLanguageResolved,
+    });
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(button).not.toBeNull();
+      button?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('zh-CN');
+    expect(onLanguageChange).not.toHaveBeenCalled();
+    expect(onLanguageResolved).not.toHaveBeenCalled();
+  });
+
+  it('never turns a rolled-back settings language pick into a host opinion', async () => {
+    // With no language prop, the resolved value is settings-derived. If the
+    // /language sync fails, the rollback must restore it through the
+    // observe-only channel — handing it to onLanguageChange would persist it
+    // as the entry's own opinion and shadow every later settings.json edit
+    // (#11955).
+    testState.settings = [languageSetting('zh')];
+    const onLanguageChange = vi.fn();
+    const onLanguageResolved = vi.fn();
+    const { container } = renderApp({ onLanguageChange, onLanguageResolved });
+    await flush();
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new Error('daemon refused'),
+    );
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      const button = container.querySelector<HTMLButtonElement>(
+        '[data-testid="change-language-workspace"]',
+      );
+      expect(button).not.toBeNull();
+      button?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    // The optimistic pick and the rollback both steer document chrome only.
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+    expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('does not roll back an accepted language pick when settings refresh fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    testState.settings = [languageSetting('zh')];
+    const onLanguageResolved = vi.fn();
+    const { container } = renderApp({ onLanguageResolved });
+    await flush();
+    mockSessionActions.refreshCommands.mockRejectedValueOnce(
+      new Error('refresh failed'),
+    );
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('en');
+  });
+
+  it('does not persist a composer language pick rejected by the daemon', async () => {
+    testState.settings = [languageSetting('zh')];
+    const onLanguageChange = vi.fn();
+    const onLanguageResolved = vi.fn();
+    renderApp({ onLanguageChange, onLanguageResolved });
+    await flush();
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new Error('daemon refused'),
+    );
+
+    await act(async () => {
+      expect(testState.latestChatEditorProps).toBeDefined();
+      testState.latestChatEditorProps?.onSubmit('/language ui en');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+    expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('keeps the resolved channel silent for a host-controlled composer language change', async () => {
+    const onLanguageResolved = vi.fn();
+    renderApp({ language: 'en', onLanguageResolved });
+    await flush();
+    mockSessionActions.sendPrompt.mockRejectedValueOnce(
+      new Error('daemon refused'),
+    );
+
+    await act(async () => {
+      expect(testState.latestChatEditorProps).toBeDefined();
+      testState.latestChatEditorProps?.onSubmit('/language ui zh');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(onLanguageResolved).not.toHaveBeenCalled();
   });
 });
 
