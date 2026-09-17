@@ -138,13 +138,15 @@ const debugLogger = createDebugLogger('omni');
  * and several wraps below flow into model-visible llmContent, which must
  * never carry real paths.
  *
- * `knownPaths` are replaced EXACTLY (split/join) before the pattern pass:
- * a regex can never enumerate every path shape (CJK segments, `~`-prefixed
- * or special-character basenames, Windows drives), but the pipeline always
- * knows which file it was working on, and exact replacement of that path is
- * immune to all of them. The pattern pass then catches other embedded paths
- * (e.g. the object-store destination) with separator-based — not
- * ASCII-word-based — segment classes, so non-ASCII segments still match.
+ * `knownPaths` are replaced before the pattern pass, twice: verbatim
+ * (split/join) first, which is immune to path shapes a regex cannot
+ * enumerate (CJK segments, `~`-prefixed or special-character basenames),
+ * then with `/` and `\` interchangeable, because the filesystem reports a
+ * path the way it resolved it, not the way the caller spelled it — on
+ * Windows `/Users/a/…` comes back `C:\Users\a\…`. The pattern pass then
+ * catches other embedded paths (e.g. the object-store destination) with
+ * separator-based — not ASCII-word-based — segment classes, so non-ASCII
+ * segments still match.
  */
 // Exported for direct unit testing of the path shapes (visible only via the
 // module namespace; not re-exported from any barrel).
@@ -154,7 +156,30 @@ export function sanitizeErrorMessage(
 ): string {
   let msg = err instanceof Error ? err.message : String(err);
   for (const known of knownPaths) {
-    if (known) msg = msg.split(known).join(path.basename(known));
+    if (!known) continue;
+    msg = msg.split(known).join(path.basename(known));
+    // Strip the directories again with `/` and `\` interchangeable, leaving
+    // whatever basename the message carries: a parent segment holding a space
+    // or a quote defeats the pattern pass below, so only the known path's own
+    // directories can remove it. The verbatim pass above cannot — it holds
+    // the spelling the caller passed, not the one the filesystem reported.
+    const segments = known.split(/[\\/]+/).filter(Boolean);
+    // A leading drive is covered by the pattern's own optional prefix.
+    if (/^[A-Za-z]:$/.test(segments[0] ?? '')) segments.shift();
+    // Without a directory to strip (a bare basename, or a root) the pattern
+    // would reduce to separators alone.
+    if (segments.length >= 2) {
+      const dirs = segments
+        .slice(0, -1)
+        .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      msg = msg.replace(
+        new RegExp(
+          `(?:[A-Za-z]:)?[\\\\/]+${dirs.join('[\\\\/]+')}[\\\\/]+`,
+          'g',
+        ),
+        '',
+      );
+    }
   }
   return (
     msg
