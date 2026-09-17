@@ -210,6 +210,12 @@ jobs:
           RUNNER_GID="$(id -g)"
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+            # The docker leg's host-side locks live in the runner's home: a
+            # root-owned leftover under ~/.cache/qwen-code-ci fails every
+            # `exec 9>` against them with EACCES before a test runs (#11990).
+            if [ -d "${HOME}/.cache/qwen-code-ci" ]; then
+              chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "${HOME}/.cache/qwen-code-ci" || echo "::warning::could not restore CI cache ownership; docker sandbox locks may stay unreadable"
+            fi
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 

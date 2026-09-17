@@ -100,14 +100,42 @@ jobs:
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Verify published export renderer'
+        # An exported transcript loads its renderer from unpkg, pinned to this
+        # exact version and guarded by an sha384 SRI digest computed from the
+        # bytes this build produced, so those bytes have to match what the
+        # registry serves before the VSIX ships. Both assets are pinned that
+        # way, so both are checked.
+        #
+        # The wait is not incidental. npm accepts a publish and queues it
+        # ("Your package is being processed and may take a few minutes to
+        # become available"), and unpkg trails the registry on top of that.
+        # Measured on 0.23.4, 0.23.5-preview.0 and 0.24.0: ~25m to the
+        # registry, ~30m to unpkg. Release-event runs therefore start well
+        # inside the window where these URLs still 404 — v0.24.0's run failed
+        # exactly there. --retry-all-errors is what makes a 404 retryable;
+        # without it --retry only covers connection errors and 408/429/5xx, so
+        # the retries never fired.
+        #
+        # --retry-max-time bounds one curl invocation, so the 40 minutes is
+        # spent against a deadline both fetches share rather than granted to
+        # each of them.
         run: |-
           renderer_version=$(node -p "require('./package.json').version")
           published_renderer=$(mktemp)
           trap 'rm -f "${published_renderer}"' EXIT
-          curl --fail --location --silent --show-error --retry 3 \
-            "https://unpkg.com/@qwen-code/qwen-code@${renderer_version}/export-transcript-document.js" \
-            --output "${published_renderer}"
-          cmp packages/web-templates/src/export-html/dist/export-transcript-document.js "${published_renderer}"
+          deadline=$(($(date +%s) + 2400))
+          for asset in js css; do
+            budget=$((deadline - $(date +%s)))
+            if [[ "${budget}" -lt 1 ]]; then
+              budget=1
+            fi
+            curl --fail --location --silent --show-error \
+              --retry 80 --retry-delay 30 --retry-all-errors --retry-max-time "${budget}" \
+              "https://unpkg.com/@qwen-code/qwen-code@${renderer_version}/export-transcript-document.${asset}" \
+              --output "${published_renderer}"
+            cmp "packages/web-templates/src/export-html/dist/export-transcript-document.${asset}" \
+              "${published_renderer}"
+          done
 
       - name: 'Get the version'
         id: 'version'

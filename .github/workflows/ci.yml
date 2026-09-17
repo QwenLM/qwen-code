@@ -22,6 +22,7 @@ on:
     branches:
       - 'main'
       - 'release/**'
+      - 'omni-experiment'
   merge_group:
   # The macOS and Windows lanes' ONLY remaining trigger, and therefore this
   # repository's only signal about a host that is not Linux with a GNU
