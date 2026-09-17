@@ -6,10 +6,15 @@ import { I18nProvider } from '../../i18n';
 
 const config = vi.hoisted(() => ({
   start: vi.fn(),
+  connections: vi.fn<() => string[]>(),
 }));
 
 vi.mock('../../config/remote-workspace-add', () => ({
   startRemoteWorkspaceAdd: config.start,
+}));
+
+vi.mock('../../config/remote-connections', () => ({
+  readRemoteConnections: config.connections,
 }));
 
 const { AddRemoteWorkspaceDialog } = await import('./AddRemoteWorkspaceDialog');
@@ -30,17 +35,6 @@ function mount(): void {
   });
 }
 
-function typeInto(id: string, value: string): void {
-  const input = document.querySelector<HTMLInputElement>(id)!;
-  act(() => {
-    Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      'value',
-    )!.set!.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-}
-
 afterEach(() => {
   act(() => root?.unmount());
   container?.remove();
@@ -50,20 +44,15 @@ afterEach(() => {
 });
 
 describe('AddRemoteWorkspaceDialog', () => {
-  it('uses the original local or remote workspace location choice', () => {
+  it('defaults Add Workspace to this computer', () => {
     config.start.mockReturnValue(true);
+    config.connections.mockReturnValue(['https://remote.example:4170']);
     mount();
 
     expect(document.body.textContent).toContain('Workspace location');
     expect(
-      document.querySelector<HTMLInputElement>('input[value="remote"]')
-        ?.checked,
+      document.querySelector<HTMLInputElement>('input[value="local"]')?.checked,
     ).toBe(true);
-
-    act(() => {
-      document.querySelector<HTMLInputElement>('input[value="local"]')!.click();
-    });
-    expect(document.querySelector('#remote-workspace-host-address')).toBeNull();
 
     act(() => {
       document
@@ -76,12 +65,16 @@ describe('AddRemoteWorkspaceDialog', () => {
     );
   });
 
-  it('starts the remote folder flow with the selected server credentials', () => {
+  it('starts the folder flow on a previously connected computer', () => {
     config.start.mockReturnValue(true);
+    config.connections.mockReturnValue(['https://remote.example:4170']);
     mount();
 
-    typeInto('#remote-workspace-host-address', 'https://remote.example:4170');
-    typeInto('#remote-workspace-host-token', 'secret');
+    act(() => {
+      document
+        .querySelector<HTMLInputElement>('input[value="remote"]')!
+        .click();
+    });
     act(() => {
       document
         .querySelector<HTMLButtonElement>('button[type="submit"]')!
@@ -90,23 +83,20 @@ describe('AddRemoteWorkspaceDialog', () => {
 
     expect(config.start).toHaveBeenCalledWith(
       'https://remote.example:4170',
-      'secret',
+      undefined,
     );
   });
 
-  it('keeps the dialog open when the address is invalid', () => {
+  it('disables Remote until a connection has been configured', () => {
+    config.connections.mockReturnValue([]);
     mount();
 
-    typeInto('#remote-workspace-host-address', 'remote.example:4170');
-    act(() => {
-      document
-        .querySelector<HTMLButtonElement>('button[type="submit"]')!
-        .click();
-    });
-
-    expect(config.start).not.toHaveBeenCalled();
-    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
-      'HTTP or HTTPS',
+    expect(
+      document.querySelector<HTMLInputElement>('input[value="remote"]')
+        ?.disabled,
+    ).toBe(true);
+    expect(document.body.textContent).toContain(
+      'Connect a computer in Daemon Status first.',
     );
   });
 });

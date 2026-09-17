@@ -1462,7 +1462,6 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (sessionIds: string[]) => void;
       onOpenAddWorkspace?: () => void;
-      onOpenAddRemoteWorkspace?: () => void;
       onOpenGitDiff?: (workspaceCwd: string) => void;
       onOpenCommit?: (workspaceCwd: string) => void;
       onThemeChange?: (theme: 'light' | 'dark') => void;
@@ -1490,9 +1489,6 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             Boolean(props.canOpenSessionsOverview),
           ),
           'data-can-open-split-view': String(Boolean(props.canOpenSplitView)),
-          'data-has-add-remote-workspace': String(
-            Boolean(props.onOpenAddRemoteWorkspace),
-          ),
         },
         React.createElement(
           'button',
@@ -1520,15 +1516,6 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: props.onOpenAddWorkspace,
           },
           'add workspace',
-        ),
-        React.createElement(
-          'button',
-          {
-            'data-testid': 'open-add-remote-workspace',
-            type: 'button',
-            onClick: props.onOpenAddRemoteWorkspace,
-          },
-          'add remote workspace',
         ),
         React.createElement(
           'button',
@@ -17771,20 +17758,13 @@ describe('App session callbacks', () => {
     ).toHaveLength(1);
   });
 
-  it('opens and resumes the standalone Add remote workspace flow', async () => {
+  it('opens and resumes the standalone Add workspace location flow', async () => {
     const connectorView = renderApp({}, undefined, true);
     await flush();
 
-    expect(
-      connectorView.container
-        .querySelector('[data-testid="sidebar"]')
-        ?.getAttribute('data-has-add-remote-workspace'),
-    ).toBe('true');
     act(() => {
       connectorView.container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="open-add-remote-workspace"]',
-        )
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')
         ?.click();
     });
     expect(

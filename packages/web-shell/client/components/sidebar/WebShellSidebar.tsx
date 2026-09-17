@@ -56,7 +56,6 @@ import {
   PlusIcon,
   RadioTowerIcon,
   SearchIcon,
-  ServerIcon,
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
@@ -454,8 +453,6 @@ interface WebShellSidebarProps {
    * registration is unavailable; locked workspaces hide the action separately.
    */
   onOpenAddWorkspace?: () => void;
-  /** Opens the standalone flow for registering a folder on another daemon. */
-  onOpenAddRemoteWorkspace?: () => void;
   workspaces?: DaemonWorkspaceCapability[];
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
@@ -963,7 +960,6 @@ export function WebShellSidebar({
   onOpenGitDiff,
   onOpenCommit,
   onOpenAddWorkspace,
-  onOpenAddRemoteWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
@@ -5856,17 +5852,6 @@ export function WebShellSidebar({
                       onClick={onOpenAddWorkspace}
                     >
                       <PlusIcon />
-                    </button>
-                  )}
-                  {!lockedWorkspaceCwd && onOpenAddRemoteWorkspace && (
-                    <button
-                      className={styles.projectsHeaderAction}
-                      type="button"
-                      title={t('sidebar.addRemoteWorkspace')}
-                      aria-label={t('sidebar.addRemoteWorkspace')}
-                      onClick={onOpenAddRemoteWorkspace}
-                    >
-                      <ServerIcon />
                     </button>
                   )}
                 </div>

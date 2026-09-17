@@ -17,6 +17,7 @@ import {
   getRemoteWorkspaceAddStep,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
+import { rememberRemoteConnection } from '../config/remote-connections';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -252,6 +253,7 @@ export function StandaloneAuth({
         if (response.ok) {
           persistDaemonToken(candidate, baseUrl);
           confirmDaemonTarget(baseUrl);
+          rememberRemoteConnection(baseUrl);
           setAccepted({ token: candidate || undefined });
         } else if (response.status === 401) {
           setBusy(false);

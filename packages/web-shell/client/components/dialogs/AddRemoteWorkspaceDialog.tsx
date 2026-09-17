@@ -1,31 +1,33 @@
 import { useState } from 'react';
-import {
-  getAllowedDaemonOrigin,
-  getDaemonBaseUrl,
-  getDaemonToken,
-} from '../../config/daemon';
+import { getDaemonBaseUrl, getDaemonToken } from '../../config/daemon';
+import { readRemoteConnections } from '../../config/remote-connections';
 import { startRemoteWorkspaceAdd } from '../../config/remote-workspace-add';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
-import { Input } from '../ui/input';
-import {
-  Field,
-  FieldDescription,
-  FieldError,
-  FieldGroup,
-  FieldLabel,
-} from '../ui/field';
+import { Field, FieldError, FieldGroup, FieldLabel } from '../ui/field';
 import { LaptopIcon, ServerIcon } from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
 
 export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
   const { t } = useI18n();
-  const [kind, setKind] = useState<'local' | 'remote'>('remote');
-  const [address, setAddress] = useState(() => {
+  const [connections] = useState(() => {
     const current = getDaemonBaseUrl();
-    return current && current !== window.location.origin ? current : '';
+    return Array.from(
+      new Set([
+        ...readRemoteConnections(),
+        ...(current && current !== window.location.origin ? [current] : []),
+      ]),
+    );
   });
-  const [token, setToken] = useState('');
+  const [kind, setKind] = useState<'local' | 'remote'>('local');
+  const [remoteOrigin, setRemoteOrigin] = useState(connections[0] ?? '');
   const [error, setError] = useState('');
 
   return (
@@ -40,15 +42,12 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
         onSubmit={(event) => {
           event.preventDefault();
           const origin =
-            kind === 'local'
-              ? window.location.origin
-              : getAllowedDaemonOrigin(address.trim());
+            kind === 'local' ? window.location.origin : remoteOrigin;
           if (!origin) {
-            setError(t('workspaceHost.invalidAddress'));
+            setError(t('workspaceHost.noRemoteConnections'));
             return;
           }
-          const candidate = token.trim() || getDaemonToken(origin);
-          if (!startRemoteWorkspaceAdd(origin, candidate)) {
+          if (!startRemoteWorkspaceAdd(origin, getDaemonToken(origin))) {
             setError(t('workspaceHost.navigationUnavailable'));
           }
         }}
@@ -61,10 +60,15 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
             <div className="grid grid-cols-2 gap-3">
               {(['local', 'remote'] as const).map((value) => {
                 const Icon = value === 'local' ? LaptopIcon : ServerIcon;
+                const disabled = value === 'remote' && connections.length === 0;
                 return (
                   <label
                     key={value}
-                    className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-ring/50 ${
+                    className={`flex items-start gap-3 rounded-lg border p-3 transition-colors focus-within:ring-2 focus-within:ring-ring/50 ${
+                      disabled
+                        ? 'cursor-not-allowed opacity-50'
+                        : 'cursor-pointer'
+                    } ${
                       kind === value
                         ? 'border-primary bg-accent'
                         : 'border-border hover:bg-accent/50'
@@ -75,9 +79,9 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
                       name="workspace-host-kind"
                       value={value}
                       checked={kind === value}
+                      disabled={disabled}
                       onChange={() => {
                         setKind(value);
-                        setToken('');
                         setError('');
                       }}
                       className="sr-only"
@@ -91,7 +95,11 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
                         {t(`workspaceHost.${value}`)}
                       </span>
                       <span className="text-xs text-muted-foreground">
-                        {t(`workspaceHost.${value}Hint`)}
+                        {t(
+                          disabled
+                            ? 'workspaceHost.noRemoteConnections'
+                            : `workspaceHost.${value}Hint`,
+                        )}
                       </span>
                     </span>
                   </label>
@@ -99,47 +107,28 @@ export function AddRemoteWorkspaceDialog({ onClose }: { onClose: () => void }) {
               })}
             </div>
           </fieldset>
-          {kind === 'remote' && (
-            <>
-              <Field data-invalid={error ? true : undefined}>
-                <FieldLabel htmlFor="remote-workspace-host-address">
-                  {t('workspaceHost.server')}
-                </FieldLabel>
-                <Input
-                  id="remote-workspace-host-address"
-                  type="url"
-                  inputMode="url"
-                  autoComplete="url"
-                  autoFocus
-                  placeholder="https://server.example.com:4170"
-                  value={address}
-                  aria-invalid={error ? true : undefined}
-                  onChange={(event) => {
-                    setAddress(event.target.value);
-                    setToken('');
-                    setError('');
-                  }}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="remote-workspace-host-token">
-                  {t('workspaceHost.token')}
-                </FieldLabel>
-                <Input
-                  id="remote-workspace-host-token"
-                  type="password"
-                  autoComplete="off"
-                  value={token}
-                  onChange={(event) => {
-                    setToken(event.target.value);
-                    setError('');
-                  }}
-                />
-                <FieldDescription>
-                  {t('workspaceHost.tokenHint')}
-                </FieldDescription>
-              </Field>
-            </>
+          {kind === 'remote' && connections.length > 0 && (
+            <Field>
+              <FieldLabel id="remote-workspace-computer-label">
+                {t('workspaceHost.computer')}
+              </FieldLabel>
+              <Select value={remoteOrigin} onValueChange={setRemoteOrigin}>
+                <SelectTrigger
+                  className="w-full"
+                  aria-labelledby="remote-workspace-computer-label"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {connections.map((origin) => (
+                    <SelectItem key={origin} value={origin}>
+                      <ServerIcon aria-hidden="true" />
+                      {new URL(origin).host}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
           )}
           {error && <FieldError>{error}</FieldError>}
         </FieldGroup>

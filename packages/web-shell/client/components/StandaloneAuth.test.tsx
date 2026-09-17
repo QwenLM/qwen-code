@@ -126,6 +126,9 @@ it('retries an invalid token and stores the accepted token per tab', async () =>
   expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
     'good',
   );
+  expect(
+    JSON.parse(localStorage.getItem('qwen-remote-connections') || 'null'),
+  ).toEqual(['http://daemon.test']);
   expect(fetch.mock.calls[1][1].headers).toEqual({
     Authorization: 'Bearer good',
   });

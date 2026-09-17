@@ -21,6 +21,11 @@ import {
   getDaemonToken,
   navigateToDaemon,
 } from '../../config/daemon';
+import {
+  forgetRemoteConnection,
+  readRemoteConnections,
+  rememberRemoteConnection,
+} from '../../config/remote-connections';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { Button } from '../ui/button';
@@ -29,6 +34,7 @@ import { Label } from '../ui/label';
 import { SvgLineChart, type ChartSeries } from './SvgLineChart';
 import { UsageDashboardTab } from './UsageDashboardTab';
 import styles from './DaemonStatusDialog.module.css';
+import { XIcon } from 'lucide-react';
 
 // The cheap in-memory summary is polled continuously; the expensive detail
 // (per-session, workspace diagnostics, auth — the daemon may spawn the ACP
@@ -635,6 +641,9 @@ function DaemonStatusDialogInner({
   const [connectionToken, setConnectionToken] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [connectBusy, setConnectBusy] = useState(false);
+  const [savedConnections, setSavedConnections] = useState(
+    readRemoteConnections,
+  );
   // The same-target probe outlives this component unless it is retired: the
   // parent mounts the dialog only while the panel is open, so a response
   // landing after the operator closed it — or after they edited the address —
@@ -730,6 +739,41 @@ function DaemonStatusDialogInner({
   const connectionFailed = report
     ? Boolean(summary.error && summary.report)
     : Boolean(error);
+  const savedConnectionList = savedConnections.length > 0 && (
+    <div
+      role="group"
+      aria-label={t('daemon.connection.saved')}
+      className="mt-3 flex flex-col gap-2"
+    >
+      <Label className="text-[13px] font-normal text-muted-foreground">
+        {t('daemon.connection.saved')}
+      </Label>
+      {savedConnections.map((origin) => (
+        <div key={origin} className="flex min-w-0 gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-w-0 flex-1 justify-start truncate"
+            title={origin}
+            onClick={() => onChangeTarget(origin, getDaemonToken(origin))}
+          >
+            {new URL(origin).host}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title={t('daemon.connection.forget', { address: origin })}
+            aria-label={t('daemon.connection.forget', { address: origin })}
+            onClick={() => setSavedConnections(forgetRemoteConnection(origin))}
+          >
+            <XIcon aria-hidden="true" />
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
   const connectionCard = (
     <Card title={t('daemon.connection.title')}>
       <Row label={t('daemon.connection.target')} value={workspace.baseUrl} />
@@ -741,6 +785,7 @@ function DaemonStatusDialogInner({
             : t(CONNECTION_STATUS_KEYS[workspace.status])
         }
       />
+      {standalone && savedConnectionList}
       {standalone && (
         <form
           className="mt-3 flex flex-col gap-2"
@@ -799,6 +844,8 @@ function DaemonStatusDialogInner({
                   );
                   return;
                 }
+                rememberRemoteConnection(daemonOrigin);
+                setSavedConnections(readRemoteConnections());
                 const changed = onChangeTarget(daemonOrigin, token);
                 setConnectionError(
                   changed === false

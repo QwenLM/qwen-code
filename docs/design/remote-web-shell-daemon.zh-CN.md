@@ -12,6 +12,7 @@ Web Shell 已经通过同一个 daemon `baseUrl` 发送 workspace、session、�
 
 - 允许 Web Shell URL 通过 `?daemon=<origin>` 选择一个远程 daemon。
 - 允许用户在 Web Shell 中填写或更换 daemon 地址和可选的 bearer token。
+- 记住验证成功的远程计算机，让后续添加 workspace 时可以复用。
 - 远程 daemon 继续作为 workspace、session、文件、终端和执行的唯一所有者。
 - 在所选 daemon 上保持重连和 session 导航。
 - 按 daemon origin 隔离 bearer 凭据。
@@ -30,9 +31,9 @@ Web Shell 已经通过同一个 daemon `baseUrl` 发送 workspace、session、�
 
 连接前页面始终提供 daemon 地址和可选 token 表单，包括 URL 中目标无效的情况。连接成功后，现有 Daemon 状态概览会显示当前目标和连接状态，并提供相同的切换控件。切换目标时执行完整页面导航，清除 URL 中已选的 session、workspace 和 context，并为新 daemon 创建全新的 SDK client。重连到当前正在使用的目标时改为原地重新加载，因此已选的 session、workspace 和 context 会像普通刷新一样原样保留。此过程不会探测或回退到其他 runtime。
 
-现有侧边栏继续作为 workspace 和 session 管理界面。独立 Web Shell 提供单独的“添加远程工作区”操作：先填写 daemon origin 和可选 token，导航到该 daemon，再续接到目录浏览状态。目录浏览使用 daemon 返回的目录建议，支持进入上级目录和手工填写绝对路径，并通过现有 workspace mutation 注册所选目录；连接远程 daemon 时继续隐藏原生目录选择器。session 发现、对话记录加载、文件引用、终端流量和执行不需要再实现一套远程专用逻辑，因为它们已经统一使用所选 SDK client。
+现有侧边栏继续作为 workspace 和 session 管理界面。远程连接验证成功后，仅把其 origin 记录到浏览器本地的连接目录中，bearer token 仍限定在当前标签页。普通的“添加工作区”操作会先选择计算机：这台计算机或一台已连接的远程计算机。选择远端后导航到对应 daemon，再续接到目录浏览状态。目录浏览使用 daemon 返回的目录建议，支持进入上级目录和手工填写绝对路径，并通过现有 workspace mutation 注册所选目录；连接远程 daemon 时继续隐藏原生目录选择器。session 发现、对话记录加载、文件引用、终端流量和执行不需要再实现一套远程专用逻辑，因为它们已经统一使用所选 SDK client。
 
-添加操作是一次性流程，不是主机目录。导航期间只在当前标签页保存来源 URL；取消会返回该 URL，返回上一步会回到来源并重新打开 daemon 表单，注册成功后留在所选 daemon 并清除续接状态。普通 daemon 切换不会续接该流程。
+添加操作仍是一次性流程。导航期间只在当前标签页保存来源 URL；取消会返回该 URL，更换计算机会回到来源并重新打开计算机选择，注册成功后留在所选 daemon 并清除续接状态。连接目录只保存 origin，不缓存远程 workspace，也不聚合多个 daemon 的项目。普通 daemon 切换不会续接该流程。
 
 Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键按 daemon origin 区分。旧的无限定存储键只用于同源连接。选择远程 daemon 时绝不会复用页面自身 daemon 或另一个远程 daemon 的 token。
 
@@ -42,9 +43,9 @@ Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键�
 
 ## 失败与安全边界
 
-- 不熟悉的 `?daemon=` 目标必须先明确确认，再发起探测。仅在当前标签页记住最后确认的 origin，不维护持久化主机或项目目录。
+- 不熟悉的 `?daemon=` 目标必须先明确确认，再发起探测。只有 capabilities 探测成功后，目标才会加入持久化连接目录。
 - 浏览器本地文件桥仅在所连接的 daemon 与页面同源时提供，独立与嵌入式外壳一致：跨来源目标不会挂载文件桥，本地目录不会被交给一个文案承诺「文件留在你的电脑上」的远程 daemon。远端工作区文件仍由选中的 daemon 提供。同源的 SSH 隧道部署保留原行为和按来源隔离的授权。
-- 远程添加续接必须显式触发，只在当前标签页生效，并且仅使用一次。它不会持久化主机或项目目录、不会聚合多个 daemon 的 workspace，也不会改变普通 daemon 切换行为。
+- 远程添加续接必须显式触发，只在当前标签页生效，并且仅使用一次。它会复用只含 origin 的连接目录，但不会持久化项目目录、不会聚合多个 daemon 的 workspace，也不会改变普通 daemon 切换行为。
 
 - 无效的远程地址会由连接页明确报告，并且不会被访问。
 - 认证、Origin、Host 和网络失败继续在现有连接页中明确展示；一个有效的远程目标失败时，不会回退到本地 runtime。
@@ -56,8 +57,8 @@ Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键�
 
 - 单元测试覆盖地址校验、token 隔离、查询参数保留和 CSP source。
 - 启动本地 Web Shell 和远程主机上已配置 token 的 daemon，再在浏览器中填写地址和 token 完成连接。
-- 从已有本地 workspace 选择“添加远程工作区”，连接另一个 daemon，浏览其目录并注册一个目录，确认新 workspace 在该 daemon 上成为当前 workspace。
-- 验证返回上一步会重新打开 daemon 表单，取消会回到准确的来源页面且 URL 不含 token 或续接标记，普通 daemon 切换不会打开目录浏览器。
+- 先连接一台远程计算机，再通过普通“添加工作区”选择该计算机，浏览并注册一个目录，确认新 workspace 在该 daemon 上成为当前 workspace。
+- 验证更换计算机会重新打开位置选择，取消会回到准确的来源页面且 URL 不含 token 或续接标记，普通 daemon 切换不会打开目录浏览器。
 - 验证本地页面能列出远程 workspace、获取远程目录建议、列出和引用远程文件，并加载远程 session 对话记录。
 - 验证刷新后仍保留目标和已选 session，并且不需要重新填写 token。
 
@@ -65,8 +66,8 @@ Bearer token 仍保存在当前标签页的 `sessionStorage` 中，但存储键�
 
 - Web Shell 页面可以直接连接显式配置的远程 daemon origin。
 - 无效或不可达的目标可以在连接页替换；已连接的目标可以在 Daemon 状态中切换。
-- 独立 Web Shell 侧边栏提供单独的远程 workspace 入口，支持填写 daemon origin 和可选 token、跨导航续接、浏览 daemon 目录并注册所选绝对路径。
-- 取消和返回上一步会按预期回到来源 shell；添加成功后留在所选 daemon；不会创建持久化主机或项目目录。
+- 独立 Web Shell 侧边栏只提供一个“添加工作区”入口，可以选择这台计算机或一台验证过的远程连接，跨导航续接、浏览 daemon 目录并注册所选绝对路径。
+- 取消和更换计算机会按预期回到来源 shell；添加成功后留在所选 daemon；持久化目录只含连接 origin，不包含远程项目数据或 bearer token。
 - workspace/session 发现以及文件/终端操作通过现有 SDK 使用所选 daemon。
 - 凭据绝不会跨 daemon origin 复用。
 - 远程选择在导航和刷新后仍然保留。

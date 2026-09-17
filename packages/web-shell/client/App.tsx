@@ -13251,8 +13251,9 @@ export function App({
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
   const handleOpenExistingWorkspace = useCallback(() => {
-    setShowAddWorkspaceDialog(true);
-  }, []);
+    if (standalone) setShowAddRemoteWorkspaceDialog(true);
+    else setShowAddWorkspaceDialog(true);
+  }, [standalone]);
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -18599,13 +18600,8 @@ export function App({
                       : undefined
                   }
                   onOpenAddWorkspace={
-                    dynamicWorkspaceRegistrationSupported
-                      ? () => setShowAddWorkspaceDialog(true)
-                      : undefined
-                  }
-                  onOpenAddRemoteWorkspace={
-                    standalone
-                      ? () => setShowAddRemoteWorkspaceDialog(true)
+                    standalone || dynamicWorkspaceRegistrationSupported
+                      ? handleOpenExistingWorkspace
                       : undefined
                   }
                   workspaces={workspaces}
@@ -19101,8 +19097,8 @@ export function App({
                         // createNewSession's default (no keepPanel) does that.
                         onNewSession={handlePanelNewSession}
                         onAddWorkspace={
-                          dynamicWorkspaceRegistrationSupported
-                            ? () => setShowAddWorkspaceDialog(true)
+                          standalone || dynamicWorkspaceRegistrationSupported
+                            ? handleOpenExistingWorkspace
                             : undefined
                         }
                         onError={reportError}

@@ -265,6 +265,8 @@ function openDiagnostics(): void {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
+  window.sessionStorage.clear();
   summaryState = { report: summaryReport, loading: false, error: undefined };
   fullState = { report: fullReport, loading: false, error: undefined };
   seenDetails.length = 0;
@@ -283,6 +285,39 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it('lists, switches, and forgets connected computers', () => {
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify(['https://remote.example:4170']),
+    );
+    const onChangeTarget = vi.fn();
+    mount('en', onChangeTarget);
+
+    const connection = container!.querySelector<HTMLButtonElement>(
+      'button[title="https://remote.example:4170"]',
+    )!;
+    expect(connection.textContent).toContain('remote.example:4170');
+    act(() => connection.click());
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      'https://remote.example:4170',
+      undefined,
+    );
+
+    act(() => {
+      container!
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Forget https://remote.example:4170"]',
+        )!
+        .click();
+    });
+    expect(container!.textContent).not.toContain('remote.example:4170');
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-remote-connections') || 'null',
+      ),
+    ).toEqual([]);
+  });
+
   it('shows and switches the daemon connection target', () => {
     const onChangeTarget = vi.fn();
     mount('en', onChangeTarget);
