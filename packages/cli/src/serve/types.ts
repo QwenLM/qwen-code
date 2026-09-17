@@ -21,6 +21,7 @@ import type { DaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudge
 import type { ChildHeapMode } from '@qwen-code/acp-bridge/childHeapPolicy';
 import type {
   AuthType,
+  ModelWireApi,
   InputModalities,
   MemoryProjectScope,
 } from '@qwen-code/qwen-code-core';
@@ -547,7 +548,9 @@ export interface ServeAuthProviderDescriptor {
     flowTitle?: string;
     baseUrlStepTitle?: string;
   };
-  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+  steps: Array<
+    'protocol' | 'wireApi' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
+  >;
 }
 
 export interface ServeAuthProviderCatalog {
@@ -565,6 +568,7 @@ export interface ServeAuthProviderCatalog {
 export interface ServeAuthProviderInstallRequest {
   providerId: string;
   protocol?: AuthType;
+  wireApi?: ModelWireApi;
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];

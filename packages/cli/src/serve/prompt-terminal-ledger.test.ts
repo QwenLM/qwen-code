@@ -183,6 +183,55 @@ describe('reconcileDanglingPromptTerminals', () => {
     ]);
   });
 
+  it('reconstructs a completed Goal tool turn from its recorded boundary', async () => {
+    const fixture = makeFixture();
+    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+    writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'finish the goal'),
+      {
+        ...toolCallRecord(fixture, 'a1', 'u1', 'finish'),
+        goalContext: permit,
+      },
+      {
+        ...record(fixture, 'result', 'a1', ''),
+        type: 'tool_result',
+        goalContext: permit,
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'finish',
+                name: 'run_shell_command',
+                response: { readyForVerification: true },
+              },
+            },
+          ],
+        },
+      },
+      {
+        ...systemRecord(fixture, 'end', 'result', 'goal_turn_end', {
+          toolCallId: 'finish',
+        }),
+        goalContext: permit,
+      },
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath).at(-1)).toEqual({
+      v: 1,
+      promptId: 'p1',
+      terminal: 'completed',
+      stopReason: 'reconstructed_from_transcript',
+      at: expect.any(Number),
+    });
+  });
+
   it('marks an interrupted_prompt dangling prompt interrupted', async () => {
     const fixture = makeFixture();
     writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);

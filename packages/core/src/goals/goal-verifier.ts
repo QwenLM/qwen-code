@@ -65,9 +65,10 @@ export type GoalVerifierInput = GoalVerifierInputBase &
       }
   );
 
-export type GoalVerificationResult =
+export type GoalVerificationResult = (
   | { decision: 'accept'; reason: string }
-  | { decision: 'reject'; reason: string };
+  | { decision: 'reject'; reason: string }
+) & { usage?: { totalTokenCount: number } };
 
 export type GoalVerifier = (
   input: GoalVerifierInput,
@@ -206,7 +207,12 @@ export function createGoalVerifier(
         },
         validate: validateGoalVerifierText,
       });
-      return parseGoalVerifierText(result.text);
+      return {
+        ...parseGoalVerifierText(result.text),
+        ...(result.usage?.totalTokenCount !== undefined
+          ? { usage: { totalTokenCount: result.usage.totalTokenCount } }
+          : {}),
+      };
     } finally {
       clearTimeout(timer);
     }

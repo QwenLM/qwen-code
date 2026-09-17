@@ -72,6 +72,8 @@ import type {
 import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import * as pemCertificateBlocks from './pem-certificate-blocks.js';
 import * as webShellResolver from './web-shell-resolver.js';
 import * as webShellStatic from './web-shell-static.js';
@@ -893,6 +895,168 @@ it.each([
       await handle?.close();
       vi.unstubAllEnvs();
       vi.restoreAllMocks();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(
+  ['fast', 'full'].flatMap((startup) =>
+    [
+      'workspace',
+      'workspace-env',
+      'parent-env',
+      'shell',
+      'user',
+      'home-env',
+    ].map((source) => ({
+      startup,
+      source,
+    })),
+  ),
+)(
+  'isolates User model deletion after $startup environment bootstrap ($source)',
+  async ({ startup, source }) => {
+    const workspaceOnly = ['workspace', 'workspace-env', 'parent-env'].includes(
+      source,
+    );
+    const root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-delete-env-')),
+    );
+    const home = path.join(root, 'home');
+    const workspace = path.join(root, 'workspace');
+    fs.mkdirSync(home);
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    const baseUrl = 'https://delete.example/v1';
+    const model = { name: 'gpt-4o', baseUrl };
+    const env = {
+      ANTHROPIC_API_KEY: 'test-only-key',
+      ANTHROPIC_MODEL: 'claude-other',
+      ANTHROPIC_BASE_URL: baseUrl,
+    };
+    for (const key of [
+      'QWEN_OAUTH',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'QWEN_MODEL',
+      'OPENAI_BASE_URL',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'GOOGLE_API_KEY',
+      'GOOGLE_MODEL',
+      'GOOGLE_CLOUD_PROJECT',
+      ...Object.keys(env),
+    ]) {
+      vi.stubEnv(key, undefined);
+    }
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('QWEN_HOME', home);
+    vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', path.join(root, 'no-system'));
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(root, 'no-defaults'),
+    );
+    const userFile = path.join(home, 'settings.json');
+    const workspaceFile = path.join(workspace, '.qwen', 'settings.json');
+    fs.writeFileSync(
+      userFile,
+      JSON.stringify({
+        $version: 4,
+        modelProviders: { openai: [{ id: model.name, baseUrl }] },
+        model,
+        ...(source === 'user' ? { env } : {}),
+      }),
+    );
+    fs.writeFileSync(
+      workspaceFile,
+      JSON.stringify({
+        $version: 4,
+        ...(source.endsWith('-env') ? {} : { env }),
+      }),
+    );
+    fs.writeFileSync(
+      path.join(home, 'trustedFolders.json'),
+      JSON.stringify({ [root]: 'TRUST_PARENT' }),
+    );
+    if (source === 'shell') {
+      for (const [key, value] of Object.entries(env)) {
+        vi.stubEnv(key, value);
+      }
+    }
+    if (source.endsWith('-env')) {
+      const directory =
+        source === 'home-env'
+          ? home
+          : source === 'parent-env'
+            ? root
+            : workspace;
+      fs.writeFileSync(
+        path.join(directory, '.env'),
+        Object.entries(env)
+          .map(([key, value]) => `${key}=${value}`)
+          .join('\n'),
+      );
+    }
+    settingsRuntime.resetEnvironmentTrackingForTesting();
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    let handle: RunHandle | undefined;
+    try {
+      if (startup === 'fast') {
+        const { bootstrapServeFastPathEnvironment } = await import(
+          './fast-path.js'
+        );
+        await bootstrapServeFastPathEnvironment(workspace);
+      } else {
+        settingsRuntime.loadSettings(workspace, { workspaceTrusted: true });
+      }
+      expect(process.env['ANTHROPIC_MODEL']).toBe('claude-other');
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          preheatBridge: false,
+          trustedWorkspace: true,
+          daemonLogBaseDir: path.join(root, 'debug'),
+        },
+      );
+      const response = await fetch(`${handle.url}/workspace/models`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          authType: 'openai',
+          modelId: model.name,
+          baseUrl,
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        clearedActiveModel: false,
+      });
+      const saved = JSON.parse(fs.readFileSync(userFile, 'utf8'));
+      expect(saved.modelProviders.openai).toEqual([]);
+      expect(saved.model).toEqual(
+        workspaceOnly ? { name: '', baseUrl: '' } : model,
+      );
+      if (workspaceOnly) {
+        expect(
+          JSON.parse(fs.readFileSync(workspaceFile, 'utf8')).model,
+        ).toEqual(model);
+      }
+    } finally {
+      await handle?.close();
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+      settingsRuntime.resetEnvironmentTrackingForTesting();
       fs.rmSync(root, { recursive: true, force: true });
     }
   },
@@ -4906,6 +5070,14 @@ describe('runQwenServe telemetry validation', () => {
 
   it('adds, advertises, and hot-removes a dynamic workspace runtime', async () => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    const reclaim = vi.fn();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      expect(app.locals['reclaimIdleAcp']).toBeTypeOf('function');
+      app.locals['reclaimIdleAcp'] = reclaim;
+      return app;
+    });
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hot-remove-')),
     );
@@ -4964,6 +5136,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
+        childHeapMode: 'admit',
         workspace: primary,
         token: 'hot-remove-token',
         sessionRestoreTimeoutMs: 90_000,
@@ -4995,6 +5168,19 @@ describe('runQwenServe telemetry validation', () => {
       });
       expect(added.status).toBe(201);
       expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      const signal = new AbortController().signal;
+      for (const [index, cwd] of [primary, secondary].entries()) {
+        const callback = mockCreateSpawnChannelFactoryOptions[index][
+          'reclaimIdleChild'
+        ] as (signal?: AbortSignal) => ReturnType<IdleAcpReclaimer>;
+        expect(callback).toBeTypeOf('function');
+        await callback(signal);
+        expect(reclaim).toHaveBeenNthCalledWith(
+          index + 1,
+          hashDaemonWorkspace(canonicalizeWorkspace(cwd)),
+          signal,
+        );
+      }
       for (const options of mockCreateSpawnChannelFactoryOptions) {
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,
@@ -5289,6 +5475,14 @@ describe('runQwenServe telemetry validation', () => {
 
   it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
+    const reclaim = vi.fn();
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const app = originalCreateServeApp(...args);
+      expect(app.locals['reclaimIdleAcp']).toBeTypeOf('function');
+      app.locals['reclaimIdleAcp'] = reclaim;
+      return app;
+    });
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
@@ -5349,6 +5543,7 @@ describe('runQwenServe telemetry validation', () => {
         port: 0,
         hostname: '127.0.0.1',
         mode: 'http-bridge',
+        childHeapMode: 'admit',
         workspace: [primary, secondary],
         maxSessions: 1,
         eventRingSize: 1234,
@@ -5368,6 +5563,19 @@ describe('runQwenServe telemetry validation', () => {
       await handle.runtimeReady;
       expect(createBridge).toHaveBeenCalledTimes(2);
       expect(mockCreateSpawnChannelFactoryOptions).toHaveLength(2);
+      const signal = new AbortController().signal;
+      for (const [index, cwd] of [primary, secondary].entries()) {
+        const callback = mockCreateSpawnChannelFactoryOptions[index][
+          'reclaimIdleChild'
+        ] as (signal?: AbortSignal) => ReturnType<IdleAcpReclaimer>;
+        expect(callback).toBeTypeOf('function');
+        await callback(signal);
+        expect(reclaim).toHaveBeenNthCalledWith(
+          index + 1,
+          hashDaemonWorkspace(canonicalizeWorkspace(cwd)),
+          signal,
+        );
+      }
       for (const options of mockCreateSpawnChannelFactoryOptions) {
         expect(options['pipeLimits']).toEqual({
           maxFrameBytes: 64 * 1024 * 1024,

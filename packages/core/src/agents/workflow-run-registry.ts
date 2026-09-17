@@ -417,6 +417,15 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * it rides here. Process-local, like the notification it feeds.
    */
   authoringHint?: string;
+  /**
+   * The name a name-only session may resume this run by. The runner sets it
+   * only when the run's workflow name resolved, as the run started, to the
+   * script the run executed: a name recorded from a path in a subdirectory,
+   * one a same-named project workflow shadows, or one a retry carried over to
+   * an inline copy would lead a resume to a different script. Process-local,
+   * like the notification it feeds.
+   */
+  resumeName?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -526,6 +535,17 @@ interface WorkflowApprovalRuntime {
 }
 
 export class WorkflowRunRegistry {
+  /**
+   * The session runs named workflows only (`tools.workflowNameOnly`). Set by
+   * the owning Config, which holds the lock; read when a notification offers
+   * a resume call.
+   */
+  private nameOnly = false;
+
+  setNameOnly(nameOnly: boolean): void {
+    this.nameOnly = nameOnly;
+  }
+
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
   private readonly starting = new Map<string, AbortController>();
@@ -680,8 +700,8 @@ export class WorkflowRunRegistry {
     // produced none.
     const recovery =
       entry.status === 'failed'
-        ? buildRecoveryLines(entry)
-        : buildDiagnosticsLines(entry);
+        ? buildRecoveryLines(entry, this.nameOnly)
+        : buildDiagnosticsLines(entry, this.nameOnly);
     if (recovery.length > 0) {
       const tag = entry.status === 'failed' ? 'recovery' : 'diagnostics';
       modelParts.push(
@@ -1919,9 +1939,9 @@ function buildUsageLine(entry: WorkflowTask): string {
 }
 
 /** `<recovery>` body for a failed run. */
-function buildRecoveryLines(entry: WorkflowTask): string[] {
+function buildRecoveryLines(entry: WorkflowTask, nameOnly: boolean): string[] {
   const lines: string[] = [];
-  const resume = buildResumeCall(entry);
+  const resume = buildResumeCall({ ...entry, nameOnly });
   if (resume) {
     // Only an extension workflow's name carries `<extension>:`. Its file is
     // third-party and an extension update replaces it, so the copy has to
@@ -1941,6 +1961,13 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
     if (hasUninlinableResumeArgs(entry)) {
       lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
     }
+  } else if (nameOnly) {
+    // The model may not pass a script here, and this run has no name that
+    // leads back to the one it ran — a host's script, or a name that now
+    // resolves elsewhere — so the resume is not the model's to make.
+    lines.push(
+      'This session runs named workflows only, and this run cannot be resumed by name, so only whoever started it can retry it.',
+    );
   }
   if (entry.journalPath) {
     lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
@@ -1952,14 +1979,17 @@ function buildRecoveryLines(entry: WorkflowTask): string[] {
 }
 
 /** `<diagnostics>` body for a completed run. */
-function buildDiagnosticsLines(entry: WorkflowTask): string[] {
+function buildDiagnosticsLines(
+  entry: WorkflowTask,
+  nameOnly: boolean,
+): string[] {
   const lines: string[] = [];
   if (entry.journalPath) {
     lines.push(
       `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
     );
   }
-  const resume = buildResumeCall(entry);
+  const resume = buildResumeCall({ ...entry, nameOnly });
   if (resume) {
     lines.push(
       entry.workflowName
