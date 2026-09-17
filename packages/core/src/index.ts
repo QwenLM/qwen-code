@@ -100,6 +100,7 @@ export * from './core/prompts.js';
 export * from './core/output-styles.js';
 export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
+export { buildSessionHistoryFromConversation } from './services/session-api-history.js';
 export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
 export * from './core/tool-call-preparation.js';
@@ -874,6 +875,47 @@ export {
   type StartupEventAttrs,
 } from './utils/startupEventSink.js';
 
+// ============================================================================
+// Omni multimodal experiment — upload-based media delivery
+// ============================================================================
+
+export {
+  isOmniDeliveryActive,
+  processMediaForOmniDelivery,
+  readMediaViaOmniDelivery,
+  parseHttpUrlRef,
+  downloadMediaUrl,
+  effectiveMaxDownloadFileBytes,
+  recognizeMediaFile,
+  formatDisclosureText,
+  formatOmissionText,
+  buildAdditionalMediaParts,
+  buildTranscriptParts,
+  OmniObjectStore,
+  OmniDeliveryError,
+  OmniDownloadError,
+  OmniTransportGuardError,
+  type OmniModality,
+  type OmniMediaDelivery,
+  type OmniAdditionalMediaDelivery,
+  type OmniAdditionalMediaPart,
+  type OmniTokenEstimate,
+  type DownloadedMedia,
+} from './omni/index.js';
+export { processToolResultOmniMedia } from './omni/tool-result-media.js';
+export {
+  resolveMediaPolicyModelAccess,
+  isMediaPolicyToolHiddenFromModel,
+  evaluateMediaPolicyToolCall,
+  type MediaPolicyConfigView,
+  type MediaPolicyCallGateResult,
+  type ResolvedMediaPolicyModelAccess,
+} from './omni/policy/model-access.js';
+export type {
+  OmniPolicyToolSettings,
+  OmniPolicyToolModelAccessSettings,
+  OmniPolicyToolsSettings,
+} from './omni/policy/types.js';
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
 export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';

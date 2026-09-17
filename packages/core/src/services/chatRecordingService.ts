@@ -312,6 +312,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'omni_recall'
     | 'session_model'
     | 'rewind'
     | 'agent_bootstrap'
@@ -326,6 +327,7 @@ export interface ChatRecord {
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
+    | 'goal_turn_end'
     | 'realtime_message'
     | 'turn_result';
   /** Explicit source classification used by Goal evidence validation. */
@@ -392,6 +394,7 @@ export interface ChatRecord {
     | SessionSourcesSnapshot
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
+    | GoalTurnEndRecordPayload
     | TurnResultRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
@@ -518,6 +521,11 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  completedToolCallIds?: string[];
+}
+
+export interface GoalTurnEndRecordPayload {
+  toolCallId: string;
 }
 
 export interface SlashCommandRecordPayload {
@@ -1953,6 +1961,18 @@ export class ChatRecordingService {
     }
   }
 
+  async recordGoalTurnEnd(
+    toolCallId: string,
+    goalContext: GoalTurnPermit,
+  ): Promise<void> {
+    await this.appendRecordStrict({
+      ...this.createBaseRecord('system'),
+      subtype: 'goal_turn_end',
+      goalContext: copyGoalContext(goalContext),
+      systemPayload: { toolCallId },
+    });
+  }
+
   /**
    * Records a user message drained while tool results are being submitted.
    *
@@ -2112,7 +2132,10 @@ export class ChatRecordingService {
     turnId: string,
     usage: GenerateContentResponseUsageMetadata,
   ): void {
-    const total = usage.totalTokenCount;
+    this.billGoalTurnTokens(turnId, usage.totalTokenCount ?? 0);
+  }
+
+  billGoalTurnTokens(turnId: string, total: number): void {
     if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
       return;
     }
@@ -2459,6 +2482,28 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving slash command record:', error);
+    }
+  }
+
+  /**
+   * Records the omni passive media-memory recall payload injected into the
+   * model-bound request (memory design M §9.3, D10 sideQuery mode). The
+   * reminder is assembled AFTER the user record is persisted, so without
+   * this record the transcript would never show what memory the model was
+   * given — the trajectory exporter reads it back as `turn.recall`.
+   */
+  recordOmniRecallReminder(payload: unknown): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'omni_recall',
+        systemPayload: payload as ChatRecord['systemPayload'],
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving omni recall record:', error);
     }
   }
 

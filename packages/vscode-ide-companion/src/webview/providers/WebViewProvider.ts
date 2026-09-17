@@ -43,6 +43,7 @@ import {
   QwenDaemonProcess,
   type QwenDaemonListenerHandle,
 } from '../../services/qwenDaemonProcess.js';
+import { isLoopbackHostname } from '../../services/daemonIdeConnection.js';
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -1713,6 +1714,39 @@ export class WebViewProvider {
   }
 
   /**
+   * Translate the daemon URL into one the webview can actually reach.
+   *
+   * The daemon binds the loopback of the machine hosting this extension
+   * process. In a remote window (SSH, Dev Container, WSL) that machine is not
+   * the one rendering the webview, so the raw address points the shell at the
+   * client's own loopback and every request fails with a connection refusal.
+   * `asExternalUri` asks VS Code to forward the port and returns the address
+   * on the client side. A local window needs no translation, and the result is
+   * never cached: a restarted extension host forwards to a fresh port.
+   *
+   * Only the webview-facing payload goes through this: the extension host is
+   * co-located with the daemon and must keep the loopback URL, which is also
+   * all `validateDaemonBaseUrl()` accepts.
+   */
+  private async resolveWebviewDaemonBaseUrl(baseUrl: string): Promise<string> {
+    if (!vscode.env.remoteName) return baseUrl;
+    const externalUri = await vscode.env.asExternalUri(
+      vscode.Uri.parse(baseUrl),
+    );
+    const externalUrl = externalUri.toString();
+    // This URL shares its payload with the daemon's bearer token. A
+    // browser-based remote resolves to a relay origin rather than a forwarded
+    // loopback one, and the webview CSP would then be the only thing keeping
+    // that token away from a third-party host — so refuse here instead.
+    if (!isLoopbackHostname(new URL(externalUrl).hostname)) {
+      throw new Error(
+        `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", which is not a forwarded loopback address.`,
+      );
+    }
+    return externalUrl;
+  }
+
+  /**
    * Handle common webview message types shared across all host contexts
    * (sidebar, new panel, restored panel). Returns true if the message was
    * fully handled and the caller should skip further processing.
@@ -1858,10 +1892,14 @@ export class WebViewProvider {
         const restoredSessionId = this.isViewHost
           ? viewSessionId
           : serializedSessionId;
+        const webviewBaseUrl = await this.resolveWebviewDaemonBaseUrl(
+          runtime.baseUrl,
+        );
         await webview.postMessage({
           type: 'webShellBootstrap',
           data: {
             ...runtime,
+            baseUrl: webviewBaseUrl,
             clientId: this.daemonClientId,
             workspaceCwd: canonicalWorkspaceCwd,
             // The daemon matches workspaces by canonical path, but every
