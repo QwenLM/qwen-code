@@ -130,10 +130,10 @@ export class PromptHookRunner {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
 
-      // Timeout first, then a caller abort: the provider throws its own abort
-      // error when the caller cancels, so the signal is checked as well as the
-      // error type. Anything else is a failure, even if its message mentions
-      // an abort.
+      // Timeout first, then a caller abort. Every abort rejection, ours or the
+      // provider's own abort error, happens only once the caller's signal has
+      // fired, so the signal decides. Anything else is a failure, even if its
+      // message mentions an abort.
       if (error instanceof HookTimeoutError) {
         debugLogger.warn(`Prompt hook ${hookName} timed out: ${errorMessage}`);
         return {
@@ -145,7 +145,7 @@ export class PromptHookRunner {
           duration,
         };
       }
-      if (signal?.aborted || error instanceof HookAbortError) {
+      if (signal?.aborted) {
         debugLogger.warn(`Prompt hook ${hookName} cancelled: ${errorMessage}`);
         return {
           hookConfig,

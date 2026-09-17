@@ -60,6 +60,7 @@ import type {
 import {
   createHookOutput,
   HookPhase,
+  isBlockingHookOutput,
   PermissionMode,
   PreToolUseHookOutput,
 } from './types.js';
@@ -114,18 +115,11 @@ function toProgressOutcome(
   if (!result.success) {
     return { outcome: 'error' };
   }
-  if (result.output) {
-    const output = createHookOutput(eventName, result.output);
-    const denied =
-      output instanceof PreToolUseHookOutput
-        ? output.isDenied()
-        : output.isBlockingDecision();
-    if (denied) {
-      return {
-        outcome: 'blocked',
-        blockedReason: blockedReasonOf(eventName, result),
-      };
-    }
+  if (result.output && isBlockingHookOutput(eventName, result.output)) {
+    return {
+      outcome: 'blocked',
+      blockedReason: blockedReasonOf(eventName, result),
+    };
   }
   return { outcome: 'success' };
 }

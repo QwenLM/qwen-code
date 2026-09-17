@@ -392,6 +392,22 @@ export function createHookOutput(
 }
 
 /**
+ * Whether a hook's output blocks on this event: for PreToolUse the permission
+ * decision wins over the generic `decision` field. Runners that report an
+ * outcome and the progress reporting both use this one test, so a hook that
+ * blocks can never be reported as a success.
+ */
+export function isBlockingHookOutput(
+  eventName: string,
+  data: Partial<HookOutput>,
+): boolean {
+  const output = createHookOutput(eventName, data);
+  return output instanceof PreToolUseHookOutput
+    ? output.isDenied()
+    : output.isBlockingDecision();
+}
+
+/**
  * Default implementation of HookOutput with utility methods
  */
 export class DefaultHookOutput implements HookOutput {

@@ -11,7 +11,7 @@ import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { lookup as dnsLookup } from 'dns';
 import { HookAbortError, HookTimeoutError } from './hook-errors.js';
-import { PreToolUseHookOutput, createHookOutput } from './types.js';
+import { isBlockingHookOutput } from './types.js';
 import type {
   HttpHookConfig,
   HookInput,
@@ -94,21 +94,6 @@ async function validateResolvedHost(
       resolve({ ok: true });
     });
   });
-}
-
-/**
- * Whether a 2xx response body blocks. Uses the same test as the progress
- * reporting in hookEventHandler: a PreToolUse permission decision wins over the
- * generic `decision` field.
- */
-function isBlockingHttpOutput(
-  eventName: HookEventName,
-  output: HookOutput,
-): boolean {
-  const hookOutput = createHookOutput(eventName, output);
-  return hookOutput instanceof PreToolUseHookOutput
-    ? hookOutput.isDenied()
-    : hookOutput.isBlockingDecision();
 }
 
 /**
@@ -289,7 +274,7 @@ export class HttpHookRunner {
           hookConfig,
           eventName,
           success: true,
-          outcome: isBlockingHttpOutput(eventName, output)
+          outcome: isBlockingHookOutput(eventName, output)
             ? 'blocking'
             : 'success',
           output,

@@ -112,11 +112,12 @@ export class FunctionHookRunner {
           ? error
           : new Error(errorMessage);
 
-      // Timeout first, then a caller abort, then any other failure.
+      // Timeout first, then a caller abort (the abort rejection only happens
+      // once the caller's signal has fired), then any other failure.
       const outcome: HookExecutionOutcome =
         error instanceof HookTimeoutError
           ? 'timeout'
-          : signal?.aborted || error instanceof HookAbortError
+          : signal?.aborted
             ? 'cancelled'
             : 'non_blocking_error';
 
