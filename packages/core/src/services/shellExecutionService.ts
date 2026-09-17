@@ -38,6 +38,17 @@ const debugLogger = createDebugLogger('SHELL_EXECUTION');
 const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
 const SIGKILL_TIMEOUT_MS = 200;
+/**
+ * streamStdout settle fence: after the child exits, trailing stdio keeps
+ * flowing until 'close' — but 'close' also waits on *inherited* fds, so a
+ * shell that exits while a grandchild holds the pipe (`sleep 10 &`,
+ * `nohup … &`) would defer 'close' indefinitely and wedge the result
+ * promise (background shells and the ACP channel both stream this way;
+ * PR #12067 review). Settle on 'close' or this bound after exit,
+ * whichever comes first. 1s covers trailing writes that land shortly
+ * after exit while bounding the grandchild case.
+ */
+const POST_EXIT_STREAM_DRAIN_MS = 1000;
 // Live PTY rendering only needs a short scrollback for interactive tailing.
 // The full transcript is preserved separately in raw output and final replay.
 const MAX_LIVE_TERMINAL_SCROLLBACK_LINES = 200;
@@ -952,7 +963,27 @@ export class ShellExecutionService {
         const outputChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
+        // A transport-level stdin failure (EPIPE: the child closed stdin
+        // early) is not a spawn failure, so it must not occupy the result's
+        // `error` slot when the process's own exit status is known — the
+        // sandbox finalizer reads that slot as a veto on receipt
+        // confirmation and as the evidence-retention trigger (PR #12067
+        // review). Promoted into `error` at settle only when the process
+        // left no exit information at all.
+        let stdinError: Error | null = null;
         let exited = false;
+        // Single-fire guard for handleExit: with the streamStdout drain
+        // fence, 'exit', 'close', the drain timer and 'error' can all race
+        // to settle the same execution.
+        let settled = false;
+        // streamStdout drain fence state: the recorded 'exit' info and the
+        // bound timer. Settlement happens on 'close' or timer expiry,
+        // whichever comes first (see POST_EXIT_STREAM_DRAIN_MS).
+        let recordedExit: {
+          code: number | null;
+          signal: NodeJS.Signals | null;
+        } | null = null;
+        let drainTimer: NodeJS.Timeout | null = null;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -1104,6 +1135,12 @@ export class ShellExecutionService {
           code: number | null,
           signal: NodeJS.Signals | null,
         ) => {
+          if (settled) return;
+          settled = true;
+          if (drainTimer) {
+            clearTimeout(drainTimer);
+            drainTimer = null;
+          }
           const { finalBuffer } = cleanup();
           // Ensure we don't add an extra newline if stdout already ends with one.
           const separator = stdout.endsWith('\n') ? '' : '\n';
@@ -1133,7 +1170,8 @@ export class ShellExecutionService {
             output: boundedOutput,
             exitCode: code,
             signal: signal ? os.constants.signals[signal] : null,
-            error,
+            error:
+              error ?? (code === null && signal === null ? stdinError : null),
             aborted: abortSignal.aborted,
             pid: undefined,
             executionMethod: 'child_process',
@@ -1158,7 +1196,37 @@ export class ShellExecutionService {
           if (child.pid) {
             this.activeChildProcesses.delete(child.pid);
           }
-          handleExit(code, signal);
+          if (!streamStdout) {
+            handleExit(code, signal);
+            return;
+          }
+          // streamStdout: don't settle on 'exit' — trailing stdio written
+          // between 'exit' and 'close' would race the consumer's settle
+          // (a background task's output file closes when the result
+          // resolves). Record the exit info and bound the post-exit drain
+          // so a grandchild inheriting the pipe can defer settlement by at
+          // most POST_EXIT_STREAM_DRAIN_MS instead of indefinitely.
+          if (recordedExit) return;
+          recordedExit = { code, signal };
+          exited = true;
+          drainTimer = setTimeout(() => {
+            drainTimer = null;
+            const recorded = recordedExit;
+            if (recorded) handleExit(recorded.code, recorded.signal);
+          }, POST_EXIT_STREAM_DRAIN_MS);
+          // The fence must not hold the event loop open on process exit.
+          drainTimer.unref?.();
+        };
+
+        // 'close' carries the same (code, signal) as 'exit'; the recorded
+        // exit info wins because it is the authoritative child termination
+        // (a spawn-error 'close' can carry null/null).
+        const closeHandler = (
+          code: number | null,
+          signal: NodeJS.Signals | null,
+        ) => {
+          const recorded = recordedExit ?? { code, signal };
+          handleExit(recorded.code, recorded.signal);
         };
 
         child.stdout?.on('data', stdoutHandler);
@@ -1170,7 +1238,7 @@ export class ShellExecutionService {
           child.stderr?.off('data', stderrHandler);
           child.off('error', errorHandler);
           child.off('exit', exitHandler);
-          child.off('close', exitHandler);
+          child.off('close', closeHandler);
         };
 
         const performBackgroundPromote = (): void => {
@@ -1573,10 +1641,16 @@ export class ShellExecutionService {
           this.activeChildProcesses.add(child.pid);
         }
 
-        child.on(streamStdout ? 'close' : 'exit', exitHandler);
+        child.on('exit', exitHandler);
+        if (streamStdout) {
+          child.once('close', closeHandler);
+        }
         if (launch?.stdin !== undefined && child.stdin) {
           child.stdin.on('error', (err: Error) => {
-            error = err;
+            stdinError = err;
+            debugLogger.warn(
+              `stdin transport error for pid ${child.pid}: ${err.message}`,
+            );
           });
           child.stdin.end(launch.stdin);
         }
@@ -1586,26 +1660,32 @@ export class ShellExecutionService {
           abortSignal.removeEventListener('abort', abortHandler);
           if (stdoutDecoder) {
             const remaining = stdoutDecoder.decode();
+            // In streaming binary mode the consumer was already told via
+            // binary_detected and every later chunk is dropped; flushing
+            // the decoder remainder as a data event would append mojibake
+            // (e.g. U+FFFD) past that signal (PR #12067 review).
             if (remaining) {
-              if (streamStdout)
-                onOutputEvent({
-                  type: 'data',
-                  chunk: remaining,
-                  stream: 'stdout',
-                });
-              else stdout += remaining;
+              if (streamStdout) {
+                if (isStreamingRawContent)
+                  onOutputEvent({
+                    type: 'data',
+                    chunk: remaining,
+                    stream: 'stdout',
+                  });
+              } else stdout += remaining;
             }
           }
           if (stderrDecoder) {
             const remaining = stderrDecoder.decode();
             if (remaining) {
-              if (streamStdout)
-                onOutputEvent({
-                  type: 'data',
-                  chunk: remaining,
-                  stream: 'stderr',
-                });
-              else stderr += remaining;
+              if (streamStdout) {
+                if (isStreamingRawContent)
+                  onOutputEvent({
+                    type: 'data',
+                    chunk: remaining,
+                    stream: 'stderr',
+                  });
+              } else stderr += remaining;
             }
           }
 

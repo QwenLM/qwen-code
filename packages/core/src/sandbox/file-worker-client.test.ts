@@ -59,6 +59,18 @@ describe('sandbox file worker client', () => {
       await readSandboxWriteRequest(Readable.from([launch.stdin])),
     ).toEqual(request);
   });
+  it('forwards the caller abort signal and stays on the pipe transport', async () => {
+    const signal = new AbortController().signal;
+    await writeSandboxFile(policy, request, signal);
+    const call = vi.mocked(executeBwrap).mock.calls[0];
+    // The caller's signal is the only cancellation path for a sandboxed
+    // write; swapping it for a fresh controller lets a cancelled write run
+    // to completion and commit after the caller gave up (PR #12067 review).
+    expect(call[3]).toBe(signal);
+    // The wire protocol frames the request on stdin; a PTY would merge the
+    // reply into a terminal stream.
+    expect(call[4] ?? false).toBe(false);
+  });
   it.each(['ESTALE', 'EACCES', 'ENOSPC'])(
     'preserves worker error code %s',
     async (code) => {

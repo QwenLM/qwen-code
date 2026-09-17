@@ -203,6 +203,11 @@ export async function executeBwrap(
       TMPDIR: scratch,
       TMP: scratch,
       TEMP: scratch,
+      // `--clearenv` wipes everything before these --setenv apply, so a
+      // payload env without TERM would run with TERM unset (ncurses:
+      // "unknown terminal type"). The relay bootstrap TERM default never
+      // reaches the payload; the default belongs here.
+      TERM: env['TERM'] || 'xterm-256color',
     })) {
       if (
         !key ||
@@ -255,7 +260,12 @@ export async function executeBwrap(
             /* Missing/partial receipt never proves that the payload did not run. */
           }
         }
-        if (info.error && info.exitCode === null) {
+        // Retention keys on the finalized status, not on the transport
+        // error/exit-code combination: pipe-transport failures report a
+        // numeric exit code, so keying on `info.error && exitCode === null`
+        // never retains a genuinely unconfirmed run and would retain a
+        // definitively interrupted one (PR #12067 review).
+        if (status.state === 'unconfirmed') {
           debugLogger.warn(
             'Sandbox termination is unconfirmed; retaining temporary directories',
             { control, scratch },
@@ -290,10 +300,21 @@ export async function executeBwrap(
           onSettle: (info: ShellPostPromoteSettleInfo) => {
             void finalize(info)
               .then((status) => {
-                const error = sandboxStatusError(status) ?? info.error;
+                // The specific transport/spawn error outranks the generic
+                // status-derived one: an unconfirmed run caused by a relay
+                // spawn failure should surface the spawn error, not the
+                // catch-all "could not be confirmed" (PR #12067 review).
+                const error = info.error ?? sandboxStatusError(status);
                 options.postPromote?.onSettle?.({ ...info, error });
               })
-              .catch(() => {});
+              .catch((settleError: unknown) => {
+                // The caller's postPromote.onSettle throws here, one await
+                // past the service's own try/catch guard — log instead of
+                // discarding (PR #12067 review).
+                debugLogger.warn(
+                  `post-promote settle chain failed: ${settleError instanceof Error ? settleError.message : String(settleError)}`,
+                );
+              });
           },
         },
       },
@@ -308,7 +329,7 @@ export async function executeBwrap(
             : await finalize(result);
           return {
             ...result,
-            error: sandboxStatusError(sandboxStatus) ?? result.error,
+            error: result.error ?? sandboxStatusError(sandboxStatus) ?? null,
             sandboxStatus,
           };
         },

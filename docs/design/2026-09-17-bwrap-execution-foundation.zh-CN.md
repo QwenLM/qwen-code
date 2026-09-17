@@ -12,7 +12,7 @@ Shell 服务当前通过 shell 启动命令字符串。沙箱适配器需要字�
 
 `ShellExecutionService.executeLaunch` 接收绝对可执行文件路径、字面量 argv、绝对 cwd、精确环境，以及可选的 string/Buffer stdin。在异步初始化前复制调用者拥有的值。Stdin 仅支持管道，并在发送给定字节后关闭。PTY 调用者必须提供 `TERM`；POSIX PTY 调用者必须提供与 cwd 一致的 `PWD`。现有命令字符串 `execute` API 保留环境准备与 shell 解析。
 
-两套 API 共享输出、取消、后台提升和终端管理。管道流式输出区分 stdout/stderr，并在流关闭后才结算。仅在尚未创建进程时允许从 PTY 回退到管道；spawn 后的失败不得重放 payload。输入字节由调用者负责，启动 API 不另加任意大小上限。
+两套 API 共享输出、取消、后台提升和终端管理。管道流式输出按 chunk 区分 stdout/stderr；子进程退出后末尾输出继续流动，结算发生在流关闭或退出后有界排空（1 秒）二者先到之时，持有管道的孙进程无法卡死结算。逐 chunk 的 `stream` 标记是为下一切片预留的管线：daemon UI 协议已建模该字段，本切片内 core 没有消费者读取它。仅在尚未创建进程时允许从 PTY 回退到管道；spawn 后的失败不得重放 payload。输入字节由调用者负责，启动 API 不另加任意大小上限。传输层 stdin 失败仅在进程没有留下任何退出信息时作为执行错误上报；否则以进程自身的退出状态为准。
 
 ## Linux 适配器与可信完成证据
 
