@@ -1,3 +1,4 @@
+import { saveBlob } from '../../utils/saveBlob';
 import {
   useCallback,
   useEffect,
@@ -87,20 +88,11 @@ function downloadExport(result: {
   content: string;
   filename: string;
   mimeType: string;
-}): void {
-  const url = URL.createObjectURL(
+}): Promise<void> {
+  return saveBlob(
     new Blob([result.content], { type: result.mimeType || 'text/html' }),
+    result.filename,
   );
-  try {
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = result.filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  } finally {
-    URL.revokeObjectURL(url);
-  }
 }
 
 export function StandaloneRecents({
@@ -546,7 +538,7 @@ export function StandaloneRecents({
                 },
                 onExport: () => {
                   void run(session.sessionId, async () => {
-                    downloadExport(
+                    await downloadExport(
                       await workspace.client.exportStandaloneSession(
                         session.sessionId,
                         { format: 'html' },
