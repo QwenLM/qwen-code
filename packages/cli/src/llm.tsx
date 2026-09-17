@@ -666,6 +666,7 @@ export async function main() {
         [],
         // Pass separated hooks for proper source attribution
         {
+          systemHooks: settings.getSystemHooks(),
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
@@ -973,6 +974,7 @@ export async function main() {
       argv.extensions,
       // Pass separated hooks for proper source attribution
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },

@@ -350,6 +350,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `sessionContext`       | `DaemonProductSessionContext`         | 显式产品上下文；standalone 或 Live 上下文不能同时传 `workspaceId`、`workspaceCwd` 或 `lockWorkspaceCwd`                                        |
 | `lockWorkspaceCwd`     | `string`                              | 锁定到指定工作区路径；未注册时自动持久注册，并隐藏其他工作区及添加、移除和选择入口                                                             |
 | `restartSseOnPrompt`   | `boolean`                             | 每次 prompt 被 daemon 接收后重建存活 SSE 流；流断开时提交 prompt 总会立即重建（与此开关无关）；默认关闭                                        |
+| `settings`             | `WebShellSettingsOptions`             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
 
 ### WebShell
 
@@ -367,6 +368,7 @@ const projection = projectChatRecordsToDaemonTranscript(records);
 | `onBrandResolved`          | `(brand: WebShellResolvedBrand) => void`                                                                                              | 品牌解析完成后触发，载荷只含 `name` 与 `logoDataUri`（不含 `logo` 节点），供宿主应用到自己的文档；shell 自身从不写 `document.title` 或 favicon |
 | `onSlashCommand`           | `(command: WebShellSlashCommand) => boolean \| void`                                                                                  | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为                                                                             |
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
+| `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
 详情的打开操作：
@@ -505,6 +507,26 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 
 自定义内容仍使用内置的展开、收起行为，`expanded` 会随状态更新；文件夹行右侧的内置操作不会渲染。
 未提供 `lockWorkspaceCwd` 时，该 renderer 不会执行。
+
+## 原生设置呈现
+
+嵌入方宿主可以在保留原生表单和模型选择器的前提下，隐藏单个原生设置项：
+
+```tsx
+<WebShellWithProviders
+  settings={{
+    excludeItems: ['setting:fast-model', 'setting:vision-model'],
+  }}
+/>
+```
+
+`WebShellSettingsOptions.excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。新增的上游设置默认仍然可见；未知的运行时 ID 会被忽略。
+
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control` 和 `builtin:model-management`。隐藏普通 Model 字段时，模型列表与选择仍然可用；如需隐藏模型管理块，需显式排除 `builtin:model-management`。浏览器通知与聊天宽度相互独立。既有的能力限制仍然适用。
+
+不传 `settings`、不传 `excludeItems` 或传入空列表，都会保持现有呈现。排除在两个设置作用域（工作区与用户）中都生效。被排空的分类会消失，分类导航回退到可用分类；排除全部条目则显示现有的空状态。从设置面板打开的选择器会在其来源条目被排除时关闭。
+
+**呈现限制不是访问控制。** 排除不会改写已保存的配置，也不限制 daemon 写入、斜杠命令、其他入口的模型管理或直接文件访问。该选项不提供白名单、作用域策略、字段覆盖或条目级深链。
 
 ## Markdown 图表接入
 

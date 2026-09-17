@@ -5,7 +5,10 @@
  */
 
 import type { Dispatch, SetStateAction } from 'react';
-import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
+import {
+  getSessionUpdatePayload,
+  parseDaemonBackgroundTurn,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonAvailableCommand,
   DaemonEvent,
@@ -826,7 +829,7 @@ export function getReplayTokenUsage(
     try {
       const event = events[i];
       if (event.type !== 'session_update') continue;
-      const update = getRecord(getRecord(event.data)?.['update']);
+      const update = getSessionUpdatePayload(event.data);
       const tokenUsage = getUsageTokenUsage(update);
       if (tokenUsage) return tokenUsage;
     } catch {
