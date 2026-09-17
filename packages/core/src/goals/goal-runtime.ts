@@ -7,13 +7,11 @@
 import { randomUUID } from 'node:crypto';
 import {
   buildGoalEvidenceCheckpointWindow,
-  buildGoalEvidenceCatalog,
+  buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
-  InvalidGoalEvidenceReferenceError,
-  validateGoalEvidenceReferences,
-  type GoalEvidenceCatalog,
   type GoalEvidenceCheckpointWindow,
   type GoalEvidenceRecord,
+  type GoalVerifierEvidenceWindow,
 } from './goal-evidence.js';
 import {
   checkpointBatchRecordLimit,
@@ -40,6 +38,7 @@ import {
   GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
+  goalPauseReasonForVerifierFailure,
   GOAL_STATE_VERSION,
   goalActiveTimeBudgetReason,
   goalTokenBudgetReason,
@@ -69,10 +68,13 @@ import {
   reduceGoalSpend,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
-import type {
-  GoalVerificationResult,
-  GoalVerifier,
-  GoalVerifierInput,
+import {
+  GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+  GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+  measureGoalVerifierEnvelopeBytes,
+  type GoalVerificationResult,
+  type GoalVerifier,
+  type GoalVerifierInput,
 } from './goal-verifier.js';
 import {
   createMigratedGoalState,
@@ -230,7 +232,6 @@ export interface GoalWorkerView {
   revision: number;
   objective: string;
   evidenceCursor: TranscriptCursor;
-  evidenceCatalog?: GoalEvidenceCatalog;
   verifierFeedback?: string;
 }
 
@@ -903,15 +904,8 @@ export function createGoalRuntime(
 
   const verifierInput = (
     attempt: VerificationAttempt,
-    evidence: ReturnType<typeof validateGoalEvidenceReferences>,
+    window: GoalVerifierEvidenceWindow,
   ): GoalVerifierInput => {
-    const currentDeliveredOutput = evidence.citedRecords
-      .filter(
-        (record) =>
-          record.proofKind === 'delivered_output' &&
-          record.turnId === attempt.permit.turnId,
-      )
-      .map((record) => record.content);
     const base = {
       goal: {
         goalId: attempt.goal.goalId,
@@ -919,8 +913,9 @@ export function createGoalRuntime(
         objective: attempt.goal.objective,
       },
       currentTurnId: attempt.permit.turnId,
-      evidence: evidence.citedRecords,
-      ...(currentDeliveredOutput.length > 0 ? { currentDeliveredOutput } : {}),
+      evidence: window.evidence,
+      evidenceTurnIds: window.turnIds,
+      ...(window.omitted > 0 ? { omitted: window.omitted } : {}),
     };
     if (attempt.proposal.status === 'complete') {
       return {
@@ -932,7 +927,7 @@ export function createGoalRuntime(
       ...base,
       proposal: { ...attempt.proposal, status: 'blocked' },
       blockedPolicy:
-        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when cited external_fact evidence shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
+        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when external_fact evidence in the window shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
     };
   };
 
@@ -972,7 +967,8 @@ export function createGoalRuntime(
           kind: 'usage_limited';
           reason: string;
           limitKind?: GoalLimitKind;
-        },
+        }
+      | { kind: 'paused'; reason: string },
   ): Promise<CheckpointAttempt | undefined> =>
     enqueue(async () => {
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
@@ -1051,6 +1047,32 @@ export function createGoalRuntime(
         pendingProposal = undefined;
         nextVerifierFeedback = undefined;
         commitUsageLimitedSettle(limitedSnapshot);
+        return undefined;
+      }
+
+      if (outcome.kind === 'paused') {
+        // The verifier gave no verdict, so nothing was decided about the
+        // proposal and no limit was reached. The Goal pauses with the
+        // failure as its reason; a resume continues the work, and the model
+        // proposes again once it has something to show.
+        const pausedSnapshot = settledSnapshot(
+          snapshot.goal,
+          'paused',
+          outcome.reason,
+        );
+        await options.journal.recordGoalState(randomUUID(), {
+          v: GOAL_STATE_VERSION,
+          cause: 'pause',
+          snapshot: pausedSnapshot,
+        });
+        if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
+        verificationAttempt = undefined;
+        pendingProposal = undefined;
+        nextVerifierFeedback = undefined;
+        continuationQueued = false;
+        currentTurnFeedback = undefined;
+        snapshot = structuredClone(pausedSnapshot);
+        broadcast('pause');
         return undefined;
       }
 
@@ -1142,47 +1164,57 @@ export function createGoalRuntime(
           kind: 'usage_limited';
           reason: string;
           limitKind?: GoalLimitKind;
-        };
+        }
+      | { kind: 'paused'; reason: string };
+    let verifierCalled = false;
     try {
       await evidenceSource.flush();
       if (attempt.controller.signal.aborted) return;
       const records = await evidenceSource.readActiveTranscriptChain();
       if (attempt.controller.signal.aborted) return;
-      const evidence = validateGoalEvidenceReferences({
-        records,
-        goal: attempt.goal,
-        permit: attempt.permit,
-        proposal: attempt.proposal,
-      });
+      // The window gets whatever the request has left once the objective,
+      // the reason and the policy are in it, measured on the real payload
+      // with the largest omitted count standing in for the real one. The
+      // window counts its own turn-id list against the budget.
+      const budgetBytes =
+        GOAL_VERIFIER_REQUEST_BYTE_LIMIT -
+        measureGoalVerifierEnvelopeBytes(
+          verifierInput(attempt, {
+            evidence: [],
+            turnIds: [],
+            omitted: Number.MAX_SAFE_INTEGER,
+          }),
+        );
+      if (budgetBytes <= 0) {
+        // Not a verifier failure a resume could get past: the objective or
+        // the reason fills the request by itself.
+        await recordVerificationOutcome(attempt, {
+          kind: 'paused',
+          reason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+        });
+        return;
+      }
+      const window = buildGoalVerifierEvidenceWindow(
+        { records, goal: attempt.goal, permit: attempt.permit },
+        { budgetBytes },
+      );
+      verifierCalled = true;
       const result = await verifier(
-        verifierInput(attempt, evidence),
+        verifierInput(attempt, window),
         attempt.controller.signal,
       );
       if (attempt.controller.signal.aborted) return;
       outcome = { kind: 'decision', result };
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
-      if (error instanceof InvalidGoalEvidenceReferenceError) {
-        outcome =
-          error.code === 'catalog_truncated'
-            ? {
-                kind: 'usage_limited',
-                reason: error.message,
-                limitKind: 'evidence_catalog',
-              }
-            : {
-                kind: 'decision',
-                result: { decision: 'reject', reason: error.message },
-              };
-      } else {
-        const reason =
-          error instanceof EvidenceSourceUnavailableError
-            ? error.message
-            : error instanceof Error
-              ? error.message
-              : String(error);
-        outcome = { kind: 'usage_limited', reason };
-      }
+      const message = error instanceof Error ? error.message : String(error);
+      // A verifier that timed out, failed, or answered with something that
+      // is not a verdict has decided nothing: pause, so a resume retries.
+      // A transcript the window cannot be anchored in is a different
+      // failure, and keeps the stop it has always had.
+      outcome = verifierCalled
+        ? { kind: 'paused', reason: goalPauseReasonForVerifierFailure(message) }
+        : { kind: 'usage_limited', reason: message };
     }
     const checkpoint = await recordVerificationOutcome(attempt, outcome);
     if (!checkpoint) return;
@@ -1621,12 +1653,27 @@ export function createGoalRuntime(
               if (recoveredSnapshot.goal?.status === 'active') {
                 recoveredSnapshot.goal.updatedAt = Date.now();
               }
+              // Checkpoint health a previous build recorded is meaningless
+              // to a runtime that runs no checkpoints, and a persisted
+              // stall count would otherwise keep exempting the Goal from
+              // the no-progress pause.
+              if (recoveredSnapshot.goal && !options.checkpointVerifier) {
+                delete recoveredSnapshot.goal.checkpointStalls;
+                delete recoveredSnapshot.goal.lastCheckpointFailure;
+              }
               blockedAudit = recovery.payload.blockedAudit
                 ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
                 : undefined;
               recoveredCause = recovery.payload.cause;
+              // A checkpoint a previous build left pending is dropped when
+              // this runtime has no checkpoint verifier: checkpoints are
+              // bookkeeping nothing reads any more, not work to resume.
               const pending = recovery.payload.checkpointPending;
-              if (pending && recoveredSnapshot.goal) {
+              if (
+                pending &&
+                recoveredSnapshot.goal &&
+                options.checkpointVerifier
+              ) {
                 checkpointAttempt = createCheckpointAttempt(
                   pending.permit,
                   recoveredSnapshot.goal,
@@ -1919,17 +1966,20 @@ export function createGoalRuntime(
           // continuation gate owes that Goal its wind-down hand-off before
           // the matching stop; pausing here would skip both. A Goal
           // carrying a checkpoint stall streak is drowning in evidence, not
-          // idling -- its prose overflowed the window and `update_goal`
-          // answers `checkpointRequired` without recording a proposal -- so
-          // its checkpoint runs and the stall breaker stops it with the
-          // reason that fits, instead of a pause whose remedy (resume) would
+          // idling -- its records overflowed the checkpoint window -- so its
+          // checkpoint runs and the stall breaker stops it with the reason
+          // that fits, instead of a pause whose remedy (resume) would
           // re-enter the same overflowing window.
+          // The stall exemption only means something while checkpoints can
+          // run; a runtime without a checkpoint verifier never clears a
+          // streak, so a count a previous build persisted must not exempt
+          // an idle Goal for ever.
           const noProgressLimitReached =
             noProgressTurns !== undefined &&
             noProgressTurns >= GOAL_NO_PROGRESS_TURN_LIMIT &&
             nextGoal.status === 'active' &&
             !spentBudget(nextGoal, Date.now()) &&
-            !(nextGoal.checkpointStalls ?? 0);
+            !(options.checkpointVerifier && (nextGoal.checkpointStalls ?? 0));
           if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
@@ -2080,34 +2130,13 @@ export function createGoalRuntime(
       if (!isCurrentPermit(permit) || !snapshot.goal) {
         throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
-      const goal = structuredClone(snapshot.goal);
+      const goal = snapshot.goal;
       const verifierFeedback = currentTurnFeedback;
-      const evidenceSource = options.evidenceSource;
-      if (!evidenceSource) {
-        return {
-          goalId: goal.goalId,
-          revision: goal.revision,
-          objective: goal.objective,
-          evidenceCursor: structuredClone(goal.evidenceCursor),
-          ...(verifierFeedback ? { verifierFeedback } : {}),
-        };
-      }
-      await evidenceSource.flush();
-      const records = await evidenceSource.readActiveTranscriptChain();
-      const evidenceCatalog = buildGoalEvidenceCatalog({
-        records,
-        goal,
-        permit,
-      });
-      if (!isCurrentPermit(permit) || !snapshot.goal) {
-        throw new Error(STALE_GOAL_TURN_MESSAGE);
-      }
       return {
         goalId: goal.goalId,
         revision: goal.revision,
         objective: goal.objective,
         evidenceCursor: structuredClone(goal.evidenceCursor),
-        evidenceCatalog,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       };
     },

@@ -17,14 +17,14 @@ You are drafting the text for `/goal set`. You are NOT doing the work the goal d
 
 ## How Goals are judged (why the format below matters)
 
-An active Goal is re-fed to the model every turn, and its completion is judged by an independent verifier that sees ONLY transcript evidence:
+An active Goal is re-fed to the model every turn, and its completion is judged by an independent verifier that sees ONLY transcript evidence, read from the most recent record backwards until its request is full:
 
-- Visible assistant output and tool results count as evidence. The objective itself, user prompts, and hidden reasoning do not.
+- Visible assistant output, tool results, and the user's own messages recorded for the Goal count as evidence; a user message proves only what the user said, chose, or approved. The objective itself and hidden reasoning do not, and in a long Goal the oldest records no longer reach the verifier.
 - `delivered_output` evidence proves only that text was printed. It cannot prove that tests passed, files changed, or remote state changed — those need a tool result in the transcript (an `external_fact`).
 - A claim that the user confirmed, chose, or approved something needs a real user message as evidence; otherwise the completion proposal is rejected.
-- Vague, subjective, or open-ended conditions never accumulate enough evidence; the loop then runs until a limit is hit.
+- Vague, subjective, or open-ended conditions never produce decisive evidence; the loop then runs until a limit is hit.
 
-So a good objective makes the agent PRODUCE evidence: run the named check and paste the decisive output line.
+So a good objective makes the agent PRODUCE evidence at the end: run the named check immediately before proposing completion and paste the decisive output line. A check that ran long before may have to run again when completion is proposed.
 
 ## Step 0 — should this be a Goal at all?
 
