@@ -53,10 +53,13 @@ export class WebViewContent {
     // In a remote window the daemon URL handed to the shell has been resolved
     // through VS Code's tunnel, which lands on the client's own `localhost`
     // rather than on `127.0.0.1`. The shell upgrades that URL to the matching
-    // `ws:` origin for its WebSocket transports, so both are granted. A local
-    // window keeps the narrower loopback-only policy.
+    // `ws:` origin for its WebSocket transports, so both are granted. The
+    // tunnel can land on the IPv6 loopback instead, which the token guard
+    // (`isLoopbackHostname`) and the daemon's Host allowlist both accept, so
+    // `[::1]` is granted on the same terms. A local window keeps the narrower
+    // loopback-only policy.
     const connectSrc = vscode.env.remoteName
-      ? 'http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*'
+      ? 'http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* http://[::1]:* ws://[::1]:*'
       : 'http://127.0.0.1:* ws://127.0.0.1:*';
 
     // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles

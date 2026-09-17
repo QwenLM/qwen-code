@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { isLoopbackHostname } from '../../services/daemonIdeConnection.js';
 import { WebViewContent } from './WebViewContent.js';
 
 const envMock = vi.hoisted(() => ({
@@ -121,8 +122,45 @@ describe('WebViewContent', () => {
     // The loopback pair stays alongside the tunnelled one: the extension host
     // is still co-located with the daemon.
     expect(html).toContain(
-      'connect-src http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:*;',
+      'connect-src http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* http://[::1]:* ws://[::1]:*;',
     );
+  });
+
+  it('grants the IPv6 loopback origins the token guard already accepts', () => {
+    envMock.remoteName = 'ssh-remote';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    // `resolveWebviewDaemonBaseUrl()` gates the forwarded URL on
+    // `isLoopbackHostname()`, which accepts the IPv6 loopback forms, and the
+    // daemon's Host allowlist carries `[::1]:<port>`. A forwarded URL on
+    // `[::1]` therefore clears the guard and carries the bearer token, so the
+    // CSP has to grant that origin too — otherwise the shell is blocked after
+    // the token guard already said yes.
+    for (const hostname of ['::1', '[::1]']) {
+      expect(isLoopbackHostname(hostname)).toBe(true);
+    }
+
+    const connectSrc = /connect-src ([^;]*);/.exec(html)?.[1] ?? '';
+    for (const scheme of ['http', 'ws']) {
+      expect(connectSrc).toContain(`${scheme}://[::1]:*`);
+    }
+  });
+
+  it('keeps non-loopback origins out of the remote connect-src', () => {
+    envMock.remoteName = 'ssh-remote';
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    const connectSrc = /connect-src ([^;]*);/.exec(html)?.[1] ?? '';
+    // A browser-based remote resolves `asExternalUri` to a relay origin, which
+    // the guard rejects. This CSP is the layer that still keeps the bearer
+    // token off a third-party host if that guard is ever bypassed, so granting
+    // the IPv6 loopback must not grant anything else.
+    for (const host of ['relay.vscode.dev', 'example.com']) {
+      expect(connectSrc).not.toContain(host);
+    }
+    expect(connectSrc).not.toContain('://*');
   });
 
   it('fills the VS Code webview without inherited body padding', () => {
