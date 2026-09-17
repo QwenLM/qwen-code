@@ -683,8 +683,34 @@ export async function gitRemoteRemove(
   // contacting the remote and echoes the input verbatim only when
   // nothing answers it. (The push-side alias shape is refused up front,
   // pre-destruction — see the pre-flight.)
+  // The all-scope dump answers BOTH shape classes at once — a
+  // surviving section in any scope, and a `url.*.pushInsteadOf` prefix
+  // keeping the bare name resolving push-side (the resolver leg below
+  // is fetch-side and blind to push aliases; git has no push-side
+  // resolver probe) — at zero extra spawns over the read the section
+  // half needs anyway. The pre-flight owns the steady-state shape (a
+  // section plus its alias refuses before destruction); this half is
+  // the backstop for an alias racing in after the pre-flight read.
+  let unionDump: string;
+  try {
+    unionDump = await runGit(
+      cwd,
+      ['config', '--list', '--show-scope', '-z'],
+      env,
+    );
+  } catch (err) {
+    if (isNoMatchConfigError(err)) {
+      unionDump = '';
+    } else {
+      stripConfigDump(err);
+      throw err;
+    }
+  }
   if (
-    (await remoteSectionScopes(cwd, name, env)).size > 0 ||
+    remoteSectionScopesFromRaw(unionDump, name, false).size > 0 ||
+    pushInsteadOfAliasesFromRaw(unionDump, false).some((alias) =>
+      name.startsWith(alias),
+    ) ||
     (await remoteStillResolves(cwd, name, env))
   ) {
     throw new Error('remote still configured after removal');
@@ -1918,7 +1944,37 @@ async function discountGate(
   name: string,
   env: Readonly<Record<string, string | undefined>> | undefined,
 ): Promise<boolean> {
-  if ((await remoteSectionScopes(cwd, name, env)).size > 0) return false;
+  // The scope leg and the push-alias leg share one dump: a
+  // `url.*.pushInsteadOf` prefix keeps a bare name resolving push-side
+  // while the resolver probe below is fetch-side and blind to it (git
+  // has no push-side resolver probe) — an include-held residue equal to
+  // the name is then a LIVE push upstream, not dangling residue, and
+  // must not be discounted.
+  let gateDump: string;
+  try {
+    gateDump = await runGit(
+      cwd,
+      ['config', '--list', '--show-scope', '-z'],
+      env,
+    );
+  } catch (err) {
+    if (isNoMatchConfigError(err)) {
+      gateDump = '';
+    } else {
+      stripConfigDump(err);
+      throw err;
+    }
+  }
+  if (remoteSectionScopesFromRaw(gateDump, name, false).size > 0) {
+    return false;
+  }
+  if (
+    pushInsteadOfAliasesFromRaw(gateDump, false).some((alias) =>
+      name.startsWith(alias),
+    )
+  ) {
+    return false;
+  }
   // A sectionless NAME (`.` or a scp-like colon-before-slash spelling)
   // resolves through git's transport with no config record, and the
   // probe for the path leg would put the scp-like shape on the network

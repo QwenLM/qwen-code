@@ -510,6 +510,54 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     expect(calls).not.toContain('ls-remote -- h:p');
   });
 
+  it('refuses the removal when a pushInsteadOf alias raced into the union gate dump', async () => {
+    // The fetch-side resolver is blind to push aliases (git has no
+    // push-side resolver probe), so the union gate reads them from the
+    // same all-scope dump the section half uses — zero extra spawns.
+    // The pre-flight owns the steady-state shape; this is the backstop
+    // for an alias racing in after the pre-flight read.
+    runGit
+      .mockResolvedValueOnce(
+        'local\u0000file:.git/config\u0000remote.gone.url\nhttps://example.com/g\u0000',
+      ) // origin pre-flight read (no alias yet)
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce('local\u0000core.x\ny\u0000') // snapshot
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('.git\n') // listing probe
+      .mockResolvedValueOnce('') // listing read: the row is gone
+      .mockResolvedValueOnce(
+        'local\u0000url.https://example.com/.pushinsteadof\ngone\u0000',
+      ) // union gate dump: a push alias raced in, keeping `gone` push-live
+      // Mutant path only (the alias conjunct dropped): the removal
+      // continues into the resolver, the sweep and the surviving-keys
+      // reads instead of refusing.
+      .mockResolvedValueOnce('gone\n') // union gate resolver echo
+      .mockResolvedValueOnce('') // tracking-refs sweep: for-each-ref
+      .mockResolvedValueOnce('') // tracking-refs sweep: git remote
+      .mockResolvedValueOnce('') // tracking-refs sweep: fetch dests
+      .mockResolvedValueOnce('') // tracking-refs re-verify: for-each-ref
+      .mockResolvedValueOnce('') // tracking-refs re-verify: git remote
+      .mockResolvedValueOnce('') // tracking-refs re-verify: fetch dests
+      .mockResolvedValueOnce('') // sweep dump
+      .mockResolvedValueOnce('') // swept-resolving read
+      .mockResolvedValueOnce('') // sibling worktree list
+      .mockResolvedValueOnce(''); // surviving-keys dump
+    const base = runGit.mock.calls.length;
+    await expect(gitRemoteRemove('/repo', 'gone')).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    const calls = runGit.mock.calls
+      .slice(base)
+      .map((c) => (c[1] as string[]).join(' '));
+    runGit.mockReset();
+    expect(calls).toContain('config --list --show-scope -z');
+    expect(calls).not.toContain(
+      'for-each-ref --format=%(refname) refs/remotes/',
+    );
+  });
+
   it('swallows a killed gate probe into no-discount and lets a later gate surface the kill', async () => {
     // The discount gate's probe legs answer no-discount on ANY failure
     // (a kill included) instead of aborting the rollback loop: the kill
@@ -550,6 +598,56 @@ describe('fetchGitRemotes config-read failure discrimination', () => {
     // rethrew it would have aborted before the merge arm).
     expect(calls).toContain(
       'config --local --includes --get-all -z branch.feat.merge',
+    );
+  });
+
+  it('does not discount a push-side-live residue when the gate dump carries a pushInsteadOf alias', async () => {
+    // Same push-alias leg inside the discount gate: with the section
+    // gone, a `url.*.pushInsteadOf` prefix keeping the bare name
+    // resolving push-side makes the include-held residue a LIVE push
+    // upstream — the write-back must not shadow it under the refusal.
+    runGit
+      .mockResolvedValueOnce(
+        'local\u0000file:.git/config\u0000remote.gone.url\nhttps://example.com/g\u0000',
+      ) // origin pre-flight read (no alias yet)
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-dir
+      .mockResolvedValueOnce('.git\n') // rev-parse --git-common-dir
+      .mockResolvedValueOnce('/repo\n') // rev-parse --show-toplevel
+      .mockResolvedValueOnce(
+        'local\u0000branch.feat.remote\nsurvivor\u0000worktree\u0000branch.feat.remote\ngone\u0000',
+      ) // snapshot: feat pointed (worktree value), local survivor backup
+      .mockResolvedValueOnce('') // git remote remove
+      .mockResolvedValueOnce('gone\u0000') // restore remote presence read (include-held residue)
+      .mockResolvedValueOnce('') // restore pushremote presence read
+      .mockResolvedValueOnce(
+        'local\u0000url.https://example.com/.pushinsteadof\ngone\u0000',
+      ) // gate dump: no section, but a push alias raced in — push-live
+      .mockResolvedValueOnce('') // restore merge read
+      .mockResolvedValueOnce('.git\n') // listing probe
+      .mockResolvedValueOnce('') // listing read: the row is gone
+      .mockResolvedValueOnce(
+        'local\u0000url.https://example.com/.pushinsteadof\ngone\u0000',
+      ) // union gate dump: same alias — refuses here
+      // Mutant path only (the gate's alias conjunct dropped): the gate
+      // runs the resolver + path probes and discounts the residue.
+      .mockResolvedValueOnce('gone\n') // gate resolver echo
+      .mockRejectedValueOnce(
+        Object.assign(new Error('exit 128'), {
+          stdout: '',
+          stderr: "fatal: 'gone' does not appear to be a git repository",
+          code: 128,
+        }),
+      ); // gate path probe: no such repo
+    const base = runGit.mock.calls.length;
+    await expect(gitRemoteRemove('/repo', 'gone')).rejects.toThrow(
+      /remote still configured after removal/,
+    );
+    const calls = runGit.mock.calls
+      .slice(base)
+      .map((c) => (c[1] as string[]).join(' '));
+    runGit.mockReset();
+    expect(calls).not.toContain(
+      'config --local --add branch.feat.remote survivor',
     );
   });
 
