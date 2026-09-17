@@ -5,6 +5,7 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
 
 export interface ExportToolLocation {
   path: string;
@@ -71,6 +72,16 @@ export interface ExportMessage {
       line?: number | null;
     }>;
     timestamp?: number;
+  };
+
+  /**
+   * For system messages that record a Goal transition: the journaled
+   * `goal_state` record, including the bookkeeping ones the transcript view
+   * hides, so an export shows every verdict and stop the Goal went through.
+   */
+  goalState?: {
+    cause: GoalStateCause;
+    snapshot: GoalSnapshotV2;
   };
 }
 
