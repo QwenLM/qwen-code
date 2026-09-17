@@ -5472,6 +5472,8 @@ describe('Server Config (config.ts)', () => {
           abortController: new AbortController(),
           isBackgrounded: true,
           scriptPath: '/runtime/workflows/generated/inline/wf_lock.js',
+          // A resume call is offered only beside a journal to replay.
+          journalPath: '/runtime/workflows/wf_lock/journal.jsonl',
         } as never);
         registry.fail(entry.runId, 'boom', 2);
         const text = completion.mock.calls[0][1] as string;
