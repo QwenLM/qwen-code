@@ -38,6 +38,7 @@ export interface GoalCheckpointVerifierInput {
 }
 
 export interface GoalCheckpointVerificationResult {
+  usage?: { totalTokenCount: number };
   claims: GoalCheckpointVerifierClaim[];
 }
 
@@ -150,7 +151,10 @@ export function materializeGoalEvidenceCheckpoint(input: {
   evidence: readonly ValidatedGoalEvidenceRecord[];
   result: GoalCheckpointVerificationResult;
 }): GoalEvidenceCheckpoint {
-  if (!isRecord(input.result) || !hasOnlyKeys(input.result, ['claims'])) {
+  if (
+    !isRecord(input.result) ||
+    !hasOnlyKeys(input.result, ['claims', 'usage'])
+  ) {
     throw new InvalidGoalCheckpointError(
       'Goal checkpoint verifier returned an invalid result',
     );

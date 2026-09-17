@@ -125,6 +125,112 @@ describe('AnthropicContentGenerator', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    ['anthropic-manual', { type: 'enabled', budget_tokens: 31999 }],
+    ['anthropic-adaptive', { type: 'adaptive', display: 'summarized' }],
+    ['deepseek-anthropic', { type: 'enabled', budget_tokens: 32000 }],
+    [
+      'deepseek-anthropic',
+      { type: 'enabled' },
+      'https://api.deepseek.com/anthropic',
+    ],
+    [
+      'anthropic-manual',
+      { type: 'enabled' },
+      'https://api.deepseek.com/anthropic',
+    ],
+  ])(
+    'uses %s for an unknown alias with its default effort',
+    async (profile, thinking, baseUrl = 'https://example.test') => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      mockConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            profile,
+            efforts: ['low', 'medium', 'high', 'max'],
+            defaultEffort: 'medium',
+          },
+        },
+      });
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'reply',
+        model: 'company-alias',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'company-alias',
+          authType: 'anthropic' as ContentGeneratorConfig['authType'],
+          apiKey: 'dummy',
+          baseUrl,
+          samplingParams: { max_tokens: 32000, temperature: 0 },
+        },
+        mockConfig,
+      );
+      await generator.generateContent({
+        model: 'company-alias',
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+      });
+      expect(anthropicState.lastCreateArgs?.[0]).toMatchObject({
+        thinking,
+        output_config: { effort: 'medium' },
+      });
+      if (profile === 'anthropic-manual') {
+        expect(anthropicState.lastCreateArgs?.[0]).toMatchObject({
+          temperature: 1,
+        });
+        await generator.generateContent({
+          model: 'company-alias',
+          contents: 'Hello',
+          config: { maxOutputTokens: 500 },
+        });
+        expect(anthropicState.lastCreateArgs?.[0]).not.toHaveProperty(
+          'thinking',
+        );
+      }
+    },
+  );
+
+  it('uses adaptive for a declared alias even with an explicit manual budget', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    mockConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+      capabilities: {
+        reasoning: {
+          profile: 'anthropic-adaptive',
+          efforts: ['medium', 'max'],
+          defaultEffort: 'max',
+        },
+      },
+    });
+    anthropicState.createImpl.mockResolvedValue({
+      id: 'reply',
+      model: 'company-alias',
+      content: [{ type: 'text', text: 'ok' }],
+    });
+    const generator = new AnthropicContentGenerator(
+      {
+        model: 'company-alias',
+        authType: 'anthropic' as ContentGeneratorConfig['authType'],
+        apiKey: 'dummy',
+        reasoning: { budget_tokens: 2048 },
+        samplingParams: { max_tokens: 64000 },
+      },
+      mockConfig,
+    );
+    await generator.generateContent({
+      model: 'company-alias',
+      contents: [{ role: 'model', parts: [{ text: 'Partial answer' }] }],
+    });
+    expect(anthropicState.lastCreateArgs?.[0]).toMatchObject({
+      thinking: { type: 'adaptive', display: 'summarized' },
+      output_config: { effort: 'max' },
+    });
+    const body = anthropicState.lastCreateArgs?.[0] as {
+      messages: Array<{ role: string }>;
+    };
+    expect(body.messages.at(-1)?.role).toBe('user');
+  });
+
   it('uses claude-cli identity (User-Agent + x-app + Bearer auth) for non-Anthropic baseURLs', async () => {
     // Non-Anthropic-native baseURL → IdeaLab-style proxy path:
     //  - User-Agent presents as `claude-cli/<version> (external, cli)`

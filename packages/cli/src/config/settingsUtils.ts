@@ -310,7 +310,10 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
   {
     section: 'agents',
     key: 'crossSessionMessaging',
-    strictness: (value: unknown): number => (value === true ? 0 : 1),
+    // Unset means on — the default — so it ranks with `true`. Anything the
+    // reader does not recognize keeps the socket closed, like `false`.
+    strictness: (value: unknown): number =>
+      value === true || value === undefined ? 0 : 1,
   },
   {
     section: 'agents',
