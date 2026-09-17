@@ -2,9 +2,11 @@
 
 [English](2026-09-17-managed-agent-java-runtime-broker-mvp.md) | [简体中文](2026-09-17-managed-agent-java-runtime-broker-mvp.zh-CN.md)
 
+Executable plan: [Managed Agent Hosted Runtime](../plans/2026-09-17-managed-agent-hosted-runtime-execution.md)
+
 Status: Implementation in progress
 Date: 2026-09-17
-Source baseline: `ace3f3355b692911836ed9ec9f0ce67c2f90a3d2`
+Source baseline: `65a6adf882bc8cf543d691ef6850c49b64b3718d`
 
 ## 1. Problem
 
@@ -103,9 +105,10 @@ tenantId
 + canonicalCwd
 + capabilityDigest
 + isolationClass
++ sessionIdentity when isolationClass=session
 ```
 
-Agent revisions with the same executable capabilities may share a Runtime. Strong-isolation workloads use `isolationClass=session`.
+Agent revisions with the same executable capabilities may share a Runtime. Strong-isolation workloads use `isolationClass=session`, which adds the owning Harness Session to the binding key and forces the provisioner to return a distinct Runtime.
 
 ## 7. Data models
 
@@ -201,7 +204,9 @@ POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release
 ```
 
-`control` is a validated discriminated union for the existing Managed Tool v2 operations: manifest, file-history bind/checkpoint/snapshot, begin-turn, prepare, confirmation, confirm, and preflight. It is not an arbitrary method name and JSON payload.
+The P2 client polls `GET /executions/{executionCallId}`. The `/events` route and its sequence semantics are reserved here and are implemented with the product event store in P3/P4.
+
+The qwen client produces a typed discriminated union for the existing Managed Tool v2 operations: manifest, file-history bind/checkpoint/snapshot, begin-turn, prepare, confirmation, confirm, and preflight. Java validates the closed operation-name set; the Managed Runtime remains the field-level payload validator in P2. This is not an arbitrary URL or HTTP-method proxy.
 
 Every command has a stable request ID. Physical tool execution additionally uses the Java Execution Ledger.
 
@@ -330,7 +335,7 @@ Normal Runtime logs do not share the ready-record channel.
 5. Java-owned local process lifecycle, standalone worker boot protocol, status/cancel/release, and process-tree verification.
 6. Durable repositories, public Agent/Session/Turn/Item APIs, Artifacts, and retirement of the old experimental control plane.
 
-The Java package and repository mapping is resolved before slice 3; it does not block qwen-side contract and provider work.
+The embeddable Java Broker lives in `packages/sdk-java/runtime-broker`. Product services provide their authenticated Session resolver and Runtime provisioner without adding Spring or scheduler dependencies to the Broker core.
 
 ### 16.1 Implemented in the current qwen slice
 
@@ -341,7 +346,18 @@ The Java package and repository mapping is resolved before slice 3; it does not 
 - Fail-closed ordinary-session engine selection and removal of Local Runtime fallback in Hosted mode.
 - Lazy Broker acquisition, so a no-Tool turn does not contact or wait for the Broker.
 
-The Java Broker, prompt-time `ensureBinding`, public event projection, standalone Runtime boot protocol, and durable repositories remain later slices.
+Prompt-time product-service `warm()`, public event projection, standalone Runtime boot protocol, and durable repositories remain later slices.
+
+### 16.2 Implemented in the current Java slice
+
+- A Java 11 embeddable `RuntimeBrokerService` with authenticated Harness Session scope resolution and compatible Runtime binding reuse.
+- Asynchronous `warm()` and acquisition, allowing the product service to start provisioning without blocking model inference.
+- An in-memory execution ledger that returns one `executionCallId` and dispatches once for one idempotency key.
+- Cross-Harness identity rejection, terminal cancellation precedence, active-execution release fencing, and failed-provisioning retry.
+- A reference `/internal/runtime-broker/v1` HTTP adapter and an HTTP transport for the existing Managed Runtime v1/v2 worker routes.
+- Maven tests and CI coverage for the new module.
+
+Prompt admission still needs to call `warm()` from the real Java product service. Durable repositories, public events, standalone Runtime process ownership, and physical process-tree cancellation remain later slices.
 
 ## 17. Validation plan
 

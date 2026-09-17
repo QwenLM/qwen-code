@@ -2,9 +2,11 @@
 
 [English](2026-09-17-managed-agent-java-runtime-broker-mvp.md) | [简体中文](2026-09-17-managed-agent-java-runtime-broker-mvp.zh-CN.md)
 
+可执行计划：[Managed Agent Hosted Runtime](../plans/2026-09-17-managed-agent-hosted-runtime-execution.md)
+
 状态：实施中
 日期：2026-09-17
-源码基线：`ace3f3355b692911836ed9ec9f0ce67c2f90a3d2`
+源码基线：`65a6adf882bc8cf543d691ef6850c49b64b3718d`
 
 ## 1. 问题
 
@@ -103,9 +105,10 @@ tenantId
 + canonicalCwd
 + capabilityDigest
 + isolationClass
++ isolationClass=session 时的 sessionIdentity
 ```
 
-如果可执行能力相同，不同 Agent revision 可以共享 Runtime。强隔离任务使用 `isolationClass=session`。
+如果可执行能力相同，不同 Agent revision 可以共享 Runtime。强隔离任务使用 `isolationClass=session`；此时 binding key 加入所属 Harness Session，并要求 provisioner 返回独立 Runtime。
 
 ## 7. 数据模型
 
@@ -201,7 +204,9 @@ POST /internal/runtime-broker/v1/executions/{executionCallId}:cancel
 POST /internal/runtime-broker/v1/tool-sessions/{runtimeSessionId}:release
 ```
 
-`control` 是对应现有 Managed Tool v2 操作的严格判别联合：manifest、file-history bind/checkpoint/snapshot、begin-turn、prepare、confirmation、confirm 和 preflight。它不是任意方法名加任意 JSON payload。
+P2 客户端先轮询 `GET /executions/{executionCallId}`。`/events` 路由及其序号语义在此冻结，并在 P3/P4 接入产品事件存储时实现。
+
+qwen 客户端为现有 Managed Tool v2 操作生成有类型的判别联合：manifest、file-history bind/checkpoint/snapshot、begin-turn、prepare、confirmation、confirm 和 preflight。Java 校验封闭的操作名集合；P2 中字段级 payload 校验仍由 Managed Runtime 完成。它不是任意 URL 或 HTTP 方法代理。
 
 所有命令携带稳定 request ID；物理工具执行额外进入 Java Execution Ledger。
 
@@ -330,7 +335,7 @@ node managed-runtime-worker.js --boot-config /owned/path/boot.json
 5. Java 自有本地进程生命周期、独立 worker boot 协议、status/cancel/release 和进程树验证。
 6. 持久化 Repository、公共 Agent/Session/Turn/Item API、Artifact 和旧实验控制面退役。
 
-在第3个切片前确定 Java package 和仓库映射；它不阻塞 qwen 侧契约和 Provider 开发。
+可嵌入的 Java Broker 位于 `packages/sdk-java/runtime-broker`。产品服务通过接口注入已鉴权的 Session resolver 与 Runtime provisioner，Broker 核心不绑定 Spring 或具体调度系统。
 
 ### 16.1 当前 qwen 切片已完成
 
@@ -341,7 +346,18 @@ node managed-runtime-worker.js --boot-config /owned/path/boot.json
 - Hosted 模式下普通会话的引擎选择失败即关闭，并移除 Local Runtime 回退。
 - Broker 获取保持懒加载，因此无 Tool 的轮次不会访问或等待 Broker。
 
-Java Broker、Prompt 接收时并行执行 `ensureBinding`、公开事件投影、独立 Runtime 启动协议与持久化仓储仍属于后续切片。
+产品服务在 Prompt 接收时并行调用 `warm()`、公开事件投影、独立 Runtime 启动协议与持久化仓储仍属于后续切片。
+
+### 16.2 当前 Java 切片已完成
+
+- 增加 Java 11 可嵌入 `RuntimeBrokerService`，由已鉴权的 Harness Session 解析权威 scope，并复用兼容 Runtime binding。
+- 增加异步 `warm()` 和 acquire，使产品服务可以启动 Runtime provisioning 而不阻塞模型推理。
+- 增加内存版执行账本，同一幂等键只返回一个 `executionCallId` 并且只派发一次。
+- 覆盖跨 Harness 身份拒绝、取消终态优先、活动执行释放栅栏以及 provisioning 失败后重试。
+- 增加 `/internal/runtime-broker/v1` 参考 HTTP 适配器，以及访问现有 Managed Runtime v1/v2 worker 路由的 HTTP transport。
+- 为新模块增加 Maven 测试与 CI 覆盖。
+
+真实 Java 产品服务的 Prompt admission 仍需调用 `warm()`。持久化 repository、公共事件、独立 Runtime 进程所有权与物理进程树取消仍属于后续切片。
 
 ## 17. 验证计划
 
