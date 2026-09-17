@@ -87,9 +87,10 @@ export class Logger {
   private writeQueue: Promise<unknown> = Promise.resolve();
   // Sessions whose removal is decided but whose write has not landed yet. Every op
   // assigns `this.logs` from its OWN disk snapshot, and that snapshot still holds the
-  // rows of any purge queued behind it — so without this an earlier op re-adopts rows
-  // a later optimistic removal already dropped, and a read inside that window returns
-  // a prompt from a session the user was just told was deleted.
+  // rows of any purge queued behind it — so every such assignment goes through
+  // `adoptDiskSnapshot`, or an earlier op re-adopts rows a later optimistic removal
+  // already dropped, and a read inside that window returns a prompt from a session
+  // the user was just told was deleted.
   private pendingPurgeSessions = new Set<string>();
   private debugLogger: DebugLogger;
 
@@ -120,6 +121,23 @@ export class Logger {
     const next = this.writeQueue.then(() => op());
     this.writeQueue = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Makes a disk snapshot the in-memory cache, minus the rows of every purge
+   * that has not been written yet. `ownRow`, the row the adopting op just
+   * wrote, is kept: if the purge behind it fails, its rollback restores only
+   * the rows it removed itself. Only the cache is filtered, never the array an
+   * op writes to disk, so a failed purge still leaves the file as it was.
+   */
+  private adoptDiskSnapshot(rows: LogEntry[], ownRow?: LogEntry): void {
+    this.logs =
+      this.pendingPurgeSessions.size === 0
+        ? rows
+        : rows.filter(
+            (row) =>
+              row === ownRow || !this.pendingPurgeSessions.has(row.sessionId),
+          );
   }
 
   private async _readLogFile(): Promise<LogEntry[]> {
@@ -258,7 +276,7 @@ export class Logger {
       this.debugLogger.debug(
         `Duplicate log entry detected and skipped: session ${entryToAppend.sessionId}, messageId ${entryToAppend.messageId}`,
       );
-      this.logs = currentLogsOnDisk; // Ensure in-memory is synced with disk
+      this.adoptDiskSnapshot(currentLogsOnDisk); // Ensure in-memory is synced with disk
       return null; // Indicate that no new entry was actually added
     }
 
@@ -270,7 +288,7 @@ export class Logger {
         JSON.stringify(currentLogsOnDisk, null, 2),
         { encoding: 'utf-8' },
       );
-      this.logs = currentLogsOnDisk;
+      this.adoptDiskSnapshot(currentLogsOnDisk, entryToAppend);
       return entryToAppend; // Return the successfully appended entry
     } catch (error) {
       this.debugLogger.debug('Error writing to log file:', error);
@@ -461,7 +479,7 @@ export class Logger {
         // Entry already gone from disk (concurrent rotation/clear).
         // Adopt disk state as truth so the in-memory cache doesn't
         // diverge from a freshly-rotated file.
-        this.logs = currentLogsOnDisk;
+        this.adoptDiskSnapshot(currentLogsOnDisk);
         return false;
       }
 
@@ -473,7 +491,7 @@ export class Logger {
           JSON.stringify(currentLogsOnDisk, null, 2),
           { encoding: 'utf-8' },
         );
-        this.logs = currentLogsOnDisk;
+        this.adoptDiskSnapshot(currentLogsOnDisk);
         // Roll back this instance's nextMessageId so a subsequent log doesn't
         // skip the freed slot (matters for tests that assert sequential ids).
         if (
@@ -522,12 +540,6 @@ export class Logger {
    */
   async removeSessionMessages(sessionId: string): Promise<boolean> {
     return this.removeSessionsMessages([sessionId]);
-  }
-
-  /** A disk snapshot with every not-yet-written purge still applied. */
-  private withoutPendingPurges(rows: LogEntry[]): LogEntry[] {
-    if (this.pendingPurgeSessions.size === 0) return rows;
-    return rows.filter((row) => !this.pendingPurgeSessions.has(row.sessionId));
   }
 
   /**
@@ -649,7 +661,7 @@ export class Logger {
         // None of the sessions has anything on disk (they never logged a prompt,
         // or another instance already purged them). Adopt the disk snapshot so the
         // cache doesn't diverge from a file that moved on underneath us.
-        this.logs = this.withoutPendingPurges(currentLogsOnDisk);
+        this.adoptDiskSnapshot(currentLogsOnDisk);
         return false;
       }
 
@@ -657,7 +669,7 @@ export class Logger {
         await atomicWriteFile(logFilePath, JSON.stringify(kept, null, 2), {
           encoding: 'utf-8',
         });
-        this.logs = this.withoutPendingPurges(kept);
+        this.adoptDiskSnapshot(kept);
         return true;
       } catch (error) {
         this.debugLogger.debug(
