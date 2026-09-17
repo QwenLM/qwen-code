@@ -267,6 +267,8 @@ P4 已自动化并接入 Java CI：
 
 ### P5：Java 自有 Runtime 生命周期
 
+详细执行方案：[Managed Agent Java 自有 Runtime 生命周期执行方案](./2026-09-17-managed-agent-java-owned-runtime-lifecycle.md)
+
 先实现 `LocalProcessRuntimeProvisioner`，稳定后再实现 Kubernetes 版本：
 
 - Java 创建 boot config 文件并以独立参数启动 worker；
