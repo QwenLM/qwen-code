@@ -68,7 +68,12 @@ import {
   getStableClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
-import { extractHttpStatus, isRecord } from './httpErrors.js';
+import {
+  extractHttpStatus,
+  isRecord,
+  isAcpChildCapacityError,
+} from './httpErrors.js';
+import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
   getStandaloneConnectionState,
@@ -611,6 +616,11 @@ function projectSubagentToolUpdate(
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const taskStatus = status ?? event.status;
+  const settled =
+    taskStatus === 'completed' ||
+    taskStatus === 'failed' ||
+    taskStatus === 'cancelled';
   const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
   const skills = Array.isArray(rawOutput?.['skills'])
@@ -647,30 +657,33 @@ function projectSubagentToolUpdate(
           ? { subagentSessionReady: rawOutput['subagentSessionReady'] }
           : {}),
         ...(terminateReason ? { terminateReason } : {}),
-        ...(typeof rawOutput['tokenCount'] === 'number'
+        ...(skills.length > 0 ? { skills } : {}),
+        ...(settled && typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
           : {}),
-        ...(skills.length > 0 ? { skills } : {}),
         ...(executionSummary
           ? {
               executionSummary: {
+                ...(settled
+                  ? Object.fromEntries(
+                      [
+                        'inputTokens',
+                        'outputTokens',
+                        'thoughtTokens',
+                        'cachedTokens',
+                        'totalTokens',
+                      ]
+                        .filter(
+                          (key) => typeof executionSummary[key] === 'number',
+                        )
+                        .map((key) => [key, executionSummary[key]]),
+                    )
+                  : {}),
                 ...(typeof executionSummary['totalToolCalls'] === 'number'
                   ? { totalToolCalls: executionSummary['totalToolCalls'] }
                   : {}),
                 ...(typeof executionSummary['totalDurationMs'] === 'number'
                   ? { totalDurationMs: executionSummary['totalDurationMs'] }
-                  : {}),
-                ...(typeof executionSummary['outputTokens'] === 'number'
-                  ? { outputTokens: executionSummary['outputTokens'] }
-                  : {}),
-                ...(typeof executionSummary['inputTokens'] === 'number'
-                  ? { inputTokens: executionSummary['inputTokens'] }
-                  : {}),
-                ...(typeof executionSummary['cachedTokens'] === 'number'
-                  ? { cachedTokens: executionSummary['cachedTokens'] }
-                  : {}),
-                ...(typeof executionSummary['totalTokens'] === 'number'
-                  ? { totalTokens: executionSummary['totalTokens'] }
                   : {}),
               },
             }
@@ -694,11 +707,7 @@ function projectSubagentToolUpdate(
 function projectMainTranscriptEvents(events: DaemonUiEvent[]): DaemonUiEvent[] {
   const projected: DaemonUiEvent[] = [];
   for (const event of events) {
-    if (
-      'parentToolCallId' in event &&
-      event.parentToolCallId &&
-      event.type !== 'assistant.usage'
-    ) {
+    if ('parentToolCallId' in event && event.parentToolCallId) {
       continue;
     }
     projected.push(
@@ -1422,7 +1431,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               getTurnIndexPage: (options) =>
                 connectedSession.getTurnIndexPage(options),
               getTranscriptPage: (options) =>
-                connectedSession.getTranscriptPage(options),
+                connectedSession.getTranscriptPage({
+                  ...options,
+                  ...(subagentTranscriptModeRef.current === 'summary'
+                    ? { compactedReplayMode: 'summary' as const }
+                    : {}),
+                }),
               materializeTranscriptEvents:
                 materializeNavigationTranscriptEvents,
             },
@@ -2118,7 +2132,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : {}),
               ...(!shouldResumeRequestedSession &&
               subagentTranscriptModeRef.current === 'summary'
-                ? { liveReplayMode: 'summary' as const }
+                ? {
+                    liveReplayMode: 'summary' as const,
+                    compactedReplayMode: 'summary' as const,
+                  }
                 : {}),
               ...(historyPaginationSupported &&
               (!restoreSessionId || restoreMode === 'load') &&
@@ -4002,8 +4019,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // events the SSE client already yielded (lastSeenEventId has advanced
           // past them).
           flushTranscriptSync();
-          const message =
-            error instanceof Error ? error.message : String(error);
+          const capacityRejected = isAcpChildCapacityError(error);
+          const message = capacityRejected
+            ? getTranslator('en')('daemon.capacity.exhausted')
+            : error instanceof Error
+              ? error.message
+              : String(error);
           const errorStatus = extractHttpStatus(error);
           if (
             activeSessionContextRef.current?.kind === 'standalone' &&
@@ -4069,6 +4090,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             (pendingLoad === undefined ||
               pendingLoad.sessionId === restoreSessionId);
           if (
+            !capacityRejected &&
             autoReconnect &&
             loadingRequestedSession &&
             ((restoreRetryDelayMs !== undefined && pendingLoadMatches) ||
@@ -4135,6 +4157,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             pendingLoad.reject(error);
           }
           if (
+            capacityRejected ||
             (session === undefined &&
               activeSessionContextRef.current?.kind === 'standalone' &&
               isSessionWriterBlockedCode(getDaemonErrorCode(error))) ||
@@ -4640,6 +4663,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         settleRestoredActivePrompt: () =>
           settleCurrentSessionRestoredPromptRef.current(),
         flushTranscript: () => flushCurrentTranscriptRef.current(),
+        getEventDetailMode: () => subagentTranscriptModeRef.current,
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
           settleCurrentSessionRestoredPromptRef.current = () => false;
@@ -4843,6 +4867,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let terminalFailure = false;
       try {
         const page = await activeSession.getTranscriptPage({
+          ...(subagentTranscriptModeRef.current === 'summary'
+            ? { compactedReplayMode: 'summary' as const }
+            : {}),
           ...(history.cursor !== undefined
             ? { cursor: history.cursor }
             : history.beforeRecordId !== undefined

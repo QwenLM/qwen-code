@@ -3853,15 +3853,17 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.agents?.maxParallelAgents).toBe(4);
 
       const warnings = getSettingsWarnings(settings);
-      for (const key of [
-        'agents.crossSessionMessaging',
-        'agents.crossSessionInbound',
-      ]) {
-        const warning = warnings.find((w) => w.includes(key));
-        expect(warning).toBeDefined();
-        expect(warning).toContain('would loosen the default value');
-        expect(warning).toContain('only make this setting stricter');
-      }
+      const inboundWarning = warnings.find((w) =>
+        w.includes('agents.crossSessionInbound'),
+      );
+      expect(inboundWarning).toBeDefined();
+      expect(inboundWarning).toContain('would loosen the default value');
+      expect(inboundWarning).toContain('only make this setting stricter');
+      // The switch is on by default, so a workspace `true` only repeats
+      // what is already in force: dropped, but nothing to warn about.
+      expect(
+        warnings.some((w) => w.includes('agents.crossSessionMessaging')),
+      ).toBe(false);
     });
 
     it('honors a workspace value that tightens the user value', () => {
@@ -3934,7 +3936,9 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.agents?.crossSessionInbound).toBe('hold');
-      expect(settings.merged.agents?.crossSessionMessaging).toBeUndefined();
+      // The switch defaults to on, so a workspace `false` is a tightening
+      // against an unset user scope and is kept — also without a warning.
+      expect(settings.merged.agents?.crossSessionMessaging).toBe(false);
       expect(
         getSettingsWarnings(settings).some((w) => w.includes('crossSession')),
       ).toBe(false);
@@ -3958,6 +3962,31 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.agents?.crossSessionInbound).toBe('refuse');
       const warning = getSettingsWarnings(settings).find((w) =>
         w.includes('agents.crossSessionInbound'),
+      );
+      expect(warning).toContain('would loosen the User value');
+    });
+
+    it('warns when a workspace true would reopen a switch the user turned off', () => {
+      // The one warning path left for this key: an operator scope's false
+      // outranks a workspace true. An unset operator scope would not reach
+      // it — a workspace true then repeats the default and drops silently.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionMessaging: false },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ agents: { crossSessionMessaging: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionMessaging).toBe(false);
+      const warning = getSettingsWarnings(settings).find((w) =>
+        w.includes('agents.crossSessionMessaging'),
       );
       expect(warning).toContain('would loosen the User value');
     });

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   AuthType,
   type ChatRecord,
@@ -629,15 +630,19 @@ export async function main() {
       argv.sandboxImage ??
       process.env['QWEN_SANDBOX_IMAGE'] ??
       settings.merged.tools?.sandboxImage;
-    if (
-      sandboxConfig &&
-      sandboxConfig.command !== 'sandbox-exec' &&
-      customSandboxImage
-    ) {
+    // Only the container backends run an image with its own in-process updater;
+    // `sandbox-exec` and `bwrap` confine this process in place, so neither the
+    // image handoff nor the host-update relaunch marker applies to them.
+    // Narrowed to the config (not a boolean) so `.image` stays type-safe below.
+    const containerSandbox =
+      sandboxConfig?.command === 'docker' || sandboxConfig?.command === 'podman'
+        ? sandboxConfig
+        : undefined;
+    if (containerSandbox?.image && customSandboxImage) {
       // Images built before this handoff protocol must be rebuilt; they cannot
       // be made to skip their in-process updater from the host.
-      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = sandboxConfig.image;
-    } else if (sandboxConfig && sandboxConfig.command !== 'sandbox-exec') {
+      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = containerSandbox.image;
+    } else if (containerSandbox) {
       const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
       process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
         Boolean(
@@ -1215,6 +1220,7 @@ export async function main() {
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.
+        prepareFileWatchersForProcessExit();
         await runExitCleanup();
       }
       process.exit(0);
