@@ -2076,6 +2076,119 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('routes the git remotes methods over REST', async () => {
+      const remotes = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        remotes: [
+          {
+            name: 'origin',
+            fetchUrl: 'https://example.com/o/r.git',
+            pushUrl: 'https://example.com/o/r.git',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, remotes));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+
+      await ws.workspaceGitRemotes();
+      await ws.workspaceGitRemoteAdd('origin', 'https://example.com/o/r.git');
+      await ws.workspaceGitRemoteRemove('origin');
+
+      const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', `${base}/git/remotes`],
+        ['POST', `${base}/git/remote`],
+        ['POST', `${base}/git/remote/remove`],
+      ]);
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        name: 'origin',
+        url: 'https://example.com/o/r.git',
+      });
+      expect(JSON.parse(calls[2]!.body!)).toEqual({ name: 'origin' });
+    });
+
+    it('applies an explicit per-call timeout on git remote remove', async () => {
+      // The third argument reaches fetchWithTimeout: a 5ms per-call
+      // budget aborts a stalling request fast, while the client-wide
+      // default (30s) would still be pending at the barrier. The fetch
+      // double honors the abort signal the way real fetch does.
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(init.signal?.reason ?? new Error('aborted')),
+            );
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+
+      const outcome = await Promise.race([
+        ws.workspaceGitRemoteRemove('origin', undefined, 5).then(
+          () => 'resolved',
+          () => 'aborted',
+        ),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('pending'), 1_000),
+        ),
+      ]);
+      expect(outcome).toBe('aborted');
+    });
+
+    it('applies an explicit per-call timeout on git remote add', async () => {
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(init.signal?.reason ?? new Error('aborted')),
+            );
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+
+      const outcome = await Promise.race([
+        ws
+          .workspaceGitRemoteAdd(
+            'origin',
+            'https://example.com/o/r.git',
+            undefined,
+            5,
+          )
+          .then(
+            () => 'resolved',
+            () => 'aborted',
+          ),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('pending'), 1_000),
+        ),
+      ]);
+      expect(outcome).toBe('aborted');
+    });
+
+    it('passes cwd as a query parameter on the git remotes methods', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+      const cwd = '/work/secondary/packages/app';
+
+      await ws.workspaceGitRemotes(cwd);
+      await ws.workspaceGitRemoteAdd('origin', 'https://x/o.git', cwd);
+      await ws.workspaceGitRemoteRemove('origin', cwd);
+
+      const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
+      const enc = encodeURIComponent(cwd);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', `${base}/git/remotes?cwd=${enc}`],
+        ['POST', `${base}/git/remote?cwd=${enc}`],
+        ['POST', `${base}/git/remote/remove?cwd=${enc}`],
+      ]);
+    });
+
     it('passes cwd as a query parameter on git mutation methods', async () => {
       const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
@@ -10645,6 +10758,68 @@ describe('DaemonClient', () => {
       });
 
       expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
+    });
+  });
+
+  describe('sessionWorkflowTaskAction', () => {
+    it('sends the start input of a run-script call', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          changed: true,
+          status: 'running',
+          taskId: 'wf_compiled1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sessionWorkflowTaskAction(
+          's/1',
+          'definition-7',
+          'run-script',
+          'client-9',
+          {
+            script: 'return 1',
+            args: { question: 'which tables grew?' },
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        ),
+      ).resolves.toEqual({
+        changed: true,
+        status: 'running',
+        taskId: 'wf_compiled1',
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s%2F1/tasks/definition-7/workflow-action',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        action: 'run-script',
+        script: 'return 1',
+        args: { question: 'which tables grew?' },
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-9');
+    });
+
+    // A daemon that predates start input must see exactly the body it knows.
+    it('sends the action alone when there is no start input', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { changed: true, status: 'running' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.sessionWorkflowTaskAction('s-1', 'wf-1', 'rerun');
+      await client.sessionWorkflowTaskAction(
+        's-1',
+        'deep-review',
+        'run-saved',
+        undefined,
+        {},
+      );
+
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ action: 'rerun' });
+      expect(JSON.parse(calls[1]!.body!)).toEqual({ action: 'run-saved' });
     });
   });
 });
