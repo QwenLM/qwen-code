@@ -1734,11 +1734,17 @@ export class WebViewProvider {
       vscode.Uri.parse(baseUrl),
     );
     const externalUrl = externalUri.toString();
+    const hostname = new URL(externalUrl).hostname;
+    if (hostname.startsWith('[')) {
+      throw new Error(
+        `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", but the webview cannot connect to an IPv6 literal under its content security policy.`,
+      );
+    }
     // This URL shares its payload with the daemon's bearer token. A
     // browser-based remote resolves to a relay origin rather than a forwarded
     // loopback one, and the webview CSP would then be the only thing keeping
     // that token away from a third-party host — so refuse here instead.
-    if (!isLoopbackHostname(new URL(externalUrl).hostname)) {
+    if (!isLoopbackHostname(hostname)) {
       throw new Error(
         `Qwen Code cannot reach its daemon from this window: VS Code resolved it to "${externalUrl}", which is not a forwarded loopback address.`,
       );
