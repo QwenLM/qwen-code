@@ -412,7 +412,6 @@ function renderSidebar(
             | 'hooks'
           )[];
         };
-    onOpenGitDiff?: (cwd: string) => void;
     onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
     onOpenWorkspacesOverview?: () => void;
@@ -470,7 +469,6 @@ function renderSidebar(
           footer={overrides.footer}
           onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
           workspaceOverview={overrides.workspaceOverview}
-          onOpenGitDiff={overrides.onOpenGitDiff}
           onNewWorktreeSession={overrides.onNewWorktreeSession}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
@@ -1656,7 +1654,6 @@ describe('WebShellSidebar workspace removal', () => {
       projectFeaturesEnabled: false,
       onOpenAddWorkspace: vi.fn(),
       onOpenWorkspacesOverview: vi.fn(),
-      onOpenGitDiff: vi.fn(),
     });
     await act(async () => {
       await Promise.resolve();
@@ -3355,7 +3352,6 @@ describe('WebShellSidebar workspace removal', () => {
     const onNewSession = vi.fn(() => true);
     const onNewWorktreeSession = vi.fn();
     renderSidebar({
-      onOpenGitDiff: vi.fn(),
       onNewSession,
       onNewWorktreeSession,
       workspaces: [
@@ -3375,6 +3371,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     act(() => click(workspaceAction('/tmp/other')!));
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(menuItemLabels()).toContain('New worktree task');
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
@@ -3419,7 +3418,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
 
-    act(() => click(workspaceAction('/tmp/project')!));
+    await act(async () => {
+      click(workspaceAction('/tmp/project')!);
+    });
     const worktree = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
     ).find((element) => element.textContent === 'New worktree task');
@@ -3548,16 +3549,18 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    const clickWorktree = () => {
-      act(() => click(workspaceAction('/tmp/other')!));
+    const clickWorktree = async () => {
+      await act(async () => {
+        click(workspaceAction('/tmp/other')!);
+      });
       const item = Array.from(
         document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
       ).find((element) => element.textContent === 'New worktree task');
       expect(item).toBeDefined();
       act(() => click(item!));
     };
-    clickWorktree();
-    clickWorktree();
+    await clickWorktree();
+    await clickWorktree();
     expect(onNewWorktreeSession).toHaveBeenCalledTimes(1);
     expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
     const catalogCallsBefore = refreshWorkspaceSessionCatalog.mock.calls.length;
@@ -3630,8 +3633,7 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    // The selection drives the fetch: skills is never requested.
-    expect(workspaceMcp).toHaveBeenCalled();
+    expect(workspaceMcp).not.toHaveBeenCalled();
     expect(workspaceSkills).not.toHaveBeenCalled();
 
     // Hovering the header lists only the selected facet in the popover.
@@ -3648,6 +3650,8 @@ describe('WebShellSidebar workspace removal', () => {
     const rows = document.querySelectorAll(
       '[role="dialog"] [data-web-shell-workspace-overview]',
     );
+    expect(workspaceMcp).toHaveBeenCalledTimes(1);
+    expect(workspaceSkills).not.toHaveBeenCalled();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.getAttribute('data-web-shell-workspace-overview')).toBe(
       'mcp',

@@ -8,7 +8,7 @@
 
 /**
  * Compact native OpenTUI dialogs for the remaining long-tail commands
- * (M3, #8677): editor/auth/trust/delete/resume/branch/hooks/rewind/diff/
+ * (M3, #8677): editor/auth/trust/delete/resume/branch/rewind/diff/
  * arena/subagent_create/subagent_list. Each mounts a real panel (info or
  * confirm) instead of "unsupported". Heavy ones (diff/resume/arena/subagents/
  * editor) are compact here and get fidelity passes in M4.
@@ -30,6 +30,7 @@ import {
   checkHasEditorType,
   isEditorAvailable,
 } from '@qwen-code/qwen-code-core/utils/editor.js';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   EDITOR_DISPLAY_NAMES,
@@ -567,21 +568,6 @@ export function readHooksEnabled(
       );
 }
 
-export function OpenTuiHooksDialog({ config, settings, onClose }: P) {
-  useEsc(onClose);
-  const enabled = readHooksEnabled(config, settings);
-  return (
-    <Shell title="Hooks" onClose={onClose}>
-      <box flexDirection="column" marginTop={1}>
-        <Row label="Hooks enabled:" value={enabled ? 'yes' : 'no'} />
-        <text fg={C.dim}>
-          {'Lifecycle hooks run around tool/session events.'}
-        </text>
-      </box>
-    </Shell>
-  );
-}
-
 export function OpenTuiRewindDialog({ onClose }: P) {
   useEsc(onClose);
   return (
@@ -604,7 +590,13 @@ export function OpenTuiDiffDialog({ onClose }: P) {
       .then(({ execFile }) => {
         execFile(
           'git',
-          ['diff', '--color=never'],
+          [
+            ...NO_EXEC_CONFIG,
+            'diff',
+            '--no-ext-diff',
+            '--no-textconv',
+            '--color=never',
+          ],
           { maxBuffer: 1024 * 1024 * 8 },
           (_err, stdout) => {
             if (alive)

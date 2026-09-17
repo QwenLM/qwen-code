@@ -37,6 +37,8 @@ import {
   WorkflowAgentCapExceededError,
   WorkflowAgentFailedError,
 } from './workflow-agent-failure.js';
+import { DISPATCH_AFFECTING_AGENT_OPTS } from './workflow-journal.js';
+import { resolveBuiltinToolName } from '../../tools/tool-names.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
@@ -769,7 +771,7 @@ describe('WorkflowOrchestrator', () => {
     // Cross-realm: the sandbox wraps the host error in a vm-realm Error
     // (per T1/T8/T14 defense). The dispatch is never invoked because the
     // gate short-circuits before scheduler.run.
-    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('token budget exceeded');
     expect(String(caught)).toContain('1000');
     expect(dispatchCalls).toBe(0);
   });
@@ -796,7 +798,7 @@ describe('WorkflowOrchestrator', () => {
     }
     // q1 = 60/100, q2 = 120/100 (overshoot), q3 = gate refuses
     expect(dispatchCalls).toBe(2);
-    expect(String(caught)).toContain('exceeded the token budget');
+    expect(String(caught)).toContain('token budget exceeded');
     expect(budget.spent()).toBe(120);
   });
 
@@ -869,7 +871,7 @@ describe('WorkflowOrchestrator', () => {
           agentCompleted: () => completed++,
         },
       }),
-    ).rejects.toThrow(/exceeded the token budget/);
+    ).rejects.toThrow(/token budget exceeded/);
     // ASSERT it doesn't reach 10 (the without-fix overshoot value):
     // with the scheduler pinned to limit 1, slot-acquire re-checks are
     // serialized, so exactly 3 dispatches pass (spent 0/40/80 at acquire;
@@ -916,7 +918,7 @@ describe('WorkflowOrchestrator', () => {
         resumeReplay: buildReplay(priorEntries),
         emitter: { resumeRespawn: (line) => respawns.push(line) },
       }),
-    ).rejects.toThrow(/exceeded the token budget/);
+    ).rejects.toThrow(/token budget exceeded/);
 
     expect(dispatchCalls).toBe(3);
     expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(3);
@@ -947,7 +949,7 @@ describe('WorkflowOrchestrator', () => {
         emitter: { resumeRespawn: (line) => respawns.push(line) },
       });
       if (round < 3) {
-        await expect(run).rejects.toThrow(/exceeded the token budget/);
+        await expect(run).rejects.toThrow(/token budget exceeded/);
       } else {
         await expect(run).resolves.toMatchObject({
           result: Array.from({ length: 10 }, (_, i) => `slot${i}`),
@@ -973,6 +975,43 @@ describe('WorkflowOrchestrator', () => {
   // sites); no dedicated test — debugLogger has its own enable/disable
   // gating and a spy here would be brittle. Manual verification path:
   // run with DEBUG=WORKFLOW=1 and trigger a budget-exhausted dispatch.
+
+  // A turn target is gated on the whole turn's spend — the main loop and
+  // every other run included — while the registry keeps mirroring this run
+  // alone: its own spend, and no cap, since the target is not this run's.
+  it('gates a turn target on the turn spend and reports only the run to the registry', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    let turnSpent = 499_999;
+    const budget = new WorkflowBudgetImpl(500_000, {
+      source: 'directive',
+      turnSpent: () => turnSpent,
+    });
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      // Tokens spent elsewhere in the turn while this agent ran.
+      turnSpent += 10;
+      return 'ok';
+    });
+    const budgetUpdates: Array<{ spent: number; total: number | null }> = [];
+    const caught = await orchestrator
+      .run({
+        script: `await agent('q1'); await agent('q2'); return 'done';`,
+        args: undefined,
+        budget,
+        emitter: {
+          budgetUpdated: (spent, total) => budgetUpdates.push({ spent, total }),
+        },
+      })
+      .catch((e: unknown) => e);
+
+    expect(dispatchCalls).toBe(1);
+    expect(String(caught)).toContain(
+      'token budget exceeded (500009 / 500000 output tokens)',
+    );
+    expect(budget.runSpent()).toBe(0);
+    expect(budgetUpdates).toEqual([{ spent: 0, total: null }]);
+  });
 
   // ── P5 T4: budgetUpdated emitter event ─────────────────────────────────
 
@@ -1281,7 +1320,7 @@ describe('WorkflowOrchestrator', () => {
 
     scheduler.resume();
     await expect(run).resolves.toMatchObject({
-      result: expect.stringContaining('exceeded the token budget'),
+      result: expect.stringContaining('token budget exceeded'),
     });
     expect(dispatchCalls).toBe(0);
   });
@@ -1375,7 +1414,7 @@ describe('WorkflowOrchestrator', () => {
     controller.abort();
 
     await expect(run).resolves.toMatchObject({
-      result: expect.stringContaining('exceeded the token budget'),
+      result: expect.stringContaining('token budget exceeded'),
     });
   });
 
@@ -1449,7 +1488,7 @@ describe('WorkflowOrchestrator', () => {
       caught = e;
     }
     // parent p1 spends 60; nested n1 spends 60 (total 120); nested n2 gated.
-    expect(String(caught)).toMatch(/exceeded the token budget/);
+    expect(String(caught)).toMatch(/token budget exceeded/);
     expect(budget.spent()).toBe(120);
   });
 
@@ -1578,6 +1617,45 @@ describe('WorkflowOrchestrator', () => {
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
     return { journal, entries };
   }
+
+  // The sandbox normalizes effort and disallowedTools before the resume key is
+  // derived: spelling the same request differently must replay, and a
+  // genuinely different request must not.
+  it('derives one resume key for equivalent effort and disallowedTools spellings', async () => {
+    const keyFor = async (opts: string): Promise<string> => {
+      const { journal, entries } = memoryJournal();
+      await new WorkflowOrchestrator(async () => 'ok').run({
+        script: `return await agent('scan', ${opts});`,
+        args: undefined,
+        journal,
+      });
+      const started = entries.find((e) => e.type === 'started');
+      return (started as { key: string }).key;
+    };
+
+    const medium = await keyFor(
+      `{ effort: 'medium', disallowedTools: ['write_file', 'edit'] }`,
+    );
+    expect(
+      await keyFor(
+        `{ effort: 'MED', disallowedTools: ['edit', 'write_file', 'edit'] }`,
+      ),
+    ).toBe(medium);
+    expect(
+      await keyFor(
+        `{ effort: 'high', disallowedTools: ['edit', 'write_file'] }`,
+      ),
+    ).not.toBe(medium);
+    expect(
+      await keyFor(`{ effort: 'medium', disallowedTools: ['edit'] }`),
+    ).not.toBe(medium);
+    // A built-in tool named by its display name is the same deny.
+    expect(
+      await keyFor(
+        `{ effort: 'medium', disallowedTools: ['WriteFile', 'Edit'] }`,
+      ),
+    ).toBe(medium);
+  });
 
   it('settles a sequential agent() to null when the agent itself failed', async () => {
     const { journal, entries } = memoryJournal();
@@ -1850,7 +1928,9 @@ describe('WorkflowOrchestrator', () => {
 
       expect(dispatch).toHaveBeenCalledOnce();
       expect(entries.map((entry) => entry.type)).toEqual(['started', 'result']);
-      expect(entries.some((entry) => entry.key === keyB)).toBe(false);
+      expect(
+        entries.some((entry) => entry.type !== 'source' && entry.key === keyB),
+      ).toBe(false);
       expect(respawns).toEqual([]);
     } finally {
       if (previous === undefined) {
@@ -2909,7 +2989,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
           args: undefined,
           budget,
         }),
-      ).rejects.toThrow(/exceeded the token budget/);
+      ).rejects.toThrow(/token budget exceeded/);
 
       const capOrchestrator = new WorkflowOrchestrator(async () => {
         throw new WorkflowAgentCapExceededError(1000);
@@ -3427,6 +3507,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeIgnoreFiles?: string;
     options?: {
       runConfigOverrides?: unknown;
+      modelConfigOverrides?: unknown;
       taskName?: string;
       subagentId?: string;
     };
@@ -3521,6 +3602,15 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
+        // Mirrors the real manager for everything a unit test can know: MCP
+        // patterns and built-in tools match, anything else is unmatched. The
+        // schema-deny refusal resolves names itself and does not use this.
+        findUnmatchedToolNames: async (names: string[]) =>
+          names.filter(
+            (name) =>
+              !name.startsWith('mcp__') &&
+              resolveBuiltinToolName(name) === undefined,
+          ),
         createAgentHeadless: async (
           subagentConfig: {
             name?: string;
@@ -3531,6 +3621,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
           options?: {
             eventEmitter?: unknown;
             runConfigOverrides?: unknown;
+            modelConfigOverrides?: unknown;
             taskName?: string;
             subagentId?: string;
           },
@@ -3545,6 +3636,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               .getQwenIgnoreFileNamesDisplay(),
             options: {
               runConfigOverrides: options?.runConfigOverrides,
+              modelConfigOverrides: options?.modelConfigOverrides,
               taskName: options?.taskName,
               subagentId: options?.subagentId,
             },
@@ -4204,6 +4296,235 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       ]),
     );
   });
+
+  // effort needs the agent's own content-generator config, which only the
+  // override path builds: it has to leave the fast path and reach the manager
+  // as a per-agent model-config override, never as a session change.
+  it('routes effort through the override path as a per-agent model override', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    const result = await createProductionDispatch(config)('hi', {
+      effort: 'low',
+    });
+
+    expect(result).toBe('done');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.options?.modelConfigOverrides).toEqual({
+      reasoningEffort: 'low',
+    });
+    expect(calls[0]!.config.model).toBeUndefined();
+  });
+
+  it('sends no model-config override when effort is omitted', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('hi', { model: 'qwen3-max' });
+
+    expect(calls[0]!.options?.modelConfigOverrides).toBeUndefined();
+  });
+
+  // The sandbox normalizes effort before it crosses; a host caller that
+  // dispatches directly gets the same normalization and the same refusal.
+  it('normalizes a host-supplied effort alias and refuses an unknown tier', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+
+    await dispatch('hi', { effort: 'X-High' as unknown as 'xhigh' });
+    expect(calls[0]!.options?.modelConfigOverrides).toEqual({
+      reasoningEffort: 'xhigh',
+    });
+
+    await expect(
+      dispatch('hi', { effort: 'turbo' as unknown as 'low' }),
+    ).rejects.toThrow(/agent\(\{effort\}\): unknown effort tier "turbo"/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('unions per-call disallowedTools with the agentType denies and the floor', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Scanner',
+        description: 'read-only scan',
+        systemPrompt: 'scan prompt',
+        level: 'project',
+        disallowedTools: ['Foo'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      agentType: 'Scanner',
+      disallowedTools: ['Shell', 'write_file'],
+    });
+
+    const disallowed = calls[0]!.config.disallowedTools ?? [];
+    // The built-in display name arrives as its tool name.
+    expect(disallowed).toEqual(
+      expect.arrayContaining([
+        'Foo',
+        'run_shell_command',
+        'write_file',
+        'ask_user_question',
+        'send_message',
+        'monitor',
+        'enter_plan_mode',
+        'exit_plan_mode',
+        'agent',
+      ]),
+    );
+    expect(new Set(disallowed).size).toBe(disallowed.length);
+  });
+
+  it('routes disallowedTools alone through the override path', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      disallowedTools: ['edit'],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.disallowedTools).toEqual(
+      expect.arrayContaining(['edit', 'agent', 'ask_user_question']),
+    );
+  });
+
+  // A schema agent answers only through structured_output. Denying it must be
+  // refused before anything spawns, by display name as well as by tool name,
+  // with no help from the tool registry (the stub above does not resolve it).
+  it.each([['structured_output'], ['StructuredOutput']])(
+    'refuses a schema agent that denies %s before spawning',
+    async (name) => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('extract', {
+          schema: { type: 'object' },
+          disallowedTools: [name],
+        }),
+      ).rejects.toThrow(
+        /schema mode needs the structured_output tool, but disallowedTools deny it/,
+      );
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it('refuses a schema agent whose agent type denies structured_output', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      findSubagentByName: async () => ({
+        name: 'Scanner',
+        description: 'scan',
+        systemPrompt: 'scan prompt',
+        level: 'project',
+        disallowedTools: ['StructuredOutput'],
+      }),
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('extract', {
+        agentType: 'Scanner',
+        schema: { type: 'object' },
+      }),
+    ).rejects.toThrow(/schema mode needs the structured_output tool/);
+    expect(calls).toHaveLength(0);
+  });
+
+  // A deny that matches no tool would leave the agent that very tool while
+  // the script believes it narrowed it.
+  it('refuses a deny entry that matches no tool before spawning', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(config)('scan', {
+        disallowedTools: ['Bash', 'edit'],
+      }),
+    ).rejects.toThrow(/"Bash" matches no tool/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('accepts MCP deny patterns', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('scan', {
+      disallowedTools: ['mcp__github', 'mcp__slack__*'],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.config.disallowedTools).toEqual(
+      expect.arrayContaining(['mcp__github', 'mcp__slack__*']),
+    );
+  });
+
+  // The host re-checks the deny list's shape for callers that bypass the
+  // sandbox: a bare string would otherwise spread into single characters and a
+  // padded name would deny nothing.
+  it.each([
+    ['a bare string', 'write_file'],
+    ['a padded name', [' edit']],
+  ])(
+    'refuses a host-supplied deny list that is %s before spawning',
+    async (_label, disallowedTools) => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          disallowedTools: disallowedTools as unknown as string[],
+        }),
+      ).rejects.toThrow(/must be an array of non-empty tool-name strings/);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  // Every option the resume key projects must also keep a dispatch off the
+  // fast path. The guard is driven by the same list, so an option added there
+  // cannot be silently dropped by a fast path that ignores it.
+  it.each(DISPATCH_AFFECTING_AGENT_OPTS.map((key) => [key]))(
+    'keeps a dispatch that sets only %s off the fast path',
+    async (key) => {
+      const samples: Record<string, unknown> = {
+        schema: { type: 'object' },
+        model: 'qwen3-max',
+        effort: 'low',
+        isolation: 'worktree',
+        agentType: 'Scanner',
+        workingDir: '/nonexistent/worktree',
+        disallowedTools: ['edit'],
+      };
+      expect(samples).toHaveProperty(key);
+      const { config } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Scanner',
+          description: 'scan',
+          systemPrompt: 'scan prompt',
+          level: 'project',
+        }),
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      const fastPathAgentsBefore = created.length;
+
+      await createProductionDispatch(config)('probe', {
+        [key]: samples[key],
+      }).catch(() => undefined);
+
+      expect(created.length).toBe(fastPathAgentsBefore);
+    },
+  );
 
   it('schema-mode: subagent calls structured_output successfully → returns validated args', async () => {
     const { config } = fakeConfigWithMgr({

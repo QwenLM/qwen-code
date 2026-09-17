@@ -52,7 +52,7 @@ function toolResult({
   };
 }
 
-function fakeDriver({ revisionCapability = true, results = {} } = {}) {
+function fakeDriver({ revisionCapability = true, results = {}, platform = "windows" } = {}) {
   const calls = [];
   const asyncOptions = [];
   const driver = {
@@ -65,6 +65,7 @@ function fakeDriver({ revisionCapability = true, results = {} } = {}) {
     },
     async listToolsJson() {
       return JSON.stringify({
+        platform,
         tools: [
           {
             name: "get_window_state",
@@ -349,8 +350,8 @@ test("an incomplete capture retries once without disabling diffs", async () => {
             actions: ["invoke"],
           },
         ],
-        capture_complete: false,
         observation_revision: {
+          capture_complete: false,
           mode: "full",
           lineage_id: "l_transient",
           revision_id: "l_transient:r0",
@@ -399,7 +400,290 @@ test("an incomplete capture retries once without disabling diffs", async () => {
   assert.equal(observation.diagnostics.captureComplete, false);
   assert.deepEqual(observation.elements, []);
   assert.match(observation.text, /capture is incomplete/i);
-  assert.match(observation.text, /without `disableDiff`/);
+  assert.match(observation.text, /Retry after the UI settles/);
+});
+
+for (const nested of [false, true]) {
+  test(`budget captures preserve current tokens without retry (${nested ? "nested" : "top-level"})`, async () => {
+    let count = 0;
+    const capture = {
+      capture_complete: false,
+      capture_incomplete_details: ["walk: max_elements truncated"],
+    };
+    const driver = fakeDriver({
+      results: {
+        getWindowState: () =>
+          toolResult({
+            structured: {
+              ...(!nested && capture),
+              tree_markdown: "FULL",
+              elements: [{ element_token: "rv1:bounded:0", label: "Address bar" }],
+              observation_revision: {
+                ...(nested && capture),
+                mode: count++ === 0 ? "full" : "no_change",
+                stable_element_ids: true,
+                revision_id: `bounded:r${count}`,
+              },
+            },
+          }),
+      },
+    });
+    const computer = new ComputerUse(driver, { sdk: fakeSdk });
+    const first = await computer.observeWindow({ pid: 42, windowId: 7 });
+    const second = await computer.observeWindow({ pid: 42, windowId: 7 });
+    assert.equal(driver.calls.length, 2);
+    assert.equal(driver.calls[1].input.observationRevision.baseRevisionId, "bounded:r1");
+    assert.equal(first.diagnostics.captureComplete, false);
+    assert.equal(first.diagnostics.captureReadComplete, undefined);
+    assert.equal(first.diagnostics.captureTruncated, true);
+    assert.deepEqual(
+      first.diagnostics.captureIncompleteDetails,
+      capture.capture_incomplete_details,
+    );
+    assert.match(first.text, /^Accessibility capture is incomplete \(traversal limit\)/);
+    assert.equal(second.mode, "no_change");
+    assert.deepEqual(second.elements, first.elements);
+  });
+}
+
+for (const [readComplete, details] of [
+  [undefined, ["AXTitle: ax_error -25204", "walk: max_elements truncated"]],
+  [false, ["walk: max_elements truncated"]],
+  [undefined, ["provider_unresponsive", "max_elements_reached"]],
+]) {
+  test(`mixed read failure and truncation retries once (read flag ${readComplete})`, async () => {
+    let reads = 0;
+    const driver = fakeDriver({
+      results: {
+        getWindowState: () =>
+          toolResult({
+            structured: {
+              tree_markdown: "Captured controls",
+              capture_complete: false,
+              capture_read_complete: ++reads === 1 ? readComplete : true,
+              capture_truncated: true,
+              capture_incomplete_details:
+                reads === 1 ? details : ["walk: max_elements truncated"],
+              elements: [{ element_token: reads === 1 ? "s1:0" : "rv1:bounded:0" }],
+              observation_revision: {
+                mode: "full",
+                revision_id: reads === 1 ? "transient:r0" : "bounded:r1",
+                stable_element_ids: reads > 1,
+                resync_reason: reads === 1 ? "capture_incomplete" : "missing_base",
+              },
+            },
+          }),
+      },
+    });
+    const observation = await new ComputerUse(driver, { sdk: fakeSdk }).observeWindow({
+      pid: 42,
+      windowId: 7,
+    });
+    assert.equal(reads, 2);
+    assert.equal(observation.diagnostics.captureReadComplete, true);
+    assert.equal(observation.diagnostics.captureComplete, false);
+    assert.equal(observation.elements[0].element_token, "rv1:bounded:0");
+  });
+}
+
+for (const reason of ["walk_deadline_reached", "element_bounds_timeout"]) {
+  for (const nested of [false, true]) {
+    test(`deadline capture returns its prefix without another walk (${reason}, nested ${nested})`, async () => {
+      const complete = (id) => toolResult({ structured: {
+        tree_markdown: "Ready",
+        elements: [{ element_token: `rv1:${id}:0` }],
+        capture_complete: true,
+        observation_revision: {
+          mode: "full", lineage_id: id, revision_id: `${id}:r1`, stable_element_ids: true,
+        },
+      } });
+      const capture = {
+        capture_complete: false,
+        capture_truncated: true,
+        capture_incomplete_details: [reason, "max_depth_reached"],
+      };
+      const results = [complete("old"), toolResult({ structured: {
+        ...(nested ? {} : capture),
+        tree_markdown: "Completed prefix",
+        elements: [{ element_index: 0, element_token: "s00000001:0" }],
+        observation_revision: {
+          ...(nested ? capture : {}),
+          mode: "full", revision_id: "transient:r0", stable_element_ids: false,
+          resync_reason: "capture_incomplete",
+        },
+      } }), complete("recovered")];
+      const driver = fakeDriver({ results: { getWindowState: () => results.shift() } });
+      const computer = new ComputerUse(driver, { sdk: fakeSdk });
+      await computer.observeWindow({ pid: 42, windowId: 7 });
+      const partial = await computer.observeWindow({ pid: 42, windowId: 7 });
+      assert.equal(driver.calls.length, 2);
+      assert.match(partial.text, /Completed prefix/);
+      assert.equal(partial.elements[0].element_token, "s00000001:0");
+      assert.equal(partial.diagnostics.captureReadComplete, false);
+      assert.equal(partial.diagnostics.stableElementIds, false);
+      const recovered = await computer.observeWindow({ pid: 42, windowId: 7 });
+      assert.equal(driver.calls.length, 3);
+      assert.equal(driver.calls[2].input.observationRevision.baseRevisionId, undefined);
+      assert.equal(recovered.diagnostics.stableElementIds, true);
+    });
+  }
+}
+
+for (const detail of ["max_elements_reached", "max_depth_reached"]) {
+  test(`legacy Linux budget capture is not retried: ${detail}`, async () => {
+    const driver = fakeDriver({ results: {
+      getWindowState: toolResult({ structured: {
+        tree_markdown: "[637] Button",
+        elements: [{ element_index: 637, element_token: "s00000001:637" }],
+        capture_complete: false, capture_truncated: true,
+        capture_incomplete_details: [detail],
+        observation_revision: { mode: "full", stable_element_ids: false,
+          revision_id: "transient:r1", resync_reason: "capture_incomplete" },
+      } }),
+    } });
+    const computer = new ComputerUse(driver, { sdk: fakeSdk });
+    const observation = await computer.observeWindow({ pid: 42, windowId: 7, maxElements: 1 });
+    assert.equal(driver.calls.length, 1);
+    assert.equal(observation.elements[0].element_token, "s00000001:637");
+    assert.match(observation.text, /traversal limit/);
+  });
+}
+
+test("legacy incomplete snapshots keep issued tokens and invalidate the stable cursor", async () => {
+  let count = 0;
+  const driver = fakeDriver({
+    results: {
+      getWindowState: () =>
+        toolResult({
+          structured: {
+            tree_markdown: "FULL",
+            elements: [{ element_token: `s${++count}:0`, label: "Address bar" }],
+            observation_revision: {
+              mode: "full",
+              capture_complete: false,
+              capture_incomplete_details: ["walk: max_depth exceeded"],
+              stable_element_ids: false,
+              revision_id: `transient:r${count}`,
+              resync_reason: "capture_incomplete",
+            },
+          },
+        }),
+    },
+  });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  const first = await computer.observeWindow({ pid: 42, windowId: 7 });
+  const second = await computer.observeWindow({ pid: 42, windowId: 7 });
+  assert.equal(driver.calls.length, 2);
+  assert.equal(driver.calls[1].input.observationRevision.baseRevisionId, undefined);
+  assert.equal(first.elements[0].element_token, "s1:0");
+  assert.equal(second.elements[0].element_token, "s2:0");
+});
+
+test("text budgets preserve whole rows and full elements, and can be expanded", async () => {
+  const rows = Array.from(
+    { length: 500 },
+    (_, index) =>
+      ` [${index}] <AXButton> "Control ${index}" element_token=rv1:lineage:${index}`,
+  );
+  const elements = rows.map((_, index) => ({ element_token: `rv1:lineage:${index}` }));
+  const driver = fakeDriver({
+    results: {
+      getWindowState: toolResult({
+        structured: {
+          tree_markdown: rows.join("\n"),
+          elements,
+          capture_complete: false,
+          capture_truncated: true,
+        },
+      }),
+    },
+  });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  for (const maxTextChars of [undefined, 512]) {
+    const observation = await computer.observeWindow({
+      pid: 42,
+      windowId: 7,
+      maxTextChars,
+    });
+    assert.ok(observation.text.length <= (maxTextChars ?? 12_000));
+    assert.match(observation.text, /^Accessibility capture is incomplete/);
+    assert.match(observation.text, /Text truncated/);
+    assert.equal(observation.diagnostics.textTruncated, true);
+    assert.equal(observation.diagnostics.textChars, observation.text.length);
+    assert.ok(rows.includes(observation.text.split("\n").at(-1)));
+    assert.deepEqual(observation.elements, elements);
+  }
+  const expanded = await computer.observeWindow({
+    pid: 42,
+    windowId: 7,
+    disableDiff: true,
+    maxTextChars: 100_000,
+  });
+  assert.equal(expanded.diagnostics.textTruncated, false);
+  assert.match(expanded.text, /Control 499/);
+  assert.equal(driver.calls.at(-1).input.observationRevision.forceFull, true);
+  assert.equal(Object.hasOwn(driver.calls.at(-1).input, "maxTextChars"), false);
+  await assert.rejects(
+    computer.observeWindow({ pid: 42, windowId: 7, maxTextChars: 511 }),
+    /maxTextChars/,
+  );
+});
+
+test("native revision completeness takes precedence and retries only once", async () => {
+  let snapshots = 0;
+  const driver = fakeDriver({
+    results: {
+      getWindowState: () =>
+        toolResult({
+          structured: {
+            capture_complete: true,
+            elements: [{ element_token: `s${++snapshots}:0` }],
+            observation_revision: {
+              capture_complete: false,
+              mode: "full",
+              resync_reason: "capture_incomplete",
+              stable_element_ids: false,
+            },
+          },
+        }),
+    },
+  });
+  const observation = await new ComputerUse(driver, {
+    sdk: fakeSdk,
+  }).observeWindow({ pid: 42, windowId: 7 });
+  assert.equal(driver.calls.length, 2);
+  assert.equal(observation.diagnostics.captureComplete, false);
+  assert.deepEqual(observation.elements, [{ element_token: "s2:0" }]);
+  assert.match(observation.text, /capture is incomplete/i);
+});
+
+test("observations preserve input and screenshot context from the native payload", async () => {
+  const fields = {
+    background_input: { supported: false },
+    degraded: true,
+    degraded_reason: "ax_window_unresolved",
+    escalation: { recommended: "foreground" },
+    window_bounds: { x: 10, y: 20, width: 300, height: 200 },
+    screenshot_scale: 2,
+    screenshot_frame_valid: false,
+    screenshot_error: { code: "invalid_frame" },
+  };
+  const driver = fakeDriver({
+    results: { getWindowState: () => toolResult({ structured: fields }) },
+  });
+  const observation = await new ComputerUse(driver, {
+    sdk: fakeSdk,
+  }).observeWindow({ pid: 42, windowId: 7 });
+  assert.deepEqual(observation.context, {
+    backgroundInput: fields.background_input,
+    degraded: true,
+    degradedReason: fields.degraded_reason,
+    escalation: fields.escalation,
+    windowBounds: fields.window_bounds,
+    screenshotScale: 2,
+    screenshotFrameValid: false,
+    screenshotError: fields.screenshot_error,
+  });
 });
 
 test("the incomplete-capture retry restores the automatic cursor", async () => {
@@ -790,6 +1074,29 @@ test("typed discovery methods expose apps, windows, and exact-window lookup", as
   assert.equal((await computer.getWindow({ pid: 42, windowId: 7 })).title, "Harness");
 });
 
+test("structured actions retain native new-window notices alongside action evidence", async () => {
+  const text = 'Pressed cmd+n.\n\n🪟 Action opened new window(s): Harness ("Untitled").';
+  const structured = { effect: "unverifiable", route: "global_input" };
+  const action = { effect: 2, route: 2 };
+  const driver = fakeDriver({
+    results: {
+      windowHotkey: toolResult({ text, structured, action }),
+      windowPressKey: toolResult({ structured }),
+    },
+  });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  const result = await computer.hotkey({ pid: 42, windowId: 7, keys: ["cmd", "n"] });
+  assert.equal(result.text, text);
+  assert.equal(result.effect, structured.effect);
+  assert.equal(result.route, structured.route);
+  assert.deepEqual(result.action, action);
+  assert.equal(result.operation.state, "completed");
+  assert.equal(result.operation.dispatched, true);
+  const silent = await computer.pressKey({ pid: 42, windowId: 7, key: "Enter" });
+  assert.equal(Object.hasOwn(silent, "text"), false);
+  await computer.close();
+});
+
 test("all core actions use named typed SDK methods", async () => {
   const driver = fakeDriver();
   const computer = new ComputerUse(driver, { sdk: fakeSdk });
@@ -945,13 +1252,60 @@ test("an explicit delivery mode overrides the environment default", async () => 
   assert.equal(driver.calls[0].input.deliveryMode, "background");
 });
 
-test("an unset environment default resolves every supported action to background", async () => {
+test("an unset environment default preserves Windows background delivery", async () => {
   const driver = fakeDriver();
   const computer = new ComputerUse(driver, { sdk: fakeSdk, environment: {} });
 
   await computer.click({ pid: 42, windowId: 7, x: 10, y: 20 });
 
   assert.equal(driver.calls[0].input.deliveryMode, "background");
+});
+
+test("Linux defaults authorize native focus preparation for every input action", async () => {
+  const driver = fakeDriver({ platform: "linux" });
+  let inventories = 0;
+  const owner = { listToolsJson() { inventories += 1; return '{"platform":"linux"}'; } };
+  const computer = new ComputerUse(driver, { sdk: fakeSdk, owner });
+  const target = { pid: 42, windowId: 7 };
+  const element = { ...target, elementToken: "rv1:l_a:1" };
+  await computer.click(element);
+  await computer.doubleClick(element);
+  await computer.rightClick(element);
+  await computer.drag({ ...target, fromX: 1, fromY: 2, toX: 3, toY: 4 });
+  await computer.scroll({ ...element, direction: "down" });
+  await computer.typeText({ ...element, text: "once" });
+  await computer.pressKey({ ...target, key: "Enter" });
+  await computer.hotkey({ ...target, keys: ["ctrl", "a"] });
+  assert.equal(inventories, 1);
+  assert.equal(driver.calls.length, 8);
+  assert.ok(driver.calls.every(({ input }) => input.deliveryMode === "foreground"));
+  assert.ok(driver.calls.every(({ input }) => input.pid === 42 && input.windowId === 7n));
+  assert.equal(driver.calls[0].input.elementToken, element.elementToken);
+});
+
+test("Linux automatic delivery never replays an uncertain mutation error", async () => {
+  const driver = fakeDriver({ platform: "linux", results: {
+    windowTypeText: toolResult({ isError: true, structured: {
+      code: "verification_failed", effect: "unverifiable",
+    } }),
+  } });
+  const computer = new ComputerUse(driver, { sdk: fakeSdk });
+  await assert.rejects(computer.typeText({ pid: 42, windowId: 7, text: "once" }), {
+    code: "verification_failed",
+  });
+  assert.equal(driver.calls.length, 1);
+});
+
+test("refreshing the connected platform refreshes the input default", async () => {
+  const driver = fakeDriver();
+  let platform = "linux";
+  const owner = { listToolsJson: () => JSON.stringify({ platform }) };
+  const computer = new ComputerUse(driver, { sdk: fakeSdk, owner });
+  await computer.pressKey({ pid: 42, windowId: 7, key: "Tab" });
+  platform = "windows";
+  await computer.getPlatform();
+  await computer.pressKey({ pid: 42, windowId: 7, key: "Tab" });
+  assert.deepEqual(driver.calls.map(({ input }) => input.deliveryMode), ["foreground", "background"]);
 });
 
 test("an invalid environment delivery default fails before dispatch", async () => {

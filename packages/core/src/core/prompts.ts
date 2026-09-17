@@ -453,12 +453,24 @@ ${toolGuidance}
 ${(function () {
   // Determine sandbox status based on environment variables
   const isSandboxExec = process.env['SANDBOX'] === 'sandbox-exec';
+  // The in-place bwrap backend confines this process behind a read-only host
+  // root rather than running a container, and its denials read "Read-only
+  // file system" instead of "Operation not permitted" — so it needs its own
+  // section rather than the container wording below.
+  const isKernelSandbox = process.env['SANDBOX'] === 'bwrap';
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
   if (isSandboxExec) {
     return `
 # macOS Seatbelt
 You are running under macos seatbelt with limited access to files outside the project directory or system temp directory, and with limited access to host system resources such as ports. If you encounter failures that could be due to MacOS Seatbelt (e.g. if a command fails with 'Operation not permitted' or similar error), as you report the error to the user, also explain why you think it could be due to MacOS Seatbelt, and how the user may need to adjust their Seatbelt profile.
+`;
+  } else if (isKernelSandbox) {
+    const backend = process.env['SANDBOX'];
+    return `
+# Kernel Sandbox (${backend})
+You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY outside the writable roots configured at startup; /dev is the exception — a minimal synthetic device tree replaces it, so host device nodes (/dev/shm, /dev/kvm, /dev/dri, /dev/snd) are absent rather than read-only, and no writable root restores them. You cannot inspect the writable set from in here: 'QWEN_SANDBOX=bwrap qwen sandbox' explicitly selects this backend and only reports from outside, so tell the user to run it from this project directory on the host — the report reflects that directory's settings, and a session started elsewhere or with '--include-directories' may bind a different set. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions, even inside a writable root. Host services reached through Unix sockets remain outside this filesystem boundary, including in closed network mode. Proxied mode supplies proxy settings without preventing direct connections. Granted repository Git metadata, including config and hooks, remains writable and can affect later unconfined Git commands.
+When a write fails with EROFS, report it to the user, name the refused path, and explain that changing the writable roots requires restarting with the appropriate sandbox configuration. Do NOT work around a refusal by writing somewhere else, by escalating privileges, or by retrying the same write.
 `;
   } else if (isGenericSandbox) {
     return `
@@ -675,6 +687,12 @@ export interface SystemPromptLayers {
    */
   base: string;
   /**
+   * Stable layer: the omni progressive-media-understanding contract
+   * (omni/media-guidance.ts) — fixed for the whole session (the omni
+   * config and provider do not change in-session).
+   */
+  mediaGuidance?: string | null;
+  /**
    * Context layer: concatenated context files (QWEN.md hierarchy, baseline
    * rules, extension files). Reloaded only on explicit refresh.
    */
@@ -698,6 +716,7 @@ export interface SystemPromptLayers {
 export function assembleSystemPrompt(layers: SystemPromptLayers): string {
   return (
     layers.base +
+    buildSystemPromptSuffix(layers.mediaGuidance ?? undefined) +
     buildSystemPromptSuffix(layers.contextFiles) +
     buildSystemPromptSuffix(layers.appendPrompt) +
     (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +

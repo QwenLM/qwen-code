@@ -110,6 +110,25 @@ export interface PlanReport {
    * roster's job, and the roster reads `effort`.
    */
   budget: ReviewBudget;
+  /**
+   * The review's wall, as a DURATION from the attempt's start, in seconds —
+   * written by every capture command unless it was told `--deadline none`.
+   * A duration rather than an epoch because the plan is never rewritten on
+   * `--resume` (its mtime is the run epoch every fence keys on), and an
+   * epoch stored at capture would be stale for every continuation; the
+   * readers add it to the CURRENT attempt's start instead, which the
+   * run-session ledger records afresh when a resume starts a new session (a
+   * same-session resume continues the attempt, and its wall). See lib/deadline.ts
+   * `resolveReviewDeadline` for precedence — the environment's epoch, when
+   * CI exports one, wins over this.
+   */
+  deadlineSeconds?: number;
+  /**
+   * Where `deadlineSeconds` came from: `flag` for `--deadline <minutes>`,
+   * `default` for the tier's own wall. The distinction is load-bearing for
+   * the huge round tier, which reduces only under an explicit clock.
+   */
+  deadlineSource?: 'flag' | 'default';
   repositoryContext?: RepositoryContext;
 }
 
@@ -122,7 +141,7 @@ export interface PlanReport {
  *
  * `context` carries the two facts about the machine that the round cap depends
  * on — the operator's `review.reverseAuditRounds` ceiling and whether this run
- * has a deadline — and is a **required** parameter, deliberately not resolved
+ * has an EXPLICIT deadline — and is a **required** parameter, deliberately not resolved
  * in here. Three capture commands build a plan; an optional parameter is one a
  * call site can quietly omit, and a policy that silently applies to two of the
  * three review entry points is worse than one that applies to none. Passing

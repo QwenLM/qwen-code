@@ -48,7 +48,9 @@ the script body can read it. Fields outside that list are dropped. The
 approval dialog prints the name, the description, and each phase title with
 its `detail` as a one-line explanation beside it: give every phase a `detail`,
 because for a run that may dispatch hundreds of agents it is what the user
-reads before approving.
+reads before approving. In a workflow an extension ships, `whenToUse` also lists
+the workflow for the model to start when a request matches it; leave it out and
+the workflow runs only when someone asks for it by name.
 
 Injected globals, and nothing else:
 
@@ -61,10 +63,11 @@ Injected globals, and nothing else:
   invalid arguments.
 - `pipeline(items, ...stages)` — run each item through the stages
   independently. See **Default to `pipeline()`**.
-- `workflow(nameOrRef, args?)` — run a saved workflow inline. See **Saved
+- `workflow(nameOrRef, args?, { stepId }?)` — run a saved workflow inline. See **Saved
   workflows and workflow()**.
 - `args` — the structured value the caller passed, or `undefined`.
-- `budget` — `budget.total` (`null` = uncapped) and `budget.spent()`.
+- `budget` — `{ total, spent(), remaining() }`. See **Scaling to the token
+  budget**.
 
 Pass THUNKS to `parallel()`, not eager calls: `parallel([() => agent(...)])`,
 not `parallel([agent(...)])`. The eager form is refused outright: a
@@ -73,9 +76,10 @@ has already been admitted, counted against the caps, and spent — with its
 result discarded.
 
 A script must be deterministic so a resume replays the same call sequence.
-`Math.random()` throws, and so does all of `Date` — `new Date()`,
+`Math.random()` throws, and so does all of `Date` — `Date()`, `new Date()`,
 `Date.now()`, `Date.parse()` and `Date.UTC()` alike. Pass timestamps in via
-`args`, or stamp the result after the workflow returns.
+`args`, or stamp the result after the workflow returns. A script that calls any
+of them is refused before it starts, so none of its agents runs first.
 
 Scripts run in a `node:vm` sandbox with no filesystem, shell, network, or
 environment access. All I/O happens through the prompts you give the agents, so
@@ -83,11 +87,11 @@ say explicitly what each one should read and whether it may edit files.
 
 ## agent() options
 
-`agent(prompt, { label?, phase?, schema?, model?, agentType?, isolation?, workingDir?, stallMs? })`
+`agent(prompt, { stepId?, label?, phase?, schema?, model?, effort?, agentType?, isolation?, workingDir?, stallMs?, disallowedTools? })`
 
-- `label` (string) — the name shown in the run views and the failures list.
-  Make it unique per dispatch: a failure line carries only the label and the
-  error, so two failed dispatches that share a label cannot be told apart.
+- `stepId` (string, ≤128 chars) — optional caller node ID; does not affect caching. Also accepted in `workflow()` options.
+- `label` (string) — display name in run views and failures.
+  Make it unique per dispatch to distinguish failures.
 - `phase` (string) — opens a named phase at this call, exactly as `phase(title)`
   would: this dispatch and every dispatch issued after it are attributed to that
   phase. It is not scoped to the one call, so in a fan-out open phases with
@@ -104,6 +108,24 @@ say explicitly what each one should read and whether it may edit files.
   agent type 'X' not found"; check for null.
 - `model` (string) — per-call model override; routes provider correctly via the
   subagent runtime view.
+- `effort` (`'low'` | `'medium'` | `'high'` | `'xhigh'` | `'max'`) — the
+  reasoning effort for this one agent. It is limited to the tiers `/effort`
+  offers for the agent's model or, for a model whose settings declare none, to
+  the tiers its provider's built-in table accepts: a tier the model does not
+  offer becomes the next stronger tier it does offer, or its strongest tier
+  when none is stronger. A model that offers no tiers, or thinking turned off
+  for the session or the model, leaves the agent with the effort it would have
+  had without the option. The session's own effort is never changed, and an
+  explicit tier replaces any thinking budget the agent would otherwise inherit;
+  a thinking setting fixed in the provider settings (such as `extra_body` or
+  `samplingParams`) still takes precedence over the tier, as it does over
+  `/effort`. Omitting `effort` inherits the session's effort only while the
+  agent stays on the session's provider: a `model` override that switches
+  provider starts from that model's own reasoning settings, so pass `effort`
+  there. Aliases such as `'med'` and `'x-high'` are accepted; any other value
+  rejects the call. Use `'low'` for cheap mechanical stages and the higher tiers
+  only for the hardest verify or judge stages. A different effort is a
+  different resume cache key.
 - `isolation` — `'worktree'` provisions a fresh git worktree under
   `<projectRoot>/.qwen/worktrees/agent-<7hex>`; the worktree is auto-removed if
   no changes, otherwise the path and branch are returned alongside the result.
@@ -131,6 +153,20 @@ say explicitly what each one should read and whether it may edit files.
   a legitimately slow tool is not a stall. Default 180000 (override via
   `QWEN_CODE_WORKFLOW_STALL_SECONDS`, whole seconds); `0` disables the
   watchdog. Wall time per attempt is bounded separately.
+- `disallowedTools` (string[]) — tools this agent may not call, on top of the
+  floor below; it can only narrow the agent's tools, never re-enable one. Name a
+  tool by its tool name (`run_shell_command`, `write_file`, `edit`) or its
+  display name (`Shell`, `WriteFile`, `Edit`), or deny MCP tools with
+  `mcp__<server>` (every tool of that server), `mcp__<server>__*`, or
+  `mcp__<server>__<tool>`. An entry that names no built-in or registered tool
+  and is not an `mcp__` pattern, such as `'Bash'`, resolves the call to null
+  with the reason recorded rather than silently denying nothing. Entries must
+  be non-empty strings without surrounding whitespace, or the call is rejected.
+  A `schema` agent whose denies, from this call or from its `agentType`,
+  include `structured_output` resolves to null with the reason recorded,
+  because it would have no way to return its result. The resume cache key
+  depends on which tools are denied, not on their order or duplicates, and not
+  on whether a built-in tool is named by its tool name or its display name.
 
 Workflow subagents can never use AskUserQuestion, SendMessage, Monitor,
 EnterPlanMode, ExitPlanMode, or the Agent tool, whatever their `agentType`. A
@@ -185,9 +221,18 @@ at its index.
   come back `null` — but a value above the clamp is silently cut down to it.
 - Stall retries: 3 attempts per `agent()` call; the stall timeout itself
   (`QWEN_CODE_WORKFLOW_STALL_SECONDS`) is applied as given.
-- Tokens: a per-run output-token cap may be in effect — read `budget.total`
-  (`null` = uncapped) before committing to a large fan-out, because once the
-  cap is reached every further `agent()` call is refused.
+- Tokens: a token target or cap may be in effect — read `budget.total`
+  (`null` = uncapped) before committing to a large fan-out, because once it is
+  reached every further `agent()` call is refused.
+- Size guideline: the tool description states the session's guideline — small
+  (5 agents), medium (15, the default) or large (50) — or none when the user
+  set it to unrestricted. It is advisory: follow it unless the user's prompt
+  calls for a different scale. A running workflow that schedules more agents
+  than the guideline (25 when unrestricted) or projects past ~1.5M output
+  tokens is flagged to the user as a large workflow; it is not stopped.
+- The user can steer size from the prompt ("use a small workflow, 5 agents
+  max") or with the Dynamic Workflow Size setting. A change made mid-session
+  arrives as a reminder that replaces the guideline in the description.
 
 ## Default to `pipeline()`
 
@@ -235,25 +280,25 @@ truncation reads as full coverage, which is worse than a smaller honest result.
 
 ## Saved workflows and workflow()
 
-`workflow(nameOrRef, args?)` runs a saved workflow inline under this run's caps
-and nests one level only — a workflow reached through `workflow()` cannot call
-`workflow()` itself, and doing so throws.
+`workflow(nameOrRef, args?, { stepId }?)` shares this run's caps. Calls have
+individual traces grouping their agents. It nests one level only;
+a nested `workflow()` call throws.
 
 It takes one of two forms. `workflow('<name>')` resolves a name against
 `<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
 slash commands) and `~/.qwen/workflows` (user scope, lower precedence when both
-define the same name). `workflow({ scriptPath: '<absolute path>' })` loads a
-script file directly from either of those directories or from the
-generated-scripts root (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the
-per-project runtime dir, not the project tree); a path outside those roots is
-refused. A bare string is always a name: a path passed as a string is rejected
+define the same name); an active extension's workflow is always named
+`'<extension>:<name>'`. `workflow({ scriptPath: '<absolute path>' })` loads a
+script file directly from either of those directories, an active extension's
+workflow file, or the generated-scripts root
+(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project runtime dir,
+not the project tree); any other path is refused. A bare string is always a name: a path passed as a string is rejected
 as an invalid workflow name. At the top level that rejection ends the run;
 inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any
 other thunk rejection — with no agent dispatched and nothing in the failures
 list — so null-check a `workflow()` result too.
 
-To create or edit a saved workflow, use the `workflow-creator` skill — it owns
-the file layout, naming rules, and the save round-trip.
+Use the `workflow-creator` skill to create or edit saved workflows.
 
 ## Resume and diagnostics
 
@@ -408,3 +453,16 @@ it needs, handles each `null` in the stage that dispatched the agent, gives
 every verify dispatch its own label, `log()`s every dimension and agent it
 loses, and returns what the verifiers refuted next to what they confirmed — a
 verifier can be wrong too, and nothing is silently omitted.
+
+## Scaling to the token budget
+
+When the user's message sets a turn target with a `+500k`-style directive
+(`+1m`, "use 300k tokens"), `budget.total` is that target and `spent()` then
+counts every output token this turn — the main loop and every agent, not just
+this run. Otherwise `total` is an operator's per-run cap, or `null`. Once
+`spent()` reaches `total`, further `agent()` calls throw; agents already
+running are not stopped by it. Loop with
+`while (budget.total && budget.remaining() > 50_000) { ... }` — guard on
+`budget.total`, since with no target `remaining()` is `Infinity` and the loop
+runs to the 1000-agent cap — or size a fan-out once with
+`const FLEET = budget.total ? Math.floor(budget.total / 100_000) : 5;`.

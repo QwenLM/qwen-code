@@ -81,7 +81,15 @@ import {
 import { BRIEFS } from './agent-briefs.js';
 import { labelFromLaunchPrompt } from './agent-identity.js';
 import { chunkIdsProblem } from './diff-plan.js';
-import { readBudgetStop } from './deadline.js';
+import {
+  cheapestRebuildAdmissionSeconds,
+  minutesPhrase,
+  minutesText,
+  wallLeftText,
+  readBudgetStop,
+  reverseAuditBudgetExhausted,
+  verifyBudgetExhausted,
+} from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
 
@@ -1189,6 +1197,18 @@ type Delivery =
   | 'findings-unread';
 
 /**
+ * The shapes whose FIX is a BUILD — `agent-prompt --role …` — and so a
+ * launch the round gate or the compose floor rules on. The other shapes'
+ * FIX relaunches a prompt already printed, which no gate sees; a wall that
+ * has closed cannot refuse it, so it is never waived.
+ */
+const GATED_FIX: ReadonlySet<Delivery> = new Set<Delivery>([
+  'not-built',
+  'not-launched',
+  'rewritten',
+]);
+
+/**
  * Two sentences per failed shape, for two different readers.
  *
  * `gap` goes into the posted review body, under `Not reviewed:` — a PR author
@@ -1460,6 +1480,13 @@ export interface VerificationReport {
    */
   remediation: string[];
   /**
+   * The FIXes withheld because the plan's wall would refuse the build they
+   * name, one sentence each with the gate's own arithmetic — for stderr as
+   * `NOTE:` lines beside the FIX lines, so a gap that posts without a FIX
+   * is explained rather than silent. Never rendered into the body.
+   */
+  waived: string[];
+  /**
    * True when this review posts findings and NO verifier's delivery came back
    * clean — the structured form of the `verification — …` gap line, for the
    * verdict computation. A Request changes is "earned by a confirmed
@@ -1543,6 +1570,7 @@ export function verificationGaps(
   const built = readRecordedPrompts(planPath);
   const gaps: VerificationReport['gaps'] = [];
   const remediation: string[] = [];
+  const waived: string[] = [];
   // The balanced (medium) tier deliberately skips Step 5 (reverse audit). Read
   // the effort from the plan, so this reader and the roster agree. At medium the
   // absent reverse audit is a by-design omission that caps the verdict at Comment
@@ -1709,20 +1737,58 @@ export function verificationGaps(
   //
   // Only the time-budget cause earns this exemption. A ROUND-CAP stop does
   // NOT: the cap gate refuses only `round > cap`, so the not-built gap's FIX
-  // (rebuild `--round 1`) is admitted, and a local run has no deadline to
-  // refuse it at all — the monotone-refusal premise fails twice. So a
-  // round-cap marker leaves the not-built gap and its rebuild remediation
-  // owed, exactly as if no marker were present.
+  // (rebuild `--round 1`) is admitted, and a run whose wall still holds —
+  // every healthy local run — has nothing to refuse it either: the
+  // monotone-refusal premise fails twice. So a round-cap marker leaves the
+  // not-built gap and its rebuild remediation owed, exactly as if no marker
+  // were present.
+  //
+  // The wall is a separate question, asked separately, and it answers only
+  // for the REMEDIATION: a FIX whose build the gate would refuse is not
+  // owed, but the disclosure it would have repaired still is — a run that
+  // burned its wall without building an auditor must say so, and the
+  // round-cap disclosure (`roundCapStopDisclosure`) claims the opposite. So
+  // the wall waives the rebuild FIX and never a gap, for any reverse-audit
+  // shape (the FIX is the same build), marker or no marker; and the verify
+  // FIX likewise, when the compose floor would refuse the verifier build.
+  // Priced the way the gate prices the named build — one auditor, the
+  // gate's own estimator over the same stamps — not at a flat constant,
+  // which would answer for a different round. (On a 3B plan the
+  // orchestrator rebuilds with `--all-chunks`, priced one auditor per
+  // chunk — wider only inside the in-flight window, so this errs toward
+  // keeping the FIX.) Asked at compose time; the wall only closes
+  // further afterwards. Only a FIX that IS such a build is waived: the
+  // relaunch shapes (`brief-unread`, `findings-unread`) re-run an already
+  // printed prompt, which no gate rules on, so those stay owed.
   const stop = readBudgetStop(planPath);
   const budgetStopped = stop !== null && stop.cause !== 'round-cap';
   const reverseByDesign = budgetStopped && reverse === 'not-built';
+  const rebuildRuling = GATED_FIX.has(reverse)
+    ? reverseAuditBudgetExhausted(
+        env,
+        // The FIX says `--round <k>` and k is the orchestrator's to fill
+        // in; the estimate turns on it (round k's own stamps are excluded),
+        // so price every round the stamps could make it and take the least
+        // — the waiver then fires only when the gate would refuse the
+        // rebuild whichever round it names.
+        cheapestRebuildAdmissionSeconds(planPath, 1, env),
+        Date.now(),
+        planPath,
+        plan,
+      )
+    : null;
+  const rebuildRefused = rebuildRuling !== null;
+  const verifyRuling = verifyBudgetExhausted(env, Date.now(), planPath, plan);
+  const verifyRefused = verifyRuling !== null;
+  // Minutes, like the BUDGET / VERIFY BUDGET lines and the resume note on
+  // the same channel — never bare seconds beside them (`wallLeftText`).
   // A repairable reverse-audit gap only at high: medium is complete without it.
   const reverseGap =
     !balancedMedium &&
     !focusedNavigation &&
     !reverseByDesign &&
     reverse !== 'ok';
-  if (reverseGap) {
+  if (reverseGap && !rebuildRefused) {
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6
     // prescribes could never run. This function is handed the real path.
@@ -1731,6 +1797,19 @@ export function verificationGaps(
         '--plan <plan>',
         () => `--plan ${shellQuotePath(planPath)}`,
       )}`,
+    );
+  } else if (reverseGap && rebuildRuling !== null) {
+    // Withheld, and said so: a gap with no FIX beside it would otherwise
+    // read as an oversight, and an orchestrator might build the round by
+    // hand — the exact build the gate would refuse (exit 4).
+    waived.push(
+      `reverse audit: the rebuild FIX is withheld — the plan's wall can no ` +
+        `longer admit that build (${wallLeftText(rebuildRuling.remainingSeconds)}, ` +
+        `under the ${minutesText(rebuildRuling.reserveSeconds)}-minute reserve ` +
+        `plus at least the ${minutesText(rebuildRuling.expectedRoundSeconds)}` +
+        `-minute round estimate — the least any round could be priced at); ` +
+        `the gap still posts, and the round builder would refuse the build ` +
+        `(exit 4), so do not attempt it`,
     );
   }
 
@@ -1754,14 +1833,24 @@ export function verificationGaps(
     verify = bestDelivery(currentDigestKeys(planPath, verifyKeys));
     if (verify !== 'ok') {
       unverifiedFindings = true;
-      remediation.push(
-        `verification: ${VERIFY_GAP[verify].fix.replace(
-          '--plan <plan>',
-          // A function replacer: a plain string gives `$&`/`$\`` special
-          // meaning, and a path is not a place for replacement patterns.
-          () => `--plan ${shellQuotePath(planPath)}`,
-        )}`,
-      );
+      if (verifyRefused && GATED_FIX.has(verify)) {
+        waived.push(
+          `verification: the rebuild FIX is withheld — the plan's wall is ` +
+            `at or under the compose floor (${wallLeftText(verifyRuling.remainingSeconds)}, ` +
+            `floor ${minutesPhrase(verifyRuling.composeFloorSeconds)}), so the verify ` +
+            `builder would refuse the shard (exit 4); the findings post ` +
+            `unverified and cap the verdict, so do not attempt it`,
+        );
+      } else {
+        remediation.push(
+          `verification: ${VERIFY_GAP[verify].fix.replace(
+            '--plan <plan>',
+            // A function replacer: a plain string gives `$&`/`$\`` special
+            // meaning, and a path is not a place for replacement patterns.
+            () => `--plan ${shellQuotePath(planPath)}`,
+          )}`,
+        );
+      }
     }
   }
 
@@ -1825,7 +1914,13 @@ export function verificationGaps(
         '本次仅覆盖静态导航改动，发现仍需独立验证，因此无法认证 Approve',
     });
   }
-  return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
+  return {
+    ok: gaps.length === 0,
+    gaps,
+    remediation,
+    waived,
+    unverifiedFindings,
+  };
 }
 
 export { TranscriptsUnavailableError };

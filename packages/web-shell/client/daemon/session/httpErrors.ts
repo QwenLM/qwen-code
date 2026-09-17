@@ -23,6 +23,24 @@ export function isInvalidClientIdError(error: unknown): boolean {
   );
 }
 
+export function isAcpChildCapacityError(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || !isRecord(error.body))
+    return false;
+  const body = error.body;
+  const data = isRecord(body['data']) ? body['data'] : undefined;
+  const capacity = isRecord(body['capacity']) ? body['capacity'] : undefined;
+  const rpcCapacity = isRecord(data?.['capacity'])
+    ? data['capacity']
+    : undefined;
+  return [
+    body['code'],
+    data?.['errorKind'],
+    data?.['code'],
+    capacity?.['code'],
+    rpcCapacity?.['code'],
+  ].includes('acp_child_capacity_exhausted');
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
