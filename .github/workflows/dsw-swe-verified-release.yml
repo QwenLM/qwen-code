@@ -138,7 +138,7 @@ jobs:
     needs: 'release_gate'
     if: "${{ needs.release_gate.outputs.should_run == 'true' }}"
     runs-on: ['self-hosted', 'Linux', 'X64', 'qwen-benchmark-dsw-hk-eas']
-    timeout-minutes: 15
+    timeout-minutes: 100
     env:
       RELEASE_TAG: "${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}"
       QWEN_REF: "${{ github.event_name == 'release' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}"
@@ -198,6 +198,48 @@ jobs:
             echo "release_id=${release_id}"
             echo "release_url=$(jq -r .html_url release.json)"
           } >> "${GITHUB_OUTPUT}"
+
+      - name: 'Wait for the release on npm'
+        # eas-smoke only validates templates and installs nothing, so it is the
+        # one backend that does not need the release to be on the registry.
+        if: "${{ needs.release_gate.outputs.execution_backend != 'eas-smoke' }}"
+        env:
+          QWEN_REF: '${{ steps.release.outputs.qwen_ref }}'
+          # npm accepts a publish and queues it ("Your package is being
+          # processed and may take a few minutes to become available") while the
+          # Release event fires as soon as release.yml returns. Measured on
+          # 0.23.4, 0.23.5-preview.0 and 0.24.0: ~25 minutes to the registry, and
+          # v0.23.0 took 55m22s. The agent cache prepared below installs this
+          # exact version on this machine, so the wait belongs here, in front of
+          # it, with the same signal and budget as update-ecs-runner-qwen.yml.
+          RESOLVE_TIMEOUT_SECONDS: '5400'
+          RESOLVE_INTERVAL_SECONDS: '30'
+        run: |-
+          set -euo pipefail
+          # The pinned runtime the dispatch script installs with, so the wait
+          # resolves through the same npm and registry as that install.
+          eas_node_bin="${EAS_NODE_BIN:-/mnt/workspace/qwen-benchmark-cache/node/runtime/bin}"
+          export PATH="${eas_node_bin}:${PATH}"
+          registry="${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}"
+          specifier="@qwen-code/qwen-code@${QWEN_REF#v}"
+          # Per-attempt stderr is held back so that dozens of identical 404
+          # blocks do not bury the log; the last one is replayed on give-up.
+          err_log="$(mktemp)"
+          deadline=$((SECONDS + RESOLVE_TIMEOUT_SECONDS))
+          while :; do
+            resolved="$(npm view "${specifier}" version --registry "${registry}" 2>"${err_log}" | tail -n 1)" || true
+            if [[ -n "${resolved}" ]]; then
+              echo "${specifier} is on the registry as ${resolved}"
+              break
+            fi
+            if ((SECONDS >= deadline)); then
+              cat "${err_log}" >&2
+              echo "::error::${specifier} is still not resolvable after ${RESOLVE_TIMEOUT_SECONDS}s."
+              exit 1
+            fi
+            echo "${specifier} is not on the registry yet; retrying in ${RESOLVE_INTERVAL_SECONDS}s."
+            sleep "${RESOLVE_INTERVAL_SECONDS}"
+          done
 
       - name: 'Dispatch to persistent DSW pool'
         id: 'dispatch'
