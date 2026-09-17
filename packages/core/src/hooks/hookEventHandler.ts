@@ -1019,9 +1019,9 @@ export class HookEventHandler {
       const invocationIds = allHookConfigs.map(
         () => `hook-${++hookInvocationSerial}`,
       );
-      // Read once per batch: onHookEnd runs in the same async context, but
-      // reading it twice would let a concurrent agent frame split one hook's
-      // start from its end. Same source as the hook input's `agent_id`.
+      // Read once per batch so a hook's start and end carry the same value by
+      // construction rather than by relying on async context propagation.
+      // Same source as the hook input's `agent_id`.
       const agentId = getCurrentAgentId() ?? undefined;
       const onHookStart = (config: HookConfig, index: number) => {
         const hookName = this.getHookName(config);
