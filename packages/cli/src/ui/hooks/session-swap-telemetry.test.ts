@@ -173,6 +173,7 @@ function makeFakeEnv() {
     getHistory: vi.fn().mockReturnValue([]),
     rememberImagePayloads: vi.fn(),
     reconcileImagePayloads: vi.fn(),
+    setCompletedToolCallIds: vi.fn(),
   };
 
   // One shared session-service object: every getSessionService() call sees

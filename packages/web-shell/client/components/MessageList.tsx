@@ -1,3 +1,4 @@
+import { getSourcesByTurn } from './sources/sourceEntries';
 import {
   forwardRef,
   memo,
@@ -44,6 +45,7 @@ import { CompactModeContext } from '../WebShellContexts';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
@@ -173,6 +175,9 @@ export interface MessageListProps {
   onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
   turnArtifacts?: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
+  sourceEntries?: readonly WebShellSource[];
+  sourceSessionId?: string;
+  onSourceOpen?: (source: WebShellSource) => void;
   turnScheduledTasks?: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>;
   onReviewChanges?: (
     changes: readonly TurnOutputFileChange[],
@@ -544,7 +549,17 @@ export function attachTurnOutputs(
     ) {
       return;
     }
-    result.push({
+    // The card closes the turn's own content, so it belongs above a local recap
+    // that trails the turn rather than after it. Status rows are not turn
+    // content, and the walk stops at the turn's own last row, so the card can
+    // never land inside the turn.
+    let insertAt = result.length;
+    for (let index = result.length - 1; index >= 0; index -= 1) {
+      const item = result[index];
+      if (item.type !== 'message' || item.message.role !== 'system') break;
+      if (item.message.source === 'recap') insertAt = index;
+    }
+    result.splice(insertAt, 0, {
       type: 'turn_outputs',
       key: turnId,
       turnId,
@@ -674,15 +689,21 @@ function findFinalAnswerIndex(
   end: number,
   includeBackgroundNotifications = true,
 ): number {
-  let lastWorkStepIndex = start;
+  let hasLaterWork = false;
   for (let i = end; i > start; i--) {
-    if (isExecutionWorkStep(items[i]!)) {
-      lastWorkStepIndex = i;
-      break;
-    }
-  }
-  for (let i = end; i > lastWorkStepIndex; i--) {
-    if (isFinalContentCandidate(items[i]!, includeBackgroundNotifications)) {
+    const item = items[i]!;
+    if (
+      item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'background_notification_turn_started'
+    ) {
+      hasLaterWork = false;
+    } else if (isExecutionWorkStep(item)) {
+      hasLaterWork = true;
+    } else if (
+      !hasLaterWork &&
+      isFinalContentCandidate(item, includeBackgroundNotifications)
+    ) {
       return i;
     }
   }
@@ -1561,8 +1582,21 @@ function completedBackgroundShellTaskIds(
   const taskIds = new Set(terminalTaskIds);
   for (const item of items) {
     if (item.type !== 'message' || item.message.role !== 'system') continue;
-    if (item.message.source !== 'background_notification') continue;
-    const data = item.message.data;
+    if (
+      item.message.source !== 'background_notification' &&
+      item.message.source !== 'background_task_completed' &&
+      item.message.source !== 'background_notification_turn_started'
+    )
+      continue;
+    let data = item.message.data;
+    if (
+      item.message.source === 'background_notification_turn_started' &&
+      data &&
+      typeof data === 'object' &&
+      'backgroundTask' in data
+    ) {
+      data = data.backgroundTask ?? data;
+    }
     if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
     if (!('kind' in data) || data.kind !== 'shell') continue;
     // Shell background notifications are terminal-only.
@@ -1647,7 +1681,9 @@ function backgroundAgentCompletionForMessage(message: Message): {
 } | null {
   if (
     message.role !== 'system' ||
-    message.source !== 'background_notification'
+    (message.source !== 'background_notification' &&
+      message.source !== 'background_task_completed' &&
+      message.source !== 'background_notification_turn_started')
   ) {
     return null;
   }
@@ -1656,7 +1692,15 @@ function backgroundAgentCompletionForMessage(message: Message): {
       ?.trimStart()
       .toLowerCase()
       .startsWith('background agent ') === true;
-  const data = message.data;
+  let data = message.data;
+  if (
+    message.source === 'background_notification_turn_started' &&
+    data &&
+    typeof data === 'object' &&
+    'backgroundTask' in data
+  ) {
+    data = data.backgroundTask ?? data;
+  }
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     return identifiesAgent
       ? {
@@ -1948,6 +1992,27 @@ export function applyTurnCollapse(
     );
 
     const answerIdx = findFinalAnswerIndex(items, start, end);
+    let answerStartIdx = answerIdx;
+    // A passive completion can split one streamed answer into several rows.
+    // Keep those segments, but stop at work or an automatic execution marker.
+    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
+      let crossedCompletion = false;
+      for (let i = answerIdx - 1; i > start; i--) {
+        const item = items[i]!;
+        if (item.type !== 'message') break;
+        if (
+          item.message.role === 'system' &&
+          item.message.source === 'background_task_completed'
+        ) {
+          crossedCompletion = true;
+        } else if (crossedCompletion && item.message.role === 'assistant') {
+          answerStartIdx = i;
+          crossedCompletion = false;
+        } else {
+          break;
+        }
+      }
+    }
     let hiddenCount = 0;
     let terminalTs: number | undefined;
     let cancelledElapsedMs: number | undefined;
@@ -1962,7 +2027,10 @@ export function applyTurnCollapse(
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
-      const isStep = isHideableStep(item, i === answerIdx);
+      const isStep = isHideableStep(
+        item,
+        i >= answerStartIdx && i <= answerIdx,
+      );
       if (isStep) {
         hiddenCount++;
       }
@@ -2141,7 +2209,8 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i === answerIdx)) result.push(item);
+      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
+        result.push(item);
     }
   }
 
@@ -2903,6 +2972,9 @@ export const MessageList = memo(
       onCanScrollToBottomChange,
       turnFileChanges,
       turnArtifacts,
+      sourceEntries,
+      sourceSessionId,
+      onSourceOpen,
       turnScheduledTasks,
       onReviewChanges,
       onOpenArtifact,
@@ -3421,7 +3493,66 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns } = useWebShellCustomization();
+    const { collapseCompletedTurns, sourceReferences } =
+      useWebShellCustomization();
+    const sourcesByTurnCache = useRef<
+      | {
+          sourceMessages: readonly Message[];
+          dependencies: readonly unknown[];
+          value: ReadonlyMap<string, readonly WebShellSource[]>;
+        }
+      | undefined
+    >(undefined);
+    const sourcesByTurn = useMemo(() => {
+      const dependencies = [
+        sourceEntries,
+        workspaceCwd,
+        sourceSessionId,
+        sourceReferences,
+      ] as const;
+      const cached = sourcesByTurnCache.current;
+      return streamingTailContentOnly &&
+        isResponding &&
+        cached &&
+        cached.sourceMessages === previousMessagesRef.current &&
+        sameIdentities(cached.dependencies, dependencies)
+        ? cached.value
+        : getSourcesByTurn(
+            messages,
+            sourceEntries ?? [],
+            workspaceCwd,
+            sourceSessionId,
+            sourceReferences,
+          );
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      streamingTailContentOnly,
+      isResponding,
+    ]);
+    useLayoutEffect(() => {
+      // Keep StrictMode replays and abandoned renders out of the cache.
+      sourcesByTurnCache.current = {
+        sourceMessages: messages,
+        dependencies: [
+          sourceEntries,
+          workspaceCwd,
+          sourceSessionId,
+          sourceReferences,
+        ],
+        value: sourcesByTurn,
+      };
+    }, [
+      messages,
+      sourceEntries,
+      workspaceCwd,
+      sourceSessionId,
+      sourceReferences,
+      sourcesByTurn,
+    ]);
     const collapseEnabled = collapseCompletedTurns ?? true;
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
@@ -5501,10 +5632,24 @@ export const MessageList = memo(
           return (
             <MessageItem
               message={displayItem.message}
+              onLocateBackgroundSource={
+                displayItem.message.role === 'system' &&
+                displayItem.message.source ===
+                  'background_notification_turn_started' &&
+                displayItem.message.backgroundTurn?.toolUseId &&
+                findDisplayItemIndex(
+                  displayItems,
+                  '',
+                  displayItem.message.backgroundTurn.toolUseId,
+                ) >= 0
+                  ? scrollToMessage
+                  : undefined
+              }
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
+              onTurnOutputOpen={onTurnOutputOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
                 onEditUserMessage && userMessageEditTarget
@@ -5548,6 +5693,12 @@ export const MessageList = memo(
                 flashTarget,
               )}
               assistantTurnFooterInfo={assistantTurnFooterInfo}
+              turnSources={
+                finalAssistantTurnId
+                  ? sourcesByTurn.get(finalAssistantTurnId)
+                  : undefined
+              }
+              onSourceOpen={onSourceOpen}
               generateContent={generateContent}
             />
           );
@@ -5582,6 +5733,8 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        displayItems,
+        scrollToMessage,
         onImagePreview,
         onAttachmentPreview,
         onInsightReportOpen,
@@ -5607,6 +5760,8 @@ export const MessageList = memo(
         onOpenScheduledTask,
         onReviewChanges,
         onTurnOutputOpen,
+        sourcesByTurn,
+        onSourceOpen,
         onError,
       ],
     );

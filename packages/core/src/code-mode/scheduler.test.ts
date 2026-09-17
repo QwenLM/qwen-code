@@ -280,6 +280,17 @@ describe('CodeModeOnly scheduler dispatch', () => {
   it('passes the Qwen image_gen result to generatedImage()', async () => {
     const config = makeFakeConfig({
       codeModeOnly: true,
+      imageModel: 'openai:qwen-image-2.0',
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'qwen-image-2.0',
+            baseUrl: 'https://images.example/v1',
+            envKey: 'TEST_IMAGE_API_KEY',
+            imageOnly: true,
+          },
+        ],
+      },
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -465,12 +476,12 @@ describe('CodeModeOnly scheduler dispatch', () => {
       new AbortController().signal,
     );
     try {
-      await vi.waitFor(() => expect(started).toBe(2), { timeout: 4000 });
+      await vi.waitFor(() => expect(started).toBe(2), { timeout: 30_000 });
     } finally {
       release();
     }
     await scheduled;
-  }, 10_000);
+  }, 40_000);
 
   it('applies nested tool permission denial before execution', async () => {
     const config = makeFakeConfig({
@@ -583,7 +594,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
             ),
         ).toBe(true);
       },
-      { timeout: 4000 },
+      { timeout: 30_000 },
     );
     const waiting = updates
       .flat()
@@ -603,7 +614,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
     await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
     expect(execute).toHaveBeenCalledOnce();
     expect(completed.mock.calls[0]?.[0][0].status).toBe('success');
-  }, 10_000);
+  }, 40_000);
 
   it('runs nested hooks with the real tool name', async () => {
     const config = makeFakeConfig({

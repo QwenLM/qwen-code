@@ -39,6 +39,7 @@ const hash = getProjectHash(projectDir);
 const TEST_HOME_DIR = path.join(os.tmpdir(), 'qwen-core-logger-home');
 
 let originalHome: string | undefined;
+let originalRuntimeDir: string | undefined;
 let testGeminiDir: string;
 let testLogFilePath: string;
 let testCheckpointFilePath: string;
@@ -121,6 +122,11 @@ describe('Logger', () => {
     vi.setSystemTime(new Date('2025-01-01T12:00:00.000Z'));
     originalHome = process.env['HOME'];
     process.env['HOME'] = TEST_HOME_DIR;
+    // Self-hosted CI runners export QWEN_RUNTIME_DIR for their own qwen
+    // tooling; it outranks HOME-derived paths in Storage, so these
+    // path-expectation tests must run with it cleared.
+    originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['QWEN_RUNTIME_DIR'];
     setTestPaths();
     // Clean up before the test
     await cleanupLogAndCheckpointFiles();
@@ -142,6 +148,11 @@ describe('Logger', () => {
       delete process.env['HOME'];
     } else {
       process.env['HOME'] = originalHome;
+    }
+    if (originalRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
     }
   });
 

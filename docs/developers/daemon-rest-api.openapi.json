@@ -1131,7 +1131,7 @@
             }
           },
           "429": {
-            "description": "The session prompt queue or rate limit is full.",
+            "description": "The daemon prompt rate limit was exceeded (`code: rate_limit_exceeded`); honor `Retry-After` before retrying.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1141,7 +1141,7 @@
             }
           },
           "503": {
-            "description": "The owning runtime is unavailable.",
+            "description": "The owning runtime is unavailable, or the session prompt queue is full (`code: prompt_queue_full`, with `Retry-After: 5`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1537,6 +1537,17 @@
               "type": "string"
             },
             "description": "Frozen transcript snapshot the anchors read from. Required when atRecordId is present; otherwise may only accompany beforeRecordId. Cannot be combined with direction or cursor."
+          },
+          {
+            "name": "compactedReplayMode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["full", "summary"],
+              "default": "full"
+            },
+            "description": "Project returned events after page selection. Summary removes nested subagent detail without changing cursor selection or stored history. Also supported by the workspace-qualified transcript route."
           }
         ],
         "responses": {
@@ -3280,13 +3291,19 @@
           },
           "sourceId": {
             "type": "string"
+          },
+          "compactedReplayMode": {
+            "type": "string",
+            "enum": ["full", "summary"],
+            "default": "full",
+            "description": "Load-only projection of compactedReplay. Does not mutate retained history. Summary filtering follows page selection, so a page may contain fewer visible items."
           }
         },
         "additionalProperties": false
       },
       "ResumeSessionRequest": {
         "type": "object",
-        "description": "Resume request. historyPageSize is not parsed on this route, and liveReplayMode is not passed to the bridge resume call (only the legacy-standalone compatibility restore sees it), so neither field is published here.",
+        "description": "Resume request. historyPageSize is not parsed. liveReplayMode and compactedReplayMode are validated but omitted from the ordinary bridge resume call; only legacy-standalone compatibility restore receives them. These load-only fields are not published here.",
         "properties": {
           "cwd": {
             "type": "string"
@@ -3787,6 +3804,12 @@
           "_meta": {
             "type": ["object", "null"],
             "additionalProperties": true
+          },
+          "eventDetailMode": {
+            "type": "string",
+            "enum": ["full", "summary"],
+            "default": "full",
+            "description": "Per-prompt event projection before ring retention and SSE delivery. Shared by session subscribers; settlement resets full. Filtered detail cannot be recovered from the ring."
           }
         },
         "additionalProperties": true

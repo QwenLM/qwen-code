@@ -735,7 +735,7 @@ export class MemoryPressureMonitor extends EventEmitter {
             },
           );
           if (result.meta) {
-            chat.setHistory(result.history);
+            chat.setHistory(result.history, chat.getCompletedToolCallIds());
             chat.reconcileImagePayloads?.(result.history);
             // Explicitly clear fileReadCache here instead of relying on
             // the subsequent clear_file_cache step. This removes the

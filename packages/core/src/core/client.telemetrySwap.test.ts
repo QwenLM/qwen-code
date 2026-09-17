@@ -106,6 +106,7 @@ function makeEnv() {
     getHistory: vi.fn().mockReturnValue([]),
     rememberImagePayloads: vi.fn(),
     reconcileImagePayloads: vi.fn(),
+    setCompletedToolCallIds: vi.fn(),
   } as unknown as LlmChat;
   const startChat = vi
     .spyOn(client, 'startChat')
