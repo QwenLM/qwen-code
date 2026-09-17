@@ -5,6 +5,7 @@
  */
 
 import { existsSync, realpathSync, promises as fsp } from 'node:fs';
+import * as crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -19801,6 +19802,39 @@ describe('createServeApp', () => {
           promptId: '11111111-1111-4111-8111-111111111111',
         }),
       );
+    });
+
+    it('validates and strips a caller-supplied prompt payload digest', async () => {
+      let forwardedRequest: unknown;
+      const bridge = fakeBridge({
+        promptImpl: async (_sessionId, request) => {
+          forwardedRequest = request;
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const prompt = [{ type: 'text', text: 'digest me' }];
+      const payloadDigest = `sha256:${crypto
+        .createHash('sha256')
+        .update(JSON.stringify(prompt), 'utf8')
+        .digest('hex')}`;
+
+      const accepted = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt, payloadDigest });
+
+      expect(accepted.status).toBe(202);
+      expect(forwardedRequest).toMatchObject({ prompt });
+      expect(forwardedRequest).not.toHaveProperty('payloadDigest');
+
+      const rejected = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt, payloadDigest: `sha256:${'0'.repeat(64)}` });
+
+      expect(rejected.status).toBe(400);
+      expect(rejected.body.code).toBe('invalid_prompt_payload_digest');
     });
 
     it('passes an AbortSignal into bridge.sendPrompt', async () => {

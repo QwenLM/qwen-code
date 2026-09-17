@@ -7888,6 +7888,24 @@ export function registerSessionRoutes(
             return;
           }
         }
+        const rawPayloadDigest = body['payloadDigest'];
+        if (rawPayloadDigest !== undefined) {
+          const expectedPayloadDigest = `sha256:${crypto
+            .createHash('sha256')
+            .update(JSON.stringify(prompt), 'utf8')
+            .digest('hex')}`;
+          if (
+            typeof rawPayloadDigest !== 'string' ||
+            !/^sha256:[0-9a-f]{64}$/u.test(rawPayloadDigest) ||
+            rawPayloadDigest !== expectedPayloadDigest
+          ) {
+            res.status(400).json({
+              error: '`payloadDigest` does not match `prompt`',
+              code: 'invalid_prompt_payload_digest',
+            });
+            return;
+          }
+        }
         const rawRequestDeadline = body['deadlineMs'];
         let requestDeadlineMs: number | undefined;
         if (rawRequestDeadline !== undefined && rawRequestDeadline !== null) {
@@ -7944,6 +7962,7 @@ export function registerSessionRoutes(
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
         delete forwardedBody['delivery'];
+        delete forwardedBody['payloadDigest'];
         delete forwardedBody['promptId'];
         const forwardedMeta =
           typeof forwardedBody['_meta'] === 'object' &&

@@ -1,10 +1,10 @@
 # Managed Agent P3 Java Prompt 服务接入执行方案
 
-状态：P3a 已实现并验证，P3b 待执行
+状态：P3a、P3b 已实现并验证，P3c 待产品 Java 仓接入
 
 日期：2026-09-18
 
-实施进度：Hosted Harness 私有协议 v1、进程代际 fencing、能力协商和普通 `qwen serve` 兼容性已经落地；下一步实现 Java Hosted Harness Client。
+实施进度：Hosted Harness 私有协议 v1、进程代际 fencing、能力协商、Java Hosted Harness Client 和 Prompt payload digest 校验已经落地；下一步在产品 Java 仓实现 Coordinator、Repository、Outbox 和公共事件投影。
 
 上游方案：[Managed Agent Hosted Runtime 可执行技术方案](./2026-09-17-managed-agent-hosted-runtime-execution.md)
 
@@ -721,6 +721,6 @@ AND product feature flag enabled
 
 ## 17. 下一步
 
-当前直接执行 P3a。P3a 合入后执行 P3b，并用现有 Managed Hosted Runtime E2E 替换成带协议 fencing 的 Java client。产品 Java 团队可同时只做代码接缝确认和 Repository 映射，不要提前实现 OpenAI Controller。
+当前 qwen-code 侧 P3a、P3b 已完成。下一步在真实产品 Java 仓执行 P3c：先接入 `ManagedAgentCoordinator`、权威 Session/Turn/Binding/Event/Outbox，再将现有 DataAgent Controller 路由到 Coordinator；不要提前实现 OpenAI Controller。
 
-P3a + P3b 完成的判断不是“新增了几个类”，而是 Java 能用一个版本化、带 Harness generation fencing、caller prompt ID 可重试的私有客户端完整操作现有 `/session` 链路。
+P3a + P3b 当前已达到该判断：Java 能用一个版本化、带 Harness generation fencing、caller prompt ID 可重试的私有客户端完整操作现有 `/session` 链路。
