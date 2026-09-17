@@ -18,6 +18,18 @@ import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import * as jsoncEditor from '../../utils/jsonc-editor.js';
 
+// The DELETE route resolves the User-scope selection env from the real home
+// (`~/.env`, plus the legacy `~/.qwen/.env` whenever `QWEN_HOME` points
+// elsewhere), so a contributor's own credentials there would reach
+// `selectionEnv` and flip the active-selection decision. Pin `os.homedir()`
+// to the per-test home instead; `os.tmpdir()` and the rest stay real.
+const mockedHome = vi.hoisted(() => ({ dir: '' }));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  const homedir = () => mockedHome.dir || actual.homedir();
+  return { ...actual, default: { ...actual, homedir }, homedir };
+});
+
 let home: string;
 let workspace: string;
 let prevHome: string | undefined;
@@ -123,11 +135,13 @@ beforeEach(() => {
   workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-models-ws-'));
   prevHome = process.env['QWEN_HOME'];
   process.env['QWEN_HOME'] = home;
+  mockedHome.dir = home;
 });
 
 afterEach(() => {
   if (prevHome === undefined) delete process.env['QWEN_HOME'];
   else process.env['QWEN_HOME'] = prevHome;
+  mockedHome.dir = '';
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(workspace, { recursive: true, force: true });
 });

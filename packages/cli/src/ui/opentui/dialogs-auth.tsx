@@ -48,7 +48,10 @@ import {
   logAuth,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
+import {
+  createLoadedSettingsAdapter,
+  getRawModelProviders,
+} from '../../config/loadedSettingsAdapter.js';
 import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
 import {
@@ -916,6 +919,7 @@ function AuthDialogFlow({
       id: settings.merged.model?.name,
       baseUrl: settings.merged.model?.baseUrl,
     },
+    getRawModelProviders(settings),
   );
 
   // -- Navigation (AuthDialog parity) ---------------------------------------

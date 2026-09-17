@@ -121,9 +121,16 @@ describe('useProviderSetupFlow API selection', () => {
     modelProviders: Parameters<typeof useProviderSetupFlow>[1],
     baseUrl: string,
     modelIds: string,
+    rawModelProviders?: Parameters<typeof useProviderSetupFlow>[4],
   ) => {
     const { result } = renderHook(() =>
-      useProviderSetupFlow(submit, modelProviders),
+      useProviderSetupFlow(
+        submit,
+        modelProviders,
+        undefined,
+        undefined,
+        rawModelProviders,
+      ),
     );
     act(() => result.current.start(customProvider));
     act(() => result.current.selectProtocol(AuthType.USE_OPENAI));
@@ -216,6 +223,70 @@ describe('useProviderSetupFlow API selection', () => {
     expect(plan.modelProviders![0]!.models[0]!.generationConfig).toEqual({
       customHeaders: { Authorization: 'Bearer sk-live-secret' },
     });
+  });
+
+  it('renders preserved `${VAR}` references as written instead of the resolved secret', () => {
+    // Loading resolves every string in the tree, so a reference saved in any
+    // preserved field — not only `customHeaders` — reaches the hook as the
+    // live value, while the writer restores the placeholder before persisting.
+    // The review screen claims to show what will be saved, so it renders the
+    // same placeholder form; a literal header value stays masked.
+    const baseUrl = 'https://gateway.example/v1';
+    const raw = [
+      {
+        id: 'gpt-5',
+        baseUrl,
+        envKey: 'K',
+        generationConfig: {
+          customHeaders: {
+            Authorization: 'Bearer ${GATEWAY_TOKEN}',
+            'X-Static': 'literal-token',
+          },
+          extra_body: { api_key: '${GATEWAY_KEY}' },
+        },
+      },
+    ];
+    const resolved = [
+      {
+        ...raw[0]!,
+        generationConfig: {
+          customHeaders: {
+            Authorization: 'Bearer sk-live-token',
+            'X-Static': 'literal-token',
+          },
+          extra_body: { api_key: 'sk-live-extra-body' },
+        },
+      },
+    ];
+    const submit = vi.fn().mockResolvedValue(undefined);
+    const result = reviewCustomReconnect(
+      submit,
+      { openai: resolved },
+      baseUrl,
+      'gpt-5',
+      { openai: raw },
+    );
+    expect(result.current.state.previewError).toBe('');
+    const previewJson = result.current.state.previewJson;
+    expect(previewJson).not.toContain('sk-live-token');
+    expect(previewJson).not.toContain('sk-live-extra-body');
+    expect(
+      JSON.parse(previewJson).modelProviders.openai[0].generationConfig,
+    ).toMatchObject({
+      customHeaders: {
+        Authorization: 'Bearer ${GATEWAY_TOKEN}',
+        'X-Static': '***',
+      },
+      extra_body: { api_key: '${GATEWAY_KEY}' },
+    });
+
+    // The plan still carries the resolved values the runtime needs.
+    act(() => result.current.submit());
+    const [provider, inputs] = submit.mock.calls[0]!;
+    const plan = buildInstallPlan(provider, inputs, resolved);
+    expect(plan.modelProviders![0]!.models[0]!.generationConfig).toMatchObject(
+      resolved[0]!.generationConfig,
+    );
   });
 
   it('prefills saved Responses and clears API when switching to Anthropic', () => {

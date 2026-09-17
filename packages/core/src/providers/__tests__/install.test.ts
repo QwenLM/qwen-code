@@ -1322,6 +1322,91 @@ describe('applyProviderInstallPlan', () => {
     });
   });
 
+  it('does not let an invalid api elsewhere in settings abort a voice install', async () => {
+    // The voice-conflict probe rebuilds a registry over every bucket of the
+    // prospective providers map, and the registry constructor validates each
+    // entry. An invalid `wireApi` in a bucket the plan never touches must not
+    // refuse the install — least of all with a bare Error the daemon answers
+    // as a 500 instead of the 400 `model_purpose_conflict`.
+    const baseUrl = 'https://voice.example/v1';
+    const adapter = createAdapter({
+      idealab: [
+        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
+      ],
+      openai: [
+        {
+          id: 'qwen3-asr-flash',
+          baseUrl,
+          voiceOnly: true,
+          envKey: `${generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl)}_VOICE`,
+        },
+      ],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            providerProtocol: { idealab: 'openai' },
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const plan = buildInstallPlan(customProvider, {
+      baseUrl,
+      apiKey: 'unused',
+      modelIds: ['qwen3-asr-flash'],
+      advancedConfig: { purpose: 'voice' },
+    });
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).resolves.toMatchObject({
+      updatedModelProviders: {
+        openai: [{ id: 'qwen3-asr-flash', baseUrl, voiceOnly: true }],
+      },
+    });
+  });
+
+  it('keeps the duplicate-voice refusal on its step next to an invalid api elsewhere', async () => {
+    // Same map, but the plan reconnects the voice id at another endpoint: the
+    // refusal must still be the `modelPurpose` ProviderInstallError the daemon
+    // maps to `model_purpose_conflict`, not the registry's validation Error.
+    const adapter = createAdapter({
+      idealab: [
+        { id: 'q1', envKey: 'A', wireApi: 'resp' as ModelConfig['wireApi'] },
+      ],
+      openai: [
+        {
+          id: 'qwen3-asr-flash',
+          baseUrl: 'https://first.example/v1',
+          voiceOnly: true,
+          envKey: 'FIRST',
+        },
+      ],
+    });
+    vi.mocked(adapter.getValue).mockImplementation(
+      (key) =>
+        (
+          ({
+            'security.auth.selectedType': AuthType.USE_OPENAI,
+            providerProtocol: { idealab: 'openai' },
+          }) as Record<string, unknown>
+        )[key],
+    );
+    const plan = buildInstallPlan(customProvider, {
+      baseUrl: 'https://second.example/v1',
+      apiKey: 'unused',
+      modelIds: ['qwen3-asr-flash'],
+      advancedConfig: { purpose: 'voice' },
+    });
+    await expect(
+      applyProviderInstallPlan(plan, { settings: adapter }),
+    ).rejects.toMatchObject({
+      name: 'ProviderInstallError',
+      step: 'modelPurpose',
+    });
+    expect(adapter.setValue).not.toHaveBeenCalled();
+  });
+
   it('retires a recorded model-list version when reinstalling on the Responses route', async () => {
     const preset: ProviderConfig = {
       id: 'test',

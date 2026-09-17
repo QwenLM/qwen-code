@@ -28,6 +28,43 @@ import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver
 import { getPersistScopeForModelSelection } from './modelProvidersScope.js';
 import { getNestedProperty } from './settingsUtils.js';
 
+/**
+ * The raw (unresolved) entries behind `settings.merged.modelProviders[id]`:
+ * the first scope in merge precedence that defines the bucket, index-aligned
+ * with the merged bucket so placeholder recovery can pair entries by position.
+ */
+export function findRawModelProviderEntries(
+  settings: LoadedSettings,
+  providerId: string,
+): ModelProvidersConfig[string] | undefined {
+  return [
+    SettingScope.System,
+    ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+    SettingScope.User,
+    SettingScope.SystemDefaults,
+  ]
+    .map((source) => settings.forScope(source).originalSettings.modelProviders)
+    .find((providers) => providers && Object.hasOwn(providers, providerId))?.[
+    providerId
+  ];
+}
+
+/**
+ * Raw entries for every merged bucket — the form the writer restores before
+ * persisting, so a review screen can show a saved `${VAR}` as written instead
+ * of the resolved secret.
+ */
+export function getRawModelProviders(
+  settings: LoadedSettings,
+): ModelProvidersConfig {
+  return Object.fromEntries(
+    Object.keys(settings.merged.modelProviders ?? {}).map((providerId) => [
+      providerId,
+      findRawModelProviderEntries(settings, providerId) ?? [],
+    ]),
+  );
+}
+
 export function createLoadedSettingsAdapter(
   settings: LoadedSettings,
   scope?: SettingScope,
@@ -71,19 +108,7 @@ export function createLoadedSettingsAdapter(
         return;
       }
       const sourceFor = (providerId: string) =>
-        [
-          SettingScope.System,
-          ...(settings.isTrusted ? [SettingScope.Workspace] : []),
-          SettingScope.User,
-          SettingScope.SystemDefaults,
-        ]
-          .map(
-            (source) =>
-              settings.forScope(source).originalSettings.modelProviders,
-          )
-          .find(
-            (providers) => providers && Object.hasOwn(providers, providerId),
-          )?.[providerId];
+        findRawModelProviderEntries(settings, providerId);
       const ownsBucket = Object.hasOwn(
         settingsFile.settings.modelProviders ?? {},
         provider,

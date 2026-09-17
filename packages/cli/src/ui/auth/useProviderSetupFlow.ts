@@ -23,6 +23,7 @@ import type {
   ProviderConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
+import { preserveModelProviderPlaceholders } from '@qwen-code/qwen-code-core/providers/model-config-serialization.js';
 import { t } from '../../i18n/index.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
 
@@ -121,6 +122,7 @@ export function useProviderSetupFlow(
   modelProviders?: ModelProvidersConfig,
   providerProtocol?: ProviderProtocolConfig,
   selection?: Parameters<typeof buildInstallPlan>[3],
+  rawModelProviders?: ModelProvidersConfig,
 ) {
   const [provider, setProvider] = useState<ProviderConfig | null>(null);
   const [visibleSteps, setVisibleSteps] = useState<SetupStep[]>([]);
@@ -479,10 +481,14 @@ export function useProviderSetupFlow(
     if (provider) void onSubmit(provider, buildCurrentInputs());
   }, [provider, onSubmit, buildCurrentInputs]);
 
-  // Display copy only: preserved `customHeaders` come from the env-resolved
-  // merged settings, so a stored `${TOKEN}` reference reaches the preview as
-  // the real secret. Keep the header names (the shape stays truthful) and
-  // mask the values; `submit` builds its own plan from the raw inputs.
+  // Display copy only: preserved models come from the env-resolved merged
+  // settings, so a stored `${TOKEN}` reference reaches the hook as the real
+  // secret — in any string field, not just `customHeaders`. Render the form
+  // the writer persists (placeholders restored from the raw file), then mask
+  // whatever header value is still a literal; `submit` builds its own plan
+  // from the raw inputs.
+  const holdsReference = (value: unknown) =>
+    typeof value === 'string' && /\$\{[^}]+\}/.test(value);
   const maskCustomHeaders = (
     model: ProviderModelConfig,
   ): ProviderModelConfig => {
@@ -493,11 +499,28 @@ export function useProviderSetupFlow(
       generationConfig: {
         ...model.generationConfig,
         customHeaders: Object.fromEntries(
-          Object.keys(headers).map((name) => [name, '***']),
+          Object.entries(headers).map(([name, value]) => [
+            name,
+            holdsReference(value) ? value : '***',
+          ]),
         ),
       },
     };
   };
+  const previewModels = (patch: {
+    authType: AuthType;
+    models: ProviderModelConfig[];
+  }): ProviderModelConfig[] =>
+    (rawModelProviders && modelProviders
+      ? preserveModelProviderPlaceholders(
+          patch.models,
+          patch.authType,
+          modelProviders,
+          rawModelProviders,
+          providerProtocol,
+        )
+      : patch.models
+    ).map(maskCustomHeaders);
 
   // Computed during render on the review step, so it must stay total:
   // buildInstallPlan refuses reachable inputs (e.g. two same-endpoint models
@@ -524,7 +547,7 @@ export function useProviderSetupFlow(
             modelProviders: Object.fromEntries(
               (plan.modelProviders ?? []).map((patch) => [
                 patch.authType,
-                patch.models.map(maskCustomHeaders),
+                previewModels(patch),
               ]),
             ),
             security: { auth: { selectedType: plan.authType } },

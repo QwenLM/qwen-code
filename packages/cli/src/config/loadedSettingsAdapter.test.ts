@@ -5,8 +5,12 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createLoadedSettingsAdapter } from './loadedSettingsAdapter.js';
+import {
+  createLoadedSettingsAdapter,
+  getRawModelProviders,
+} from './loadedSettingsAdapter.js';
 import { SettingScope, loadSettings } from './settings.js';
+import type { LoadedSettings } from './settings.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -723,5 +727,73 @@ describe('createLoadedSettingsAdapter', () => {
     expect(adapter.restore).toBeTypeOf('function');
     adapter.restore!();
     expect(file.settings.env).toEqual({ K: 'v2' });
+  });
+});
+
+describe('getRawModelProviders', () => {
+  const scoped = (
+    files: Partial<Record<SettingScope, Record<string, unknown>>>,
+    merged: Record<string, unknown>,
+    isTrusted = true,
+  ) =>
+    ({
+      isTrusted,
+      merged,
+      forScope: (scope: SettingScope) => ({
+        originalSettings: files[scope] ?? {},
+      }),
+    }) as unknown as LoadedSettings;
+  const files = {
+    [SettingScope.User]: {
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-5',
+            envKey: 'K',
+            generationConfig: { extra_body: { api_key: '${GATEWAY_KEY}' } },
+          },
+        ],
+        anthropic: [{ id: 'claude', envKey: 'A' }],
+      },
+    },
+    [SettingScope.Workspace]: {
+      modelProviders: { anthropic: [{ id: 'claude-ws', envKey: '${WS_KEY}' }] },
+    },
+  };
+
+  it('returns each merged bucket from the scope that defines it, unresolved', () => {
+    const settings = scoped(files, {
+      modelProviders: {
+        openai: [
+          {
+            id: 'gpt-5',
+            envKey: 'K',
+            generationConfig: { extra_body: { api_key: 'sk-live' } },
+          },
+        ],
+        anthropic: [{ id: 'claude-ws', envKey: 'ws-live' }],
+      },
+    });
+    expect(getRawModelProviders(settings)).toEqual({
+      openai: [
+        {
+          id: 'gpt-5',
+          envKey: 'K',
+          generationConfig: { extra_body: { api_key: '${GATEWAY_KEY}' } },
+        },
+      ],
+      anthropic: [{ id: 'claude-ws', envKey: '${WS_KEY}' }],
+    });
+  });
+
+  it('skips workspace buckets while the workspace is untrusted', () => {
+    const settings = scoped(
+      files,
+      { modelProviders: { anthropic: [{ id: 'claude', envKey: 'A' }] } },
+      false,
+    );
+    expect(getRawModelProviders(settings)).toEqual({
+      anthropic: [{ id: 'claude', envKey: 'A' }],
+    });
   });
 });

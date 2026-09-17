@@ -316,11 +316,26 @@ export async function applyProviderInstallPlan(
     for (const patch of plan.modelProviders ?? []) {
       prospective = applyModelProvidersPatch(prospective, patch, mapping);
     }
+    // The registry constructor validates every entry it is handed, so a
+    // hand-edited invalid `wireApi` in a bucket this plan never touches would
+    // refuse the install with a bare Error the daemon cannot map to
+    // `model_purpose_conflict`. Drop only the entries whose protocol does not
+    // resolve: the probe counts a voice id at another endpoint, so buckets
+    // themselves must stay.
     const configured = new ModelsConfig({
-      modelProvidersConfig: prospective,
-      providerProtocolConfig: settings.getValue('providerProtocol') as
-        | ProviderProtocolConfig
-        | undefined,
+      modelProvidersConfig: Object.fromEntries(
+        Object.entries(prospective).map(([providerId, models]) => [
+          providerId,
+          Array.isArray(models)
+            ? models.filter(
+                (model) =>
+                  tryResolveModelProtocol(providerId, model, mapping) !==
+                  undefined,
+              )
+            : models,
+        ]),
+      ),
+      providerProtocolConfig: mapping,
     }).getAllConfiguredModels();
     if (
       changedVoiceIds.some(

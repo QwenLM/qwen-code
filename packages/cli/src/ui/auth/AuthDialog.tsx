@@ -16,6 +16,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
+import { getRawModelProviders } from '../../config/loadedSettingsAdapter.js';
 import {
   findProviderById,
   findProviderByCredentials,
@@ -146,6 +147,7 @@ export function AuthDialog(): React.JSX.Element {
       id: settings.merged.model?.name,
       baseUrl: settings.merged.model?.baseUrl,
     },
+    getRawModelProviders(settings),
   );
 
   // -- Navigation -----------------------------------------------------------
