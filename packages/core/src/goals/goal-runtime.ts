@@ -1621,12 +1621,27 @@ export function createGoalRuntime(
               if (recoveredSnapshot.goal?.status === 'active') {
                 recoveredSnapshot.goal.updatedAt = Date.now();
               }
+              // Checkpoint health a previous build recorded means nothing to
+              // a runtime that runs no checkpoints, and a persisted stall
+              // count would otherwise exempt the Goal from the no-progress
+              // pause for ever, since nothing is left to clear it.
+              if (recoveredSnapshot.goal && !options.checkpointVerifier) {
+                delete recoveredSnapshot.goal.checkpointStalls;
+                delete recoveredSnapshot.goal.lastCheckpointFailure;
+              }
               blockedAudit = recovery.payload.blockedAudit
                 ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
                 : undefined;
               recoveredCause = recovery.payload.cause;
+              // A checkpoint a previous build left pending is dropped when
+              // this runtime has no checkpoint verifier: it is bookkeeping
+              // nothing reads, not work to resume.
               const pending = recovery.payload.checkpointPending;
-              if (pending && recoveredSnapshot.goal) {
+              if (
+                pending &&
+                recoveredSnapshot.goal &&
+                options.checkpointVerifier
+              ) {
                 checkpointAttempt = createCheckpointAttempt(
                   pending.permit,
                   recoveredSnapshot.goal,
@@ -1924,12 +1939,16 @@ export function createGoalRuntime(
           // its checkpoint runs and the stall breaker stops it with the
           // reason that fits, instead of a pause whose remedy (resume) would
           // re-enter the same overflowing window.
+          // The stall exemption only means something while checkpoints can
+          // run: a runtime without a checkpoint verifier never clears a
+          // streak, so a count a previous build persisted must not exempt an
+          // idle Goal for ever.
           const noProgressLimitReached =
             noProgressTurns !== undefined &&
             noProgressTurns >= GOAL_NO_PROGRESS_TURN_LIMIT &&
             nextGoal.status === 'active' &&
             !spentBudget(nextGoal, Date.now()) &&
-            !(nextGoal.checkpointStalls ?? 0);
+            !(options.checkpointVerifier && (nextGoal.checkpointStalls ?? 0));
           if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,

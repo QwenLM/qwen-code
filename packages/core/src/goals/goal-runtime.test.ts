@@ -2296,10 +2296,17 @@ describe('goal runtime', () => {
         cause: 'usage_limited',
         snapshot: { goal: expectedGoal },
       });
+      // A runtime without a checkpoint verifier drops the stall count on
+      // restore: nothing could ever clear it, and it would otherwise keep
+      // exempting the Goal from the no-progress pause.
+      const { checkpointStalls: _stalls, ...restoredGoal } = expectedGoal;
       const restored = createGoalRuntime({ journal: fakeGoalJournal() });
       vi.setSystemTime(661_000);
       await restored.restore(journal.records);
-      expect(restored.getSnapshot().goal).toMatchObject(expectedGoal);
+      expect(restored.getSnapshot().goal).toMatchObject(restoredGoal);
+      expect(restored.getSnapshot().goal).not.toHaveProperty(
+        'checkpointStalls',
+      );
       expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
     } finally {
       vi.useRealTimers();
@@ -4745,6 +4752,39 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
+  it('drops a pending checkpoint from an earlier build when no checkpoint verifier is wired', async () => {
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    const snapshot: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'g-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active',
+        evidenceCursor: { recordId: 'create-record' },
+        turnCount: 2,
+        activeTimeMs: 10,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const record = goalStateRecord(snapshot, 'turn_finished');
+    record.systemPayload = {
+      ...(record.systemPayload as GoalStateRecordPayloadV2),
+      checkpointPending: {
+        permit: { goalId: 'g-1', revision: 1, turnId: 'turn-2' },
+        recordUuid: 'checkpoint-from-old-build',
+      },
+    };
+
+    await expect(runtime.restore([record])).resolves.toBeUndefined();
+
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+    expect(runtime.getSnapshot().activity).not.toBe('verifying');
+  });
+
   it('broadcasts a restored v2 snapshot to existing subscribers', async () => {
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
     const observed: GoalSnapshotV2[] = [];
@@ -6838,6 +6878,49 @@ describe('goal runtime', () => {
         lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
       });
       expect(causes.at(-1)).toBe('pause');
+    });
+
+    it('drops a stall count a previous build persisted and still pauses an idle Goal', async () => {
+      const { host, runtime } = noProgressHarness();
+      await runtime.restore([
+        goalStateRecord(
+          {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'g-1',
+              revision: 1,
+              objective: 'ship it',
+              status: 'active',
+              evidenceCursor: { recordId: 'create-record' },
+              turnCount: 4,
+              activeTimeMs: 10,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 2,
+              checkpointStalls: 2,
+              lastCheckpointFailure: 'InvalidGoalCheckpointError: old build',
+            },
+          },
+          'turn_finished',
+        ),
+      ]);
+      expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+      expect(runtime.getSnapshot().goal).not.toHaveProperty(
+        'lastCheckpointFailure',
+      );
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await vi.waitFor(() =>
+          expect(host.started.length).toBeGreaterThan(turn),
+        );
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
+      });
     });
 
     it('restarts the streak on a turn that records a tool result', async () => {
