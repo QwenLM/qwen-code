@@ -81,6 +81,26 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.UPDATE_GOAL]: 'deny',
   [ToolNames.PROPOSE_GOAL]: 'deny',
   [ToolNames.DISPLAY_IMAGE]: 'allow',
+  // The omni media family is absent from `SAFE_TOOL_ALLOWLIST`, which is where
+  // the read-only file and search tools are declared, so an Agent keeps
+  // reaching media through `read_file` / `zoom_image` / `display_image` and
+  // these stay denied — the same verdict `classifyAgentTool` gives any name it
+  // does not know.
+  [ToolNames.OMNI_DOWNSAMPLE_IMAGE]: 'deny',
+  [ToolNames.OMNI_DOWNSCALE_VIDEO]: 'deny',
+  [ToolNames.OMNI_DOWNSAMPLE_AUDIO]: 'deny',
+  [ToolNames.OMNI_EXTRACT_KEYFRAMES]: 'deny',
+  [ToolNames.OMNI_EXTRACT_AUDIO]: 'deny',
+  [ToolNames.OMNI_CLIP_VIDEO]: 'deny',
+  [ToolNames.OMNI_CONVERT_IMAGE]: 'deny',
+  [ToolNames.OMNI_TRANSCRIBE_AUDIO]: 'deny',
+  [ToolNames.OMNI_CLIP_IMAGE]: 'deny',
+  [ToolNames.OMNI_CLIP_AUDIO]: 'deny',
+  [ToolNames.OMNI_CAPTION_IMAGE]: 'deny',
+  [ToolNames.OMNI_CAPTION_AUDIO]: 'deny',
+  [ToolNames.OMNI_OCR_IMAGE]: 'deny',
+  [ToolNames.OMNI_UNDERSTAND_VIDEO_SEGMENTS]: 'deny',
+  [ToolNames.OMNI_RECALL_MEDIA_MEMORY]: 'deny',
   [ToolNames.THREAD_POST]: 'thread',
   [ToolNames.THREAD_WAIT]: 'thread',
   [ToolNames.THREAD_BLOCK]: 'thread',
