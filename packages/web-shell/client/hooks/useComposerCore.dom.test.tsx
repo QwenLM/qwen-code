@@ -1301,7 +1301,10 @@ describe('useComposerCore paste', () => {
         },
       ],
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
@@ -1341,7 +1344,10 @@ describe('useComposerCore paste', () => {
         },
       ],
       expect.any(Function),
-      undefined,
+      {
+        isCurrentDraft: expect.any(Function),
+        retainDraftDuringSessionCreation: expect.any(Function),
+      },
     );
   });
 
