@@ -78,12 +78,12 @@ export class Logger {
   private logs: LogEntry[] = []; // In-memory cache, ideally reflects the last known state of the file
   private lastLoggedUserEntry: LogEntry | null = null; // Tracks the most recently persisted USER entry for cancel-undo (mirrors claude-code's lastAddedEntry).
   // Per-instance write queue for the log-history file (logs.json).
-  // Only `logMessage` and `removeLastUserMessage` chain on this queue;
-  // their read → splice/append → writeFile cycle is otherwise non-atomic
-  // and a fast cancel + resubmit could make removeLast clobber the
-  // just-appended entry. Checkpoint ops (saveCheckpoint /
-  // deleteCheckpoint / loadCheckpoint) write to *separate* files and are
-  // intentionally not serialized on this queue.
+  // `logMessage`, `removeLastUserMessage` and `removeSessionsMessages`
+  // chain on this queue; their read → splice/append/filter → writeFile
+  // cycle is otherwise non-atomic and a fast cancel + resubmit could make
+  // removeLast clobber the just-appended entry. Checkpoint ops
+  // (saveCheckpoint / deleteCheckpoint / loadCheckpoint) write to
+  // *separate* files and are intentionally not serialized on this queue.
   private writeQueue: Promise<unknown> = Promise.resolve();
   // Sessions whose removal is decided but whose write has not landed yet. Every op
   // assigns `this.logs` from its OWN disk snapshot, and that snapshot still holds the
@@ -105,11 +105,12 @@ export class Logger {
   /**
    * Serializes a log-history mutation against every previously enqueued
    * op on this Logger. Errors propagate to the caller but do NOT poison
-   * the queue (the next op runs regardless). Scope: only `logMessage`
-   * and `removeLastUserMessage` go through here — checkpoint ops touch
-   * separate files and don't share this queue. Single-instance only:
-   * a separate Logger pointing at the same file would have its own
-   * queue, which is why callers should share one Logger per session.
+   * the queue (the next op runs regardless). Scope: only `logMessage`,
+   * `removeLastUserMessage` and `removeSessionsMessages` go through here —
+   * checkpoint ops touch separate files and don't share this queue.
+   * Single-instance only: a separate Logger pointing at the same file
+   * would have its own queue, which is why callers should share one
+   * Logger per session.
    */
   private serialize<T>(op: () => Promise<T>): Promise<T> {
     // The queue's tail is always sourced from `.catch(() => undefined)`
