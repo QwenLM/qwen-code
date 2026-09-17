@@ -112,6 +112,16 @@ function stripPromotedFields(out: HookOutput): HookOutput {
         next['permissionDecisionReason'] as string,
       );
     }
+    // PermissionRequest deny messages reach the model and the terminal; copy
+    // before mutating so the parsed object the aggregator reads is untouched.
+    const decision = next['decision'];
+    if (decision && typeof decision === 'object' && !Array.isArray(decision)) {
+      const copied = { ...(decision as Record<string, unknown>) };
+      if (typeof copied['message'] === 'string') {
+        copied['message'] = stripPromotedText(copied['message'] as string);
+      }
+      next['decision'] = copied;
+    }
     cleaned.hookSpecificOutput = next;
   }
   return cleaned;
@@ -1287,11 +1297,26 @@ export class HookRunner {
           hookConfig.command,
         )
       ) {
-        throw new Error(
+        const errorMessage =
           `PowerShell command contains a bare-quoted Windows program or script path; ` +
-            `if you intend to invoke it, prefix with the call operator '& '. ` +
-            `Example: & ${stripAnsiAndControl(hookConfig.command)}`,
+          `if you intend to invoke it, prefix with the call operator '& '. ` +
+          `Example: & ${stripAnsiAndControl(hookConfig.command)}`;
+        debugLogger.warn(
+          `Hook configuration error (non-fatal): ${errorMessage}`,
         );
+        // Fail open like any other hook failure. The reason rides on `error`
+        // only: it reaches the debug log and this hook's progress event, while
+        // an `output` here would take the tool-event consumers down their
+        // success path (they gate on output presence) and drop the failure
+        // marker the tool-call span carries.
+        resolve({
+          hookConfig,
+          eventName,
+          success: false,
+          error: new Error(errorMessage),
+          duration: Date.now() - startTime,
+        });
+        return;
       }
       // Propagate a failed last native command; $? must be read before
       // Test-Path resets it. A trailing odd backtick continues the line and
@@ -1302,9 +1327,21 @@ export class HookRunner {
         shellConfig.shell === 'powershell' && trailingBackticks % 2 === 0
           ? `\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
           : '';
+      // Windows PowerShell 5.1 writes through the console code page unless the
+      // output encoding is forced, which would mangle non-ASCII before the
+      // UTF-8 decode on the read side. The statement is the shell tool's own,
+      // including its platform guard: a POSIX pwsh lane has no code page to
+      // fix and must not take new work here.
+      // LASTEXITCODE is undefined until a native command runs, and StrictMode
+      // turns a bare read of it into a terminating error; seed $null (not 0) so
+      // the author's own `$LASTEXITCODE -ne 0` check stays fail-closed.
+      const utf8Prefix =
+        process.platform === 'win32'
+          ? '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
+          : '';
       const command =
         shellConfig.shell === 'powershell'
-          ? `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; ${hookConfig.command}${exitCodeTail}`
+          ? `${utf8Prefix}Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; ${hookConfig.command}${exitCodeTail}`
           : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
@@ -1587,8 +1624,9 @@ export class HookRunner {
         let output: HookOutput | undefined;
         const isBlockingError = exitCode === 2;
 
-        // Exit 2 carries its reason on stderr; falling back to stdout keeps an
-        // explicit block from degrading into "no output", which proceeds.
+        // Exit 2 carries its reason on stderr; falling back to stdout keeps a
+        // deny payload written there from being discarded. The blocking
+        // outcome itself is enforced as a deny in HookAggregator.
         const stdoutText = stdout.trim();
         const textToParse = isBlockingError
           ? stderr.trim() || stdoutText
@@ -1654,14 +1692,6 @@ export class HookRunner {
               parsedFromStdout ? eventName : undefined,
             );
           }
-        }
-
-        if (isBlockingError && !output) {
-          // An explicit block must never degrade into "no output" here.
-          output = {
-            decision: 'deny',
-            reason: 'Hook exited with a blocking error (code 2)',
-          };
         }
 
         const killedBySignal = exitCode === null;

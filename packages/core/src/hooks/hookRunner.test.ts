@@ -472,8 +472,7 @@ describe('HookRunner', () => {
       );
 
       expect(result.outcome).toBe('blocking');
-      expect(result.output?.decision).toBe('deny');
-      expect(result.output?.reason).toContain('blocking error');
+      expect(result.output).toBeUndefined();
 
       const aggregated = new HookAggregator().aggregateResults(
         [result],
@@ -484,7 +483,46 @@ describe('HookRunner', () => {
         aggregated.finalOutput ?? {},
       ) as PreToolUseHookOutput;
       expect(hookOutput.isDenied()).toBe(true);
+      expect(hookOutput.reason).toContain('blocking error');
     });
+
+    it.each([
+      ['an empty object', '{}'],
+      ['an explicit allow', '{"decision":"allow"}'],
+      ['an explicit ask', '{"decision":"ask"}'],
+      ['only a system message', '{"systemMessage":"report"}'],
+      [
+        'a nested permission allow',
+        '{"hookSpecificOutput":{"permissionDecision":"allow"}}',
+      ],
+    ])(
+      'denies when exit code 2 carries %s on stdout',
+      async (_label, payload) => {
+        mockSpawn.mockImplementation(() => createMockProcess(2, payload, ''));
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'gate',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        expect(result.outcome).toBe('blocking');
+
+        const aggregated = new HookAggregator().aggregateResults(
+          [result],
+          HookEventName.PreToolUse,
+        );
+        const output = createHookOutput(
+          HookEventName.PreToolUse,
+          aggregated.finalOutput ?? {},
+        ) as PreToolUseHookOutput;
+        expect(output.isDenied()).toBe(true);
+        // A blocking hook's stdout is never promoted as model context.
+        expect(output.getAdditionalContext()).toBeUndefined();
+      },
+    );
 
     it('should fall back to plain text when stderr JSON is invalid on exit code 2', async () => {
       const mockProcess = createMockProcess(2, '', 'plain blocking error');
@@ -2860,6 +2898,7 @@ describe('HookRunner', () => {
     });
 
     it('should use powershell when hookConfig.shell is powershell', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const mockProcess = createMockProcess(0, '{"continue": true}');
       mockSpawn.mockImplementation(() => mockProcess);
 
@@ -2883,12 +2922,33 @@ describe('HookRunner', () => {
       expect(spawnArgs[1]).toEqual([
         '-NoProfile',
         '-Command',
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
       ]);
       expect(spawnArgs[2].shell).toBe(false);
     });
 
+    it('omits the encoding statement for a powershell hook off Windows', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      mockSpawn.mockImplementation(() => createMockProcess(0));
+      await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'Write-Output test',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const command = mockSpawn.mock.calls[0][1][2];
+      expect(command).not.toContain('[Console]::OutputEncoding');
+      expect(command).toContain(
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test",
+      );
+    });
+
     it('uses powershell when the global shell is cmd', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const spy = mockCmdShellConfig();
       try {
         mockSpawn.mockImplementation(() => createMockProcess(0));
@@ -2908,7 +2968,7 @@ describe('HookRunner', () => {
         expect(spawnArgs[1]).toEqual([
           '-NoProfile',
           '-Command',
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; echo test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; echo test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         ]);
         // #8649's literal repro shape: shell prefix + quoted path with a
         // space + argument. cmd.exe keeps the inner quotes, PowerShell does
@@ -2928,7 +2988,7 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][1]).toEqual([
           '-NoProfile',
           '-Command',
-          `Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; bash "C:/Program Files/app/script.sh" arg\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`,
+          `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; bash "C:/Program Files/app/script.sh" arg\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`,
         ]);
       } finally {
         spy.mockRestore();
@@ -2936,6 +2996,7 @@ describe('HookRunner', () => {
     });
 
     it('passes the env-var form through for an explicit powershell shell', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       mockSpawn.mockImplementation(() => createMockProcess(0));
       await hookRunner.executeHook(
         {
@@ -2952,11 +3013,12 @@ describe('HookRunner', () => {
         'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
       );
       expect(spawnArgs[1][2]).toBe(
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
       );
     });
 
     it('uses the same powershell config for explicit shell and cmd fallback', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       const spy = mockCmdShellConfig();
       try {
         mockSpawn.mockImplementation(() => createMockProcess(0));
@@ -2985,10 +3047,10 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
         expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
         expect(explicitArgs[2]).toBe(
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output explicit\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output explicit\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         );
         expect(fallbackArgs[2]).toBe(
-          "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output fallback\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output fallback\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         );
       } finally {
         spy.mockRestore();
@@ -2996,6 +3058,7 @@ describe('HookRunner', () => {
     });
 
     it('omits the exit-code tail for a command ending in a continuation backtick', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       mockSpawn.mockImplementation(() => createMockProcess(0));
       await hookRunner.executeHook(
         {
@@ -3011,7 +3074,7 @@ describe('HookRunner', () => {
       // continuation and leak the wrapper text into the failure output.
       const continued = mockSpawn.mock.calls[0];
       expect(continued[1][2]).toBe(
-        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; Write-Output tail `",
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output tail `",
       );
 
       mockSpawn.mockImplementation(() => createMockProcess(0));
@@ -3043,6 +3106,9 @@ describe('HookRunner', () => {
         );
         expect(result.success).toBe(false);
         expect(result.error?.message).toMatch(/call operator '& '/);
+        // The refusal must not manufacture an output: any output here routes
+        // the call into the success path of every tool-event consumer.
+        expect(result.output).toBeUndefined();
         expect(mockSpawn).not.toHaveBeenCalled();
       } finally {
         spy.mockRestore();
@@ -3080,6 +3146,15 @@ describe('HookRunner', () => {
       expect(result.success).toBe(false);
       expect(result.error?.message).toMatch(/prefix with the call operator/);
       expect(result.error?.message).not.toContain('\u001b');
+      expect(result.output).toBeUndefined();
+      const aggregated = new HookAggregator().aggregateResults(
+        [result],
+        HookEventName.PreToolUse,
+      );
+      // The reason still reaches the aggregator's error list, which is the
+      // channel the failure is reported from.
+      expect(aggregated.errors[0]?.message).toContain('call operator');
+      expect(aggregated.finalOutput).toBeUndefined();
     });
 
     it.each([
@@ -3092,6 +3167,11 @@ describe('HookRunner', () => {
         'multi-line array of paths with bare-quoted .cmd',
         '"C:\\path1.cmd"\n"C:\\path2.cmd"\n"C:\\path3.cmd"',
       ],
+      [
+        'statement after a bare-quoted .cmd on the next line',
+        '"C:\\hooks\\check.cmd"\nWrite-Output done',
+      ],
+      ['bare-quoted .sh path', '"C:\\hooks\\gate.sh"'],
       [
         'backtick-continued quoted path as argument',
         'Get-Process "C:\\long `\n` path\\app.cmd"',
@@ -3174,6 +3254,7 @@ describe('HookRunner', () => {
     });
 
     it('surfaces VariableIsUndefined as systemMessage when $VAR is undefined', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       mockSpawn.mockImplementation(() =>
         createMockProcess(
           1,
@@ -3197,9 +3278,10 @@ describe('HookRunner', () => {
         createMockInput(),
       );
       const spawnArgs = mockSpawn.mock.calls[0];
-      // Pin: dropping either flag must fail here, not only the wrapping tests.
+      // Pin: dropping any prefix statement must fail here, not only the
+      // wrapping tests.
       expect(spawnArgs[1][2]).toMatch(
-        /^Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$CLAUDE_PROJECT_DIR\n\$__s = \$\?\nif \(\(Test-Path -LiteralPath variable:\\LASTEXITCODE\) -and \$LASTEXITCODE -ne 0 -and -not \$__s\) \{ exit \$LASTEXITCODE \}$/,
+        /^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$global:LASTEXITCODE = \$null;\s*\$CLAUDE_PROJECT_DIR\n\$__s = \$\?\nif \(\(Test-Path -LiteralPath variable:\\LASTEXITCODE\) -and \$LASTEXITCODE -ne 0 -and -not \$__s\) \{ exit \$LASTEXITCODE \}$/,
       );
       expect(result.success).toBe(false);
       expect(result.exitCode).toBe(1);
@@ -3284,6 +3366,36 @@ describe('HookRunner', () => {
       expect(output.hookSpecificOutput?.['additionalContext']).toBe('ctx');
       // terminalSequence is an escape channel by contract; it survives.
       expect(output.terminalSequence).toBe('\u001b]0;t\u0007');
+    });
+
+    it('strips escapes from a PermissionRequest deny message', async () => {
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(
+          0,
+          '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"\\u001b[31mdenied\\u001b[0m","updatedInput":{"note":"\\u001b[31mkeep\\u001b[0m"}}}}',
+          '',
+        ),
+      );
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'gate',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PermissionRequest,
+        createMockInput(),
+      );
+      const decision = (
+        result.output?.hookSpecificOutput as {
+          decision?: { message?: string; updatedInput?: { note?: string } };
+        }
+      )?.decision;
+      expect(decision?.message).toBe('denied');
+      // updatedInput is forwarded as tool input, not promoted text.
+      expect(decision?.updatedInput).toEqual({
+        note: '\u001b[31mkeep\u001b[0m',
+      });
     });
   });
 

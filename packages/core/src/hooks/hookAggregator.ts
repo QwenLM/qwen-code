@@ -22,6 +22,18 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('HOOK_AGGREGATOR');
 
 /**
+ * The two todo events gate on `finalOutput.decision === 'block'` and read
+ * neither 'deny' nor `continue`, so a denial written for them has to use that
+ * literal.
+ */
+function isBlockLiteralEvent(eventName: HookEventName): boolean {
+  return (
+    eventName === HookEventName.TodoCreated ||
+    eventName === HookEventName.TodoCompleted
+  );
+}
+
+/**
  * Aggregated result from multiple hook executions
  */
 export interface AggregatedHookResult {
@@ -78,7 +90,13 @@ export class HookAggregator {
     }
 
     const success = errors.length === 0;
-    const finalOutput = this.mergeOutputs(allOutputs, eventName);
+    let finalOutput = this.mergeOutputs(allOutputs, eventName);
+    // A blocking outcome has to end in a decision the consumer acts on: a
+    // payload with no decision, or with `allow`, runs the action, and `ask`
+    // sends it to confirmation rather than the block the hook asked for.
+    if (results.some((result) => result.outcome === 'blocking')) {
+      finalOutput = this.enforceBlockingDeny(finalOutput, eventName);
+    }
 
     return {
       success,
@@ -87,6 +105,78 @@ export class HookAggregator {
       totalDuration,
       finalOutput,
     };
+  }
+
+  /**
+   * Rewrite a blocking aggregation that carries no deny into one, in the
+   * shape the event's consumers actually read.
+   */
+  private enforceBlockingDeny(
+    output: HookOutput | undefined,
+    eventName: HookEventName,
+  ): HookOutput | undefined {
+    if (output && this.blocksAction(output, eventName)) {
+      return output;
+    }
+
+    const denied: HookOutput = {
+      ...output,
+      decision: isBlockLiteralEvent(eventName) ? 'block' : 'deny',
+    };
+    const reason =
+      typeof denied.reason === 'string' && denied.reason
+        ? denied.reason
+        : 'Hook exited with a blocking error';
+    denied.reason = reason;
+
+    const forced = { ...denied.hookSpecificOutput };
+    if (eventName === HookEventName.PermissionRequest) {
+      const previous = forced['decision'];
+      const decision =
+        previous && typeof previous === 'object' && !Array.isArray(previous)
+          ? { ...(previous as Record<string, unknown>) }
+          : {};
+      decision['behavior'] = 'deny';
+      decision['message'] = reason;
+      forced['decision'] = decision;
+      denied.hookSpecificOutput = forced;
+    } else if ('permissionDecision' in forced) {
+      // PreToolUse reads these before the top-level pair.
+      forced['permissionDecision'] = 'deny';
+      forced['permissionDecisionReason'] = reason;
+      denied.hookSpecificOutput = forced;
+    }
+
+    return this.createSpecificHookOutput(denied, eventName);
+  }
+
+  private blocksAction(output: HookOutput, eventName: HookEventName): boolean {
+    const specific = output.hookSpecificOutput;
+    if (eventName === HookEventName.PermissionRequest) {
+      // Its consumer reads nothing else, so neither a top-level decision nor a
+      // stop request can stand in for a nested deny.
+      const decision = specific?.['decision'];
+      return (
+        !!decision &&
+        typeof decision === 'object' &&
+        (decision as { behavior?: unknown }).behavior === 'deny'
+      );
+    }
+    if (output.continue === false && !isBlockLiteralEvent(eventName)) {
+      // These consumers route through shouldStopExecution(), so a stop request
+      // already halts the action and rewriting it would only change the block
+      // type. The two todo events are excluded: they compare the decision to
+      // 'block' and read neither 'deny' nor `continue`.
+      return true;
+    }
+    const permissionDecision = specific?.['permissionDecision'];
+    if (permissionDecision === 'allow' || permissionDecision === 'ask') {
+      return false;
+    }
+    if (output.decision === 'block' || output.decision === 'deny') {
+      return true;
+    }
+    return permissionDecision === 'deny';
   }
 
   /**
