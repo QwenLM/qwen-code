@@ -117,16 +117,31 @@ describe('sanitizeErrorMessage', () => {
     expect(out).toContain('tmp.aac');
   });
 
-  it('keeps a basename containing replacement patterns intact', () => {
-    // `$&` and `$'` in the basename would be expanded by a string
-    // replacement, re-exposing the whole path the pass just removed.
-    const known = '/Users/a/x$&y.mp4';
+  it('scrubs every occurrence of a re-spelled known path, drive included', () => {
     const err = new Error(
-      String.raw`ENOENT: no such file or directory, stat 'C:\Users\a\x$&y.mp4'`,
+      String.raw`ffmpeg: C:\Users\a\My Videos\clip.mp4: Invalid data found when processing input (C:\Users\a\My Videos\clip.mp4)`,
     );
-    const out = sanitizeErrorMessage(err, [known]);
-    expect(out).not.toContain('C:\\Users');
-    expect(out).toContain('x$&y.mp4');
+    expect(sanitizeErrorMessage(err, ['/Users/a/My Videos/clip.mp4'])).toBe(
+      'ffmpeg: clip.mp4: Invalid data found when processing input (clip.mp4)',
+    );
+  });
+
+  it('keeps a basename containing replacement patterns intact', () => {
+    // Exact assertions catch replacement-string expansion of `$&` in both
+    // the verbatim and re-spelling passes.
+    const known = '/Users/a b/x$&y.mp4';
+    for (const [message, expected] of [
+      [
+        String.raw`ENOENT: no such file or directory, stat '/Users/a b/x$&y.mp4'`,
+        String.raw`ENOENT: no such file or directory, stat 'x$&y.mp4'`,
+      ],
+      [
+        String.raw`ENOENT: no such file or directory, stat 'C:\Users\a b\x$&y.mp4'`,
+        String.raw`ENOENT: no such file or directory, stat 'x$&y.mp4'`,
+      ],
+    ] as const) {
+      expect(sanitizeErrorMessage(new Error(message), [known])).toBe(expected);
+    }
   });
 });
 
@@ -820,10 +835,8 @@ describe('readMediaViaOmniDelivery result shape', () => {
     }));
     const { readMediaViaOmniDelivery } = await import('./index.js');
 
-    // Each fixture is resolved into this platform's own spelling before it
-    // reaches the pipeline: fs reports the resolved path, so a POSIX spelling
-    // on Windows is a different input shape — scrubbing one is tracked in
-    // #12082, not asserted here.
+    // These fixtures use platform-native spelling; cross-spelling is covered
+    // by the unit case above and the integration case below.
     const cases = [
       ['/Users/张三/视频/clip.mp4', '/Users/张三'],
       ['/Users/a/videos/~draft.mp4', '/Users/a/videos'],
@@ -860,7 +873,8 @@ describe('readMediaViaOmniDelivery result shape', () => {
 
     for (const [filePath, parentFragment] of [
       ["/Users/a/it's (v2)+final@x/clip.mp4", "it's (v2)+final@x"],
-      ['/Users/a/My Videos/clip.mp4', '/Users/a/My Videos'],
+      // Separator-free so it detects a leaked parent under either spelling.
+      ['/Users/a/My Videos/clip.mp4', 'My Videos'],
     ] as const) {
       const result = await readMediaViaOmniDelivery({
         filePath,
