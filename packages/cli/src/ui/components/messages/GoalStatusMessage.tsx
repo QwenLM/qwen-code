@@ -42,7 +42,7 @@ type GoalStatusMessageProps =
   | GoalStateMessageProps;
 
 /** The theme colour of each palette slot a card view names. */
-function cardColor(color: GoalCardColor): string {
+export function goalCardThemeColor(color: GoalCardColor): string {
   switch (color) {
     case 'secondary':
       return theme.text.secondary;
@@ -81,7 +81,7 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
       </Box>
     );
   }
-  const color = cardColor(view.color);
+  const color = goalCardThemeColor(view.color);
   // This renderer writes straight to the terminal, so both lines below are
   // sanitized here: a pause reason can embed a raw provider error, and the
   // checkpoint diagnostic, though cleaned where it is written, can come back
@@ -164,7 +164,7 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
     );
   }
 
-  const color = cardColor(view.color);
+  const color = goalCardThemeColor(view.color);
   return (
     <Box flexDirection="row">
       <Box width={2} flexShrink={0}>
