@@ -158,26 +158,28 @@ export function sanitizeErrorMessage(
   for (const known of knownPaths) {
     if (!known) continue;
     msg = msg.split(known).join(path.basename(known));
-    // Strip the directories again with `/` and `\` interchangeable, leaving
-    // whatever basename the message carries: a parent segment holding a space
-    // or a quote defeats the pattern pass below, so only the known path's own
-    // directories can remove it. The verbatim pass above cannot — it holds
-    // the spelling the caller passed, not the one the filesystem reported.
+    // Replace the whole known path again with `/` and `\` interchangeable,
+    // keeping its basename: a parent segment holding a space or a quote
+    // defeats the pattern pass below, and the verbatim pass above holds the
+    // spelling the caller passed, not the one the filesystem reported.
+    // Anchored to the whole path rather than to its directories: a sibling of
+    // the known file shares those directories, so stripping them would take
+    // the separator the pattern pass anchors on and leave its leading
+    // directory in the message. The pattern pass collapses that sibling.
     const segments = known.split(/[\\/]+/).filter(Boolean);
-    // A leading drive is covered by the pattern's own optional prefix.
+    // A leading drive is covered by the pattern's own optional prefix, and
+    // `[\\/]*` absorbs the separator run of the echo (`C:\…`, `\…`, or a
+    // drive-less form) without requiring one.
     if (/^[A-Za-z]:$/.test(segments[0] ?? '')) segments.shift();
-    // Without a directory to strip (a bare basename, or a root) the pattern
-    // would reduce to separators alone.
+    // Without a directory to anchor on (a bare basename, or a root) there is
+    // nothing the verbatim pass has not already replaced.
     if (segments.length >= 2) {
-      const dirs = segments
-        .slice(0, -1)
-        .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      const spelled = segments
+        .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('[\\\\/]+');
       msg = msg.replace(
-        new RegExp(
-          `(?:[A-Za-z]:)?[\\\\/]+${dirs.join('[\\\\/]+')}[\\\\/]+`,
-          'g',
-        ),
-        '',
+        new RegExp(`(?:[A-Za-z]:)?[\\\\/]*${spelled}`, 'g'),
+        () => path.basename(known),
       );
     }
   }

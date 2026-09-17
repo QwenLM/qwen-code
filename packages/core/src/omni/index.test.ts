@@ -104,6 +104,19 @@ describe('sanitizeErrorMessage', () => {
     }
   });
 
+  it('collapses a sibling path that shares only the known path dirs', () => {
+    // The known-path pass matches the whole path, never its directories
+    // alone: stripping the dirs takes the separator the pattern pass anchors
+    // on, and the sibling survives as 'cache/tmp.aac' — a directory name the
+    // pattern pass removes when the known path is left in place.
+    const err = new Error(
+      'ffmpeg: /home/user/media/cache/tmp.aac: No such file or directory',
+    );
+    const out = sanitizeErrorMessage(err, ['/home/user/media/clip.mp4']);
+    expect(out).not.toContain('cache');
+    expect(out).toContain('tmp.aac');
+  });
+
   it('keeps a basename containing replacement patterns intact', () => {
     // `$&` and `$'` in the basename would be expanded by a string
     // replacement, re-exposing the whole path the pass just removed.
