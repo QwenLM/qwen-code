@@ -694,9 +694,13 @@ describe('e2e build artifact download retry (consumer legs)', () => {
       assert.equal(first.id, 'download-build');
       assert.equal(first['continue-on-error'], true);
       // An absorbed stall must not burn the job budget unbounded — the
-      // sandbox:none shard retry prices it to the second (the 2100s gate
-      // in run-e2e-tests.sh) — so the first attempt is time-boxed and a
-      // hang converts into a retryable failure.
+      // sandbox:none shard retry prices job time to the second (the 2100s
+      // gate in run-e2e-tests.sh) — so the first attempt is time-boxed
+      // and a hang converts into a retryable failure. The download sits
+      // between that leg's 'Record job start epoch' and 'Run E2E tests',
+      // so up to 600s of absorbed stall is charged to the 2100s, flipping
+      // the shard-retry decision only when pre-stall elapsed already sits
+      // in the 1500–2100s window.
       assert.equal(
         first['timeout-minutes'],
         10,
