@@ -40,6 +40,19 @@ const CHECKPOINT_BYTE_THRESHOLD = 19_200;
 // permanently exhaust a healthy Goal.
 const CHECKPOINT_CONTENT_BYTE_LIMIT = 2_000;
 const CHECKPOINT_CONTENT_TRUNCATION_MARKER = '\n\u2026[truncated]';
+/**
+ * How much of a user's own message the verifier window keeps, and how that
+ * budget is split. A tool result or model text that is cut short can be
+ * produced again in the next turn; a user message cannot, and it is the
+ * only thing that proves what the user asked, chose or approved. Those
+ * messages are also front- and back-loaded -- instructions first, a pasted
+ * log in the middle, the decision at the end -- so the cut is taken out of
+ * the middle, marked, and the tail gets the larger share.
+ */
+const USER_EVIDENCE_CONTENT_BYTE_LIMIT = 16_000;
+const USER_EVIDENCE_HEAD_BYTES = 6_000;
+const USER_EVIDENCE_MIDDLE_TRUNCATION_MARKER =
+  '\n\u2026[middle of the user message truncated]\n';
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
 const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
 /**
@@ -758,7 +771,10 @@ export function buildGoalVerifierEvidenceWindow(
     ) {
       continue;
     }
-    const content = capEvidenceContent(evidenceContent(record, provenance));
+    const content =
+      provenance === 'real_user'
+        ? capUserEvidenceContent(evidenceContent(record, provenance))
+        : capEvidenceContent(evidenceContent(record, provenance));
     if (!content) continue;
     const entry: GoalVerifierEvidenceRecord = {
       uuid: record.uuid,
@@ -1240,6 +1256,48 @@ export function capPreviewBytes(value: string, limit: number): string {
     cutoff += codePoint.length;
   }
   return value.slice(0, cutoff);
+}
+
+/**
+ * Keeps the first {@link USER_EVIDENCE_HEAD_BYTES} and the last of the
+ * remaining budget of a user message, with a marker where the middle was.
+ */
+function capUserEvidenceContent(content: string): string {
+  if (Buffer.byteLength(content, 'utf8') <= USER_EVIDENCE_CONTENT_BYTE_LIMIT) {
+    return content;
+  }
+  const tailBudget =
+    USER_EVIDENCE_CONTENT_BYTE_LIMIT -
+    USER_EVIDENCE_HEAD_BYTES -
+    Buffer.byteLength(USER_EVIDENCE_MIDDLE_TRUNCATION_MARKER, 'utf8');
+  return `${takeLeadingBytes(content, USER_EVIDENCE_HEAD_BYTES)}${USER_EVIDENCE_MIDDLE_TRUNCATION_MARKER}${takeTrailingBytes(content, tailBudget)}`;
+}
+
+/** The longest prefix of `value` within `budget` UTF-8 bytes, on a code point boundary. */
+function takeLeadingBytes(value: string, budget: number): string {
+  let byteLength = 0;
+  let cutoff = 0;
+  for (const codePoint of value) {
+    const codePointBytes = Buffer.byteLength(codePoint, 'utf8');
+    if (byteLength + codePointBytes > budget) break;
+    byteLength += codePointBytes;
+    cutoff += codePoint.length;
+  }
+  return value.slice(0, cutoff);
+}
+
+/** The longest suffix of `value` within `budget` UTF-8 bytes, on a code point boundary. */
+function takeTrailingBytes(value: string, budget: number): string {
+  const codePoints = [...value];
+  let byteLength = 0;
+  let start = codePoints.length;
+  for (let index = codePoints.length - 1; index >= 0; index -= 1) {
+    const codePointBytes = Buffer.byteLength(codePoints[index]!, 'utf8');
+    if (byteLength + codePointBytes > budget) break;
+    byteLength += codePointBytes;
+    start = index;
+  }
+  return codePoints.slice(start).join('');
 }
 
 function capEvidenceContent(content: string): string {

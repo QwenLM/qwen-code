@@ -1291,6 +1291,57 @@ describe('Goal verifier evidence window', () => {
     expect(JSON.stringify(window)).not.toContain('earlier');
   });
 
+  it('keeps both ends of a long user message so a decision at its end stays provable', () => {
+    const pasted = 'log line\n'.repeat(3_000); // ~27 000 bytes in the middle
+    const text = `Please pick between the two plans below.\n${pasted}\nApproved: go with plan B.`;
+    const records = [
+      record('ask', 'user', {
+        turnId: 'turn-1',
+        provenance: 'real_user',
+        text,
+      }),
+      record('tool', 'tool_result', {
+        turnId: 'turn-3',
+        toolResponse: { output: 'x'.repeat(2_500) },
+      }),
+    ];
+
+    const window = build(records, complete([]));
+
+    const user = window.evidence.find((entry) => entry.uuid === 'ask')!;
+    expect(user.proofKind).toBe('user_input');
+    expect(user.content.startsWith('Please pick between the two plans')).toBe(
+      true,
+    );
+    expect(user.content.endsWith('Approved: go with plan B.')).toBe(true);
+    expect(user.content).toContain('[middle of the user message truncated]');
+    expect(Buffer.byteLength(user.content, 'utf8')).toBeLessThanOrEqual(16_000);
+    expect(Buffer.byteLength(user.content, 'utf8')).toBeGreaterThan(2_000);
+    // Tool results keep the plain 2 000-byte cap: they can be produced again.
+    const tool = window.evidence.find((entry) => entry.uuid === 'tool')!;
+    expect(Buffer.byteLength(tool.content, 'utf8')).toBe(2_000);
+  });
+
+  it('cuts a long multi-byte user message on code point boundaries', () => {
+    const text = `选项${'界'.repeat(9_000)}批准`;
+    const records = [
+      record('ask', 'user', {
+        turnId: 'turn-3',
+        provenance: 'real_user',
+        text,
+      }),
+    ];
+
+    const [user] = build(records, complete([])).evidence;
+
+    expect(user!.content.startsWith('选项界')).toBe(true);
+    expect(user!.content.endsWith('界批准')).toBe(true);
+    expect(user!.content).not.toContain('\uFFFD');
+    expect(Buffer.byteLength(user!.content, 'utf8')).toBeLessThanOrEqual(
+      16_000,
+    );
+  });
+
   it('returns an empty window for a turn that has recorded nothing yet', () => {
     const records = [
       record('t2', 'assistant', { turnId: 'turn-2', text: 'earlier' }),
