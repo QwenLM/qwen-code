@@ -24,6 +24,7 @@ import {
   goalPauseReasonForUnreadableTranscript,
   goalPauseReasonForVerifierBudget,
   goalPauseReasonForVerifierFailure,
+  goalVerifierFailureFeedback,
   goalVerifierFailureNote,
   goalTokenBudgetReason,
   goalTurnBudgetReason,
@@ -501,6 +502,9 @@ export function createGoalRuntime(
   const commitUsageLimitedSettle = (limitedSnapshot: GoalSnapshotV2): void => {
     continuationQueued = false;
     currentTurnFeedback = undefined;
+    // A stop ends the streak a repeated blocker was earning; the resume
+    // that re-arms the budget starts a new one, as a restart would.
+    blockedAudit = undefined;
     snapshot = structuredClone(limitedSnapshot);
     broadcast('usage_limited');
   };
@@ -968,6 +972,9 @@ export function createGoalRuntime(
         continuationQueued = false;
         nextVerifierFeedback = undefined;
         currentTurnFeedback = undefined;
+        // The streak the terminal state was earned on ends with it: a Goal
+        // resumed after the user removed the blocker starts a new one.
+        blockedAudit = undefined;
         // A completed Goal ended holding the objective the model has; a
         // fresh Goal after it is a new work item, not a replacement. A
         // blocked Goal is suspended, not ended: it resumes with the objective
@@ -1014,30 +1021,56 @@ export function createGoalRuntime(
           commitUsageLimitedSettle(limitedSnapshot);
           return;
         }
+        if (queuedTurnKey !== undefined) {
+          // The user typed while the verifier ran: they are steering right
+          // now, exactly the case the no-progress bound yields to. Drop the
+          // unjudged proposal, tell the model why, and serve their turn
+          // instead of pausing in front of it.
+          verificationAttempt = undefined;
+          pendingProposal = undefined;
+          nextVerifierFeedback = goalVerifierFailureFeedback(outcome.detail);
+          snapshot = { ...snapshot, activity: 'idle' };
+          promoteQueuedUserTurn();
+          broadcast();
+          return;
+        }
         const recordUuid = randomUUID();
-        const pausedSnapshot = verifierFailurePausedSnapshot(
+        let pausedSnapshot = verifierFailurePausedSnapshot(
           meteredGoal,
           outcome,
           recordUuid,
         );
-        // A moved cursor leaves the audited turns behind it, where no
-        // window reaches; an audit that survived would let the policy's
-        // word stand in for evidence the verifier cannot see.
-        if (outcome.cause === 'reanchor') blockedAudit = undefined;
+        // A moved cursor leaves the audited turns behind it, where no window
+        // reaches; an audit that survived would let the policy's word stand
+        // in for evidence the verifier cannot see. It goes only once the
+        // record the cursor now names is really on disk.
+        const auditAfterPause =
+          outcome.cause === 'reanchor' ? undefined : blockedAudit;
         try {
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,
             cause: 'pause',
             snapshot: pausedSnapshot,
-            ...(blockedAudit
-              ? { blockedAudit: structuredClone(blockedAudit) }
+            ...(auditAfterPause
+              ? { blockedAudit: structuredClone(auditAfterPause) }
               : {}),
           });
+          blockedAudit = auditAfterPause;
         } catch {
           // A lost settle write must not strand an "active" Goal that
           // nothing will continue: the proposal is unjudged either way, so
           // show the pause and let the user's next action surface the
-          // persistence loss. Same shape as the no-progress pause.
+          // persistence loss. Same shape as the no-progress pause. A cursor
+          // pointing at the record that was never written would fail every
+          // later proposal, so a re-anchoring pause falls back to the plain
+          // one, cursor and audit untouched.
+          if (outcome.cause === 'reanchor') {
+            pausedSnapshot = verifierFailurePausedSnapshot(
+              meteredGoal,
+              { ...outcome, cause: 'verifier' },
+              recordUuid,
+            );
+          }
         }
         if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
         verificationAttempt = undefined;
@@ -1045,11 +1078,6 @@ export function createGoalRuntime(
         nextVerifierFeedback = undefined;
         continuationQueued = false;
         currentTurnFeedback = undefined;
-        // A paused Goal issues no permits, so a user turn reserved while the
-        // verifier ran cannot be served; drop the reservation as a user
-        // pause does, or a resume could hand a permit to a turn that has
-        // long since run as an ordinary one.
-        queuedTurnKey = undefined;
         snapshot = structuredClone(pausedSnapshot);
         broadcast('pause');
         return;
@@ -1113,11 +1141,15 @@ export function createGoalRuntime(
       });
       const budgetBytes =
         verifierRequestByteLimit() - measureGoalVerifierEnvelopeBytes(envelope);
+      const auditedTurnIds =
+        isRepeatedBlockerProposal(attempt.proposal) && blockedAudit
+          ? blockedAudit.turnIds
+          : [];
       const window = buildGoalVerifierWindow(
         { records, goal: attempt.goal, permit: attempt.permit },
-        { budgetBytes },
+        { budgetBytes, reachTurnIds: auditedTurnIds },
       );
-      if (window.evidence.length === 0 && window.omitted > 0) {
+      if (window.evidence.length === 0 && window.partialTurnId !== undefined) {
         // Not one record fits: the side query model's window, less the
         // objective and the policy, is too small for this Goal. Asking the
         // verifier would buy a certain rejection every turn until the
@@ -1128,18 +1160,21 @@ export function createGoalRuntime(
           detail: `the verifier's request budget of ${Math.max(0, budgetBytes)} bytes after the request envelope holds no transcript record`,
         };
       } else if (
-        isRepeatedBlockerProposal(attempt.proposal) &&
-        blockedAudit !== undefined &&
-        !blockedAudit.turnIds.every(
-          (turnId) =>
-            window.turnIds.includes(turnId) && turnId !== window.partialTurnId,
+        !auditedTurnIds.every((turnId) =>
+          window.evidence.some(
+            (entry) =>
+              entry.turnId === turnId &&
+              entry.provenance !== 'assistant_output',
+          ),
         )
       ) {
         // The blocked policy tells the verifier a repeated blocker was
         // recorded on three consecutive turns. That is only evidence if the
-        // verifier can see those turns whole; a turn the window reaches
-        // only in part may hold nothing but the model's own proposal, so
-        // the policy's word would be doing the proving.
+        // verifier sees, from each of those turns, something the model did
+        // not merely write: a tool result or the user's own words. The
+        // window reserves one such record per audited turn, so this fails
+        // only when a turn holds none, and then the policy's word would be
+        // doing the proving.
         outcome = {
           kind: 'decision',
           result: {
@@ -1709,13 +1744,16 @@ export function createGoalRuntime(
               }
             : {}),
         };
-        // Only a pause the verifier's failure caused leaves an audit behind
-        // (a user pause clears it, a no-progress pause never has one), and
-        // that pause changed nothing about the audited turns. So a resume
-        // that finds one keeps it, and the record carries it so a restart
-        // between this resume and the next finished turn does not lose it.
+        // Only a pause the verifier's failure caused leaves an audit behind:
+        // a user pause clears it, a no-progress pause never has one, and
+        // every accept and every usage_limited stop clears it. That pause
+        // changed nothing about the audited turns, so a resume that finds
+        // one keeps it, and the record carries it so a restart between this
+        // resume and the next finished turn does not lose it.
         const keepsBlockedAudit =
-          request.action === 'resume' && blockedAudit !== undefined;
+          request.action === 'resume' &&
+          snapshot.goal?.status === 'paused' &&
+          blockedAudit !== undefined;
         try {
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,

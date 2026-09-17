@@ -3367,7 +3367,7 @@ describe('SessionTranscriptReader', () => {
     expect(second.records.map((r) => r.uuid)).toEqual(['a1']);
   });
 
-  it('accounts for retained projection hints in the cache byte estimate', async () => {
+  it('accounts for retained turn hints in the cache byte estimate, and retains no Goal context', async () => {
     const reader = new SessionTranscriptReader(workspaceDir);
     const makeHintRecords = (
       targetSessionId: string,
@@ -3417,7 +3417,11 @@ describe('SessionTranscriptReader', () => {
     await reader.readPage(longSessionId);
     const longEstimate = getSessionTranscriptIndexCacheStatsForTest().byteSize;
 
-    expect(longEstimate - shortEstimate).toBeGreaterThan(80 * 1024);
+    // The long suffix sits in the task id the turn hint keeps and in the
+    // Goal context the index no longer keeps: the estimate grows by the
+    // one, and not by the four strings of the other.
+    expect(longEstimate - shortEstimate).toBeGreaterThan(8 * 1024);
+    expect(longEstimate - shortEstimate).toBeLessThan(40 * 1024);
   });
 
   it('does not let an evicted pending build overwrite a newer cache entry', async () => {

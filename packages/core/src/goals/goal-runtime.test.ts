@@ -183,6 +183,32 @@ function verifierEvidenceRecords(
   ];
 }
 
+/** A tool result showing the blocker, stamped for `permit`'s turn. */
+function blockerProbe(
+  permit: GoalTurnPermit,
+  cursorId: string,
+  records: readonly RuntimeRecord[],
+): RuntimeRecord {
+  return {
+    ...verifierEvidenceRecords(permit, cursorId)[1]!,
+    uuid: `probe-${permit.turnId}`,
+    parentUuid: records.at(-1)!.uuid,
+    type: 'tool_result',
+    provenance: 'tool_result',
+    message: {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'shell',
+            response: { output: 'error: the registry rejected the push' },
+          },
+        },
+      ],
+    },
+  };
+}
+
 function verifierUserEvidenceRecords(
   permit: GoalTurnPermit,
   cursorId: string,
@@ -1234,7 +1260,7 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().activity).toBe('running');
   });
 
-  it.each(['blocked', 'paused'] as const)(
+  it.each(['blocked'] as const)(
     'preserves queued user priority when verification stops as %s',
     async (terminalStatus) => {
       const result = deferred<Awaited<ReturnType<GoalVerifier>>>();
@@ -1289,20 +1315,182 @@ describe('goal runtime', () => {
         expectedRevision: permit.revision,
       });
 
-      if (terminalStatus === 'blocked') {
-        expect(runtime.permitForTurn('real-user')).toBeDefined();
-        expect(host.started).toHaveLength(1);
-      } else {
-        // A pause the verifier's failure caused drops the reservation, as
-        // a user pause does: the reserved prompt ran as an ordinary turn
-        // while the Goal was paused, and a permit for its key now would
-        // hold the continuation until that turn ends.
-        expect(runtime.permitForTurn('real-user')).toBeUndefined();
-        expect(host.started).toHaveLength(2);
-      }
+      expect(runtime.permitForTurn('real-user')).toBeDefined();
+      expect(host.started).toHaveLength(1);
       expect(runtime.getSnapshot().activity).toBe('running');
     },
   );
+
+  it('serves a user turn reserved during a verification that fails, instead of pausing', async () => {
+    const result = deferred<Awaited<ReturnType<GoalVerifier>>>();
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(() => result.promise);
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deploy' });
+    const permit = host.started[0]!;
+    records = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Done',
+    });
+    const finishing = runtime.finishTurn(permit);
+    await vi.waitFor(() => expect(verifier).toHaveBeenCalledOnce());
+    expect(runtime.beginTurn('real-user')).toBeUndefined();
+
+    result.reject(new Error('provider unavailable'));
+    await finishing;
+
+    // The user is steering, exactly the case the no-progress bound yields
+    // to: the unjudged proposal is dropped, their turn runs, and the model
+    // is told what became of the proposal.
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'running',
+      goal: { status: 'active' },
+    });
+    const userPermit = runtime.permitForTurn('real-user');
+    expect(userPermit).toBeDefined();
+    expect(runtime.getVerifierFeedback(userPermit!)).toBe(
+      'Your last proposal could not be verified: provider unavailable. Propose again when the evidence is in this turn.',
+    );
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+    ]);
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('clears the repeated-blocker audit when a blocked Goal is accepted, so resume starts afresh', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The blocker is real',
+    }));
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deploy' });
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [verifierEvidenceRecords(host.started[0]!, cursorId)[0]!];
+    const proposeBlocked = (permit: GoalTurnPermit) => {
+      records = [...records, blockerProbe(permit, cursorId, records)];
+      return runtime.recordTerminalProposal(permit, {
+        status: 'blocked',
+        reason: 'The registry rejects every push',
+      });
+    };
+    for (const index of [0, 1, 2]) {
+      proposeBlocked(host.started[index]!);
+      await runtime.finishTurn(host.started[index]!);
+    }
+    expect(runtime.getSnapshot().goal?.status).toBe('blocked');
+
+    // The user removed the blocker and resumed: the three turns before the
+    // fix must not count toward a new streak on the same words.
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: host.started[0]!.goalId,
+      expectedRevision: host.started[0]!.revision,
+    });
+    expect(
+      journal.appended.find((payload) => payload.cause === 'resume'),
+    ).not.toHaveProperty('blockedAudit');
+    expect(proposeBlocked(host.started[3]!)).toEqual({
+      recorded: true,
+      readyForVerification: false,
+    });
+  });
+
+  it('asks the verifier, with no evidence, when the proposing turn simply recorded none', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'reject' as const,
+      reason: 'Nothing to judge',
+    }));
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    const base = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    // Only hidden reasoning: the turn is in the lineage, its evidence is empty.
+    records = [
+      base[0]!,
+      {
+        ...base[1]!,
+        message: {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }],
+        },
+      },
+    ];
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    // An empty window is a budget problem only when a record was refused
+    // for its size; here none existed, and the verifier says so.
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({ evidence: [], omitted: 0 }),
+      expect.any(AbortSignal),
+    );
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+  });
+
+  it('keeps the old cursor when the re-anchoring pause could not be written', async () => {
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, undefined, new Error('session writer lost')],
+    });
+    const host = fakeGoalTurnHost();
+    let records: readonly RuntimeRecord[] = [];
+    const verifier: GoalVerifier = vi.fn();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource: fakeEvidenceSource(() => records),
+      verifier,
+    });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0]!;
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = verifierEvidenceRecords(permit, cursorId).slice(1);
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    // A cursor naming a record that never reached the journal would fail
+    // every later proposal; the pause falls back to the plain one.
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'paused',
+      evidenceCursor: { recordId: cursorId },
+      lastReason: expect.stringMatching(/Resume the Goal to propose again\.$/),
+    });
+  });
 
   it('restores a snapshot from before the window and drops its checkpoint health', async () => {
     const journal = fakeGoalJournal();
@@ -1577,14 +1765,7 @@ describe('goal runtime', () => {
     const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
     records = [verifierEvidenceRecords(host.started[0]!, cursorId)[0]!];
     const proposeBlocked = (permit: GoalTurnPermit) => {
-      records = [
-        ...records,
-        {
-          ...verifierEvidenceRecords(permit, cursorId)[1]!,
-          uuid: `attempt-${permit.turnId}`,
-          parentUuid: records.at(-1)!.uuid,
-        },
-      ];
+      records = [...records, blockerProbe(permit, cursorId, records)];
       return runtime.recordTerminalProposal(permit, {
         status: 'blocked',
         reason: 'The registry rejects every push',
@@ -1844,7 +2025,7 @@ describe('goal runtime', () => {
     expect(verifier).not.toHaveBeenCalled();
     expect(journal.appended.at(-1)?.cause).toBe('verifier_reject');
     expect(runtime.getSnapshot().goal?.lastReason).toContain(
-      'turns the verifier cannot see',
+      'hold no tool result or user message',
     );
   });
 
@@ -1892,10 +2073,14 @@ describe('goal runtime', () => {
     expect(journal.appended.at(-1)?.cause).toBe('verifier_reject');
     expect(runtime.getSnapshot().goal).toMatchObject({
       status: 'active',
-      lastReason: expect.stringContaining('turns the verifier cannot see'),
+      lastReason: expect.stringContaining(
+        'hold no tool result or user message',
+      ),
     });
     expect(host.inputs[3]).toMatchObject({
-      verifierFeedback: expect.stringContaining('audited turns must be within'),
+      verifierFeedback: expect.stringContaining(
+        'must carry the tool result that proves the blocker',
+      ),
     });
   });
 

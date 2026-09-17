@@ -55,10 +55,7 @@ import {
   type GoalRecoveryRecord,
   type GoalRecoverySelection,
 } from '../goals/goal-persistence.js';
-import {
-  GoalEvidenceRecordIndexAccumulator,
-  type GoalEvidenceRecordIndexHint,
-} from '../goals/goal-evidence.js';
+import {} from '../goals/goal-evidence.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
@@ -352,7 +349,6 @@ interface UuidIndexEntry {
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
   goalRecoveryCandidate: boolean;
-  goalEvidenceHint: GoalEvidenceRecordIndexHint;
   turnHint: SessionTurnRecordHint;
   navigationKind?: SessionTranscriptNavigationTurnKind;
   navigationOrdinal?: number;
@@ -1628,8 +1624,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
   for (const [uuid, entry] of index.byUuid) {
     total +=
       INDEX_ENTRY_BASE_BYTES +
-      INDEX_HINT_BASE_BYTES * 2 +
-      (entry.goalEvidenceHint.parsedGoalContext ? INDEX_HINT_BASE_BYTES : 0) +
+      INDEX_HINT_BASE_BYTES +
       INDEX_MAP_ENTRY_BYTES +
       INDEX_CONTAINER_BASE_BYTES +
       entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
@@ -1641,10 +1636,6 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.goalId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.turnId) +
-      estimateStringBytes(entry.goalEvidenceHint.claimedGoalId) +
-      estimateStringBytes(entry.goalEvidenceHint.provenance) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
   for (const turn of index.navigationTurns) {
@@ -1965,10 +1956,6 @@ async function buildIndex(params: {
   // Retain only the fields required by the shared branch resolver while the
   // frozen snapshot is parsed, so page reads never reopen the full active chain.
   const branchPointRecords = new Map<string, BranchPointRecord>();
-  const goalEvidenceAccumulators = new Map<
-    string,
-    GoalEvidenceRecordIndexAccumulator
-  >();
   let sequence = 0;
   const physicalRecords: PhysicalRecordHint[] = [];
   let sourceReadComplete = true;
@@ -2055,9 +2042,6 @@ async function buildIndex(params: {
               record as unknown as ChatRecord,
               sessionId,
             ).countsAsUserPrompt;
-            goalEvidenceAccumulators
-              .get(record.uuid)
-              ?.addFragment(record as unknown as ChatRecord);
           } else {
             const chatRecord = record as unknown as ChatRecord;
             const navigationKind = navigationKindForRecord(chatRecord);
@@ -2065,15 +2049,6 @@ async function buildIndex(params: {
               chatRecord.subtype === 'cron' ||
               projectUserTranscriptForDisplay(chatRecord).displayText !==
                 undefined;
-            const goalEvidenceAccumulator =
-              new GoalEvidenceRecordIndexAccumulator(chatRecord);
-            const goalEvidenceHint = goalEvidenceAccumulator.finish();
-            if (goalEvidenceHint.provenance) {
-              goalEvidenceAccumulators.set(
-                record.uuid,
-                goalEvidenceAccumulator,
-              );
-            }
             byUuid.set(record.uuid, {
               parentUuid: record.parentUuid,
               sessionIdMatchesFile: record.sessionId === sessionId,
@@ -2090,7 +2065,6 @@ async function buildIndex(params: {
               attributionSnapshotCandidate:
                 isAttributionSnapshotCandidate(chatRecord),
               goalRecoveryCandidate: isGoalRecoveryCandidate(chatRecord),
-              goalEvidenceHint,
               turnHint: getSessionTurnRecordHint(chatRecord, sessionId),
               ...(navigationKind ? { navigationKind } : {}),
               navigationTextSuppressed,
@@ -2111,10 +2085,6 @@ async function buildIndex(params: {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
     throw error;
-  }
-
-  for (const [uuid, accumulator] of goalEvidenceAccumulators) {
-    byUuid.get(uuid)!.goalEvidenceHint = accumulator.finish();
   }
 
   for (const [uuid, entry] of byUuid) {

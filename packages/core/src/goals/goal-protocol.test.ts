@@ -29,6 +29,7 @@ import {
   goalPauseReasonForUnreadableTranscript,
   goalPauseReasonForVerifierBudget,
   goalPauseReasonForVerifierFailure,
+  goalVerifierFailureFeedback,
   goalVerifierFailureNote,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
@@ -400,5 +401,8 @@ describe('verifier failure pause reasons', () => {
     expect(
       goalPauseReasonForVerifierBudget('the budget of 0 bytes holds no record'),
     ).toContain('larger context window');
+    expect(goalVerifierFailureFeedback('provider unavailable')).toBe(
+      'Your last proposal could not be verified: provider unavailable. Propose again when the evidence is in this turn.',
+    );
   });
 });

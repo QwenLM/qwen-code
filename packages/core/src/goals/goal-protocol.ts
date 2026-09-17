@@ -779,13 +779,22 @@ export function goalVerifierFailureNote(message: string): string {
 const GOAL_VERIFIER_FAILURE_NOTE_MAX_CHARACTERS = 160;
 
 /**
+ * What the model is told when its proposal was dropped unjudged because the
+ * user's turn took precedence over a pause: the same failure, addressed to
+ * the turn that will propose again.
+ */
+export function goalVerifierFailureFeedback(message: string): string {
+  return `${goalVerifierFailureNote(message).replace(/^Its hand-off proposal/, 'Your last proposal')} Propose again when the evidence is in this turn.`;
+}
+
+/**
  * The local rejection for a repeated blocker whose audited turns the
  * verifier's window does not all reach. The blocked policy tells the
  * verifier those three turns were recorded; letting it judge without seeing
  * them would make the policy's word the evidence.
  */
 export const GOAL_REPEATED_BLOCKER_OUT_OF_REACH_REASON =
-  'The repeated blocker was recorded on Goal turns the verifier cannot see: its window holds only the newest records, and all three audited turns must be within it. Show the blocker again in the coming turns, with the tool results that prove it, so that they fit the window together.';
+  'The repeated blocker was recorded on Goal turns that hold no tool result or user message showing it, only your own words. Each of the three audited turns must carry the tool result that proves the blocker; run the failing check again in the coming turns and propose once each turn shows it.';
 
 /** The pause reason for a Goal turn that failed rather than being stopped. */
 export function goalPauseReasonForFailure(message: string): string {

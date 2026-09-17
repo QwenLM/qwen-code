@@ -279,6 +279,54 @@ describe('createGoalVerifier', () => {
     }
   });
 
+  it('retries a reply that is not a verdict once', async () => {
+    vi.useFakeTimers();
+    try {
+      const { config, generateText } = configFor('unused');
+      generateText
+        .mockResolvedValueOnce({
+          text: '```json\n{"decision":"accept","reason":"fenced"}\n```',
+          usage: undefined,
+        })
+        .mockResolvedValueOnce({
+          text: '{"decision":"reject","reason":"insufficient"}',
+          usage: undefined,
+        });
+
+      const verification = createGoalVerifier(config, { timeoutMs: 5_000 })(
+        input(),
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(verification).resolves.toEqual({
+        decision: 'reject',
+        reason: 'insufficient',
+      });
+      expect(generateText).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up on a second reply that is not a verdict', async () => {
+    vi.useFakeTimers();
+    try {
+      const { config, generateText } = configFor('not json at all');
+      const verification = createGoalVerifier(config, { timeoutMs: 5_000 })(
+        input(),
+      );
+      const outcome = verification.then(
+        () => 'resolved',
+        (error: Error) => error.name,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(outcome).resolves.toBe('GoalVerifierReplyError');
+      expect(generateText).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('propagates provider failure and clears its timeout', async () => {
     const { config, generateText } = configFor('unused');
     generateText.mockRejectedValue(new Error('provider unavailable'));

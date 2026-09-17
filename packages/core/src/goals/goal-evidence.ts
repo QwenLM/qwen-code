@@ -720,8 +720,12 @@ const VERIFIER_RECORD_CONTENT_BYTE_LIMIT = 8_000;
  */
 const VERIFIER_RECORD_BUDGET_SHARE = 4;
 const VERIFIER_RECORD_CONTENT_BYTE_FLOOR = 1_000;
-/** Below this, a second cut of the newest record is not worth sending. */
+/** Below this, a further cut of a record is not worth sending. */
 const VERIFIER_RECORD_CONTENT_BYTE_RETRY_FLOOR = 200;
+/** How many times a record is re-cut by its measured escape ratio. */
+const VERIFIER_RECORD_REFIT_PASSES = 4;
+/** The call arguments a tool result carries along, cut in the middle. */
+const VERIFIER_CALL_ARGS_BYTE_LIMIT = 1_000;
 /** The head keeps five eighths of a cut record; the tail the rest. */
 const VERIFIER_RECORD_HEAD_SHARE = 5 / 8;
 export const VERIFIER_MIDDLE_TRUNCATION_MARKER =
@@ -762,6 +766,14 @@ export interface BuildGoalVerifierWindowOptions {
    * commas included: the verifier request limit less the rest of the request.
    */
   budgetBytes: number;
+  /**
+   * Turns whose evidence the verifier must see whatever the tail holds: for
+   * each, the newest record that is not the model's own prose (a tool result
+   * or the user's message) is admitted before the tail is filled. The
+   * repeated-blocker audit names its three turns here, since three turns of
+   * tool calls rarely fit a window together.
+   */
+  reachTurnIds?: readonly string[];
 }
 
 /**
@@ -791,7 +803,9 @@ export function buildGoalVerifierWindow(
       Math.floor(budget / VERIFIER_RECORD_BUDGET_SHARE),
     ),
   );
+  const calls = indexToolCalls(input, cursorIndex);
   const evidence: GoalVerifierEvidenceRecord[] = [];
+  const admittedIndexes = new Set<number>();
   const turnIds = new Set<string>();
   let bytes = 0;
   // A checkpoint an earlier version left summarises the records before the
@@ -806,57 +820,104 @@ export function buildGoalVerifierWindow(
     (turnIds.has(entry.turnId)
       ? 0
       : Buffer.byteLength(JSON.stringify(entry.turnId), 'utf8') + 1);
+  const admit = (index: number, entry: GoalVerifierEvidenceRecord) => {
+    bytes += entrySize(entry);
+    evidence.push(entry);
+    admittedIndexes.add(index);
+    turnIds.add(entry.turnId);
+  };
+  /**
+   * The record rendered to fit what the budget still holds: cut once by
+   * the limit and, for a record the window must hold (the newest one, or
+   * one reserved for a turn the verifier must reach), again by the measured
+   * escape ratio while it still overruns, since the head and the tail a cut
+   * keeps may escape more densely than the middle it drops. Any other
+   * record gets the one cut: the tail stays a contiguous suffix, and the
+   * first record that does not fit ends it.
+   */
+  const fitted = (
+    record: GoalEvidenceRecord,
+    refit: boolean,
+  ): GoalVerifierEvidenceRecord | 'unfit' | undefined => {
+    let entry = verifierEvidence(record, input, recordLimit, calls);
+    if (!entry) return undefined;
+    if (!refit) return bytes + entrySize(entry) <= budget ? entry : 'unfit';
+    let limit = recordLimit;
+    for (let pass = 0; pass < VERIFIER_RECORD_REFIT_PASSES; pass += 1) {
+      const entryBytes = entrySize(entry);
+      if (bytes + entryBytes <= budget) return entry;
+      const serializedContent = Buffer.byteLength(
+        JSON.stringify(entry.content),
+        'utf8',
+      );
+      const rawContent = Buffer.byteLength(entry.content, 'utf8');
+      const room = budget - bytes - (entryBytes - serializedContent);
+      if (room <= 0 || rawContent === 0) return 'unfit';
+      limit =
+        Math.min(
+          limit - 1,
+          Math.floor((room * rawContent) / serializedContent),
+        ) - 16;
+      if (limit < VERIFIER_RECORD_CONTENT_BYTE_RETRY_FLOOR) return 'unfit';
+      const recut = verifierEvidence(record, input, limit, calls);
+      if (!recut) return 'unfit';
+      entry = recut;
+    }
+    return bytes + entrySize(entry) <= budget ? entry : 'unfit';
+  };
+  // The turns the verifier must reach come first: for each, the newest
+  // record that is not the model's own prose.
+  for (const turnId of options.reachTurnIds ?? []) {
+    for (
+      let index = input.records.length - 1;
+      index > cursorIndex;
+      index -= 1
+    ) {
+      const record = input.records[index]!;
+      const admitted = admissibleVerifierRecord(record, input);
+      if (
+        !admitted ||
+        admitted.turnId !== turnId ||
+        admitted.provenance === 'assistant_output' ||
+        !hasVerifierContent(record, admitted.provenance)
+      ) {
+        continue;
+      }
+      const entry = fitted(record, true);
+      if (entry !== undefined && entry !== 'unfit') admit(index, entry);
+      break;
+    }
+  }
   for (let index = input.records.length - 1; index >= 0; index -= 1) {
+    if (admittedIndexes.has(index)) continue;
     const record = input.records[index]!;
     // Once the window is full, or before the cursor, a record is only
     // counted: eligibility is cheap, rendering a multi-megabyte tool result
     // for a count is not.
     if (full || index <= cursorIndex) {
       if (
-        (full || checkpointClaims === 0) &&
+        (index > cursorIndex || checkpointClaims === 0) &&
         isVerifierEvidence(record, input)
       ) {
         omitted += 1;
       }
       continue;
     }
-    let entry = verifierEvidence(record, input, recordLimit);
-    if (!entry) continue;
-    let entryBytes = entrySize(entry);
-    if (bytes + entryBytes > budget && evidence.length === 0) {
-      // The newest record is cut by its raw bytes but charged by its
-      // serialized ones, and escaping can double a quote-heavy result. Cut
-      // it once more by the measured ratio so the window holds at least
-      // the record that decides the proposal.
-      const serializedContent = Buffer.byteLength(
-        JSON.stringify(entry.content),
-        'utf8',
-      );
-      const overhead = entryBytes - serializedContent;
-      const rawContent = Buffer.byteLength(entry.content, 'utf8');
-      const room = budget - overhead;
-      if (room > 0 && rawContent > 0) {
-        const retryLimit =
-          Math.floor((room * rawContent) / serializedContent) - 16;
-        if (retryLimit >= VERIFIER_RECORD_CONTENT_BYTE_RETRY_FLOOR) {
-          const recut = verifierEvidence(record, input, retryLimit);
-          if (recut) {
-            entry = recut;
-            entryBytes = entrySize(entry);
-          }
-        }
-      }
-    }
-    if (bytes + entryBytes > budget) {
+    const entry = fitted(record, evidence.length === 0);
+    if (entry === undefined) continue;
+    if (entry === 'unfit') {
       full = true;
-      partialTurnId = entry.turnId;
+      partialTurnId = admissibleVerifierRecord(record, input)?.turnId;
       omitted += 1;
       continue;
     }
-    bytes += entryBytes;
-    evidence.push(entry);
-    turnIds.add(entry.turnId);
+    admit(index, entry);
   }
+  // Newest first, whatever order the reserved records were admitted in.
+  const order = new Map(
+    input.records.map((record, index) => [record.uuid, index] as const),
+  );
+  evidence.sort((a, b) => order.get(b.uuid)! - order.get(a.uuid)!);
   return {
     evidence,
     turnIds: lineageTurnIds.filter((turnId) => turnIds.has(turnId)),
@@ -865,14 +926,48 @@ export function buildGoalVerifierWindow(
   };
 }
 
+/**
+ * The tool calls made after the cursor, by call id, so a tool result can
+ * carry the call that produced it. The assistant record holding the call is
+ * older than the result and may be the record the window cuts at; the
+ * result must not lose its command to that.
+ */
+function indexToolCalls(
+  input: GoalEvidenceContext,
+  cursorIndex: number,
+): Map<string, string> {
+  const calls = new Map<string, string>();
+  for (let index = cursorIndex + 1; index < input.records.length; index += 1) {
+    const record = input.records[index]!;
+    if (record.type !== 'assistant') continue;
+    for (const part of record.message?.parts ?? []) {
+      const id = part.functionCall?.id;
+      if (id === undefined) continue;
+      const rendered = renderToolCallArgs(part.functionCall?.args);
+      if (rendered !== undefined) calls.set(id, rendered);
+    }
+  }
+  return calls;
+}
+
+function renderToolCallArgs(args: unknown): string | undefined {
+  if (args === undefined) return undefined;
+  try {
+    return cutMiddleBytes(JSON.stringify(args), VERIFIER_CALL_ARGS_BYTE_LIMIT);
+  } catch {
+    return undefined;
+  }
+}
+
 function verifierEvidence(
   record: GoalEvidenceRecord,
   input: GoalEvidenceContext,
   recordLimit: number,
+  calls: ReadonlyMap<string, string>,
 ): GoalVerifierEvidenceRecord | undefined {
   const admitted = admissibleVerifierRecord(record, input);
   if (!admitted) return undefined;
-  const content = verifierContent(record, admitted.provenance);
+  const content = verifierContent(record, admitted.provenance, calls);
   if (!content) return undefined;
   return {
     uuid: record.uuid,
@@ -938,6 +1033,7 @@ function hasVerifierContent(
 function verifierContent(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
+  calls: ReadonlyMap<string, string>,
 ): string {
   if (provenance === 'real_user') return evidenceContent(record, provenance);
   const content: string[] = [];
@@ -950,7 +1046,12 @@ function verifierContent(
       if (rendered) content.push(rendered);
     }
     if (provenance === 'tool_result' && part.functionResponse) {
-      const rendered = renderToolResponse(part.functionResponse);
+      const rendered = renderToolResponse(
+        part.functionResponse,
+        part.functionResponse.id === undefined
+          ? undefined
+          : calls.get(part.functionResponse.id),
+      );
       if (rendered) content.push(rendered);
     }
   }
@@ -1508,18 +1609,25 @@ function evidencePreview(
   return capPreviewBytes(preview.trim(), CATALOG_PREVIEW_BYTE_LIMIT);
 }
 
-function renderToolResponse(functionResponse: {
-  id?: string;
-  name?: string;
-  response?: unknown;
-}): string {
+function renderToolResponse(
+  functionResponse: {
+    id?: string;
+    name?: string;
+    response?: unknown;
+  },
+  callArgs?: string,
+): string {
   if (functionResponse.response === undefined) return '';
   try {
+    // The call's arguments ride along as text, so a result stays
+    // attributable even when the assistant record that made the call was
+    // cut from the window or cut in the middle.
     return JSON.stringify({
       ...(functionResponse.name === undefined
         ? {}
         : { name: functionResponse.name }),
       ...(functionResponse.id === undefined ? {} : { id: functionResponse.id }),
+      ...(callArgs === undefined ? {} : { call: callArgs }),
       response: functionResponse.response,
     });
   } catch {

@@ -7,7 +7,7 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { DEFAULT_RETRY_OPTIONS, retryWithBackoff } from '../utils/retry.js';
 import { knownTokenLimit, tokenLimit } from '../core/tokenLimits.js';
 import type { GoalVerifierEvidenceRecord } from './goal-evidence.js';
 import type { GoalTerminalProposal } from './goal-protocol.js';
@@ -143,6 +143,19 @@ export function goalVerifierRequestByteLimit(
     GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
     Math.floor(contextTokens * GOAL_VERIFIER_BYTES_PER_CONTEXT_TOKEN),
   );
+}
+
+/**
+ * A reply the verifier model produced that is not a verdict: fenced JSON, a
+ * missing key, an overlong reason. Transient in practice, and the most
+ * common failure of a small side query model, so it earns the one retry a
+ * provider failure gets.
+ */
+export class GoalVerifierReplyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GoalVerifierReplyError';
+  }
 }
 
 export class GoalVerifierInputTooLargeError extends Error {
@@ -296,10 +309,19 @@ export function createGoalVerifier(
             responseJsonSchema: GOAL_VERIFIER_SCHEMA,
             thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
           },
-          validate: validateGoalVerifierText,
         });
+        let verdict: GoalVerificationResult;
+        try {
+          verdict = parseGoalVerifierText(result.text);
+        } catch (error) {
+          throw new GoalVerifierReplyError(
+            error instanceof Error
+              ? error.message
+              : 'Goal verifier returned invalid output',
+          );
+        }
         return {
-          ...parseGoalVerifierText(result.text),
+          ...verdict,
           ...(result.usage?.totalTokenCount !== undefined
             ? { usage: { totalTokenCount: result.usage.totalTokenCount } }
             : {}),
@@ -308,13 +330,17 @@ export function createGoalVerifier(
         clearTimeout(timer);
       }
     };
-    // One retry with backoff for a transient provider failure (a 429 or a
-    // 5xx): an unattended Goal should not pause on the first one. A timeout
-    // or a caller's abort is not transient and is not retried.
+    // One retry with backoff for a transient failure: a provider's 429 or
+    // 5xx, or a reply that is not a verdict. An unattended Goal should not
+    // pause on the first of either. A timeout or a caller's abort is not
+    // transient and is not retried.
     return retryWithBackoff(attempt, {
       maxAttempts: 2,
       initialDelayMs: GOAL_VERIFIER_RETRY_DELAY_MS,
       maxDelayMs: GOAL_VERIFIER_RETRY_DELAY_MS,
+      shouldRetryOnError: (error) =>
+        error instanceof GoalVerifierReplyError ||
+        DEFAULT_RETRY_OPTIONS.shouldRetryOnError(error),
       ...(attemptSignal ? { signal: attemptSignal } : {}),
     });
   };

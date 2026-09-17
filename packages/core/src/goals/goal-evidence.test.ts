@@ -1498,11 +1498,64 @@ describe('buildGoalVerifierWindow', () => {
       },
       { budgetBytes: 10_000 },
     );
+    // The result carries its call's arguments, so it stays attributable
+    // even when the assistant record that made the call is cut away.
     expect(window.evidence[0]!.content).toBe(
-      '{"name":"shell","id":"c-2","response":{"output":"ok"}}',
+      '{"name":"shell","id":"c-2","call":"{\\"cmd\\":\\"echo ok\\"}","response":{"output":"ok"}}',
     );
     expect(window.evidence[1]!.content).toContain('"id":"c-1"');
     expect(window.evidence[1]!.content).toContain('"id":"c-2"');
+  });
+
+  it('reserves one record the model did not write for each turn it must reach', () => {
+    const records = [
+      record('cursor', 'system'),
+      tool('probe-1', 'turn-1', 'first attempt failed'),
+      assistant('prose-1', 'turn-1', 'It failed.'),
+      assistant('big-2', 'turn-2', 'y'.repeat(2_500)),
+      tool('probe-3', 'turn-3', 'still failing'),
+      assistant('closing', 'turn-3', 'Blocked.'),
+    ];
+    const window = buildGoalVerifierWindow(
+      { records, goal: goal(), permit: permit() },
+      { budgetBytes: 1_200, reachTurnIds: ['turn-1', 'turn-2', 'turn-3'] },
+    );
+    // turn-1's tool result is admitted ahead of the tail even though the
+    // tail alone would never reach it; turn-2 has only prose to offer.
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual([
+      'closing',
+      'probe-3',
+      'probe-1',
+    ]);
+    expect(window.turnIds).toEqual(['turn-1', 'turn-3']);
+    expect(window.omitted).toBe(2);
+  });
+
+  it('does not count the records a checkpoint stands for when the window is full', () => {
+    const legacy = {
+      ...goal(),
+      evidenceCheckpoint: {
+        checkpointId: 'cursor',
+        createdAt: 1,
+        claims: [
+          {
+            id: 'cursor:1',
+            proofKind: 'external_fact' as const,
+            claim: 'The suite passed once',
+            sourceRefs: ['old'],
+          },
+        ],
+      },
+    };
+    const window = buildGoalVerifierWindow(
+      { records: chain(), goal: legacy, permit: permit() },
+      // Room for the newest record only.
+      { budgetBytes: 220 },
+    );
+    expect(window.evidence).toHaveLength(1);
+    // One claim, plus the three post-cursor records left out; the record
+    // before the cursor is what the claim stands for.
+    expect(window.omitted).toBe(4);
   });
 
   it('counts the claims of a checkpoint from before the window as omitted', () => {
