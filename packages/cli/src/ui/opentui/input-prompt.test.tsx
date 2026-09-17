@@ -1706,7 +1706,11 @@ describe('OpenTuiInputPrompt Windows Tab approval-mode fallback (F-2)', () => {
     expect(cycles).toBe(0);
   });
 
-  it('leaves a bare Tab alone off Windows', async () => {
+  it('leaves a bare Tab alone off Windows', async (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     let cycles = 0;
     renderWithCycle(() => {
       cycles += 1;

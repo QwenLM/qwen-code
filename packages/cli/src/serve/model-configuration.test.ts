@@ -67,6 +67,37 @@ afterEach(() => {
   fs.rmSync(temp, { recursive: true, force: true });
 });
 describe('persisted model configuration', () => {
+  it('edits only the requested API when both routes share a model and URL', () => {
+    const chat = {
+      id: 'same',
+      baseUrl: 'https://one.example/v1',
+      envKey: 'ONE',
+    };
+    fs.writeFileSync(
+      path.join(temp, 'settings.json'),
+      JSON.stringify({
+        modelProviders: {
+          openai: [chat, { ...chat, wireApi: 'responses' }],
+        },
+      }),
+    );
+    const loaded = load();
+    const configs = listModelConfigurations(loaded);
+    expect(configs).toHaveLength(2);
+    expect(configs[0]!.key).not.toBe(configs[1]!.key);
+    const responses = findModelConfigurationForDeletion(loaded, {
+      authType: 'openai-responses',
+      modelId: 'same',
+      baseUrl: chat.baseUrl,
+    });
+    expect(responses).toMatchObject({ authType: 'openai-responses', index: 1 });
+    if (!responses || responses === 'ambiguous')
+      throw new Error('missing response route');
+    expect(findModelConfiguration(loaded, responses.key)?.model.wireApi).toBe(
+      'responses',
+    );
+  });
+
   it.each([0, -1, '128000', 1.5])(
     'omits invalid stored context window %s from the wire',
     (size) => {

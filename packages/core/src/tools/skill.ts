@@ -39,6 +39,7 @@ import {
   ReviewWorkflowActivationError,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  skillModelInvocationBlock,
 } from './skill-utils.js';
 
 /**
@@ -78,6 +79,26 @@ Important:
   - \`python scripts/helper.py\` -> \`python /path/to/skill/scripts/helper.py\`
   - \`reference.md\` -> \`/path/to/skill/reference.md\`
 </skills_instructions>`;
+
+/** Why resume declines to re-arm a skill the model could not invoke now. */
+const SKILL_RESTORE_BLOCK_REASONS = {
+  disabled: 'it is disabled',
+  inactive: 'its `paths:` activation has not fired',
+  hidden: 'it is hidden from model invocation',
+} as const;
+
+function logSkillNotRestored(skill: SkillConfig, reason: string): void {
+  // Emptiness, not truthiness: the parser assigns `{}` for an empty or
+  // all-unknown `hooks:` block, and such a skill has nothing to lose.
+  const declaresSideEffects =
+    (skill.allowedTools?.length ?? 0) > 0 ||
+    Object.keys(skill.hooks ?? {}).length > 0;
+  if (declaresSideEffects) {
+    debugLogger.warn(
+      `Not re-applying the hooks and allowedTools of skill "${skill.name}" on resume: ${reason}.`,
+    );
+  }
+}
 
 /**
  * Skill tool that enables the model to access skill definitions. The tool keeps
@@ -352,41 +373,69 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return this.loadedSkillContents;
   }
 
-  restoreLoadedSkillsFromHistory(history: Content[]): void {
+  async restoreLoadedSkillsFromHistory(history: Content[]): Promise<void> {
     this.clearLoadedSkills();
 
-    const cachedSkills = this.skillManager.getCachedSkills() ?? [];
-    const skillByName = new Map<string, { name: string; output: string }>();
-    for (const skill of cachedSkills) {
+    // `null` means no refresh has committed yet, not an empty cache: reading
+    // it as empty would skip every skill in the history, gates included.
+    let cachedSkills = this.skillManager.getCachedSkills();
+    if (cachedSkills === null) {
+      try {
+        await this.skillManager.listSkills();
+        cachedSkills = this.skillManager.getCachedSkills();
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to load skills while restoring a resumed session:',
+          error,
+        );
+      }
+    }
+
+    // Exact names, as the live path resolves them: a case-folded key would
+    // bind `deploy` and `Deploy` to one entry.
+    const skillByName = new Map<
+      string,
+      { name: string; output: string; config: SkillConfig }
+    >();
+    for (const skill of cachedSkills ?? []) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
-      skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
+      skillByName.set(skill.name, { name: skill.name, output, config: skill });
     }
     // Pre-rename transcripts request the authored spelling; fall back to it
     // only where no skill owns that name outright, or a resumed session
     // misses the restore and re-injects a body on the next invocation.
-    for (const skill of cachedSkills) {
-      const authored = (skill.authoredName ?? '').trim().toLowerCase();
-      const registryName = skill.name.toLowerCase();
-      if (authored && authored !== registryName && !skillByName.has(authored)) {
-        skillByName.set(authored, skillByName.get(registryName)!);
+    for (const skill of cachedSkills ?? []) {
+      const authored = (skill.authoredName ?? '').trim();
+      if (authored && authored !== skill.name && !skillByName.has(authored)) {
+        skillByName.set(authored, skillByName.get(skill.name)!);
       }
     }
 
-    const restoreSkill = (requestedName: unknown, output: unknown) => {
-      if (typeof requestedName !== 'string' || typeof output !== 'string')
+    const restored = new Map<string, SkillConfig>();
+    const unmatched = new Map<string, SkillConfig>();
+    const restoreSkill = (
+      requestedName: unknown,
+      output: unknown,
+      rearm: boolean,
+    ): void => {
+      if (typeof requestedName !== 'string' || typeof output !== 'string') {
         return;
-      const skill = skillByName.get(requestedName.toLowerCase());
-      if (
-        !skill ||
-        (output !== skill.output && !output.startsWith(`${skill.output}\n`))
-      ) {
+      }
+      const skill = skillByName.get(requestedName);
+      if (!skill) return;
+      if (output !== skill.output && !output.startsWith(`${skill.output}\n`)) {
+        // Refusals, truncated or persisted bodies and bodies of an edited
+        // SKILL.md all land here. None can be checked against the file on
+        // disk, so none may grant what its current frontmatter declares.
+        if (rearm) unmatched.set(skill.name, skill.config);
         return;
       }
       this.loadedSkillContents.add(skill.output);
       this.loadedSkillNames.add(skill.name);
+      if (rearm) restored.set(skill.name, skill.config);
     };
 
     const pendingSkillCalls = new Map<string, string>();
@@ -442,7 +491,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
               'skill' in result.args &&
               'output' in result
             ) {
-              restoreSkill(result.args.skill, result.output);
+              // A script can print this line itself, so it restores the
+              // body only and never re-arms grants or hooks.
+              restoreSkill(result.args.skill, result.output, false);
             }
           }
           continue;
@@ -458,8 +509,51 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         const requestedName = pendingSkillCalls.get(response.id);
         pendingSkillCalls.delete(response.id);
         if (requestedName === undefined) continue;
-        restoreSkill(requestedName, output);
+        restoreSkill(requestedName, output, true);
       }
+    }
+
+    // Awaited so every grant and hook is in force before the resumed session
+    // takes its first turn.
+    for (const skill of restored.values()) {
+      await this.restoreSkillSideEffects(skill);
+    }
+    for (const [name, skill] of unmatched) {
+      if (!this.loadedSkillNames.has(name)) {
+        logSkillNotRestored(
+          skill,
+          'no recorded response matches SKILL.md on disk',
+        );
+      }
+    }
+  }
+
+  /**
+   * Re-applies a restored skill's `allowedTools` and `hooks:`. Both live only
+   * in process memory, so without this a resumed session keeps the skill's
+   * instructions in context while its `PreToolUse` gate is gone (#11180).
+   */
+  private async restoreSkillSideEffects(skill: SkillConfig): Promise<void> {
+    // Skip a skill the model could not invoke now. Hooks go with the grant: a
+    // `PreToolUse` hook can answer `permissionDecision: 'allow'`, so re-arming
+    // one can widen permissions as easily as narrow them.
+    const blocked = skillModelInvocationBlock(
+      this.config,
+      this.skillManager,
+      skill,
+    );
+    if (blocked) {
+      logSkillNotRestored(skill, SKILL_RESTORE_BLOCK_REASONS[blocked]);
+      return;
+    }
+    try {
+      await applySkillSideEffects(this.config, skill);
+    } catch (error) {
+      if (!(error instanceof ReviewWorkflowActivationError)) throw error;
+      debugLogger.warn(
+        `Review workflow activation failed while restoring skill "${skill.name}" on resume:`,
+        error,
+      );
     }
   }
 

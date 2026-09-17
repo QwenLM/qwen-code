@@ -8,6 +8,7 @@ import type {
   DaemonAuthDeviceFlowSdkErrorKind,
   DaemonAuthProviderId,
   DaemonEvent,
+  DaemonBackgroundTurn,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
   DaemonSkillToggleMutation,
@@ -21,6 +22,7 @@ export type DaemonUiEventType =
   | 'user.text.delta'
   | 'user.image.delta'
   | 'user.file.delta'
+  | 'user.resource_link.delta'
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -95,6 +97,7 @@ export interface DaemonUiEventBase {
   segmentId?: string;
   /** Admitted prompt identifier for events belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   originatorClientId?: string;
@@ -147,6 +150,29 @@ export interface DaemonUiUserFileEvent extends DaemonUiEventBase {
   name: string;
   mimeType: string;
   attachmentId: string;
+  meta?: DaemonTextDeltaMeta;
+}
+
+export type DaemonResourceLink = {
+  type: 'resource_link';
+  uri: string;
+  name: string;
+  mimeType?: string | null;
+  size?: number | null;
+  description?: string | null;
+  title?: string | null;
+  annotations?: {
+    audience?: Array<'user' | 'assistant'> | null;
+    lastModified?: string | null;
+    priority?: number | null;
+    _meta?: Record<string, unknown> | null;
+  } | null;
+  _meta?: Record<string, unknown> | null;
+};
+
+export interface DaemonUiUserResourceLinkEvent extends DaemonUiEventBase {
+  type: 'user.resource_link.delta';
+  resourceLink: DaemonResourceLink;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -720,6 +746,7 @@ export type DaemonUiEvent =
   | DaemonUiTextEvent
   | DaemonUiUserImageEvent
   | DaemonUiUserFileEvent
+  | DaemonUiUserResourceLinkEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiAssistantUsageEvent
@@ -964,6 +991,7 @@ export interface DaemonTranscriptBlockBase {
   segmentId?: string;
   /** Admitted prompt identifier for content belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   /**
@@ -1005,6 +1033,8 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
     text?: string;
     attachmentId?: string;
   }>;
+  /** Original ACP resource links, with their URI and attachment metadata. */
+  resourceLinks?: DaemonResourceLink[];
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */

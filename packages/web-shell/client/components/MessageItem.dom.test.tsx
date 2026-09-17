@@ -10,6 +10,8 @@ import {
 } from '../customization';
 import type { ACPToolCall, Message } from '../adapters/types';
 import { summaryRunId } from './summaryRunId';
+import timestampStyles from './MessageTimestamp.module.css';
+import { TranscriptRenderModeProvider } from '../transcriptRenderMode';
 
 vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
@@ -19,8 +21,7 @@ vi.mock('../WebShellContexts', async () => {
 // Stub the message body components so MessageItem's own wiring — not the bodies
 // — is under test. UserMessage/AssistantMessage throw on a sentinel so we can
 // drive the message-level ErrorBoundary (the real one, imported below); the
-// rest are inert. MessageTimestamp is a passthrough so its chrome doesn't
-// interfere with querying the fallback.
+// rest are inert. MessageTimestamp remains real to verify row spacing.
 const captured = vi.hoisted(() => ({
   userMessageProps: null as null | {
     editing?: boolean;
@@ -28,37 +29,6 @@ const captured = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('./MessageTimestamp', async () => {
-  const React = await import('react');
-  return {
-    MessageTimestamp: ({
-      children,
-      toolGroupSpacing,
-      onEdit,
-    }: {
-      children: React.ReactNode;
-      toolGroupSpacing?: boolean;
-      onEdit?: () => void;
-    }) =>
-      React.createElement(
-        'div',
-        { 'data-tool-group-spacing': String(toolGroupSpacing === true) },
-        children,
-        onEdit
-          ? React.createElement(
-              'button',
-              {
-                'data-testid': 'edit-toggle',
-                onClick: onEdit,
-                type: 'button',
-              },
-              'edit',
-            )
-          : null,
-      ),
-    formatTimestamp: () => '',
-  };
-});
 vi.mock('./messages/UserMessage', async () => {
   const React = await import('react');
   return {
@@ -391,20 +361,14 @@ describe('MessageItem tool group spacing', () => {
       <I18nProvider language="en">{item(toolMsg('default'))}</I18nProvider>,
     );
 
-    expect(
-      compact.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('true');
-    expect(
-      regular.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('false');
-    expect(
-      compactAssistant.firstElementChild?.getAttribute(
-        'data-tool-group-spacing',
-      ),
-    ).toBe('false');
-    expect(
-      defaultTool.firstElementChild?.getAttribute('data-tool-group-spacing'),
-    ).toBe('false');
+    expect(compact.firstElementChild?.classList).toContain(
+      timestampStyles.toolGroupSpacing,
+    );
+    for (const container of [regular, compactAssistant, defaultTool]) {
+      expect(container.firstElementChild?.classList).not.toContain(
+        timestampStyles.toolGroupSpacing,
+      );
+    }
   });
 });
 
@@ -542,6 +506,41 @@ describe('MessageItem assistant turn footer', () => {
   });
 });
 
+describe('MessageItem background notification spacing', () => {
+  it.each(['interactive', 'document'] as const)(
+    'keeps consecutive notification rows without hover times in %s mode',
+    (mode) => {
+      const messages = [
+        'background_task_completed',
+        'background_notification_turn_started',
+      ].map((source) => ({
+        id: source,
+        role: 'system' as const,
+        content: 'Background task',
+        timestamp: Date.now(),
+        source,
+      }));
+      const container = render(
+        <I18nProvider language="en">
+          <TranscriptRenderModeProvider value={mode}>
+            {messages.map((message) => (
+              <MessageItem key={message.id} message={message} />
+            ))}
+          </TranscriptRenderModeProvider>
+        </I18nProvider>,
+      );
+      const rows = Array.from(container.children).filter((element) =>
+        element.classList.contains(timestampStyles.row),
+      );
+      expect(rows).toHaveLength(mode === 'interactive' ? 2 : 0);
+      expect(container.querySelectorAll('[data-user-selectable]')).toHaveLength(
+        2,
+      );
+      expect(container.querySelector('span[aria-hidden="true"]')).toBeNull();
+    },
+  );
+});
+
 describe('MessageItem inline message editing', () => {
   function renderEditableUserMessage(
     onSubmitUserMessageEdit: (content: string) => boolean | Promise<boolean>,
@@ -563,7 +562,7 @@ describe('MessageItem inline message editing', () => {
 
     act(() => {
       container
-        .querySelector<HTMLButtonElement>('[data-testid="edit-toggle"]')
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
         ?.click();
     });
     expect(captured.userMessageProps?.editing).toBe(true);
@@ -585,7 +584,7 @@ describe('MessageItem inline message editing', () => {
 
     act(() => {
       container
-        .querySelector<HTMLButtonElement>('[data-testid="edit-toggle"]')
+        .querySelector<HTMLButtonElement>('button[aria-label="Edit message"]')
         ?.click();
     });
 

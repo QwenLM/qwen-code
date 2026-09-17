@@ -63,10 +63,7 @@ export class AcpConnection {
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
     optionId: string;
-  }> = (data) =>
-    Promise.resolve({
-      optionId: this.resolvePermissionOptionId(data) || '',
-    });
+  }> = () => Promise.resolve({ optionId: 'cancel' });
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
     () => {};
   onSlashCommandNotification: (data: SlashCommandNotification) => void =
