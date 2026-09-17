@@ -853,6 +853,20 @@ await agent('scan package.json')
     );
   });
 
+  // A name-only session swaps the authoring pointer for the lock section and
+  // rewrites two parameter descriptions; it is paid for on every turn too.
+  it('keeps the name-only surface within the same budgets', () => {
+    const tool = new WorkflowTool({
+      ...fakeConfig(),
+      isWorkflowNameOnly: () => true,
+    } as unknown as Config);
+    expect(tool.description.length).toBeLessThanOrEqual(4_800);
+    expect(paramDescription(tool, 'name').length).toBeLessThanOrEqual(400);
+    expect(
+      paramDescription(tool, 'resumeFromRunId').length,
+    ).toBeLessThanOrEqual(850);
+  });
+
   // The inline fallback is large by construction — it carries the whole
   // reference — and grows whenever the reference does. It still needs a
   // ceiling, or growth passes every other assertion about its size. Raised
