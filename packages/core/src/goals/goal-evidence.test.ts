@@ -1352,6 +1352,29 @@ describe('Goal verifier evidence window', () => {
     );
   });
 
+  it('counts what it leaves out without rendering it', () => {
+    const exploding = {
+      ...tool('oldest', 'turn-1', 'unused'),
+      message: {
+        get parts(): never {
+          throw new Error('an omitted record was rendered');
+        },
+      },
+    } as unknown as GoalEvidenceRecord;
+    const newest = tool('newest', 'turn-3', 'ok');
+    const budget = cost(build([newest]).evidence[0], 'turn-3');
+
+    // `does-not-fit` has to be rendered to be measured; everything older
+    // than it is only counted.
+    const window = build(
+      [exploding, tool('does-not-fit', 'turn-2', 'x'.repeat(500)), newest],
+      budget + 5,
+    );
+
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual(['newest']);
+    expect(window.omitted).toBe(2);
+  });
+
   it('returns an empty window when nothing fits or nothing was recorded', () => {
     expect(build([tool('only', 'turn-3', 'ok')], 10)).toEqual({
       evidence: [],

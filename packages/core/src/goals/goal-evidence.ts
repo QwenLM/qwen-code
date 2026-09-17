@@ -124,7 +124,10 @@ export interface GoalVerifierEvidenceWindow {
   evidence: GoalVerifierEvidenceRecord[];
   /** The Goal turns the records present belong to, oldest first. */
   turnIds: string[];
-  /** Older candidates the byte budget left out. */
+  /**
+   * Older candidates the byte budget left out. They are counted without
+   * being rendered, so one with nothing visible in it is counted too.
+   */
   omitted: number;
 }
 
@@ -731,12 +734,14 @@ export function buildGoalVerifierEvidenceWindow(
     ) {
       continue;
     }
-    const content = evidenceContent(record, provenance);
-    if (!content) continue;
     if (full) {
+      // Counted, not rendered: a long session holds thousands of tool
+      // results behind the window, and none of them is going to be sent.
       omitted += 1;
       continue;
     }
+    const content = evidenceContent(record, provenance);
+    if (!content) continue;
     const entry: GoalVerifierEvidenceRecord = {
       uuid: record.uuid,
       provenance,
