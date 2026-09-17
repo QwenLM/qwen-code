@@ -3996,7 +3996,10 @@ describe('Gemini Client (client.ts)', () => {
 
     it('setHistory clears active-todo reminder state', () => {
       mockFileReadCacheClear();
-      client['chat'] = { setHistory: vi.fn() } as unknown as LlmChat;
+      client['chat'] = {
+        setHistory: vi.fn(),
+        reconcileImagePayloads: vi.fn(),
+      } as unknown as LlmChat;
       // Pretend a chain is active so the reset is observable.
       client['activeTodoWorkChainPromptId'] = 'prompt-old';
 
