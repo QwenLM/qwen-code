@@ -357,13 +357,25 @@ export function navigateToDaemon(raw: string, token?: string): boolean {
   // `nextUrl` drops `?token=` and clears the hash, so a credential that lives
   // only in the URL cannot survive this navigation — and the invalid-target
   // boot path deliberately leaves one there for recovery, with this escape
-  // hatch as its only exit. Salvage it under the page origin's key, and only
-  // when the page is not already pointed at some other daemon — a URL token
-  // belongs to the target in the address bar, never to a replacement.
+  // hatch as its only exit. Salvage it under the page origin's key, but only
+  // when the address bar names no other daemon: a URL token belongs to the
+  // target it was issued for, never to a replacement.
+  //
+  // `previousDaemonOrigin` cannot carry that test alone. This block is
+  // reachable only when the override was rejected, and rejection makes
+  // `getDaemonBaseUrl()` return '', collapsing `previousDaemonOrigin` onto the
+  // page origin exactly where a foreign target was named. Read provenance off
+  // the raw override instead: one still spelling http(s) had a real daemon
+  // behind it — a path, query, hash, credentials or cross-origin bracketed
+  // IPv6 host is what got it rejected — so its fragment credential belongs to
+  // that origin and must not be re-filed here. A non-http override never named
+  // a daemon, which keeps #12010's own `?daemon=ftp://…` recovery salvageable.
   if (
     token === undefined &&
     daemonOrigin === window.location.origin &&
-    daemonOrigin === previousDaemonOrigin
+    daemonOrigin === previousDaemonOrigin &&
+    (requestedOverride === null ||
+      !/^https?:/iu.test(requestedOverride.trim()))
   ) {
     const fromUrl = readTokenFromLocation();
     if (fromUrl) persistDaemonToken(fromUrl, daemonOrigin);

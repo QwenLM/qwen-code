@@ -426,6 +426,27 @@ describe('navigateToDaemon', () => {
     expect(assign).toHaveBeenCalledTimes(1);
   });
 
+  // The case above is stopped by an earlier conjunct: an *allowed* override
+  // resolves to the remote origin, so `previousDaemonOrigin` differs and the
+  // salvage never runs. A rejected override that still names a real http(s)
+  // host is not stopped by anything — `getAllowedDaemonOrigin` returns '' for
+  // it (`pathname !== '/'` here; a query, a hash, embedded credentials or a
+  // cross-origin bracketed IPv6 host do the same), so `getDaemonBaseUrl()` is
+  // '' and `previousDaemonOrigin` collapses onto the page origin. Every
+  // conjunct then holds and a credential `remote.example` issued gets filed
+  // under the page origin's bare key, where the landed page sends it to the
+  // page host on every request — and `assign` has already cleared the hash, so
+  // the issuing origin's own copy is unrecoverable.
+  it('does not salvage a URL token when a rejected override still names an http(s) origin', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?daemon=https%3A%2F%2Fremote.example%2Fgateway#token=remote-secret',
+    );
+    const mod = await import('./daemon');
+    expect(mod.navigateToDaemon('http://localhost:5173')).toBe(true);
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBeNull();
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
   // A target switch carries the credential in storage alone. With the write
   // refused the landed page would hold nothing for the new target while the
   // dialog read the switch as successful.
