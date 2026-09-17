@@ -524,6 +524,12 @@ export class Logger {
     return this.removeSessionsMessages([sessionId]);
   }
 
+  /** A disk snapshot with every not-yet-written purge still applied. */
+  private withoutPendingPurges(rows: LogEntry[]): LogEntry[] {
+    if (this.pendingPurgeSessions.size === 0) return rows;
+    return rows.filter((row) => !this.pendingPurgeSessions.has(row.sessionId));
+  }
+
   /**
    * The batch form of {@link removeSessionMessages}, for a multi-session delete.
    *
@@ -538,12 +544,6 @@ export class Logger {
    * @param sessionIds the sessions to purge; duplicates and unknown ids are harmless
    * @returns true when rows were actually removed from the file
    */
-  /** A disk snapshot with every not-yet-written purge still applied. */
-  private withoutPendingPurges(rows: LogEntry[]): LogEntry[] {
-    if (this.pendingPurgeSessions.size === 0) return rows;
-    return rows.filter((row) => !this.pendingPurgeSessions.has(row.sessionId));
-  }
-
   async removeSessionsMessages(
     sessionIds: readonly string[],
   ): Promise<boolean> {
