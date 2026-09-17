@@ -52,11 +52,13 @@ import { ICON } from '../constants.js';
 import {
   useProviderSetupFlow,
   type ProviderSetupFlow,
+  type SetupStep,
 } from '../auth/useProviderSetupFlow.js';
 import { normalizeModelIds } from '../auth/useAuth.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { normalizePastedText } from './input-prompt-model.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { caretSpans, useLineEdit } from './line-edit.js';
 import { Shell } from './dialogs-misc.js';
 import { C } from './theme.js';
@@ -242,16 +244,16 @@ function FieldText({
   const spans = caretSpans({ text: value, cursor: caret });
   return (
     <>
-      <text fg={C.text}>{spans.before}</text>
+      <text fg={C.text}>{sanitizeTerminalText(spans.before)}</text>
       {/* The character belongs to the value whatever owns the focus; only the
           highlight says which field the caret is in. Dropping it while inactive
           would print a value one character shorter than the one held. */}
       {active ? (
-        <text bg={C.accent}>{spans.at || ' '}</text>
+        <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
       ) : (
-        <text fg={C.text}>{spans.at}</text>
+        <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
       )}
-      <text fg={C.text}>{spans.after}</text>
+      <text fg={C.text}>{sanitizeTerminalText(spans.after)}</text>
     </>
   );
 }
@@ -905,6 +907,11 @@ function AuthDialogFlow({
   // conversation model — leaves the very same step on screen with every key
   // dead. Bumping this hands the field back.
   const [retrySeq, setRetrySeq] = useState(0);
+  // The verdict lands whenever the install finishes, which can be after the user
+  // has Esc'd back to an earlier field. Re-arming there would re-seed a field
+  // that never submitted and discard the caret parked in it, so only the step
+  // that fired the install may bump.
+  const stepRef = useRef<SetupStep | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
   const [mainIndex, setMainIndex] = useState<number | null>(null);
@@ -916,6 +923,10 @@ function AuthDialogFlow({
   const handleProviderSubmit = useCallback(
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
       const protocol = inputs.protocol ?? providerConfig.protocol;
+      const stepAtSubmit = stepRef.current;
+      const reArmField = () => {
+        if (stepRef.current === stepAtSubmit) setRetrySeq((n) => n + 1);
+      };
       try {
         const plan = buildInstallPlan(
           providerConfig,
@@ -939,7 +950,7 @@ function AuthDialogFlow({
               'Service models saved. Configure a conversation model to start chatting.',
             ),
           );
-          setRetrySeq((n) => n + 1);
+          reArmField();
           return;
         }
         notify?.(
@@ -960,7 +971,7 @@ function AuthDialogFlow({
           message: getErrorMessage(error),
         });
         setErrorMessage(msg);
-        setRetrySeq((n) => n + 1);
+        reArmField();
         logAuth(config, new AuthEvent(protocol, 'manual', 'error', msg));
       }
     },
@@ -968,6 +979,7 @@ function AuthDialogFlow({
   );
 
   const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  stepRef.current = setupFlow.state.step;
 
   // -- Navigation (AuthDialog parity) ---------------------------------------
 

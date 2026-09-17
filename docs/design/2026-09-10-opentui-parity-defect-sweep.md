@@ -1575,14 +1575,19 @@ One review round found four ways this port still closed a door on the user, and 
 piece of machinery that had stopped being reachable. All five are recorded here rather
 than folded into the decisions they qualify, because each was measured this round.
 
-The question dialog's free-text answer was the one payload in that dialog with no width
-and no row bound. ink holds the same field in a text input fifty cells wide and one row
-tall, and the confirmation this dialog lives in has no body window of its own, so a
-single long paste grew the dialog past the terminal height and pushed the options the
-user still had to pick off the screen. The row now draws inside a window of its own —
-fifty cells, less the label the row prints in front of it, on the width the dialog has —
-and the caret cell is part of that: past the window it has nowhere to go, exactly as in
-ink's fixed-width input. The collapsed echo of the same value is bounded the same way,
+The question dialog's free-text answer was the one user-supplied payload in that dialog
+with no width and no row bound. ink holds the same field in a text input fifty cells wide
+and one row tall, and the confirmation this dialog lives in has no body window of its own,
+so a single long paste grew the dialog past the terminal height and pushed the options the
+user still had to pick off the screen. The bound therefore covers what the user types and
+nothing else: the question itself, each option's label and each option's description are
+model-authored and still render with neither a width nor a row bound, so a model returning
+a long question or long descriptions grows the same dialog and pushes the same options off
+the screen with no paste anywhere in it. That remainder is recorded under Follow-ups.
+
+The answer row now draws inside a window of its own — fifty cells, less the label the
+row prints in front of it, on the width the dialog has — and the caret cell is part of
+that: past the window it has nowhere to go, exactly as in ink's fixed-width input. The collapsed echo of the same value is bounded the same way,
 since what it prints is the value a paste can make arbitrarily long. The bound is on the
 drawing alone. Submission reads the stored value, so the answer keeps every character,
 including the line breaks a pasted paragraph carries.
@@ -1669,6 +1674,94 @@ the retry counter and the settle verdict all turn on what a single stdin read
 carries beside the key that submitted it, which is a property of the tty rather
 than of any script. Like the caret rule in Decision 35, these five rest on the
 unit suites.
+
+## Decision 40 — the re-arm belongs to the step that submitted, and every cell of a field is sanitised
+
+A fourth review round found three ways the machinery the rounds before it added were still
+wrong, and one column of arithmetic that had never been charged. All four are recorded here
+rather than folded into the decisions they qualify, because each was measured this round.
+
+The retry counter Decision 39 added is bumped by an asynchronous verdict. Held in flight,
+that verdict lands whenever the install finishes, which can be after the user has backed out
+of the step that fired it and parked the caret mid-value in an earlier field; the bump then
+re-seeds whichever field happens to be mounted, the caret the user parked jumps to the end of
+the line, and the next Backspace deletes a character they did not mean to. The counter is now
+bumped only while the dialog still stands on the step that fired the install: the step is
+mirrored into a ref during render and read when the submit starts. What the guard scopes is
+when the counter moves, never whether it moves on the step that failed — a rejected install
+and an install that saved service models and no conversation model both still hand their own
+step's field back, which is what the two tests Decision 39 pins.
+
+Decision 37 stopped the free-text row's insert branch on an answer the pause was holding, and
+Decision 39 asked the same of the paste path. The row's editing branch as a whole was still
+open, and it is not only an insert: the shared line model writes the value on a Backspace, a
+Delete and a word-erase as well. On a multi-select the answer is re-assembled from the checked
+set and the typed value when the review tab submits, so letters typed inside the pause widened
+an answer Enter had already recorded. The branch now asks the lock, and asks it only on a
+multi-select: a single-select field whose submit the pause rejected stays editable, which is
+Decision 39's fourth item and what its own test pins.
+
+The caret cell was the one span of either dialog's field drawn without sanitising, while both
+spans beside it went through it. The filter the line model applies on insert drops the C0 and
+C1 controls and keeps a bidi override, so a bracketed paste can park one in a value, and the
+cell the user is looking at then rewrote the direction of the rest of the row: the dialog
+showed an answer that was not the one being submitted. Both fields now sanitise all three
+spans. The bound is on the drawing, as it is for the width bound beside it: the submitted
+value keeps every code point.
+
+The row's width budget charged the confirmation box's two columns of margin and not the two
+columns of padding the same box spends, so on a terminal sixty columns wide or narrower the
+last two cells it drew — the caret cell among them — fell outside the box that contains them,
+and the renderer either clipped the caret or wrapped and grew the dialog by the row the bound
+exists to save. The chip row's budget twenty lines above charges both. The row now charges
+four, and fifty cells remains the binding cap wherever the terminal is wide enough for it,
+mirroring ink's own field width.
+
+What this round did not change is the window's anchor. Once a value passes the window the
+caret cell is dropped and further keystrokes move nothing on screen, and the truncation marker
+is counted as a cell the caret can sit on, so the highlighted cell can draw the marker instead
+of the character being edited. ink's field scrolls to the caret on the width axis, as
+Decision 32's rule already has this port doing on the newline axis. Making the window follow
+the caret is its own change with its own tests, recorded under Follow-ups.
+
+Five new unit tests — three in the confirmation dialog's suite and two in the authentication
+one — and five mutations, one per behaviour named above. The two suites are a hundred tests
+together and green with the fixes in place; each mutation fails exactly the test that owns the
+behaviour it takes away and nothing else:
+
+| mutation                                                 | fails                                 |
+| -------------------------------------------------------- | ------------------------------------- |
+| the lock's clause taken off the keystroke branch         | the keystroke-trailing-an-answer test |
+| the caret cell sanitised no longer (question dialog)     | the bidi caret-cell test              |
+| the width budget back to the margin alone                | the narrow-terminal test              |
+| the step guard taken off the re-arm                      | the late-verdict caret test           |
+| the field spans sanitised no longer (authentication one) | the bidi field test                   |
+
+The machine leg was re-run at this head: twenty-seven scenarios on both legs, fifty-four
+runs, none of them erroring. Of the seventy-eight checkpoints, nineteen have identical
+non-blank content rows and fifty-nine diverge, carrying 241 rows only ink draws and 285
+only this port draws once the two sampled checkpoints — the spinner's phrase rotation and
+the mid-stream indicator, which hold elapsed time and a phrase chosen per tick — are
+counted apart. Against the previous head, 143 of the 156 plain captures are
+byte-identical with the version the banner prints normalised away. The thirteen that are
+not divide into ten in three families whose content moves between two runs of the same
+binary — the mid-stream indicator, `/stats` and the held-phrase row, on both legs, four of
+the ten being the sample files — and three on the ink leg of the `@`-completion scenario,
+which in this run did not print the extension-refresh notice the other leg printed. That
+notice is the transient already recorded as a follow-up, and this is the first run in
+which it landed on ink's side of the comparison rather than this port's.
+
+The identical-checkpoint count therefore reads nineteen where the previous head's read
+twenty-two, and the whole of that movement is those three checkpoints.
+
+Nothing recorded in this decision moves a frame, and that is measured rather than argued:
+no capture in any question-dialog or authentication scenario differs from the previous
+head. The width budget binds only on a terminal of sixty columns or narrower holding a
+value long enough to reach the cap, and the one fifty-eight-column scenario captures the
+chip row before any free-text row is opened. The step guard, the lock's new term and the
+two sanitising spans all turn on what arrives beside a key, or on which code point the
+caret happens to sit on, and no scenario produces either. Like the five items of Decision
+39, these four rest on the unit suites.
 
 ## Coverage boundary
 
@@ -2076,3 +2169,18 @@ What was verified, and how far the verification reaches:
   the viewport reserve and the description floor are the same five rows, so its
   probe passed with the floor deleted. It now pins both heights, and deleting the
   floor fails it.
+- The question dialog's answer window is anchored at the head of the value, so
+  past the window the caret cell is not drawn and keystrokes move nothing on
+  screen while Enter still submits the whole value, and the truncation marker
+  counts as a cell the caret can sit on. ink's field scrolls to the caret on the
+  width axis, as Decision 32's rule has this port doing on the newline axis.
+  Following the caret here means deriving the caret from the pre-truncation line
+  and a window offset rather than from the truncated string, which is its own
+  change with its own tests.
+- The question dialog bounds what the user types and nothing else. The question
+  text, each option label and each option description are model-authored and
+  render with neither a width nor a row bound, so a long question or long
+  descriptions grow the dialog past the terminal height and push the options
+  still to be picked off the screen with no user input involved — the outcome
+  Decision 39's bound exists to prevent, reachable from a payload it does not
+  cover.

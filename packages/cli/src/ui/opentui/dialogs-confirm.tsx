@@ -914,6 +914,10 @@ function AskUserQuestionFlow(props: {
         submitCustomRow();
       } else if (
         fieldIsMine() &&
+        // Only a multi-select answer is recomputed from the typed value, so
+        // only one can be widened after its Enter has been recorded. A
+        // single-select field whose submit the pause rejected stays editable.
+        !(multi && answerIsLocked()) &&
         !custom.handleKey(original) &&
         isPrintableKeyInput(key)
       ) {
@@ -1097,7 +1101,9 @@ function AskUserQuestionFlow(props: {
     1,
     Math.min(
       CUSTOM_FIELD_WIDTH,
-      width - 2 - getCachedStringWidth(`❯ ${customMark}${customLabel}> `),
+      // The inline confirmation's own two columns of margin and two of padding;
+      // `headerCap` charges the same four, split across `rowOverhead`.
+      width - 4 - getCachedStringWidth(`❯ ${customMark}${customLabel}> `),
     ),
   );
   const customField = customFieldWindow(
@@ -1167,7 +1173,9 @@ function AskUserQuestionFlow(props: {
                     cell has nowhere to go, exactly as in ink's fixed-width
                     TextInput. */}
                 {customField.caretInside ? (
-                  <text bg={C.accent}>{customField.at || ' '}</text>
+                  <text bg={C.accent}>
+                    {sanitizeTerminalText(customField.at) || ' '}
+                  </text>
                 ) : null}
                 <text fg={C.text}>
                   {sanitizeTerminalText(customField.after)}

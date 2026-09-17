@@ -692,6 +692,52 @@ describe('OpenTuiToolConfirmation', () => {
       );
     });
 
+    it('draws no bidi override out of the caret cell a paste put one in', () => {
+      // stripUnsafeCharacters keeps U+202E, so a bracketed paste can park a
+      // RIGHT-TO-LEFT OVERRIDE in the value; drawn raw from the one cell the user
+      // is looking at, it rewrites the direction of the rest of the row and the
+      // dialog shows an answer that is not the one being submitted.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      paste('ab\u202ecd');
+      press({ name: 'left' });
+      press({ name: 'left' });
+      press({ name: 'left' });
+      // Sanitising leaves the cell empty, so it draws the blank fallback.
+      expect(cursorCell(container)).toBe(' ');
+      expect(container.textContent ?? '').not.toContain('\u202e');
+      expect(container.textContent ?? '').toContain('ab');
+      expect(container.textContent ?? '').toContain('cd');
+      // The bound is on the drawing only: the answer keeps every code point.
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'ab\u202ecd' } },
+      );
+    });
+
+    it('keeps the long answer inside the box on a narrow terminal', () => {
+      // The inline confirmation spends two columns of margin and two of padding,
+      // so at 58 columns the row has 54 and the 7-cell prefix leaves a 47-cell
+      // cap. The window draws one cell less than the cap it is handed and spends
+      // that cell on the ellipsis, so 45 x's and the marker. Charging only the
+      // margin lets the last two cells — the caret cell among them — fall
+      // outside the box.
+      mocks.state.dimensions = { width: 58, height: 40 };
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(askDetails(twoOptions, onConfirm));
+      press({ name: '3', sequence: '3' });
+      paste('x'.repeat(120));
+      expect(container.textContent ?? '').toContain('x'.repeat(45) + '…');
+      expect(container.textContent ?? '').not.toContain('x'.repeat(46));
+      press({ name: 'return', sequence: '\r' });
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'x'.repeat(120) } },
+      );
+    });
+
     it('keeps every character of a burst that shares one batch', () => {
       const onConfirm = vi.fn(async () => {});
       const container = mount(askDetails(twoOptions, onConfirm));
@@ -1202,6 +1248,24 @@ describe('OpenTuiToolConfirmation', () => {
       press({ name: 'down' });
       press({ name: 'down' });
       paste('xyz');
+      settleAdvance();
+      expect(container.textContent ?? '').toContain('Notify: mail');
+      expect(container.textContent ?? '').not.toContain('mail, xyz');
+    });
+
+    it('drops the keystrokes that trail an answer the pause is still holding', () => {
+      // The same window as the paste above, reached by typing: the field is still
+      // drawn and focused, and a multi-select answer is recomputed from the typed
+      // value, so letters accepted here widen an answer Enter already recorded.
+      const onConfirm = vi.fn(async () => {});
+      const container = mount(multiAskDetails(onConfirm));
+      press({ name: 'right' });
+      press({ name: 'right' });
+      press({ name: 'space', sequence: ' ' });
+      press({ name: 'return', sequence: '\r' });
+      press({ name: 'down' });
+      press({ name: 'down' });
+      typeChars('xyz');
       settleAdvance();
       expect(container.textContent ?? '').toContain('Notify: mail');
       expect(container.textContent ?? '').not.toContain('mail, xyz');

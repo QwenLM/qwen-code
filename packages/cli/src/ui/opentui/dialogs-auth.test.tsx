@@ -986,6 +986,49 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('down');
     expect(focusedField()).toEqual({ text: '1234', cell: '4' });
   });
+
+  it('keeps the caret a late install verdict finds parked in an earlier field', async () => {
+    // The install is async, so its verdict can land after the user has Esc'd back
+    // to a field that never submitted. Re-arming the latch there re-seeds that
+    // field from its value and throws the parked caret away, so the next
+    // Backspace deletes a character the user did not mean to.
+    let rejectInstall: (error: Error) => void = () => {};
+    core.applyProviderInstallPlan.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          rejectInstall = reject;
+        }),
+    );
+    await runPresetFlowToTerminalModels();
+    await press('return'); // models: fires the install, which stays in flight
+    await pressEsc(); // back to the API-key step
+    await press('left');
+    await press('left');
+    expect(focusedField()).toEqual({ text: 'sk-test', cell: 's' });
+    await act(async () => {
+      rejectInstall(new Error('401'));
+    });
+    await vi.waitFor(() => {
+      expect(screen.getByText(/Failed to authenticate/)).toBeTruthy();
+    });
+    expect(focusedField()).toEqual({ text: 'sk-test', cell: 's' });
+    await press('backspace');
+    expect(focusedField()).toEqual({ text: 'sk-tst', cell: 's' });
+  });
+
+  it('draws no bidi override out of a field a paste put one in', async () => {
+    // stripUnsafeCharacters keeps U+202E, so a bracketed paste can park a
+    // RIGHT-TO-LEFT OVERRIDE in a field's value. The value holds every code
+    // point; the cell the caret sits on must not emit one raw and rewrite the
+    // direction of the row the user is reading.
+    await runToBaseUrlStep();
+    await pasteText('ab\u202ecd');
+    await press('left');
+    await press('left');
+    await press('left');
+    expect(focusedField()).toEqual({ text: 'ab cd', cell: ' ' });
+    expect(document.body.textContent).not.toContain('\u202e');
+  });
 });
 
 describe('recommended-model checkboxes out of one read (#113)', () => {
