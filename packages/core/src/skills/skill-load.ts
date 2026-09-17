@@ -24,76 +24,82 @@ export async function loadSkillsFromDir(
   debugLogger.debug(`Loading skills from directory (skill-load): ${baseDir}`);
   try {
     const entries = await fs.readdir(baseDir, { withFileTypes: true });
-    const skills: SkillConfig[] = [];
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
-    for (const entry of entries) {
-      // Skip transient install artifacts (backup / staging dirs left behind
-      // by a crashed reinstall). Without this filter a stale `.backup-*`
-      // sibling with a valid SKILL.md would be loaded as a duplicate skill,
-      // and a "deleted" skill could reappear from its backup sibling.
-      // Match only the actual artifact shape (`.backup-<pid>-<timestamp>` /
-      // `.installing-<pid>-<timestamp>`, anchored at the end of the entry
-      // name) so that legitimate skill dirs whose names merely contain
-      // `.backup-` or `.installing-` (e.g. `db.backup-2024`) are not skipped.
-      if (
-        /\.backup-\d+-\d+$/.test(entry.name) ||
-        /\.installing-\d+-\d+$/.test(entry.name)
-      ) {
-        debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
-        continue;
-      }
-
-      // Process directories and symlinks that resolve to directories.
-      // Plain files are silently skipped (each skill must be a directory).
-      const isDirectory = entry.isDirectory();
-      const isSymlink = entry.isSymbolicLink();
-
-      if (!isDirectory && !isSymlink) {
-        debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
-        continue;
-      }
-
-      const skillDir = path.join(baseDir, entry.name);
-
-      // For symlinks, verify the target (a) resolves and (b) is a
-      // directory. Shared with `skill-manager.ts` so the two parsers
-      // stay in sync. Targets pointing outside `baseDir` are allowed
-      // — see `symlinkScope.ts` for the rationale.
-      if (isSymlink) {
-        const check = await validateSymlinkTarget(skillDir);
-        if (!check.ok) {
-          if (check.reason === 'not-directory') {
-            debugLogger.warn(
-              `Skipping symlink ${entry.name} that does not point to a directory`,
-            );
-          } else {
-            debugLogger.warn(
-              `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
-            );
-          }
-          continue;
+    const loaded = await Promise.allSettled(
+      entries.map(async (entry): Promise<SkillConfig | null> => {
+        // Skip transient install artifacts (backup / staging dirs left behind
+        // by a crashed reinstall). Without this filter a stale `.backup-*`
+        // sibling with a valid SKILL.md would be loaded as a duplicate skill,
+        // and a "deleted" skill could reappear from its backup sibling.
+        // Match only the actual artifact shape (`.backup-<pid>-<timestamp>` /
+        // `.installing-<pid>-<timestamp>`, anchored at the end of the entry
+        // name) so that legitimate skill dirs whose names merely contain
+        // `.backup-` or `.installing-` (e.g. `db.backup-2024`) are not skipped.
+        if (
+          /\.backup-\d+-\d+$/.test(entry.name) ||
+          /\.installing-\d+-\d+$/.test(entry.name)
+        ) {
+          debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+          return null;
         }
-      }
-      const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
 
-      try {
-        // Check if SKILL.md exists
-        await fs.access(skillManifest);
+        // Process directories and symlinks that resolve to directories.
+        // Plain files are silently skipped (each skill must be a directory).
+        const isDirectory = entry.isDirectory();
+        const isSymlink = entry.isSymbolicLink();
 
-        const content = await fs.readFile(skillManifest, 'utf8');
-        const config = parseSkillContent(content, skillManifest);
-        skills.push(config);
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error';
-        debugLogger.error(
-          `Failed to parse skill at ${skillDir}: ${errorMessage}`,
-        );
-        continue;
+        if (!isDirectory && !isSymlink) {
+          debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
+          return null;
+        }
+
+        const skillDir = path.join(baseDir, entry.name);
+
+        // For symlinks, verify the target (a) resolves and (b) is a
+        // directory. Shared with `skill-manager.ts` so the two parsers
+        // stay in sync. Targets pointing outside `baseDir` are allowed
+        // — see `symlinkScope.ts` for the rationale.
+        if (isSymlink) {
+          const check = await validateSymlinkTarget(skillDir);
+          if (!check.ok) {
+            if (check.reason === 'not-directory') {
+              debugLogger.warn(
+                `Skipping symlink ${entry.name} that does not point to a directory`,
+              );
+            } else {
+              debugLogger.warn(
+                `Skipping invalid symlink ${entry.name}: ${check.error instanceof Error ? check.error.message : 'Unknown error'}`,
+              );
+            }
+            return null;
+          }
+        }
+        const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
+
+        try {
+          // Check if SKILL.md exists
+          await fs.access(skillManifest);
+
+          const content = await fs.readFile(skillManifest, 'utf8');
+          return parseSkillContent(content, skillManifest);
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : 'Unknown error';
+          debugLogger.error(
+            `Failed to parse skill at ${skillDir}: ${errorMessage}`,
+          );
+          return null;
+        }
+      }),
+    );
+
+    const skills: SkillConfig[] = [];
+    for (const result of loaded) {
+      if (result.status === 'fulfilled' && result.value != null) {
+        skills.push(result.value);
       }
     }
-
     return skills;
   } catch (error) {
     // Directory doesn't exist or can't be read

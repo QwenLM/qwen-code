@@ -44,27 +44,36 @@ export async function loadAgentPluginSkills(
     );
     return [];
   }
+  const settled = await Promise.allSettled(
+    entries.map(async (entry): Promise<SkillConfig | null> => {
+      const skillDir = path.join(resolvedSkillsPath, entry.name);
+      try {
+        const resolvedSkillDir = resolveContainedExistingPath(
+          pluginRoot,
+          skillDir,
+        );
+        if (!fs.statSync(resolvedSkillDir).isDirectory()) return null;
+        const skillManifest = path.join(resolvedSkillDir, 'SKILL.md');
+        const resolvedManifest = resolveContainedExistingPath(
+          pluginRoot,
+          skillManifest,
+        );
+        if (!fs.statSync(resolvedManifest).isFile()) return null;
+        const content = await fs.promises.readFile(resolvedManifest, 'utf8');
+        return parseAgentPluginSkill(content, resolvedManifest, entry.name);
+      } catch (error) {
+        debugLogger.warn(
+          `Skipping Agent Plugins skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      }
+    }),
+  );
+
   const skills: SkillConfig[] = [];
-  for (const entry of entries) {
-    const skillDir = path.join(resolvedSkillsPath, entry.name);
-    try {
-      const resolvedSkillDir = resolveContainedExistingPath(
-        pluginRoot,
-        skillDir,
-      );
-      if (!fs.statSync(resolvedSkillDir).isDirectory()) continue;
-      const skillManifest = path.join(resolvedSkillDir, 'SKILL.md');
-      const resolvedManifest = resolveContainedExistingPath(
-        pluginRoot,
-        skillManifest,
-      );
-      if (!fs.statSync(resolvedManifest).isFile()) continue;
-      const content = await fs.promises.readFile(resolvedManifest, 'utf8');
-      skills.push(parseAgentPluginSkill(content, resolvedManifest, entry.name));
-    } catch (error) {
-      debugLogger.warn(
-        `Skipping Agent Plugins skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`,
-      );
+  for (const result of settled) {
+    if (result.status === 'fulfilled' && result.value != null) {
+      skills.push(result.value);
     }
   }
   return skills;

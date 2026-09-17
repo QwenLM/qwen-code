@@ -1614,18 +1614,19 @@ export class ExtensionManager {
       return [];
     }
 
-    const extensions: Extension[] = [];
-    for (const subdir of subdirs) {
-      const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension({
-        extensionDir,
-        workspaceDir,
-      });
-      if (extension != null) {
-        extensions.push(extension);
-      }
-    }
-    return extensions;
+    const settled = await Promise.allSettled(
+      subdirs.map((subdir) =>
+        this.loadExtension({
+          extensionDir: path.join(extensionsDir, subdir),
+          workspaceDir,
+        }),
+      ),
+    );
+    return settled.flatMap((result) =>
+      result.status === 'fulfilled' && result.value != null
+        ? [result.value]
+        : [],
+    );
   }
 
   async loadExtension(
@@ -1704,22 +1705,26 @@ export class ExtensionManager {
         extension.skills = await loadAgentPluginSkills(effectiveExtensionPath);
         extension.agents = [];
       } else {
-        extension.commands = await loadCommandsFromDir(
-          `${effectiveExtensionPath}/commands`,
-        );
         extension.contextFiles = getContextFileNames(config)
           .map((contextFileName) =>
             path.join(effectiveExtensionPath, contextFileName),
           )
           .filter((contextFilePath) => fs.existsSync(contextFilePath));
-        extension.skills = await loadSkillsFromDir(
-          `${effectiveExtensionPath}/skills`,
-        );
         const agentExecutorRefusals = new Map<string, SubagentError>();
-        extension.agents = await loadSubagentFromDir(
-          `${effectiveExtensionPath}/agents`,
-          agentExecutorRefusals,
-        );
+        // commands / skills / agents live in disjoint directories with no
+        // shared state, so their directory scans run concurrently; each
+        // loader already swallows its own per-entry failures.
+        const [commands, skills, agents] = await Promise.all([
+          loadCommandsFromDir(`${effectiveExtensionPath}/commands`),
+          loadSkillsFromDir(`${effectiveExtensionPath}/skills`),
+          loadSubagentFromDir(
+            `${effectiveExtensionPath}/agents`,
+            agentExecutorRefusals,
+          ),
+        ]);
+        extension.commands = commands;
+        extension.skills = skills;
+        extension.agents = agents;
         extension.agentExecutorRefusals = agentExecutorRefusals;
       }
 

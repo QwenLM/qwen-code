@@ -1837,36 +1837,44 @@ export async function loadSubagentFromDir(
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
+    // Files are read concurrently; each branch only awaits fs work before its
+    // own refusals.set, and Map.set on distinct keys is atomic on the
+    // single-threaded event loop, so no locking is needed.
+    const settled = await Promise.allSettled(
+      files
+        .filter((file) => file.endsWith('.md'))
+        .map(async (file) => {
+          const filePath = path.join(baseDir, file);
+
+          try {
+            const content = await fs.readFile(filePath, 'utf8');
+            return parseSubagentContent(
+              content,
+              filePath,
+              'extension',
+              new SubagentValidator(),
+            );
+          } catch (error) {
+            warnInvalidSubagentFile(filePath, error);
+            if (
+              refusals &&
+              error instanceof SubagentError &&
+              error.subagentName !== undefined &&
+              error.message.includes('invalid executor block')
+            ) {
+              refusals.set(error.subagentName.toLowerCase(), error);
+            }
+            return null;
+          }
+        }),
+    );
+
     const subagents: SubagentConfig[] = [];
-
-    for (const file of files) {
-      if (!file.endsWith('.md')) continue;
-
-      const filePath = path.join(baseDir, file);
-
-      try {
-        const content = await fs.readFile(filePath, 'utf8');
-        const config = parseSubagentContent(
-          content,
-          filePath,
-          'extension',
-          new SubagentValidator(),
-        );
-        subagents.push(config);
-      } catch (error) {
-        warnInvalidSubagentFile(filePath, error);
-        if (
-          refusals &&
-          error instanceof SubagentError &&
-          error.subagentName !== undefined &&
-          error.message.includes('invalid executor block')
-        ) {
-          refusals.set(error.subagentName.toLowerCase(), error);
-        }
-        continue;
+    for (const result of settled) {
+      if (result.status === 'fulfilled' && result.value != null) {
+        subagents.push(result.value);
       }
     }
-
     return subagents;
   } catch (_error) {
     // Directory doesn't exist or can't be read
