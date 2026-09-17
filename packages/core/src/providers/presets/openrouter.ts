@@ -35,7 +35,7 @@ export const openRouterProvider: ProviderConfig = {
   },
   customHeaders: {
     'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
-    'X-OpenRouter-Title': 'Qwen Code',
+    'X-Title': 'Qwen Code',
   },
   documentationUrl: 'https://openrouter.ai/docs',
   uiGroup: 'third-party',

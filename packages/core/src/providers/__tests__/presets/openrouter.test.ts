@@ -65,7 +65,14 @@ describe('openRouterProvider', () => {
   it('declares customHeaders for attribution', () => {
     expect(openRouterProvider.customHeaders).toEqual({
       'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
-      'X-OpenRouter-Title': 'Qwen Code',
+      'X-Title': 'Qwen Code',
     });
+  });
+
+  it('uses only the header keys OpenRouter documents for attribution', () => {
+    expect(Object.keys(openRouterProvider.customHeaders ?? {}).sort()).toEqual([
+      'HTTP-Referer',
+      'X-Title',
+    ]);
   });
 });
