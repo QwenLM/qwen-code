@@ -4426,6 +4426,66 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('getSystemHooks', () => {
+    const hook = (command: string) => [
+      { hooks: [{ type: 'command', command }] },
+    ];
+
+    function loadWith(files: Record<string, Record<string, unknown>>) {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => typeof p === 'string' && p in files,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          typeof p === 'string' && p in files ? JSON.stringify(files[p]) : '{}',
+      );
+      return loadSettings(MOCK_WORKSPACE_DIR);
+    }
+
+    it('concatenates SystemDefaults and System hooks, SystemDefaults first', () => {
+      const settings = loadWith({
+        [getSystemDefaultsPath()]: {
+          hooks: { PreToolUse: hook('echo defaults') },
+        },
+        [getSystemSettingsPath()]: {
+          hooks: { PreToolUse: hook('echo system') },
+        },
+      });
+
+      expect(settings.getSystemHooks()).toEqual({
+        PreToolUse: [...hook('echo defaults'), ...hook('echo system')],
+      });
+    });
+
+    it('returns undefined, not an empty object, when neither system file has hooks', () => {
+      const settings = loadWith({
+        [getSystemSettingsPath()]: { ui: { theme: 'system-theme' } },
+        [USER_SETTINGS_PATH]: { hooks: { Stop: hook('echo user') } },
+      });
+
+      expect(settings.getSystemHooks()).toBeUndefined();
+    });
+
+    it('returns only system hooks, never user or workspace hooks', () => {
+      const settings = loadWith({
+        [getSystemSettingsPath()]: {
+          hooks: { PreToolUse: hook('echo system') },
+        },
+        [USER_SETTINGS_PATH]: { hooks: { PreToolUse: hook('echo user') } },
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          hooks: { PreToolUse: hook('echo workspace') },
+        },
+      });
+
+      expect(settings.getSystemHooks()).toEqual({
+        PreToolUse: hook('echo system'),
+      });
+      expect(settings.getUserHooks()).toEqual({
+        PreToolUse: hook('echo user'),
+      });
+    });
+  });
+
   describe('reloadScopeFromDisk', () => {
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(
