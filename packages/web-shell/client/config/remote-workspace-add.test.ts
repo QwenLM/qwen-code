@@ -141,4 +141,13 @@ describe('remote workspace add navigation', () => {
       `${testOrigin}/session/current?daemon=https%3A%2F%2Fremote.example`,
     );
   });
+
+  it('reports no step for an entry point evaluated outside a document', () => {
+    vi.stubGlobal('window', undefined);
+    try {
+      expect(getRemoteWorkspaceAddStep()).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

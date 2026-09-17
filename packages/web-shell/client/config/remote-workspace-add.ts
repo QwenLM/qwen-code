@@ -12,6 +12,10 @@ export type RemoteWorkspaceAddStep = 'connect' | 'browse';
 export function getRemoteWorkspaceAddStep():
   | RemoteWorkspaceAddStep
   | undefined {
+  // Parity with getAllowedDaemonOrigin in the sibling module: this is the only
+  // reader on a render path, and an entry point that evaluates outside a
+  // document has no URL to carry a step.
+  if (typeof window === 'undefined') return undefined;
   const step = new URLSearchParams(window.location.search).get(FLOW_PARAM);
   return step === 'connect' || step === 'browse' ? step : undefined;
 }
