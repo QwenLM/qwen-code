@@ -11,6 +11,7 @@ import {
   createGoalVerifier,
   GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
   GoalVerifierInputTooLargeError,
+  goalVerifierTimeoutMs,
   measureGoalVerifierEnvelopeBytes,
   parseGoalVerifierText,
   type GoalVerifierInput,
@@ -95,6 +96,17 @@ describe('parseGoalVerifierText', () => {
   });
 });
 
+describe('goalVerifierTimeoutMs', () => {
+  it('grows with the request and stops at the side query lifetime', () => {
+    expect(goalVerifierTimeoutMs(1_000)).toBe(45_000);
+    expect(goalVerifierTimeoutMs(64_000)).toBe(60_000);
+    expect(goalVerifierTimeoutMs(GOAL_VERIFIER_REQUEST_BYTE_LIMIT)).toBe(
+      150_000,
+    );
+    expect(goalVerifierTimeoutMs(10_000_000)).toBe(180_000);
+  });
+});
+
 describe('createGoalVerifier', () => {
   it('returns the side query usage alongside the decision', async () => {
     const { config, generateText } = configFor('');
@@ -147,7 +159,7 @@ describe('createGoalVerifier', () => {
       currentTurnId: 'turn-3',
       evidenceTurnIds: ['turn-3'],
     });
-    expect(payload).not.toHaveProperty('omittedEarlier');
+    expect(payload).not.toHaveProperty('omitted');
     expect(JSON.stringify(payload)).not.toContain('evidenceRefs');
     expect(request.systemInstruction).toContain(
       'Never require evidence that update_goal itself was called',
@@ -193,7 +205,7 @@ describe('createGoalVerifier', () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
-    const value: GoalVerifierInput = { ...input(), omittedEarlier: 12 };
+    const value: GoalVerifierInput = { ...input(), omitted: 12 };
 
     await createGoalVerifier(config)(value);
 
@@ -203,9 +215,9 @@ describe('createGoalVerifier', () => {
     const payload = JSON.parse(
       request.contents[0]?.parts?.[0]?.text ?? '',
     ) as Record<string, unknown>;
-    expect(payload).toMatchObject({ omittedEarlier: 12 });
+    expect(payload).toMatchObject({ omitted: 12 });
     expect(request.systemInstruction).toContain(
-      'When omittedEarlier is greater than zero',
+      'When omitted is greater than zero',
     );
   });
 
@@ -265,7 +277,7 @@ describe('createGoalVerifier', () => {
       ...base,
       evidence: [],
       evidenceTurnIds: [turnId, turnId, turnId],
-      omittedEarlier: Number.MAX_SAFE_INTEGER,
+      omitted: Number.MAX_SAFE_INTEGER,
     });
     const window = buildGoalVerifierEvidenceWindow(
       {
@@ -287,14 +299,14 @@ describe('createGoalVerifier', () => {
       },
       { budgetBytes: GOAL_VERIFIER_REQUEST_BYTE_LIMIT - envelopeBytes },
     );
-    expect(window.omittedEarlier).toBeGreaterThan(0);
+    expect(window.omitted).toBeGreaterThan(0);
 
     await expect(
       createGoalVerifier(config)({
         ...base,
         evidence: window.evidence,
         evidenceTurnIds: window.turnIds,
-        omittedEarlier: window.omittedEarlier,
+        omitted: window.omitted,
       }),
     ).resolves.toEqual({ decision: 'accept', reason: 'grounded' });
     const request = generateText.mock.calls[0]![0] as Parameters<

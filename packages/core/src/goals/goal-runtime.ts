@@ -9,6 +9,8 @@ import {
   buildGoalEvidenceCheckpointWindow,
   buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
+  GoalVerifierWindowCoverageError,
+  validateGoalVerifierWindowCoverage,
   VERIFIER_EVIDENCE_WINDOW_MIN_BYTES,
   type GoalEvidenceCheckpointWindow,
   type GoalEvidenceRecord,
@@ -915,9 +917,7 @@ export function createGoalRuntime(
       currentTurnId: attempt.permit.turnId,
       evidence: window.evidence,
       evidenceTurnIds: window.turnIds,
-      ...(window.omittedEarlier > 0
-        ? { omittedEarlier: window.omittedEarlier }
-        : {}),
+      ...(window.omitted > 0 ? { omitted: window.omitted } : {}),
     };
     if (attempt.proposal.status === 'complete') {
       return {
@@ -1152,7 +1152,7 @@ export function createGoalRuntime(
         verifierInput(attempt, {
           evidence: [],
           turnIds: Array.from({ length: 3 }, () => attempt.permit.turnId),
-          omittedEarlier: Number.MAX_SAFE_INTEGER,
+          omitted: Number.MAX_SAFE_INTEGER,
         }),
       );
       const budgetBytes = GOAL_VERIFIER_REQUEST_BYTE_LIMIT - envelopeBytes;
@@ -1171,22 +1171,58 @@ export function createGoalRuntime(
           },
           { budgetBytes },
         );
-        const result = await verifier(
-          verifierInput(attempt, window),
-          attempt.controller.signal,
-        );
+        validateGoalVerifierWindowCoverage(attempt.proposal, window);
+        let result: GoalVerificationResult;
+        try {
+          result = await verifier(
+            verifierInput(attempt, window),
+            attempt.controller.signal,
+          );
+        } catch (error) {
+          // A full window is a sixty-thousand-token request; a model that
+          // times out on it, or cannot hold it, gets one more chance at
+          // half the size before the failure stops the Goal.
+          if (attempt.controller.signal.aborted) return;
+          if (budgetBytes / 2 < VERIFIER_EVIDENCE_WINDOW_MIN_BYTES) throw error;
+          const smaller = buildGoalVerifierEvidenceWindow(
+            {
+              records,
+              goal: attempt.goal,
+              permit: attempt.permit,
+              proposal: attempt.proposal,
+            },
+            { budgetBytes: Math.floor(budgetBytes / 2) },
+          );
+          result = await verifier(
+            verifierInput(attempt, smaller),
+            attempt.controller.signal,
+          );
+        }
         if (attempt.controller.signal.aborted) return;
         outcome = { kind: 'decision', result };
       }
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
-      const reason =
-        error instanceof EvidenceSourceUnavailableError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : String(error);
-      outcome = { kind: 'usage_limited', reason };
+      if (error instanceof GoalVerifierWindowCoverageError) {
+        // The deterministic half of the blocked policy failed: the proposal
+        // is refused with the rule it broke, and the Goal keeps working.
+        outcome = {
+          kind: 'decision',
+          result: { decision: 'reject', reason: error.message },
+        };
+      } else if (error instanceof EvidenceSourceUnavailableError) {
+        // The transcript after the cursor cannot be attributed to this
+        // permit. Marked evidence-limited so that a resume repoints the
+        // cursor past the record at fault instead of stopping on it again.
+        outcome = {
+          kind: 'usage_limited',
+          reason: error.message,
+          limitKind: 'evidence_catalog',
+        };
+      } else {
+        const reason = error instanceof Error ? error.message : String(error);
+        outcome = { kind: 'usage_limited', reason };
+      }
     }
     const checkpoint = await recordVerificationOutcome(attempt, outcome);
     if (!checkpoint) return;
@@ -1625,6 +1661,14 @@ export function createGoalRuntime(
               if (recoveredSnapshot.goal?.status === 'active') {
                 recoveredSnapshot.goal.updatedAt = Date.now();
               }
+              // Checkpoint health a previous build recorded is meaningless
+              // to a runtime that runs no checkpoints, and a persisted
+              // stall count would otherwise keep exempting the Goal from
+              // the no-progress pause.
+              if (recoveredSnapshot.goal && !options.checkpointVerifier) {
+                delete recoveredSnapshot.goal.checkpointStalls;
+                delete recoveredSnapshot.goal.lastCheckpointFailure;
+              }
               blockedAudit = recovery.payload.blockedAudit
                 ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
                 : undefined;
@@ -1934,12 +1978,16 @@ export function createGoalRuntime(
           // checkpoint runs and the stall breaker stops it with the reason
           // that fits, instead of a pause whose remedy (resume) would
           // re-enter the same overflowing window.
+          // The stall exemption only means something while checkpoints can
+          // run; a runtime without a checkpoint verifier never clears a
+          // streak, so a count a previous build persisted must not exempt
+          // an idle Goal for ever.
           const noProgressLimitReached =
             noProgressTurns !== undefined &&
             noProgressTurns >= GOAL_NO_PROGRESS_TURN_LIMIT &&
             nextGoal.status === 'active' &&
             !spentBudget(nextGoal, Date.now()) &&
-            !(nextGoal.checkpointStalls ?? 0);
+            !(options.checkpointVerifier && (nextGoal.checkpointStalls ?? 0));
           if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,

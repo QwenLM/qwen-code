@@ -16,6 +16,8 @@ import {
   buildGoalEvidenceCatalog,
   buildGoalVerifierEvidenceWindow,
   EvidenceSourceUnavailableError,
+  USER_MESSAGE_OUTSIDE_GOAL_TURN,
+  validateGoalVerifierWindowCoverage,
   InvalidGoalEvidenceReferenceError,
   validateGoalEvidenceReferences,
   type GoalEvidenceProvenance,
@@ -1272,7 +1274,7 @@ describe('Goal verifier evidence window', () => {
     const window = build(records, complete([]));
 
     expect(window.turnIds).toEqual(['turn-3']);
-    expect(window.omittedEarlier).toBe(0);
+    expect(window.omitted).toBe(0);
     expect(window.evidence.map((entry) => entry.uuid)).toEqual([
       'tool',
       'text',
@@ -1373,7 +1375,7 @@ describe('Goal verifier evidence window', () => {
     expect(completion.evidence.some((entry) => entry.uuid === 'approval')).toBe(
       true,
     );
-    expect(completion.omittedEarlier).toBeGreaterThan(0);
+    expect(completion.omitted).toBeGreaterThan(0);
     expect(completion.evidence[0]!.uuid).toBe('t4-199');
     expect(completion.evidence.every((e) => e.turnId !== 'turn-2')).toBe(true);
 
@@ -1448,6 +1450,168 @@ describe('Goal verifier evidence window', () => {
     );
   });
 
+  it("takes the user's messages with or without Goal turn context", () => {
+    const records = [
+      record('while-blocked', 'user', {
+        provenance: 'real_user',
+        text: 'use option B',
+      }),
+      record('other-goal', 'user', {
+        goalId: 'goal-9',
+        turnId: 'turn-1',
+        provenance: 'real_user',
+        text: 'from another goal revision',
+      }),
+      record('tool', 'tool_result', {
+        turnId: 'turn-3',
+        toolResponse: { output: 'implemented B' },
+      }),
+    ];
+
+    const window = build(records, complete([]));
+
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual([
+      'tool',
+      'other-goal',
+      'while-blocked',
+    ]);
+    expect(window.evidence[2]).toMatchObject({
+      proofKind: 'user_input',
+      turnId: USER_MESSAGE_OUTSIDE_GOAL_TURN,
+      content: 'use option B',
+    });
+    expect(window.evidence[1]).toMatchObject({ turnId: 'turn-1' });
+  });
+
+  it('refuses a chain that repeats a record uuid', () => {
+    const records = [
+      record('tool', 'tool_result', {
+        turnId: 'turn-3',
+        toolResponse: { output: 'once' },
+      }),
+      record('tool', 'tool_result', {
+        turnId: 'turn-3',
+        toolResponse: { output: 'twice' },
+      }),
+    ];
+
+    expect(() => build(records, complete([]))).toThrow(
+      expect.objectContaining({ code: 'duplicate_record_uuid' }),
+    );
+  });
+
+  it('keeps the proposing turn in a small window and skips records that do not fit', () => {
+    const big = (
+      uuid: string,
+      turnId: string,
+      provenance: 'user' | 'tool_result',
+    ) =>
+      provenance === 'user'
+        ? record(uuid, 'user', {
+            turnId,
+            provenance: 'real_user',
+            text: 'x'.repeat(17_000),
+          })
+        : record(uuid, 'tool_result', {
+            turnId,
+            toolResponse: { output: 'x'.repeat(17_000) },
+          });
+    const records = [
+      record('approved', 'user', {
+        turnId: 'turn-1',
+        provenance: 'real_user',
+        text: 'yes, approved',
+      }),
+      big('paste-1', 'turn-1', 'user'),
+      big('paste-2', 'turn-1', 'user'),
+      ...Array.from({ length: 6 }, (_, index) =>
+        big(`t2-${index}`, 'turn-2', 'tool_result'),
+      ),
+      ...Array.from({ length: 6 }, (_, index) =>
+        big(`t3-${index}`, 'turn-3', 'tool_result'),
+      ),
+      ...Array.from({ length: 6 }, (_, index) =>
+        big(`t4-${index}`, 'turn-4', 'tool_result'),
+      ),
+    ];
+
+    // A 190 kB objective leaves the smallest window there is: the proposing
+    // turn's newest record and one from each preceding turn take most of
+    // it, the pasted logs no longer fit, and they are skipped instead of
+    // ending the scan in front of the user's short approval.
+    const window = build(
+      records,
+      blockedProposal('repeated'),
+      permit('turn-4'),
+      goal(),
+      64_000,
+    );
+
+    const uuids = window.evidence.map((entry) => entry.uuid);
+    expect(uuids[0]).toBe('t4-5');
+    expect(uuids).toContain('t3-5');
+    expect(uuids).toContain('t2-5');
+    expect(uuids).toContain('approved');
+    expect(uuids).not.toContain('paste-1');
+    expect(uuids).not.toContain('paste-2');
+    expect(() =>
+      validateGoalVerifierWindowCoverage(blockedProposal('repeated'), window),
+    ).not.toThrow();
+  });
+
+  it('enforces the deterministic half of the blocked policy on the window', () => {
+    const turns = ['turn-2', 'turn-3', 'turn-4'];
+    const proseOnly = turns.map((turnId) =>
+      record(`${turnId}-text`, 'assistant', { turnId, text: 'still blocked' }),
+    );
+    const withFacts = turns.map((turnId) =>
+      record(`${turnId}-tool`, 'tool_result', {
+        turnId,
+        toolResponse: { output: `${turnId}: dependency missing` },
+      }),
+    );
+    const user = record('ask', 'user', {
+      turnId: 'turn-4',
+      provenance: 'real_user',
+      text: 'stop here',
+    });
+    const at = (
+      records: GoalEvidenceRecord[],
+      proposal: GoalTerminalProposal,
+    ) =>
+      validateGoalVerifierWindowCoverage(
+        proposal,
+        build(records, proposal, permit('turn-4')),
+      );
+
+    // A repeated blocker needs three turns, and the earlier two must hold
+    // something the model did not merely say.
+    expect(() => at(proseOnly, blockedProposal('repeated'))).toThrow(
+      expect.objectContaining({ code: 'repeated_blocker_turn_coverage' }),
+    );
+    expect(() => at(withFacts.slice(1), blockedProposal('repeated'))).toThrow(
+      expect.objectContaining({ code: 'repeated_blocker_turn_coverage' }),
+    );
+    expect(() => at(withFacts, blockedProposal('repeated'))).not.toThrow();
+    // An infeasible blocker needs a tool result; an immediate one needs
+    // user input or a tool result.
+    expect(() => at([proseOnly[2]!], blockedProposal('infeasible'))).toThrow(
+      expect.objectContaining({
+        code: 'infeasible_blocker_external_fact_required',
+      }),
+    );
+    expect(() =>
+      at([withFacts[2]!], blockedProposal('infeasible')),
+    ).not.toThrow();
+    expect(() => at([proseOnly[2]!], blockedProposal('authority'))).toThrow(
+      expect.objectContaining({
+        code: 'immediate_blocker_external_evidence_required',
+      }),
+    );
+    expect(() => at([user], blockedProposal('authority'))).not.toThrow();
+    expect(() => at([], complete([]))).not.toThrow();
+  });
+
   it('returns an empty window for a turn that has recorded nothing yet', () => {
     const records = [
       record('t2', 'assistant', { turnId: 'turn-2', text: 'earlier' }),
@@ -1456,14 +1620,14 @@ describe('Goal verifier evidence window', () => {
     expect(build(records, complete([]))).toEqual({
       evidence: [],
       turnIds: ['turn-3'],
-      omittedEarlier: 0,
+      omitted: 0,
     });
     // A blocked window still reaches back two turns, so the earlier turn's
     // record is admitted even though the current turn has none.
     expect(build(records, blockedProposal('repeated'))).toMatchObject({
       evidence: [{ uuid: 't2', turnId: 'turn-2' }],
       turnIds: ['turn-2', 'turn-3'],
-      omittedEarlier: 0,
+      omitted: 0,
     });
   });
 
@@ -1487,7 +1651,7 @@ describe('Goal verifier evidence window', () => {
       'turn-3-tool',
       'turn-2-tool',
     ]);
-    expect(window.omittedEarlier).toBe(0);
+    expect(window.omitted).toBe(0);
   });
 
   it('budgets the window by serialized bytes and leaves out the oldest records past it', () => {
@@ -1505,7 +1669,7 @@ describe('Goal verifier evidence window', () => {
     // are the oldest, and they are counted, not dropped.
     expect(window.evidence.length).toBeLessThan(48);
     expect(window.evidence.length).toBeGreaterThan(40);
-    expect(window.omittedEarlier).toBe(140 - window.evidence.length);
+    expect(window.omitted).toBe(140 - window.evidence.length);
     expect(window.evidence[0]!.uuid).toBe('a-139');
     expect(window.evidence.at(-1)!.uuid).toBe(
       `a-${140 - window.evidence.length}`,

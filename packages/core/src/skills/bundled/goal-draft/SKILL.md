@@ -19,7 +19,7 @@ You are drafting the text for `/goal set`. You are NOT doing the work the goal d
 
 An active Goal is re-fed to the model every turn, and its completion is judged by an independent verifier that sees ONLY transcript evidence, and only from the turn that proposes completion:
 
-- Visible assistant output and tool results of that turn count as evidence, and so do the user's own messages from any turn of the Goal, but only as proof of what the user said, chose, or approved. The objective itself, hidden reasoning, and anything else printed in earlier turns do not.
+- Visible assistant output and tool results of that turn count as evidence, and so do the user's own messages from anywhere in the session, but only as proof of what the user said, chose, or approved. The objective itself, hidden reasoning, and anything else printed in earlier turns do not.
 - `delivered_output` evidence proves only that text was printed. It cannot prove that tests passed, files changed, or remote state changed — those need a tool result in the transcript (an `external_fact`).
 - A claim that the user confirmed, chose, or approved something needs a real user message as evidence; otherwise the completion proposal is rejected.
 - Vague, subjective, or open-ended conditions never produce decisive evidence; the loop then runs until a limit is hit.
