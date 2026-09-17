@@ -5,11 +5,15 @@
  */
 // @vitest-environment jsdom
 
-import { act, renderHook } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import type { Part } from '@google/genai';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { CoreToolScheduler } from '@qwen-code/qwen-code-core';
+import type { Config, ToolResult } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  CoreToolScheduler,
+  MockTool,
+} from '@qwen-code/qwen-code-core';
 import {
   mapToDisplay,
   type TrackedToolCall,
@@ -182,5 +186,148 @@ describe('useReactToolScheduler', () => {
 
     expect(scheduleSpy).toHaveBeenCalledOnce();
     scheduleSpy.mockRestore();
+  });
+
+  it('keeps the same scheduler so a later tool queues after callback identities change', async () => {
+    let resolveFirst: ((result: ToolResult) => void) | undefined;
+    const execute = vi.fn(
+      (params: { [key: string]: unknown }): Promise<ToolResult> => {
+        if (params['which'] === 'first') {
+          return new Promise<ToolResult>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve({
+          llmContent: 'second',
+          returnDisplay: 'second',
+        });
+      },
+    );
+    const mockTool = new MockTool({
+      name: 'mockTool',
+      displayName: 'Mock Tool',
+      execute,
+    });
+    const mockToolRegistry = {
+      getTool: vi.fn(() => mockTool),
+      ensureTool: vi.fn(async () => mockTool),
+      getAllToolNames: vi.fn(() => ['mockTool']),
+    };
+    const mockConfig = {
+      getToolRegistry: () => mockToolRegistry,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () => 4_000_000,
+      getTruncateToolOutputLines: () => 1000,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getBaseLlmClient: vi.fn(),
+      getUseModelRouter: () => false,
+      getLlmClient: () => null,
+      getShellExecutionConfig: () => ({
+        terminalWidth: 80,
+        terminalHeight: 24,
+      }),
+      getChatRecordingService: () => undefined,
+      getMessageBus: () => undefined,
+      getDisableAllHooks: () => true,
+      getHookSystem: () => undefined,
+      getDebugLogger: () => ({
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as Config;
+
+    type SchedulerProps = {
+      onComplete: (tools: unknown[]) => Promise<void>;
+      onEditorClose: () => void;
+      onToolResultFullTurnModel?: (model: string) => boolean;
+    };
+
+    const firstOnComplete = vi.fn(async () => {});
+    const { result, rerender } = renderHook<
+      ReturnType<typeof useReactToolScheduler>,
+      SchedulerProps
+    >(
+      ({ onComplete, onEditorClose, onToolResultFullTurnModel }) =>
+        useReactToolScheduler(
+          onComplete,
+          mockConfig,
+          () => undefined,
+          onEditorClose,
+          onToolResultFullTurnModel,
+        ),
+      {
+        initialProps: {
+          onComplete: firstOnComplete,
+          onEditorClose: vi.fn(),
+        },
+      },
+    );
+
+    const signal = new AbortController().signal;
+    act(() => {
+      result.current[1](
+        {
+          callId: 'call-1',
+          name: 'mockTool',
+          args: { which: 'first' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        signal,
+      );
+    });
+
+    await waitFor(() => {
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+    expect(resolveFirst).toBeDefined();
+
+    const latestOnComplete = vi.fn(async () => {});
+    rerender({
+      onComplete: latestOnComplete,
+      onEditorClose: vi.fn(),
+      onToolResultFullTurnModel: vi.fn(() => false),
+    });
+
+    act(() => {
+      result.current[1](
+        {
+          callId: 'call-2',
+          name: 'mockTool',
+          args: { which: 'second' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-2',
+        },
+        signal,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst!({
+        llmContent: 'first',
+        returnDisplay: 'first',
+      });
+    });
+
+    await waitFor(() => {
+      expect(latestOnComplete).toHaveBeenCalled();
+    });
+    expect(firstOnComplete).not.toHaveBeenCalled();
   });
 });

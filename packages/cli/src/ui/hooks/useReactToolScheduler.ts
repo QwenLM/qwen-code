@@ -31,7 +31,7 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
-import { useCallback, useState, useMemo } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   HistoryItemToolGroup,
   IndividualToolCallDisplay,
@@ -118,6 +118,26 @@ export function useReactToolScheduler(
     TrackedToolCall[]
   >([]);
 
+  // useLlmStream passes inline callbacks, so identities change every render.
+  // Recreating CoreToolScheduler then would drop an in-flight batch's queue
+  // and let a later schedule() run in parallel on a fresh idle instance.
+  const onCompleteRef = useRef(onComplete);
+  const getPreferredEditorRef = useRef(getPreferredEditor);
+  const onEditorCloseRef = useRef(onEditorClose);
+  const onToolResultFullTurnModelRef = useRef(onToolResultFullTurnModel);
+
+  useLayoutEffect(() => {
+    onCompleteRef.current = onComplete;
+    getPreferredEditorRef.current = getPreferredEditor;
+    onEditorCloseRef.current = onEditorClose;
+    onToolResultFullTurnModelRef.current = onToolResultFullTurnModel;
+  }, [
+    onComplete,
+    getPreferredEditor,
+    onEditorClose,
+    onToolResultFullTurnModel,
+  ]);
+
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
       // Shell liveness heartbeats are for headless consumers; the TUI
@@ -142,9 +162,9 @@ export function useReactToolScheduler(
 
   const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
     async (completedToolCalls) => {
-      await onComplete(completedToolCalls);
+      await onCompleteRef.current(completedToolCalls);
     },
-    [onComplete],
+    [],
   );
 
   const toolCallsUpdateHandler: ToolCallsUpdateHandler = useCallback(
@@ -204,18 +224,18 @@ export function useReactToolScheduler(
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
-        getPreferredEditor,
-        onEditorClose,
-        onToolResultFullTurnModel,
+        getPreferredEditor: () => getPreferredEditorRef.current(),
+        onEditorClose: () => onEditorCloseRef.current(),
+        // Always wrap: Core treats a missing callback as false, and a later
+        // render may introduce onToolResultFullTurnModel on the same instance.
+        onToolResultFullTurnModel: (model: string) =>
+          onToolResultFullTurnModelRef.current?.(model) ?? false,
       }),
     [
       config,
       outputUpdateHandler,
       allToolCallsCompleteHandler,
       toolCallsUpdateHandler,
-      getPreferredEditor,
-      onEditorClose,
-      onToolResultFullTurnModel,
     ],
   );
 
