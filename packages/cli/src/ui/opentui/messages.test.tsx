@@ -12,6 +12,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -595,6 +598,36 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
       expect(physicalRowsTotal(['ab cde'], 5)).toBe(2);
     });
 
+    it('tracks the word class per grapheme cluster, not per codepoint (R14-1)', () => {
+      // The native classifies a grapheme cluster by its FIRST codepoint:
+      // NFD 'e\u0301' keeps the ASCII word class through the combining
+      // mark, so the CJK transition break opens and the row paints 3 like
+      // the native renderer; per-codepoint tracking lets the combining
+      // mark reset the class to 0 and deletes that break (2 — an
+      // under-count).
+      expect(physicalRowsTotal(['e\u0301' + '你'.repeat(54)], 106)).toBe(3);
+      // The NFC sibling U+00E9 is class 0 (not an ASCII word codepoint), so
+      // NO transition break opens — the fix must not widen the word class
+      // to all non-ASCII to pass the first case.
+      expect(physicalRowsTotal(['\u00e9' + '你'.repeat(54)], 106)).toBe(2);
+    });
+
+    it('pins the break tables to the installed @opentui/core version (R14-1)', () => {
+      // The WORD_WRAP_* tables in messages.tsx were transcribed from the
+      // native renderer's findWrapBreaks at @opentui/core 0.5.8, and the
+      // native rules move between releases (0.5.11 changed the CJK<->ASCII
+      // transition itself). A dependency bump must re-transcribe and
+      // re-verify the tables against the new native, so it turns this
+      // guard red. The version is read from the installed package itself —
+      // the package.json pin is exact, so the installed copy is the one
+      // the renderer paints with.
+      const entry = createRequire(import.meta.url).resolve('@opentui/core');
+      const { version } = JSON.parse(
+        readFileSync(join(dirname(entry), 'package.json'), 'utf8'),
+      ) as { version: string };
+      expect(version).toBe('0.5.8');
+    });
+
     it('breaks between CJK and ASCII word runs', () => {
       // 3 + 30 + 3 = 36 columns: the character estimate charged 2 rows, the
       // word wrap paints 3 (the CJK run moves whole past the break).
@@ -609,8 +642,15 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
         Array.from({ length: 4 }, () => 'a'.repeat(54)).join(' '),
       );
       const win = headWindowPhysical(rows, 108, 20);
-      expect(win.hiddenRows).toBe(5);
+      // 4 whole rows (16 painted) plus the sliced fifth: slicing the
+      // 219-column row to the 3-row remainder's 318 columns keeps all 4 of
+      // its painted rows, so the slice shrinks to the 113 columns that
+      // paint 2 — 18 of the 19-row budget charged, 6 rows hidden (R15-1).
+      expect(win.hiddenRows).toBe(6);
       expect(win.visible).toHaveLength(5);
+      // R15-1: the window's visible rows must paint inside the 19-row
+      // content budget it certifies.
+      expect(physicalRowsTotal(win.visible, 106)).toBeLessThanOrEqual(19);
     });
   });
 
@@ -809,6 +849,18 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(win.hiddenRows).toBe(4);
   });
 
+  it("charges the tail window's sliced row the height it paints (R15-1)", () => {
+    // The word-wrap mirror of the dialog-body fixture: 4x54-column tokens
+    // paint one row PER token, so slicing the over-budget row to
+    // `remaining * cols` columns keeps more painted rows than the budget
+    // certifies — the slice must shrink until it fits.
+    const rows = Array.from({ length: 6 }, () =>
+      Array.from({ length: 4 }, () => 'a'.repeat(54)).join(' '),
+    );
+    const tw = tailWindowPhysical(rows, 108, 19);
+    expect(physicalRowsTotal(tw.visible, 106)).toBeLessThanOrEqual(19);
+  });
+
   it('truncates over-long results to the trailing characters', () => {
     const short = 'short output';
     expect(truncateResultDisplayChars(short)).toBe(short);
@@ -834,32 +886,47 @@ describe('capToolCardDescription (transcript card flood bound)', () => {
 
   it('keeps the head of an over-long description and counts the hidden rows', () => {
     const desc = 'x'.repeat(1000);
-    const cols = 110 - STATUS_INDICATOR_WIDTH;
     const cap = capToolCardDescription(
       desc,
       'mcp__mem0',
       110,
       TOOL_CARD_DESCRIPTION_ROWS,
     );
-    // The label row shares the budget: 4 description rows, the first one
-    // hosting the name inline.
-    const rows = Math.ceil(('mcp__mem0'.length + 1 + desc.length) / cols);
-    expect(cap.description).toBe('x'.repeat(4 * cols - 'mcp__mem0'.length - 1));
-    expect(cap.hiddenRows).toBe(rows - 4);
-    expect(cap.hiddenRows).toBeGreaterThan(0);
+    // The label row shares the budget: 4 description rows at the name-aware
+    // 98 columns (108 minus the 10-column name) — 11 painted rows total, 7
+    // hidden.
+    expect(cap.description).toBe('x'.repeat(4 * 98));
+    expect(cap.hiddenRows).toBe(7);
   });
 
   it('measures wide-character descriptions in display columns', () => {
-    // 1000 Han characters span 2000 columns: 19 rows at 108 cols, not the
-    // 10 rows a UTF-16 length estimate would model.
+    // 1000 Han characters span 2000 columns: 21 rows at the name-aware 98
+    // columns (49 Han per row), not the 10 rows a UTF-16 length estimate
+    // would model.
     const cap = capToolCardDescription(
       '汉'.repeat(1000),
       'mcp__mem0',
       110,
       TOOL_CARD_DESCRIPTION_ROWS,
     );
-    expect(toCodePoints(cap.description)).toHaveLength(211);
-    expect(cap.hiddenRows).toBe(15);
+    expect(toCodePoints(cap.description)).toHaveLength(196);
+    expect(cap.hiddenRows).toBe(17);
+  });
+
+  it('bounds the description by painted rows, not a column estimate (R14-1)', () => {
+    // Eight 54-column space-separated tokens at the name-aware 98 columns:
+    // the word wrap paints one row PER token (a second never fits), so the
+    // column estimate's ceil(449/108) = 5 rows left all eight tokens to
+    // paint 8 rows against the 5-row bound — the transcript-column flood
+    // the cap exists to prevent, with no hidden-tail label.
+    const cap = capToolCardDescription(
+      Array.from({ length: 8 }, () => 'x'.repeat(54)).join(' '),
+      'mcp__mem0',
+      110,
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    expect(physicalRowsTotal([cap.description], 98)).toBeLessThanOrEqual(4);
+    expect(cap.hiddenRows).toBeGreaterThan(0);
   });
 
   it('keeps a one-row budget to one painted row when the name fits (R11-1)', () => {

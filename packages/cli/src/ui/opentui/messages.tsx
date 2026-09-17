@@ -30,6 +30,7 @@ import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
 import { ICON, TOOL_STATUS } from '../constants.js';
 import {
   getCachedStringWidth,
+  graphemeSegmenter,
   sanitizeMultilineForDisplay,
   sanitizeTerminalText,
   toCodePoints,
@@ -207,17 +208,30 @@ function physicalRowCount(row: string, cols: number): number {
 
   const gcol = new Array<number>(n);
   const gbrk = new Array<boolean>(n).fill(false);
+  // The native tracks the word class per GRAPHEME CLUSTER, classified by
+  // the cluster's first codepoint, and registers the transition break at
+  // the cluster's start: a combining mark must not reset the class and
+  // delete the CJK/ASCII break the cluster boundary opens (R14-1). ASCII
+  // text has no class-2 codepoints and no multi-codepoint clusters, so the
+  // segmenter is skipped there.
+  if (!allAscii) {
+    let ci = 0;
+    let prevClass: 0 | 1 | 2 = 0;
+    for (const seg of graphemeSegmenter.segment(text)) {
+      const cls = wordWrapClass(seg.segment.codePointAt(0)!);
+      if (
+        ci > 0 &&
+        ((prevClass === 1 && cls === 2) || (prevClass === 2 && cls === 1))
+      ) {
+        gbrk[ci - 1] = true;
+      }
+      prevClass = cls;
+      for (const _cp of seg.segment) ci++;
+    }
+  }
   let col = 0;
-  let prevClass: 0 | 1 | 2 = 0;
   for (let i = 0; i < n; i++) {
     const cp = cps[i].codePointAt(0)!;
-    const cls = wordWrapClass(cp);
-    if (
-      i > 0 &&
-      ((prevClass === 1 && cls === 2) || (prevClass === 2 && cls === 1))
-    ) {
-      gbrk[i - 1] = true;
-    }
     if (
       cp <= 0x7f
         ? WORD_WRAP_BREAK_ASCII.has(cps[i])
@@ -227,7 +241,6 @@ function physicalRowCount(row: string, cols: number): number {
     }
     gcol[i] = col;
     col += widths[i];
-    prevClass = cls;
   }
 
   // The native hard-split cursor is a byte offset advanced only by hard
@@ -395,14 +408,45 @@ function sliceRowToWidth(
 }
 
 /**
+ * Slices `row` to at most `maxRows` painted rows at `cols` columns. The
+ * first cut keeps `maxRows * cols` display columns, but the word wrap
+ * prices that slice higher than `maxRows` whenever a token near half the
+ * row width leaves part of the last budgeted row unused, so the slice is
+ * re-measured and shrunk until it paints inside the budget it is charged
+ * (R15-1). The shrink step always shortens the slice (no codepoint in
+ * either break set measures 0 columns after the detab), so the loop
+ * terminates; the length guard covers a slice whose first codepoint alone
+ * exceeds the width step.
+ */
+function sliceRowToRows(
+  row: string,
+  maxRows: number,
+  cols: number,
+  side: 'head' | 'tail',
+): { text: string; rows: number } {
+  let text = sliceRowToWidth(row, maxRows * cols, side);
+  let rows = physicalRowCount(text, cols);
+  while (rows > maxRows && text.length > 0) {
+    text = sliceRowToWidth(
+      text,
+      Math.max(getCachedStringWidth(text) - cols, 1),
+      side,
+    );
+    rows = physicalRowCount(text, cols);
+  }
+  return { text, rows };
+}
+
+/**
  * Physical-height head window (ink MaxSizedBox overflowDirection 'bottom'
  * parity): the cap counts WRAPPED rows at width - 2 display columns (not
  * UTF-16 code units — wide-character bodies would otherwise be undercounted
  * ~2x and silently never engage the cap), because a
  * single logical row — e.g. a JSON.stringify'd confirmation payload — can
  * wrap to dozens of physical rows that a logical-row window never bounds.
- * An over-budget tail logical row is sliced to its head display columns; the
- * hidden tail is summarized by hiddenTailLinesLabel.
+ * An over-budget tail logical row is sliced to a head piece charged the
+ * height it actually paints; the hidden tail is summarized by
+ * hiddenTailLinesLabel.
  */
 export function headWindowPhysical(
   rows: readonly string[],
@@ -425,8 +469,11 @@ export function headWindowPhysical(
     }
     const remaining = budget - used;
     if (remaining > 0) {
-      visible.push(sliceRowToWidth(row, remaining * cols, 'head'));
-      used = budget;
+      const slice = sliceRowToRows(row, remaining, cols, 'head');
+      if (slice.text) {
+        visible.push(slice.text);
+        used += slice.rows;
+      }
     }
     break;
   }
@@ -468,8 +515,11 @@ export function tailWindowPhysical(
     }
     const remaining = budget - used;
     if (remaining > 0) {
-      visible.unshift(sliceRowToWidth(row, remaining * cols, 'tail'));
-      used = budget;
+      const slice = sliceRowToRows(row, remaining, cols, 'tail');
+      if (slice.text) {
+        visible.unshift(slice.text);
+        used += slice.rows;
+      }
     }
     break;
   }
@@ -869,10 +919,13 @@ export function pendingCardMaxRows(
 
 /**
  * Keeps the head of a description that would wrap past `maxRows` at the
- * given width; the hidden tail is summarized by hiddenTailLinesLabel. Rows
- * are measured in terminal display columns (not UTF-16 code units) so
- * wide-character payloads engage the cap (name + description wrap inside
- * width - STATUS_INDICATOR_WIDTH columns).
+ * given width; the hidden tail is summarized by hiddenTailLinesLabel. The
+ * description word-wraps in the columns the card's flex row leaves after
+ * the status glyph and the tool name, so the bound and the slice are priced
+ * in PAINTED rows at that name-aware share: a column estimate under-counts
+ * a space-separated payload (a token near half the row width leaves half a
+ * row unused) and the card floods the transcript column with no hidden-tail
+ * label (R14-1).
  */
 export function capToolCardDescription(
   description: string,
@@ -882,22 +935,21 @@ export function capToolCardDescription(
 ): { description: string; hiddenRows: number } {
   const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
   const nameCols = getCachedStringWidth(name) + 1;
-  const rows = Math.ceil((nameCols + getCachedStringWidth(description)) / cols);
-  if (rows <= maxRows) return { description, hiddenRows: 0 };
-  const descRows = Math.max(maxRows - 1, 1);
-  // Floor at one full row of columns only where the exact slice is empty:
-  // the sibling division can drop the budget to a single row, where a
-  // display name wider than the row would otherwise zero the slice and
-  // DELETE the description — the only surface carrying an mcp call's
-  // arguments (R7-2), so the name then shares the row with whatever
-  // description fits. Applied unconditionally the floor overrides a
+  // The R7-2 floor: the sibling division can drop the budget to a single
+  // row, where a display name wider than the row would otherwise zero the
+  // description's share and DELETE it — the only surface carrying an mcp
+  // call's arguments — so the description then takes its own full-width
+  // rows below the name. Applied unconditionally the floor overrides a
   // positive slice too, and the card paints name + a full-row description
   // — 2 physical rows against a budget that certified 1 (R11-1).
-  const exactCols = descRows * cols - nameCols;
-  const visibleCols = exactCols > 0 ? exactCols : cols;
+  const descCols = nameCols < cols ? Math.max(cols - nameCols, 10) : cols;
+  const rows = physicalRowsTotal([description], descCols);
+  if (rows <= maxRows) return { description, hiddenRows: 0 };
+  const descRows = Math.max(maxRows - 1, 1);
+  const slice = sliceRowToRows(description, descRows, descCols, 'head');
   return {
-    description: sliceRowToWidth(description, visibleCols, 'head'),
-    hiddenRows: Math.max(rows - descRows, 1),
+    description: slice.text,
+    hiddenRows: Math.max(rows - slice.rows, 1),
   };
 }
 

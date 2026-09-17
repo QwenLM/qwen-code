@@ -485,7 +485,11 @@ describe('OpenTuiToolConfirmation', () => {
     // 20-row collapsed window) but paint 45 (the detabbed indent ends the
     // first word-wrapped row and the 107-column token takes two more), so
     // the window must count the detabbed rows or no hidden-tail label /
-    // ctrl-s affordance appears while rows sit off the viewport.
+    // ctrl-s affordance appears while rows sit off the viewport. The
+    // 60-row height gives the expanded tail window a 40-row budget: the
+    // affordance is offered because expansion genuinely gains rows (5
+    // hidden vs 26), not from the head/tail budget asymmetry (R15-1).
+    mocks.state.dimensions = { width: 110, height: 60 };
     const prompt = Array.from(
       { length: 15 },
       () => '\t' + 'x'.repeat(107),

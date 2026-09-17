@@ -142,17 +142,14 @@ function toolItemRows(
   // description wraps, so the description occupies the name-aware column
   // share the budget itself converts with (messages.tsx's
   // cardDescriptionColumns) — the raw-cols measure under-counts every
-  // capped card that share widens (R10-1).
+  // capped card that share widens (R10-1). And the charge is the
+  // word-wrapped PAINTED height, not a column estimate: the estimate
+  // under-counts a space-separated payload and rowsAbove then certifies
+  // rows the viewport does not have (R14-1).
   const descCols = cardDescriptionColumns(cols, nameCols);
   let rows =
-    Math.max(
-      1,
-      Math.ceil(
-        ((cap.description ? getCachedStringWidth(cap.description) : 0) +
-          getCachedStringWidth(suffix)) /
-          descCols,
-      ),
-    ) + (cap.hiddenRows > 0 ? 1 : 0);
+    Math.max(1, physicalRowsTotal([cap.description + suffix], descCols)) +
+    (cap.hiddenRows > 0 ? 1 : 0);
   // ToolCardBody, indented by the same status column.
   if (item.todos) {
     rows += item.todos.reduce(

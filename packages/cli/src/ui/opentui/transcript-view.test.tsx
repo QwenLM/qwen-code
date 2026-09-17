@@ -334,17 +334,20 @@ describe('OpenTuiTranscriptView', () => {
     // before dividing. If the settled 5-row floor lifted the divided bound
     // back up, eight cards would paint 8*5/0.7 + 14 ≈ 71 physical rows
     // against the 80-26-5 = 49-row region and push the one mounted dialog
-    // off the alt screen. N8_MARKER at ~351 sits past the 3-row budget's
-    // 196 visible columns but inside the lifted floor's 412, so only the
-    // released floor shows it; HEAD_MARKER at ~150 sits inside the 196 but
-    // past the 1-row floor's 88, so an over-yielding card fails too. (An
-    // under-yield to exactly 4 rows — 304 columns — hides N8_MARKER as
-    // well; the arithmetic pins in messages.test.tsx discriminate that.)
+    // off the alt screen. The painted-row cap slices this break-poor JSON
+    // to 88 columns at the 3-row budget (the '{' break row leaves the
+    // second row short, so the shrink step drops from 176 to 88) and to
+    // 264 columns at the lifted 5-row floor: N8_MARKER at ~150 sits past
+    // the budget's 88 but inside the lifted floor's 264, so only the
+    // released floor shows it, while HEAD_MARKER at ~60 is inside even the
+    // budgeted slice. (The 1-row floor's slice coincides at 88 columns for
+    // this payload, so the under-yield side stays pinned by the arithmetic
+    // in messages.test.tsx.)
     const description =
       '{"content":"' +
-      'h'.repeat(138) +
+      'h'.repeat(48) +
       'HEAD_MARKER' +
-      'a'.repeat(190) +
+      'a'.repeat(79) +
       'N8_MARKER' +
       'b'.repeat(300) +
       '"}';
@@ -385,10 +388,11 @@ describe('OpenTuiTranscriptView', () => {
     // DELETES the description node, and the card is the only surface
     // carrying the call's arguments (the mcp dialog shows just the server
     // and tool names). Terminal height is not part of the binding condition
-    // (nameCols >= cols is what zeroes the slice), so the 24-row viewport
-    // is incidental. The one-row floor keeps a full row of description
-    // columns: the marker survives, and the label still counts 7 hidden
-    // rows — a lifted sibling floor (5 rows) would read '... last 4'.
+    // (nameCols >= cols is what zeroes the share), so the 24-row viewport
+    // is incidental. The floor gives the description its own full-width
+    // rows below the name: the marker survives the 34-column slice, and the
+    // label counts the 6 painted rows still hidden — a lifted sibling
+    // floor (5 rows) would read '... last 3'.
     const description = 'ARGS_MARKER ' + 'x'.repeat(200);
     const parked = (id: string) =>
       toolItem({
@@ -407,7 +411,7 @@ describe('OpenTuiTranscriptView', () => {
     );
     const text = container.textContent ?? '';
     expect(text).toContain('ARGS_MARKER');
-    expect(text).toContain('... last 7 lines hidden ...');
+    expect(text).toContain('... last 6 lines hidden ...');
   });
 
   it('memoizes the pending-card measure across sibling re-renders', () => {
@@ -562,12 +566,13 @@ describe('OpenTuiTranscriptView', () => {
 
   it('drops the pending budget when the call resolves or completes', () => {
     // A stale memo would keep the pending-priced cap after the call leaves
-    // awaiting_approval: the 34-row budget shows the whole ~3k-column
-    // payload, while the settled 5-row cap cuts it past column 412. Each
-    // rerender parks a fresh sibling in the same batch so the sibling count
-    // stays 1 and only the flipped field changes — otherwise the count
-    // delta masks a dropped confirm/done dep.
-    const description = '{"content":"' + 'a'.repeat(3000) + 'TAIL"}';
+    // awaiting_approval: the 34-row budget shows the whole payload (32
+    // painted rows at the name-aware 88 columns), while the settled 5-row
+    // cap cuts it past column 264. Each rerender parks a fresh sibling in
+    // the same batch so the sibling count stays 1 and only the flipped
+    // field changes — otherwise the count delta masks a dropped
+    // confirm/done dep.
+    const description = '{"content":"' + 'a'.repeat(2700) + 'TAIL"}';
     const parked = (id: string) =>
       toolItem({
         id,
@@ -997,9 +1002,9 @@ describe('OpenTuiTranscriptView', () => {
     // The card's flex row spends the 41-column mcp name before the
     // description wraps, so the description paints in the name-aware share
     // of the row — the budget's own wrap ratio — not the raw full-width
-    // basis: a 3000-column args JSON capped to 390 visible columns paints
-    // ceil(390 / 66) = 6 rows plus the hidden-tail label, not the 4+1 the
-    // raw-cols measure charged.
+    // basis: a 3000-column args JSON capped to 264 visible columns paints
+    // 4 rows at the 66-column share plus the hidden-tail label, not the
+    // 4+1 the raw-cols measure charged.
     const callsBefore = mocks.pendingSpy.mock.calls.length;
     render(
       <OpenTuiTranscriptView
@@ -1028,7 +1033,7 @@ describe('OpenTuiTranscriptView', () => {
       .map((call) => call[6]);
     expect(rowsAboveArgs.length).toBeGreaterThan(0);
     for (const rowsAbove of rowsAboveArgs) {
-      expect(rowsAbove).toBe(7);
+      expect(rowsAbove).toBe(5);
     }
 
     // The same conversion prices a description UNDER the cap: 300 columns
