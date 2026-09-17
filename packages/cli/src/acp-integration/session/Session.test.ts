@@ -4827,6 +4827,98 @@ describe('Session', () => {
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: 'no pin',
+      settingsApprovalMode: undefined,
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: false,
+      expected: 'auto',
+    },
+    {
+      name: 'plan pin',
+      settingsApprovalMode: 'plan',
+      effectiveMode: ApprovalMode.PLAN,
+      restricted: false,
+      expected: 'plan',
+    },
+    {
+      name: 'default pin',
+      settingsApprovalMode: 'default',
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: false,
+      expected: 'default',
+    },
+    {
+      name: 'restricted',
+      settingsApprovalMode: 'plan',
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: true,
+      expected: 'default',
+    },
+  ])(
+    'dispatches a per-run scheduled task with $name → $expected',
+    async ({
+      settingsApprovalMode,
+      effectiveMode,
+      restricted,
+      expected,
+    }) => {
+      const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              id: string;
+              prompt: string;
+              cronExpr: string;
+              lastFiredAt: number;
+              sessionMode: 'per_run';
+            }) => void,
+          ) => {
+            callback({
+              id: 'task-1',
+              prompt: 'review the next PR',
+              cronExpr: '0 * * * *',
+              lastFiredAt: 123,
+              sessionMode: 'per_run',
+            });
+          },
+        ),
+        stop: vi.fn(),
+        annotateRunSession,
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(effectiveMode);
+      mockConfig.isSafeMode = vi.fn().mockReturnValue(restricted);
+      mockConfig.getBareMode = vi.fn().mockReturnValue(false);
+      if (settingsApprovalMode !== undefined) {
+        Object.assign(mockSettings.merged, {
+          tools: { approvalMode: settingsApprovalMode },
+        });
+      }
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'child-session',
+      });
+
+      session.startCronScheduler();
+
+      await vi.waitFor(() => {
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          SERVE_CONTROL_EXT_METHODS.createSubSession,
+          expect.objectContaining({
+            approvalMode: expected,
+            callerSessionId: 'test-session-id',
+          }),
+        );
+      });
+    },
+  );
+
   it('runs a per-run scheduled task in the task session when the daemon cannot create a fresh one', async () => {
     const annotateRunSession = vi.fn().mockResolvedValue(undefined);
     const scheduler = {
@@ -31120,12 +31212,8 @@ describe('Session', () => {
     });
 
     describe('approval mode session/request_permission', () => {
-      function mockWriteFileTool(
-        execute: ReturnType<typeof vi.fn>,
-        onConfirm: ReturnType<typeof vi.fn> = vi
-          .fn()
-          .mockResolvedValue(undefined),
-      ) {
+      function mockWriteFileTool(execute: ReturnType<typeof vi.fn>) {
+        const onConfirm = vi.fn().mockResolvedValue(undefined);
         return {
           name: core.ToolNames.WRITE_FILE,
           kind: core.Kind.Edit,
@@ -31149,12 +31237,8 @@ describe('Session', () => {
         };
       }
 
-      function mockShellTool(
-        execute: ReturnType<typeof vi.fn>,
-        onConfirm: ReturnType<typeof vi.fn> = vi
-          .fn()
-          .mockResolvedValue(undefined),
-      ) {
+      function mockShellTool(execute: ReturnType<typeof vi.fn>) {
+        const onConfirm = vi.fn().mockResolvedValue(undefined);
         return {
           name: core.ToolNames.SHELL,
           kind: core.Kind.Execute,

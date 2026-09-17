@@ -25,6 +25,7 @@ import {
   isValidCronTaskRoutingId,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
+  type ApprovalMode,
 } from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
@@ -2147,7 +2148,9 @@ export class BridgeClient implements Client {
       completion,
       ...(typeof model === 'string' ? { model } : {}),
       ...(typeof groupId === 'string' ? { groupId } : {}),
-      ...(typeof approvalMode === 'string' ? { approvalMode } : {}),
+      ...(typeof approvalMode === 'string'
+        ? { approvalMode: approvalMode as ApprovalMode }
+        : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
       ...source,
       callerSessionId,

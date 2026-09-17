@@ -20,6 +20,12 @@ import {
   rehydrateScheduledTaskSessions,
 } from './scheduled-task-keepalive.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import { resetHomeEnvBootstrapForTesting } from '../config/settings.js';
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
 
 function task(over: Partial<DurableCronTask>): DurableCronTask {
   return {
@@ -38,6 +44,12 @@ describe('scheduled-task keepalive', () => {
   let workspace: string;
   let beats: string[];
   let loads: string[];
+  const originalQwenHome = process.env['QWEN_HOME'];
+  const originalQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+  const originalSystemSettings = process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+  const originalSystemDefaults = process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+  const originalSafeMode = process.env['QWEN_CODE_SAFE_MODE'];
+  const originalBareMode = process.env['QWEN_CODE_SIMPLE'];
   const bridge = {
     recordHeartbeat: (id: string) => {
       beats.push(id);
@@ -63,6 +75,20 @@ describe('scheduled-task keepalive', () => {
     scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'sched-keepalive-'));
     workspace = path.join(scratch, 'workspace');
     await fsp.mkdir(workspace, { recursive: true });
+    await fsp.mkdir(path.join(scratch, 'qwen-home'), { recursive: true });
+    process.env['QWEN_HOME'] = path.join(scratch, 'qwen-home');
+    process.env['QWEN_RUNTIME_DIR'] = path.join(scratch, 'runtime');
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+      scratch,
+      'system-settings.json',
+    );
+    process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+      scratch,
+      'system-defaults.json',
+    );
+    delete process.env['QWEN_CODE_SAFE_MODE'];
+    delete process.env['QWEN_CODE_SIMPLE'];
+    resetHomeEnvBootstrapForTesting();
     Storage.setRuntimeBaseDir(scratch);
     beats = [];
     loads = [];
@@ -70,6 +96,13 @@ describe('scheduled-task keepalive', () => {
 
   afterEach(async () => {
     Storage.setRuntimeBaseDir(null);
+    restoreEnv('QWEN_HOME', originalQwenHome);
+    restoreEnv('QWEN_RUNTIME_DIR', originalQwenRuntimeDir);
+    restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', originalSystemSettings);
+    restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', originalSystemDefaults);
+    restoreEnv('QWEN_CODE_SAFE_MODE', originalSafeMode);
+    restoreEnv('QWEN_CODE_SIMPLE', originalBareMode);
+    resetHomeEnvBootstrapForTesting();
     await fsp.rm(scratch, { recursive: true, force: true });
   });
 
@@ -700,6 +733,7 @@ describe('scheduled-task keepalive', () => {
       sessionScope: 'thread',
       sourceType: 'scheduled_task',
       sourceId: 'unbound-1',
+      approvalMode: 'auto',
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');

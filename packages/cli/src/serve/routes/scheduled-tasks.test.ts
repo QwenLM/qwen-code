@@ -35,6 +35,7 @@ import type {
 import { removeTasksForSessions } from '../scheduled-task-session-lifecycle.js';
 import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
+import { resetHomeEnvBootstrapForTesting } from '../../config/settings.js';
 
 const stderrLines = vi.hoisted(() => [] as string[]);
 
@@ -65,6 +66,7 @@ interface StubBridge {
     parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
+    approvalMode?: string;
   }): Promise<{ sessionId: string; modelApplied?: boolean }>;
   sendPrompt(
     sessionId: string,
@@ -108,6 +110,7 @@ interface StubBridge {
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
   spawnParents: Array<string | undefined>;
   spawnModels: Array<string | undefined>;
+  spawnApprovalModes: Array<string | undefined>;
   prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
   persisted: string[];
@@ -129,6 +132,7 @@ function makeStubBridge(): StubBridge {
     spawnSources: [],
     spawnParents: [],
     spawnModels: [],
+    spawnApprovalModes: [],
     prompts: [],
     closed: [],
     persisted: [],
@@ -146,6 +150,7 @@ function makeStubBridge(): StubBridge {
       bridge.spawnScopes.push(req.sessionScope);
       bridge.spawnParents.push(req.parentSessionId);
       bridge.spawnModels.push(req.modelServiceId);
+      bridge.spawnApprovalModes.push(req.approvalMode);
       bridge.spawnSources.push({
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
         ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
@@ -230,6 +235,35 @@ interface Harness {
   channelDeliveryAuthorizations: ChannelDeliveryAuthorizationStore;
 }
 
+const originalQwenHome = process.env['QWEN_HOME'];
+const originalQwenRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+const originalSystemSettings = process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+const originalSystemDefaults = process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'];
+const originalSafeMode = process.env['QWEN_CODE_SAFE_MODE'];
+const originalBareMode = process.env['QWEN_CODE_SIMPLE'];
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
+function isolateSettingsHome(scratch: string): void {
+  const qwenHome = path.join(scratch, 'qwen-home');
+  process.env['QWEN_HOME'] = qwenHome;
+  process.env['QWEN_RUNTIME_DIR'] = path.join(scratch, 'runtime');
+  process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = path.join(
+    scratch,
+    'system-settings.json',
+  );
+  process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH'] = path.join(
+    scratch,
+    'system-defaults.json',
+  );
+  delete process.env['QWEN_CODE_SAFE_MODE'];
+  delete process.env['QWEN_CODE_SIMPLE'];
+  resetHomeEnvBootstrapForTesting();
+}
+
 async function makeHarness(
   runtimeTrusted?: boolean,
   generationGuard?: WorkspaceRuntime['generationGuard'],
@@ -237,6 +271,8 @@ async function makeHarness(
   const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'sched-route-'));
   const workspace = path.join(scratch, 'workspace');
   await fsp.mkdir(workspace, { recursive: true });
+  await fsp.mkdir(path.join(scratch, 'qwen-home'), { recursive: true });
+  isolateSettingsHome(scratch);
   // The durable tasks file lands under the runtime base dir, not the real
   // ~/.qwen — redirect it into the scratch dir for the duration of the test.
   Storage.setRuntimeBaseDir(scratch);
@@ -287,6 +323,13 @@ async function makeHarness(
 
 async function teardown(h: Harness): Promise<void> {
   Storage.setRuntimeBaseDir(null);
+  restoreEnv('QWEN_HOME', originalQwenHome);
+  restoreEnv('QWEN_RUNTIME_DIR', originalQwenRuntimeDir);
+  restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', originalSystemSettings);
+  restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', originalSystemDefaults);
+  restoreEnv('QWEN_CODE_SAFE_MODE', originalSafeMode);
+  restoreEnv('QWEN_CODE_SIMPLE', originalBareMode);
+  resetHomeEnvBootstrapForTesting();
   await fsp.rm(h.scratch, { recursive: true, force: true });
 }
 
@@ -489,6 +532,8 @@ describe('scheduled-tasks routes', () => {
     const childSessionId = h.bridge.spawned[1]!;
     expect(childSessionId).not.toBe(controllerSessionId);
     expect(h.bridge.spawnParents[1]).toBe(controllerSessionId);
+    expect(h.bridge.spawnApprovalModes[0]).toBe('auto');
+    expect(h.bridge.spawnApprovalModes[1]).toBe('auto');
     expect(h.bridge.spawnSources[1]).toEqual({
       sourceType: 'default',
       sourceId: `scheduled_task_run:${created.body.id}`,
@@ -518,6 +563,27 @@ describe('scheduled-tasks routes', () => {
     const stored = await readCronTasks(h.workspace);
     expect(stored[0]?.sessionMode).toBe('per_run');
     expect(stored[0]?.runs?.at(-1)?.sessionId).toBe(childSessionId);
+  });
+
+  it('honors a workspace plan pin on unattended scheduled-task spawns', async () => {
+    await fsp.mkdir(path.join(h.workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(h.workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ tools: { approvalMode: 'plan' } }),
+      'utf8',
+    );
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+    });
+    expect(created.status).toBe(201);
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+    expect(run.status).toBe(200);
+    expect(h.bridge.spawnApprovalModes[0]).toBe('plan');
+    expect(h.bridge.spawnApprovalModes[1]).toBe('plan');
   });
 
   it('applies the saved model and group to each manual per-run session', async () => {
@@ -853,6 +919,7 @@ describe('scheduled-tasks routes', () => {
     const id = created.body.id as string;
     const spawnOrAttach = h.bridge.spawnOrAttach.bind(h.bridge);
     vi.spyOn(h.bridge, 'spawnOrAttach').mockImplementationOnce(async (req) => {
+      expect(req.approvalMode).toBe('auto');
       const child = await spawnOrAttach(req);
       expect(await readCronTasks(h.workspace)).toEqual([]);
       expect(await removeCronTasks(h.workspace, [id])).toBe(0);

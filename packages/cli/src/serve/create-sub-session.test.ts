@@ -853,6 +853,70 @@ describe('sub-session launcher', () => {
     ]);
   });
 
+  it('forwards approvalMode into standalone createChildWithInitialPrompt', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+    });
+    const createChildWithInitialPrompt = vi.fn(
+      async (
+        request: {
+          sessionId: string;
+          parentSessionId: string;
+          promptId: string;
+          modelServiceId?: string;
+          approvalMode?: string;
+        },
+        prompt: string,
+      ) => ({
+        session: {
+          sessionId: request.sessionId,
+          workspaceCwd: WS,
+          attached: false,
+          sourceType: 'standalone',
+          sourcePersisted: true,
+          parentSessionPersisted: true,
+          modelApplied: false,
+        },
+        projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+        workingDirectory: { state: 'ready' as const },
+        initialPrompt: {
+          promptId: request.promptId,
+          lastEventId: 37,
+          turn: new Promise<never>(() => {}),
+        },
+        prompt,
+      }),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        resume: vi.fn(),
+        continueSession: vi.fn(async (_sessionId, dispatch) =>
+          dispatch({ bridge: fake.bridge } as never, 'caller-standalone'),
+        ),
+      }),
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'standalone child task',
+      completion: 'sent',
+      approvalMode: 'auto',
+      callerSessionId: 'caller-standalone',
+    });
+
+    expect(createChildWithInitialPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parentSessionId: 'caller-standalone',
+        approvalMode: 'auto',
+        promptId: expect.any(String),
+      }),
+      'standalone child task',
+    );
+    expect(fake.spawns).toEqual([]);
+  });
+
   it('preserves standalone scheduled-task model selection failures', async () => {
     const fake = makeFakeBridge({
       callerSourceTypes: { 'caller-standalone': 'standalone' },

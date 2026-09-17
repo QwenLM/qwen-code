@@ -710,12 +710,15 @@ export interface CreateSubSessionInfo {
   /** Optional named group for a scheduled-task run session. */
   groupId?: string;
   /**
-   * Optional approval mode applied at spawn (same values as
-   * `tools.approvalMode` / `session/set_mode`). Unattended scheduled-task
-   * fires must pass an explicit mode — typically `auto` — so the child does
-   * not inherit an ask-everything default nobody can answer.
+   * Optional approval mode applied at spawn. Accepts canonical
+   * `session/set_mode` ids (`ApprovalMode` enum values: `plan`, `default`,
+   * `auto-edit`, `auto`, `yolo`). This is not a free-form
+   * `tools.approvalMode` spelling — aliases such as `auto_edit` are rejected
+   * at the `bridgeClient` boundary (`KNOWN_APPROVAL_MODES`). Unattended
+   * scheduled-task fires must pass an explicit mode so the child does not
+   * inherit an ask-everything default nobody can answer.
    */
-  approvalMode?: string;
+  approvalMode?: ApprovalMode;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
   /** Optional immutable creator attribution for the fresh session. */

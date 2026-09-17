@@ -8181,10 +8181,13 @@ describe('resolveSubagentApprovalMode', () => {
     ).toBe(PermissionMode.AutoEdit);
   });
 
-  it('should default to auto-edit when parent is default and folder is trusted', () => {
+  it('should default to auto when parent is default and folder is trusted', () => {
+    // Auto (classifier-mediated), not AutoEdit: an ACP parent now boots
+    // DEFAULT, and AutoEdit would skip the classifier then hard-deny
+    // background subagent non-read-only shell.
     expect(
       resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, true),
-    ).toBe(PermissionMode.AutoEdit);
+    ).toBe(PermissionMode.Auto);
   });
 
   it('should default to parent mode when parent is default and folder is untrusted', () => {

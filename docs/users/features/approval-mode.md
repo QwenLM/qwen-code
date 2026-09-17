@@ -137,11 +137,7 @@ qwen --approval-mode default
 
 **Run "headless" queries in Ask Permissions Mode**
 
-Headless CLI commands (`qwen --prompt …` without `--acp`) default to **Auto Mode**, not Ask Permissions. To force Ask Permissions:
-
-```
-qwen --approval-mode default --prompt "Analyze this code for potential bugs"
-```
+Headless CLI commands (`qwen --prompt …` without `--acp`) default to **Auto Mode**, not Ask Permissions. Headless runs cannot prompt: with `--approval-mode default` the write and execute tools are denied outright unless you allowlist them (`--allowed-tools` or `permissions.allow`). Use `--acp` (or `--input-format stream-json`) when a consumer must answer `session/request_permission`.
 
 ACP hosts that want Auto after boot can call `session/set_mode` with `auto` / `auto-edit` / `yolo`, or launch with `--approval-mode`.
 
