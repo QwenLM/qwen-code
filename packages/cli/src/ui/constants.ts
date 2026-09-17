@@ -67,3 +67,10 @@ export const SPINNER_FRAMES = [
 ];
 
 export const SPINNER_INTERVAL_MS = 80;
+
+/**
+ * The frame drawn while a call is parked on a confirmation: ink's
+ * `LoadingIndicator` passes it as `nonRespondingDisplay`, so both renderers stop
+ * animating and show this one instead. Shared so the value cannot drift.
+ */
+export const WAITING_SPINNER_FRAME = '⠏';
