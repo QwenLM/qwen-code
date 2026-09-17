@@ -50,6 +50,32 @@ afterEach(() => {
 });
 
 describe('AddRemoteWorkspaceDialog', () => {
+  it('uses the original local or remote workspace location choice', () => {
+    config.start.mockReturnValue(true);
+    mount();
+
+    expect(document.body.textContent).toContain('Workspace location');
+    expect(
+      document.querySelector<HTMLInputElement>('input[value="remote"]')
+        ?.checked,
+    ).toBe(true);
+
+    act(() => {
+      document.querySelector<HTMLInputElement>('input[value="local"]')!.click();
+    });
+    expect(document.querySelector('#remote-workspace-host-address')).toBeNull();
+
+    act(() => {
+      document
+        .querySelector<HTMLButtonElement>('button[type="submit"]')!
+        .click();
+    });
+    expect(config.start).toHaveBeenCalledWith(
+      window.location.origin,
+      undefined,
+    );
+  });
+
   it('starts the remote folder flow with the selected server credentials', () => {
     config.start.mockReturnValue(true);
     mount();
