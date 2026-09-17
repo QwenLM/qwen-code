@@ -82,18 +82,12 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
     );
   }
   const color = goalCardThemeColor(view.color);
-  // This renderer writes straight to the terminal, so both lines below are
-  // sanitized here: a pause reason can embed a raw provider error, and the
-  // checkpoint diagnostic, though cleaned where it is written, can come back
-  // from a journal record verbatim.
+  // This renderer writes straight to the terminal, so the reason is
+  // sanitized here: a pause reason can embed a raw provider error.
   const reason =
     view.reason === undefined
       ? undefined
       : sanitizeTerminalText(view.reason).trim();
-  const checkpoint =
-    view.checkpoint === undefined
-      ? undefined
-      : sanitizeTerminalText(view.checkpoint);
 
   return (
     <Box flexDirection="row">
@@ -118,11 +112,6 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
         {reason ? (
           <Text color={theme.text.secondary} wrap="wrap">
             Reason: {reason}
-          </Text>
-        ) : null}
-        {checkpoint ? (
-          <Text color={theme.status.warning} wrap="wrap">
-            {checkpoint}
           </Text>
         ) : null}
       </Box>

@@ -12,7 +12,6 @@
  * terminal sanitizes it.
  */
 
-import { goalCheckpointHealthLine } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
 import { ICON } from '../constants.js';
 import { formatTokenCount } from '../statusLinePresets.js';
 import { formatDuration } from './formatters.js';
@@ -28,8 +27,6 @@ export type GoalSnapshotLike = {
     activeTimeBudgetMs?: number;
     tokensUsed?: number;
     tokenBudget?: number;
-    checkpointStalls?: number;
-    lastCheckpointFailure?: string;
     lastReason?: string;
   } | null;
   activity?: string;
@@ -64,8 +61,6 @@ export type GoalCardView =
       subtitle: string | null;
       objective: string;
       reason?: string;
-      /** Checkpoint health, when goalCheckpointHealthVisible shows it. */
-      checkpoint?: string;
     };
 
 /** Computes the GoalStateCard view (icon/title/subtitle/objective/reason)
@@ -150,11 +145,6 @@ export function describeGoalCard(
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
       ? goal.lastReason?.trim()
       : undefined;
-  // Checkpoint health, worded by core like the ink card's; transcript-view
-  // sanitizes the line when it renders it, so no cleaner is passed here.
-  const checkpointLine = goalCheckpointHealthLine(goal);
-  const checkpoint =
-    checkpointLine === undefined ? undefined : `Checkpoint: ${checkpointLine}`;
   return {
     state: 'card',
     icon: lifecycle.icon,
@@ -163,7 +153,6 @@ export function describeGoalCard(
     subtitle: stats.length > 0 ? stats.join(' · ') : null,
     objective: goal.objective ?? '',
     reason,
-    ...(checkpoint ? { checkpoint } : {}),
   };
 }
 
