@@ -63,17 +63,6 @@ const SOURCE_EXTENSIONS = new Set([
   '.cts',
 ]);
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git']);
-// Build artifacts that a build step stages inside a protected root. Each is
-// git-ignored, so it can hold no committed source; a skipped-directory name
-// found under one of these is a product of the build, not hidden code.
-const STAGED_ARTIFACT_ROOTS = [
-  // The Browser Use build copies the bundled skill's runtime (playwright-core
-  // and the SDK bundle, node_modules included) next to its SKILL.md.
-  join(CORE_SRC, 'skills', 'bundled', 'browser-use', 'runtime'),
-];
-function isWithin(path, roots) {
-  return roots.some((root) => path === root || path.startsWith(root + sep));
-}
 // vitest methods that load (or reconstruct) the named module for real —
 // vi.mock registers a factory but still resolves the module path, and
 // doMock/importActual/importMock load it outright.
@@ -89,10 +78,7 @@ const VI_MODULE_METHODS = new Set([
  * is trust must not shrink silently: unlistable directories and
  * skipped-directory names (node_modules/dist/.git — none belong inside a
  * protected source root, and content hidden there would escape the scan)
- * are collected as diagnostics for the caller to fail on. The one exception
- * is a directory under one of `stagedRoots`: those are git-ignored build
- * artifacts staged inside a protected root (see STAGED_ARTIFACT_ROOTS). They
- * are not source, cannot hold committed code, and are not walked at all.
+ * are collected as diagnostics for the caller to fail on.
  *
  * Symlinks fail closed. `checkRule` resolves a file's relative imports from
  * the path the file was reached at, but a symlink's bytes live wherever the
@@ -103,7 +89,7 @@ const VI_MODULE_METHODS = new Set([
  * Because symlinks are never followed, traversal cannot cycle or leave the
  * root.
  */
-function listSourceFiles(root, stagedRoots = STAGED_ARTIFACT_ROOTS) {
+function listSourceFiles(root) {
   const files = [];
   const unreadableDirs = [];
   const symlinks = [];
@@ -123,7 +109,6 @@ function listSourceFiles(root, stagedRoots = STAGED_ARTIFACT_ROOTS) {
         continue;
       }
       if (entry.isDirectory()) {
-        if (isWithin(full, stagedRoots)) continue;
         if (SKIP_DIRS.has(entry.name)) {
           skippedDirs.push(full);
         } else {

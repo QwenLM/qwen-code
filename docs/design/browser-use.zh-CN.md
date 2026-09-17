@@ -41,7 +41,7 @@ flowchart TB
 
 Browser Use 以内置 skill 及其运行时资源随 Qwen Code 一起发布，无需单独安装 Browser Use 运行时包或第二个 Qwen 扩展，复用现有的 Qwen Chrome 扩展。Skill 的 `runtime/` 目录包含 Browser SDK、Native Host 和固定版本的 Playwright 依赖。Skill 向现有 Node REPL 注册 `runtime/node_modules` 并导入 `runtime/index.js`；CLI 本身不执行浏览器逻辑。kernel 在没有 Node 全局对象的隔离 realm 中执行该导入，因此运行时 bundle 在开头通过 `createRequire` 自行绑定 `process`；构建时的加载检查运行在主 realm，无法发现缺失的绑定，故由一个基于 kernel 的测试固定该行为。源码开发、转译构建和发布的 CLI 使用同一布局。仍需配置通用 Node REPL MCP server，并在浏览器安装 Qwen Chrome 扩展。内置资源不会在 CLI 启动时连接 Chrome；SDK 在首次使用时才连接。
 
-Browser Use 包编译成功后会为源码开发准备运行时资源，正常安装的 `prepare` hook 会执行该构建。修改 Browser Use 源码或依赖后，运行 `npm run build --workspace=@qwen-code/browser-use` 刷新运行时。`npm run dev` 复用这些产物，不执行构建或复制；CLI 和 Core 仍直接运行 TypeScript 源码。若运行时缺失，调用 skill 时已有的 setup 检查会报告资源不完整。
+没有任何构建步骤会把该运行时写进源码树：打包步骤把它复制到 `dist/bundled/browser-use/runtime` 供发布的 CLI 使用；`npm run dev` 把同样的文件复制到源码 `SKILL.md` 旁边（git 忽略的位置），因为只有开发模式会从源码树读取内置 skill；正常安装的 `prepare` hook 负责构建这些副本的来源包。修改 Browser Use 源码或依赖后，运行 `npm run build --workspace=@qwen-code/browser-use` 并重新启动 `npm run dev` 以刷新开发副本；CLI 和 Core 仍直接运行 TypeScript 源码。若运行时缺失，调用 skill 时已有的 setup 检查会报告资源不完整。
 
 Browser Use 默认对模型可用，由模型根据用户任务选择。用户可通过 `/skills` 或 `skills.disabled` 禁用，使用与 Computer Use 相同的控制方式。禁用的 skill 不参与模型发现和 skill 调用。这是 Computer Use 也使用的通用 skill 机制，不是浏览器权限边界：禁用 skill 不会移除已有对话中的指令，也不会断开现有 SDK 会话。
 

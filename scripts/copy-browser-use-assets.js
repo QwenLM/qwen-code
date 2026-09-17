@@ -9,6 +9,15 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * Copy the built Browser Use runtime (SDK bundle, Native Host, its setup
+ * script, NOTICE and the pinned playwright-core) into `skillDir/runtime`.
+ *
+ * Two callers: `copy_bundle_assets.js` stages it into `dist/bundled` for the
+ * shipped CLI, and `scripts/dev.js` (or running this file directly) stages it
+ * next to the source SKILL.md for `npm run dev`. No build step writes into the
+ * source tree; the dev copy is git-ignored.
+ */
 export function copyBrowserUseAssets(root, skillDir) {
   const browserUseDir = path.join(root, 'packages', 'browser-use');
   const runtimeFiles = [

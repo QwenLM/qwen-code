@@ -28,6 +28,7 @@ import {
   readFileSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
+import { copyBrowserUseAssets } from './copy-browser-use-assets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -56,6 +57,23 @@ if (existsSync(userDocsTarget) && !existsSync(qcHelperDocsLink)) {
   } catch {
     // Symlink may fail on some systems; non-critical for dev
   }
+}
+
+// Stage the Browser Use skill runtime next to its SKILL.md for dev mode. The
+// bundle step does the same into dist/bundled; only dev mode reads the skill
+// from the source tree, so this copy exists nowhere else (it is git-ignored,
+// and no build step writes it). It needs the built browser-use package.
+try {
+  copyBrowserUseAssets(
+    root,
+    join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'browser-use'),
+  );
+} catch (error) {
+  console.warn(
+    `Browser Use skill runtime not staged for dev mode: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
 }
 
 // Entry point for the CLI

@@ -15,21 +15,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // global. build.mjs's own load check imports dist/index.js in Node's main
 // realm and therefore cannot see that difference, so this test runs the
 // skill's first cell, verbatim from SKILL.md, through the real kernel built in
-// packages/node-repl/dist against the runtime staged by the browser-use build.
+// packages/node-repl/dist against a runtime it stages itself, the way the
+// bundle step and `npm run dev` do, into a temporary skill directory.
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
-const skillBase = path.join(
+const skillFile = path.join(
   repoRoot,
-  'packages/core/src/skills/bundled/browser-use',
+  'packages/core/src/skills/bundled/browser-use/SKILL.md',
 );
-const skillFile = path.join(skillBase, 'SKILL.md');
-const stagedModules = path.join(skillBase, 'runtime/node_modules');
+const browserUseDist = path.join(repoRoot, 'packages/browser-use/dist');
 const nodeReplDist = path.join(repoRoot, 'packages/node-repl/dist');
 const requiredArtifacts = [
   path.join(nodeReplDist, 'kernel-manager.js'),
   path.join(nodeReplDist, 'security-policy.js'),
   path.join(nodeReplDist, 'runtime/kernel.mjs'),
-  path.join(skillBase, 'runtime/index.js'),
-  path.join(stagedModules, 'playwright-core/package.json'),
+  path.join(browserUseDist, 'index.js'),
+  path.join(browserUseDist, 'native-host.js'),
 ];
 
 interface KernelOutcome {
@@ -57,7 +57,11 @@ interface SecurityPolicyModule {
   NodeReplSecurityPolicy: { default(): unknown };
 }
 
-function firstSkillCell(): string {
+interface CopyAssetsModule {
+  copyBrowserUseAssets(root: string, skillDir: string): void;
+}
+
+function firstSkillCell(skillBase: string): string {
   const skill = fs.readFileSync(skillFile, 'utf8');
   const cell = /```js\n([\s\S]*?)```/.exec(skill)?.[1];
   if (cell === undefined) throw new Error('SKILL.md has no ```js cell');
@@ -88,10 +92,17 @@ describe('bundled skill runtime inside the node_repl kernel', () => {
     const { NodeReplSecurityPolicy } = (await import(
       pathToFileURL(path.join(nodeReplDist, 'security-policy.js')).href
     )) as SecurityPolicyModule;
+    const { copyBrowserUseAssets } = (await import(
+      pathToFileURL(path.join(repoRoot, 'scripts/copy-browser-use-assets.js'))
+        .href
+    )) as CopyAssetsModule;
 
     const tmpRootDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'qwen-browser-use-kernel-'),
     );
+    const skillBase = path.join(tmpRootDir, 'skill');
+    copyBrowserUseAssets(repoRoot, skillBase);
+    const stagedModules = path.join(skillBase, 'runtime/node_modules');
     // A socket whose grandparent directory does not exist makes the bridge
     // fail deterministically, after the runtime has already loaded and read
     // process.env/process.platform, without touching the user's Chrome.
@@ -109,7 +120,7 @@ describe('bundled skill runtime inside the node_repl kernel', () => {
     try {
       await manager.addModuleRoot(stagedModules);
       const outcome = await manager.exec({
-        code: firstSkillCell(),
+        code: firstSkillCell(skillBase),
         timeoutMs: 60_000,
       });
 

@@ -59,13 +59,16 @@ layout. The generic Node REPL MCP server must be configured, and the Qwen
 Chrome extension must be installed in the browser. Bundling does not connect
 to Chrome at CLI startup; the SDK connects when first used.
 
-The Browser Use package build stages this runtime for source development after
-compilation succeeds. The normal installation `prepare` hook runs that build.
-After changing Browser Use sources or dependencies, run
-`npm run build --workspace=@qwen-code/browser-use` to refresh the runtime.
-`npm run dev` reuses these artifacts without building or copying them. CLI and
-Core continue to run directly from TypeScript source. If the runtime is missing,
-the skill's existing setup check reports the incomplete runtime when invoked.
+No build step writes this runtime into the source tree. The bundle step copies
+it into `dist/bundled/browser-use/runtime` for the shipped CLI, and `npm run
+dev` copies the same files next to the source `SKILL.md` (a git-ignored
+location) because only development mode reads bundled skills from the source
+tree; the normal installation `prepare` hook builds the package those copies
+come from. After changing Browser Use sources or dependencies, run
+`npm run build --workspace=@qwen-code/browser-use` and start `npm run dev`
+again to refresh the development copy. CLI and Core continue to run directly
+from TypeScript source. If the runtime is missing, the skill's existing setup
+check reports the incomplete runtime when invoked.
 
 Browser Use is available to the model by default and is selected according to
 the user's task. Users can disable it through `/skills` or `skills.disabled`,
