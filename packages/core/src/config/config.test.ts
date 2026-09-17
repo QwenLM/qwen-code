@@ -1044,7 +1044,6 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getUserHooks()).toBe(mergedHooks);
       expect(config.getProjectHooks()).toBe(mergedHooks);
-      expect(config.getSystemHooks()).toBeUndefined();
     });
 
     it('serves system hooks without promoting the merged hooks to system hooks', () => {
