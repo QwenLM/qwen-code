@@ -14,6 +14,7 @@ import {
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   type ChatRecord,
   type ResumedSessionData,
+  type SlashCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   appendPromptLedgerRecord,
@@ -302,7 +303,25 @@ export async function reconcileDanglingPromptTerminals(
   }
   const { apiHistory, completedToolCallIds } =
     buildSessionHistoryFromConversation(resumed.conversation);
-  const historyTail = apiHistory.slice(-TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
+  // Trim BEFORE windowing: the bounded tail has to be cut from the
+  // classifiable projection, not from the raw one. Slicing first lets a run of
+  // trailing system-injected notifications fill the entire window — they are
+  // unbounded, since `#persistDaemonBackgroundNotification` (packages/core
+  // Session.ts) persists each one on enqueue and
+  // `MAX_BACKGROUND_NOTIFICATION_QUEUE` bounds the PENDING queue, not the
+  // persisted records. An all-notification window leaves the classifiable tail
+  // empty while the attribution loop above, which walks the WHOLE transcript
+  // rather than the window, still reports the model entry as the last visible
+  // non-system write: detection reads `none` (`boundary >= end` with
+  // `end === 0`), the id-less guard below has nothing to upgrade, and the
+  // provenance-bound guard accepts that `assistant` tail — stamping
+  // `completed` for a prompt that died mid tool-run. Cost is unchanged: the
+  // window still holds at most TURN_INTERRUPTION_HISTORY_TAIL_COUNT entries.
+  const classifiableEnd = effectiveHistoryEnd(apiHistory);
+  const historyTail = apiHistory.slice(
+    Math.max(0, classifiableEnd - TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
+    classifiableEnd,
+  );
   const verdict = detectTurnInterruption(historyTail, completedToolCallIds);
   // Id-less tool-call guard: `detectTurnInterruption` ignores functionCalls
   // without an id (they cannot be paired on the wire), but reconciliation
@@ -310,17 +329,12 @@ export async function reconcileDanglingPromptTerminals(
   // daemon died mid tool-run, so upgrade the verdict to interrupted
   // (`interrupted_turn` semantics).
   //
-  // The guard has to read the SAME tail the verdict read. Detection trims
-  // trailing system-injected notifications internally, so passing the raw tail
-  // here lets a notification hide the model entry from this guard while the
-  // trim hides the notification from detection — both miss at once, and a
-  // prompt that died mid tool-run gets stamped `completed`.
-  const classifiableTail = historyTail.slice(
-    0,
-    effectiveHistoryEnd(historyTail),
-  );
+  // The guard reads the SAME tail the verdict read, which the trim-first
+  // window above now guarantees by construction: no trailing notification can
+  // hide the model entry from this guard while detection trims it away, the
+  // both-miss-at-once shape that stamped a mid-tool-run death `completed`.
   const interrupted =
-    verdict.kind !== 'none' || tailHoldsAnyFunctionCall(classifiableTail);
+    verdict.kind !== 'none' || tailHoldsAnyFunctionCall(historyTail);
   // Provenance-bound completion guard. A `none` verdict rests on the
   // classifier's TEXT-SHAPE trim, which cannot tell a real prompt whose whole
   // text happens to be an envelope (pasted out of a transcript, or forwarded
@@ -419,26 +433,33 @@ function isCompressionResetRecord(record: ChatRecord): boolean {
  * Whether `record` is the result half of a LOCALLY handled slash command
  * whose input is `previous`: the exact shape `SessionApiHistoryAccumulator`
  * pops out of the api history projection
- * (`packages/core/src/services/session-api-history.ts`). The conditions are
- * mirrored rather than shared because the payload type is not exported from
- * core's barrel; mirroring keeps the two in step in the safe direction — if
- * the accumulator ever stops popping a shape, that shape's user entry stays
- * in the projection, the verdict classifies it, and this predicate's answer
- * no longer matters.
+ * (`packages/core/src/services/session-api-history.ts`). The payload is read
+ * through core's exported `SlashCommandRecordPayload` (a type-only barrel
+ * import, like `ChatRecord` above), so renaming or retyping any field named
+ * below is a compile error here instead of a silent `undefined` comparison
+ * that would leave `localCommandCompleted` false forever — and, the ledger
+ * being append-only, every later load of that session reporting `unknown`.
+ *
+ * The CONDITIONS stay mirrored rather than shared: sharing them means exporting
+ * a predicate from core and handing it the accumulator's notion of `previous`
+ * (`lastMaterialRecord`, which does NOT skip `provenance: 'system'` records and
+ * is cleared after a pop), whereas this loop passes `lastVisibleNonSystem`
+ * (which skips them and is never cleared) — wiring the wrong one through would
+ * make a notification-interleaved ordering pop in one module and not the
+ * other. Drift is asymmetric, and only one direction is safe: if the
+ * accumulator STOPS popping a shape, that shape's user entry stays in the
+ * projection, the verdict classifies it, and this predicate's answer no longer
+ * matters. If it STARTS popping one, or relaxes a condition, the projection
+ * loses the user entry while this mirror returns false, so the completion guard
+ * vetoes and that command's promptId stays `unknown` — a MISSING terminal, the
+ * failure this module is allowed to have, never a wrong one.
  */
 function isLocalSlashCommandResult(
   record: ChatRecord,
   previous: ChatRecord | undefined,
 ): boolean {
   if (record.subtype !== 'slash_command') return false;
-  const payload = record.systemPayload as
-    | {
-        phase?: unknown;
-        sentToModel?: unknown;
-        rawCommand?: unknown;
-        outputHistoryItems?: unknown;
-      }
-    | undefined;
+  const payload = record.systemPayload as SlashCommandRecordPayload | undefined;
   const items = payload?.outputHistoryItems;
   const parts = previous?.message?.parts;
   const first = parts?.[0];
@@ -447,12 +468,7 @@ function isLocalSlashCommandResult(
     payload.sentToModel !== true &&
     Array.isArray(items) &&
     items.length > 0 &&
-    items.every(
-      (item) =>
-        typeof item === 'object' &&
-        item !== null &&
-        (item as { type?: unknown }).type === 'assistant',
-    ) &&
+    items.every((item) => item['type'] === 'assistant') &&
     previous?.type === 'user' &&
     previous.subtype === undefined &&
     previous.message?.role === 'user' &&
