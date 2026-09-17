@@ -332,6 +332,23 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(JSON.stringify(response.body)).not.toContain(dir);
   });
 
+  it('classifies a pull refused by an unparsable configured refspec as remote_config_unparsable', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    // A hand-corrupted fetch refspec: git dies parsing it before
+    // mutating anything. The classifier's invalid-refspec arm owns the
+    // pull route's contract too (this PR moved it 500 → 409).
+    git(dir, 'config', 'remote.origin.fetch', ':::bogus');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('remote_config_unparsable');
+  });
+
   // The classifier is shared by every workspace git route, so the file that
   // owns it must be able to go red when the table changes — including the
   // remote-specific branches the remotes routes depend on.
@@ -461,6 +478,15 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       ],
       [
         "error: could not lock config file .git/config\nfatal: Could not set 'remote.foo.url' to '/tmp/no such remote/x'",
+        409,
+        'git_config_write_failed',
+      ],
+      // Single-line lock failure: the rollback's own `--local --add`
+      // write reports `could not lock config file …` with nothing after
+      // it (the removal's rm died mid-destruction, the wedged lock
+      // persists into the rollback write).
+      [
+        'error: could not lock config file .git/config: File exists',
         409,
         'git_config_write_failed',
       ],

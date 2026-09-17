@@ -360,14 +360,14 @@ export function sendGitError(
   // section` — and a config-chosen VALUE can carry a real newline, so any
   // deeper line is attacker-controllable. A lock surfaces as git's own
   // two-line chain (`could not lock config file …` followed by the write
-  // failure); everything else git reports in these shapes is single-line.
+  // failure) — or single-line from the rollback's own `--local --add`
+  // writes, whose lock failure is `error: could not lock config file
+  // .git/config: File exists` with nothing after it.
   if (
     /^(?:error|fatal): could not (?:remove config section |set 'remote\.|unset 'branch\.)/i.test(
       fullMessage,
     ) ||
-    /^(?:error|fatal): could not lock config file [^\n]*\n(?:error|fatal): could not (?:remove config section |set 'remote\.|unset 'branch\.)/i.test(
-      fullMessage,
-    )
+    /^(?:error|fatal): could not lock config file /i.test(fullMessage)
   ) {
     res.status(409).json({ error: 'git_config_write_failed', message });
     return;
