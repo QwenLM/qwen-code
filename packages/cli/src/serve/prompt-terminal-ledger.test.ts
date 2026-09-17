@@ -1003,6 +1003,44 @@ describe('reconcileDanglingPromptTerminals', () => {
     ]);
   });
 
+  it('stamps a completed turn whose assistant tail is followed by a notification', async () => {
+    // The `provenance === 'system'` skip in the attribution loop is
+    // load-bearing in BOTH directions. The case above pins the first one: a
+    // notification-only tail must not count as the target's own write. This
+    // one pins the second: a notification must not become the LAST visible
+    // non-system write either. Without the skip, `n1` (user-role, with a real
+    // `message`) overwrites `a1` as the tail type, so the provenance-bound
+    // completion guard vetoes a turn the model actually answered — and since
+    // the ledger is append-only, that prompt stays `unknown` on every later
+    // load.
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 1500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'question', RECORD_BASE_MS),
+      recordAt(fixture, 'a1', 'u1', 'answer', RECORD_BASE_MS + 2000),
+      notificationRecord(fixture, 'n1', 'a1', RECORD_BASE_MS + 3000),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'completed',
+        stopReason: 'reconstructed_from_transcript',
+        at: expect.any(Number),
+      },
+    ]);
+  });
+
   it('fails closed when the visible tail is a real prompt shaped like a notification', async () => {
     // Reconciliation classifies one tail with two models of "system-injected":
     // record `provenance` for attribution (above) and rendered text shape for

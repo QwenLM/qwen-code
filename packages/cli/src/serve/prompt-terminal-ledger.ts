@@ -8,6 +8,7 @@ import type { Content } from '@google/genai';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import {
   buildSessionHistoryFromConversation,
+  createDebugLogger,
   detectTurnInterruption,
   effectiveHistoryEnd,
   SessionService,
@@ -27,6 +28,8 @@ import {
 } from '@qwen-code/acp-bridge/promptLedger';
 import type { PromptLedgerSink } from '@qwen-code/acp-bridge/bridgeOptions';
 import type { BridgeRestoredSession } from '@qwen-code/acp-bridge/bridgeTypes';
+
+const debugLogger = createDebugLogger('PROMPT_TERMINAL_LEDGER');
 
 /**
  * Serve-layer assembly of the bridge's ledger sink: the bridge only calls
@@ -311,16 +314,33 @@ export async function reconcileDanglingPromptTerminals(
   // own turn can certify completion, so bind the stamp to the authoritative
   // `provenance` signal instead of to the shape-derived verdict.
   //
-  // `tool_result` is accepted alongside `assistant`: a history ending in the
-  // user-role `functionResponse` that closed the final tool call legitimately
-  // reaches `none` via `boundary >= end` in `detectTurnInterruption`, and that
-  // response is recorded as a `tool_result` record.
+  // `tool_result` is accepted alongside `assistant` for the GOAL-BOUNDARY
+  // shape only. `boundary >= end` in `detectTurnInterruption` requires the
+  // closing call id to be in `completedToolCallIds`, and that set has exactly
+  // two producers — the `goal_turn_end` branch and the compression payload,
+  // both in `packages/core/src/services/session-api-history.ts`. An ordinary
+  // closed tool pair never reaches this guard: it classifies as
+  // `interrupted_prompt` and takes the interrupted path above.
   if (
     !interrupted &&
     lastVisibleNonSystemType !== 'assistant' &&
     lastVisibleNonSystemType !== 'tool_result'
   ) {
-    return; // Fail closed: a user-role tail cannot prove the turn completed.
+    // Fail closed: a user-role tail cannot prove the turn completed. Name the
+    // veto that fired — its consequence is permanent (the ledger is
+    // append-only and `settledPromptIds` filters it, so every later load keeps
+    // reporting `unknown` for this prompt) and both production callers swallow
+    // reconciliation failures best-effort (`routes/session.ts`), so this is
+    // the only place the reason is observable.
+    debugLogger.debug(
+      '[PromptTerminalLedger] completion vetoed: non-model tail',
+      {
+        promptId: target,
+        lastVisibleNonSystemType,
+        verdictKind: verdict.kind,
+      },
+    );
+    return;
   }
   // TOCTOU fence: a prompt admitted while `loadSession` ran appended its
   // `in_flight` after the snapshot above, and the visible tail may now

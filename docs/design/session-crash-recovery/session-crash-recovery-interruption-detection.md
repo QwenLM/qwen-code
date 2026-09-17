@@ -213,9 +213,25 @@ Not covered yet:
   removes it and the turn reports `clean` with no way to re-drive it.
   Distinguishing the two needs the record's `provenance` to survive the
   projection into `Content` (`session-api-history.ts`), or a daemon-side
-  re-drive; no shape predicate at this layer can reach it. With at least one
-  reminder part — plan mode, an output style, an active todo chain — the
-  entry is NOT trimmed and recovers as `interrupted_prompt`.
+  re-drive; no shape predicate at this layer can reach it. This is the
+  DEFAULT daemon exposure rather than a narrow edge case: every reminder
+  source that would keep the entry untrimmed is opt-in (plan mode, an output
+  style, an active todo chain), and a normal session's default approval mode
+  is `ApprovalMode.AUTO` (`packages/cli/src/config/config.ts`), so a failed
+  automatic turn writes a bare envelope unless the user turned one of them
+  on. With at least one reminder part the entry is NOT trimmed and recovers
+  as `interrupted_prompt`. Tracked in #12042 (shape A).
+- A real prompt whose whole text happens to be a bare envelope — pasted out
+  of a transcript, or forwarded verbatim by a channel/SDK client. The record
+  is `provenance: 'real_user'`, but the classifier only ever sees `Content`,
+  so the same shape rule trims it and exposes the PREVIOUS turn's model text
+  as the tail: recovery reports `clean` with `canContinue = false`, and the
+  orphaned prompt silently loses its banner and Retry where `main` recovered
+  it as `interrupted_prompt`. The prompt-terminal-ledger half of this shape
+  is closed (the provenance-bound completion guard in
+  `docs/design/2026-08-19-prompt-terminal-ledger-design.md` step 6 fails
+  closed instead of stamping `completed`); the recovery half needs the same
+  authoritative provenance channel. Tracked in #12042 (shape B).
 
 Completeness here does not come from adding a large amount of code at once. It
 comes from consolidating current capabilities into a unified plan so the states
@@ -407,6 +423,13 @@ Core fixtures:
      count as structural.
    - Model-role entry whose whole text is a bare envelope: `none`. The model
      answered; the envelope shape alone cannot prove provenance.
+   - USER-role entry whose whole text is a bare envelope but whose record is
+     `provenance: 'real_user'` (a prompt pasted out of a transcript, or one
+     forwarded verbatim by a channel/SDK client): must stay
+     `interrupted_prompt`. This is the required behaviour, not the current
+     one — the shape rule cannot tell it from a system-injected notification,
+     so today the trim removes it and recovery reports `clean`; the ledger
+     side fails closed instead of stamping `completed`. Tracked in #12042.
 
 Entrypoint adapter tests:
 
