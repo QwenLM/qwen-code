@@ -185,6 +185,7 @@ import type {
   ServeWorkspaceMcpResourcesStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
+  ServeWorkflowActionInput,
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
 } from '@qwen-code/acp-bridge/status';
@@ -1062,8 +1063,10 @@ interface FakeBridgeOpts {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved',
+      | 'run-saved'
+      | 'run-script',
     context?: BridgeClientRequestContext,
+    input?: ServeWorkflowActionInput,
   ) => Promise<{ changed: boolean; status?: string; taskId?: string }>;
   clearSessionGoalImpl?: (
     sessionId: string,
@@ -1396,8 +1399,10 @@ interface FakeBridge extends AcpSessionBridge {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved';
+      | 'run-saved'
+      | 'run-script';
     context?: BridgeClientRequestContext;
+    input?: ServeWorkflowActionInput;
   }>;
   clearSessionGoalCalls: string[];
   controlSessionGoalCalls: Array<{
@@ -2667,14 +2672,27 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
     },
-    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+    async controlSessionWorkflowTask(
+      sessionId,
+      taskId,
+      action,
+      context,
+      input,
+    ) {
       controlSessionWorkflowTaskCalls.push({
         sessionId,
         taskId,
         action,
         ...(context ? { context } : {}),
+        ...(input ? { input } : {}),
       });
-      return controlSessionWorkflowTaskImpl(sessionId, taskId, action, context);
+      return controlSessionWorkflowTaskImpl(
+        sessionId,
+        taskId,
+        action,
+        context,
+        input,
+      );
     },
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
@@ -11222,7 +11240,25 @@ describe('createServeApp', () => {
         .post('/session/s-1/tasks/deep-review/workflow-action')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .send({ action: 'run-saved' });
+        .send({
+          action: 'run-saved',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        });
+      const runScriptRes = await request(app)
+        .post('/session/s-1/tasks/definition-7/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          action: 'run-script',
+          script: 'return 1',
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        });
+      const badActionRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'run-anything' });
 
       expect(pauseRes.status).toBe(200);
       expect(pauseRes.body).toEqual({ changed: true, status: 'pausing' });
@@ -11236,6 +11272,12 @@ describe('createServeApp', () => {
       expect(deleteRes.body).toEqual({ changed: true, status: 'running' });
       expect(runSavedRes.status).toBe(200);
       expect(runSavedRes.body).toEqual({ changed: true, status: 'running' });
+      expect(runScriptRes.status).toBe(200);
+      expect(runScriptRes.body).toEqual({ changed: true, status: 'running' });
+      expect(badActionRes.status).toBe(400);
+      expect(badActionRes.body.error).toContain('"run-script"');
+      // The start input reaches the runtime only for the two start actions;
+      // a control action's call carries none, as it did before it existed.
       expect(bridge.controlSessionWorkflowTaskCalls).toEqual([
         {
           sessionId: 's-1',
@@ -11247,7 +11289,24 @@ describe('createServeApp', () => {
         { sessionId: 's-1', taskId: 'task-1', action: 'retry' },
         { sessionId: 's-1', taskId: 'task-1', action: 'rerun' },
         { sessionId: 's-1', taskId: 'task-1', action: 'delete-history' },
-        { sessionId: 's-1', taskId: 'deep-review', action: 'run-saved' },
+        {
+          sessionId: 's-1',
+          taskId: 'deep-review',
+          action: 'run-saved',
+          input: {
+            args: { question: 'which tables grew?' },
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        },
+        {
+          sessionId: 's-1',
+          taskId: 'definition-7',
+          action: 'run-script',
+          input: {
+            script: 'return 1',
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        },
       ]);
     });
 
@@ -39031,6 +39090,81 @@ describe('auth device-flow routes', () => {
       .set('Host', `127.0.0.1:${baseOpts.port}`);
     expect(res.status).toBe(200);
     expect(res.body.features).toContain('auth_device_flow');
+  });
+
+  it.each([
+    { protocol: 'openai', wireApi: 'unknown' },
+    { protocol: 'openai', wireApi: null },
+    { protocol: 'anthropic', wireApi: 'responses' },
+    { protocol: 'gemini', wireApi: 'chat-completions' },
+  ])(
+    'POST /workspace/auth/provider rejects incompatible api before installation: %j',
+    async (selection) => {
+      const installAuthProvider = vi.fn();
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_api');
+      expect(installAuthProvider).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([{ protocol: 'openai', wireApi: 'responses' }])(
+    'POST /workspace/auth/provider accepts OpenAI API selection: %j',
+    async (selection) => {
+      const installAuthProvider = vi
+        .fn()
+        .mockResolvedValue({ v: 1, message: 'Saved' });
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(200);
+      expect(installAuthProvider).toHaveBeenCalledWith(
+        expect.objectContaining(selection),
+        expect.any(Function),
+      );
+    },
+  );
+
+  it('POST /workspace/auth/provider does not change a fixed provider protocol via the legacy alias', async () => {
+    const installAuthProvider = vi.fn();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge: fakeBridge(),
+      installAuthProvider,
+    });
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        protocol: 'openai-responses',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_protocol');
+    expect(installAuthProvider).not.toHaveBeenCalled();
   });
 
   it('POST /workspace/auth/provider rejects unsupported protocol values', async () => {

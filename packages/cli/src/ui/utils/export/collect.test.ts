@@ -6,8 +6,14 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  Config,
+  GoalRecord,
+  GoalStateCause,
+} from '@qwen-code/qwen-code-core';
 import { collectSessionData } from './collect.js';
+import { toJsonl } from './formatters/jsonl.js';
 import type { ExportConfig } from './types.js';
 
 describe('collectSessionData', () => {
@@ -232,6 +238,211 @@ describe('collectSessionData', () => {
     );
 
     expect(data.metadata?.channel).toBe('daemon');
+  });
+
+  describe('goal_state records', () => {
+    const GOAL: GoalRecord = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship it',
+      status: 'active',
+      evidenceCursor: { recordId: 'user-1' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      tokensUsed: 0,
+      createdAt: 100,
+      updatedAt: 100,
+    };
+
+    function base(uuid: string, second: number) {
+      return {
+        uuid,
+        parentUuid: null,
+        sessionId: 'session-goal-state',
+        timestamp: `2026-09-17T00:00:0${second}.000Z`,
+        cwd: '',
+        version: '1.0.0',
+      };
+    }
+
+    function goalState(
+      uuid: string,
+      second: number,
+      cause: GoalStateCause,
+      goal: GoalRecord | null,
+    ): ChatRecord {
+      return {
+        ...base(uuid, second),
+        type: 'system',
+        subtype: 'goal_state',
+        systemPayload: {
+          v: 2,
+          cause,
+          snapshot: { v: 2, activity: 'idle', goal },
+        },
+      } as unknown as ChatRecord;
+    }
+
+    function text(uuid: string, second: number, type: 'user' | 'assistant') {
+      return {
+        ...base(uuid, second),
+        type,
+        message: {
+          role: type === 'user' ? 'user' : 'model',
+          parts: [{ text: `${type} ${uuid}` }],
+        },
+      } as unknown as ChatRecord;
+    }
+
+    const turned: GoalRecord = { ...GOAL, turnCount: 1, updatedAt: 200 };
+    const rejected: GoalRecord = {
+      ...turned,
+      updatedAt: 300,
+      lastReason: 'npm test output is missing',
+    };
+
+    it('writes every Goal transition in record order, bookkeeping included', async () => {
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-goal-state',
+          startTime: '2026-09-17T00:00:00.000Z',
+          messages: [
+            text('user-1', 0, 'user'),
+            goalState('goal-create', 1, 'create', GOAL),
+            text('assistant-1', 2, 'assistant'),
+            goalState('goal-turn', 3, 'turn_finished', turned),
+            // Replay hides this one: same snapshot, checkpoint cause.
+            goalState('goal-checkpoint', 4, 'checkpoint', turned),
+            goalState('goal-reject', 5, 'verifier_reject', rejected),
+            text('assistant-2', 6, 'assistant'),
+          ],
+        },
+        config,
+      );
+
+      expect(
+        data.messages.map((message) => [
+          message.type,
+          message.goalState?.cause ??
+            message.message?.parts?.map((part) => part.text).join(' | '),
+        ]),
+      ).toEqual([
+        // The replayed `/goal …` line joins the user message before it, and
+        // the transition it caused follows both.
+        ['user', 'user user-1 | /goal ship it'],
+        ['system', 'create'],
+        ['assistant', 'assistant assistant-1'],
+        ['system', 'turn_finished'],
+        ['system', 'checkpoint'],
+        ['system', 'verifier_reject'],
+        ['assistant', 'assistant assistant-2'],
+      ]);
+
+      // One uuid, one entry: the text replayed from the transition's own
+      // record keeps that record's timestamp but not its uuid, so a record
+      // reference in a snapshot resolves to the transition alone.
+      const uuids = data.messages.map((message) => message.uuid);
+      expect(new Set(uuids).size).toBe(uuids.length);
+      expect(data.messages[0]).toMatchObject({
+        type: 'user',
+        timestamp: '2026-09-17T00:00:01.000Z',
+      });
+      expect(data.messages[0]!.uuid).not.toBe('goal-create');
+      expect(data.messages[1]).toMatchObject({
+        uuid: 'goal-create',
+        goalState: { v: 2, cause: 'create' },
+      });
+
+      const reject = data.messages.find(
+        (message) => message.goalState?.cause === 'verifier_reject',
+      );
+      expect(reject).toMatchObject({
+        uuid: 'goal-reject',
+        timestamp: '2026-09-17T00:00:05.000Z',
+        message: {
+          role: 'system',
+          parts: [
+            {
+              text: 'Goal verifier_reject (active, turn 1): npm test output is missing',
+            },
+          ],
+        },
+        goalState: { snapshot: { v: 2, goal: rejected } },
+      });
+    });
+
+    it('writes a transition that is the last record of the session', async () => {
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-goal-state',
+          startTime: '2026-09-17T00:00:00.000Z',
+          messages: [
+            text('user-1', 0, 'user'),
+            goalState('goal-create', 1, 'create', GOAL),
+            goalState('goal-clear', 2, 'clear', null),
+          ],
+        },
+        config,
+      );
+
+      expect(data.messages.at(-1)).toMatchObject({
+        type: 'system',
+        message: { parts: [{ text: 'Goal clear' }] },
+        goalState: { cause: 'clear', snapshot: { goal: null } },
+      });
+      const lines = toJsonl(data)
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(
+        lines.filter((line) => line.goalState).map((line) => line.uuid),
+      ).toEqual(['goal-create', 'goal-clear']);
+    });
+
+    it('carries the whole journaled payload, blocked audit included', async () => {
+      const audited = goalState('goal-turn', 1, 'turn_finished', turned);
+      const blockedAudit = {
+        fingerprint: 'external\nregistry is down',
+        count: 2,
+        turnIds: ['turn-1', 'turn-2'],
+      };
+      (audited.systemPayload as unknown as Record<string, unknown>)[
+        'blockedAudit'
+      ] = blockedAudit;
+
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-goal-state',
+          startTime: '2026-09-17T00:00:00.000Z',
+          messages: [text('user-1', 0, 'user'), audited],
+        },
+        config,
+      );
+
+      expect(data.messages.at(-1)?.goalState).toEqual({
+        v: 2,
+        cause: 'turn_finished',
+        snapshot: { v: 2, activity: 'idle', goal: turned },
+        blockedAudit,
+      });
+    });
+
+    it('leaves out a goal_state record it cannot parse', async () => {
+      const malformed = {
+        ...goalState('goal-bad', 1, 'create', GOAL),
+        systemPayload: { v: 2, cause: 'create' },
+      } as unknown as ChatRecord;
+
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-goal-state',
+          startTime: '2026-09-17T00:00:00.000Z',
+          messages: [text('user-1', 0, 'user'), malformed],
+        },
+        config,
+      );
+
+      expect(data.messages.map((message) => message.type)).toEqual(['user']);
+    });
   });
 
   it('replays tool calls when daemon export config has no tool registry', async () => {

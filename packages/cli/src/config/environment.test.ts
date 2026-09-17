@@ -287,6 +287,42 @@ describe('daemon registration capacity environment', () => {
 });
 
 describe('buildRuntimeEnvironment', () => {
+  it.each([false, true])(
+    'stops at a symlinked home (home env: %s)',
+    (hasHomeEnv) => {
+      const root = makeWorkspace();
+      const home = path.join(root, 'home');
+      const linkedHome = path.join(root, 'linked-home');
+      fs.mkdirSync(home);
+      fs.symlinkSync(home, linkedHome, 'junction');
+      process.env['HOME'] = linkedHome;
+      process.env['USERPROFILE'] = linkedHome;
+      fs.writeFileSync(
+        path.join(root, '.env'),
+        'RUNTIME_PARENT=workspace-only',
+      );
+      const homeEnvFile = path.join(linkedHome, '.env');
+      if (hasHomeEnv) {
+        fs.writeFileSync(homeEnvFile, 'RUNTIME_DOTENV=home-only');
+      }
+      const settings = testSettings({
+        security: { folderTrust: { enabled: false } },
+      });
+
+      const snapshot = buildRuntimeEnvironment(
+        settings,
+        os.homedir(),
+        {},
+        false,
+      );
+      expect(snapshot.envFilePaths).toEqual(hasHomeEnv ? [homeEnvFile] : []);
+      expect(snapshot.effectiveEnv['RUNTIME_DOTENV']).toBe(
+        hasHomeEnv ? 'home-only' : undefined,
+      );
+      expect(snapshot.effectiveEnv['RUNTIME_PARENT']).toBeUndefined();
+    },
+  );
+
   it('computes a runtime overlay without mutating process.env or base env', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(

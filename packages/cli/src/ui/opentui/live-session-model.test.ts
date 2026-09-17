@@ -146,6 +146,32 @@ describe('foldLiveEvent confirm-resolved (outcome parity, R1-18)', () => {
   });
 });
 
+describe('foldLiveEvent tool-queued (approved but not started)', () => {
+  it('records the queued status and clears it again', () => {
+    const queued = foldLiveEvent([{ ...waitingTool(), confirm: 'approved' }], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(queued[0]).toMatchObject({ confirm: 'approved', queued: true });
+    const running = foldLiveEvent(queued, {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: false,
+    });
+    expect(running[0]).toMatchObject({ queued: false });
+  });
+
+  it('ignores a status for a call with no card', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'tool-queued',
+      id: 'tool1',
+      queued: true,
+    });
+    expect(items).toHaveLength(1);
+  });
+});
+
 describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
   it('carries promptId and sentToModel onto the user item (R1-16)', () => {
     const items = foldLiveEvent([assistant('hi')], {
@@ -328,6 +354,48 @@ describe('foldLiveEvent tool-result ansi', () => {
       totalLines: 30,
       totalBytes: 4096,
     });
+  });
+
+  it('drops the grid when a later chunk carries plain text', () => {
+    // A shell run that streams ANSI and then trips binary detection replaces
+    // the grid with a plain string, and ToolCardBody prefers the grid
+    // unconditionally — a stale one would hide the notice for good, including
+    // in the settled card.
+    const grid = [
+      [
+        {
+          text: 'partial',
+          bold: false,
+          italic: false,
+          underline: false,
+          dim: false,
+          inverse: false,
+          fg: '',
+          bg: '',
+        },
+      ],
+    ];
+    let items = foldLiveEvent([], {
+      type: 'tool-start',
+      id: 'tool1',
+      tool: 'run_shell_command',
+      title: 'run_shell_command',
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-result',
+      id: 'tool1',
+      display: '',
+      ansi: { grid },
+    });
+    items = foldLiveEvent(items, {
+      type: 'tool-output',
+      id: 'tool1',
+      output: '[Binary output detected. Halting stream...]',
+    });
+    const tool = items[0];
+    if (tool.kind !== 'tool') throw new Error('expected tool item');
+    expect(tool.ansi).toBeUndefined();
+    expect(tool.output).toBe('[Binary output detected. Halting stream...]');
   });
 });
 
@@ -712,6 +780,26 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     activity = 'idle',
   ): GoalSnapshotLike => ({ goal, activity }) as GoalSnapshotLike;
 
+  it('has no checkpoint line, whatever an earlier build left on the record', () => {
+    const view = describeGoalCard(
+      snap({
+        objective: 'o',
+        status: 'usage_limited',
+        lastReason: 'Three evidence checkpoints stalled.',
+        limitKind: 'checkpoint_request',
+        checkpointStalls: 3,
+        lastCheckpointFailure: 'Error: provider failed',
+      }),
+    );
+
+    expect(view).toMatchObject({
+      state: 'card',
+      reason: 'Three evidence checkpoints stalled.',
+    });
+    expect(view).not.toHaveProperty('checkpoint');
+    expect(JSON.stringify(view)).not.toContain('provider failed');
+  });
+
   it('renders every lifecycle state', () => {
     expect(
       describeGoalCard(snap({ objective: 'o', status: 'active' })),
@@ -762,66 +850,6 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     });
   });
 
-  it('shows checkpoint health, matching the ink card', () => {
-    expect(
-      describeGoalCard(
-        snap({
-          objective: 'o',
-          status: 'active',
-          checkpointStalls: 2,
-          lastCheckpointFailure: 'Error: provider failed',
-        }),
-      ),
-    ).toMatchObject({
-      checkpoint: 'Checkpoint: 2/3 stalled · Error: provider failed',
-    });
-    expect(
-      describeGoalCard(
-        snap({
-          objective: 'o',
-          status: 'active',
-          lastCheckpointFailure: 'Error: provider failed',
-        }),
-      ),
-    ).toMatchObject({
-      checkpoint: 'Checkpoint: last check failed · Error: provider failed',
-    });
-    // A stop for another reason clears the diagnostic and keeps the streak:
-    // the line is the count alone, with no trailing separator.
-    expect(
-      describeGoalCard(
-        snap({ objective: 'o', status: 'paused', checkpointStalls: 2 }),
-      ),
-    ).toMatchObject({ checkpoint: 'Checkpoint: 2/3 stalled' });
-    const healthy = describeGoalCard(
-      snap({ objective: 'o', status: 'active' }),
-    );
-    expect(healthy).toMatchObject({ state: 'card' });
-    expect(healthy).not.toHaveProperty('checkpoint');
-
-    // Same visibility rule as the ink card: never on a completed Goal, and a
-    // stall-free failure only while the Goal is active.
-    expect(
-      describeGoalCard(
-        snap({
-          objective: 'o',
-          status: 'complete',
-          checkpointStalls: 1,
-          lastCheckpointFailure: 'Error: provider failed',
-        }),
-      ),
-    ).not.toHaveProperty('checkpoint');
-    expect(
-      describeGoalCard(
-        snap({
-          objective: 'o',
-          status: 'paused',
-          lastCheckpointFailure: 'Error: provider failed',
-        }),
-      ),
-    ).not.toHaveProperty('checkpoint');
-  });
-
   it('builds the subtitle from turns and active time', () => {
     expect(
       describeGoalCard(
@@ -833,6 +861,44 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
         }),
       ),
     ).toMatchObject({ subtitle: '2 turns · 1m 1s' });
+  });
+
+  it.each([
+    [3, 20, 723_000, 1_800_000, '3/20 turns · 12m 3s/30m'],
+    [1, 20, 0, undefined, '1/20 turns'],
+    [1, 1, 0, undefined, '1/1 turn'],
+    [3, undefined, 723_000, undefined, '3 turns · 12m 3s'],
+  ])(
+    'shows turn and active-time budgets (%s/%s)',
+    (turnCount, turnBudget, activeTimeMs, activeTimeBudgetMs, expected) => {
+      expect(
+        describeGoalCard(
+          snap({
+            objective: 'o',
+            status: 'paused',
+            turnCount,
+            turnBudget,
+            activeTimeMs,
+            activeTimeBudgetMs,
+          }),
+        ),
+      ).toMatchObject({ subtitle: expected });
+    },
+  );
+
+  it('hides unused turn and active-time budgets', () => {
+    expect(
+      describeGoalCard(
+        snap({
+          objective: 'o',
+          status: 'active',
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        }),
+      ),
+    ).toMatchObject({ subtitle: null });
   });
 
   it('carries spend in the subtitle, matching the ink card', () => {

@@ -429,4 +429,92 @@ describe('FunctionHookRunner', () => {
       expect(mockCallback).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('outcome', () => {
+    const neverSettles = () => vi.fn(() => new Promise<never>(() => {}));
+
+    it('reports its own timeout as timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        const execution = functionRunner.execute(
+          createMockConfig(neverSettles(), { timeout: 50 }),
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        await vi.advanceTimersByTimeAsync(50);
+        const result = await execution;
+
+        expect(result.outcome).toBe('timeout');
+        expect(result.success).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a caller abort during the callback as cancelled', async () => {
+      const controller = new AbortController();
+      const callback = neverSettles();
+
+      const execution = functionRunner.execute(
+        createMockConfig(callback, { timeout: 60_000 }),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(callback).toHaveBeenCalled());
+      controller.abort();
+      const result = await execution;
+
+      expect(result.outcome).toBe('cancelled');
+      expect(result.success).toBe(false);
+    });
+
+    it('reports a callback that throws as a non-blocking error', async () => {
+      const result = await functionRunner.execute(
+        createMockConfig(vi.fn().mockRejectedValue(new Error('timed out'))),
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('keeps the configured error message prefix on a timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        const execution = functionRunner.execute(
+          createMockConfig(neverSettles(), {
+            timeout: 50,
+            errorMessage: 'Policy check failed',
+          }),
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        await vi.advanceTimersByTimeAsync(50);
+        const result = await execution;
+
+        expect(result.error?.message).toBe(
+          'Policy check failed: Function hook timed out after 50ms',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a caller abort before the callback as cancelled', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const callback = vi.fn();
+
+      const result = await functionRunner.execute(
+        createMockConfig(callback),
+        HookEventName.PreToolUse,
+        createMockInput(),
+        { signal: controller.signal },
+      );
+
+      expect(result.outcome).toBe('cancelled');
+      expect(callback).not.toHaveBeenCalled();
+    });
+  });
 });
