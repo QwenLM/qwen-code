@@ -15,6 +15,8 @@ or public customization options.
 
 ## Design
 
+The hover interaction is extended by [Composer context shortcuts](2026-09-13-web-shell-hover-compression.md). Its interactive card preserves the local counter, accessible used/window description, and secondary-text requirements below.
+
 - Reduce the default composer minimum height to 116px and show a subtle focus
   border while the editor, toolbar popup, or reference picker is active. Escape restores the
   popup trigger focus; choosing an insertion keeps its existing focus action.

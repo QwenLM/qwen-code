@@ -627,6 +627,7 @@ class FakeBridge {
         taskId: string;
         action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2];
         context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3];
+        input: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[4];
       }
     | undefined;
   async controlSessionWorkflowTask(
@@ -634,8 +635,9 @@ class FakeBridge {
     taskId: string,
     action: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[2],
     context: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[3],
+    input: Parameters<HttpAcpBridge['controlSessionWorkflowTask']>[4],
   ) {
-    this.lastWorkflowAction = { sessionId, taskId, action, context };
+    this.lastWorkflowAction = { sessionId, taskId, action, context, input };
     return { changed: true, status: 'running' as const };
   }
   lastSavedWorkflowRead: { sessionId: string; name: string } | undefined;
@@ -1861,6 +1863,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       retryable: true,
     });
   });
+
+  it.each(['full', 'summary'] as const)(
+    'accepts the daemon eventDetailMode extension over ACP: %s',
+    async (eventDetailMode) => {
+      const send = vi.spyOn(bridge, 'sendPrompt');
+      const connId = await initialize();
+      await newSession(connId);
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'hello' }],
+          eventDetailMode,
+        },
+      });
+      expect(ack.status).toBe(202);
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledWith(
+          'sess-1',
+          expect.objectContaining({ eventDetailMode }),
+          expect.any(AbortSignal),
+          expect.anything(),
+        ),
+      );
+    },
+  );
 
   it.each([
     { meta: undefined, context: {} },
@@ -8894,6 +8924,48 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         taskId: 'workflow-1',
         action: 'retry',
         context: { clientId: 'client-1', fromLoopback: true },
+        // A control action carries no start input, whatever the caller sends.
+        input: undefined,
+      });
+    });
+
+    it('_qwen/session/tasks/workflow_action forwards the start input of a run-script call', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/tasks/workflow_action',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'definition-7',
+          action: 'run-script',
+          script: 'return 1',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { changed: true, status: 'running' },
+      });
+      expect(bridge.lastWorkflowAction).toMatchObject({
+        sessionId: 'sess-1',
+        taskId: 'definition-7',
+        action: 'run-script',
+        input: {
+          script: 'return 1',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
       });
     });
 

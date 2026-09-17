@@ -447,6 +447,71 @@ describe('retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(2);
   });
 
+  it('should retry a status-less upstream error carrying a provider request id', async () => {
+    // A gateway error pushed into an already-200 SSE stream reaches us as an
+    // APIError with no HTTP status, so only the classification can open the
+    // retry gate. Without it the turn died on the first attempt.
+    let attempts = 0;
+    const mockFn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 1) {
+        throw Object.assign(new Error("'id'"), {
+          code: 'KeyError',
+          requestID: 'cd7f37f3-d38a-9dec-804f-f70dda5650eb',
+        });
+      }
+      return 'ok';
+    });
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await promise;
+
+    expect(result).toBe('ok');
+    expect(mockFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('should not retry a status-less error that carries only a provider code', async () => {
+    // Permanent local failures (missing credentials, invalid MCP config) have a
+    // string `code` but no request id; the request id is what distinguishes an
+    // upstream failure from one of those.
+    const mockFn = vi.fn(async () => {
+      throw Object.assign(new Error('No API key configured'), {
+        code: 'MISSING_API_KEY',
+      });
+    });
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+    });
+    await expect(promise).rejects.toThrow('No API key configured');
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not retry a permanent provider code even when the request is traced', async () => {
+    // Moderation and credential rejections arrive inside an already-200 stream,
+    // so no HTTP status is left to fail fast on. Re-sending the identical
+    // request cannot succeed, and walking the production ladder for it costs
+    // about eighty seconds.
+    const mockFn = vi.fn(async () => {
+      throw Object.assign(new Error('Content filtered'), {
+        code: 'data_inspection_failed',
+        requestID: 'req-1',
+      });
+    });
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+    });
+    await expect(promise).rejects.toThrow('Content filtered');
+    expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
   it('should respect maxDelayMs', async () => {
     const mockFn = createFailingFunction(3);
     const setTimeoutSpy = vi.spyOn(global, 'setTimeout');

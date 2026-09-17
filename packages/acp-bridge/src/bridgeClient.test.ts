@@ -51,6 +51,7 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   BridgeClient,
   type BridgeClientDeferredArtifactBatch,
+  type BridgeClientSessionEntry,
 } from './bridgeClient.js';
 import {
   type LiveSpeakToUserHandler,
@@ -74,7 +75,10 @@ import type {
   CurrentSessionScheduledTaskCreateInfo,
 } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
-import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import {
+  CANCEL_VOTE_SENTINEL,
+  MultiClientPermissionMediator,
+} from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
 import {
   SESSION_ATTACHMENT_MAX_ITEM_BYTES,
@@ -1239,7 +1243,7 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn() },
+        { request: vi.fn(), cancelForPrompt: vi.fn() },
         0,
         Infinity,
       );
@@ -1869,6 +1873,30 @@ describe('BridgeClient — current-session scheduled-task dispatch', () => {
       assertCallerPromptActive: expect.any(Function),
     });
   });
+
+  it.each(['prompt-1', 'background-1'])(
+    'accepts explicit scheduled-task ownership for %s during a handoff',
+    async (promptId) => {
+      const { client, handler } = makeCurrentSessionClient({
+        backgroundTurn: {
+          turnId: 'background-1',
+          taskId: 'task-1',
+          kind: 'agent',
+          startedAt: 100,
+        },
+      });
+      handler.mockImplementation(async (info) => {
+        info.assertCallerPromptActive();
+        return { id: 'cron-1', cron: request.cron };
+      });
+      await expect(
+        client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+          { ...request, promptId },
+        ),
+      ).resolves.toEqual({ id: 'cron-1', cron: request.cron });
+    },
+  );
 
   it('lets the host revalidate the exact prompt before committing', async () => {
     const { client, entry, handler } = makeCurrentSessionClient();
@@ -3686,6 +3714,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           settledMidTurnMessageIds?: string[];
           pendingPromptList?: PendingPromptEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
+          backgroundTurn?: BridgeClientSessionEntry['backgroundTurn'];
           activePromptId?: string;
           promptActive?: boolean;
           attachments?: SessionAttachmentStore;
@@ -3715,6 +3744,84 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       ownsSession as never,
     );
   }
+
+  it.each(['new-rpc', 'old-auto', 'unknown', 42])(
+    'validates drain ownership before removing steering: %s',
+    async (promptId) => {
+      const publish = vi.fn().mockReturnValue(true);
+      const queue = [{ messageId: 'mid-1', text: 'Check the result' }];
+      const client = makeClientWithEntry('sess:drain', {
+        sessionId: 'sess:drain',
+        promptActive: true,
+        activePromptId: 'new-rpc',
+        backgroundTurn: {
+          turnId: 'old-auto',
+          taskId: 'task',
+          kind: 'agent',
+          startedAt: 1,
+        },
+        midTurnMessageQueue: queue,
+        events: { publish },
+      });
+      const result = await client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:drain',
+        promptId,
+      });
+      if (promptId === 'new-rpc') {
+        expect(result['messages']).toEqual(['Check the result']);
+        expect(queue).toHaveLength(0);
+        expect(publish).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'mid_turn_message_injected',
+            promptId,
+          }),
+        );
+      } else {
+        expect(result['messages']).toEqual([]);
+        expect(queue).toEqual([
+          { messageId: 'mid-1', text: 'Check the result' },
+        ]);
+        expect(publish).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('lets a background-only execution drain and claim its continuation', async () => {
+    const queue = [{ messageId: 'mid-1', text: 'Check the result' }];
+    const settledMidTurnMessageIds: string[] = [];
+    const client = makeClientWithEntry('sess:drain', {
+      sessionId: 'sess:drain',
+      promptActive: false,
+      backgroundTurn: {
+        turnId: 'old-auto',
+        taskId: 'task',
+        kind: 'agent',
+        startedAt: 1,
+      },
+      midTurnMessageQueue: queue,
+      settledMidTurnMessageIds,
+      pendingPromptList: [],
+      events: { publish: vi.fn().mockReturnValue(true) },
+    });
+    await expect(
+      client.extMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'sess:drain',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    await expect(
+      client.extMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'sess:drain',
+        promptId: 'old-auto',
+      }),
+    ).resolves.toEqual({ claimed: true, hasQueuedPrompt: false });
+    const result = await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:drain',
+      promptId: 'old-auto',
+    });
+    expect(result['messages']).toEqual(['Check the result']);
+    expect(queue).toEqual([]);
+    expect(settledMidTurnMessageIds).toEqual(['mid-1']);
+  });
 
   it('drains the queue, returns the messages, and publishes one injected frame', async () => {
     const publish = vi.fn().mockReturnValue(true);
@@ -4996,5 +5103,213 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RequestError);
     expect((err as RequestError).code).toBe(-32601);
+  });
+});
+
+describe('background execution ownership', () => {
+  it.each(['rpc', 'background', 'ordinary'] as const)(
+    'keeps terminal sequence ownership during %s execution',
+    async (owner) => {
+      const publish = vi.fn();
+      const entry = {
+        sessionId: 'session',
+        promptActive: owner !== 'background',
+        activePromptId: 'P',
+        activePromptOriginatorClientId: 'C',
+        backgroundTurn:
+          owner === 'ordinary'
+            ? undefined
+            : {
+                turnId: 'B',
+                taskId: 'task',
+                kind: 'agent',
+                startedAt: 1,
+              },
+        events: { publish },
+      };
+      const client = new BridgeClient(
+        (() => entry) as never,
+        vi.fn(),
+        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        0,
+        Infinity,
+      );
+      await client.extNotification('qwen/notify/session/terminal-sequence', {
+        v: 1,
+        sessionId: 'session',
+        sequence: '\u001b]0;title\u0007',
+      });
+      expect(publish).toHaveBeenCalledExactlyOnceWith({
+        type: 'terminal_sequence',
+        data: { sequence: '\u001b]0;title\u0007' },
+        promptId: owner === 'background' ? 'B' : 'P',
+        ...(owner === 'background' ? {} : { originatorClientId: 'C' }),
+      });
+    },
+  );
+
+  it('rejects malformed background descriptors before resolving a session', async () => {
+    const client = makeClient();
+    await expect(
+      client.extMethod('_qwencode/start_turn', {
+        sessionId: 'session',
+        source: 'background_notification',
+        turnId: 'notification',
+        taskId: 'task',
+        kind: ['agent'],
+        startedAt: 1000,
+      }),
+    ).resolves.toEqual({ accepted: false });
+  });
+
+  it('keeps explicit updates and permission requests off a preadmitted user prompt', async () => {
+    const backgroundTurn = {
+      turnId: 'notification-1',
+      taskId: 'Explore-1',
+      kind: 'agent' as const,
+      startedAt: 1000,
+    };
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'session',
+      activePromptId: 'new-user',
+      promptActive: true,
+      activePromptOriginatorClientId: 'new-client',
+      backgroundTurn,
+      events: { publish },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map(),
+    };
+    const request = vi.fn(async () => ({
+      kind: 'cancelled' as const,
+      reason: 'session_closed' as const,
+    }));
+    const client = new BridgeClient(
+      (() => entry) as never,
+      () => undefined,
+      { request } as never,
+      0,
+      Infinity,
+    );
+    const prepared = client.prepareSessionUpdateFrames(
+      {
+        sessionId: 'session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'old task result' },
+          _meta: { backgroundTurn },
+        },
+      },
+      entry as never,
+    );
+    expect(prepared.frames[0]).toMatchObject({ promptId: 'notification-1' });
+    expect(prepared.frames[0].originatorClientId).toBeUndefined();
+    const completed = client.prepareSessionUpdateFrames(
+      {
+        sessionId: 'session',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'completed' },
+          _meta: { source: 'background_task_completed' },
+        },
+      },
+      entry as never,
+    );
+    expect(completed.frames[0].promptId).toBeUndefined();
+    await client.requestPermission({
+      sessionId: 'session',
+      _meta: { backgroundTurn },
+      toolCall: { toolCallId: 'call', title: 'run', kind: 'execute' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    });
+    await expect(
+      client.requestPermission({
+        sessionId: 'session',
+        _meta: {
+          backgroundTurn: { ...backgroundTurn, turnId: 'finished-old-turn' },
+        },
+        toolCall: { toolCallId: 'stale', title: 'stale tool', kind: 'execute' },
+        options: [],
+      }),
+    ).resolves.toEqual({ outcome: { outcome: 'cancelled' } });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        promptId: 'notification-1',
+        originatorClientId: undefined,
+      }),
+      0,
+    );
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'permission_request',
+        promptId: 'notification-1',
+      }),
+    );
+  });
+
+  it('cancels the finished turn’s orphaned approvals but not a live prompt’s', async () => {
+    const backgroundTurn = {
+      turnId: 'notification-1',
+      taskId: 'task',
+      kind: 'agent' as const,
+      startedAt: 1000,
+    };
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'session',
+      promptActive: true,
+      activePromptId: 'user-1',
+      backgroundTurn,
+      events: { publish },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map<string, unknown>(),
+    };
+    const mediator = new MultiClientPermissionMediator('first-responder', {
+      emit: () => {},
+      audit: {
+        recordRequested: () => {},
+        recordVoted: () => {},
+        recordForbidden: () => {},
+        recordResolved: () => {},
+        recordTimeout: () => {},
+      },
+      now: () => Date.now(),
+      votersForSession: () => new Set<string>(),
+    });
+    const client = new BridgeClient(
+      (() => entry) as never,
+      () => undefined,
+      mediator,
+      0,
+      Infinity,
+    );
+
+    const turnApproval = client.requestPermission({
+      sessionId: 'session',
+      _meta: { backgroundTurn },
+      toolCall: { toolCallId: 'call-bg', title: 'run', kind: 'execute' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    });
+    const promptApproval = client.requestPermission({
+      sessionId: 'session',
+      toolCall: { toolCallId: 'call-fg', title: 'run', kind: 'execute' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    });
+    expect(entry.pendingPermissionIds.size).toBe(2);
+
+    client.finishBackgroundTurn('session', 'notification-1', 'end_turn');
+
+    await expect(turnApproval).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(1);
+    expect(entry.pendingInteractions.size).toBe(1);
+    // The live prompt's approval stays pending for its own lifecycle.
+    mediator.forgetSession('session');
+    await expect(promptApproval).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(0);
   });
 });

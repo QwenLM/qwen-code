@@ -831,6 +831,36 @@ describe('toolHookTriggers', () => {
   });
 
   describe('appendAdditionalContext', () => {
+    it('preserves structured media and its ordering when adding hook context', () => {
+      const parts = [
+        { text: 'resource media-1' },
+        { fileData: { mimeType: 'image/png', fileUri: 'oss://image' } },
+      ];
+      const original = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'exec',
+            response: { output: 'read completed' },
+            parts,
+          },
+        },
+      ];
+      expect(appendAdditionalContext(original, 'hook context')).toEqual([
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'exec',
+            response: { output: 'read completed\n\nhook context' },
+            parts,
+          },
+        },
+      ]);
+      expect(original[0].functionResponse.response.output).toBe(
+        'read completed',
+      );
+    });
+
     it('should return original content when no additional context is provided', () => {
       const result = appendAdditionalContext('original content', undefined);
       expect(result).toBe('original content');

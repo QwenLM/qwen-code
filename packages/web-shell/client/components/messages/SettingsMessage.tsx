@@ -109,6 +109,8 @@ export interface SettingsMessageSettingsState {
 }
 
 const SUB_DIALOG_KEYS = new Set([
+  'advisorModel',
+  'imageModel',
   'fastModel',
   'visionModel',
   'voiceModel',
@@ -191,6 +193,10 @@ function formatValue(
 ): string {
   const effective = resolveValue(setting, scope);
   if (effective === undefined || effective === null) return '';
+  if (setting.key === 'advisorModel' && effective === '')
+    return t('model.useMain');
+  if (setting.key === 'imageModel' && effective === '')
+    return t('model.disabled');
   if (setting.key === THEME_SETTING_KEY) {
     const theme = themeSettingToWebShellTheme(effective, WebShellThemeId.Dark);
     return t(`theme.${theme}`);
@@ -209,7 +215,7 @@ function formatValue(
       ? formatSettingOption(setting, opt.value, opt.label, t)
       : String(effective);
   }
-  const s = String(effective);
+  const s = String(effective).replaceAll('\0', ' · ');
   return s.length > 24 ? `${s.slice(0, 21)}…` : s;
 }
 
@@ -542,11 +548,12 @@ export function SettingsMessage({
   }, [error, settings, status, t]);
 
   const handleSetValue = useCallback(
-    (key: string, value: unknown) => {
+    (key: string, value: unknown, onSaved?: () => void) => {
       if (!restartPending) setMessage(null);
       setBusyKey(key);
       setValue(scope, key, value)
         .then(async (result) => {
+          onSaved?.();
           try {
             await reload();
           } catch {
@@ -617,8 +624,11 @@ export function SettingsMessage({
         themeSettingToWebShellTheme(value) ?? selectedTheme,
         (next) => {
           const theme = next as WebShellTheme;
-          onThemeChange(theme);
-          handleSetValue(THEME_SETTING_KEY, webShellThemeToSettingValue(theme));
+          handleSetValue(
+            THEME_SETTING_KEY,
+            webShellThemeToSettingValue(theme),
+            scope === 'user' ? () => onThemeChange(theme) : undefined,
+          );
         },
         WEB_SHELL_THEMES.map((theme) => ({
           value: theme,
@@ -692,7 +702,11 @@ export function SettingsMessage({
       <SettingInput
         name={setting.key}
         label={formatSettingLabel(setting, t)}
-        type={setting.type === 'number' ? 'number' : 'text'}
+        type={
+          setting.type === 'number' || setting.type === 'integer'
+            ? 'number'
+            : 'text'
+        }
         value={value}
         disabled={disabled}
         onCommit={(next) => handleSetValue(setting.key, next)}

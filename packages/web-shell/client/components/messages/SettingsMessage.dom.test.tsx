@@ -67,6 +67,30 @@ function boolSetting(): DaemonSettingDescriptor {
   };
 }
 
+function integerSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'tools.webSearch.maxPerSession',
+    type: 'integer',
+    label: 'Max Searches per Session',
+    category: 'Tools',
+    requiresRestart: true,
+    default: undefined,
+    values: { effective: 200 },
+  };
+}
+
+function themeSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'ui.theme',
+    type: 'string',
+    label: 'Theme',
+    category: 'UI',
+    requiresRestart: false,
+    default: 'Qwen Dark',
+    values: { effective: 'Qwen Dark' },
+  };
+}
+
 function subDialogSetting(): DaemonSettingDescriptor {
   return {
     key: 'fastModel',
@@ -171,6 +195,7 @@ function renderPanel(
   state: SettingsMessageSettingsState,
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
+    onThemeChange: (theme: 'dark' | 'light') => void;
     modelManagement: ModelManagementProps;
     initialCategory: string;
   }> = {},
@@ -182,7 +207,7 @@ function renderPanel(
         embedded
         initialCategory={overrides.initialCategory}
         onLanguageChange={noop}
-        onThemeChange={noop}
+        onThemeChange={overrides.onThemeChange ?? noop}
         onSubDialog={overrides.onSubDialog ?? noop}
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
@@ -214,6 +239,19 @@ function switchButton(container: HTMLElement): HTMLButtonElement {
   );
   if (!el) throw new Error('boolean switch not found');
   return el;
+}
+
+async function chooseLightTheme(container: HTMLElement): Promise<void> {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Theme"]',
+  );
+  if (!trigger) throw new Error('Theme selector not found');
+  await act(async () => trigger.click());
+  const option = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ).find((item) => item.textContent?.trim() === 'Light');
+  if (!option) throw new Error('Light theme option not found');
+  await act(async () => option.click());
 }
 
 describe('SettingsMessage initialCategory', () => {
@@ -335,6 +373,52 @@ describe('SettingsMessage initialCategory', () => {
 });
 
 describe('SettingsMessage user-scope editing', () => {
+  it('keeps a workspace theme change settings-owned', async () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({ requiresRestart: false } as DaemonSettingUpdateResult),
+    );
+    const onThemeChange = vi.fn();
+    const container = renderPanel(makeState([themeSetting()], setValue), {
+      onThemeChange,
+    });
+
+    await chooseLightTheme(container);
+    await act(async () => Promise.resolve());
+
+    expect(setValue).toHaveBeenCalledWith(
+      'workspace',
+      'ui.theme',
+      'Qwen Light',
+    );
+    expect(onThemeChange).not.toHaveBeenCalled();
+  });
+
+  it('commits a user theme only after the daemon accepts it', async () => {
+    let resolveSave!: (result: DaemonSettingUpdateResult) => void;
+    const setValue = vi.fn(
+      () =>
+        new Promise<DaemonSettingUpdateResult>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const onThemeChange = vi.fn();
+    const container = renderPanel(makeState([themeSetting()], setValue), {
+      onThemeChange,
+    });
+    clickUserTab(container);
+
+    await chooseLightTheme(container);
+    expect(onThemeChange).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSave({ requiresRestart: false } as DaemonSettingUpdateResult);
+      await Promise.resolve();
+    });
+
+    expect(setValue).toHaveBeenCalledWith('user', 'ui.theme', 'Qwen Light');
+    expect(onThemeChange).toHaveBeenCalledWith('light');
+  });
+
   it('persists a boolean toggle to the user scope from the User tab', async () => {
     const setValue = vi.fn(
       (scope: 'workspace' | 'user', key: string, value: unknown) =>
@@ -353,6 +437,42 @@ describe('SettingsMessage user-scope editing', () => {
     });
 
     expect(setValue).toHaveBeenCalledWith('user', 'general.testFlag', true);
+  });
+
+  it('edits an integer setting in a number input and commits a number', async () => {
+    // A text input would commit the string "5", which the daemon's integer
+    // validation rejects.
+    const setValue = vi.fn(
+      (scope: 'workspace' | 'user', key: string, value: unknown) =>
+        Promise.resolve({
+          key,
+          scope,
+          value,
+          requiresRestart: true,
+        } as DaemonSettingUpdateResult),
+    );
+    const container = renderPanel(makeState([integerSetting()], setValue));
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="tools.webSearch.maxPerSession"]',
+    );
+    expect(input?.type).toBe('number');
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '5');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+
+    expect(setValue).toHaveBeenCalledWith(
+      'workspace',
+      'tools.webSearch.maxPerSession',
+      5,
+    );
   });
 
   it('still persists to workspace scope on the default (Workspace) tab', async () => {

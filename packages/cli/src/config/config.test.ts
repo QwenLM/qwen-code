@@ -3073,6 +3073,58 @@ describe('loadCliConfig', () => {
       );
     });
 
+    it('lets WEB_SEARCH_TIMEOUT_MS override tools.webSearch.timeoutMs', async () => {
+      vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', '90000');
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 30000 } },
+      });
+      expect(config.getWebSearchSettings()?.timeoutMs).toBe(90000);
+    });
+
+    it('ignores an empty, non-numeric or non-positive WEB_SEARCH_TIMEOUT_MS', async () => {
+      for (const raw of ['', 'abc', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_TIMEOUT_MS', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { timeoutMs: 30000 } },
+        });
+        expect(config.getWebSearchSettings()?.timeoutMs).toBe(30000);
+      }
+    });
+
+    it('passes a budget-only setting through without other web search keys', async () => {
+      // Core still treats this as the automatic path: only model or an
+      // env-declared backend make the configuration explicit.
+      const config = await loadWithSettings({
+        tools: { webSearch: { timeoutMs: 45000 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ timeoutMs: 45000 });
+    });
+
+    it('lets WEB_SEARCH_MAX_PER_SESSION override tools.webSearch.maxPerSession', async () => {
+      vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', '50');
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()?.maxPerSession).toBe(50);
+    });
+
+    it('ignores an empty, non-numeric, fractional or non-positive WEB_SEARCH_MAX_PER_SESSION', async () => {
+      for (const raw of ['', 'abc', '1.5', '-5', '0']) {
+        vi.stubEnv('WEB_SEARCH_MAX_PER_SESSION', raw);
+        const config = await loadWithSettings({
+          tools: { webSearch: { maxPerSession: 10 } },
+        });
+        expect(config.getWebSearchSettings()?.maxPerSession).toBe(10);
+      }
+    });
+
+    it('passes a cap-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { maxPerSession: 10 } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
     // Both modes must turn the tool off explicitly: leaving the settings
     // undefined would let the registry derive a backend from the provider.
     it('disables web search in safe mode', async () => {
@@ -5931,6 +5983,11 @@ describe('sandbox image resolution precedence', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     delete process.env['QWEN_SANDBOX_IMAGE'];
+    // These cases measure image precedence, not platform-dependent backend
+    // selection: on macOS the un-stubbed resolution picks sandbox-exec, an
+    // in-place backend that carries no image. Pin a container backend — the
+    // probe is answered by the spawnSync mock above (`docker version` → 0).
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
   });
 
   afterEach(() => {
@@ -6189,6 +6246,63 @@ describe('loadCliConfig skills.directories', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getCustomSkillDirs()).toEqual([]);
+  });
+});
+
+describe('loadCliConfig omni settings key validation', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    process.argv = ['node', 'script.js'];
+  });
+
+  it('accepts known nested omni keys (storage, memory, processing maps)', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      omni: {
+        delivery: {
+          upload: {
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKeyEnv: 'DASHSCOPE_API_KEY',
+            model: 'qwen3.5-omni-plus',
+          },
+        },
+        storage: { retentionDays: 7, maxTotalBytes: 1024 * 1024 * 1024 },
+        memory: { recall: { mode: 'active' } },
+        processing: {
+          // Free-form map: policy names are user-defined — the walk must
+          // stop at map nodes instead of rejecting every name.
+          fixedPolicies: {
+            'my-policy': { priority: 10, toolName: 'omni_extract_audio' },
+          },
+        },
+      },
+    } as Settings;
+
+    await expect(loadCliConfig(settings, argv)).resolves.toBeDefined();
+  });
+
+  it('rejects an unknown key directly under omni', async () => {
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storag: { retentionDays: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni".*"storag"/s,
+    );
+  });
+
+  it('rejects an unknown NESTED key with its full path', async () => {
+    // The deletion-controlling knobs live at omni.storage.* — a typo
+    // there must fail loud instead of leaving the GC on defaults.
+    const argv = await parseArguments();
+    const settings = {
+      omni: { storage: { retentionDay: 7 } },
+    } as unknown as Settings;
+
+    await expect(loadCliConfig(settings, argv)).rejects.toThrow(
+      /unknown key\(s\) under "omni\.storage".*"retentionDay"/s,
+    );
   });
 });
 

@@ -14,7 +14,6 @@ const {
   mockConfigUpdate,
   mockGetGlobalTempDir,
   mockGetPanel,
-  mockMessageHandlerInstances,
   mockOnDidChangeConfiguration,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
@@ -30,13 +29,12 @@ const {
   endTurnCallbackRef,
   streamChunkCallbackRef,
   transcriptUpdateCallbackRef,
-  toolCallCallbackRef,
-  permissionRequestCallbackRef,
-  askUserQuestionCallbackRef,
   mockShowInformationMessage,
   mockWindowState,
   mockQwenAgentManagerInstances,
   mockClipboardWriteText,
+  mockEnvRemoteName,
+  mockAsExternalUri,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
     (event: { affectsConfiguration: (section: string) => boolean }) => unknown
@@ -53,12 +51,6 @@ const {
   mockGetPanel: vi.fn<() => { webview: { postMessage: unknown } } | null>(
     () => null,
   ),
-  mockMessageHandlerInstances: [] as Array<{
-    permissionHandler?: (message: {
-      type: string;
-      data: { optionId?: string };
-    }) => void;
-  }>,
   mockOnDidChangeConfiguration: vi.fn(
     (
       handler: (event: {
@@ -110,29 +102,18 @@ const {
       | ((notification: Record<string, unknown>) => void)
       | undefined,
   },
-  toolCallCallbackRef: {
-    current: undefined as
-      | ((update: Record<string, unknown>) => void)
-      | undefined,
-  },
-  permissionRequestCallbackRef: {
-    current: undefined as ((request: unknown) => Promise<string>) | undefined,
-  },
-  askUserQuestionCallbackRef: {
-    current: undefined as
-      | ((request: unknown) => Promise<{ optionId: string }>)
-      | undefined,
-  },
   mockShowInformationMessage: vi.fn<
     (message: string, ...items: string[]) => Thenable<string | undefined>
   >(() => Promise.resolve(undefined)),
   mockWindowState: { focused: true },
   mockQwenAgentManagerInstances: [] as Array<{
-    permissionRequestCallback?: (request: unknown) => Promise<string>;
-    cancelCurrentPrompt: ReturnType<typeof vi.fn>;
     disconnect: ReturnType<typeof vi.fn>;
   }>,
   mockClipboardWriteText: vi.fn(),
+  // `vscode.env.remoteName` is undefined in a local window and a string
+  // ('ssh-remote', 'dev-container', 'wsl', ...) in a remote one.
+  mockEnvRemoteName: { current: undefined as string | undefined },
+  mockAsExternalUri: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -219,8 +200,13 @@ vi.mock('vscode', () => ({
       fsPath: `${base.fsPath ?? ''}/${parts.join('/')}`.replace(/\/+/g, '/'),
     })),
     file: vi.fn((filePath: string) => ({ fsPath: filePath })),
+    parse: vi.fn((value: string) => ({ toString: () => value })),
   },
   env: {
+    get remoteName() {
+      return mockEnvRemoteName.current;
+    },
+    asExternalUri: mockAsExternalUri,
     openExternal: mockOpenExternal,
     clipboard: {
       writeText: mockClipboardWriteText,
@@ -299,31 +285,14 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onEndTurn = vi.fn((cb: (reason?: string, source?: string) => void) => {
       endTurnCallbackRef.current = cb;
     });
-    onToolCall = vi.fn(
-      (callback: (update: Record<string, unknown>) => void) => {
-        toolCallCallbackRef.current = callback;
-      },
-    );
+    onToolCall = vi.fn();
     onPlan = vi.fn();
-    onPermissionRequest = vi.fn(
-      (callback: (request: unknown) => Promise<string>) => {
-        this.permissionRequestCallback = callback;
-        permissionRequestCallbackRef.current = callback;
-      },
-    );
-    onAskUserQuestion = vi.fn(
-      (callback: (request: unknown) => Promise<{ optionId: string }>) => {
-        askUserQuestionCallbackRef.current = callback;
-      },
-    );
     onTranscriptUpdate = vi.fn(
       (callback: (notification: Record<string, unknown>) => void) => {
         transcriptUpdateCallbackRef.current = callback;
       },
     );
     onDisconnected = vi.fn();
-    permissionRequestCallback?: (request: unknown) => Promise<string>;
-    cancelCurrentPrompt = vi.fn();
     disconnect = vi.fn();
     constructor() {
       mockQwenAgentManagerInstances.push(this);
@@ -370,30 +339,7 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
 
 vi.mock('./MessageHandler.js', () => ({
   MessageHandler: class {
-    constructor(
-      _agentManager: unknown,
-      _conversationStore: unknown,
-      _currentConversationId: string | null,
-      _sendToWebView: (message: unknown) => void,
-    ) {
-      mockMessageHandlerInstances.push(this);
-    }
     setAuthInteractiveHandler = vi.fn();
-    permissionHandler?: (message: {
-      type: string;
-      data: { optionId?: string };
-    }) => void;
-    setPermissionHandler = vi.fn(
-      (
-        handler: (message: {
-          type: string;
-          data: { optionId?: string };
-        }) => void,
-      ) => {
-        this.permissionHandler = handler;
-      },
-    );
-    setAskUserQuestionHandler = vi.fn();
     setCurrentConversationId = vi.fn();
     getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
@@ -560,20 +506,18 @@ beforeEach(() => {
   endTurnCallbackRef.current = undefined;
   streamChunkCallbackRef.current = undefined;
   transcriptUpdateCallbackRef.current = undefined;
-  toolCallCallbackRef.current = undefined;
-  permissionRequestCallbackRef.current = undefined;
-  askUserQuestionCallbackRef.current = undefined;
   mockWindowState.focused = true;
   mockShowInformationMessage.mockReset();
   mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
   mockClipboardWriteText.mockReset();
   mockClipboardWriteText.mockResolvedValue(undefined);
+  mockEnvRemoteName.current = undefined;
+  mockAsExternalUri.mockReset();
 });
 
 describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
     mockConfigGet.mockImplementation(
@@ -935,153 +879,6 @@ describe('WebViewProvider.attachToView', () => {
     expect(panelPostMessage).not.toHaveBeenCalled();
   });
 
-  it('marks rejected switch_mode permission requests as failed without cancelling the session', async () => {
-    const postMessage = vi.fn();
-    const webview = {
-      options: undefined as unknown,
-      html: '',
-      postMessage,
-      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
-        toString: () => `webview:${uri.fsPath}`,
-      })),
-      onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })),
-    };
-
-    const provider = new WebViewProvider(
-      { subscriptions: [] } as never,
-      { fsPath: '/extension-root' } as never,
-    );
-
-    await provider.attachToView(
-      {
-        webview,
-        visible: true,
-        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
-      } as never,
-      'qwen-code.chatView.sidebar',
-    );
-
-    const agentManager = mockQwenAgentManagerInstances.at(-1);
-    const messageHandler = mockMessageHandlerInstances.at(-1);
-
-    expect(agentManager?.permissionRequestCallback).toBeTypeOf('function');
-
-    const permissionPromise = agentManager?.permissionRequestCallback?.({
-      options: [
-        {
-          optionId: 'proceed_once',
-          name: 'Yes',
-          kind: 'allow_once',
-        },
-        {
-          optionId: 'cancel',
-          name: 'No, keep planning (esc)',
-          kind: 'reject_once',
-        },
-      ],
-      toolCall: {
-        toolCallId: 'tool-call-1',
-        title: 'Would you like to proceed?',
-        kind: 'switch_mode',
-        status: 'pending',
-      },
-    });
-
-    expect(messageHandler?.permissionHandler).toBeTypeOf('function');
-
-    messageHandler?.permissionHandler?.({
-      type: 'permissionResponse',
-      data: { optionId: 'cancel' },
-    });
-
-    await expect(permissionPromise).resolves.toBe('cancel');
-    expect(agentManager?.cancelCurrentPrompt).not.toHaveBeenCalled();
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'streamEnd',
-      }),
-    );
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'toolCall',
-      data: expect.objectContaining({
-        type: 'tool_call_update',
-        toolCallId: 'tool-call-1',
-        kind: 'switch_mode',
-        status: 'failed',
-      }),
-    });
-  });
-
-  it('settles a matching pending permission when the tool call becomes terminal', async () => {
-    const { postMessage } = await setupAttachedProvider();
-    const agentManager = mockQwenAgentManagerInstances.at(-1);
-    const permissionPromise = agentManager?.permissionRequestCallback?.({
-      options: [
-        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
-        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
-      ],
-      toolCall: {
-        toolCallId: 'tool-call-aborted',
-        title: 'Run command',
-        kind: 'execute',
-        status: 'pending',
-      },
-    });
-
-    toolCallCallbackRef.current?.({
-      sessionUpdate: 'tool_call_update',
-      toolCallId: 'tool-call-aborted',
-      status: 'failed',
-    });
-
-    await expect(permissionPromise).resolves.toBe('cancel');
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'permissionResolved',
-      data: { optionId: 'cancel' },
-    });
-  });
-
-  it('rejects one workflow approval without cancelling the parent prompt', async () => {
-    const { postMessage } = await setupAttachedProvider();
-    const agentManager = mockQwenAgentManagerInstances.at(-1);
-    const messageHandler = mockMessageHandlerInstances.at(-1);
-    const permissionPromise = agentManager?.permissionRequestCallback?.({
-      options: [
-        { optionId: 'proceed_once', name: 'Yes', kind: 'allow_once' },
-        { optionId: 'cancel', name: 'No', kind: 'reject_once' },
-      ],
-      toolCall: {
-        toolCallId: 'workflow-approval-1',
-        title: 'Run command',
-        kind: 'execute',
-        status: 'pending',
-        _meta: { workflowApproval: true },
-      },
-    });
-
-    messageHandler?.permissionHandler?.({
-      type: 'permissionResponse',
-      data: { optionId: 'cancel' },
-    });
-
-    await expect(permissionPromise).resolves.toBe('cancel');
-    await vi.waitFor(() => {
-      expect(postMessage).toHaveBeenCalledWith({
-        type: 'toolCall',
-        data: expect.objectContaining({
-          type: 'tool_call_update',
-          toolCallId: 'workflow-approval-1',
-          status: 'failed',
-        }),
-      });
-    });
-    expect(agentManager?.cancelCurrentPrompt).not.toHaveBeenCalled();
-    expect(postMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'streamEnd' }),
-    );
-  });
-
   it('replays available skills to the webview after webviewReady', async () => {
     let messageHandler:
       | ((message: { type: string; data?: unknown }) => Promise<void>)
@@ -1223,7 +1020,6 @@ describe('WebViewProvider.attachToView', () => {
 describe('WebViewProvider transcript forwarding', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
   });
@@ -1764,80 +1560,6 @@ describe('Notification & dot indicator', () => {
     expect(mockShowInformationMessage).not.toHaveBeenCalled();
   });
 
-  it('shows blue dot and notification for permission requests when panel is not active', async () => {
-    const mockPanel = {
-      active: false,
-      visible: false,
-      webview: { postMessage: vi.fn() },
-      iconPath: undefined as unknown,
-    };
-    mockGetPanel.mockReturnValue(mockPanel as never);
-    mockWindowState.focused = false;
-
-    await setupAttachedProvider();
-
-    // Trigger permission request — don't await, it blocks on user response
-    void permissionRequestCallbackRef.current?.({
-      toolCall: { title: 'Bash' },
-      options: [],
-    });
-
-    // Blue dot
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-
-    // Notification with tool name
-    expect(mockShowInformationMessage).toHaveBeenCalledWith(
-      'Qwen Code: Needs your permission to use Bash.',
-      'Show',
-    );
-  });
-
-  it('blue dot takes priority over orange dot', async () => {
-    const mockPanel = {
-      active: false,
-      visible: false,
-      webview: { postMessage: vi.fn() },
-      iconPath: undefined as unknown,
-    };
-    mockGetPanel.mockReturnValue(mockPanel as never);
-    mockWindowState.focused = false;
-
-    await setupAttachedProvider();
-
-    // First: task completes, orange dot
-    streamChunkCallbackRef.current?.('chunk');
-    vi.advanceTimersByTime(25_000);
-    endTurnCallbackRef.current?.('end_turn');
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-orange.png'),
-      }),
-    );
-
-    // Then: permission request, should upgrade to blue
-    void permissionRequestCallbackRef.current?.({
-      toolCall: { title: 'Read' },
-      options: [],
-    });
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-
-    // Another endTurn should NOT downgrade back to orange
-    endTurnCallbackRef.current?.('end_turn');
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-  });
-
   it('does not send duplicate idle notifications for multi-turn tasks', async () => {
     const mockPanel = {
       active: false,
@@ -2034,37 +1756,6 @@ describe('Notification & dot indicator', () => {
       'Show',
     );
   });
-
-  it('shows blue dot and notification for askUserQuestion when panel is not active', async () => {
-    const mockPanel = {
-      active: false,
-      visible: false,
-      webview: { postMessage: vi.fn() },
-      iconPath: undefined as unknown,
-    };
-    mockGetPanel.mockReturnValue(mockPanel as never);
-    mockWindowState.focused = false;
-
-    await setupAttachedProvider();
-
-    // Trigger askUserQuestion — don't await, it blocks on user response
-    void askUserQuestionCallbackRef.current?.({
-      questions: [{ question: 'Which option?' }],
-    });
-
-    // Blue dot
-    expect(mockPanel.iconPath).toEqual(
-      expect.objectContaining({
-        fsPath: expect.stringContaining('icon-blue.png'),
-      }),
-    );
-
-    // Notification without tool name (generic message)
-    expect(mockShowInformationMessage).toHaveBeenCalledWith(
-      'Qwen Code: Waiting for your input.',
-      'Show',
-    );
-  });
 });
 
 describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
@@ -2101,6 +1792,71 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     ).sendMessageToWebView = vi.fn();
     return provider;
   }
+
+  it('keeps a first-time service save without claiming authentication or rolling it back', async () => {
+    const { minimaxProvider, resolveBaseUrl } = await import(
+      '@qwen-code/qwen-code-core'
+    );
+    const provider = makeProvider();
+    const initialize = vi.fn();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = initialize;
+    await provider['handleAuthInteractive'](minimaxProvider, {
+      baseUrl: resolveBaseUrl(minimaxProvider),
+      apiKey: 'test-image',
+      modelIds: ['image-01'],
+    });
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+    expect(
+      (
+        provider as unknown as {
+          sendMessageToWebView: ReturnType<typeof vi.fn>;
+        }
+      ).sendMessageToWebView,
+    ).toHaveBeenCalledExactlyOnceWith({
+      type: 'authState',
+      data: { authenticated: false },
+    });
+    expect(mockShowInformationMessage).toHaveBeenCalledWith(
+      'Service models saved. Configure a conversation model to start chatting.',
+    );
+  });
+
+  it('retains saved model fields when reconnecting through the extension', async () => {
+    const model = {
+      id: inputs.modelIds[0],
+      baseUrl: inputs.baseUrl,
+      envKey: 'DEEPSEEK_API_KEY',
+      name: '[DeepSeek] My tuned model',
+      generationConfig: {
+        contextWindowSize: 65536,
+        customHeaders: { 'X-Route': '${ROUTE}' },
+      },
+    };
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: [model] },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](providerConfig, inputs);
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    expect(
+      mockApplyProviderInstallPlanToFile.mock.calls[0][0].modelProviders[0]
+        .models,
+    ).toEqual([model]);
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
 
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
@@ -2346,7 +2102,6 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
     conversationStoreMocks.getAllConversations.mockReset();
@@ -2689,12 +2444,108 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
     );
     expect(firstErrors).toHaveLength(0);
   });
+
+  function bootstrapPayloads(postMessage: ReturnType<typeof vi.fn>) {
+    return postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: Record<string, unknown> },
+      )
+      .filter((message) => message.type === 'webShellBootstrap')
+      .map((message) => message.data);
+  }
+
+  it('hands the webview the tunnelled daemon URL in a remote window', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://localhost:52100',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    // The daemon binds the loopback of the machine hosting the extension
+    // process, but the shell renders on the client, where that address points
+    // at the client's own loopback. Only the forwarded URL is reachable.
+    const [bootstrap] = bootstrapPayloads(setup.postMessage);
+    expect(bootstrap?.baseUrl).toBe('http://localhost:52100');
+    expect(bootstrap?.token).toBe('token-1');
+    // The tunnel is resolved from the daemon's own loopback URL, which stays
+    // the source of truth for everything the host does with it.
+    const resolvedFrom = mockAsExternalUri.mock.calls[0]?.[0] as {
+      toString(): string;
+    };
+    expect(resolvedFrom.toString()).toBe('http://127.0.0.1:4101');
+  });
+
+  it('leaves the daemon URL untouched in a local window', async () => {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    const [bootstrap] = bootstrapPayloads(setup.postMessage);
+    expect(bootstrap?.baseUrl).toBe('http://127.0.0.1:4101');
+    expect(mockAsExternalUri).not.toHaveBeenCalled();
+  });
+
+  it('re-resolves the tunnel on every bootstrap instead of caching it', async () => {
+    mockEnvRemoteName.current = 'dev-container';
+    mockAsExternalUri
+      .mockResolvedValueOnce({ toString: () => 'http://localhost:52100' })
+      .mockResolvedValueOnce({ toString: () => 'http://localhost:52101' });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    // A restarted extension host forwards to a fresh client-side port, so a
+    // cached resolution would point every later panel at a dead one.
+    expect(
+      bootstrapPayloads(setup.postMessage).map((data) => data?.baseUrl),
+    ).toEqual(['http://localhost:52100', 'http://localhost:52101']);
+  });
+
+  it('refuses a resolution that is not a forwarded loopback address', async () => {
+    // A browser-based remote resolves to a relay origin. The bootstrap payload
+    // carries the daemon's bearer token, so it must not be handed to a webview
+    // pointed at a third-party host.
+    mockEnvRemoteName.current = 'codespaces';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'https://4101-space.app.github.dev',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: { message?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data?.message).toContain(
+      'not a forwarded loopback address',
+    );
+  });
 });
 
 describe('WebViewProvider web-shell permission bridge', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
     mockConfigGet.mockImplementation(

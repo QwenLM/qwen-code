@@ -128,6 +128,48 @@ export interface LlmFinishedEventValue {
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 }
 
+/**
+ * Provenance of a tool-call request. Set exclusively by in-process callers
+ * when they construct the {@link ToolCallRequestInfo} — it is NEVER parsed
+ * from tool parameters, wire protocols, or model output, and it is NEVER
+ * inferred from `isClientInitiated`. A missing origin fails closed as
+ * `{ kind: 'model' }` (the least-privileged origin).
+ *
+ * `fixed_policy` marks calls issued by the omni fixed-policy orchestrator:
+ * they bypass the interactive permission flow (no confirmation dialog, no
+ * plan/auto classification) but still honor PreToolUse hooks and the
+ * PermissionManager tool-enablement check.
+ */
+export type ToolExecutionOrigin =
+  | { kind: 'model' }
+  | { kind: 'client' }
+  | {
+      kind: 'fixed_policy';
+      /** ID of the fixed policy that issued this call. */
+      policyId: string;
+      /** Pipeline stage the policy ran in. */
+      stage: 'preprocessing' | 'transport_guard';
+    };
+
+/**
+ * Raw, successful media-policy tool artifacts captured by the scheduler
+ * BEFORE PostToolUse hook artifacts are merged in — hook-produced artifacts
+ * must never impersonate policy outputs. Carried on
+ * {@link ToolCallResponseInfo.policyArtifacts} for the fixed-policy
+ * orchestrator (and the model-call artifact bridge) to consume.
+ */
+export interface PolicyArtifactBatch {
+  /** Canonical tool name that produced the artifacts. */
+  toolName: string;
+  /** The call id of the invocation (the orchestrator uses its staging
+   * invocation id as the call id, so this keys the staging directory). */
+  invocationId: string;
+  /** Origin the call executed under (missing origins fail closed to model
+   * before this batch is built, so this is always concrete). */
+  executionOrigin: ToolExecutionOrigin;
+  /** The tool's own `ToolResult.artifacts`, unmerged and in order. */
+  artifacts: ToolArtifact[];
+}
 /** @deprecated Use `LlmErrorEventValue`; retained until a future major release. */
 export type GeminiErrorEventValue = LlmErrorEventValue;
 
@@ -149,6 +191,12 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   goalContext?: GoalTurnPermit;
+  /**
+   * Provenance of this request. Only set by in-process callers; absent on
+   * every request materialized from model output or a wire protocol.
+   * Consumers treat a missing value as `{ kind: 'model' }` (fail closed).
+   */
+  executionOrigin?: ToolExecutionOrigin;
   /** Parent model tool call for a programmatically dispatched child call. */
   parentCallId?: string;
   source?: 'model' | 'code_mode';
@@ -173,8 +221,21 @@ export interface ToolCallResponseInfo {
   persistedOutputFiles?: string[];
   modelOverride?: string;
   terminateTurn?: boolean;
+  /**
+   * Set only when the call was denied because it needed user approval and the
+   * session had no way to ask for it (non-interactive mode). Headless front
+   * ends use it to suggest an approval mode; every other denial, such as a
+   * hook block or a deny rule, reports its own reason instead.
+   */
+  approvalRequired?: true;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
+  /**
+   * Raw successful artifacts of a media-policy tool, captured before
+   * PostToolUse hook artifact merging. Absent for non-media-policy tools,
+   * failed calls, and calls that produced no artifacts.
+   */
+  policyArtifacts?: PolicyArtifactBatch;
   boundaryArtifact?: ToolResultBoundaryArtifact;
 }
 
