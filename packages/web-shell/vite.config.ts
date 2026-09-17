@@ -142,6 +142,19 @@ export default defineConfig(({ command }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'client/index.html'),
+        // This import-free worker must remain at the origin root so it can
+        // control all Web Shell navigation.
+        sw: resolve(__dirname, 'client/sw.js'),
+      },
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
+        format: 'es',
+      },
+    },
   },
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
