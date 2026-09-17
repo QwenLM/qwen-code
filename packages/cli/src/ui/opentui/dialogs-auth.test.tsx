@@ -93,6 +93,7 @@ vi.mock('./theme.js', () => ({
 }));
 vi.mock('../../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: () => ({}),
+  getRawModelProviders: () => ({}),
 }));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
