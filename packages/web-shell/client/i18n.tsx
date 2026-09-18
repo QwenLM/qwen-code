@@ -51,6 +51,7 @@ const EN: Messages = {
   'branchPicker.action.newBranch': 'New Branch…',
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
+  'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
   'branchPicker.invalidBranchName':
     'Invalid branch name — avoid spaces, ~, ^, :, ? * and leading -',
@@ -191,6 +192,9 @@ const EN: Messages = {
   'gitLog.detailError': 'Failed to load commit details',
   'gitLog.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitLog.copySha': (v) => `Copy commit ${v?.sha ?? ''}`,
+  'gitLog.allBranches': 'All branches',
+  'gitLog.search': 'Search message, author, or hash',
+  'gitLog.noMatches': 'No commits match',
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -492,6 +496,30 @@ const EN: Messages = {
   'live.noFallback':
     'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
+  'live.browser.connect': 'Talk in this browser',
+  'live.browser.connecting': 'Connecting microphone…',
+  'live.browser.requirement.host': 'This browser tab',
+  'live.browser.requirement.runtime': 'Live runtime',
+  'live.browser.takeOver': 'Take over in this tab',
+  'live.browser.disconnect': 'Release microphone',
+  'live.browser.setupDescription':
+    'Use this browser tab as the microphone and speaker for Live Voice.',
+  'live.browser.readyDescription':
+    'This tab is the microphone and speaker for Live Voice.',
+  'live.browser.otherTabDescription':
+    'Another Web Shell tab is the microphone and speaker for Live Voice.',
+  'live.browser.headphonesHint':
+    'Headphones give the best result: they keep the reply out of the microphone.',
+  'live.browser.closed.occupied':
+    'Another Live Voice endpoint is already connected.',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host took over Live Voice from this tab.',
+  'live.browser.closed.supersededTab':
+    'Another Web Shell tab took over Live Voice.',
+  'live.browser.closed.refused':
+    'Live Voice is turned off, or this workspace is not trusted.',
+  'live.browser.closed.microphone': 'The microphone could not be opened.',
+  'live.browser.closed.lost': 'The Live Voice connection was lost.',
   'settings.liveShortcut.capture': 'Press shortcut',
   'settings.liveShortcut.clear': 'Clear',
   'settings.liveShortcut.off': 'Off',
@@ -499,6 +527,8 @@ const EN: Messages = {
   'settings.liveSetup.experimental': 'Experimental',
   'settings.liveSetup.description':
     'Talk to Qwen from anywhere on this Mac with Realtime voice, Appshot, and task handoff.',
+  'settings.liveSetup.browserDescription':
+    'Talk to Qwen with Realtime voice and task handoff, using this browser as the microphone and speaker.',
   'settings.liveSetup.enable': 'Enable Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
@@ -614,6 +644,8 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.dissatisfied': 'Not satisfied',
+  'assistant.satisfied': 'Satisfied',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -2718,6 +2750,7 @@ const EN: Messages = {
     'Use this provider for conversation. The current model is retained when it is included in the configuration.',
   'auth.purpose.image': 'Image generation',
   'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.realtime': 'Live Voice',
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
@@ -2924,6 +2957,11 @@ const EN: Messages = {
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
     'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+  'contextCompression.result': (v) =>
+    `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `Compression instructions were truncated to ${v?.max ?? ''} characters.`,
+  'contextCompression.noop': 'No compression needed.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
   'contextUsage.previousReading':
@@ -3903,6 +3941,7 @@ const ZH: Messages = {
   'branchPicker.action.newBranch': '新建分支…',
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
+  'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
   'branchPicker.invalidBranchName':
     '无效的分支名称 — 避免空格、~、^、:、? * 以及以 - 开头',
@@ -4035,6 +4074,9 @@ const ZH: Messages = {
   'gitLog.detailError': '加载提交详情失败',
   'gitLog.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
   'gitLog.copySha': (v) => `复制提交 ${v?.sha ?? ''}`,
+  'gitLog.allBranches': '全部分支',
+  'gitLog.search': '搜索提交信息、作者或哈希',
+  'gitLog.noMatches': '没有匹配的提交',
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',
@@ -4405,6 +4447,27 @@ const ZH: Messages = {
   'live.noFallback':
     '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
+  'live.browser.connect': '在此浏览器中通话',
+  'live.browser.connecting': '正在连接麦克风…',
+  'live.browser.requirement.host': '此浏览器标签页',
+  'live.browser.requirement.runtime': 'Live 运行时',
+  'live.browser.takeOver': '在此标签页接管',
+  'live.browser.disconnect': '释放麦克风',
+  'live.browser.setupDescription':
+    '将此浏览器标签页用作实时语音的麦克风和扬声器。',
+  'live.browser.readyDescription': '此标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.otherTabDescription':
+    '另一个 Web Shell 标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.headphonesHint':
+    '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
+  'live.browser.closed.occupied': '已有其他实时语音端连接。',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host 已从此标签页接管实时语音。',
+  'live.browser.closed.supersededTab':
+    '另一个 Web Shell 标签页已接管实时语音。',
+  'live.browser.closed.refused': '实时语音未开启，或此工作区不受信任。',
+  'live.browser.closed.microphone': '无法打开麦克风。',
+  'live.browser.closed.lost': '实时语音连接已断开。',
   'settings.liveShortcut.capture': '请按下快捷键',
   'settings.liveShortcut.clear': '清除',
   'settings.liveShortcut.off': '关闭',
@@ -4412,6 +4475,8 @@ const ZH: Messages = {
   'settings.liveSetup.experimental': '实验性',
   'settings.liveSetup.description':
     '在这台 Mac 的任意界面通过 Realtime 语音、Appshot 和任务交接与 Qwen 对话。',
+  'settings.liveSetup.browserDescription':
+    '通过 Realtime 语音和任务交接与 Qwen 对话，由此浏览器充当麦克风和扬声器。',
   'settings.liveSetup.enable': '启用 Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
@@ -4526,6 +4591,8 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.dissatisfied': '不满意',
+  'assistant.satisfied': '满意',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
@@ -6457,6 +6524,7 @@ const ZH: Messages = {
     '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
   'auth.purpose.image': '生图',
   'auth.purpose.voice': '语音转写',
+  'auth.purpose.realtime': '实时语音',
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
@@ -6650,6 +6718,11 @@ const ZH: Messages = {
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
     '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+  'contextCompression.result': (v) =>
+    `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `压缩指令已截断为 ${v?.max ?? ''} 个字符。`,
+  'contextCompression.noop': '无需压缩。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',

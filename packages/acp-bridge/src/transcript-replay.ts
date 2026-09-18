@@ -26,7 +26,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
-  projectGoalStateToLegacy,
+  projectGoalCard,
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
@@ -1118,10 +1118,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         previous: this.goalState,
         next: payload.snapshot,
       });
-      const projection = projectGoalStateToLegacy(
-        payload,
-        this.goalState?.goal ?? null,
-      );
+      const goalStatus = projectGoalCard(payload, this.goalState?.goal ?? null);
       const goalControlCommand = projectGoalControlCommand(
         payload.cause,
         payload.snapshot,
@@ -1142,7 +1139,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           }),
         );
       }
-      const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
@@ -1151,9 +1147,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           extra: {
             goalState: payload.snapshot,
             goalStatus,
-            ...(projection.goalTerminal
-              ? { goalTerminal: projection.goalTerminal }
-              : {}),
             'qwen.session.recordId': record.uuid,
           },
         }),
@@ -1191,12 +1184,26 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         continue;
       }
       if (!isObjectRecord(item) || typeof item['text'] !== 'string') continue;
+      const contextCompression = isObjectRecord(item['contextCompression'])
+        ? item['contextCompression']
+        : undefined;
+      const contextCompressionNotice = isObjectRecord(
+        item['contextCompressionNotice'],
+      )
+        ? item['contextCompressionNotice']
+        : undefined;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
           text: item['text'].replace(/\n/g, '  \n'),
           ...meta,
-          extra: { source: 'slash_command' },
+          extra: {
+            source: 'slash_command',
+            ...(contextCompression ? { contextCompression } : {}),
+            // Replayed on its own key, exactly as it was recorded: the folded
+            // block keeps both, so the note survives beside the result.
+            ...(contextCompressionNotice ? { contextCompressionNotice } : {}),
+          },
         }),
       );
     }

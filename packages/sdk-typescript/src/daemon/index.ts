@@ -539,6 +539,7 @@ export type {
   DaemonDiffHunk,
   DaemonGitLogEntry,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitFileStat,
   DaemonGitCommitDetail,
   DaemonGitBranchInfo,

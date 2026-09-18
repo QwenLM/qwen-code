@@ -10,9 +10,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// A scripted lstat simulates the lstat→mkdir race: the directory appears
-// between the existence check and the create, owned by someone else or with
-// permissive bits.
+// A scripted lstat returns the directory seen after mkdir, including a
+// concurrent creator that supplied unsafe ownership or permissions.
 const lstatMock = vi.hoisted(() => vi.fn());
 // A scripted chmod fails the post-listen step of start() while the socket is
 // already bound and accepting.
@@ -74,12 +73,10 @@ import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
   type BridgeRequest,
-} from '../protocol.js';
-import {
-  ChromeExtensionTransport,
-  ensureSocketDirectory,
-} from './chrome-extension-transport.js';
-import { encodeFrame, FrameDecoder } from './framing.js';
+} from './protocol.js';
+import { ChromeExtensionTransport } from './transport/chrome-extension-transport.js';
+import { prepareSocketDirectory } from './socket-path.js';
+import { encodeFrame, FrameDecoder } from './transport/framing.js';
 
 const roots: string[] = [];
 const transports: ChromeExtensionTransport[] = [];
@@ -115,7 +112,7 @@ function directoryInfo(uid: number, mode: number) {
   };
 }
 
-describe('ensureSocketDirectory create race', () => {
+describe('prepareSocketDirectory creation checks', () => {
   it.skipIf(process.platform === 'win32' || owner === undefined)(
     'rejects a permissive directory that appears during creation',
     async () => {
@@ -124,18 +121,13 @@ describe('ensureSocketDirectory create race', () => {
       const leaf = path.join(root, 'leaf');
       lstatMock.mockImplementation(async (target: string) => {
         if (target === leaf) {
-          // First look: missing. After mkdir: a permissive entry the
-          // mkdir(0o700) could not have produced itself.
-          const seen = lstatMock.mock.calls.filter(
-            ([candidate]) => candidate === leaf,
-          ).length;
-          if (seen === 1)
-            throw Object.assign(new Error('missing'), { code: 'ENOENT' });
           return directoryInfo(owner!, 0o755);
         }
         return await fs.promises.lstat(target);
       });
-      await expect(ensureSocketDirectory(leaf)).rejects.toThrow('not usable');
+      await expect(
+        prepareSocketDirectory(path.join(leaf, 'bridge.sock')),
+      ).rejects.toThrow('private user-owned directory');
     },
   );
 
@@ -147,16 +139,13 @@ describe('ensureSocketDirectory create race', () => {
       const leaf = path.join(root, 'leaf');
       lstatMock.mockImplementation(async (target: string) => {
         if (target === leaf) {
-          const seen = lstatMock.mock.calls.filter(
-            ([candidate]) => candidate === leaf,
-          ).length;
-          if (seen === 1)
-            throw Object.assign(new Error('missing'), { code: 'ENOENT' });
           return directoryInfo(owner! + 1, 0o700);
         }
         return await fs.promises.lstat(target);
       });
-      await expect(ensureSocketDirectory(leaf)).rejects.toThrow('not usable');
+      await expect(
+        prepareSocketDirectory(path.join(leaf, 'bridge.sock')),
+      ).rejects.toThrow('private user-owned directory');
     },
   );
 });
@@ -180,6 +169,7 @@ describe('start failure after listen', () => {
             type: 'hello',
             protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
             extensionId: CHROME_EXTENSION_ID,
+            extensionInstanceId: 'deadline-test',
           }),
         );
         await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
@@ -220,6 +210,7 @@ describe('request deadlines', () => {
           type: 'hello',
           protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
           extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId: 'deadline-test',
         }),
       );
       await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
