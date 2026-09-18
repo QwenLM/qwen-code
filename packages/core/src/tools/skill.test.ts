@@ -795,6 +795,102 @@ describe('SkillTool', () => {
   });
 
   describe('refreshSkills', () => {
+    it.each(['user', 'project', 'extension'] as const)(
+      'reloads a changed %s skill body while unchanged refreshes remain deduplicated',
+      async (level) => {
+        const original: SkillConfig = {
+          ...mockSkills[0],
+          name: level === 'extension' ? 'portable:review' : 'review',
+          ...(level === 'extension'
+            ? { authoredName: 'review', extensionName: 'portable' }
+            : {}),
+          level,
+          body: 'Version one.',
+        };
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue([original]);
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          original,
+        );
+        await skillTool.refreshSkills();
+        const invoke = async () =>
+          partToString(
+            (
+              await (skillTool as SkillToolWithProtectedMethods)
+                .createInvocation({ skill: original.name })
+                .execute()
+            ).llmContent,
+          );
+        const first = await invoke();
+        expect(first).toContain('Version one.');
+        await skillTool.refreshSkills();
+        expect(await invoke()).toContain('already loaded');
+        const updated = { ...original, body: 'Version two.' };
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue([updated]);
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          updated,
+        );
+        await skillTool.refreshSkills();
+        const second = await invoke();
+        expect(second).toContain('Version two.');
+        expect(second).not.toContain('Version one.');
+        expect(skillTool.getLoadedSkillContents()).toEqual(
+          new Set([first, second]),
+        );
+        await skillTool.refreshSkills();
+        expect(await invoke()).toContain('already loaded');
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue([original]);
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          original,
+        );
+        await skillTool.refreshSkills();
+        expect(await invoke()).toBe(first);
+      },
+    );
+
+    it.each(['removed', 'disabled'] as const)(
+      'invalidates a %s extension skill and permits fresh loading when it returns',
+      async (state) => {
+        const original: SkillConfig = {
+          ...mockSkills[0],
+          name: 'portable:review',
+          extensionName: 'portable',
+          level: 'extension',
+        };
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue([original]);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([original]);
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          original,
+        );
+        await skillTool.refreshSkills();
+        const invoke = async () =>
+          partToString(
+            (
+              await (skillTool as SkillToolWithProtectedMethods)
+                .createInvocation({ skill: original.name })
+                .execute()
+            ).llmContent,
+          );
+        const first = await invoke();
+        if (state === 'removed') {
+          vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
+          vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([]);
+        } else {
+          vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+        }
+        await skillTool.refreshSkills();
+        expect(
+          skillTool.validateToolParams({ skill: original.name }),
+        ).not.toBeNull();
+        expect(skillTool.getLoadedSkillNames().has(original.name)).toBe(false);
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set([first]));
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue([original]);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([original]);
+        vi.mocked(config.isSkillEnabled).mockReturnValue(true);
+        await skillTool.refreshSkills();
+        expect(await invoke()).toBe(first);
+      },
+    );
+
     it('surfaces collection failures for strict refreshes without changing the default behavior', async () => {
       vi.mocked(mockSkillManager.listSkills).mockRejectedValue(
         new Error('skill listing failed'),
