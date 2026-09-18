@@ -411,6 +411,10 @@ import {
   buildGoalStatusUpdate,
   MessageEmitter,
 } from './emitters/MessageEmitter.js';
+import type {
+  ContextCompressionMeta,
+  ContextCompressionNotice,
+} from '../../ui/types.js';
 import {
   goalPublicationKey,
   legacyGoalSupersession,
@@ -15390,27 +15394,80 @@ export class Session implements SessionContext {
         // Command returns multiple messages via async generator (ACP-preferred)
         // Stream all messages to the client as agent message chunks.
         const chunks: string[] = [];
+        // The invocation note rides its own `_meta` key: the reducer folds this
+        // turn's text frames into one block and spreads `_meta` key by key, so a
+        // note sharing `contextCompression` would be overwritten by the result
+        // that follows. Its own key survives the fold, and a client that reads it
+        // renders the note as a row beside the compression it belongs to.
+        const standalone: Array<{
+          text: string;
+          contextCompressionNotice: ContextCompressionNotice;
+        }> = [];
+        let contextCompression: ContextCompressionMeta | undefined;
         for await (const msg of result.messages) {
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          const content = msg.content || '';
+          const notice = msg.contextCompressionNotice;
           await this.messageEmitter.emitSlashCommandOutput(
-            (msg.content || '').replace(/\n/g, '  \n'),
+            content.replace(/\n/g, '  \n'),
+            undefined,
+            notice
+              ? { contextCompressionNotice: notice }
+              : msg.contextCompression
+                ? { contextCompression: msg.contextCompression }
+                : undefined,
           );
-          chunks.push(msg.content || '');
+          if (notice) {
+            // Recorded with a trailing newline so a replay's folded block still
+            // reads as two lines.
+            standalone.push({
+              text: `${content}\n`,
+              contextCompressionNotice: notice,
+            });
+            continue;
+          }
+          chunks.push(content);
+          // Both terminal phases are recorded: replay then rebuilds the row the
+          // live turn showed instead of falling back to the English sentence.
+          if (
+            msg.contextCompression?.phase === 'done' ||
+            msg.contextCompression?.phase === 'noop'
+          ) {
+            contextCompression = msg.contextCompression;
+          }
         }
         // Write a system/slash_command record for history replay (same reason as
         // 'message' case — system records are invisible to model history).
-        if (chunks.length > 0) {
+        // Standalone frames are recorded as their own items so replay rebuilds
+        // the same rows the live turn showed.
+        const outputHistoryItems: Array<Record<string, unknown>> = [
+          ...standalone.map((frame) => ({
+            type: 'assistant',
+            text: frame.text,
+            contextCompressionNotice: frame.contextCompressionNotice,
+          })),
+          ...(chunks.length > 0
+            ? [
+                {
+                  type: 'assistant',
+                  text: chunks.join('\n'),
+                  // Replayed alongside the joined text so a restarted session
+                  // re-renders the same localized line the live turn showed.
+                  ...(contextCompression ? { contextCompression } : {}),
+                },
+              ]
+            : []),
+        ];
+        if (outputHistoryItems.length > 0) {
           recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt
               .filter((b) => b.type === 'text')
               .map((b) => (b.type === 'text' ? b.text : ''))
               .join(' '),
-            outputHistoryItems: [
-              { type: 'assistant', text: chunks.join('\n') },
-            ],
+            outputHistoryItems,
           });
         }
 
