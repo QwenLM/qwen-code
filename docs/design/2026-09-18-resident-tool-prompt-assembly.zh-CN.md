@@ -121,7 +121,7 @@ getCoreSystemPrompt(
 
 1. **默认会话回归（已在 CI）。** 现有 17 份完整提示词快照覆盖"无快照"路径，`renders identically when every tool is declared` 覆盖"全部声明"路径。两者共同构成让改动对常见场景安全的守卫。
 2. **效果，以及效果之外不漂移（已在 CI）。** 两条测试夹住节省量：文件七件套白名单必须减少 900-1,400 字符（实测 1,104，约 276 token——只有策略条目，因为该白名单保留了全部示例），更窄的白名单必须减少 3,800-5,000 字符（实测 4,327，约 1,082 token，含三个示例块）。第三条断言四种按模型选择的示例写法都被门控，而不只是方括号写法。三者合起来能在收益丢失与新增未门控工具文案时失败。`changes nothing outside the two gated sections` 从两次渲染中剥掉 `## Using Your Tools` 与 `# Examples`，断言其余部分完全相同。
-3. **不变量（已在 CI）。** `never names an undeclared tool inside the gated sections` 以词边界匹配把每个 `ToolNames` 取值扫一遍被门控文本，可抓住门控不足；配合完整集合亦可抓住门控过度。之所以限定这两段，是因为 §6 中那两处未门控的散文引用。
+3. **不变量，双向（已在 CI）。** `never names an undeclared tool inside the gated sections` 以词边界匹配把每个 `ToolNames` 取值扫一遍被门控文本；`gates every tool name the gated sections can mention, on every example set` 把它变成与配置无关的检查——逐个withhold 全部 66 个名字、对四套示例模板各跑一遍，这正是能抓住"按模型选择的写法未被门控"的那条。`keeps the policy text of every tool that is declared` 钉住相反方向，防止门控过度。之所以限定这两段，是因为 §6 中的那些残留。
 4. **反向检查与接线（已在 CI）。** `leaves CodeModeOnly guidance untouched by the declared set` 断言 code mode 在有无快照时渲染完全一致；`takes the declared set from the Config snapshot` 断言 `getMainSessionBaseSystemPrompt` 确实读取 `Config.getPromptToolSnapshot()`——这正是让 `/context` 与真实请求同源的性质。
 5. **Token 度量（已交接）。** 在设置了裁剪版 `tools.eager` 白名单的会话上，对比改动前后的系统提示词一行，以 provider 的 `input_token_count` 为基准（分类标尺本身正在 #12119 中修复）。交接文档还包含把本改动与 `tools.eager` 自身收益分离的三档跑法，以及在仓库缺少 eval 设施下只能做的弱化召回验证。
 
