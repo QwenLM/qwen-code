@@ -355,8 +355,15 @@ function snapshotAssignments(
   // Joined without newlines: this text is injected between the user's
   // statements, so any newline here would shift every subsequent line number in
   // reported stack traces (and the shift would grow with the binding count).
-  // Each assignment already ends in ';'.
-  return assignments.length > 0 ? assignments.join('') : '';
+  // Each assignment already ends in ';', and the leading ';' terminates the
+  // statement this text is injected after: the injection point is a top-level
+  // statement's `endIndex`, so a cell whose last statement omits its semicolon
+  // would otherwise glue the snapshot identifier onto the user's final token
+  // (`f()__qwen_repl_..._snapshot['x'] = ...`), which `vm.SourceTextModule`
+  // rejects as a syntax error for the whole cell. It equally separates this
+  // commit from a declarator marker injected at the same offset. A ';' is an
+  // empty statement wherever the previous statement was already terminated.
+  return assignments.length > 0 ? `;${assignments.join('')}` : '';
 }
 
 function snapshotDeclarator(
