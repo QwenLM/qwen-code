@@ -11711,6 +11711,241 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('publishes one settlement when the same live terminal is delivered twice', async () => {
+    // The wire can hand the same terminal over twice: a resumed stream
+    // re-delivering its last frame, or a proxy re-emitting one. The live
+    // publish is not gated on local admission — `promptSettledFromTurnEvent`
+    // builds a settlement for any terminal carrying a prompt id — so the
+    // published-key set in `publishPromptSettlement` is the only thing keeping
+    // one terminal from reaching hosts twice. Deleting its
+    // `publishedPromptSettlementsRef.current.has(key)` early return turns this
+    // red with two identical settlements.
+    const terminalGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-settle-dedupe',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events: async function* duplicatedTerminal(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          terminalGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-1',
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        yield {
+          id: 12,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-1',
+          data: { promptId: 'prompt-1', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        await new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    sdkMocks.sessions.push(session);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+
+    await act(async () => {
+      terminalGate.resolve();
+      await flushPromises();
+    });
+
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'end_turn' });
+      await flushPromises();
+    });
+
+    // Both frames settled the same `(sessionId, promptId)`; only one is
+    // published, and the submitter's own promise resolves once.
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-dedupe',
+        promptId: 'prompt-1',
+        outcome: 'completed',
+        stopReason: 'end_turn',
+      },
+    ]);
+  });
+
+  it('withholds the live settlement while a journal repair targets the same prompt', async () => {
+    // The load arms a live-journal repair for `prompt-live` and the same
+    // prompt's terminal then arrives on the live stream. Publishing there
+    // would certify the truncated projection as the turn's final message, and
+    // the key burn makes it uncorrectable, so the live path withholds it until
+    // the repair resolves. Dropping `!repairTargetsTerminal` from the publish
+    // condition turns this red.
+    const terminalGate = createDeferred<void>();
+    const initialSession = createMockSession({
+      sessionId: 'session-settle-repair',
+      hasActivePrompt: true,
+      lastEventId: 5,
+      replaySnapshot: {
+        compactedReplay: [],
+        liveJournal: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            promptId: 'prompt-live',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 2,
+              retainedEvents: 1,
+              maxBytes: 512,
+              maxEvents: 1,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-live',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained tail' },
+              },
+            },
+          },
+        ],
+      },
+      events: async function* matchingTerminal(
+        options: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          terminalGate.promise,
+          new Promise<void>((resolve) =>
+            options.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (options.signal?.aborted) return;
+        yield {
+          id: 6,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-live',
+          data: { promptId: 'prompt-live', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        await new Promise<void>((resolve) =>
+          options.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    // The repair reload reads the whole turn back. Its replay publishes
+    // nothing here either — the prompt was never locally bound — so the
+    // assertion below cannot be satisfied by a second, post-repair publish.
+    const repairedSession = createMockSession({
+      sessionId: 'session-settle-repair',
+      lastEventId: 7,
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 4,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-live',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'long prompt' },
+              },
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            promptId: 'prompt-live',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'repaired answer' },
+              },
+            },
+          },
+          {
+            id: 6,
+            v: 1,
+            type: 'turn_complete',
+            promptId: 'prompt-live',
+            data: { promptId: 'prompt-live', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(initialSession, repairedSession);
+    const settlements: DaemonPromptSettledEvent[] = [];
+
+    function Harness() {
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      terminalGate.resolve();
+      await flushPromises();
+      await flushTranscriptDispatch();
+    });
+
+    expect(settlements).toEqual([]);
+    // Positive control: the episode really was armed for this prompt, and the
+    // terminal really did trigger the repair reload rather than being ignored.
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2),
+      );
+      await flushPromises();
+    });
+    expect(settlements).toEqual([]);
+  });
+
   it('does not let replay state events overwrite fresh connection status', async () => {
     sdkMocks.workspaceProviders.mockResolvedValueOnce({
       v: 1,
