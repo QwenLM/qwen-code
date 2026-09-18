@@ -2916,7 +2916,8 @@ describe('Session', () => {
       expect(session.queuedPeerMessageIds()).toEqual(['msg-a', 'msg-b']);
       expect(session.hasRoomForPeerMessage()).toBe(true);
 
-      for (let i = 3; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+      // The agent result does not count against the peer budget.
+      for (let i = 3; i <= MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
         await session.enqueuePeerMessage({
           msgId: `msg-${i}`,
           displayText: 'x',
@@ -2924,9 +2925,50 @@ describe('Session', () => {
         });
       }
       expect(session.hasRoomForPeerMessage()).toBe(false);
+      expect(session.isOpenForPeerMessages()).toBe(true);
 
       session.dispose();
       expect(session.hasRoomForPeerMessage()).toBe(false);
+      expect(session.isOpenForPeerMessages()).toBe(false);
+    });
+
+    it("keeps delivered messages and background results out of each other's way", async () => {
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = new AbortController();
+      const queued = () =>
+        (
+          session as unknown as {
+            notificationQueue: Array<{ kind: string; taskId: string }>;
+          }
+        ).notificationQueue;
+
+      for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+        await session.enqueuePeerMessage({
+          msgId: `msg-${i}`,
+          displayText: 'm',
+          modelText: 'm',
+        });
+      }
+      // A full set of results arrives after the messages, and one more.
+      for (let i = 0; i <= MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+        await session.enqueueBackgroundNotification({
+          displayText: 'Shell completed.',
+          modelText: '<task-notification />',
+          taskId: `shell-${i}`,
+          status: 'completed',
+          kind: 'shell',
+        });
+      }
+
+      // Every message the senders were told was delivered is still there;
+      // the overflow cost one result, not a message.
+      expect(session.queuedPeerMessageIds()).toHaveLength(
+        MAX_BACKGROUND_NOTIFICATION_QUEUE,
+      );
+      const shells = queued().filter((item) => item.kind === 'shell');
+      expect(shells).toHaveLength(MAX_BACKGROUND_NOTIFICATION_QUEUE);
+      expect(shells[0]?.taskId).toBe('shell-1');
     });
 
     it('asks the client about a held message outside the tool approval queue', async () => {

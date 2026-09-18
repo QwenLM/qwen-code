@@ -640,6 +640,15 @@ export class PeerMessaging {
     );
   }
 
+  /**
+   * Settle as expired the held messages addressed to a session that is
+   * going away while the process stays up. `isFor` is asked about each
+   * held message's `toSessionId`. Returns how many were settled.
+   */
+  expireHeldFor(isFor: (toSessionId: string | undefined) => boolean): number {
+    return this.gate?.expireHeldWhere((frame) => isFor(frame.toSessionId)) ?? 0;
+  }
+
   /** Remove a revoked grant's authority from messages already waiting. */
   forgetController(id: string): number {
     return this.withControllerValidity(

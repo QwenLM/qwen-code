@@ -111,13 +111,17 @@ export type HoldCause =
   | 'policy-unreadable';
 
 /**
- * Cap on parked messages.
+ * Cap on parked messages, per addressed session.
  *
  * A hold buffer is reachable by anything that can write to the socket, so
  * it needs a ceiling or a chatty peer becomes a memory leak in a session
  * whose user stepped away. Once full it turns arrivals away rather than
  * making room: what is already parked is the user's to decide, and an
  * arrival must not be able to destroy it.
+ *
+ * Counted per session so a process hosting several cannot have one
+ * session's backlog turn away every message for the others. Such a host
+ * holds at most this many times its session count.
  */
 export const MAX_HELD_MESSAGES = 50;
 
@@ -787,7 +791,12 @@ export class InboundGate {
       return 'accept';
     }
 
-    if (this.held.length >= MAX_HELD_MESSAGES) {
+    const heldKey = heldSessionKey(frame);
+    let heldForSession = 0;
+    for (const entry of this.held) {
+      if (heldSessionKey(entry.frame) === heldKey) heldForSession += 1;
+    }
+    if (heldForSession >= MAX_HELD_MESSAGES) {
       // The newcomer is turned away rather than a parked message evicted.
       // Evicting made an arrival destroy someone else's message: a flood
       // walked the user's real backlog out one entry at a time, and each
@@ -905,7 +914,19 @@ export class InboundGate {
     const release: HeldMessage[] = [];
     let dropped = 0;
 
+    let misaddressed = 0;
     for (const entry of this.held) {
+      // First, before any policy: a message for a session that is no
+      // longer here has nobody left to decide it, and judging it by the
+      // policy of a session that does not exist would report a refusal
+      // nobody made.
+      if (!this.pinStillValid(entry.frame)) {
+        misaddressed += 1;
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        continue;
+      }
       const decision = this.resolvePolicy(entry.frame, originOf(entry));
       const { policy } = decision;
       if (policy === 'accept') {
@@ -924,7 +945,6 @@ export class InboundGate {
     }
 
     let released = 0;
-    let misaddressed = 0;
     for (const entry of release) {
       if (!this.pinStillValid(entry.frame)) {
         misaddressed += 1;
@@ -962,13 +982,48 @@ export class InboundGate {
     this.held.push(...stillHeld);
     this.rescheduleExpiry();
 
-    if (release.length > 0 || dropped > 0) {
+    if (release.length > 0 || dropped > 0 || misaddressed > 0) {
       debugLogger.debug(
         `reevaluate (${reason}): released ${released}, dropped ${dropped}, misaddressed ${misaddressed}, ${this.held.length} still held`,
       );
       this.notifyHeldChange();
     }
     return released;
+  }
+
+  /**
+   * Settle as expired the parked messages `isFor` picks, for a host whose
+   * session is going away while the process stays up.
+   *
+   * Nobody is left to decide them, so they end the way a message does
+   * when its session exits: `expired`. Left parked they would keep taking
+   * the session's hold slots, keep their senders waiting on `held`, and
+   * later be judged by whatever the host answers for a session it no
+   * longer holds. Returns how many were settled.
+   */
+  expireHeldWhere(isFor: (frame: PeerUserFrame) => boolean): number {
+    const settling: HeldMessage[] = [];
+    const survivors: HeldMessage[] = [];
+    for (const entry of this.held) {
+      let matches = false;
+      try {
+        matches = isFor(entry.frame);
+      } catch {
+        matches = false;
+      }
+      (matches ? settling : survivors).push(entry);
+    }
+    if (settling.length === 0) return 0;
+    this.held.length = 0;
+    this.held.push(...survivors);
+    for (const entry of settling) {
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      this.recordSettled(entry.frame.msgId, 'expired');
+      void this.report(entry.frame, 'expired');
+    }
+    this.notifyHeldChange();
+    this.rescheduleExpiry();
+    return settling.length;
   }
 
   /**
@@ -1291,6 +1346,15 @@ function withCause(entry: HeldMessage, decision: PolicyDecision): HeldMessage {
  * The scope, when known, names who set the policy: a user who never
  * touched the key should not read "your setting".
  */
+/**
+ * The session a held message counts against for the hold cap. Session ids
+ * are compared case-insensitively, so respelling one does not buy a
+ * second allowance.
+ */
+function heldSessionKey(frame: PeerUserFrame): string {
+  return frame.toSessionId?.toLowerCase() ?? '';
+}
+
 export function describeHoldCause(
   cause: HoldCause,
   scope?: PolicyScope,

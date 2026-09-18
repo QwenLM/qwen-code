@@ -3721,7 +3721,7 @@ class QwenAgent implements Agent {
    */
   private readonly peerReviews = new Map<
     string,
-    { sessionId: string; controller: AbortController }
+    { session: Session; controller: AbortController }
   >();
   // Set by closePeerMessaging: a retry must not resurrect an inbox after
   // teardown ran.
@@ -4418,7 +4418,7 @@ class QwenAgent implements Agent {
     // a record left behind advertises a session that is gone, and peers
     // would keep addressing it until this process exits.
     this.registeredSessions.delete(sessionId);
-    this.abortPeerReviewsFor(session);
+    this.abortPeerReviewsFor(session, sessionId);
     try {
       await session.getConfig().unregisterSessionRegistry();
     } catch (error) {
@@ -4896,12 +4896,16 @@ class QwenAgent implements Agent {
   private hostedSession(id: string | undefined): Session | undefined {
     if (id === undefined) return undefined;
     const wanted = normalizeSessionIdForLookup(id);
+    // A disposed session is still in the map while its removal awaits
+    // cleanup, and must already count as gone: nothing new may be
+    // delivered to it or asked of its client.
     const byKey = this.sessions.get(wanted);
-    if (byKey) return byKey;
+    if (byKey) return byKey.isOpenForPeerMessages() ? byKey : undefined;
     for (const session of this.sessions.values()) {
       if (
+        session.isOpenForPeerMessages() &&
         normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
-        wanted
+          wanted
       ) {
         return session;
       }
@@ -4975,10 +4979,7 @@ class QwenAgent implements Agent {
       const session = this.hostedSession(entry.frame.toSessionId);
       if (!session) continue;
       const controller = new AbortController();
-      this.peerReviews.set(key, {
-        sessionId: session.getConfig().getSessionId(),
-        controller,
-      });
+      this.peerReviews.set(key, { session, controller });
       this.askPeerReview(messaging, session, entry, controller.signal, 0);
     }
   }
@@ -5004,22 +5005,10 @@ class QwenAgent implements Agent {
   ): void {
     const msgId = entry.frame.msgId;
     const askAgain = (why: string) => {
-      if (signal.aborted) return;
-      const delayMs = Math.min(
-        PEER_REVIEW_RETRY_MAX_MS,
-        PEER_REVIEW_RETRY_BASE_MS * 2 ** attempt,
-      );
-      debugLogger.debug(
-        `[ACP] peer review of ${msgId} ${why}; asking again in ${delayMs}ms`,
-      );
-      const timer = setTimeout(() => {
-        signal.removeEventListener('abort', onAbort);
-        if (signal.aborted) return;
+      this.afterPeerReviewBackoff(session, signal, attempt, () => {
+        debugLogger.debug(`[ACP] peer review of ${msgId} ${why}; asking again`);
         this.askPeerReview(messaging, session, entry, signal, attempt + 1);
-      }, delayMs);
-      timer.unref?.();
-      const onAbort = () => clearTimeout(timer);
-      signal.addEventListener('abort', onAbort, { once: true });
+      });
     };
     void session
       .requestPeerMessageReview(
@@ -5037,7 +5026,13 @@ class QwenAgent implements Agent {
             msgId,
             decision === 'deliver' ? 'approve' : 'deny',
           );
-          if (outcome !== 'done') {
+          if (outcome === 'failed') {
+            // Approved, but the session could not take it right now. The
+            // gate parks it again unchanged, so the held set does not
+            // change and no new review would start: retry the delivery
+            // itself — the person already said yes.
+            this.retryApprovedPeerMessage(messaging, session, msgId, signal, 0);
+          } else if (outcome !== 'done') {
             debugLogger.debug(
               `[ACP] peer review of ${msgId} answered ${decision}: ${outcome}`,
             );
@@ -5051,15 +5046,90 @@ class QwenAgent implements Agent {
       );
   }
 
-  /** Withdraw the reviews out for one session, which is going away. */
-  private abortPeerReviewsFor(session: Session): void {
-    const sessionId = session.getConfig().getSessionId();
+  /**
+   * Deliver a message a person approved, after the session could not take
+   * it the first time. Retried with the same backoff as a review while the
+   * message is still held and the session still open; it ends when the
+   * delivery lands, the message stops being held, or it expires.
+   */
+  private retryApprovedPeerMessage(
+    messaging: PeerMessaging,
+    session: Session,
+    msgId: string,
+    signal: AbortSignal,
+    attempt: number,
+  ): void {
+    this.afterPeerReviewBackoff(session, signal, attempt, () => {
+      const outcome = messaging.decide(msgId, 'approve');
+      if (outcome === 'failed') {
+        this.retryApprovedPeerMessage(
+          messaging,
+          session,
+          msgId,
+          signal,
+          attempt + 1,
+        );
+      } else if (outcome !== 'done') {
+        debugLogger.debug(
+          `[ACP] approved peer message ${msgId} could not be delivered: ${outcome}`,
+        );
+      }
+    });
+  }
+
+  /**
+   * Run `next` after the backoff for `attempt`, unless the review is
+   * withdrawn or its session closes first.
+   */
+  private afterPeerReviewBackoff(
+    session: Session,
+    signal: AbortSignal,
+    attempt: number,
+    next: () => void,
+  ): void {
+    if (signal.aborted || !session.isOpenForPeerMessages()) return;
+    const delayMs = Math.min(
+      PEER_REVIEW_RETRY_MAX_MS,
+      PEER_REVIEW_RETRY_BASE_MS * 2 ** attempt,
+    );
+    const onAbort = () => clearTimeout(timer);
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      if (signal.aborted || !session.isOpenForPeerMessages()) return;
+      next();
+    }, delayMs);
+    timer.unref?.();
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  /**
+   * Withdraw the reviews out for one session, which is going away, and
+   * settle the messages still held for it.
+   *
+   * Reviews are matched by the session object, not by id: /clear changes
+   * the id a session answers to. Held messages are matched by every id
+   * the session was known by.
+   */
+  private abortPeerReviewsFor(session: Session, mapKey: string): void {
     for (const [key, review] of this.peerReviews) {
-      if (review.sessionId === sessionId) {
+      if (review.session === session) {
         review.controller.abort();
         this.peerReviews.delete(key);
       }
     }
+    const ids = new Set([
+      normalizeSessionIdForLookup(mapKey),
+      normalizeSessionIdForLookup(session.getConfig().getSessionId()),
+    ]);
+    void this.peerMessagingStart
+      ?.then((messaging) =>
+        messaging?.expireHeldFor(
+          (toSessionId) =>
+            toSessionId !== undefined &&
+            ids.has(normalizeSessionIdForLookup(toSessionId)),
+        ),
+      )
+      .catch(() => {});
   }
 
   /**

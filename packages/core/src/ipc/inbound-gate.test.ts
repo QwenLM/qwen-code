@@ -2393,6 +2393,68 @@ describe('a gate for a process hosting several sessions', () => {
     });
   });
 
+  it('caps held messages per session, so one backlog cannot turn away another', () => {
+    const host = hostOfTwo();
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      expect(
+        host.gate.admit(
+          frame({
+            fromMode: 'bypass',
+            toSessionId: 'strict',
+            content: `s${i}`,
+          }),
+        ),
+      ).toBe('held');
+    }
+    // Full for `strict`, respelled or not...
+    expect(
+      host.gate.admit(
+        frame({ fromMode: 'bypass', toSessionId: 'STRICT', content: 'over' }),
+      ),
+    ).toBe('dropped');
+    // ...and still open for its sibling.
+    expect(
+      host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'relaxed' })),
+    ).toBe('held');
+  });
+
+  it('expires the held messages of a session that goes away', () => {
+    const host = hostOfTwo();
+    const forStrict = frame({ fromMode: 'bypass', toSessionId: 'strict' });
+    const forRelaxed = frame({ fromMode: 'bypass', toSessionId: 'relaxed' });
+    host.gate.admit(forStrict);
+    host.gate.admit(forRelaxed);
+
+    expect(host.gate.expireHeldWhere((f) => f.toSessionId === 'strict')).toBe(
+      1,
+    );
+    expect(host.gate.getHeld().map((e) => e.frame.msgId)).toEqual([
+      forRelaxed.msgId,
+    ]);
+    expect(host.statuses.at(-1)).toEqual({
+      msgId: forStrict.msgId,
+      status: 'expired',
+    });
+    // Settled: the same id repeats its verdict instead of parking again.
+    expect(host.gate.admit(forStrict)).not.toBe('held');
+  });
+
+  it('answers a held message whose session is gone misaddressed, not denied', () => {
+    const host = hostOfTwo();
+    const forStrict = frame({ fromMode: 'bypass', toSessionId: 'strict' });
+    host.gate.admit(forStrict);
+    // The session leaves without its holds being settled; a sibling's mode
+    // change then re-judges the backlog.
+    delete host.settings['strict'];
+    host.gate.reevaluate('approval-mode-changed');
+
+    expect(host.gate.getHeld()).toHaveLength(0);
+    expect(host.statuses.at(-1)).toEqual({
+      msgId: forStrict.msgId,
+      status: 'misaddressed',
+    });
+  });
+
   it('keeps a message held for good when its session never expires holds', () => {
     const host = hostOfTwo();
     host.settings['relaxed']!.expiryMs = null;

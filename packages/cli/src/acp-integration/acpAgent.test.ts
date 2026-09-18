@@ -5221,6 +5221,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getSettings: vi.fn(() => _settings),
           setMode: vi.fn().mockResolvedValue(undefined),
           hasRoomForPeerMessage: vi.fn().mockReturnValue(true),
+          isOpenForPeerMessages: vi.fn().mockReturnValue(true),
           enqueuePeerMessage: vi.fn().mockResolvedValue({ accepted: true }),
           queuedPeerMessageIds: vi.fn().mockReturnValue([]),
           requestPeerMessageReview: vi.fn(() => new Promise(() => {})),
@@ -5360,6 +5361,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         decide: vi.fn(() => 'done'),
         reevaluate: vi.fn(() => 0),
         expireUndelivered: vi.fn(),
+        expireHeldFor: vi.fn(
+          (_isFor: (toSessionId: string | undefined) => boolean) => 0,
+        ),
       };
     }
 
@@ -5747,6 +5751,69 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       mockConnectionState.resolve();
       await agentPromise;
       expect(signalOf(3).aborted).toBe(true);
+    });
+
+    it('retries the delivery a person approved when the session could not take it', async () => {
+      const inbox = fakeInbox();
+      const { session, agentPromise } = await bootWithInbox('hosted-f', inbox);
+      const listener = inbox.onHeldChange.mock.calls[0]![0] as (
+        held: Array<ReturnType<typeof heldFor>>,
+      ) => void;
+      session['requestPeerMessageReview']!.mockResolvedValueOnce('deliver');
+      // Full the first time, room the second.
+      inbox.decide.mockReturnValueOnce('failed').mockReturnValueOnce('done');
+      const entry = heldFor('hosted-f');
+
+      listener([entry]);
+      await vi.waitFor(() => expect(inbox.decide).toHaveBeenCalledTimes(2), {
+        timeout: 3000,
+      });
+      expect(inbox.decide).toHaveBeenNthCalledWith(
+        2,
+        entry.frame.msgId,
+        'approve',
+      );
+      // The person is not asked a second time: they already said yes.
+      expect(session['requestPeerMessageReview']).toHaveBeenCalledTimes(1);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('treats a session being removed as gone, and settles what it held', async () => {
+      const inbox = fakeInbox();
+      const { agent, session, options, innerConfig, agentPromise } =
+        await bootWithInbox('hosted-x', inbox);
+      const listener = inbox.onHeldChange.mock.calls[0]![0] as (
+        held: Array<ReturnType<typeof heldFor>>,
+      ) => void;
+      const before = heldFor('hosted-x', 'before');
+      listener([before]);
+      const firstSignal = session['requestPeerMessageReview']!.mock
+        .calls[0]![1] as AbortSignal;
+      // /clear gave the session a new id since its review started.
+      vi.mocked(innerConfig.getSessionId).mockReturnValue('hosted-x-2');
+
+      // Disposed, its removal still awaiting cleanup.
+      session['isOpenForPeerMessages']!.mockReturnValue(false);
+      expect(options.getPolicySetting('hosted-x')).toBe('refuse');
+      listener([before, heldFor('hosted-x', 'during')]);
+      expect(session['requestPeerMessageReview']).toHaveBeenCalledTimes(1);
+
+      // The process stays up; only this session closes.
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: 'hosted-x',
+      });
+      expect(firstSignal.aborted).toBe(true);
+      await vi.waitFor(() => expect(inbox.expireHeldFor).toHaveBeenCalled());
+      const isFor = inbox.expireHeldFor.mock.calls[0]![0];
+      expect(isFor('hosted-x')).toBe(true);
+      expect(isFor('hosted-x-2')).toBe(true);
+      expect(isFor('someone-else')).toBe(false);
+      expect(isFor(undefined)).toBe(false);
+
+      mockConnectionState.resolve();
+      await agentPromise;
     });
 
     it('re-judges held messages when a hosted session changes mode', async () => {

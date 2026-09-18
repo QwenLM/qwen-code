@@ -462,6 +462,11 @@ const GOAL_HELD_RECOVERY_COMMANDS =
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
+/**
+ * Queued messages from other sessions, kept apart from the budget for
+ * background results so neither can push the other out.
+ */
+const MAX_QUEUED_PEER_MESSAGES = MAX_BACKGROUND_NOTIFICATION_QUEUE;
 function readDaemonAttachmentReferences(
   value: unknown,
 ): SessionAttachmentReference[] | undefined {
@@ -10504,7 +10509,19 @@ export class Session implements SessionContext {
   }
 
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
-    while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+    // Messages from other sessions have a budget of their own, reserved
+    // before the sender was told `delivered` (`hasRoomForPeerMessage`).
+    // They neither take a slot a result needs nor can be evicted by one:
+    // an evicted message would leave its sender holding a `delivered`
+    // receipt for something the model never saw.
+    while (
+      item.kind !== 'peer' &&
+      this.#countQueuedNotifications((queued) => queued.kind !== 'peer') >=
+        MAX_BACKGROUND_NOTIFICATION_QUEUE
+    ) {
+      const candidates = this.notificationQueue.filter(
+        (queued) => queued.kind !== 'peer',
+      );
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
       // that can release it — so those are protected and the unrelated ones
@@ -10518,14 +10535,14 @@ export class Session implements SessionContext {
       // reads the original entry by index, since the guard predicate needs
       // fields the projection deliberately drops.
       const admission = decideNotificationAdmission(
-        this.notificationQueue.map(toAdmissibleNotification),
+        candidates.map(toAdmissibleNotification),
         toAdmissibleNotification(item),
         {
           max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
           isProtected: (_projected, index) =>
             guardDefersUnrelatedWork &&
             this.#notificationContinuesTodoStopGuardWorkChain(
-              this.notificationQueue[index]!,
+              candidates[index]!,
             ),
         },
       );
@@ -10541,7 +10558,10 @@ export class Session implements SessionContext {
         return;
       }
       if (admission.action === 'push') break;
-      const [evicted] = this.notificationQueue.splice(admission.index, 1);
+      const [evicted] = this.notificationQueue.splice(
+        this.notificationQueue.indexOf(candidates[admission.index]!),
+        1,
+      );
       debugLogger.warn(
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
@@ -10634,18 +10654,36 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Whether another peer message fits without pushing anything out of the
-   * notification queue. Checked before a message is accepted, so a full
-   * queue turns the sender away with an honest receipt instead of evicting
-   * a result the session has not seen.
+   * Whether another peer message fits in the budget peer messages have
+   * in the notification queue. Checked before a message is accepted, and
+   * counting the ones still being recorded, so a full budget turns the
+   * sender away with an honest receipt. Peer messages are never evicted
+   * and never evict anything else.
    */
   hasRoomForPeerMessage(): boolean {
     return (
       !this.disposed &&
       !this.closing &&
-      this.notificationQueue.length + this.acceptingPeerMessageIds.size <
-        MAX_BACKGROUND_NOTIFICATION_QUEUE
+      this.#countQueuedNotifications((queued) => queued.kind === 'peer') +
+        this.acceptingPeerMessageIds.size <
+        MAX_QUEUED_PEER_MESSAGES
     );
+  }
+
+  /**
+   * Whether this session can still be addressed at all. False once it is
+   * disposed, which happens before the host finishes removing it.
+   */
+  isOpenForPeerMessages(): boolean {
+    return !this.disposed;
+  }
+
+  #countQueuedNotifications(
+    matches: (item: QueuedBackgroundNotification) => boolean,
+  ): number {
+    let count = 0;
+    for (const queued of this.notificationQueue) if (matches(queued)) count++;
+    return count;
   }
 
   /** Ids of peer messages accepted here that no turn has handled yet. */
