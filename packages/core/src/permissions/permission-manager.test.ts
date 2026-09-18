@@ -2484,6 +2484,12 @@ describe('PermissionManager', () => {
       ['bash', 'echo `whoami` # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo $HOME # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo a\\ b # c ; rm -rf /tmp/x', 'deny'],
+      // Characterization rows for #11815's measured table: these reach `allow`
+      // only because the unterminated quote masks the in-comment separator, so
+      // they are expected to go red when #11765 changes the splitter.
+      ['bash', "echo 'a\\' # note: use ; carefully", 'allow'],
+      ['bash', "echo 'a\\' # trailing && touch /tmp/x", 'allow'],
+      ['bash', "echo 'a\\' # trailing | touch /tmp/x", 'allow'],
     ] as const)(
       'handles comments conservatively for %s: %s',
       async (shell, command, expected) => {
@@ -2503,6 +2509,25 @@ describe('PermissionManager', () => {
         ).toBe(expected);
       },
     );
+
+    // Row 6 of the same measured table, kept out of it because the segment
+    // starts with `git`: the table's `Bash(echo *)` rule cannot match, so the
+    // verdict there comes from the read-only default (`ask`) rather than from a
+    // rule. The split is asserted as well — a bare `echo B` also resolves to
+    // `allow`, so the verdict alone would stay green if the apostrophe in
+    // `don't` ever stopped masking the `;`.
+    it("keeps `git status # don't ; echo B` one allowed segment", async () => {
+      shellTypeMock.value = 'bash';
+      const command = "git status # don't ; echo B";
+      expect(splitCompoundCommand(command)).toEqual([command]);
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(git *)'] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('allow');
+    });
 
     // The comment fast path is only sound when the scanned string is literally
     // what the shell executes. That holds for run_shell_command, but not for
