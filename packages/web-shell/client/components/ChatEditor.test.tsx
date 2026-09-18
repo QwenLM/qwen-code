@@ -1887,7 +1887,243 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
-describe('ChatEditor Plan toggle', () => {
+describe('ChatEditor Plan in the add menu', () => {
+  const actions = ['addMenu', 'approvalMode', 'plan', 'model'] as const;
+  const planButton = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>('[data-web-shell-plan-button]');
+
+  async function openPlanMenuItem(container: HTMLDivElement) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector('[data-testid="composer-add-menu-trigger"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    // A missing entry only means something once the menu is known to be open.
+    const menu = portalRoot.querySelector('[role="menu"]');
+    expect(menu).not.toBeNull();
+    const entry = portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-plan"]',
+    );
+    if (entry) {
+      const rows = menu!.querySelectorAll('[role^="menuitem"]');
+      expect(rows[rows.length - 1]).toBe(entry);
+    }
+    return entry;
+  }
+
+  it('keeps Plan off the toolbar until it is on and enables it from the menu', async () => {
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: actions,
+      onTogglePlan,
+    });
+    expect(planButton(container)).toBeNull();
+    expect(container.querySelector('[data-web-shell-plan-control]')).toBeNull();
+    expect(
+      container.querySelector('[data-toolbar-measure^="plan:"]'),
+    ).toBeNull();
+
+    const item = (await openPlanMenuItem(container))!;
+    expect(item.getAttribute('role')).toBe('menuitemcheckbox');
+    expect(item.getAttribute('aria-checked')).toBe('false');
+    expect(item.textContent).toBe('Plan modePlan first, run after you approve');
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      // The menu runs the choice once it has closed.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).toHaveBeenCalledOnce();
+  });
+
+  it('reports an enabled Plan as a dismissible chip after the permission control', async () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: actions,
+      planMode: true,
+      currentMode: 'yolo',
+      isRunning: true,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const chip = planButton(container)!;
+    expect(
+      container.querySelectorAll('[data-web-shell-plan-button]'),
+    ).toHaveLength(1);
+    expect(chip.hasAttribute('data-web-shell-plan-chip')).toBe(true);
+    // The close mark is what makes the chip dismissible. Matched by class
+    // because the plan icon is an svg too.
+    expect(chip.querySelector('[class*="planChipClose"]')).not.toBeNull();
+    // Hosts that select the Plan control by this hook still find it.
+    expect(chip.hasAttribute('data-web-shell-plan-control')).toBe(true);
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    expect(chip.getAttribute('aria-label')).toBe('Plan');
+    expect(
+      document.getElementById(chip.getAttribute('aria-describedby')!)
+        ?.textContent,
+    ).toBe(
+      'Planning; execute with Full Access after approval. Click to exit planning.',
+    );
+    const controls = Array.from(
+      container.querySelectorAll('[data-web-shell-toolbar-leading] button'),
+    );
+    expect(controls.indexOf(chip)).toBe(
+      controls.indexOf(
+        container.querySelector('[data-web-shell-mode-button]')!,
+      ) + 1,
+    );
+    expect(
+      (await openPlanMenuItem(container))!.getAttribute('aria-checked'),
+    ).toBe('true');
+
+    // Propagation is what closes a menu the chip was clicked on top of.
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    act(() => chip.click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+    // Controlled: the chip stays until the host reports Plan off.
+    expect(planButton(container)).not.toBeNull();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+  });
+
+  it('keeps the chip operable while approval disables input', () => {
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: actions,
+      disabled: true,
+      planMode: true,
+      onTogglePlan,
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-add-menu-trigger"]',
+      )!.disabled,
+    ).toBe(true);
+    act(() => planButton(container)!.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('disables the menu entry and the chip during a plan handoff', async () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: actions,
+      planMode: true,
+      modeControlsDisabled: true,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const chip = planButton(container)!;
+    expect(chip.disabled).toBe(true);
+    act(() => chip.click());
+    const item = (await openPlanMenuItem(container))!;
+    expect(item.hasAttribute('data-disabled')).toBe(true);
+    // The add menu never disables a row without saying why.
+    expect(item.textContent).toContain('Switching mode');
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(onTogglePlan).not.toHaveBeenCalled();
+
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: false });
+    expect(chip.disabled).toBe(false);
+    act(() => chip.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { width: 0, label: '' },
+    { width: 300, label: 'Plan' },
+  ])(
+    'fits the chip label to available toolbar width $width',
+    ({ width, label }) => {
+      const bounds = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+            return { width: 72 } as DOMRect;
+          if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+            return { width: 44 } as DOMRect;
+          if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+            return { width } as DOMRect;
+          return { width: 0 } as DOMRect;
+        });
+      try {
+        const container = renderChatEditor({
+          visibleToolbarActions: actions,
+          planMode: true,
+          onTogglePlan: vi.fn(),
+        });
+        expect(planButton(container)!.textContent).toBe(label);
+        // The budget is only right if the replicas stand in for the real chip.
+        expect(
+          container.querySelector('[data-toolbar-measure="plan:collapsed"]')
+            ?.textContent,
+        ).toBe('');
+        expect(
+          container.querySelector('[data-toolbar-measure="plan:expanded"]')
+            ?.textContent,
+        ).toBe('Plan');
+      } finally {
+        bounds.mockRestore();
+      }
+    },
+  );
+
+  it('measures the chip when Plan turns on after mount', () => {
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+          return { width: 72 } as DOMRect;
+        if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+          return { width: 44 } as DOMRect;
+        if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+          return { width: 300 } as DOMRect;
+        return { width: 0 } as DOMRect;
+      });
+    try {
+      const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+      const container = renderChatEditor(props);
+      expect(planButton(container)).toBeNull();
+      rerenderChatEditor(container, { ...props, planMode: true });
+      expect(planButton(container)!.textContent).toBe('Plan');
+    } finally {
+      bounds.mockRestore();
+    }
+  });
+
+  it.each([
+    { visibleToolbarActions: ['addMenu'] as const, onTogglePlan: vi.fn() },
+    { visibleToolbarActions: ['addMenu', 'plan'] as const },
+  ])(
+    'requires both the plan action and a toggle handler: %j',
+    async (props) => {
+      const container = renderChatEditor({ ...props, planMode: true });
+      expect(planButton(container)).toBeNull();
+      expect(await openPlanMenuItem(container)).toBeNull();
+    },
+  );
+});
+
+// A host that lists `plan` without `addMenu` has no menu to hold the entry.
+describe('ChatEditor Plan toolbar switch fallback', () => {
   it('associates the Plan switch with its changing accessible description', () => {
     const props = {
       visibleToolbarActions: ['plan'] as const,
@@ -2178,7 +2414,9 @@ describe('ChatEditor toolbar popovers', () => {
     );
     await act(async () => {
       yolo?.click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Long enough to catch a focus restore that arrives from the popover's
+      // post-unmount timeout, which is what this asserts does not happen.
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
     expect(onSelectMode).toHaveBeenCalledWith('yolo');

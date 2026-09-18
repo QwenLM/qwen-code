@@ -1599,6 +1599,59 @@
   cursor: default;
 }
 
+/* Shown only while Plan is on: the state has to stay visible even though the
+   entry itself is tucked into the add menu. */
+.planChip {
+  flex: 0 0 auto;
+  padding: 0 6px 0 8px;
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color) 12%,
+    transparent
+  );
+  color: var(--chat-editor-accent-color);
+}
+
+.toolBtn.planChip:not(:disabled):hover {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color) 20%,
+    transparent
+  );
+  color: var(--chat-editor-accent-color);
+}
+
+.planChip .toolBtnText {
+  color: inherit;
+}
+
+/* No dimming: like every other .toolBtn, including the permission button
+   beside it, the chip keeps its appearance while mode controls are busy. That
+   state is brief, and dimming one control of the pair would flicker. */
+.planChip:disabled {
+  cursor: default;
+}
+
+.planChipClose {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.7;
+}
+
+.planChip:not(:disabled):hover .planChipClose {
+  opacity: 1;
+}
+
+.addMenuPlanIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
 .workspaceSelectTrigger {
   min-width: 0;
   max-width: 176px;
