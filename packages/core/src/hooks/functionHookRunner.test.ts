@@ -6,10 +6,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FunctionHookRunner } from './functionHookRunner.js';
-import {
-  DEFAULT_FUNCTION_HOOK_TIMEOUT_MS,
-  describeHookTimeout,
-} from './hook-timeout.js';
 import { HookEventName, HookType } from './types.js';
 import type { FunctionHookConfig, HookInput, HookOutput } from './types.js';
 
@@ -519,75 +515,6 @@ describe('FunctionHookRunner', () => {
 
       expect(result.outcome).toBe('cancelled');
       expect(callback).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('timeout matches describeHookTimeout', () => {
-    const neverSettles = () => vi.fn(() => new Promise<never>(() => {}));
-
-    const runUntil = async (
-      config: FunctionHookConfig,
-      pendingMs: number,
-    ): Promise<{ pendingAfter: boolean; outcome: string | undefined }> => {
-      let settled = false;
-      const execution = functionRunner
-        .execute(config, HookEventName.PreToolUse, createMockInput())
-        .then((result) => {
-          settled = true;
-          return result;
-        });
-      await vi.advanceTimersByTimeAsync(pendingMs);
-      const pendingAfter = !settled;
-      await vi.advanceTimersByTimeAsync(1);
-      const result = await execution;
-      return { pendingAfter, outcome: result.outcome };
-    };
-
-    it('times out a configured value in milliseconds at the described delay', async () => {
-      const described = describeHookTimeout(HookType.Function, 60);
-      expect(described.timeoutMs).toBe(60);
-      vi.useFakeTimers();
-      try {
-        const run = await runUntil(
-          createMockConfig(neverSettles(), { timeout: 60 }),
-          59,
-        );
-        expect(run).toEqual({ pendingAfter: true, outcome: 'timeout' });
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('times out an unconfigured hook at the described default', async () => {
-      const described = describeHookTimeout(HookType.Function, undefined);
-      expect(described.timeoutMs).toBe(DEFAULT_FUNCTION_HOOK_TIMEOUT_MS);
-      vi.useFakeTimers();
-      try {
-        const run = await runUntil(
-          createMockConfig(neverSettles()),
-          DEFAULT_FUNCTION_HOOK_TIMEOUT_MS - 1,
-        );
-        expect(run).toEqual({ pendingAfter: true, outcome: 'timeout' });
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('times out a zero timeout at once, as described', async () => {
-      // Real timers: Node runs a 0 ms timer after 1 ms, fake timers do not.
-      expect(describeHookTimeout(HookType.Function, 0)).toEqual({
-        timeoutMs: 1,
-        source: 'unusable',
-        ignoredConfiguredValue: false,
-      });
-      const started = Date.now();
-      const result = await functionRunner.execute(
-        createMockConfig(neverSettles(), { timeout: 0 }),
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-      expect(result.outcome).toBe('timeout');
-      expect(Date.now() - started).toBeLessThan(1000);
     });
   });
 });

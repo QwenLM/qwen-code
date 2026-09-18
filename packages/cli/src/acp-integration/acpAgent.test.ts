@@ -9739,7 +9739,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('lists workspace hooks from the registry with their stored config and state, without subagent entries', async () => {
+  it('lists workspace hooks from the registry with their stored config and state', async () => {
     const getAllSessionHooks = vi.fn().mockReturnValue([
       {
         hookId: 'session-hook-1',
@@ -9756,7 +9756,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getBareMode: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('workspace-session'),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
-      isTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue({
         getAllHooks: () => [
           {
@@ -9776,15 +9775,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             eventName: 'Stop',
             source: 'session',
             agentScope: 'agent-1',
-            enabled: true,
-            config: {
-              type: 'http',
-              url: 'https://hooks.example.com/agent-stop',
-            },
-          },
-          {
-            eventName: 'Stop',
-            source: 'project',
             enabled: true,
             config: {
               type: 'http',
@@ -9841,7 +9831,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             headers: { 'X-Team': 'core' },
             once: true,
           },
-          source: 'project',
+          source: 'session',
           enabled: true,
         },
       ],
@@ -28571,108 +28561,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('keeps a cold legacy Goal bootstrap inside visible history', async () => {
-    const recentRecords = [
-      { uuid: 'u2', role: 'user', parts: [{ text: 'latest' }] },
-      { uuid: 'a2', role: 'model', parts: [{ text: 'answer' }] },
-    ];
-    const visibleGoalRecord = {
-      uuid: 'visible-goal',
-      type: 'system',
-      subtype: 'slash_command',
-      systemPayload: {
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'visible goal',
-            iterations: 0,
-            setAt: 123,
-          },
-        ],
-      },
-    };
-    const hiddenGoalRecord = {
-      uuid: 'hidden-goal',
-      type: 'system',
-      subtype: 'slash_command',
-      systemPayload: {
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'hidden inherited goal',
-            iterations: 0,
-          },
-        ],
-      },
-    };
-    const innerConfig = bindRestoreMocks({
-      sessionExists: true,
-      resumedConversation: { messages: recentRecords },
-    });
-    innerConfig.getSessionService().readRestoreProjection.mockResolvedValue({
-      sessionId: 'persisted-1',
-      filePath: '/tmp/session.jsonl',
-      startTime: '2026-07-16T00:00:00.000Z',
-      lastUpdated: '2026-07-16T00:00:02.000Z',
-      runtime: {
-        apiHistory: [],
-        uiTelemetryEvents: [],
-        recording: {
-          lastCompletedUuid: 'a2',
-          turnParentUuids: [],
-        },
-        goalRecords: [visibleGoalRecord, hiddenGoalRecord],
-        goalRecoverySourceUuid: 'hidden-goal',
-        initialTurn: 0,
-        backgroundNotificationTaskIds: [],
-      },
-      replay: {
-        records: recentRecords,
-        gaps: [],
-        hasMore: true,
-        anchorRecordId: 'u2',
-        goalRecoverySourceUuid: 'visible-goal',
-        goalBootstrapRecords: [visibleGoalRecord],
-      },
-    });
-    let replayOptions: unknown;
-    mockHistoryReplay.mockImplementation(
-      async (_context, _history, _gaps, options) => {
-        replayOptions = options;
-      },
-    );
-    const { agent, agentPromise } = await spawnAgent();
-
-    await agent.loadSession({
-      cwd: '/tmp',
-      sessionId: 'persisted-1',
-      mcpServers: [],
-      _meta: {
-        'qwen.session.loadReplayMode': 'bulk',
-        'qwen.session.loadReplayPageSize': 2,
-        'qwen.session.loadReplayHideInherited': true,
-      },
-    });
-
-    expect(replayOptions).toEqual({
-      goalBootstrap: {
-        goalStatus: {
-          kind: 'set',
-          condition: 'visible goal',
-          iterations: 0,
-          setAt: 123,
-        },
-      },
-    });
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
   it('keeps a streamed hide-inherited load on the visible Goal', async () => {
     const visibleGoalRecord = {
       uuid: 'visible-goal',
@@ -29626,86 +29514,6 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(firstSession.installRewriter).toHaveBeenCalledTimes(1);
     expect(firstSession.startCronScheduler).toHaveBeenCalledTimes(1);
     expect(firstSession.beginClose.mock.results[0]?.value).toHaveBeenCalled();
-
-    mockConnectionState.resolve();
-    await agentPromise;
-  });
-
-  it('bootstraps a live recent page from an older legacy Goal record', async () => {
-    const recentRecords = [
-      { uuid: 'u2', role: 'user', parts: [{ text: 'latest' }] },
-      { uuid: 'a2', role: 'model', parts: [{ text: 'answer' }] },
-    ];
-    bindRestoreMocks({
-      sessionExists: true,
-      resumedConversation: { messages: recentRecords },
-    });
-    const { agent, agentPromise } = await spawnAgent();
-    await agent.loadSession({
-      cwd: '/tmp',
-      sessionId: 'persisted-1',
-      mcpServers: [],
-    });
-    const firstSession = lastSessionMock!;
-    const legacyGoalRecord = {
-      uuid: 'goal',
-      type: 'system',
-      subtype: 'slash_command',
-      systemPayload: {
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'keep the live goal visible',
-            iterations: 0,
-          },
-        ],
-      },
-    };
-    firstSession
-      .getConfig()
-      .getSessionService()
-      .readLiveRestoreProjection.mockResolvedValue({
-        sessionId: 'persisted-1',
-        startTime: '2026-07-16T00:00:00.000Z',
-        lastUpdated: '2026-07-16T00:00:02.000Z',
-        replay: {
-          records: recentRecords,
-          gaps: [],
-          hasMore: true,
-          anchorRecordId: 'u2',
-        },
-        goalRecords: [legacyGoalRecord],
-        goalRecoverySourceUuid: 'goal',
-      });
-    let replayOptions: unknown;
-    mockHistoryReplay.mockImplementation(
-      async (_context, _history, _gaps, options) => {
-        replayOptions = options;
-      },
-    );
-
-    await agent.loadSession({
-      cwd: '/tmp',
-      sessionId: 'persisted-1',
-      mcpServers: [],
-      _meta: {
-        'qwen.session.loadReplayMode': 'bulk',
-        'qwen.session.loadReplayPageSize': 2,
-      },
-    });
-
-    expect(replayOptions).toEqual({
-      finalizeDangling: true,
-      goalBootstrap: {
-        goalStatus: {
-          kind: 'set',
-          condition: 'keep the live goal visible',
-          iterations: 0,
-        },
-      },
-    });
 
     mockConnectionState.resolve();
     await agentPromise;

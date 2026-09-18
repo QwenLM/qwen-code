@@ -478,10 +478,6 @@ import {
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
 import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
-import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   executeGeneration,
@@ -1131,19 +1127,7 @@ function replayGoalBootstrap(
         payload?.['cause'],
       );
     }
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(projection.goalRecords ?? []),
-    );
-    return active
-      ? {
-          goalStatus: {
-            kind: active.iterations > 0 ? 'checking' : 'set',
-            condition: active.condition,
-            iterations: active.iterations,
-            ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-          },
-        }
-      : undefined;
+    return undefined;
   }
   const sourceUuid = projection?.replay?.goalRecoverySourceUuid;
   if (!projection?.replay || !sourceUuid) return undefined;
@@ -1163,18 +1147,7 @@ function replayGoalBootstrap(
       payload?.['cause'],
     );
   }
-  const active = findGoalToRestore(
-    collectGoalStatusItemsFromRecords(goalBootstrapRecords),
-  );
-  if (!active) return undefined;
-  return {
-    goalStatus: {
-      kind: active.iterations > 0 ? 'checking' : 'set',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-    },
-  };
+  return undefined;
 }
 
 function replayInitialGoalState(
@@ -8949,13 +8922,9 @@ class QwenAgent implements Agent {
       const workspaceCwd = this.workspaceCwd(config);
       const listing = buildHooksListing(config);
       // The workspace view lists the registry only; session hooks have their
-      // own per-session status method. Entries a subagent attached while it
-      // runs sit in the registry too, but they are not workspace
-      // configuration.
+      // own per-session status method.
       const hooks: ServeHookEntry[] = listing.rows
-        .filter(
-          (row) => row.origin === 'registry' && row.agentScope === undefined,
-        )
+        .filter((row) => row.origin === 'registry')
         .map(
           (row): ServeHookEntry => ({
             kind: 'hook',

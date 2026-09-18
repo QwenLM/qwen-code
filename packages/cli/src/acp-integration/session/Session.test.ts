@@ -27097,6 +27097,55 @@ describe('Session', () => {
         expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
       });
 
+      // A transcript from before Goal state was journaled restores with no
+      // Goal and no cause, and nothing corrects the legacy `set` card the
+      // replay ended on. The trailing `cleared` card says nothing drives it.
+      it('supersedes a replayed legacy goal card when the runtime recovered no Goal', async () => {
+        mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
+
+        await session.publishRecoveredGoalState([
+          {
+            uuid: 'legacy-goal',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: new Date(0).toISOString(),
+            type: 'system',
+            subtype: 'slash_command',
+            cwd: '/tmp',
+            version: 'test',
+            systemPayload: {
+              phase: 'result',
+              outputHistoryItems: [
+                {
+                  type: 'goal_status',
+                  kind: 'set',
+                  condition: 'ship the thing',
+                  iterations: 2,
+                  setAt: 1234,
+                },
+              ],
+            },
+          } as unknown as core.ChatRecord,
+        ]);
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                lastReason: expect.stringContaining(
+                  'recorded by an earlier version of Qwen Code',
+                ),
+              }),
+            },
+          },
+        });
+      });
+
       // R3-6's second trigger: `recoverGoalFromRecords` returns
       // `'unsupported'`, `restore()` latches `recoveryError`, and the replay
       // still emitted the active legacy `set` card. Nothing in-session

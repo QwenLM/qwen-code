@@ -1140,12 +1140,6 @@ export default {
   'Clear Authentication': 'Limpar autenticação',
   disabled: 'desativado',
   enabled: 'ativado',
-  'disabled (bare mode)': 'desativado (modo mínimo)',
-  'disabled (safe mode)': 'desativado (modo seguro)',
-  'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
-  'disabled (folder not trusted)': 'desativado (pasta não confiável)',
-  'disabled (turned off for this session)':
-    'desativado (desligado nesta sessão)',
   'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',

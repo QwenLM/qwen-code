@@ -11,7 +11,6 @@ import { combineAbortSignals } from '../utils/abortController.js';
 import { isBlockedAddress, isMetadataAddress } from './ssrfGuard.js';
 import { lookup as dnsLookup } from 'dns';
 import { HookAbortError, HookTimeoutError } from './hook-errors.js';
-import { DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS } from './hook-timeout.js';
 import { isBlockingHookOutput } from './types.js';
 import type {
   HttpHookConfig,
@@ -22,6 +21,11 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('HTTP_HOOK_RUNNER');
+
+/**
+ * Default timeout for HTTP hook execution
+ */
+const DEFAULT_HTTP_TIMEOUT = 10 * 60 * 1000;
 
 /**
  * Maximum output length (10,000 characters as per Qwen Code spec)
@@ -210,7 +214,7 @@ export class HttpHookRunner {
       // Set up combined abort signal (external signal + timeout)
       const timeout = hookConfig.timeout
         ? hookConfig.timeout * 1000
-        : DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS * 1000;
+        : DEFAULT_HTTP_TIMEOUT;
       const { signal: combinedSignal, cleanup } = combineAbortSignals(
         [signal],
         { timeoutMs: timeout },

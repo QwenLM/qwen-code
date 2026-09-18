@@ -14,7 +14,7 @@ A Goal keeps Qwen Code working across turns until a stated condition is met. Set
 | `/goal clear`            | Remove the Goal.                                              |
 | `/goal-draft <intent>`   | Have the objective written for you before you set it (below). |
 
-Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). Headless usage is covered in [Headless Mode](./headless.md#run-a-persistent-goal).
+Creating, editing, or resuming a Goal requires a trusted workspace (`/trust`). A session recorded before Goal state was journaled (Qwen Code releases before 2026-07-29) resumes with no Goal: the `/goal` cards in its history are shown, a trailing card says the Goal is not being driven, and `/goal set` starts it again. Headless usage is covered in [Headless Mode](./headless.md#run-a-persistent-goal).
 
 Once a Goal has billed a turn, the footer pill and every status card show what it has spent against the window it is allowed, as `1.2k/30.0m`. The figure counts the model calls in the Goal's own turns, its direct foreground subagents, and its verifier checks. Nested and background subagents, unrelated side queries, cron turns, and notification turns are excluded. A failed check that returns no usable result cannot be counted. Restoring already recorded usage does not count it again. The window is set by [`model.goalTokenBudget`](../configuration/settings.md); resuming a Goal that has spent its window grants another one on top of what it has already spent, so the figure reads `30.0m/60.0m` rather than starting over. A Goal with no budget shows only what it has spent. A Goal that has not billed a turn yet shows no figures at all.
 

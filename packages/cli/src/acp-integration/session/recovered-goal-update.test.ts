@@ -7,10 +7,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   GoalPersistenceUnavailableError,
+  type ChatRecord,
   type GoalRuntime,
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
-import { renderPreparedGoalUpdate } from './recovered-goal-update.js';
+import {
+  LEGACY_GOAL_REASON,
+  renderPreparedGoalUpdate,
+  UNREADABLE_GOAL_REASON,
+} from './recovered-goal-update.js';
 
 const hiddenSnapshot: GoalSnapshotV2 = {
   v: 2,
@@ -28,6 +33,26 @@ const hiddenSnapshot: GoalSnapshotV2 = {
     updatedAt: 2,
   },
 };
+
+function legacySetCard(condition: string, iterations: number): ChatRecord {
+  return {
+    uuid: `goal-${iterations}`,
+    parentUuid: null,
+    sessionId: 'session-1',
+    timestamp: new Date(0).toISOString(),
+    type: 'system' as const,
+    subtype: 'slash_command',
+    cwd: '/tmp',
+    version: 'test',
+    systemPayload: {
+      phase: 'result',
+      rawCommand: '/goal',
+      outputHistoryItems: [
+        { type: 'goal_status', kind: 'set', condition, iterations },
+      ],
+    },
+  } as unknown as ChatRecord;
+}
 
 function runtime(): GoalRuntime {
   return {
@@ -165,6 +190,63 @@ describe('renderPreparedGoalUpdate', () => {
         },
       }),
     ]);
+  });
+
+  it('clears a replayed legacy Goal that the runtime did not recover', async () => {
+    // A transcript from before Goal state was journaled restores with no
+    // Goal and no cause. Its newest card can still be a `set`, which a
+    // client that derives the live Goal from the newest card would show as
+    // running; the trailing `cleared` card says nothing is driving it.
+    const idle = {
+      getSnapshot: vi.fn(() => ({ v: 2, activity: 'idle', goal: null })),
+      getRecoveryCause: vi.fn(() => undefined),
+    } as unknown as GoalRuntime;
+
+    const result = await renderPreparedGoalUpdate(async () => idle, {
+      replayedRecords: [legacySetCard('older objective', 2)],
+    });
+
+    expect(result.updates).toEqual([
+      expect.objectContaining({
+        _meta: {
+          goalStatus: expect.objectContaining({
+            kind: 'cleared',
+            condition: 'older objective',
+            iterations: 2,
+            lastReason: LEGACY_GOAL_REASON,
+          }),
+        },
+      }),
+    ]);
+    expect(LEGACY_GOAL_REASON).not.toBe(UNREADABLE_GOAL_REASON);
+  });
+
+  it('emits nothing when the runtime recovered no Goal and the replay holds no running legacy card', async () => {
+    const idle = {
+      getSnapshot: vi.fn(() => ({ v: 2, activity: 'idle', goal: null })),
+      getRecoveryCause: vi.fn(() => undefined),
+    } as unknown as GoalRuntime;
+
+    const result = await renderPreparedGoalUpdate(async () => idle, {
+      replayedRecords: [
+        {
+          ...legacySetCard('finished objective', 4),
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/goal',
+            outputHistoryItems: [
+              {
+                type: 'goal_status',
+                kind: 'achieved',
+                condition: 'finished objective',
+              },
+            ],
+          },
+        } as unknown as ChatRecord,
+      ],
+    });
+
+    expect(result.updates).toEqual([]);
   });
 
   it('falls back to a page-out bootstrap when replay has no Goal card', async () => {

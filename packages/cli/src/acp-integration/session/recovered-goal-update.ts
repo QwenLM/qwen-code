@@ -47,11 +47,23 @@ export async function renderPreparedGoalUpdate(
     const status = unrestorableGoalStatus(
       options.replayedRecords,
       options.bootstrap,
+      UNREADABLE_GOAL_REASON,
     );
     return { updates: status ? [buildGoalStatusUpdate(status)] : [] };
   }
   const cause = runtime.getRecoveryCause?.();
-  if (!cause) return { updates: [] };
+  if (!cause) {
+    // Nothing was recovered. A transcript from before Goal state was
+    // journaled (#7895) can still end on a legacy `set` card, which a client
+    // that derives the live Goal from the newest card would show as running;
+    // the trailing `cleared` card says that nothing is driving it.
+    const status = unrestorableGoalStatus(
+      options.replayedRecords,
+      options.bootstrap,
+      LEGACY_GOAL_REASON,
+    );
+    return { updates: status ? [buildGoalStatusUpdate(status)] : [] };
+  }
   const snapshot = runtime.getSnapshot();
   const publicationKey = goalPublicationKey(snapshot, cause);
   if (options.hideRuntimeGoal) {
@@ -79,9 +91,16 @@ export async function renderPreparedGoalUpdate(
   };
 }
 
-function unrestorableGoalStatus(
+/** Why a Goal was not restored, as the trailing card tells the user. */
+export const UNREADABLE_GOAL_REASON =
+  'Goal not restored: its saved state could not be read, so this session is not driving it.';
+export const LEGACY_GOAL_REASON =
+  'Goal not restored: it was recorded by an earlier version of Qwen Code, so this session is not driving it. Set it again with /goal set.';
+
+export function unrestorableGoalStatus(
   replayedRecords?: readonly ChatRecord[],
   bootstrap?: HistoryReplayGoalBootstrap,
+  lastReason: string = UNREADABLE_GOAL_REASON,
 ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
   const active =
     (replayedRecords?.length
@@ -93,8 +112,7 @@ function unrestorableGoalStatus(
     condition: active.condition,
     iterations: active.iterations,
     ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-    lastReason:
-      'Goal not restored: its saved state could not be read, so this session is not driving it.',
+    lastReason,
   };
 }
 

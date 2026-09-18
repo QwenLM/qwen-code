@@ -349,10 +349,6 @@ import {
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../../ui/utils/restoreGoal.js';
-import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
 } from '../../ui/commands/types.js';
@@ -412,10 +408,11 @@ import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
-import type { HistoryItemGoalStatus } from '../../ui/types.js';
 import {
   goalPublicationKey,
+  LEGACY_GOAL_REASON,
   renderPreparedGoalUpdate,
+  unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
@@ -2514,8 +2511,15 @@ export class Session implements SessionContext {
       return;
     }
     const cause = runtime.getRecoveryCause?.();
-    // Nothing was recovered, so the replay already told the whole story.
-    if (!cause) return;
+    if (!cause) {
+      // Nothing was recovered. A legacy `set` card the replay ended on would
+      // otherwise read as a running Goal; say that nothing is driving it.
+      await this.#supersedeUnrestorableGoal(
+        replayedRecords,
+        LEGACY_GOAL_REASON,
+      );
+      return;
+    }
     await this.#queueGoalState(runtime.getSnapshot(), cause);
   }
 
@@ -2570,33 +2574,15 @@ export class Session implements SessionContext {
    */
   async #supersedeUnrestorableGoal(
     replayedRecords?: readonly ChatRecord[],
+    lastReason?: string,
   ): Promise<void> {
-    const status = this.#unrestorableGoalStatus(replayedRecords);
+    const status = unrestorableGoalStatus(
+      replayedRecords,
+      undefined,
+      lastReason,
+    );
     if (!status) return;
     await this.messageEmitter.emitGoalStatus(status);
-  }
-
-  /**
-   * The `cleared` card for an active legacy goal the runtime refused to
-   * recover, or `undefined` when there is nothing to supersede. Shared by the
-   * streaming and rendering recovery paths so they cannot drift.
-   */
-  #unrestorableGoalStatus(
-    replayedRecords?: readonly ChatRecord[],
-  ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
-    if (!replayedRecords?.length) return undefined;
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(replayedRecords),
-    );
-    if (!active) return undefined;
-    return {
-      kind: 'cleared',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-      lastReason:
-        'Goal not restored: its saved state could not be read, so this session is not driving it.',
-    };
   }
 
   async #publishGoalState(

@@ -711,12 +711,6 @@ export default {
   active: 'active',
   disabled: 'disabled',
   enabled: 'enabled',
-  'disabled (bare mode)': 'disabled (bare mode)',
-  'disabled (safe mode)': 'disabled (safe mode)',
-  'disabled (disableAllHooks)': 'disabled (disableAllHooks)',
-  'disabled (folder not trusted)': 'disabled (folder not trusted)',
-  'disabled (turned off for this session)':
-    'disabled (turned off for this session)',
   'View Details': 'View Details',
   'Update failed:': 'Update failed:',
   'Updating {{name}}...': 'Updating {{name}}...',

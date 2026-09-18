@@ -28,6 +28,7 @@ import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
+  SlashCommandRecordPayload,
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
@@ -2271,8 +2272,8 @@ export class SessionService {
     const objective =
       recovery.kind === 'v2'
         ? recovery.payload.snapshot.goal?.objective
-        : recovery.kind === 'legacy'
-          ? recovery.objective
+        : recovery.kind === 'none'
+          ? legacyGoalCardObjective(records)
           : undefined;
     return objective ? this.truncatePromptForDisplay(objective) : undefined;
   }
@@ -4770,4 +4771,47 @@ export function normalizeDerivedBranchTitle(
     .replace(/(\S)\(\d+\)$/, '$1')
     .trim();
   return normalized || undefined;
+}
+
+/**
+ * The objective of the newest running Goal card a build before #7895
+ * journaled. The runtime no longer restores such a Goal, but the card is
+ * still the only thing that labels a session whose one prompt was `/goal`;
+ * this reads it for the session list and nothing else.
+ */
+function legacyGoalCardObjective(records: ChatRecord[]): string | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record?.type !== 'system' || record.subtype !== 'slash_command') {
+      continue;
+    }
+    const payload = record.systemPayload as
+      | SlashCommandRecordPayload
+      | undefined;
+    if (
+      payload?.phase !== 'result' ||
+      !Array.isArray(payload.outputHistoryItems)
+    ) {
+      continue;
+    }
+    for (const item of [...payload.outputHistoryItems].reverse()) {
+      if (
+        typeof item !== 'object' ||
+        item === null ||
+        (item as { type?: unknown }).type !== 'goal_status'
+      ) {
+        continue;
+      }
+      const card = item as { kind?: unknown; condition?: unknown };
+      if (
+        (card.kind === 'set' || card.kind === 'checking') &&
+        typeof card.condition === 'string' &&
+        card.condition.trim()
+      ) {
+        return card.condition.trim();
+      }
+      return undefined;
+    }
+  }
+  return undefined;
 }

@@ -53,7 +53,6 @@ import {
   type GoalVerifierInput,
 } from './goal-verifier.js';
 import {
-  createMigratedGoalState,
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
@@ -1063,25 +1062,6 @@ export function createGoalRuntime(
             if (recoveredCause === 'verifier_reject') {
               nextVerifierFeedback = recoveredSnapshot.goal?.lastReason;
             }
-          } else if (recovery.kind === 'legacy') {
-            const recordUuid = randomUUID();
-            const payload = createMigratedGoalState({
-              objective: recovery.objective,
-              goalId: randomUUID(),
-              recordUuid,
-              now: Date.now(),
-            });
-            try {
-              await options.journal.recordGoalState(recordUuid, payload);
-            } catch (error) {
-              throw new GoalPersistenceUnavailableError(
-                error instanceof Error ? error.message : String(error),
-                { cause: error },
-              );
-            }
-            assertAvailable();
-            recoveredSnapshot = structuredClone(payload.snapshot);
-            recoveredCause = payload.cause;
           }
           assertAvailable();
           if (recoveredSnapshot) snapshot = recoveredSnapshot;

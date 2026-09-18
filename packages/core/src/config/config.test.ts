@@ -4212,22 +4212,36 @@ describe('Server Config (config.ts)', () => {
     // A pre-canonical transcript whose newest Goal record is a legacy
     // `goal_status` card. Recovering it is the one restore path that has to
     // *write*: it journals a migrated `goal_state` record.
-    const legacyGoalSession = (): ResumedSessionData => {
+    const pausedGoalSession = (): ResumedSessionData => {
       const record = {
-        uuid: 'legacy-goal',
+        uuid: 'paused-goal',
         parentUuid: null,
         sessionId: 'resumed-session',
         timestamp: new Date(0).toISOString(),
         type: 'system',
-        subtype: 'slash_command',
+        subtype: 'goal_state',
         provenance: 'goal_control',
         cwd: '/tmp',
         version: 'test',
         systemPayload: {
-          phase: 'result',
-          outputHistoryItems: [
-            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
-          ],
+          v: 2,
+          cause: 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'ship the thing',
+              status: 'paused',
+              evidenceCursor: { recordId: 'paused-goal' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          },
         },
       } as unknown as ChatRecord;
       return {
@@ -4244,19 +4258,19 @@ describe('Server Config (config.ts)', () => {
     };
 
     // Under a writer lease the recorder is `inactive` until it is handed the
-    // lease, and rejects every write until then. Kicking the legacy
-    // migration off from the constructor drove that write into the guard,
-    // and `restore()` latches the failure as `recoveryError` permanently:
-    // the migrated goal was dropped and the whole resumed session lost goal
-    // persistence. Ordering is the deciding variable, so this asserts the
-    // deferred restore lands the goal rather than bricking the runtime.
-    it('waits for the session writer before migrating a legacy Goal', async () => {
+    // lease, and rejects every write until then. Restore waits for the
+    // lease so that the first Goal turn a restored active Goal starts does
+    // not write into that guard, and so that `restore()` cannot latch a
+    // lease-timing failure as `recoveryError` for the whole session.
+    // Ordering is the deciding variable, so this asserts the deferred
+    // restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before restoring a Goal', async () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const recorder = config.getChatRecordingService();
       if (!recorder) throw new Error('expected a chat recording service');
@@ -4288,7 +4302,8 @@ describe('Server Config (config.ts)', () => {
       ).startPendingGoalRestore();
 
       const runtime = await ready;
-      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      // Restoring reads the journal and writes nothing to it.
+      expect(recordGoalState).not.toHaveBeenCalled();
       expect(runtime.getSnapshot().goal).toMatchObject({
         objective: 'ship the thing',
         status: 'paused',
@@ -4305,7 +4320,7 @@ describe('Server Config (config.ts)', () => {
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const ready = config.getGoalRuntimeReady();
       config.startNewSession('replacement-session');
