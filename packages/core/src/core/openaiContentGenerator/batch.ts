@@ -21,6 +21,23 @@ interface BatchOutputLine {
   error?: { message?: string } | null;
 }
 
+/**
+ * A batch failure that must never be retried by the caller.
+ *
+ * `retryWithBackoff` re-invokes `runBatchCompletion` from the top, which
+ * uploads a new input file and creates a SECOND paid job — and when the give-up
+ * came from failed polling, the first one is still running, still billing and
+ * now unreachable. A plain `Error` is not enough to prevent that: this repo's
+ * classifier reads provider payloads out of message TEXT (`getErrorCode` parses
+ * the first `{...}` it finds, `getErrorStatus` matches `HTTP_STATUS/\d{3}`,
+ * `isStatuslessThrottle` sniffs for rate-limit bodies), and these messages
+ * interpolate provider-authored detail. The type is what `shouldRetryOnError`
+ * fails fast on, so the invariant holds whatever DashScope happened to return.
+ */
+export class BatchNotRetryableError extends Error {
+  override readonly name = 'BatchNotRetryableError';
+}
+
 const abortError = () =>
   Object.assign(new Error('Batch request aborted'), { name: 'AbortError' });
 
@@ -179,7 +196,7 @@ export async function runBatchCompletion(
         const detail = error instanceof Error ? error.message : String(error);
         if (++pollFailures > MAX_POLL_FAILURES) {
           abandoned = true;
-          throw new Error(
+          throw new BatchNotRetryableError(
             `Batch ${batch.id} is still running, but polling it failed ` +
               `${pollFailures} times in a row (${detail}). Recover the result ` +
               `with \`qwen batch fetch ${batch.id}\`.`,
@@ -199,7 +216,7 @@ export async function runBatchCompletion(
       // batch carries its reason only there, and a bare "failed" leaves
       // nothing to debug with once the remote file is gone.
       const detail = await failureDetail(client, batch.error_file_id);
-      throw new Error(
+      throw new BatchNotRetryableError(
         `Batch ${batch.id} ${batch.status}${detail ? `: ${detail}` : ''}`,
       );
     }
@@ -213,7 +230,9 @@ export async function runBatchCompletion(
       (output?.response?.body as { error?: { message?: string } } | undefined)
         ?.error?.message ??
       'no output';
-    throw new Error(`Batch ${batch.id} request failed: ${detail}`);
+    throw new BatchNotRetryableError(
+      `Batch ${batch.id} request failed: ${detail}`,
+    );
   } catch (error) {
     if (signal?.aborted && batch && !SETTLED.has(batch.status)) {
       await client.batches.cancel(batch.id).catch(() => undefined);

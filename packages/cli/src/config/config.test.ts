@@ -910,6 +910,35 @@ describe('parseArguments', () => {
     expect(argv.batch).toBe(true);
   });
 
+  it('rejects --batch on a provider without a Batch API instead of silently running realtime', async () => {
+    // executionMode is read by the OpenAI pipeline alone; every other
+    // generator ignores it, so an ungated --batch would run at full price
+    // while the user believes the turn was deferred and discounted.
+    process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+    const argv = await parseArguments();
+    await expect(
+      loadCliConfig(
+        { security: { auth: { selectedType: 'gemini' } } } as Settings,
+        argv,
+      ),
+    ).rejects.toThrow(
+      '--batch needs an OpenAI-compatible API key on a DashScope endpoint',
+    );
+  });
+
+  it('accepts --batch against a loopback endpoint (local proxy or the test harness)', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+    vi.stubEnv('OPENAI_BASE_URL', 'http://127.0.0.1:8899/v1');
+    process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+    const argv = await parseArguments();
+    await expect(
+      loadCliConfig(
+        { security: { auth: { selectedType: 'openai' } } } as Settings,
+        argv,
+      ),
+    ).resolves.toBeDefined();
+  });
+
   it('exits after a `batch` subcommand instead of falling through to the main flow', async () => {
     // Falling through would reach the memory relaunch, whose child parses argv
     // again and would submit (and bill) a second batch job.

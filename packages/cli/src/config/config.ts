@@ -99,6 +99,9 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { batchCommand } from '../commands/batch.js';
+import { DashScopeOpenAICompatibleProvider } from '@qwen-code/qwen-code-core/core/openaiContentGenerator/provider/dashscope.js';
+import { AuthType as AuthTypeValues } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
+import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
 import { sandboxCommand } from '../commands/sandbox.js';
@@ -1578,6 +1581,23 @@ function warnAboutOutputStyle(warning: string): void {
   console.error(`WARNING: ${warning}`);
 }
 
+/**
+ * A loopback base URL — a local proxy in front of DashScope, or the fake
+ * server the batch regression harness runs against. Parsed, not regexed, so a
+ * path like `https://evil.example/127.0.0.1/` cannot pass as local.
+ */
+function isLoopbackEndpoint(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false;
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return (
+      hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function loadCliConfig(
   settings: Settings,
   argv: CliArgs,
@@ -2104,6 +2124,31 @@ export async function loadCliConfig(
   });
 
   const { model: resolvedModel } = resolvedCliConfig;
+
+  // `--batch` exists only on the DashScope Batch API. `executionMode` is read
+  // by the OpenAI pipeline alone — the Responses, Anthropic, Gemini and
+  // Vertex generators ignore it — so without this gate the flag is a silent
+  // no-op: the run goes realtime at full price while the user believes the
+  // turn was deferred and discounted. Qwen OAuth has no `/batches` route at
+  // all, and a non-DashScope OpenAI-compatible host fails server-side with a
+  // 404 only after the first upload. Fail fast instead, before any request.
+  if (argv.batch) {
+    const isDashScopeKeyAuth =
+      selectedAuthType === AuthTypeValues.USE_OPENAI &&
+      (DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+        authType: selectedAuthType,
+        baseUrl: resolvedCliConfig.baseUrl,
+      } as ContentGeneratorConfig) ||
+        isLoopbackEndpoint(resolvedCliConfig.baseUrl));
+    if (!isDashScopeKeyAuth) {
+      throw new Error(
+        '--batch needs an OpenAI-compatible API key on a DashScope endpoint ' +
+          `(auth type "openai"); resolved auth type is "${selectedAuthType ?? 'none'}"` +
+          `${resolvedCliConfig.baseUrl ? ` at ${resolvedCliConfig.baseUrl}` : ''}. ` +
+          'No other provider has a Batch API, so the run would silently go realtime at full price.',
+      );
+    }
+  }
 
   // Disable ToolSearch when explicitly configured or for models that benefit
   // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)

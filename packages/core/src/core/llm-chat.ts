@@ -5201,6 +5201,7 @@ export class LlmChat {
         if (error instanceof Error) {
           if (isSchemaDepthError(error.message)) return false;
           if (isInvalidArgumentError(error.message)) return false;
+          if (isNonRetryableBatchError(error)) return false;
         }
 
         const status = getErrorStatus(error);
@@ -6771,6 +6772,22 @@ export function isSchemaDepthError(errorMessage: string): boolean {
 
 export function isInvalidArgumentError(errorMessage: string): boolean {
   return errorMessage.includes('Request contains an invalid argument');
+}
+
+/**
+ * A Batch API give-up (`BatchNotRetryableError`), which must fail fast.
+ *
+ * Retrying re-enters `runBatchCompletion` from the top: a new upload and a
+ * second paid job, while the first may still be running and unreachable. The
+ * message carries provider-authored detail, and this repo's classifier reads
+ * provider payloads out of message text — a rate-limit body or an
+ * `HTTP_STATUS/503` in that detail is enough to make the classifier call it
+ * retryable — so the decision is taken on the error's identity instead.
+ * Matched by name, not `instanceof`, so `core/` needs no import from the
+ * OpenAI provider directory.
+ */
+export function isNonRetryableBatchError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'BatchNotRetryableError';
 }
 
 /** @deprecated Use `LlmChat`; retained until a future major release. */

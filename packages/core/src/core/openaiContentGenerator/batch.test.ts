@@ -7,10 +7,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type OpenAI from 'openai';
 import {
+  BatchNotRetryableError,
   completionAsChunk,
   runBatchCompletion,
   singleChunkStream,
 } from './batch.js';
+import { isNonRetryableBatchError } from '../llm-chat.js';
+import { isRetryableUpstreamError } from '../../utils/retryErrorClassification.js';
 
 const completion = {
   id: 'chatcmpl-1',
@@ -292,6 +295,67 @@ describe('runBatchCompletion', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect(client.batches.cancel).toHaveBeenCalledWith('b4');
     expect(client.batches.retrieve).not.toHaveBeenCalled();
+  });
+});
+
+describe("the give-up error and the caller's retry classifier", () => {
+  // The invariant fix #4 rests on: a retry re-enters runBatchCompletion from
+  // the top and creates a SECOND paid job while the first may still be
+  // running and unreachable.
+  const withThrottleBody =
+    'Batch b7 is still running, but polling it failed 6 times in a row ' +
+    '({"error":{"type":"rate_limit_error","message":"Too many requests, please try again later"}}). ' +
+    'Recover the result with `qwen batch fetch b7`.';
+  const withHttpStatus =
+    'Batch b7 is still running, but polling it failed 6 times in a row ' +
+    '(HTTP_STATUS/503 upstream unavailable). Recover with `qwen batch fetch b7`.';
+
+  it('would be retried if it were a plain Error — the guard is load-bearing', () => {
+    // Not a hypothetical: the message interpolates provider-authored detail,
+    // and the classifier reads provider payloads out of message text.
+    expect(isRetryableUpstreamError(new Error(withThrottleBody))).toBe(true);
+    expect(isRetryableUpstreamError(new Error(withHttpStatus))).toBe(true);
+  });
+
+  it('fails fast on identity, whatever the provider wrote into the message', () => {
+    expect(
+      isNonRetryableBatchError(new BatchNotRetryableError(withThrottleBody)),
+    ).toBe(true);
+    expect(
+      isNonRetryableBatchError(new BatchNotRetryableError(withHttpStatus)),
+    ).toBe(true);
+    expect(isNonRetryableBatchError(new Error(withThrottleBody))).toBe(false);
+  });
+
+  it('is the type every give-up path throws', async () => {
+    const client = mockClient();
+    // A fresh Response per call: a Response body can only be read once.
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockImplementation(
+          async () => new Response(JSON.stringify({ id: 'file-in' })),
+        ),
+    );
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    client.batches.create.mockResolvedValue({
+      id: 'b8',
+      status: 'in_progress',
+    });
+    client.batches.retrieve.mockRejectedValue(new Error('socket hang up'));
+
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toBeInstanceOf(BatchNotRetryableError);
+
+    client.batches.create.mockResolvedValue({ id: 'b9', status: 'expired' });
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toBeInstanceOf(BatchNotRetryableError);
+
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 });
 
