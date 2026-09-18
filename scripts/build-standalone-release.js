@@ -72,8 +72,7 @@ const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // packaging cross-builds all targets from a single host. Linux is glibc-only
 // on purpose: RELEASE_TARGETS bundles glibc-linked Bun binaries that cannot
 // start on musl hosts, so the -musl render packages would be dead weight
-// claiming support the archive cannot deliver. Declared before the
-// top-level `main()` call below (ESM const TDZ).
+// claiming support the archive cannot deliver.
 const OPENTUI_PLATFORM_PACKAGES = [
   '@opentui/core-darwin-arm64',
   '@opentui/core-darwin-x64',
@@ -82,15 +81,6 @@ const OPENTUI_PLATFORM_PACKAGES = [
   '@opentui/core-win32-arm64',
   '@opentui/core-win32-x64',
 ];
-
-if (isMainModule()) {
-  try {
-    await main();
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exitCode = 1;
-  }
-}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -563,3 +553,12 @@ export {
   readNodePtyPackageSpecs,
   RELEASE_TARGETS,
 };
+
+if (isMainModule()) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
+}

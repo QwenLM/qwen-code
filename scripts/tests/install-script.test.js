@@ -738,6 +738,11 @@ describe('standalone release packaging', () => {
   });
 
   it('loads the standalone release packaging helper', () => {
+    const releaseScript = readScript('scripts/build-standalone-release.js');
+    expect(releaseScript).toMatch(
+      /let pnpmLockedKeys;[\s\S]*if \(isMainModule\(\)\)/,
+    );
+
     const output = execFileSync(
       process.execPath,
       ['scripts/build-standalone-release.js', '--help'],
