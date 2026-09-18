@@ -31,18 +31,40 @@ describe('web-shell package build boundary', () => {
       expect(
         shouldExternalizeWebShellDependency(packageName, 'transcript'),
       ).toBe(false);
-      expect(
-        shouldExternalizeWebShellDependency(
-          `${packageName}/internal`,
-          'transcript',
-        ),
-      ).toBe(false);
       expect(shouldExternalizeWebShellDependency(packageName)).toBe(true);
     }
 
-    expect(shouldExternalizeWebShellDependency('react', 'transcript')).toBe(
-      true,
-    );
+    expect(
+      shouldExternalizeWebShellDependency('lucide-react', 'transcript'),
+    ).toBe(true);
+    expect(
+      shouldExternalizeWebShellDependency(
+        'lucide-react/internal',
+        'transcript',
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldExternalizeWebShellDependency('react/jsx-runtime', 'transcript'),
+    ).toBe(true);
+    expect(
+      shouldExternalizeWebShellDependency('@qwen-code/sdk/browser', 'transcript'),
+    ).toBe(true);
+    expect(
+      shouldExternalizeWebShellDependency('echarts/core', 'transcript'),
+    ).toBe(true);
+    expect(
+      shouldExternalizeWebShellDependency(
+        'remark-cjk-friendly/internal',
+        'transcript',
+      ),
+    ).toBe(true);
+    expect(
+      shouldExternalizeWebShellDependency('@codemirror/view/internal', 'transcript'),
+    ).toBe(true);
+    expect(
+      shouldExternalizeWebShellDependency('katex/dist/katex.js', 'transcript'),
+    ).toBe(true);
   });
 
   it('keeps stylesheet entrypoints bundled', () => {
@@ -58,6 +80,12 @@ describe('web-shell package build boundary', () => {
     expect(
       shouldExternalizeWebShellDependency('katex/dist/katex.min.css'),
     ).toBe(false);
+    expect(
+      shouldExternalizeWebShellDependency(
+        'katex/dist/katex.min.css',
+        'transcript',
+      ),
+    ).toBe(false);
   });
 
   it('does not externalize local or undeclared modules', () => {
@@ -65,5 +93,8 @@ describe('web-shell package build boundary', () => {
     expect(shouldExternalizeWebShellDependency('not-a-web-shell-dependency')).toBe(
       false,
     );
+    expect(
+      shouldExternalizeWebShellDependency('./client/transcript', 'transcript'),
+    ).toBe(false);
   });
 });
