@@ -1347,6 +1347,22 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.decision).toBeUndefined();
     });
 
+    // An ask outside PreToolUse is read by nobody, so it must not cost a stop
+    // request its stop: only this consumer's ask outranks the exemption.
+    it('leaves a stop request alone on a lane whose consumer reads no ask', () => {
+      const result = aggregator.aggregateResults(
+        [
+          blockingResult(HookEventName.Stop, {
+            continue: false,
+            decision: 'ask',
+          }),
+        ],
+        HookEventName.Stop,
+      );
+      expect(result.finalOutput?.continue).toBe(false);
+      expect(result.finalOutput?.decision).toBe('ask');
+    });
+
     const permissionRequestCases: Array<
       [string, HookOutput | undefined, string]
     > = [
@@ -1419,27 +1435,114 @@ describe('HookAggregator', () => {
       expect(output.getPermissionDecisionReason()).toContain('blocking error');
     });
 
+    const okResult = (
+      eventName: HookEventName,
+      output: HookOutput,
+    ): HookExecutionResult => ({
+      hookConfig: { type: HookType.Command, command: 'gate' },
+      eventName,
+      success: true,
+      outcome: 'success',
+      output,
+      duration: 5,
+    });
+
+    // An ask is answered by one approval, so a blocking outcome carrying one -- or
+    // collecting one from a sibling hook -- has to overwrite it.
     it.each([
-      [HookEventName.TodoCreated, 'an empty payload', {}],
-      [HookEventName.TodoCompleted, 'an empty payload', {}],
+      [
+        'a nested ask on the blocking hook itself',
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            hookSpecificOutput: { permissionDecision: 'ask' },
+          }),
+        ],
+      ],
+      [
+        'an ask a sibling hook contributed',
+        [
+          okResult(HookEventName.PreToolUse, {
+            hookSpecificOutput: {
+              permissionDecision: 'ask',
+              permissionDecisionReason: 'needs human review',
+            },
+          }),
+          blockingResult(HookEventName.PreToolUse, {
+            continue: false,
+            stopReason: 'denied by policy',
+          }),
+        ],
+      ],
+      [
+        'a stop request that also asks',
+        [
+          blockingResult(HookEventName.PreToolUse, {
+            continue: false,
+            decision: 'ask',
+          }),
+        ],
+      ],
+    ])('denies rather than prompts when %s', (_label, results) => {
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PreToolUse,
+      );
+      const output = createHookOutput(
+        HookEventName.PreToolUse,
+        result.finalOutput ?? {},
+      ) as PreToolUseHookOutput;
+      expect(output.isDenied()).toBe(true);
+      expect(output.isAsk()).toBe(false);
+    });
+
+    const todoCases: Array<[HookEventName, string, HookOutput, string]> = [
+      [
+        HookEventName.TodoCreated,
+        'an empty payload',
+        {},
+        'Hook exited with a blocking error',
+      ],
+      [
+        HookEventName.TodoCompleted,
+        'an empty payload',
+        {},
+        'Hook exited with a blocking error',
+      ],
       [
         HookEventName.TodoCreated,
         'a stop request it never reads',
         { continue: false },
+        'Hook exited with a blocking error',
       ],
       [
         HookEventName.TodoCompleted,
         'a stop request it never reads',
         { continue: false },
+        'Hook exited with a blocking error',
       ],
-    ])(
+      [
+        HookEventName.TodoCreated,
+        'the deny an exit 2 produces',
+        { decision: 'deny', reason: 'not allowed' },
+        'not allowed',
+      ],
+      [
+        HookEventName.TodoCompleted,
+        'the deny an exit 2 produces',
+        { decision: 'deny', reason: 'not allowed' },
+        'not allowed',
+      ],
+    ];
+
+    it.each(todoCases)(
       'writes the block literal the %s consumer compares to, for %s',
-      (eventName, _case, payload) => {
+      (eventName, _case, payload, reason) => {
         const result = aggregator.aggregateResults(
           [blockingResult(eventName, payload)],
           eventName,
         );
         expect(result.finalOutput?.decision).toBe('block');
+        expect(result.finalOutput?.reason).toBe(reason);
       },
     );
 

@@ -2345,6 +2345,9 @@ export function resolveCommandPath(
         result = execFileSync(checkCommand, checkArgs, {
           encoding: 'utf8',
           shell: false,
+          // The execSync family inherits stderr, so a miss would print the finder's
+          // "could not find" line into the user's session; `e.stderr` still fills.
+          stdio: ['ignore', 'pipe', 'pipe'],
           cwd: opts?.cwd,
         }).trim();
       } catch {
@@ -2361,6 +2364,9 @@ export function resolveCommandPath(
         result = execFileSync(shell, checkArgs, {
           encoding: 'utf8',
           shell: false,
+          // Same reason: whatever this probe writes to stderr belongs to the
+          // lookup, not to the user's session.
+          stdio: ['ignore', 'pipe', 'pipe'],
           cwd: opts?.cwd,
         }).trim();
       } catch {

@@ -1324,14 +1324,11 @@ export class HookRunner {
         });
         return;
       }
-      // Propagate a failed last native command; $? must be read before
-      // Test-Path resets it. A trailing odd backtick continues the line and
-      // would swallow the tail, so such commands keep only the prefix.
-      const trailingBackticks =
-        hookConfig.command.match(/`+(?=\s*$)/)?.[0].length ?? 0;
+      // Propagate a failed last native command; $? is read before Test-Path resets
+      // it. The blank line stops a trailing backtick from swallowing the tail.
       const exitCodeTail =
-        shellConfig.shell === 'powershell' && trailingBackticks % 2 === 0
-          ? `\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
+        shellConfig.shell === 'powershell'
+          ? `\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
           : '';
       // Windows PowerShell 5.1 writes through the console code page unless the
       // output encoding is forced, which would mangle non-ASCII before the

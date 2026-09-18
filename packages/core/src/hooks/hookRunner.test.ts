@@ -2959,7 +2959,7 @@ describe('HookRunner', () => {
       expect(spawnArgs[1]).toEqual([
         '-NoProfile',
         '-Command',
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
       ]);
       expect(spawnArgs[2].shell).toBe(false);
     });
@@ -3005,7 +3005,7 @@ describe('HookRunner', () => {
         expect(spawnArgs[1]).toEqual([
           '-NoProfile',
           '-Command',
-          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; echo test\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; echo test\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         ]);
         // #8649's literal repro shape: shell prefix + quoted path with a
         // space + argument. cmd.exe keeps the inner quotes, PowerShell does
@@ -3025,7 +3025,7 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][1]).toEqual([
           '-NoProfile',
           '-Command',
-          `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; bash "C:/Program Files/app/script.sh" arg\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`,
+          `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; bash "C:/Program Files/app/script.sh" arg\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`,
         ]);
       } finally {
         spy.mockRestore();
@@ -3050,7 +3050,7 @@ describe('HookRunner', () => {
         'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
       );
       expect(spawnArgs[1][2]).toBe(
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
       );
     });
 
@@ -3084,50 +3084,45 @@ describe('HookRunner', () => {
         expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
         expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
         expect(explicitArgs[2]).toBe(
-          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output explicit\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output explicit\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         );
         expect(fallbackArgs[2]).toBe(
-          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output fallback\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output fallback\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }",
         );
       } finally {
         spy.mockRestore();
       }
     });
 
-    it('omits the exit-code tail for a command ending in a continuation backtick', async () => {
-      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
-      mockSpawn.mockImplementation(() => createMockProcess(0));
-      await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'Write-Output tail `',
-          source: HooksConfigSource.Project,
-          shell: 'powershell',
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-      // Joined onto that line, the tail would be swallowed by the hook's own
-      // continuation and leak the wrapper text into the failure output.
-      const continued = mockSpawn.mock.calls[0];
-      expect(continued[1][2]).toBe(
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output tail `",
-      );
-
-      mockSpawn.mockImplementation(() => createMockProcess(0));
-      await hookRunner.executeHook(
-        {
-          type: HookType.Command,
-          command: 'Write-Output literal ``',
-          source: HooksConfigSource.Project,
-          shell: 'powershell',
-        },
-        HookEventName.PreToolUse,
-        createMockInput(),
-      );
-      const literal = mockSpawn.mock.calls[1];
-      expect(literal[1][2]).toContain('$__s = $?');
-    });
+    it.each([
+      ['a continuation backtick at the end', 'Write-Output tail `'],
+      [
+        'a literal backtick inside a trailing comment',
+        'Write-Output gate `gate.sh` # same as `gate.sh`',
+      ],
+      ['a backtick followed by spaces at the end', 'Write-Output tail `  '],
+      ['two backticks at the end', 'Write-Output literal ``'],
+    ])(
+      'keeps the exit-code tail separated by a blank line for %s',
+      async (_label, command) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        // One newline gets escaped by that backtick and swallows the tail, so the
+        // blank line is what keeps the blocking exit code propagating.
+        const spawned: string = mockSpawn.mock.calls[0][1][2];
+        expect(spawned).toContain(`${command}\n\n$__s = $?`);
+      },
+    );
 
     it('rejects a bare-quoted path on the cmd fallback lane', async () => {
       const spy = mockCmdShellConfig();
@@ -3318,7 +3313,7 @@ describe('HookRunner', () => {
       // Pin: dropping any prefix statement must fail here, not only the
       // wrapping tests.
       expect(spawnArgs[1][2]).toMatch(
-        /^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$global:LASTEXITCODE = \$null;\s*\$CLAUDE_PROJECT_DIR\n\$__s = \$\?\nif \(\(Test-Path -LiteralPath variable:\\LASTEXITCODE\) -and \$LASTEXITCODE -ne 0 -and -not \$__s\) \{ exit \$LASTEXITCODE \}$/,
+        /^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$global:LASTEXITCODE = \$null;\s*\$CLAUDE_PROJECT_DIR\n\n\$__s = \$\?\nif \(\(Test-Path -LiteralPath variable:\\LASTEXITCODE\) -and \$LASTEXITCODE -ne 0 -and -not \$__s\) \{ exit \$LASTEXITCODE \}$/,
       );
       expect(result.success).toBe(false);
       expect(result.exitCode).toBe(1);

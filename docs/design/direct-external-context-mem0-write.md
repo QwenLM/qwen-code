@@ -256,9 +256,11 @@ ACP, `serve`, resume/continue, and startup YOLO; and disabling native memory,
 speculation, chat recording, telemetry, and usage statistics. These measures
 do not create process isolation. On Windows, the allowlisted `PATH` must
 resolve both `pwsh` and `powershell` to administrator-controlled
-executables (`pwsh` wins when both are present), and PowerShell profiles
-must be absent or administrator-controlled because Core invokes the
-configured shell by name.
+executables (`pwsh` wins when both are present, and only where the hook
+shell is resolved by probing), `ComSpec` must be pinned to the interpreter
+the hooks are written for because a `ComSpec` naming `powershell.exe` or
+`pwsh.exe` is launched as it stands with no `PATH` lookup, and PowerShell
+profiles must be absent or administrator-controlled.
 
 Each repository security domain requires a distinct Mem0 Project and
 Project-specific credential. `app_id` is classification inside that Project,

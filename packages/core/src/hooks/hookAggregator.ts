@@ -15,6 +15,7 @@ import {
   StopHookOutput,
   PermissionRequestHookOutput,
   isToolArtifactLike,
+  isBlockingHookOutput,
 } from './types.js';
 import type { HookOutput, HookExecutionResult } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -162,21 +163,18 @@ export class HookAggregator {
         (decision as { behavior?: unknown }).behavior === 'deny'
       );
     }
-    if (output.continue === false && !isBlockLiteralEvent(eventName)) {
-      // These consumers route through shouldStopExecution(), so a stop request
-      // already halts the action and rewriting it would only change the block
-      // type. The two todo events are excluded: they compare the decision to
-      // 'block' and read neither 'deny' nor `continue`.
+    if (isBlockLiteralEvent(eventName)) {
+      return output.decision === 'block';
+    }
+    if (isBlockingHookOutput(eventName, output)) {
       return true;
     }
-    const permissionDecision = specific?.['permissionDecision'];
-    if (permissionDecision === 'allow' || permissionDecision === 'ask') {
-      return false;
-    }
-    if (output.decision === 'block' || output.decision === 'deny') {
-      return true;
-    }
-    return permissionDecision === 'deny';
+    // A stop request halts on its own, except where an ask prompts first and one
+    // approval runs what the hook exited 2 to block -- only PreToolUse reads asks.
+    const asks =
+      eventName === HookEventName.PreToolUse &&
+      (specific?.['permissionDecision'] === 'ask' || output.decision === 'ask');
+    return output.continue === false && !asks;
   }
 
   /**
