@@ -34,6 +34,41 @@ describe('prepareNodeReplCell', () => {
     expect(prepared.source).toContain('next;');
   });
 
+  it('keeps a cell parseable when a top-level statement omits its semicolon', async () => {
+    // The commit is injected at a top-level statement's `endIndex`. Without a
+    // leading terminator the generated identifier is glued onto the user's last
+    // token, and the kernel rejects the entire cell with `SyntaxError: Unexpected
+    // identifier '__qwen_repl_...'`. The two shapes fail for different reasons, so
+    // they are covered separately.
+    //
+    // Path 1: an unterminated expression statement. `activeBindings` is seeded from
+    // `previousBindings`, so every cell after the first one has a non-empty commit.
+    const expression = await prepareNodeReplCell('next', {
+      previousBindings: [{ name: 'previous', kind: 'const' }],
+      cellId: 'cell-omit-semicolon',
+    });
+    // Path 2: an unterminated declaration in a fresh kernel. Here the hoisted `var`
+    // seed alone makes `activeBindings` non-empty, and the declarator marker lands
+    // at the same offset as the commit, so the two are concatenated:
+    // `var next = 1, <helper> = (..., undefined)__qwen_repl_..._snapshot[...]`.
+    const declaration = await prepareNodeReplCell('var next = 1', {
+      previousBindings: [],
+      cellId: 'cell-omit-semicolon-declaration',
+    });
+
+    for (const { source } of [expression, declaration]) {
+      expect(source).not.toMatch(/[\w$)\]]__qwen_repl_/);
+    }
+    // The commit still carries the payload it exists for.
+    expect(expression.source).toContain('["previous"] = {binding:');
+    expect(declaration.source).toContain('["next"] = {binding:');
+    // LINE_OFFSET invariant: the prelude occupies exactly one physical line, so the
+    // user's first line stays physical line 2 and reported stack traces keep lining
+    // up with the code the model wrote. Terminating the commit must not add a line.
+    expect(expression.source.split('\n')[1]).toContain('next');
+    expect(declaration.source.split('\n')[1]).toContain('var next = 1');
+  });
+
   it('carries a previous binding with its declaration kind so conflicts are native', async () => {
     const prepared = await prepareNodeReplCell('const value = 2;', {
       previousBindings: [{ name: 'value', kind: 'const' }],
