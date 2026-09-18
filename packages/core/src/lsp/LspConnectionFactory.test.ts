@@ -233,5 +233,24 @@ describe('LspConnectionFactory', () => {
       },
       TEST_TIMEOUT_MS,
     );
+
+    it(
+      'resyncs past a header block with no Content-Length',
+      async () => {
+        // A stray header block ahead of the real frame must be skipped whole,
+        // so the framing that follows it is still parsed.
+        const server = await startStubServer([
+          Buffer.concat([
+            Buffer.from('X-Banner: hi\r\n\r\n', 'utf8'),
+            frame(SYMBOLS_BODY),
+          ]),
+        ]);
+
+        const result = await awaitFrame(server.connection.initialize({}));
+
+        expect(result).toEqual(DOCUMENT_SYMBOLS);
+      },
+      TEST_TIMEOUT_MS,
+    );
   });
 });
