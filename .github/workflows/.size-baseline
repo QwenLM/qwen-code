@@ -26,10 +26,11 @@
 35684 desktop-release.yml
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
-23879 e2e.yml
+26717 e2e.yml
 11394 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
+1343 mobile-shell.yml
 7642 main-ci-failure-issue.yml
 1686 npm-cache.yml
 2709 pnpm-lock-freshness.yml

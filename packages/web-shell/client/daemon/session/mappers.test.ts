@@ -399,6 +399,39 @@ describe('getReplayTokenCount', () => {
     ).toBe(23_000);
   });
 
+  it('restores flat persisted usage and ignores newer subagent usage', () => {
+    const usage = { inputTokens: 23_000, totalTokens: 25_000 };
+    const events: DaemonEvent[] = [
+      usageEvent(1, { inputTokens: 11_000 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage },
+        },
+      },
+      {
+        id: 3,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            parentToolCallId: 'agent-1',
+            usage: { inputTokens: 1_000 },
+          },
+        },
+      },
+    ];
+
+    expect(getReplayTokenUsage(events)).toEqual(usage);
+    expect(getReplayTokenCount(events)).toBe(23_000);
+  });
+
   it('returns the latest structured usage fields', () => {
     expect(
       getReplayTokenUsage([
@@ -1102,9 +1135,9 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(Object.keys(goal!)).not.toContain('activeTimeBudgetMs');
   });
 
-  it('carries checkpoint health through from the wire', () => {
-    // Same pin as limitKind: the field-by-field rebuild must not drop the
-    // stall streak or the failure the Goals dialog shows before a stop.
+  it('drops the checkpoint health an older daemon still sends', () => {
+    // Goals no longer run evidence checkpoints and no surface draws these
+    // two fields, so the field-by-field rebuild leaves them behind.
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
       {
@@ -1138,11 +1171,9 @@ describe('updateConnectionFromDaemonEvent', () => {
       } as DaemonEvent,
     );
 
-    expect(next.goalState?.goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 2,
-      lastCheckpointFailure: 'Error: provider failed',
-    });
+    expect(next.goalState?.goal).toMatchObject({ status: 'active' });
+    expect(next.goalState?.goal).not.toHaveProperty('checkpointStalls');
+    expect(next.goalState?.goal).not.toHaveProperty('lastCheckpointFailure');
   });
 
   it('drops an unknown limitKind rather than passing it through', () => {

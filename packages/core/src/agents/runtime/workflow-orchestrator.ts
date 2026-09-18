@@ -69,6 +69,7 @@ import {
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type { SubagentConfig } from '../../subagents/types.js';
+import { resolveAgentExecutionBackend } from '../../subagents/execution-backend.js';
 import {
   GitWorktreeService,
   generateAgentWorktreeSlug,
@@ -81,6 +82,12 @@ import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import { runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
+import {
+  canonicalAgentToolName,
+  describeAgentToolAllowEntryProblem,
+  listAgentToolNames,
+  narrowAgentTools,
+} from './workflow-agent-tools.js';
 
 /**
  * Default ceiling on total `agent()` calls per workflow run (matches upstream
@@ -571,6 +578,17 @@ export function createProductionDispatch(
     // agentType definition rides along so the override path reuses it
     // instead of re-scanning subagent files per attempt.
     const agentIdentity = await resolveWorkflowAgentIdentity(config, opts);
+    if (
+      resolveAgentExecutionBackend(config, agentIdentity.resolvedAgentType) ===
+      'container'
+    ) {
+      throw Object.assign(
+        new Error(
+          'Container execution is required; workflow agents are unsupported. Start a regular subagent instead.',
+        ),
+        { __wfRunFailure: true },
+      );
+    }
     if (agentIdentity.resolvedAgentType?.executor !== undefined) {
       throw new Error(
         'Workflow agent() does not support external-executor agents: ' +
@@ -922,6 +940,35 @@ function resolveDispatchDenies(raw: unknown): string[] {
 }
 
 /**
+ * `opts.tools` as a de-duplicated list of names, or `undefined` when omitted,
+ * with built-in display names mapped to tool names as the sandbox maps them.
+ * Same host-side re-check as {@link resolveDispatchDenies}, for a caller that
+ * reaches the dispatch without the sandbox.
+ */
+function resolveDispatchAllows(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    !Array.isArray(raw) ||
+    raw.length === 0 ||
+    raw.some(
+      (name) =>
+        typeof name !== 'string' || name.length === 0 || name !== name.trim(),
+    )
+  ) {
+    throw new Error(
+      "agent({tools}): must be a non-empty array of tool-name strings without surrounding whitespace, e.g. ['run_shell_command', 'read_file']. Omit tools to keep every tool.",
+    );
+  }
+  for (const name of raw as string[]) {
+    const problem = describeAgentToolAllowEntryProblem(name);
+    if (problem !== null) {
+      throw new Error(`agent({tools}): ${sanitizeForErrorMessage(problem)}`);
+    }
+  }
+  return [...new Set((raw as string[]).map(canonicalAgentToolName))];
+}
+
+/**
  * Override path for `agent({ agentType, model, effort, isolation,
  * disallowedTools })`. Resolves the
  * requested agentType against `SubagentManager`, applies the workflow
@@ -941,7 +988,7 @@ function resolveDispatchDenies(raw: unknown): string[] {
  *
  * Why disallowed-floor is augmented on `SubagentConfig.disallowedTools`
  * (not via `toolConfigOverride`): augmenting before `convertToRuntimeConfig`
- * lets the manager's `transformToToolNames` normalize all entries together
+ * lets the manager's `resolveToolNames` normalize all entries together
  * (display name → tool name + MCP pattern preservation). A toolConfigOverride
  * would bypass that normalization and require us to duplicate it here. A
  * per-call `disallowedTools` joins the same union for the same reason.
@@ -996,6 +1043,7 @@ async function runOverridePath(
 
   const effort = resolveDispatchEffort(opts.effort);
   const requestedDenies = resolveDispatchDenies(opts.disallowedTools);
+  const requestedAllows = resolveDispatchAllows(opts.tools);
 
   const subagentMgr = config.getSubagentManager();
   let baseConfig: SubagentConfig;
@@ -1122,6 +1170,74 @@ async function runOverridePath(
     throw new Error(
       'agent({schema, disallowedTools}): schema mode needs the structured_output tool, but disallowedTools deny it (from this call or from the agent type).',
     );
+  }
+
+  // agent({tools}) narrows the agent to exact names. Every refusal below is
+  // about names alone and comes before anything is provisioned; whether a
+  // named tool is available to the agent is left to its declaration filter,
+  // as it is for an agent type's own allowlist.
+  if (requestedAllows !== undefined) {
+    // An agent type with its own MCP servers gets their tools only in the
+    // registry built for the agent, so an mcp__ name cannot be judged against
+    // this session's registry; the declaration filter decides it.
+    const agentHasOwnMcpServers =
+      baseConfig.mcpServers !== undefined &&
+      Object.keys(baseConfig.mcpServers).length > 0;
+    const checkMcpNames = !agentHasOwnMcpServers;
+    // MCP servers are discovered in the background, and their tools are not
+    // in the registry until discovery settles. A name that only the registry
+    // can vouch for is judged after that, so a dispatch issued right after the
+    // session starts is not refused for a tool about to appear. The wait is
+    // bounded by discovery's own timeout; a list of built-in names never waits.
+    if (
+      requestedAllows.some(
+        (name) =>
+          resolveBuiltinToolName(name) === undefined &&
+          (checkMcpNames || !name.startsWith('mcp__')),
+      )
+    ) {
+      await config.waitForMcpReady();
+    }
+    const unmatchedAllows = await subagentMgr.findUnmatchedToolNames(
+      requestedAllows,
+      { checkMcpNames },
+    );
+    if (unmatchedAllows.length > 0) {
+      throw new Error(
+        `agent({tools}): ${sanitizeForErrorMessage(
+          listAgentToolNames(unmatchedAllows),
+        )} ${unmatchedAllows.length === 1 ? 'names' : 'name'} no tool. Use a tool name (run_shell_command, read_file), a display name (Shell, ReadFile), or an MCP tool's exact name as the model sees it (mcp__<server>__<tool>).`,
+      );
+    }
+    const agentTypeTools =
+      baseConfig.tools !== undefined &&
+      baseConfig.tools.length > 0 &&
+      !baseConfig.tools.includes('*')
+        ? baseConfig.tools
+        : undefined;
+    try {
+      augmented.tools = narrowAgentTools({
+        requested: requestedAllows,
+        requestedNames: await subagentMgr.resolveToolNames(requestedAllows),
+        ...(agentTypeTools !== undefined
+          ? {
+              agentTypeTools,
+              agentTypeToolNames:
+                await subagentMgr.resolveToolNames(agentTypeTools),
+            }
+          : {}),
+        denies: await subagentMgr.resolveToolNames(
+          augmented.disallowedTools ?? [],
+        ),
+        schema: opts.schema !== undefined,
+      });
+    } catch (error) {
+      throw new Error(
+        sanitizeForErrorMessage(
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
+    }
   }
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config
@@ -2477,10 +2593,10 @@ async function settleToNullArray(
  * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
  * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
  * itself rejects when given invalid arguments (non-array / non-function
- * element), when the run is aborted, or when a token/agent-cap gate refuses a
- * dispatch. The result array is revived into the vm realm by the sandbox
- * wrapper (per-element JSON round-trip) — this host array never reaches the
- * script directly.
+ * element), when the run is aborted, or when a token/agent-cap or container
+ * policy gate refuses a dispatch. The sandbox wrapper revives the result array
+ * into the vm realm (per-element JSON round-trip) — this host array never
+ * reaches the script directly.
  */
 function makeParallelImpl(
   signal: AbortSignal | undefined,

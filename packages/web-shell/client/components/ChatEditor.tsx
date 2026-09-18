@@ -67,6 +67,7 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { getContextUsageLevel } from '../utils/contextUsage';
+import { pastedTextTitle } from '../utils/largePaste';
 import type { ContextUsageControls } from '../hooks/useContextUsageControls';
 import { ContextUsagePopover } from './ContextUsagePopover';
 import { VoiceButton } from '../voice/VoiceButton';
@@ -228,6 +229,8 @@ interface ChatEditorProps {
   onOpenGitDiff?: () => void;
   /** Opens the commit dialog. */
   onOpenCommit?: () => void;
+  /** Opens the commit history graph. */
+  onOpenLog?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1589,6 +1592,7 @@ export const ChatEditor = memo(
       gitStatus,
       onOpenGitDiff,
       onOpenCommit,
+      onOpenLog,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -3115,35 +3119,25 @@ export const ChatEditor = memo(
                 )}
                 {core.pastedFiles.length > 0 && (
                   <div className={styles.files}>
-                    {core.pastedFiles.map((file, i) => (
-                      <div
-                        key={`${file.name}-${i}`}
-                        className={`${styles.fileChip}${
-                          onAttachmentPreview
-                            ? ` ${styles.fileChipPreviewable}`
-                            : ''
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          className={styles.fileChipPreview}
-                          disabled={!onAttachmentPreview}
-                          onClick={() =>
-                            onAttachmentPreview?.({
-                              name: file.name,
-                              mimeType: file.media_type,
-                              ...(file.data ? { data: file.data } : {}),
-                              ...(file.text !== undefined
-                                ? { text: file.text }
-                                : {}),
-                            })
-                          }
-                        >
-                          <FileAttachmentContent
-                            name={file.name}
-                            mimeType={file.media_type}
-                          />
-                        </button>
+                    {core.pastedFiles.map((file, i) => {
+                      const foldedText = file.text;
+                      // A folded paste is named after its own title, so the
+                      // card renders that title; the name is the fallback for a
+                      // paste with nothing to derive one from.
+                      const title =
+                        foldedText === undefined
+                          ? file.name
+                          : pastedTextTitle(foldedText, file.name);
+                      const openPreview = () =>
+                        onAttachmentPreview?.({
+                          name: file.name,
+                          mimeType: file.media_type,
+                          ...(file.data ? { data: file.data } : {}),
+                          ...(foldedText !== undefined
+                            ? { text: foldedText }
+                            : {}),
+                        });
+                      const removeButton = (
                         <button
                           type="button"
                           className={styles.fileChipRemove}
@@ -3153,7 +3147,7 @@ export const ChatEditor = memo(
                             if (disabled) return;
                             core.removeFile(i);
                           }}
-                          aria-label={`Remove ${file.name}`}
+                          aria-label={`Remove ${title}`}
                         >
                           <svg
                             width="8"
@@ -3170,8 +3164,84 @@ export const ChatEditor = memo(
                             />
                           </svg>
                         </button>
-                      </div>
-                    ))}
+                      );
+                      if (foldedText === undefined) {
+                        return (
+                          <div
+                            key={`${file.name}-${i}`}
+                            className={`${styles.fileChip}${
+                              onAttachmentPreview
+                                ? ` ${styles.fileChipPreviewable}`
+                                : ''
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              className={styles.fileChipPreview}
+                              disabled={!onAttachmentPreview}
+                              onClick={openPreview}
+                            >
+                              <FileAttachmentContent
+                                name={file.name}
+                                mimeType={file.media_type}
+                              />
+                            </button>
+                            {removeButton}
+                          </div>
+                        );
+                      }
+                      // The size is omitted rather than derived from the text
+                      // length, which would label characters as bytes.
+                      const meta =
+                        file.size === undefined
+                          ? undefined
+                          : formatAttachmentSize(file.size);
+                      return (
+                        <div
+                          key={`${file.name}-${i}`}
+                          className={`${styles.fileChip} ${styles.fileChipText}`}
+                        >
+                          <span className={styles.fileChipIcon}>
+                            <FileTypeIcon
+                              name={file.name}
+                              mimeType={file.media_type}
+                              size={24}
+                              aria-hidden="true"
+                            />
+                          </span>
+                          <span className={styles.fileChipBody}>
+                            <button
+                              type="button"
+                              className={styles.fileChipTitle}
+                              title={title}
+                              disabled={!onAttachmentPreview}
+                              onClick={openPreview}
+                            >
+                              {title}
+                            </button>
+                            <span className={styles.fileChipMeta}>
+                              <button
+                                type="button"
+                                className={styles.fileChipExpand}
+                                disabled={disabled}
+                                onClick={() => {
+                                  if (disabled) return;
+                                  core.expandPastedText(i);
+                                }}
+                              >
+                                {t('editor.pastedTextShowInEditor')}
+                                <ChevronRightIcon
+                                  size={12}
+                                  aria-hidden="true"
+                                />
+                              </button>
+                              {meta === undefined ? null : <span>{meta}</span>}
+                            </span>
+                          </span>
+                          {removeButton}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -3367,6 +3437,7 @@ export const ChatEditor = memo(
                         status={gitStatus}
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
+                        onOpenLog={onOpenLog}
                       >
                         <button
                           type="button"

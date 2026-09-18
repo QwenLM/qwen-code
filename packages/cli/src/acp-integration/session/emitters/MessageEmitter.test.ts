@@ -120,6 +120,27 @@ describe('MessageEmitter', () => {
         _meta: { source: 'slash_command' },
       });
     });
+
+    it('should carry structured payloads without letting them displace its own keys', async () => {
+      await emitter.emitSlashCommandOutput(
+        'Compressing context...',
+        undefined,
+        {
+          contextCompression: { phase: 'progress' },
+          // A payload must never be able to re-label the frame.
+          source: 'spoofed',
+        },
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Compressing context...' },
+        _meta: {
+          contextCompression: { phase: 'progress' },
+          source: 'slash_command',
+        },
+      });
+    });
   });
 
   describe('emitGoalStatus', () => {
