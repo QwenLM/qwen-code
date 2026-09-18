@@ -7,6 +7,9 @@
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { parseGoalStateRecordPayloadV2 } from './goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from './goal-protocol.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GOAL_PERSISTENCE');
 
 /**
  * What a transcript holds for the Goal runtime to restore. Only `goal_state`
@@ -40,6 +43,7 @@ export function selectGoalRecoveryFromRecords(
 ): GoalRecoverySelection {
   let unsupported: GoalRecovery | undefined;
   let unsupportedSourceUuid: string | undefined;
+  const skippedUuids: string[] = [];
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
     if (record?.subtype !== 'goal_state') continue;
@@ -48,8 +52,19 @@ export function selectGoalRecoveryFromRecords(
         ? parseGoalStateRecordPayloadV2(record.systemPayload)
         : undefined;
     if (payload) {
+      if (skippedUuids.length > 0) {
+        // Recovery takes the newest record that parses, so a record a later
+        // build wrote in a shape this one rejects rewinds the Goal to an
+        // older transition. Not an error the caller can act on -- the Goal
+        // still restores -- but the one trace that says it happened and
+        // which newer records were stepped over.
+        debugLogger.warn(
+          `Goal recovery skipped ${skippedUuids.length} newer goal_state record(s) that did not parse (${skippedUuids.join(', ')}) and restored from ${record.uuid}.`,
+        );
+      }
       return { recovery: { kind: 'v2', payload }, sourceUuid: record.uuid };
     }
+    skippedUuids.push(record.uuid);
     if (!unsupported) {
       unsupported = {
         kind: 'unsupported',
