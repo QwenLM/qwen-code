@@ -1320,3 +1320,20 @@ it('graceful stop disconnects TUI with friendly copy, not the wire cause token',
   expect(JSON.stringify(updates)).toContain('Workspace runtime stopped.');
   expect(JSON.stringify(updates)).not.toContain('workspace_runtime_stop');
 });
+
+it('ordinary close renders generic copy, not the wire reason token', () => {
+  const updates = reduceDaemonEventToTuiUpdates({
+    id: 1,
+    v: 1,
+    type: 'session_closed',
+    data: {
+      sessionId: 'session',
+      reason: 'client_close',
+      exitCode: null,
+      signalCode: null,
+    },
+  });
+  expect(updates.some((update) => update.type === 'disconnected')).toBe(true);
+  expect(JSON.stringify(updates)).toContain('Session closed');
+  expect(JSON.stringify(updates)).not.toContain('client_close');
+});

@@ -14492,7 +14492,14 @@ export function createSessionControlPlane(
         entry.spawnOwnerWantedKill = true;
         return false;
       }
-      if (runtimeStop) return false;
+      // Record the intent exactly like the bail above: the stop owns
+      // teardown for now, but if it ends incomplete and this session
+      // survives, the tombstone lets the next detach/settle complete the
+      // deferred reap.
+      if (runtimeStop) {
+        entry.spawnOwnerWantedKill = true;
+        return false;
+      }
       if (entry.closing) {
         const closingChannel = channelInfoForEntry(entry);
         if (!closingChannel) return false;

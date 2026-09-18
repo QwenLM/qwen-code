@@ -3707,3 +3707,41 @@ it('requires an explicit resume for a stopped pane', async () => {
     sessionContext: { kind: 'workspace', cwd: '/workspace' },
   });
 });
+
+it('fences pane submits while the runtime is stopped and says why', async () => {
+  connectionState.runtimeStopped = true;
+  connectionState.status = 'disconnected';
+  // The parked state retains sessionId, so the status-based submit guard
+  // alone does not catch this.
+  connectionState.sessionId = 'stopped';
+  const notice = vi.fn();
+  render({ onImageIngestionNotice: notice });
+  await act(async () => {
+    testid('pane-submit')!.click();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(notice).toHaveBeenCalledWith(
+    'warning',
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  );
+});
+
+it('does not submit a deferred /plan prompt after the runtime stops', async () => {
+  const prepared = deferred<{ mode: string }>();
+  setApprovalMode.mockReturnValueOnce(prepared.promise);
+  render();
+  act(() => {
+    latestOnSubmit!('/plan explain the migration');
+  });
+  expect(setApprovalMode).toHaveBeenCalledOnce();
+  // The runtime stops while the plan-mode switch is still in flight; the
+  // deferred continuation must re-check the fence before submitting.
+  connectionState = {
+    ...connectionState,
+    runtimeStopped: true,
+    status: 'disconnected',
+  };
+  rerender();
+  await act(async () => prepared.resolve({ mode: 'plan' }));
+  expect(sendPrompt).not.toHaveBeenCalled();
+});

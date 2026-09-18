@@ -98,7 +98,7 @@ Unknown/untrusted/ambiguous/bootstrap/draining/removed 等既有 resolver 错误
 3. 仅通过现有 close 路径关闭捕获的 session，使用 `requireAgentClose: true` 和有界确认。该路径处理等待交互、取消工作、排空记录。跟踪部分结果。Child 明确拒绝时停止后续关闭并解除临时门禁，不能等待从未开始的 release；传输结果未知时可能已经终止整个捕获 channel，需继续依据它的释放事实收敛。
 4. 发出既有 `session_closed`，保留 `reason: client_close`，新增 `cause: workspace_runtime_stop`。扩展受控 close options 和 SDK 事件类型/校验。对于 stop 关联的致命 channel 退出，也要给受影响 session 保留终态用户停止信号，并单独报告未确认的持久化/teardown；不能让普通崩溃重连分支悄悄撤销用户操作。不发 `workspace_removed`。
 5. 已确认 session 全部关闭且无意外工作后，清理捕获 channel 的软保温，走 PR2 相同的自有 teardown。复用内部机制，不放宽 PR2 零 session 条件，也不永久 shutdown bridge。
-6. 仅为 tracked-child handle 增加 `registryReleased: Promise<void>`，并在 daemon-owned channel 上可选透传。只在已有 registry release 函数删除计数项之后 resolve。不能在根进程退出、发 kill 信号、termination `finally` 或吞掉退出错误时 resolve。即使根退出清理已从 live-channel 集合移除它，也要保留捕获的 channel 引用。
+6. 仅为 tracked-child handle 增加 `registryReleased: Promise<void>`，并在 daemon-owned channel 上可选透传。只在已有 registry release 函数删除计数项之后 resolve。不能在根进程退出、发 kill 信号、termination `finally` 或吞掉退出错误时 resolve。Windows 上 registry 不跟踪后代进程组，根进程退出完成即为释放证据，此时 `released: true` 不证明进程树已消失。即使根退出清理已从 live-channel 集合移除它，也要保留捕获的 channel 引用。
 7. 只有该 child 的释放 promise 完成、session-close 结果明确后才能报告成功。响应与现有总预算竞争，失败响应后仍继续捕获的清理。通过 bridge 内部契约暴露清理完成信号，只有该信号才能解除 bridge/coordinator 门禁并恢复 keepalive。完成回调核验当前操作身份，不能解除后续操作的门禁。所选 child 资源尚未确认时继续保留生命周期 `stopping` 和容量计数，即使响应回执已是 `failed`。没有触发 teardown 的明确 close 拒绝仍正常收敛清理并解除自身门禁。
 8. 保留注册、generation 身份、bridge/coordinator/service 对象、文件、已保存历史、环境/存储根目录及无关 terminal。Session close 沿用 catalog invalidation；MCP/Skills 通过原 epoch 机制变为 stale。仅在 stop/门禁收敛、捕获 runtime 仍是当前可信 active 注册、且没有 removal/trust drain 或 daemon shutdown 时，才恢复 keepalive 观测；操作不修改持久任务启用状态。后续用户主动使用时正常冷启动，并加载原保存 session 身份。
 

@@ -914,7 +914,10 @@ export function ChatPane({
       // the composer (the pane banner offers Resume); a submit here would
       // only race the dead runtime. The parked state retains sessionId, so
       // shouldBlockComposerSubmit alone cannot catch it.
-      if (connectionRef.current.runtimeStopped) return false;
+      if (connectionRef.current.runtimeStopped) {
+        onImageIngestionNotice?.('warning', t('capacityChoice.stopped'));
+        return false;
+      }
       transcriptViewportRef.current?.scrollToBottom();
       // The host handler is documented as running before Web Shell handles a
       // slash command, so it gets `/goal` first here exactly as it does in the
@@ -1102,6 +1105,7 @@ export function ChatPane({
               if (
                 !applied ||
                 !owner.isCurrent() ||
+                current.runtimeStopped ||
                 current.loadingTranscript ||
                 shouldBlockComposerSubmit({
                   connectionStatus: current.status,

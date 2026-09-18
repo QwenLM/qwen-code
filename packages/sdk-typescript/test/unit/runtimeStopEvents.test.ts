@@ -30,11 +30,25 @@ describe('workspace runtime stop terminal events', () => {
   );
   it('warns UI consumer when stopped session persistence is unconfirmed', () => {
     const events = normalizeDaemonEvent(terminal());
-    const warning = events.find(
-      (event) => 'text' in event && /persist|sav|record/i.test(event.text),
-    );
-    // The warning must stay a non-recoverable error: regressing to a plain
-    // status line would read as an ordinary close.
-    expect(warning).toMatchObject({ type: 'error', recoverable: false });
+    // Pin the exact copy and severity: a loose-text match would still pass
+    // after a rewording, and a regression to a status line would read as an
+    // ordinary close.
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'error',
+        recoverable: false,
+        text: 'Workspace runtime stopped; session persistence is unconfirmed.',
+      }),
+    ]);
+  });
+  it('renders the graceful stop copy when persistence is confirmed', () => {
+    const frame = terminal();
+    delete (frame.data as Record<string, unknown>).persistenceUnconfirmed;
+    expect(normalizeDaemonEvent(frame)).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        text: 'Workspace runtime stopped.',
+      }),
+    ]);
   });
 });
