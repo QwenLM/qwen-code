@@ -496,6 +496,28 @@ const EN: Messages = {
   'live.noFallback':
     'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
+  'live.browser.connect': 'Talk in this browser',
+  'live.browser.connecting': 'Connecting microphone…',
+  'live.browser.takeOver': 'Take over in this tab',
+  'live.browser.disconnect': 'Release microphone',
+  'live.browser.setupDescription':
+    'Use this browser tab as the microphone and speaker for Live Voice.',
+  'live.browser.readyDescription':
+    'This tab is the microphone and speaker for Live Voice.',
+  'live.browser.otherTabDescription':
+    'Another Web Shell tab is the microphone and speaker for Live Voice.',
+  'live.browser.headphonesHint':
+    'Headphones give the best result: they keep the reply out of the microphone.',
+  'live.browser.closed.occupied':
+    'Another Live Voice endpoint is already connected.',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host took over Live Voice from this tab.',
+  'live.browser.closed.supersededTab':
+    'Another Web Shell tab took over Live Voice.',
+  'live.browser.closed.refused':
+    'Live Voice is turned off, or this workspace is not trusted.',
+  'live.browser.closed.microphone': 'The microphone could not be opened.',
+  'live.browser.closed.lost': 'The Live Voice connection was lost.',
   'settings.liveShortcut.capture': 'Press shortcut',
   'settings.liveShortcut.clear': 'Clear',
   'settings.liveShortcut.off': 'Off',
@@ -4421,6 +4443,25 @@ const ZH: Messages = {
   'live.noFallback':
     '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
+  'live.browser.connect': '在此浏览器中通话',
+  'live.browser.connecting': '正在连接麦克风…',
+  'live.browser.takeOver': '在此标签页接管',
+  'live.browser.disconnect': '释放麦克风',
+  'live.browser.setupDescription':
+    '将此浏览器标签页用作实时语音的麦克风和扬声器。',
+  'live.browser.readyDescription': '此标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.otherTabDescription':
+    '另一个 Web Shell 标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.headphonesHint':
+    '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
+  'live.browser.closed.occupied': '已有其他实时语音端连接。',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host 已从此标签页接管实时语音。',
+  'live.browser.closed.supersededTab':
+    '另一个 Web Shell 标签页已接管实时语音。',
+  'live.browser.closed.refused': '实时语音未开启，或此工作区不受信任。',
+  'live.browser.closed.microphone': '无法打开麦克风。',
+  'live.browser.closed.lost': '实时语音连接已断开。',
   'settings.liveShortcut.capture': '请按下快捷键',
   'settings.liveShortcut.clear': '清除',
   'settings.liveShortcut.off': '关闭',
