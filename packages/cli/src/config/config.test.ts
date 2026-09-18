@@ -5679,11 +5679,11 @@ describe('loadCliConfig approval mode', () => {
   });
 
   // --- Untrusted Folder Scenarios ---
-  describe.each([false, undefined])('when folder trust is %s', (isTrusted) => {
+  describe('when folder is NOT trusted', () => {
     beforeEach(() => {
       vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted,
-        source: isTrusted === undefined ? undefined : 'file',
+        isTrusted: false,
+        source: 'file',
       });
     });
 
@@ -5728,6 +5728,17 @@ describe('loadCliConfig approval mode', () => {
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
     });
+  });
+
+  it('should treat an undecided folder as untrusted', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
   });
 });
 

@@ -2465,6 +2465,26 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
+  it('does not load env before a folder trust decision', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-undecided-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-undecided-workspace\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
   it('does not load env from a descendant of an explicitly untrusted workspace', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();

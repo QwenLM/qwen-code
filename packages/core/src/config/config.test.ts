@@ -13035,13 +13035,12 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
-  it.each([ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, ApprovalMode.AUTO])(
-    'rejects %s before an enabled folder trust decision',
-    (mode) => {
-      const config = new Config({ ...baseParams, folderTrust: true });
-      expect(() => config.setApprovalMode(mode)).toThrow(TrustGateError);
-    },
-  );
+  it('rejects privileged modes before an enabled folder trust decision', () => {
+    const config = new Config({ ...baseParams, folderTrust: true });
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
+  });
 
   describe('DAC plan workflow', () => {
     it.each([

@@ -170,7 +170,7 @@ function findEnvFilesFastPath(
       path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
         ? path.dirname(dirPath)
         : dirPath;
-    return isWorkspaceTrustedFastPath(settings, workspaceDir) !== false;
+    return isWorkspaceTrustedFastPath(settings, workspaceDir) === true;
   };
 
   const pushCandidate = (filePath: string): boolean => {
@@ -738,7 +738,7 @@ export function loadServeFastPathSettings(
     initialTrustCheckSettings,
     realWorkspaceDir,
   );
-  const isTrusted = trustDecision ?? true;
+  const isTrusted = trustDecision ?? false;
   const startupChannelsTrusted =
     isWorkspaceTrustedFastPath(
       mergeFastPathSettings(systemDefaults, user, system),
