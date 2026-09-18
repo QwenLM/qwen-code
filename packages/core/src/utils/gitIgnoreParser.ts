@@ -9,6 +9,9 @@ import * as path from 'node:path';
 import ignore from 'ignore';
 import { isPathWithinRoot } from './workspaceContext.js';
 
+// Bound transient directory and per-path matcher caches during large scans.
+const MATCHER_CACHE_RESET_INTERVAL = 10_000;
+
 export interface GitIgnoreFilter {
   isIgnored(filePath: string): boolean;
 }
@@ -17,8 +20,10 @@ export class GitIgnoreParser implements GitIgnoreFilter {
   private projectRoot: string;
   private cache: Map<string, string[]> = new Map();
   private globalPatterns: string[] | undefined;
-  // Compiled ignore matcher memoized per directory chain — see getIgnorerForDir.
+  // Directories with no additional rules share a compiled matcher.
   private ignorerCache: Map<string, ReturnType<typeof ignore>> = new Map();
+  private chainIgnorers: Map<string, ReturnType<typeof ignore>> = new Map();
+  private ignorerLookups = 0;
 
   constructor(projectRoot: string) {
     this.projectRoot = path.resolve(projectRoot);
@@ -147,11 +152,8 @@ export class GitIgnoreParser implements GitIgnoreFilter {
         return false;
       }
 
-      // The applicable rules depend only on the containing directory chain,
-      // so the compiled matcher is built once per directory and reused for
-      // every entry in it. Previously a fresh ignore() instance (with full
-      // pattern recompilation) was constructed on every call — costly when
-      // glob queries thousands of entries during traversal pruning.
+      // Reuse the matcher for the chain of contributing ignore files, not a
+      // fresh copy of every ancestor rule for each directory in a large tree.
       const ig = this.getIgnorerForDir(path.dirname(resolved));
       return ig.ignores(normalizedPath);
     } catch (_error) {
@@ -166,15 +168,25 @@ export class GitIgnoreParser implements GitIgnoreFilter {
    * directory is itself ignored, deeper `.gitignore` files are not consulted.
    */
   private getIgnorerForDir(leafDir: string): ReturnType<typeof ignore> {
+    // Count memo hits too: ignore() also caches every tested path internally.
+    // Drop all references to those matchers periodically, retaining only the
+    // already-loaded, non-empty rule snapshots rather than empty-directory
+    // entries that grow with the number of directories visited.
+    if (++this.ignorerLookups > MATCHER_CACHE_RESET_INTERVAL) {
+      this.ignorerLookups = 1;
+      this.ignorerCache.clear();
+      this.chainIgnorers.clear();
+      for (const [dir, patterns] of this.cache) {
+        if (patterns.length === 0) {
+          this.cache.delete(dir);
+        }
+      }
+    }
+
     const cached = this.ignorerCache.get(leafDir);
     if (cached) {
       return cached;
     }
-
-    const ig = ignore();
-
-    // Always ignore .git directory
-    ig.add('.git');
 
     // Load global patterns from .git/info/exclude on first use
     if (this.globalPatterns === undefined) {
@@ -188,7 +200,9 @@ export class GitIgnoreParser implements GitIgnoreFilter {
         ? this.loadPatternsForFile(excludeFile)
         : [];
     }
-    ig.add(this.globalPatterns);
+    const chainPatterns: string[][] = [];
+    let chainKey = '';
+    let ig = this.getChainIgnorer(chainKey, chainPatterns);
 
     // Collect the directory chain root..leafDir.
     const dirsToVisit = [this.projectRoot];
@@ -217,24 +231,42 @@ export class GitIgnoreParser implements GitIgnoreFilter {
         }
       }
 
-      if (this.cache.has(dir)) {
-        const patterns = this.cache.get(dir);
-        if (patterns) {
-          ig.add(patterns);
-        }
-      } else {
+      let patterns = this.cache.get(dir);
+      if (!patterns) {
         const gitignorePath = path.join(dir, '.gitignore');
-        if (fs.existsSync(gitignorePath)) {
-          const patterns = this.loadPatternsForFile(gitignorePath);
-          this.cache.set(dir, patterns);
-          ig.add(patterns);
-        } else {
-          this.cache.set(dir, []); // Cache miss
-        }
+        patterns = fs.existsSync(gitignorePath)
+          ? this.loadPatternsForFile(gitignorePath)
+          : [];
+        this.cache.set(dir, patterns);
+      }
+      if (patterns.length > 0) {
+        chainPatterns.push(patterns);
+        // Absolute directories distinguish equally named nested ignore files;
+        // NUL cannot occur in a directory name, so chain keys are unambiguous.
+        chainKey += '\0' + dir;
+        ig = this.getChainIgnorer(chainKey, chainPatterns);
       }
     }
 
     this.ignorerCache.set(leafDir, ig);
+    return ig;
+  }
+
+  private getChainIgnorer(
+    chainKey: string,
+    chainPatterns: string[][],
+  ): ReturnType<typeof ignore> {
+    let ig = this.chainIgnorers.get(chainKey);
+    if (!ig) {
+      // Never add a child's rules to a shared ancestor's mutable matcher.
+      ig = ignore()
+        .add('.git')
+        .add(this.globalPatterns ?? []);
+      for (const patterns of chainPatterns) {
+        ig.add(patterns);
+      }
+      this.chainIgnorers.set(chainKey, ig);
+    }
     return ig;
   }
 }
