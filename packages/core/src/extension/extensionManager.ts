@@ -98,7 +98,11 @@ import {
   ExtensionUninstallEvent,
   ExtensionUpdateEvent,
 } from '../telemetry/types.js';
-import { loadSkillsFromDir } from '../skills/skill-load.js';
+import {
+  EXTENSION_SCAN_CONCURRENCY,
+  loadSkillsFromDir,
+  mapWithConcurrency,
+} from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import {
   loadExtensionWorkflows,
@@ -457,6 +461,12 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
     nodir: true,
     dot: true,
     follow: true,
+    // fast-glob caps its own traversal workers at CPU_COUNT (its settings
+    // default), so one glob call opens at most ~cpu-count descriptors at
+    // once regardless of the commands tree depth. Combined with the small
+    // EXTENSION_SCAN_CONCURRENCY outer bound, concurrent traversals stay
+    // inside the shared descriptor budget enforced by the manifest readers'
+    // gate (SKILL_LOAD_CONCURRENCY in skill-load.ts).
   };
 
   try {
@@ -1624,18 +1634,24 @@ export class ExtensionManager {
       return [];
     }
 
-    const extensions: Extension[] = [];
-    for (const subdir of subdirs) {
-      const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension({
-        extensionDir,
-        workspaceDir,
-      });
-      if (extension != null) {
-        extensions.push(extension);
-      }
-    }
-    return extensions;
+    // Promise.all semantics, not allSettled: loadExtension converts its own
+    // per-extension errors to null, but an entry whose stat itself throws
+    // (e.g. a dangling symlink at the extensions root) must propagate and
+    // fail the whole load — read-only consumers rely on that fail-closed
+    // signal. The outer bound is deliberately small: it only schedules
+    // extensions into their per-extension phase, while every descriptor opened
+    // underneath (skills/commands/agents reads) is admitted through the shared
+    // gate inside mapWithConcurrency, keeping total in-flight reads global.
+    const extensions = await mapWithConcurrency(
+      subdirs,
+      EXTENSION_SCAN_CONCURRENCY,
+      (subdir) =>
+        this.loadExtension({
+          extensionDir: path.join(extensionsDir, subdir),
+          workspaceDir,
+        }),
+    );
+    return extensions.filter((extension) => extension != null);
   }
 
   async loadExtension(
@@ -1716,22 +1732,26 @@ export class ExtensionManager {
         // The Agent Plugins v1 schema defines no workflows.
         extension.workflows = [];
       } else {
-        extension.commands = await loadCommandsFromDir(
-          `${effectiveExtensionPath}/commands`,
-        );
         extension.contextFiles = getContextFileNames(config)
           .map((contextFileName) =>
             path.join(effectiveExtensionPath, contextFileName),
           )
           .filter((contextFilePath) => fs.existsSync(contextFilePath));
-        extension.skills = await loadSkillsFromDir(
-          `${effectiveExtensionPath}/skills`,
-        );
         const agentExecutorRefusals = new Map<string, SubagentError>();
-        extension.agents = await loadSubagentFromDir(
-          `${effectiveExtensionPath}/agents`,
-          agentExecutorRefusals,
-        );
+        // commands / skills / agents live in disjoint directories with no
+        // shared state, so their directory scans run concurrently; each
+        // loader already swallows its own per-entry failures.
+        const [commands, skills, agents] = await Promise.all([
+          loadCommandsFromDir(`${effectiveExtensionPath}/commands`),
+          loadSkillsFromDir(`${effectiveExtensionPath}/skills`),
+          loadSubagentFromDir(
+            `${effectiveExtensionPath}/agents`,
+            agentExecutorRefusals,
+          ),
+        ]);
+        extension.commands = commands;
+        extension.skills = skills;
+        extension.agents = agents;
         extension.agentExecutorRefusals = agentExecutorRefusals;
         extension.workflows = await loadExtensionWorkflows(
           effectiveExtensionPath,

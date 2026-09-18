@@ -33,6 +33,10 @@ import {
   SubagentErrorCode,
 } from './types.js';
 import { SubagentValidator } from './validation.js';
+import {
+  SKILL_LOAD_CONCURRENCY,
+  mapWithConcurrency,
+} from '../skills/skill-load.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
 import type { SubagentExecutor } from '../agents/runtime/subagent-executor.js';
 import type {
@@ -1848,37 +1852,40 @@ export async function loadSubagentFromDir(
 ): Promise<SubagentConfig[]> {
   try {
     const files = await fs.readdir(baseDir);
-    const subagents: SubagentConfig[] = [];
+    // Files are read concurrently under a bounded limit; each branch only
+    // awaits fs work before its own refusals.set, and Map.set on distinct
+    // keys is atomic on the single-threaded event loop, so no locking is
+    // needed.
+    const loaded = await mapWithConcurrency(
+      files.filter((file) => file.endsWith('.md')),
+      SKILL_LOAD_CONCURRENCY,
+      async (file): Promise<SubagentConfig | null> => {
+        const filePath = path.join(baseDir, file);
 
-    for (const file of files) {
-      if (!file.endsWith('.md')) continue;
-
-      const filePath = path.join(baseDir, file);
-
-      try {
-        const content = await fs.readFile(filePath, 'utf8');
-        const config = parseSubagentContent(
-          content,
-          filePath,
-          'extension',
-          new SubagentValidator(),
-        );
-        subagents.push(config);
-      } catch (error) {
-        warnInvalidSubagentFile(filePath, error);
-        if (
-          refusals &&
-          error instanceof SubagentError &&
-          error.subagentName !== undefined &&
-          error.message.includes('invalid executor block')
-        ) {
-          refusals.set(error.subagentName.toLowerCase(), error);
+        try {
+          const content = await fs.readFile(filePath, 'utf8');
+          return parseSubagentContent(
+            content,
+            filePath,
+            'extension',
+            new SubagentValidator(),
+          );
+        } catch (error) {
+          warnInvalidSubagentFile(filePath, error);
+          if (
+            refusals &&
+            error instanceof SubagentError &&
+            error.subagentName !== undefined &&
+            error.message.includes('invalid executor block')
+          ) {
+            refusals.set(error.subagentName.toLowerCase(), error);
+          }
+          return null;
         }
-        continue;
-      }
-    }
+      },
+    );
 
-    return subagents;
+    return loaded.filter((subagent) => subagent != null);
   } catch (_error) {
     // Directory doesn't exist or can't be read
     return [];

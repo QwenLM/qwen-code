@@ -10,6 +10,10 @@ import type { SkillConfig } from '../../skills/types.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeContent } from '../../utils/textUtils.js';
 import { parse as parseYaml } from '../../utils/yaml-parser.js';
+import {
+  SKILL_LOAD_CONCURRENCY,
+  mapWithConcurrency,
+} from '../../skills/skill-load.js';
 import { resolveContainedExistingPath } from './paths.js';
 
 const debugLogger = createDebugLogger('AGENT_PLUGINS_V1');
@@ -44,30 +48,35 @@ export async function loadAgentPluginSkills(
     );
     return [];
   }
-  const skills: SkillConfig[] = [];
-  for (const entry of entries) {
-    const skillDir = path.join(resolvedSkillsPath, entry.name);
-    try {
-      const resolvedSkillDir = resolveContainedExistingPath(
-        pluginRoot,
-        skillDir,
-      );
-      if (!fs.statSync(resolvedSkillDir).isDirectory()) continue;
-      const skillManifest = path.join(resolvedSkillDir, 'SKILL.md');
-      const resolvedManifest = resolveContainedExistingPath(
-        pluginRoot,
-        skillManifest,
-      );
-      if (!fs.statSync(resolvedManifest).isFile()) continue;
-      const content = await fs.promises.readFile(resolvedManifest, 'utf8');
-      skills.push(parseAgentPluginSkill(content, resolvedManifest, entry.name));
-    } catch (error) {
-      debugLogger.warn(
-        `Skipping Agent Plugins skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-  return skills;
+  const loaded = await mapWithConcurrency(
+    entries,
+    SKILL_LOAD_CONCURRENCY,
+    async (entry): Promise<SkillConfig | null> => {
+      const skillDir = path.join(resolvedSkillsPath, entry.name);
+      try {
+        const resolvedSkillDir = resolveContainedExistingPath(
+          pluginRoot,
+          skillDir,
+        );
+        if (!fs.statSync(resolvedSkillDir).isDirectory()) return null;
+        const skillManifest = path.join(resolvedSkillDir, 'SKILL.md');
+        const resolvedManifest = resolveContainedExistingPath(
+          pluginRoot,
+          skillManifest,
+        );
+        if (!fs.statSync(resolvedManifest).isFile()) return null;
+        const content = await fs.promises.readFile(resolvedManifest, 'utf8');
+        return parseAgentPluginSkill(content, resolvedManifest, entry.name);
+      } catch (error) {
+        debugLogger.warn(
+          `Skipping Agent Plugins skill "${entry.name}": ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      }
+    },
+  );
+
+  return loaded.filter((skill) => skill != null);
 }
 
 export function parseAgentPluginSkill(

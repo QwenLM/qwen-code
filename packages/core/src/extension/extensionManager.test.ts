@@ -15,6 +15,10 @@ import {
 import { ExtensionStorage } from './storage.js';
 import { QWEN_DIR } from '../config/storage.js';
 import {
+  SKILL_LOAD_CONCURRENCY,
+  peakDescriptorGateInFlight,
+} from '../skills/skill-load.js';
+import {
   ExtensionManager,
   ExtensionUpdateState,
   SettingScope,
@@ -3293,6 +3297,123 @@ describe('extension tests', () => {
         const ext = extensions.find((e) => e.config.name === 'no-commands-ext');
         expect(ext?.commands).toEqual([]);
       });
+    });
+
+    it('loads valid extensions concurrently and skips invalid ones', async () => {
+      for (let i = 0; i < 8; i += 1) {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: `valid-ext-${i}`,
+          version: '1.0.0',
+        });
+        for (let s = 0; s < 4; s += 1) {
+          const skillDir = path.join(extDir, 'skills', `skill-${s}`);
+          fs.mkdirSync(skillDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(skillDir, 'SKILL.md'),
+            `---\nname: skill-${s}\ndescription: Skill ${s}\n---\nBody`,
+          );
+        }
+        const agentsDir = path.join(extDir, 'agents');
+        fs.mkdirSync(agentsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(agentsDir, 'agent.md'),
+          '---\nname: agent\ndescription: Agent\n---\nYou are a benchmark agent prompt.',
+        );
+      }
+      // A corrupt manifest: loadExtension must skip it without throwing.
+      const corruptDir = path.join(userExtensionsDir, 'corrupt-ext');
+      fs.mkdirSync(corruptDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(corruptDir, EXTENSIONS_CONFIG_FILENAME),
+        '{not json',
+      );
+      // A valid extension mixing a broken skill and a broken agent with good
+      // entries: the broken ones are dropped, the rest still load.
+      const mixedDir = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'mixed-ext',
+        version: '1.0.0',
+      });
+      fs.mkdirSync(path.join(mixedDir, 'skills', 'good'), { recursive: true });
+      fs.writeFileSync(
+        path.join(mixedDir, 'skills', 'good', 'SKILL.md'),
+        '---\nname: good\ndescription: Good skill\n---\nBody',
+      );
+      fs.mkdirSync(path.join(mixedDir, 'skills', 'bad'), { recursive: true });
+      fs.writeFileSync(
+        path.join(mixedDir, 'skills', 'bad', 'SKILL.md'),
+        'no frontmatter here',
+      );
+      fs.mkdirSync(path.join(mixedDir, 'agents'), { recursive: true });
+      fs.writeFileSync(
+        path.join(mixedDir, 'agents', 'good.md'),
+        '---\nname: good-agent\ndescription: Good agent\n---\nYou are a good agent prompt.',
+      );
+      fs.writeFileSync(
+        path.join(mixedDir, 'agents', 'broken.md'),
+        '---\nname: broken-agent\n---\nPrompt',
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      const names = extensions.map((e) => e.config.name).sort();
+      expect(names).toEqual([
+        'mixed-ext',
+        ...[...Array(8).keys()].map((i) => `valid-ext-${i}`),
+      ]);
+
+      const mixed = extensions.find((e) => e.config.name === 'mixed-ext');
+      expect(mixed?.skills?.map((s) => s.name)).toEqual(['good']);
+      expect(mixed?.agents?.map((a) => a.name)).toEqual(['good-agent']);
+      for (const valid of extensions.filter((e) =>
+        e.config.name.startsWith('valid-ext-'),
+      )) {
+        expect(valid.skills).toHaveLength(4);
+        expect(valid.agents).toHaveLength(1);
+      }
+    });
+
+    it('keeps concurrent manifest reads within the shared descriptor gate', async () => {
+      // A large nested fan-out (many extensions × many skills/agents) must
+      // hold total in-flight SKILL.md reads at or under SKILL_LOAD_CONCURRENCY
+      // — the gate is module-wide, so per-level caps multiplying across the
+      // extensions → loaders → files nesting would otherwise blow past it
+      // under a low RLIMIT_NOFILE and silently truncate the load.
+      const EXTENSIONS = 40;
+      const SKILLS = 24;
+      for (let i = 0; i < EXTENSIONS; i += 1) {
+        const extDir = createExtension({
+          extensionsDir: userExtensionsDir,
+          name: `gate-ext-${i}`,
+          version: '1.0.0',
+        });
+        for (let s = 0; s < SKILLS; s += 1) {
+          const skillDir = path.join(extDir, 'skills', `skill-${s}`);
+          fs.mkdirSync(skillDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(skillDir, 'SKILL.md'),
+            `---\nname: skill-${s}\ndescription: Skill ${s}\n---\nBody`,
+          );
+        }
+      }
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+
+      const extensions = manager.getLoadedExtensions();
+      expect(extensions).toHaveLength(EXTENSIONS);
+      for (const extension of extensions) {
+        expect(extension.skills).toHaveLength(SKILLS);
+      }
+      expect(peakDescriptorGateInFlight()).toBeLessThanOrEqual(
+        SKILL_LOAD_CONCURRENCY,
+      );
+      // Sanity: the gate must have observed real concurrency, otherwise this
+      // test proves nothing.
+      expect(peakDescriptorGateInFlight()).toBeGreaterThan(1);
     });
   });
 
