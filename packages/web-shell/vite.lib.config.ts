@@ -171,9 +171,10 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
-    // Keep the library and app on one syntax floor. Runtime packages are
-    // externalized below, while package-owned output and the transcript entry
-    // still need a stable target for npm consumers.
+    // Keep the library and app on one syntax floor. Public package entries
+    // externalize declared runtime packages. The transcript build preserves
+    // its specialized bundle boundary because /export html consumes it as an
+    // input and enforces a strict renderer-size budget (#11031).
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
@@ -187,7 +188,11 @@ export default defineConfig(({ mode }) => ({
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: shouldExternalizeWebShellDependency,
+      external: (id) =>
+        shouldExternalizeWebShellDependency(
+          id,
+          mode === 'transcript' ? 'transcript' : 'package',
+        ),
     },
   },
   define: {
