@@ -2396,6 +2396,7 @@ export function createServeApp(
       getEnabled: () => liveVoiceEnabled,
       setEnabled: setLiveVoiceEnabled,
       env: daemonEnv,
+      nativeHost: liveNativeHostAvailable,
       ...(deps.persistSettings
         ? {
             persistSettings: async (writes) => {
@@ -2855,12 +2856,10 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
-      // Shipped Web Shells render the native-Host install card as soon as
-      // `experimental.liveVoice.enabled` is listed, which is a dead end off
-      // macOS. Keep the keys native-only until the browser client that can
-      // act on them ships; until then Live Voice is enabled off macOS through
-      // settings.json.
-      includeLiveVoice: liveNativeHostAvailable,
+      // Listed wherever Live Voice exists. The bundled Web Shell trims its
+      // setup card to what applies (`/live/setup` reports `nativeHost`), so
+      // off macOS it never offers to install the native Host.
+      includeLiveVoice: liveVoiceSurfaceAvailable,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
