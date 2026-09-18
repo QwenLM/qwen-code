@@ -4160,6 +4160,7 @@ class QwenAgent implements Agent {
           cwd,
           undefined,
           {
+            systemHooks: settings.getSystemHooks(),
             userHooks: settings.getUserHooks(),
             projectHooks: settings.getProjectHooks(),
           },
@@ -8647,6 +8648,7 @@ class QwenAgent implements Agent {
         workflowStepId: true,
         runSavedArgs: true,
         runScript: true,
+        nameOnly: config.isWorkflowNameOnly?.() === true,
       },
       savedWorkflows,
     };
@@ -14894,6 +14896,7 @@ class QwenAgent implements Agent {
       undefined,
       // Pass separated hooks for proper source attribution
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },

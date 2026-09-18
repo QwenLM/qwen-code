@@ -239,6 +239,8 @@ describe('bundled workflow-authoring skill', () => {
       'inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any other thunk rejection',
     ],
     ['so null-check a `workflow()` result too'],
+    // The name-only lock reaches nested calls too.
+    ['`workflow({ scriptPath })` throws the same way; nest by name'],
     // isolation: every refusal, and the workaround for the nested one.
     ['when the session is already inside a worktree'],
     ['pass it as `workingDir`'],

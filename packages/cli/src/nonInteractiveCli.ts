@@ -82,7 +82,6 @@ import {
   getErrorType,
   getActiveInteractionSpan,
   buildGoalContinuationParts,
-  goalCheckpointHealthLine,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -303,15 +302,11 @@ export function formatGoalState(
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
-  // Both lines are written to stdout as they are, so both are sanitized: a
-  // pause reason can embed a raw provider error.
+  // Written to stdout as it is, so it is sanitized: a pause reason can embed
+  // a raw provider error.
   if (goal.status !== 'active' && goal.lastReason) {
     lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
   }
-  // The checkpoint line the interactive cards show, in the same words: a
-  // checkpoint stop reason names the kind of failure, only this says which.
-  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
-  if (checkpoint !== undefined) lines.push(`Checkpoint: ${checkpoint}`);
   return lines.join('\n');
 }
 

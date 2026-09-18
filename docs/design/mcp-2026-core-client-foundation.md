@@ -105,9 +105,16 @@ not advertise privileged App capabilities.
   the daemon response.
 - If the isolation origin is unavailable, WebShell displays the ordinary tool
   text rather than rendering the App.
-- Compacted session history keeps `type: 'mcp_app'` with empty `html` and the
-  original `fallbackText`; WebShell renders that text instead of mounting an
-  empty sandbox.
+- Compaction splits by purpose. Terminal (interactive) history keeps
+  `type: 'mcp_app'` with empty `html` and the original `fallbackText`, and the
+  TUI renders that text instead of mounting an empty sandbox. A recorded
+  transcript keeps the App `html` within its 1 MiB resource limit so WebShell
+  replay can mount the app, and keeps `toolResult` only while its serialized
+  form fits the retained-display budget (32 KiB); above it the field is dropped
+  rather than truncated. Retained `html` reaches replay `rawOutput` and the
+  resumed display only, never model context. A fully compliant resource of
+  256 KiB or more crosses the daemon's large-pipe-frame threshold on replay —
+  that is the intended cost of rendering Apps from a transcript.
 - The host sends `ui/resource-teardown` and waits for it to settle before
   unloading the sandbox iframe.
 
@@ -126,8 +133,10 @@ not advertise privileged App capabilities.
   dashboard resource, and render that dashboard inside an actual daemon-backed
   WebShell transcript. The PR description includes the external test fixture
   used for this verification without shipping it in the product repository.
-- Compacted replay of an App result must show fallback text and must not mount
-  a sandbox iframe.
+- Compacted terminal-history replay of an App result must show fallback text and
+  must not mount a sandbox iframe. Replay of a recorded transcript must mount
+  the sandbox and render the retained App `html`, and must not carry an
+  over-budget `toolResult`.
 - Invalid App resource MIME types and unavailable resources must retain the
   ordinary text result.
 - The sandbox route must reject CSP directive injection and remain a static,

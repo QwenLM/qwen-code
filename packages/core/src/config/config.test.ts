@@ -145,6 +145,8 @@ import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { createHookOutput, HookSystem } from '../hooks/index.js';
+import { HookRegistry } from '../hooks/hookRegistry.js';
+import { HookPlanner } from '../hooks/hookPlanner.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -930,6 +932,9 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('setHooksFromSettings', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
     const userHooks = {
       PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
     };
@@ -988,6 +993,159 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getProjectHooks()).toBeUndefined();
       expect(config.getUserHooks()).toBe(userHooks);
+    });
+
+    it('replaces system hooks together with the other fields', () => {
+      const config = new Config({ ...baseParams, systemHooks });
+
+      config.setHooksFromSettings({ userHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBe(userHooks);
+    });
+  });
+
+  describe('per-scope hooks and the legacy merged fallback', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
+    const userHooks = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    const projectHooks = {
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'echo project' }] }],
+    };
+    const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+
+    it('does not read the merged hooks as project hooks when only user hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        userHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getUserHooks()).toBe(userHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('does not read the merged hooks as user hooks when only project hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        projectHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBeUndefined();
+    });
+
+    it('still serves the merged hooks as user and project hooks when no scope is supplied', () => {
+      const config = new Config({ ...baseParams, hooks: mergedHooks });
+
+      expect(config.getUserHooks()).toBe(mergedHooks);
+      expect(config.getProjectHooks()).toBe(mergedHooks);
+    });
+
+    it('serves system hooks without promoting the merged hooks to system hooks', () => {
+      const withSystem = new Config({
+        ...baseParams,
+        systemHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(withSystem.getSystemHooks()).toBe(systemHooks);
+      expect(withSystem.getUserHooks()).toBeUndefined();
+      expect(withSystem.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['safe mode', { safeMode: true }],
+      ['bare mode', { bareMode: true }],
+    ])('loads no system hooks in %s', (_label, mode) => {
+      const config = new Config({ ...baseParams, ...mode, systemHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+    });
+
+    describe('registration through the hook registry', () => {
+      // What the CLI handed Config before system hooks had their own channel:
+      // a user settings hook, no workspace hooks, and the merged settings
+      // (which then held only that user hook) as the legacy field.
+      const lintHook = {
+        PreToolUse: [
+          {
+            hooks: [{ type: 'command', command: './lint.sh', name: 'lint' }],
+          },
+        ],
+      };
+
+      async function registryFor(params: Partial<ConfigParameters>) {
+        const config = new Config({ ...baseParams, ...params });
+        const registry = new HookRegistry(config);
+        await registry.initialize();
+        return registry;
+      }
+
+      it('registers a user settings hook once, under the user source', async () => {
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        expect(
+          registry.getAllHooks().map(({ eventName, source }) => ({
+            eventName,
+            source,
+          })),
+        ).toEqual([{ eventName: HookEventName.PreToolUse, source: 'user' }]);
+      });
+
+      it('runs that hook once per event, as it did while it was registered twice', async () => {
+        // The planner dedups by hook identity regardless of source, so the
+        // double registration never doubled execution; this pins that the
+        // change above does not alter how many times the hook runs.
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+
+      it('runs a hook registered under two sources once, because the planner dedups by identity', async () => {
+        // A Config built from merged settings alone still registers the hook
+        // under both the user and project sources. The planner is what keeps
+        // that from running it twice.
+        const registry = await registryFor({ hooks: lintHook });
+        expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
+          'user',
+          'project',
+        ]);
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+    });
+
+    it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
+      const config = new Config({
+        ...baseParams,
+        trustedFolder: false,
+        systemHooks,
+        projectHooks,
+      });
+
+      expect(config.getSystemHooks()).toBe(systemHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
     });
   });
 
@@ -4657,7 +4815,7 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('arms the checkpoint verifier with the configured timeout', () => {
+    it('does not wire a checkpoint verifier into the Goal runtime', () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
@@ -4667,13 +4825,10 @@ describe('Server Config (config.ts)', () => {
 
       config.getGoalRuntime();
 
-      // Assert the call, not only the getter: the options argument is the
-      // one line that carries the setting into the verifier, and the
-      // getter-only checks above stay green if it is dropped.
-      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.[0]).toBe(config);
-      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
+      // The setting still normalizes, but nothing consumes checkpoint claims
+      // any more, so no checkpoint verifier is created and no checkpoint
+      // side query can run or stall.
+      expect(vi.mocked(createGoalCheckpointVerifier)).not.toHaveBeenCalled();
     });
 
     it('caps the checkpoint ceiling at a wait the default wire honours', () => {
@@ -5267,6 +5422,67 @@ describe('Server Config (config.ts)', () => {
       ],
     });
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  describe('isWorkflowNameOnly', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('is off by default, and on from the setting or the environment', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: true,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(true);
+      // The environment only turns the lock on.
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: false,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+    });
+
+    // Notifications read the lock from the registry the config owns, so the
+    // two cannot disagree about which resume call to offer.
+    it('hands the lock to its workflow run registry', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      for (const workflowNameOnly of [true, false]) {
+        const registry = new Config({
+          ...baseParams,
+          workflowNameOnly,
+        }).getWorkflowRunRegistry();
+        const completion = vi.fn();
+        registry.setCompletionCallback(completion);
+        const entry = registry.register({
+          runId: 'wf_lock',
+          meta: null,
+          status: 'running',
+          startTime: 1,
+          outputFile: '',
+          abortController: new AbortController(),
+          isBackgrounded: true,
+          scriptPath: '/runtime/workflows/generated/inline/wf_lock.js',
+        } as never);
+        registry.fail(entry.runId, 'boom', 2);
+        const text = completion.mock.calls[0][1] as string;
+        expect(text.includes('only whoever started it')).toBe(workflowNameOnly);
+        expect(text.includes('Workflow({ scriptPath')).toBe(!workflowNameOnly);
+      }
+    });
+
+    it('is decided when the session starts', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      const config = new Config(baseParams);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(config.isWorkflowNameOnly()).toBe(false);
+    });
   });
 
   it('keeps project-derived features disabled for a provisional workspace', () => {
