@@ -211,6 +211,11 @@ describe('collectContextData (contextCommand)', () => {
     expect(getLastCachedContentTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(65_267);
     expect(data.breakdown.cachedTokens).toBe(0);
+    // A session with no cache hit must not grow a `Cached prefix 0 tokens`
+    // row under `Used` in the text renderer (forwarded to ACP clients as
+    // `formattedText`). `totalTokens` is nonzero here, which is what makes
+    // this witness the `> 0` guard rather than the `hasTokenCount` gate.
+    expect(formatContextUsageText(data)).not.toContain('Cached prefix');
   });
 
   it('reads the history through the shallow reader, not a deep clone', async () => {
@@ -412,6 +417,11 @@ describe('collectContextData (contextCommand)', () => {
 
       expect(data.breakdown.unattributed).toBe(0);
       expect(sumRows(data.breakdown)).toBe(5_000);
+      // The `scale < 1` branch forces `unattributed` to 0, so the row must be
+      // suppressed in the text renderer rather than printed as `0 tokens`.
+      // `totalTokens` is nonzero, so this witnesses the `> 0` guard and not
+      // the `hasTokenCount` gate.
+      expect(formatContextUsageText(data)).not.toContain('Unattributed');
       // The cached count is an annotation, never a term of the row sum, and
       // never subtracted when deriving `messages` (this is the only branch that
       // still derives it by subtraction).
@@ -698,6 +708,53 @@ describe('collectContextData (contextCommand)', () => {
       expect(text).toContain('Startup context');
       expect(text).toContain('Unattributed');
       expect(text).toContain('Cached prefix');
+    });
+
+    it('bills tool calls and ordinary tool output as messages (#12033)', async () => {
+      // The two arms of `estimateConversationTokens` that dominate a real
+      // tool-using session's history: a `functionCall` part and a
+      // `functionResponse` from an ordinary (non-skill) tool. Unbilled, their
+      // whole cost migrates into `unattributed` — the mis-attribution #12033
+      // exists to remove — while `messages` reads near-zero.
+      // No media part here on purpose: nested `inlineData` is billed at the
+      // flat image budget, which 'charges nested tool media at the flat image
+      // budget, not as base64 text' pins. The skill-response arms stay pinned
+      // by their own two cases above; this one uses a different tool name so
+      // it cannot mask a regression in the `ToolNames.SKILL` condition.
+      const toolCall = {
+        id: 'call-1',
+        name: 'run_shell_command',
+        args: { command: 'npm test' },
+      };
+      const toolResponse = {
+        id: 'call-1',
+        name: 'run_shell_command',
+        response: { output: 'x'.repeat(8_000) },
+      };
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            prelude,
+            conversation[0]!,
+            { role: 'model', parts: [{ functionCall: toolCall }] },
+            {
+              role: 'user',
+              parts: [{ functionResponse: toolResponse }],
+            } as unknown as Content,
+          ],
+        }),
+        false,
+      );
+
+      // `estimateFunctionResponseTokens` serializes exactly these three keys.
+      expect(data.breakdown.messages).toBe(
+        100 +
+          estimateContextTextTokens(JSON.stringify(toolCall)) +
+          estimateContextTextTokens(JSON.stringify(toolResponse)),
+      );
+      expect(sumRows(data.breakdown)).toBe(100_000);
     });
   });
 
@@ -1042,6 +1099,11 @@ describe('/context shows three-tier thresholds', () => {
 
     expect(text).toMatch(/Current tier:\s+safe/);
     expect(data.breakdown.currentTier).toBe('safe');
+    // No chat → no prelude → `startupContext` is 0, and this row is pushed
+    // *outside* the `hasTokenCount` block, so it is the one guard a zero-total
+    // fixture cannot witness. Suppressing it is what keeps a pre-first-send
+    // `/context` free of a `Startup context 0 tokens (0.0%)` row.
+    expect(text).not.toContain('Startup context');
   });
 
   it('classifies usage at or above the hard threshold as the hard tier', async () => {
