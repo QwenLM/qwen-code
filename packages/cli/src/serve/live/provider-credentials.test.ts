@@ -11,6 +11,8 @@ import {
   DEFAULT_LIVE_SHORTCUT,
   DEFAULT_LIVE_VOICE,
   DEFAULT_LIVE_VOICE_MODEL,
+  findLiveRealtimeRoute,
+  listLiveRealtimeRoutes,
   LiveProviderConfigError,
   readLiveVoiceConfiguration,
   resolveLiveProviderCredential,
@@ -132,5 +134,167 @@ describe('Live provider credentials', () => {
     expect(() => resolveLiveProviderCredential(input)).toThrow(
       /not configured/,
     );
+  });
+
+  describe('realtimeOnly routes', () => {
+    const route = {
+      id: 'qwen3.5-omni-plus-realtime',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      envKey: 'DASHSCOPE_API_KEY',
+      realtimeOnly: true,
+    };
+
+    function routed(
+      liveVoice: Record<string, unknown> = {},
+      providers: Record<string, unknown[]> = { openai: [route] },
+      extra: Partial<Settings> = {},
+    ): Settings {
+      return {
+        experimental: {
+          liveVoice: { enabled: true, model: route.id, ...liveVoice },
+        },
+        modelProviders: providers,
+        ...extra,
+      } as unknown as Settings;
+    }
+
+    it('takes the endpoint from baseUrl and the key from envKey', () => {
+      const credential = resolveLiveProviderCredential(routed(), {
+        env: { DASHSCOPE_API_KEY: ' env-secret ' },
+      });
+      expect(credential).toEqual({
+        endpoint: DEFAULT_LIVE_ENDPOINT,
+        realtimeModel: route.id,
+        voice: DEFAULT_LIVE_VOICE,
+      });
+      expect(credential.apiKey).toBe('env-secret');
+    });
+
+    it('prefers the route over the free-standing endpoint and key', () => {
+      const credential = resolveLiveProviderCredential(
+        routed(
+          {
+            apiKey: 'legacy-secret',
+            endpoint: 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime',
+          },
+          undefined,
+        ),
+        { env: { DASHSCOPE_API_KEY: 'env-secret' } },
+      );
+      expect(credential.endpoint).toBe(DEFAULT_LIVE_ENDPOINT);
+      expect(credential.apiKey).toBe('env-secret');
+    });
+
+    it('falls back to the settings env block for the key', () => {
+      const credential = resolveLiveProviderCredential(
+        routed({}, undefined, {
+          env: { DASHSCOPE_API_KEY: 'settings-env-secret' },
+        } as Partial<Settings>),
+        { env: {} },
+      );
+      expect(credential.apiKey).toBe('settings-env-secret');
+    });
+
+    it('names the missing variable instead of using the legacy key', () => {
+      expect(() =>
+        resolveLiveProviderCredential(routed({ apiKey: 'legacy-secret' }), {
+          env: {},
+        }),
+      ).toThrow(/requires DASHSCOPE_API_KEY/);
+    });
+
+    it('does not read an envKey that names an Object.prototype member', () => {
+      expect(() =>
+        resolveLiveProviderCredential(
+          routed({}, { openai: [{ ...route, envKey: 'constructor' }] }),
+          { env: {} },
+        ),
+      ).toThrow(/requires constructor/);
+    });
+
+    it('keeps the DashScope allow-list for a derived endpoint', () => {
+      expect(() =>
+        resolveLiveProviderCredential(
+          routed(
+            {},
+            {
+              openai: [{ ...route, baseUrl: 'https://gateway.example.com/v1' }],
+            },
+          ),
+          { env: { DASHSCOPE_API_KEY: 'env-secret' } },
+        ),
+      ).toThrow(/supported secure DashScope WebSocket endpoint/);
+      // http would derive ws://, which the allow-list also refuses.
+      expect(() =>
+        resolveLiveProviderCredential(
+          routed(
+            {},
+            {
+              openai: [
+                {
+                  ...route,
+                  baseUrl: 'http://dashscope.aliyuncs.com/compatible-mode/v1',
+                },
+              ],
+            },
+          ),
+          { env: { DASHSCOPE_API_KEY: 'env-secret' } },
+        ),
+      ).toThrow(LiveProviderConfigError);
+    });
+
+    it('requires baseUrl and envKey on the route', () => {
+      expect(() =>
+        resolveLiveProviderCredential(
+          routed({}, { openai: [{ id: route.id, realtimeOnly: true }] }),
+          { env: {} },
+        ),
+      ).toThrow(/must declare baseUrl and envKey/);
+    });
+
+    it('ignores a same-id entry that is not realtimeOnly', () => {
+      const input = routed(
+        { apiKey: 'legacy-secret' },
+        { openai: [{ ...route, realtimeOnly: undefined }] },
+      );
+      expect(listLiveRealtimeRoutes(input)).toEqual([]);
+      // Falls through to the unchanged free-standing path.
+      expect(resolveLiveProviderCredential(input, { env: {} }).apiKey).toBe(
+        'legacy-secret',
+      );
+    });
+
+    it('resolves provider:modelId and refuses an ambiguous bare id', () => {
+      const input = routed(
+        {},
+        {
+          openai: [route],
+          'dashscope-intl': [
+            {
+              ...route,
+              baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+            },
+          ],
+        },
+      );
+      expect(() => findLiveRealtimeRoute(input, route.id)).toThrow(
+        /more than one realtimeOnly route/,
+      );
+      expect(
+        findLiveRealtimeRoute(input, `dashscope-intl:${route.id}`),
+      ).toMatchObject({ provider: 'dashscope-intl' });
+      const credential = resolveLiveProviderCredential(
+        routed(
+          { model: `dashscope-intl:${route.id}` },
+          input.modelProviders as never,
+        ),
+        { env: { DASHSCOPE_API_KEY: 'env-secret' } },
+      );
+      expect(credential.endpoint).toBe(
+        'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime',
+      );
+      // The upstream sees the bare model id, not the selector.
+      expect(credential.realtimeModel).toBe(route.id);
+    });
   });
 });

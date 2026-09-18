@@ -258,6 +258,7 @@ export async function applyProviderInstallPlan(
               (preserveSelection || patch.mergeStrategy !== 'append'))) &&
           (Boolean(existing.imageOnly) !== Boolean(model.imageOnly) ||
             Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly) ||
+            Boolean(existing.realtimeOnly) !== Boolean(model.realtimeOnly) ||
             (isImageGenerationCapable(existing) &&
               !isImageGenerationCapable(model))),
       ),
@@ -268,6 +269,7 @@ export async function applyProviderInstallPlan(
         (existing) =>
           !existing.imageOnly &&
           !existing.voiceOnly &&
+          !existing.realtimeOnly &&
           (patch.ownsModel?.(existing) ??
             patch.models.some((model) => isSameModelIdentity(existing, model))),
       );
@@ -276,7 +278,7 @@ export async function applyProviderInstallPlan(
       patch.mergeStrategy !== 'append' &&
       ownBucketModels.some(
         (existing) =>
-          (existing.imageOnly || existing.voiceOnly) &&
+          (existing.imageOnly || existing.voiceOnly || existing.realtimeOnly) &&
           patch.ownsModel?.(existing) &&
           !patch.models.some((model) => model.id === existing.id),
       );

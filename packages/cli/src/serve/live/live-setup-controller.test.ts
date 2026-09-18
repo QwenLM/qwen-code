@@ -11,7 +11,13 @@ import { LiveHostInstaller } from './live-host-installer.js';
 import { LiveSetupController } from './live-setup-controller.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
 
-function createHarness(options: { initiallyEnabled?: boolean } = {}) {
+function createHarness(
+  options: {
+    initiallyEnabled?: boolean;
+    modelProviders?: Record<string, unknown[]>;
+    env?: Record<string, string | undefined>;
+  } = {},
+) {
   const initiallyEnabled = options.initiallyEnabled ?? false;
   let settings = {
     experimental: {
@@ -20,7 +26,10 @@ function createHarness(options: { initiallyEnabled?: boolean } = {}) {
         shortcut: 'Command+E',
       },
     },
-  } as Settings;
+    ...(options.modelProviders
+      ? { modelProviders: options.modelProviders }
+      : {}),
+  } as unknown as Settings;
   let enabled = initiallyEnabled;
   const persistSettings = vi.fn(async (writes) => {
     const liveVoice = { ...settings.experimental?.liveVoice };
@@ -62,6 +71,7 @@ function createHarness(options: { initiallyEnabled?: boolean } = {}) {
     getEnabled: () => enabled,
     setEnabled,
     validateCredential,
+    ...(options.env ? { env: options.env } : {}),
   });
   return {
     controller,
@@ -182,6 +192,112 @@ describe('LiveSetupController', () => {
     expect(await harness.controller.getStatus()).toMatchObject({
       enabled: false,
       keyConfigured: true,
+    });
+  });
+
+  describe('realtimeOnly routes', () => {
+    const route = {
+      id: 'qwen3.5-omni-plus-realtime',
+      name: 'Omni Realtime',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      envKey: 'DASHSCOPE_API_KEY',
+      realtimeOnly: true,
+    };
+    const chat = { id: 'qwen3.8-max', envKey: 'DASHSCOPE_API_KEY' };
+
+    it('lists only realtime routes as choices and reports the route key', async () => {
+      const harness = createHarness({
+        modelProviders: { openai: [chat, route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      const status = await harness.controller.getStatus();
+      expect(status.models).toEqual([
+        { id: route.id, provider: 'openai', name: 'Omni Realtime' },
+      ]);
+      expect(status.voice).toBe('Tina');
+      // The default model id matches the route, so its envKey decides.
+      expect(status.keyConfigured).toBe(true);
+    });
+
+    it('reports no usable key when the route variable is unset', async () => {
+      const harness = createHarness({
+        modelProviders: { openai: [route] },
+        env: {},
+      });
+      expect((await harness.controller.getStatus()).keyConfigured).toBe(false);
+    });
+
+    it('enables through a route without any liveVoice.apiKey', async () => {
+      const harness = createHarness({
+        modelProviders: { openai: [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      await harness.controller.update({ enabled: true });
+      expect(harness.validateCredential).toHaveBeenCalledWith(
+        expect.objectContaining({
+          endpoint: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
+          realtimeModel: route.id,
+        }),
+      );
+      expect(harness.persistSettings).toHaveBeenCalledWith([
+        expect.objectContaining({
+          key: 'experimental.liveVoice.enabled',
+          value: true,
+        }),
+      ]);
+    });
+
+    it('still demands liveVoice.apiKey when the model names no route', async () => {
+      const harness = createHarness({
+        modelProviders: { openai: [chat] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      await expect(
+        harness.controller.update({ enabled: true }),
+      ).rejects.toMatchObject({ code: 'live_api_key_required' });
+    });
+
+    it('validates a model or voice change against the provider before saving', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        modelProviders: { openai: [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      await harness.controller.update({ voice: 'Ethan' });
+      expect(harness.validateCredential).toHaveBeenCalledWith(
+        expect.objectContaining({ voice: 'Ethan' }),
+      );
+      expect(harness.settings().experimental?.liveVoice).toMatchObject({
+        voice: 'Ethan',
+      });
+
+      harness.validateCredential.mockRejectedValueOnce(
+        new Error('model not found'),
+      );
+      await expect(
+        harness.controller.update({
+          model: `openai:${route.id}`,
+          voice: 'Nope',
+        }),
+      ).rejects.toMatchObject({ code: 'live_provider_validation_failed' });
+      expect(harness.settings().experimental?.liveVoice).toMatchObject({
+        voice: 'Ethan',
+      });
+    });
+
+    it('rejects a route that cannot produce a credential', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        modelProviders: {
+          openai: [{ ...route, baseUrl: 'https://gateway.example.com/v1' }],
+        },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      await expect(
+        harness.controller.update({ voice: 'Ethan' }),
+      ).rejects.toMatchObject({ code: 'invalid_live_model', status: 400 });
+      expect(harness.validateCredential).not.toHaveBeenCalled();
+      expect(harness.persistSettings).not.toHaveBeenCalled();
     });
   });
 });

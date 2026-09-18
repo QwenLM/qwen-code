@@ -485,13 +485,16 @@ export function buildInstallPlan(
           : {}),
         ...(existing?.imageOnly ? { imageOnly: true } : {}),
         ...(existing?.voiceOnly ? { voiceOnly: true } : {}),
+        // Hand-written Live Voice routes must survive a provider reconnect
+        // as realtime routes, not resurface as chat models.
+        ...(existing?.realtimeOnly ? { realtimeOnly: true } : {}),
         ...(existing.envKey ? { envKey: existing.envKey } : {}),
       };
     });
   }
   if (models.length > 0) {
     const conversation = models.filter(
-      (model) => !model.imageOnly && !model.voiceOnly,
+      (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
     );
     const credentialModels = conversation.length ? conversation : models;
     const keys = new Set(credentialModels.map((model) => model.envKey));
@@ -521,6 +524,7 @@ export function buildInstallPlan(
           (model) =>
             !model.imageOnly &&
             !model.voiceOnly &&
+            !model.realtimeOnly &&
             model.id === selection.id &&
             (!selection.baseUrl || model.baseUrl === selection.baseUrl),
         )
@@ -531,7 +535,9 @@ export function buildInstallPlan(
         resolveModelProtocol(savedProtocol, model) === selection?.authType,
     ) ??
     selectedModels[0] ??
-    models.find((model) => !model.imageOnly && !model.voiceOnly);
+    models.find(
+      (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
+    );
   if (models.length === 0) {
     throw new Error(
       `No models configured for provider "${config.id}". Check model list or provider configuration.`,

@@ -3712,7 +3712,7 @@ export interface DaemonModelConfiguration {
   envKey?: string;
   contextWindowSize?: number;
   canEditContextWindow?: boolean;
-  purpose: 'chat' | 'image' | 'voice';
+  purpose: 'chat' | 'image' | 'voice' | 'realtime';
   imageModel?: string;
   advisorModel?: string;
 }
@@ -3880,6 +3880,10 @@ export interface DaemonLiveSetupStatus {
   enabled: boolean;
   keyConfigured: boolean;
   model: string;
+  /** Absent on daemons that predate selectable Live Voice models. */
+  voice?: string;
+  /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
+  models?: Array<{ id: string; provider: string; name?: string }>;
   shortcut: string;
   install: DaemonLiveHostInstallStatus;
   live: DaemonLiveStatus;
@@ -3893,6 +3897,9 @@ export interface DaemonLiveSetupUpdate {
   enabled?: boolean;
   shortcut?: string;
   apiKey?: DaemonLiveSetupApiKeyMutation;
+  /** `modelId` or `provider:modelId` of a `realtimeOnly` route. */
+  model?: string;
+  voice?: string;
 }
 
 export interface DaemonLiveMuteUpdate {
