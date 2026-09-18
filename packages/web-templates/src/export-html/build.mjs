@@ -105,6 +105,14 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'hooks/useComposerCore.ts; they now live in utils/composerTag.ts, which ' +
       'is editor-free. Import from there, not from the composer hook.',
   },
+  {
+    pattern: /(^|\/)node_modules\/@modelcontextprotocol\/(ext-apps|sdk)\//,
+    why:
+      'A document has no daemon URL, so MCP Apps render their recorded text ' +
+      'without starting an interactive bridge. The app-bridge entry is ' +
+      'resolved to src/document-mcp-app-bridge-stub.ts below; the public ' +
+      'Web Shell package must keep its real MCP dependency external.',
+  },
 ];
 
 // `shiki` and `@shikijs/*` are replaced wholesale rather than marked external:
@@ -114,6 +122,10 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
 const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
 const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
 const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');
+const documentMcpAppBridgeStub = join(
+  srcDir,
+  'document-mcp-app-bridge-stub.ts',
+);
 const stripDocumentDeadModules = {
   name: 'strip-document-dead-modules',
   setup(build) {
@@ -126,6 +138,10 @@ const stripDocumentDeadModules = {
     build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
       path: documentMermaidStub,
     }));
+    build.onResolve(
+      { filter: /^@modelcontextprotocol\/ext-apps\/app-bridge$/ },
+      () => ({ path: documentMcpAppBridgeStub }),
+    );
   },
 };
 
