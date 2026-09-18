@@ -57,6 +57,7 @@ const NUMBER_OPTIONS = new Map<
   ['sessionRestoreTimeoutMs', 'session-restore-timeout-ms'],
   ['sessionReapIntervalMs', 'session-reap-interval-ms'],
   ['sessionIdleTimeoutMs', 'session-idle-timeout-ms'],
+  ['sessionPromptSettledCloseGraceMs', 'session-prompt-settled-close-grace-ms'],
   ['permissionResponseTimeoutMs', 'permission-response-timeout-ms'],
   ['rateLimitPrompt', 'rate-limit-prompt'],
   ['rateLimitMutation', 'rate-limit-mutation'],
@@ -435,7 +436,11 @@ export function parseServeFastPathArgs(
       // Same reasoning as memory-pressure-mode: yargs `choices` already owns
       // the error message for a bad value, and letting an unknown string past
       // here would put a value in `ServeOptions` its own type forbids.
-      if (read.value !== 'off' && read.value !== 'observe') {
+      if (
+        read.value !== 'off' &&
+        read.value !== 'observe' &&
+        read.value !== 'admit'
+      ) {
         return { kind: 'fallback' };
       }
       options.childHeapMode = read.value;

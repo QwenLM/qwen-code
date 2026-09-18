@@ -138,6 +138,7 @@ export class WeixinChannel extends ChannelBase {
           senderName: msg.fromUserId,
           chatId: msg.fromUserId,
           text: msg.text,
+          ...(msg.syntheticText ? { syntheticText: true as const } : {}),
           isGroup: false,
           isMentioned: false,
           isReplyToBot: false,
@@ -203,6 +204,10 @@ export class WeixinChannel extends ChannelBase {
           process.stderr.write(
             `[Weixin:${this.name}] Failed to download image: ${err instanceof Error ? err.message : err}\n`,
           );
+          const failureText = '(User sent an image but download failed)';
+          envelope.text = envelope.syntheticText
+            ? failureText
+            : `${envelope.text}\n\n${failureText}`;
         }
       }
 

@@ -5,39 +5,226 @@
  */
 
 import type { Response } from 'express';
+import { RequestError } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  AcpChildCapacityExceededError,
+  McpAuthenticationInProgressError,
+  SessionNotFoundError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  InvalidSessionTranscriptTurnAnchorError,
   SessionIdCaseConflictError,
+  SessionSourceError,
   SessionTranscriptChangedError,
   SessionWriterConflictError,
   SessionWriterLostError,
   SessionWriterUnavailableError,
 } from '@qwen-code/qwen-code-core';
+import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  WorkspaceRuntimeInitializationError,
+  WorkspaceRuntimeStillStartingError,
+} from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
-import { BridgeTimeoutError } from '../acp-session-bridge.js';
+import {
+  BridgeTimeoutError,
+  WorkspaceDrainingError,
+} from '../acp-session-bridge.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
-import type { DaemonLogger } from '../daemon-logger.js';
 
 function responseMock(): {
   response: Response;
+  set: ReturnType<typeof vi.fn>;
   status: ReturnType<typeof vi.fn>;
   json: ReturnType<typeof vi.fn>;
-  set: ReturnType<typeof vi.fn>;
 } {
+  const set = vi.fn();
   const status = vi.fn();
   const json = vi.fn();
-  const set = vi.fn();
-  const response = { status, json, set };
+  const response = { set, status, json };
+  set.mockReturnValue(response);
   status.mockReturnValue(response);
   json.mockReturnValue(response);
-  set.mockReturnValue(response);
-  return { response: response as unknown as Response, status, json, set };
+  return { response: response as unknown as Response, set, status, json };
 }
 
+describe('workflow parameter errors', () => {
+  it.each(['request', 'wire'] as const)(
+    'preserves parameter details from a %s error',
+    (transport) => {
+      const source = RequestError.invalidParams(
+        { errorKind: 'workflow_invalid_params' },
+        '`sourceRef` must contain non-empty id and revision strings',
+      );
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
+      const { response, status, json } = responseMock();
+
+      sendBridgeError(response, error);
+
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({
+        error: source.message,
+        code: 'workflow_invalid_params',
+      });
+    },
+  );
+
+  it.each([
+    new Error('Unexpected workflow failure'),
+    RequestError.invalidParams(undefined, 'Unclassified parameter error'),
+    RequestError.internalError(
+      { errorKind: 'unknown_workflow_error' },
+      'Unexpected workflow failure',
+    ),
+  ])('keeps unclassified errors as internal failures: %s', (error) => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+
+    sendBridgeError(response, error, undefined, daemonLog);
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: error.message }),
+    );
+  });
+});
+
+describe('child capacity errors', () => {
+  it.each([false, true])(
+    'preserves capacity through runtime wrapper=%s',
+    (wrapped) => {
+      const capacity = new AcpChildCapacityExceededError(6, 6);
+      const { response, status, json, set } = responseMock();
+      sendBridgeError(
+        response,
+        wrapped ? new WorkspaceRuntimeInitializationError(capacity) : capacity,
+      );
+      expect(status).toHaveBeenCalledWith(503);
+      expect(json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: capacity.code,
+          maxConcurrentChildren: 6,
+          committedAcpChildren: 6,
+        }),
+      );
+      expect(set).not.toHaveBeenCalled();
+    },
+  );
+  it('retains a verified standalone rollback and its capacity cause without Retry-After', () => {
+    const capacity = {
+      code: 'acp_child_capacity_exhausted' as const,
+      maxConcurrentChildren: 1,
+      committedAcpChildren: 1,
+    };
+    const { response, status, json, set } = responseMock();
+    sendBridgeError(
+      response,
+      new StandaloneSessionServiceError(
+        'standalone_creation_rolled_back',
+        'session-1',
+        'rolled back',
+        true,
+        capacity,
+      ),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'standalone_creation_rolled_back',
+        capacity,
+        sessionId: 'session-1',
+        retryable: true,
+      }),
+    );
+    expect(set).not.toHaveBeenCalled();
+  });
+});
+
 describe('sendBridgeError session writer errors', () => {
+  it.each(['local', 'rpc'] as const)(
+    'records %s source failures with request context',
+    (transport) => {
+      for (const [code, statusCode, level] of [
+        ['invalid_source', 400, 'warn'],
+        ['source_persistence_unavailable', 503, 'error'],
+      ] as const) {
+        const { response, status, json } = responseMock();
+        const daemonLog = {
+          warn: vi.fn(),
+          error: vi.fn(),
+        } as unknown as DaemonLogger;
+        const error =
+          transport === 'local'
+            ? new SessionSourceError(code, 'Source operation failed')
+            : Object.assign(new Error('Source operation failed'), {
+                data: { errorKind: code },
+              });
+        const context = {
+          route: 'POST /session/:id/sources',
+          sessionId: 'session-1',
+        };
+
+        sendBridgeError(response, error, context, daemonLog);
+
+        expect(status).toHaveBeenCalledWith(statusCode);
+        expect(json).toHaveBeenCalledWith({
+          error: 'Source operation failed',
+          code,
+        });
+        if (level === 'error') {
+          expect(daemonLog.error).toHaveBeenCalledWith(
+            error.message,
+            error,
+            context,
+          );
+        } else {
+          expect(daemonLog.warn).toHaveBeenCalledWith(error.message, {
+            ...context,
+            errorType: error.name,
+          });
+        }
+      }
+    },
+  );
+
+  it('logs unavailable source persistence to stderr without a daemon logger', () => {
+    const { response } = responseMock();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      sendBridgeError(
+        response,
+        new SessionSourceError(
+          'source_persistence_unavailable',
+          'Source persistence is unavailable',
+        ),
+        { route: 'POST /session/:id/sources', sessionId: 'session-1' },
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('POST /session/:id/sources session=session-1'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('maps concurrent MCP authentication to conflict', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, new McpAuthenticationInProgressError());
+
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Another MCP authentication is already in progress',
+      code: 'mcp_authentication_in_progress',
+    });
+  });
+
   it('serializes the structured session-closing code', () => {
     const { response, status, json } = responseMock();
 
@@ -89,15 +276,21 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
-  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+  it('maps channel initialization timeouts without caller context to the reduced contract', () => {
     const { response, status, json, set } = responseMock();
     const error = new BridgeTimeoutError('initialize', 10_000);
 
     sendBridgeError(response, error);
 
     expect(set).not.toHaveBeenCalled();
-    expect(status).toHaveBeenCalledWith(500);
-    expect(json).toHaveBeenCalledWith({ error: error.message });
+    expect(status).toHaveBeenCalledWith(504);
+    expect(json).toHaveBeenCalledWith({
+      error: error.message,
+      code: 'init_timeout',
+      errorKind: 'init_timeout',
+      phase: 'channel.initialize',
+      timeoutMs: 10_000,
+    });
   });
 
   it.each([
@@ -254,6 +447,115 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Session write ownership could not be verified.',
       code: 'session_writer_unavailable',
       errorKind: 'session_writer_unavailable',
+    });
+  });
+
+  it('maps an invalid transcript turn anchor to the public 400 contract', () => {
+    const { response, status, json } = responseMock();
+
+    sendBridgeError(response, new InvalidSessionTranscriptTurnAnchorError(), {
+      sessionId: 'session-1',
+    });
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid transcript turn anchor',
+      code: 'invalid_turn_anchor',
+      sessionId: 'session-1',
+    });
+  });
+
+  it('maps a serialized invalid turn anchor to the public 400 contract', () => {
+    const { response, status, json } = responseMock();
+    const error = Object.assign(new Error('Invalid transcript turn anchor'), {
+      data: { errorKind: 'invalid_turn_anchor' },
+    });
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid transcript turn anchor',
+      code: 'invalid_turn_anchor',
+    });
+  });
+
+  it('maps runtime still starting to 503 with Retry-After', () => {
+    const { response, set, status, json } = responseMock();
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceRuntimeStillStartingError(),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace runtime is still starting',
+      code: 'runtime_still_starting',
+    });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'Workspace runtime is still starting',
+      expect.any(WorkspaceRuntimeStillStartingError),
+      { route: 'POST /workspace/runtime/ensure' },
+    );
+  });
+
+  it('logs the cause of runtime initialization failures', () => {
+    const { response, set, status, json } = responseMock();
+    const cause = new Error('child initialize failed');
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceRuntimeInitializationError(cause),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'child initialize failed',
+      cause,
+      { route: 'POST /workspace/runtime/ensure' },
+    );
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace runtime failed to initialize',
+      code: 'runtime_initialization_failed',
+    });
+  });
+
+  it('logs the cause of a runtime failure hidden by workspace draining', () => {
+    const { response, set, status, json } = responseMock();
+    const cause = new Error('preheat failed');
+    const daemonLog = {
+      error: vi.fn(),
+    } as unknown as DaemonLogger;
+
+    sendBridgeError(
+      response,
+      new WorkspaceDrainingError('/workspace', cause),
+      { route: 'POST /workspace/runtime/ensure' },
+      daemonLog,
+    );
+
+    expect(daemonLog.error).toHaveBeenCalledWith('preheat failed', cause, {
+      route: 'POST /workspace/runtime/ensure',
+    });
+    expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Workspace "/workspace" is being removed',
+      code: 'workspace_draining',
+      workspaceCwd: '/workspace',
     });
   });
 

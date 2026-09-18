@@ -42,6 +42,18 @@ describe('built-in channel registry', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     const catalog = await supportedChannelCatalog();
+    expect(
+      catalog
+        .find((entry) => entry.type === 'dws')
+        ?.fields.find((field) => field.key === 'dmPolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    });
 
     expect(catalog.find((entry) => entry.type === 'dingtalk')).toEqual({
       type: 'dingtalk',
@@ -126,9 +138,22 @@ describe('built-in channel registry', () => {
       'groupPolicy',
       'sessionScope',
       'multiSession',
+      'instructions',
     ]);
     expect(
       entry?.fields.find((field) => field.key === 'senderPolicy'),
     ).toMatchObject({ default: 'pairing' });
+    // The shared descriptor is injected into every manageable channel, and
+    // dingtalk substitutes its own default block instead of composing with it
+    // (DingtalkAdapter.ts:908), so pin both the multiline render hint and the
+    // neutral copy: neither survives an accidental revert to a plain string
+    // field or to text that promises additive guidance.
+    const instructions = entry?.fields.find(
+      (field) => field.key === 'instructions',
+    );
+    expect(instructions).toMatchObject({ kind: 'string', multiline: true });
+    expect(instructions?.description).toContain(
+      'replace their own default guidance',
+    );
   });
 });

@@ -45,6 +45,73 @@ describe('EventBus', () => {
     expect(bus.lastEventId).toBe(2);
   });
 
+  it('projects before ring retention and fanout without consuming filtered IDs', async () => {
+    const bus = new EventBus();
+    const iter = bus.subscribe()[Symbol.asyncIterator]();
+    bus.setEventDetailMode('summary');
+    const nested = {
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'private detail' },
+          _meta: { parentToolCallId: 'agent-1' },
+        },
+      },
+    };
+    expect(bus.publish(nested)).toBeUndefined();
+    const childUsage = {
+      ...nested,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            parentToolCallId: 'agent-1',
+            usage: { inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+    };
+    expect(bus.publish(childUsage)).toBeUndefined();
+    expect(bus.lastEventId).toBe(0);
+    const result = bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'agent-1',
+          status: 'completed',
+          rawOutput: {
+            type: 'task_execution',
+            toolCalls: ['detail'],
+            taskPrompt: 'prompt',
+            result: 'answer',
+            tokenCount: 2,
+            executionSummary: { inputTokens: 10, outputTokens: 2 },
+          },
+        },
+      },
+    });
+    expect(result?.id).toBe(1);
+    expect(result).toHaveProperty('data.update.rawOutput.executionSummary', {
+      inputTokens: 10,
+      outputTokens: 2,
+    });
+    expect(result).toHaveProperty('data.update.rawOutput.tokenCount', 2);
+    expect((await iter.next()).value).toEqual(result);
+    expect(JSON.stringify(result)).not.toContain('toolCalls');
+    bus.setEventDetailMode('full');
+    expect(bus.publish(nested)?.id).toBe(2);
+    expect((await iter.next()).value?.data).toEqual(nested.data);
+    const replay = await collect(bus.subscribe({ lastEventId: 0 }), 3);
+    expect(replay.slice(0, 2).map((e) => e.id)).toEqual([1, 2]);
+    expect(replay[0]).toEqual(result);
+    expect(replay[2]?.type).toBe('replay_complete');
+    await iter.return?.();
+    bus.close();
+  });
+
   it('rejects invalid maxQueuedBytes options', () => {
     expect(
       () => new EventBus(100, undefined, undefined, { maxQueuedBytes: 0 }),
@@ -845,9 +912,9 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('default ring size is 8000 (#3803 §02 target)', async () => {
+  it('default ring size is 8000', async () => {
     const bus = new EventBus();
-    for (let i = 1; i <= 8001; i++) bus.publish({ type: 'foo', data: i });
+    for (let i = 1; i <= 8_001; i++) bus.publish({ type: 'foo', data: i });
     // After publishing 8001 frames into the default ring, the replay
     // backlog should hold the most recent 8000 (oldest dropped).
     // A `lastEventId: 0` resume with a queue cap larger than the ring
@@ -858,23 +925,23 @@ describe('EventBus', () => {
     // crosses the eviction-detection threshold (earliest > last + 1),
     // so an extra synthetic `state_resync_required` frame is emitted
     // FIRST. The filter below restricts to live ids, which excludes
-    // the synthetic (no id), so the original "8000 live frames"
+    // the synthetic (no id), so the original "N live frames"
     // invariant is preserved.
     const abort = new AbortController();
     const iter = bus.subscribe({
       lastEventId: 0,
-      maxQueued: 9000,
+      maxQueued: 9_000,
       signal: abort.signal,
     });
     // Collect 8001 frames now: 1 synthetic resync + 8000 live.
-    const events = await collect(iter, 8001);
+    const events = await collect(iter, 8_001);
     abort.abort();
     const liveIds = events
       .filter((e) => e.id !== undefined)
       .map((e) => e.id as number);
-    expect(liveIds).toHaveLength(8000);
+    expect(liveIds).toHaveLength(8_000);
     expect(liveIds[0]).toBe(2);
-    expect(liveIds[liveIds.length - 1]).toBe(8001);
+    expect(liveIds[liveIds.length - 1]).toBe(8_001);
     // The synthetic resync frame is the first one.
     expect(events[0]?.type).toBe('state_resync_required');
   });

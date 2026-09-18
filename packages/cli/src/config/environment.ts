@@ -15,11 +15,16 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
+  isPrivateProvenanceEnvKey,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { publishPendingCompileCache } from './compile-cache.js';
+import {
+  captureEnvironmentBeforeLoad,
+  resetEnvironmentSnapshotForTesting,
+} from './environment-snapshot.js';
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
   ENV_CORRUPTED_PATH,
@@ -46,9 +51,6 @@ const RELOAD_EXCLUDED_KEYS = new Set([
   'ENV',
   'PATH',
   'HOME',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
 ]);
 
 // Windows env lookup is case-insensitive, so a reload matching only the
@@ -165,6 +167,7 @@ export function resetHomeEnvBootstrapForTesting(): void {
 /** Test-only: reset environment reload provenance between tests. */
 export function resetEnvironmentTrackingForTesting(): void {
   resetLoaderKeyRejectionReportingForTesting();
+  resetEnvironmentSnapshotForTesting();
   dotEnvSourcedKeys.clear();
   settingsEnvSourcedKeys.clear();
   lastReloadSnapshot.clear();
@@ -325,6 +328,11 @@ export function findEnvFiles(
     }
   };
 
+  if (path.resolve(startDir) === path.resolve(homeDir)) {
+    pushHomeCandidates();
+    return found;
+  }
+
   let currentDir = realStartDir;
   let visitedHomeDir = false;
   while (true) {
@@ -458,6 +466,10 @@ function canApplyParsedEnvKey(
   // repopulate the slots scrubInheritedLoaderEnv() emptied and reopen the
   // #8653 cross-workspace vector.
   if (isLoaderEnvKey(key)) return false;
+  // Launcher→child provenance markers are fixed constants, so unlike the
+  // hardcoded project tier they are rejected at every scope — a home `.env`
+  // must not be able to forge sandbox or Conversations runtime state either.
+  if (isPrivateProvenanceEnvKey(key)) return false;
   if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;
@@ -569,6 +581,7 @@ export function loadEnvironment(
   settings: Settings,
   startDir: string = process.cwd(),
 ): void {
+  captureEnvironmentBeforeLoad();
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);

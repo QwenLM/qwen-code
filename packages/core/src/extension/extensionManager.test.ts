@@ -27,7 +27,11 @@ import {
   type ExtensionMutationEvent,
   type PreparedExtensionMutation,
 } from './extensionManager.js';
-import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
+import type {
+  Config,
+  MCPServerConfig,
+  ExtensionInstallMetadata,
+} from '../index.js';
 import { ExtensionStore } from './extension-store.js';
 import { ExtensionPreferencesStore } from './extensionPreferences.js';
 import {
@@ -299,6 +303,447 @@ describe('extension tests', () => {
     });
   }
 
+  describe('extension workflows', () => {
+    const workflowSource = (name: string) =>
+      `export const meta = { name: '${name}', description: 'Runs ${name}' };\nreturn 1;\n`;
+
+    it('loads workflows from the default directory as <extension>:<meta.name>', async () => {
+      const directory = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'suite',
+      });
+      fs.mkdirSync(path.join(directory, 'workflows'));
+      fs.writeFileSync(
+        path.join(directory, 'workflows', 'audit.js'),
+        workflowSource('audit'),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const [extension] = manager.getLoadedExtensions();
+
+      expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+        'suite:audit',
+      ]);
+      expect(extension.workflows?.[0]?.scriptPath).toBe(
+        fs.realpathSync(path.join(directory, 'workflows', 'audit.js')),
+      );
+    });
+
+    it('reads only the paths the manifest declares in workflows', async () => {
+      const directory = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'suite',
+      });
+      fs.writeFileSync(
+        path.join(directory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'suite',
+          version: '1.0.0',
+          workflows: '${extensionPath}${/}flows',
+        }),
+      );
+      fs.mkdirSync(path.join(directory, 'workflows'));
+      fs.writeFileSync(
+        path.join(directory, 'workflows', 'default.js'),
+        workflowSource('default'),
+      );
+      fs.mkdirSync(path.join(directory, 'flows'));
+      fs.writeFileSync(
+        path.join(directory, 'flows', 'custom.js'),
+        workflowSource('custom'),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const [extension] = manager.getLoadedExtensions();
+
+      expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+        'suite:custom',
+      ]);
+    });
+
+    it('offers the workflows it ships for consent on install', async () => {
+      const sourcePath = path.join(tempWorkspaceDir, 'workflow-source');
+      fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+      fs.writeFileSync(
+        path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+      );
+      fs.writeFileSync(
+        path.join(sourcePath, 'workflows', 'audit.js'),
+        workflowSource('audit'),
+      );
+
+      const requestConsent = vi.fn(async () => {});
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = await manager.installExtension(
+        { type: 'local', source: sourcePath },
+        requestConsent,
+      );
+
+      expect(requestConsent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workflows: [
+            expect.objectContaining({
+              name: 'wf-ext:audit',
+              description: 'Runs audit',
+              scriptPath: path.join(sourcePath, 'workflows', 'audit.js'),
+            }),
+          ],
+          previousWorkflows: [],
+        }),
+      );
+      expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+        'wf-ext:audit',
+      ]);
+      // The installed copy, not the source, is what loads.
+      expect(extension.workflows?.[0]?.scriptPath).toBe(
+        fs.realpathSync(path.join(extension.path, 'workflows', 'audit.js')),
+      );
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'discloses a symlinked workflow that the install copies as a regular file',
+      async () => {
+        const sourcePath = path.join(tempWorkspaceDir, 'linked-source');
+        fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+        fs.mkdirSync(path.join(sourcePath, 'shared'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          workflowSource('audit'),
+        );
+        fs.symlinkSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          path.join(sourcePath, 'workflows', 'audit.js'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'local', source: sourcePath },
+          requestConsent,
+        );
+
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workflows: [expect.objectContaining({ name: 'wf-ext:audit' })],
+          }),
+        );
+        expect(
+          fs
+            .lstatSync(path.join(extension.path, 'workflows', 'audit.js'))
+            .isSymbolicLink(),
+        ).toBe(false);
+        expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+          'wf-ext:audit',
+        ]);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'keeps runtime symlink rules for a linked extension, in consent and at load',
+      async () => {
+        const sourcePath = path.join(
+          tempWorkspaceDir,
+          'linked-workflow-source',
+        );
+        fs.mkdirSync(path.join(sourcePath, 'workflows'), { recursive: true });
+        fs.mkdirSync(path.join(sourcePath, 'shared'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0' }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          workflowSource('audit'),
+        );
+        fs.symlinkSync(
+          path.join(sourcePath, 'shared', 'audit.js'),
+          path.join(sourcePath, 'workflows', 'audit.js'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'link', source: sourcePath },
+          requestConsent,
+        );
+
+        // A linked extension loads its source as-is, where links are refused,
+        // so consent must not list what will never load.
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({ workflows: [] }),
+        );
+        expect(extension.workflows).toEqual([]);
+      },
+    );
+
+    it.each([
+      'flows',
+      '${extensionPath}${/}flows',
+      '$QWEN_TEST_WORKFLOW_DIR',
+      '${QWEN_TEST_WORKFLOW_DIR}',
+    ])('discloses and loads the same workflows for %s', async (workflows) => {
+      const saved = process.env['QWEN_TEST_WORKFLOW_DIR'];
+      process.env['QWEN_TEST_WORKFLOW_DIR'] = 'flows';
+      try {
+        const sourcePath = path.join(tempWorkspaceDir, 'workflow-source');
+        fs.mkdirSync(path.join(sourcePath, 'flows'), { recursive: true });
+        fs.writeFileSync(
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'wf-ext', version: '1.0.0', workflows }),
+        );
+        fs.writeFileSync(
+          path.join(sourcePath, 'flows', 'a.js'),
+          workflowSource('audit'),
+        );
+
+        const requestConsent = vi.fn(async () => {});
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extension = await manager.installExtension(
+          { type: 'local', source: sourcePath },
+          requestConsent,
+        );
+
+        expect(requestConsent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workflows: [expect.objectContaining({ name: 'wf-ext:audit' })],
+            previousWorkflows: [],
+          }),
+        );
+        expect(extension.workflows?.map((workflow) => workflow.name)).toEqual([
+          'wf-ext:audit',
+        ]);
+      } finally {
+        if (saved === undefined) delete process.env['QWEN_TEST_WORKFLOW_DIR'];
+        else process.env['QWEN_TEST_WORKFLOW_DIR'] = saved;
+      }
+    });
+  });
+
+  describe('extension skill states', () => {
+    let manager: ExtensionManager;
+    let extensionDirectory: string;
+    let extensionId: string;
+
+    beforeEach(async () => {
+      extensionDirectory = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'suite',
+      });
+      for (const name of ['skill-a', 'skill-b', 'constructor', '__proto__']) {
+        const skillDirectory = path.join(extensionDirectory, 'skills', name);
+        fs.mkdirSync(skillDirectory, { recursive: true });
+        fs.writeFileSync(
+          path.join(skillDirectory, 'SKILL.md'),
+          `---\nname: ${name}\ndescription: Test skill\n---\nSkill body`,
+        );
+      }
+      manager = createExtensionManager();
+      await manager.refreshCache();
+      extensionId = manager.getLoadedExtensions()[0]!.id;
+    });
+
+    it.each([undefined, {}])(
+      'defaults undeclared skill states to enabled: %j',
+      async (skillStates) => {
+        fs.writeFileSync(
+          path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'suite', version: '1.0.0', skillStates }),
+        );
+        await manager.refreshCache();
+        expect(
+          manager.getExtensionSkillState(extensionId, '__proto__'),
+        ).toEqual({
+          defaultEnabled: true,
+          workspaceEnabled: null,
+        });
+      },
+    );
+
+    it('parses normalized boolean defaults without losing prototype-named skills', async () => {
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'suite',
+          version: '1.0.0',
+          skillStates: Object.fromEntries([
+            [' Skill-A ', false],
+            ['constructor', true],
+            ['__proto__', false],
+          ]),
+        }),
+      );
+      await manager.refreshCache();
+      for (const [name, expected] of [
+        ['skill-a', false],
+        ['skill-b', true],
+        ['constructor', true],
+        ['__proto__', false],
+      ] as const) {
+        expect(
+          manager.getExtensionSkillState(extensionId, name).defaultEnabled,
+        ).toBe(expected);
+      }
+    });
+
+    it.each([
+      null,
+      [],
+      'enabled',
+      { 'skill-a': 'false' },
+      { 'bad name': true },
+    ])('rejects invalid native skillStates: %j', (skillStates) => {
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'suite', version: '1.0.0', skillStates }),
+      );
+      expect(() =>
+        manager.loadExtensionConfig({ extensionDir: extensionDirectory }),
+      ).toThrow();
+    });
+
+    it('saves a mixed batch on an inactive extension without changing activation or refreshing other resources', async () => {
+      const refreshTools = vi
+        .spyOn(manager, 'refreshTools')
+        .mockResolvedValue();
+      await manager.setExtensionDefaultActivation(extensionId, 'disabled');
+      refreshTools.mockClear();
+      const refreshCache = vi.fn().mockResolvedValue(undefined);
+      manager.setConfig({
+        getSkillManager: () => ({ refreshCache }),
+      } as unknown as Config);
+      const before = await manager.getExtensionStoreSnapshot();
+      const onCommitted = vi.fn();
+      const result = await manager.setExtensionSkillStates(
+        extensionId,
+        tempWorkspaceDir,
+        [
+          { name: 'Skill-A', state: 'disabled' },
+          { name: '__proto__', state: 'enabled' },
+        ],
+        onCommitted,
+      );
+      expect(result.generation).toBe(before.generation + 1);
+      expect(onCommitted).toHaveBeenCalledExactlyOnceWith(result.generation);
+      expect(refreshCache).toHaveBeenCalledExactlyOnceWith({
+        throwOnError: true,
+      });
+      expect(refreshTools).not.toHaveBeenCalled();
+      expect(manager.getLoadedExtensions()[0]?.isActive).toBe(false);
+      expect(manager.getExtensionSkillState(extensionId, 'skill-a')).toEqual({
+        defaultEnabled: true,
+        workspaceEnabled: false,
+      });
+      expect(
+        manager.getExtensionSkillState(extensionId, '__proto__')
+          .workspaceEnabled,
+      ).toBe(true);
+      expect(
+        manager.getExtensionSkillState(extensionId, 'skill-b').workspaceEnabled,
+      ).toBeNull();
+      expect(
+        manager.getExtensionSkillState(
+          extensionId,
+          'skill-a',
+          path.join(tempWorkspaceDir, 'other'),
+        ).workspaceEnabled,
+      ).toBeNull();
+
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'suite',
+          version: '2.0.0',
+          skillStates: { ['__proto__']: false },
+        }),
+      );
+      await manager.refreshCache();
+      expect(
+        manager.getExtensionSkillState(extensionId, '__proto__')
+          .workspaceEnabled,
+      ).toBe(true);
+      fs.writeFileSync(
+        path.join(extensionDirectory, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'suite', version: '3.0.0' }),
+      );
+      const restarted = createExtensionManager();
+      await restarted.refreshCache();
+      expect(
+        restarted.getExtensionSkillState(extensionId, 'skill-a')
+          .workspaceEnabled,
+      ).toBe(false);
+    });
+
+    it('rejects the entire batch for foreign ownership or duplicate names and does not refresh skills', async () => {
+      const other = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'other',
+      });
+      fs.mkdirSync(path.join(other, 'skills', 'foreign'), { recursive: true });
+      fs.writeFileSync(
+        path.join(other, 'skills', 'foreign', 'SKILL.md'),
+        '---\nname: foreign\ndescription: Other extension\n---\nOther body',
+      );
+      await manager.refreshCache();
+      const before = await manager.getExtensionStoreSnapshot();
+      const refreshCache = vi.fn();
+      manager.setConfig({
+        getSkillManager: () => ({ refreshCache }),
+      } as unknown as Config);
+      await expect(
+        manager.setExtensionSkillStates(extensionId, tempWorkspaceDir, [
+          { name: 'skill-a', state: 'disabled' },
+          { name: 'foreign', state: 'enabled' },
+        ]),
+      ).rejects.toThrow('does not belong');
+      await expect(
+        manager.setExtensionSkillStates(extensionId, tempWorkspaceDir, [
+          { name: 'skill-a', state: 'disabled' },
+          { name: ' Skill-A ', state: 'disabled' },
+        ]),
+      ).rejects.toThrow('Duplicate');
+      expect(await manager.getExtensionStoreSnapshot()).toEqual(before);
+      expect(refreshCache).not.toHaveBeenCalled();
+    });
+
+    it('retains committed states and reports skill-only refresh failure', async () => {
+      manager.setConfig({
+        getSkillManager: () => ({
+          refreshCache: vi
+            .fn()
+            .mockRejectedValue(new Error('skill refresh failed')),
+        }),
+      } as unknown as Config);
+      const result = await manager.setExtensionSkillStates(
+        extensionId,
+        tempWorkspaceDir,
+        [{ name: 'skill-a', state: 'disabled' }],
+      );
+      expect(result.warnings).toEqual([
+        {
+          code: 'extension_runtime_refresh_failed',
+          error: 'skill refresh failed',
+        },
+      ]);
+      expect(
+        manager.getExtensionSkillState(extensionId, 'skill-a').workspaceEnabled,
+      ).toBe(false);
+      expect((await manager.getExtensionStoreSnapshot()).generation).toBe(
+        result.generation,
+      );
+    });
+  });
+
   describe('installExtension', () => {
     function writeExtractedExtension(destination: string, name: string) {
       fs.mkdirSync(destination, { recursive: true });
@@ -330,6 +775,13 @@ describe('extension tests', () => {
         fs.writeFileSync(path.join(sourcePath, component, 'ignored.md'), 'no');
       }
       fs.writeFileSync(path.join(sourcePath, 'QWEN.md'), 'ignored context');
+      // The Agent Plugins v1 schema defines no workflows, so a shipped
+      // workflows/ directory must neither be disclosed nor loaded.
+      fs.mkdirSync(path.join(sourcePath, 'workflows'));
+      fs.writeFileSync(
+        path.join(sourcePath, 'workflows', 'audit.js'),
+        "export const meta = { name: 'audit', description: 'Audit' };\nreturn 1;\n",
+      );
       const sourceContents = new Map(
         [
           'plugin.json',
@@ -359,6 +811,7 @@ describe('extension tests', () => {
       expect(extension.skills?.[0]?.allowedTools).toBeUndefined();
       expect(extension.commands).toEqual([]);
       expect(extension.agents).toEqual([]);
+      expect(extension.workflows).toEqual([]);
       expect(extension.contextFiles).toEqual([]);
       expect(extension.hooks).toBeUndefined();
       expect(extension.settings).toBeUndefined();
@@ -374,9 +827,11 @@ describe('extension tests', () => {
           originSource: 'AgentPlugins',
           commands: [],
           subagents: [],
+          workflows: [],
           skills: [expect.objectContaining({ name: 'direct' })],
         }),
       );
+      expect(extension.workflows).toEqual([]);
 
       for (const [file, contents] of sourceContents) {
         expect(fs.readFileSync(path.join(extension.path, file))).toEqual(

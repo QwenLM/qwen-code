@@ -137,11 +137,10 @@ export default {
   'type to filter…': 'escriviu per filtrar…',
   'No skills are currently available.':
     'No hi ha habilitats disponibles actualment.',
-  'All available skills are locked at a higher scope (see below).':
-    'Totes les habilitats disponibles estan bloquejades en un àmbit superior (veure a sota).',
   'No skills match the search.': 'Cap habilitat coincideix amb la cerca.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    "Bloquejades per paràmetres d'àmbit superior (aquí no es poden commutar):",
+  'Locked by settings entries you cannot toggle here:':
+    'Bloquejades per entrades de paràmetres (aquí no es poden commutar):',
+  '{{count}} locked not shown': '{{count}} habilitats bloquejades no mostrades',
   'higher scope': 'àmbit superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloquejada: {{scope}}]',
@@ -477,6 +476,7 @@ export default {
   'Hide Window Title': 'Amaga el títol de la finestra',
   'Show Status in Title': "Mostra l'estat al títol",
   'Hide Tips': 'Amaga els consells',
+  'Show Tool Call Arguments': 'Mostra els arguments de les crides a eines',
   'Show Line Numbers in Code': 'Mostra els números de línia al codi',
   'Show Citations': 'Mostra les cites',
   'Custom Witty Phrases': 'Frases enginyoses personalitzades',
@@ -622,6 +622,10 @@ export default {
     'Aquesta extensió instal·larà les habilitats següents:',
   'This extension will install the following subagents:':
     'Aquesta extensió instal·larà els subagents següents:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Aquesta extensió instal·larà els fluxos de treball següents (scripts JavaScript que poden iniciar subagents):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Aquests scripts de flux de treball han canviat des de la versió instal·lada: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Instal·lació cancel·lada per a "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -686,6 +690,7 @@ export default {
   'Context files:': 'Fitxers de context:',
   'Skills:': 'Habilitats:',
   'Agents:': 'Agents:',
+  'Workflows:': 'Fluxos de treball:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     "No s'ha pogut instal·lar l'extensió d'enllaç.",
@@ -787,6 +792,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurats',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Torneu a obrir aquest menú per recarregar les definicions dels hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Els controls dels hooks i la configuració de seguretat HTTP requereixen un reinici.',
+  'Failed to reload hook definitions: {{error}}':
+    'No s’han pogut recarregar les definicions dels hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Return per seleccionar · Esc per cancel·lar',
   'Exit codes:': 'Codis de sortida:',
@@ -851,8 +862,8 @@ export default {
     "L'entrada a l'ordre és JSON amb tool_name, tool_input, tool_use_id, error, error_type, is_interrupt i is_timeout.",
   'Input to command is JSON with notification message and type.':
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text de la TUI interactiva compatible).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'L’entrada de l’ordre és JSON amb "prompt" (el prompt actual vinculat al model) i el camp opcional "submitted_prompt" (la projecció de text capturada en un límit d’enviament compatible).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
@@ -1595,6 +1606,11 @@ export default {
   'No tasks currently running': 'No hi ha cap tasca en execució',
   'No entry to show.': 'No hi ha cap entrada per mostrar.',
   'needs approval': 'necessita aprovació',
+  'Large workflow': 'Workflow gran',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow gran: {{agents}} agents programats (llindar d’avís {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow gran: ~{{tokens}} tokens de sortida previstos (llindar d’avís {{cap}}).',
   'rejected — edit config to re-approve':
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
@@ -2206,6 +2222,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',
@@ -2377,6 +2395,7 @@ export default {
   'from {{marketplace}}': 'de {{marketplace}}',
   installed: 'instal·lada',
   '{{count}} Agents': '{{count}} agents',
+  '{{count}} Workflows': '{{count}} workflows',
   '{{count}} Commands': '{{count}} ordres',
   '{{count}} MCP': '{{count}} MCP',
   '{{count}} Skills': '{{count}} habilitats',
@@ -2732,8 +2751,6 @@ export default {
   // ============================================================================
   // Ordres diverses
   // ============================================================================
-  'Set a goal — keep working until the condition is met':
-    'Estableix un objectiu — continua treballant fins que es compleixi la condició',
   'Show current process memory diagnostics':
     'Mostra els diagnòstics de memòria del procés actual',
   'Record a CPU profile for Chrome DevTools analysis':

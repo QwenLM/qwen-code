@@ -70,7 +70,14 @@ export interface AcpChannelExitInfo {
   signalCode: NodeJS.Signals | null;
 }
 
+export interface ChannelFactoryStartupContext {
+  // Report the blocking condition when the bridge startup deadline expires.
+  getTimeoutError?: () => Error;
+}
+
 export type ChannelFactory = (
   workspaceCwd: string,
   childEnvOverrides?: Readonly<Record<string, string | undefined>>,
+  signal?: AbortSignal,
+  startup?: ChannelFactoryStartupContext,
 ) => Promise<AcpChannel>;

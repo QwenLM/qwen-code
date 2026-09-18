@@ -15,7 +15,7 @@ import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { formatRuntime } from '../../utils/formatRuntime';
-import { getGoalActiveTimeMs } from '../GoalStatusStrip';
+import { getGoalActiveTimeMs, getGoalTokenLabel } from '../GoalStatusStrip';
 import styles from './GoalsDialog.module.css';
 
 /**
@@ -369,6 +369,8 @@ export function GoalsDialog({
           const canPause = goal.status === 'active';
           // Shared with `GoalStatusStrip` so the two gates cannot drift apart.
           const canResume = canResumeGoal(goal);
+          const tokenLabel = getGoalTokenLabel(goal, t);
+          const activeTimeMs = getGoalActiveTimeMs(item.snapshot, now);
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -445,16 +447,33 @@ export function GoalsDialog({
                 <span className={styles.meta} data-testid="goal-activity">
                   {t(`goal.activity.${item.snapshot.activity}`)}
                 </span>
-                <span className={styles.meta}>
+                <span className={styles.meta} data-testid="goal-turns">
                   {goal.turnCount > 0
-                    ? t(goal.turnCount === 1 ? 'goal.turn' : 'goal.turns', {
-                        count: goal.turnCount,
-                      })
+                    ? goal.turnBudget === undefined
+                      ? t(goal.turnCount === 1 ? 'goal.turn' : 'goal.turns', {
+                          count: goal.turnCount,
+                        })
+                      : t('goal.turnsOfBudget', {
+                          count: goal.turnCount,
+                          budget: goal.turnBudget,
+                        })
                     : t('goals.notYetEvaluated')}
                 </span>
-                <span className={styles.meta} data-testid="goal-elapsed">
-                  {formatRuntime(getGoalActiveTimeMs(item.snapshot, now))}
-                </span>
+                {tokenLabel ? (
+                  <span className={styles.meta} data-testid="goal-tokens">
+                    {tokenLabel}
+                  </span>
+                ) : null}
+                {activeTimeMs > 0 && (
+                  <span className={styles.meta} data-testid="goal-elapsed">
+                    {goal.activeTimeBudgetMs === undefined
+                      ? formatRuntime(activeTimeMs)
+                      : t('goal.activeOfBudget', {
+                          used: formatRuntime(activeTimeMs),
+                          budget: formatRuntime(goal.activeTimeBudgetMs),
+                        })}
+                  </span>
+                )}
                 <button
                   type="button"
                   className={styles.sessionLink}

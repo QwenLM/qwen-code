@@ -8,6 +8,10 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ChannelConfigFieldDescriptor } from '@qwen-code/channel-base';
 import {
+  CHANNEL_OUTPUT_MODE_FIELD,
+  parseChannelOutputMode,
+} from '@qwen-code/channel-base';
+import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
@@ -121,25 +125,6 @@ function assertStringRecord(
   }
 }
 
-function assertNumberRecord(
-  key: string,
-  value: unknown,
-  allowedKeys: ReadonlySet<string>,
-): void {
-  if (!isRecord(value)) {
-    throw invalidConfig(`Channel field "${key}" must be an object.`);
-  }
-  for (const [nestedKey, nestedValue] of Object.entries(value)) {
-    if (
-      !allowedKeys.has(nestedKey) ||
-      typeof nestedValue !== 'number' ||
-      !Number.isFinite(nestedValue)
-    ) {
-      throw invalidConfig(`Channel field "${key}.${nestedKey}" is invalid.`);
-    }
-  }
-}
-
 function assertSharedField(
   key: string,
   value: unknown,
@@ -157,7 +142,6 @@ function assertSharedField(
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
-    blockStreaming: new Set(['on', 'off']),
   };
   if (Object.hasOwn(enumValues, key)) {
     if (typeof value !== 'string' || !enumValues[key]!.has(value)) {
@@ -250,14 +234,6 @@ function assertSharedField(
       value,
       new Set(['id', 'displayName', 'description']),
     );
-    return true;
-  }
-  if (key === 'blockStreamingChunk') {
-    assertNumberRecord(key, value, new Set(['minChars', 'maxChars']));
-    return true;
-  }
-  if (key === 'blockStreamingCoalesce') {
-    assertNumberRecord(key, value, new Set(['idleMs']));
     return true;
   }
   if (key === 'memoryScope') {
@@ -541,7 +517,24 @@ export class WorkspaceChannelSettingsStore {
       const value = applySecretUpdate(previous[key], update);
       if (value !== undefined) nextConfig[key] = value;
     }
-    assertManagedConfig(nextConfig, previous, plugin.management.fields);
+    try {
+      parseChannelOutputMode(
+        name,
+        nextConfig['outputMode'],
+        plugin.supportsOutputMode === true,
+      );
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    assertManagedConfig(
+      nextConfig,
+      previous,
+      plugin.supportsOutputMode === true
+        ? [...plugin.management.fields, CHANNEL_OUTPUT_MODE_FIELD]
+        : plugin.management.fields,
+    );
     const multiSessionError = multiSessionCompatibilityError(name, {
       multiSession: nextConfig['multiSession'] === true,
       sessionScope:

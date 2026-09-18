@@ -27,6 +27,8 @@ import {
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
+  SubagentExecutionEvent,
+  makeGoalStateEvent,
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -167,6 +169,23 @@ describe('QwenLogger', () => {
           version: os.release(),
         }),
       );
+    });
+
+    it('includes the base URL for OpenAI Responses auth', async () => {
+      const config = makeFakeConfig({
+        getAuthType: () => AuthType.USE_OPENAI_RESPONSES,
+        getContentGeneratorConfig: () => ({
+          model: 'gpt-5',
+          baseUrl: 'https://api.example.com',
+        }),
+      });
+      const logger = QwenLogger.getInstance(config)!;
+
+      const payload = await (
+        logger as unknown as { createRumPayload(): Promise<RumPayload> }
+      ).createRumPayload();
+
+      expect(payload.properties?.['base_url']).toBe('https://api.example.com');
     });
 
     it('includes source when source.json exists with valid source', async () => {
@@ -392,6 +411,152 @@ describe('QwenLogger', () => {
       expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).not.toMatch(
         /pattern|path|stdout|stderr|needle/,
       );
+    });
+
+    it('journals the loop detector attribution on subagent loop stops', () => {
+      // A loop stop must stay attributable in the journal (issue #9450
+      // requirement #7): dropping the loop_type spread would record the
+      // stop as an unattributable failure.
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new SubagentExecutionEvent('worker-a', 'failed', {
+        terminate_reason: 'loop_detected',
+        loop_type: 'consecutive_identical_tool_calls',
+      });
+
+      logger.logSubagentExecutionEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'tool',
+          name: 'subagent_execution',
+          properties: expect.objectContaining({
+            subagent_name: 'worker-a',
+            status: 'failed',
+            terminate_reason: 'loop_detected',
+            loop_type: 'consecutive_identical_tool_calls',
+          }),
+        }),
+      );
+    });
+
+    it('omits loop_type from subagent journals when no loop fired', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new SubagentExecutionEvent('worker-b', 'completed');
+
+      logger.logSubagentExecutionEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.not.objectContaining({
+            loop_type: expect.anything(),
+          }),
+        }),
+      );
+    });
+
+    it('journals a Goal transition without its Goal id or absent figures', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'blocked',
+          goal_id: 'g-1',
+          revision: 4,
+          status: 'blocked',
+          turn_count: 7,
+          tokens_used: 9_000,
+          no_progress_turns: 3,
+        }),
+      );
+
+      const rumEvent = enqueueSpy.mock.calls[0]![0];
+      expect(rumEvent).toMatchObject({
+        event_type: 'action',
+        type: 'goal',
+        name: 'goal_state',
+        properties: {
+          cause: 'blocked',
+          revision: 4,
+          status: 'blocked',
+          turn_count: 7,
+          tokens_used: 9_000,
+          no_progress_turns: 3,
+        },
+      });
+      const keys = Object.keys(rumEvent.properties ?? {});
+      expect(keys).not.toContain('goal_id');
+      expect(keys).not.toContain('limit_kind');
+      expect(keys).not.toContain('token_budget');
+    });
+
+    it('journals every allowed Goal property without the Goal id', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'usage_limited',
+          goal_id: 'g-1',
+          revision: 4,
+          status: 'usage_limited',
+          limit_kind: 'time_budget',
+          turn_count: 7,
+          tokens_used: 9_000,
+          no_progress_turns: 3,
+          token_budget: 80_000,
+          turn_budget: 50,
+          active_time_ms: 60_000,
+          active_time_budget_ms: 60_000,
+          objective_length: 22,
+        }),
+      );
+
+      const rumEvent = enqueueSpy.mock.calls[0]![0];
+      expect(rumEvent.properties).toEqual({
+        cause: 'usage_limited',
+        revision: 4,
+        status: 'usage_limited',
+        limit_kind: 'time_budget',
+        turn_count: 7,
+        tokens_used: 9_000,
+        no_progress_turns: 3,
+        token_budget: 80_000,
+        turn_budget: 50,
+        active_time_ms: 60_000,
+        active_time_budget_ms: 60_000,
+        objective_length: 22,
+      });
+      expect(Object.keys(rumEvent.properties ?? {})).not.toContain('goal_id');
+    });
+
+    it('preserves zero Goal figures in analytics', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      logger.logGoalStateEvent(
+        makeGoalStateEvent({
+          cause: 'create',
+          goal_id: 'g-1',
+          revision: 1,
+          status: 'active',
+          turn_count: 0,
+          tokens_used: 0,
+          active_time_ms: 0,
+        }),
+      );
+
+      expect(enqueueSpy.mock.calls[0]![0].properties).toEqual({
+        cause: 'create',
+        revision: 1,
+        status: 'active',
+        turn_count: 0,
+        tokens_used: 0,
+        active_time_ms: 0,
+      });
     });
 
     it('logs protocol tag sanitization without model content', () => {
@@ -717,7 +882,7 @@ describe('QwenLogger', () => {
       }
     });
 
-    it('should log a failed hook call event with error when telemetry log prompts enabled', () => {
+    it('should log a failed hook call event without forwarding raw error text', () => {
       const configWithLogPrompts = makeFakeConfig({
         getTelemetryLogPromptsEnabled: () => true,
       });
@@ -752,51 +917,13 @@ describe('QwenLogger', () => {
             duration_ms: 200,
             success: 0,
             exit_code: 1,
-            error: 'Command failed',
-          }),
-        }),
-      );
-    });
-
-    it('should not include error when telemetry log prompts disabled', () => {
-      const configWithoutLogPrompts = makeFakeConfig({
-        getTelemetryLogPromptsEnabled: () => false,
-      });
-      // Clear singleton to create new instance with different config
-      (QwenLogger as unknown as { instance: undefined }).instance = undefined;
-      const logger = QwenLogger.getInstance(configWithoutLogPrompts)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new HookCallEvent(
-        'PostToolUse',
-        'command',
-        'cleanup.sh',
-        { tool_name: 'shell' },
-        200,
-        false,
-        undefined,
-        1,
-        '',
-        'error output',
-        'Command failed with sensitive data',
-      );
-
-      logger.logHookCallEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          properties: expect.objectContaining({
-            hook_event_name: 'PostToolUse',
-            hook_type: 'command',
-            hook_name: 'cleanup.sh',
-            duration_ms: 200,
-            success: 0,
-            exit_code: 1,
           }),
         }),
       );
 
-      // Error should NOT be in properties
+      // Hook error text is dropped fail-closed: the failure is already
+      // signalled by `success` / `exit_code`, so no raw `error` property
+      // is forwarded to the sink even when telemetry log prompts are on.
       const callArgs = enqueueSpy.mock.calls[0][0];
       expect(callArgs.properties).not.toHaveProperty('error');
     });
@@ -1061,13 +1188,38 @@ describe('QwenLogger', () => {
             success: 0,
             duration_ms: 42,
             error_type: 'unknown',
-            error_message: 'failed',
+            error_message: '***REDACTED***',
           }),
         }),
       );
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('function_args');
       expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
+    });
+  });
+
+  describe('error text redaction', () => {
+    it('replaces error text at the enqueue boundary', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const event: RumEvent & { message: string } = {
+        type: 'exception',
+        name: 'test',
+        message: 'raw top-level error',
+        properties: {
+          error_message: 'raw error message',
+          error_excerpt: 'raw error excerpt',
+          error_type: 'exit_code',
+        },
+      };
+
+      logger.enqueueLogEvent(event);
+
+      expect(event.message).toBe('***REDACTED***');
+      expect(event.properties).toEqual({
+        error_message: '***REDACTED***',
+        error_excerpt: '***REDACTED***',
+        error_type: 'exit_code',
+      });
     });
   });
 });

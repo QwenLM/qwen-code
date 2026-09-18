@@ -30,6 +30,10 @@ import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import {
+  getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
+} from '../reasoning-effort.js';
+import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../modalityDefaults.js';
@@ -42,6 +46,7 @@ import {
 } from '../stream-guards.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
+import { markFlushedToolCallPark } from '../stream-transport-retry.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
@@ -55,6 +60,13 @@ import {
 } from '../../telemetry/gen-ai-request.js';
 import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
+import { trailingReattachPartCount } from '../../services/image-payload-references.js';
+import type { ResolvedReasoning } from '../reasoning-overrides.js';
+import { ensureReasoningContentOnAssistantMessage } from './provider/utils.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../reasoning-overrides.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 const OPENAI_STRICT_SCHEMA_KEYS = new Set([
@@ -79,6 +91,79 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+function profileReasoning(
+  profile: NonNullable<ResolvedReasoning['profile']>,
+  reasoning: ContentGeneratorConfig['reasoning'],
+): Record<string, unknown> {
+  if (reasoning === undefined) return {};
+  const enabled = reasoning !== false;
+  const effort = reasoning && reasoning.effort;
+  switch (profile) {
+    case 'openai-reasoning':
+      return { reasoning: enabled ? reasoning : { enabled: false } };
+    case 'openai-effort':
+    case 'dashscope-effort':
+      return effort || !enabled
+        ? { reasoning_effort: enabled ? effort : 'none' }
+        : {};
+    case 'deepseek-openai':
+      return {
+        thinking: { type: enabled ? 'enabled' : 'disabled' },
+        ...(effort ? { reasoning_effort: effort } : {}),
+      };
+    case 'dashscope-thinking':
+      return { enable_thinking: enabled };
+    case 'qwen-chat-template':
+      return { chat_template_kwargs: { enable_thinking: enabled } };
+    default:
+      return {};
+  }
+}
+
+function applyConfiguredReasoningEffort(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+  capabilities: ResolvedReasoning | undefined,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (capabilities?.profile) {
+    const loose = request as unknown as Record<string, unknown>;
+    const { reasoning, ...rest } = loose;
+    const { effort: _effort, ...siblings } = asObject(reasoning) ?? {};
+    return {
+      ...(Object.keys(siblings).length ? { reasoning: siblings } : {}),
+      ...profileReasoning(
+        capabilities.profile,
+        reasoning as ContentGeneratorConfig['reasoning'],
+      ),
+      ...rest,
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+  }
+  if (
+    !capabilities ||
+    capabilities.toggleOnly ||
+    !Array.isArray(capabilities.efforts)
+  ) {
+    return request;
+  }
+  const loose = request as unknown as Record<string, unknown>;
+  const reasoning = asObject(loose['reasoning']);
+  if (!reasoning || !('effort' in reasoning)) return request;
+
+  const effort = capabilities.efforts.find(
+    (candidate) => candidate === reasoning['effort'],
+  );
+  // GPT flattens after raw overrides merge in the provider.
+  if (effort && getGptReasoningCapabilities(loose['model'] as string))
+    return request;
+  const { effort: _drop, ...rest } = reasoning;
+  const next = { ...loose };
+  if (Object.keys(rest).length > 0) next['reasoning'] = rest;
+  else delete next['reasoning'];
+  if (effort && next['reasoning_effort'] === undefined) {
+    next['reasoning_effort'] = effort;
+  }
+  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
 }
 
 function normalizeSchemaType(value: unknown): string | undefined {
@@ -164,6 +249,34 @@ function isRequiredThinkingError(error: unknown): boolean {
 }
 
 /**
+ * True when the wire request carries inline media content parts. Gates the
+ * media-degradation retry: only a request that actually put media on the
+ * wire can be failing because the route rejects the media shape
+ * (QwenLM/qwen-code#10693).
+ */
+function wireRequestHasMediaContent(
+  wireRequest: Record<string, unknown> | undefined,
+): boolean {
+  const messages = wireRequest?.['messages'];
+  if (!Array.isArray(messages)) return false;
+  return messages.some((message) => {
+    const content = (message as { content?: unknown }).content;
+    return (
+      Array.isArray(content) &&
+      content.some((part) => {
+        const type = (part as { type?: unknown }).type;
+        return (
+          type === 'image_url' ||
+          type === 'input_audio' ||
+          type === 'video_url' ||
+          type === 'file'
+        );
+      })
+    );
+  });
+}
+
+/**
  * Error thrown when the API returns an error embedded as stream content
  * instead of a proper HTTP error. Some providers (e.g., certain OpenAI-compatible
  * endpoints) return throttling errors as a normal SSE chunk with
@@ -201,6 +314,23 @@ function isSSECompatibleContentType(contentType: string | null): boolean {
     mediaType === 'text/event-stream' ||
     mediaType === 'application/x-ndjson' ||
     mediaType === 'application/stream+json'
+  );
+}
+
+/**
+ * True when the response carries user-visible model output: any candidate
+ * part without the `thought` flag (text, functionCall, inlineData, …).
+ * Mirrors LlmChat's delivered-content notion (its
+ * `hasNonThoughtCandidateParts`), which excludes thought parts — a
+ * thought-only prefix must still count as nothing delivered.
+ */
+function hasNonThoughtCandidateParts(
+  response: GenerateContentResponse,
+): boolean {
+  return Boolean(
+    response.candidates?.some((candidate) =>
+      candidate.content?.parts?.some((part) => !part.thought),
+    ),
   );
 }
 
@@ -460,6 +590,7 @@ export class ContentGenerationPipeline {
           guarded,
           context,
           request,
+          openaiRequest,
           userPromptId,
           telemetryAttempt,
         );
@@ -486,7 +617,8 @@ export class ContentGenerationPipeline {
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
+    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
     telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
@@ -499,6 +631,17 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    // Whether any user-visible content (a non-thought part) has been yielded
+    // on this stream. The error-path flush below consults it before
+    // withholding a parked tool-call finish: it must mirror LlmChat's
+    // delivered-content notion, which excludes thought parts. Seeded from the
+    // caller's continuation marker because the replay gate the withhold
+    // protects is turn-scoped (LlmChat's transportContinuationText), which a
+    // fresh attempt's own yields cannot see: with a continuation in flight
+    // that gate is already shut by the accumulated prefix, and withholding
+    // would only strand the model's decided tool call into another prose
+    // continuation.
+    let contentYielded = request.continuationInFlight === true;
     let pendingFinishProtocolTagSanitized:
       | NonNullable<RequestContext['protocolTagSanitized']>
       | undefined;
@@ -621,11 +764,16 @@ export class ContentGenerationPipeline {
               pendingFinishResponse,
               pendingFinishProtocolTagSanitized,
             );
-            yield pendingFinishResponse;
+            // Set before suspending rather than after: a consumer that throws
+            // into this generator at the yield below never runs the statement
+            // that follows it, and the error-path flush re-tests this flag
+            // before deciding whether the response still needs delivering.
             finishYielded = true;
+            yield pendingFinishResponse;
             // Keep pendingFinishResponse alive so late-arriving usage
             // metadata can still be merged (see finishYielded block above).
           } else {
+            contentYielded ||= hasNonThoughtCandidateParts(response);
             logPendingProtocolTagSanitized(response, sanitization);
             yield response;
           }
@@ -648,9 +796,20 @@ export class ContentGenerationPipeline {
               index: 0,
             },
           ];
+          // Held parts are whatever the converter had accumulated — plain
+          // content, thought-marked reasoning, or both — so this goes through
+          // the same predicate as every other yield site. LlmChat counts a
+          // chunk as delivered on that same rule; if the two flags disagree
+          // here, the error-path flush below withholds a parked tool call
+          // whose replay gate is already shut.
+          contentYielded ||= hasNonThoughtCandidateParts(response);
           yield response;
         }
-      } else if (context.pendingThinkingTagCandidate) {
+      } else if (
+        context.pendingThinkingTagCandidate ||
+        (context.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+          context.taggedThinkingParser?.hasUnclosedThought())
+      ) {
         throw new InvalidStreamError(
           'Model response leaked thinking tags.',
           'PROTOCOL_TAG_LEAK',
@@ -664,11 +823,83 @@ export class ContentGenerationPipeline {
           pendingFinishResponse,
           pendingFinishProtocolTagSanitized,
         );
+        // Before the yield, for the reason given at the in-loop one above.
+        finishYielded = true;
         yield pendingFinishResponse;
       }
     } catch (error) {
+      // Omni delivery-cache hygiene for mid-stream failures: DashScope
+      // reports dead oss:// media after the 200 OK — either as an
+      // error_finish SSE chunk (surfaced as StreamContentError above) or as
+      // a stream error — so the non-streaming catch in
+      // executeWithErrorHandling never sees it. Run the same conservative
+      // invalidation here before any rethrow. Never throws; awaiting keeps
+      // a fast retry from racing the cache file write.
+      await this.invalidateOmniOssCacheOnError(openaiRequest, error);
+
       if (error instanceof InvalidStreamError) {
         throw error;
+      }
+
+      // A finish chunk parked for the usage merge must not be lost when the
+      // iterator throws before the trailing usage chunk arrives (e.g. a
+      // gateway error frame landing where that tail would have been):
+      // downstream completeness gates key on the finish reason to tell a
+      // completed answer from a cut one. The flush sits below the
+      // InvalidStreamError rethrow — a protocol-tag-leak stream must not
+      // deliver one — and above the guard and StreamContentError rethrows so
+      // every recoverable error class still sees it. The Stage 2d flush above
+      // sets `finishYielded` before it suspends, so a consumer that throws
+      // into this generator while it is parked on that yield cannot make this
+      // flush deliver the same response a second time.
+      //
+      // A parked finish carrying a functionCall stays parked only while
+      // nothing user-visible was delivered: the converter emits functionCall
+      // parts only on the finish chunk, and releasing one here would flip
+      // LlmChat's delivered flags (streamYieldedContentChunk,
+      // streamYieldedFunctionCall) and shut the transport replay gate that
+      // recovers exactly this cut. Once content has been yielded that gate
+      // is already shut, so withholding buys no recovery — it would strand
+      // the model's decided tool call: LlmChat would see prose, no
+      // functionCall, and no finish reason, so the continuation arm would
+      // resume over the delivered prose while the call never reaches
+      // error-path persistence or the scheduler's repair flow. Releasing it
+      // here puts the cut on the same footing as the Anthropic
+      // deferred-batch release gate.
+      // TypeScript narrows pendingFinishResponse to null here (its only
+      // assignments sit inside the handleChunkMerging callback), so the
+      // property access needs the same explicit cast as the finishYielded
+      // merge above.
+      const parked = pendingFinishResponse as GenerateContentResponse | null;
+      const parkedHasToolCall = parked?.candidates?.some((candidate) =>
+        candidate.content?.parts?.some((part) => part.functionCall),
+      );
+      if (
+        pendingFinishResponse &&
+        !finishYielded &&
+        // A cancellation is not a stream failure to recover from: synthesising
+        // a delivery here hands the consumer a finish it was never shown, and
+        // cancellation persistence keeps whatever the consumer received.
+        // Spelled exactly as the PROTOCOL_TAG_LEAK branch below spells it, so
+        // one catch does not hold two notions of "aborted".
+        request.config?.abortSignal?.aborted !== true &&
+        (!parkedHasToolCall || contentYielded)
+      ) {
+        logPendingProtocolTagSanitized(
+          pendingFinishResponse,
+          pendingFinishProtocolTagSanitized,
+        );
+        // `contentYielded` is this pipeline's view of what was delivered, and
+        // the consumer can still withhold a chunk it was handed — LlmChat's
+        // protocol-tag suppression drops a leading-JSON chunk whole. Tag a
+        // released tool call so the send loop, which knows what actually
+        // reached the caller, can refuse to let it shut a replay gate that is
+        // in fact still open.
+        if (parkedHasToolCall) {
+          markFlushedToolCallPark(pendingFinishResponse);
+        }
+        yield pendingFinishResponse;
+        finishYielded = true;
       }
 
       // Re-throw StreamContentError directly so it can be handled by
@@ -802,13 +1033,22 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     isStreaming: boolean,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
-    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
+    const reasoningCapabilities = resolveReasoningForModel(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      context.model,
+    );
+    const convertedMessages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       context,
     );
+    const messages =
+      reasoningCapabilities?.profile === 'deepseek-openai'
+        ? convertedMessages.map(ensureReasoningContentOnAssistantMessage)
+        : convertedMessages;
 
     // Apply provider-specific enhancements
-    const baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+    let baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
@@ -825,6 +1065,37 @@ export class ContentGenerationPipeline {
       (
         baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming
       ).stream = false;
+    }
+
+    const effectiveReasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      reasoningCapabilities,
+    );
+    if (
+      reasoningCapabilities &&
+      !('reasoning' in baseRequest) &&
+      effectiveReasoning &&
+      request.config?.thinkingConfig?.includeThoughts !== false
+    ) {
+      baseRequest = {
+        ...baseRequest,
+        reasoning: effectiveReasoning,
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    }
+    // A `reasoning` object the user put in `samplingParams` ships verbatim (the
+    // contract `clampConfiguredReasoningEffort` keeps), so the capability
+    // mapping must leave it for the provider hook to translate.
+    if (
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      (!reasoningCapabilities?.profile ||
+        this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined) &&
+      (reasoningCapabilities?.profile ||
+        !isOpenRouterHostname(this.contentGeneratorConfig))
+    ) {
+      baseRequest = applyConfiguredReasoningEffort(
+        baseRequest,
+        reasoningCapabilities,
+      );
     }
 
     // Add tools if present and non-empty.
@@ -854,6 +1125,7 @@ export class ContentGenerationPipeline {
     let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
+      trailingReattachPartCount(request.contents),
     );
     if (
       this.contentGeneratorConfig.enableCacheControl !== false &&
@@ -885,11 +1157,54 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const thinkingMandatory = this.requiresThinking(model);
+    const explicitThinkingMandatory =
+      reasoningCapabilities?.canDisable === false ||
+      this.requiresThinking(model);
+    const profile = reasoningCapabilities?.profile;
+    const thinkingMandatory =
+      explicitThinkingMandatory ||
+      (!profile &&
+        getGptReasoningCapabilities(model)?.thinkingMandatory === true);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
-    if (reasoningDisabled) {
+    if (
+      (profile === 'openai-effort' || profile === 'dashscope-effort') &&
+      isReasoningEffortPlaceholder(providerRequest.reasoning_effort) &&
+      effectiveReasoning &&
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
+      this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined
+    )
+      providerRequest.reasoning_effort =
+        effectiveReasoning.effort as typeof providerRequest.reasoning_effort;
+    if (reasoningDisabled && profile) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      if (
+        !thinkingMandatory ||
+        request.config?.thinkingConfig?.includeThoughts === false
+      ) {
+        delete typed['reasoning'];
+        delete typed['reasoning_effort'];
+      }
+      if (!thinkingMandatory) {
+        if (isDashScope && profile === 'dashscope-effort') {
+          delete typed['thinking_budget'];
+          delete typed['enable_thinking'];
+        }
+        const template = asObject(typed['chat_template_kwargs']);
+        Object.assign(typed, profileReasoning(profile, false));
+        if (profile === 'qwen-chat-template') {
+          delete typed['enable_thinking'];
+          typed['chat_template_kwargs'] = {
+            ...template,
+            enable_thinking: false,
+          };
+        } else if (reasoningCapabilities?.disableField === 'enable_thinking') {
+          delete typed['reasoning_effort'];
+          typed['enable_thinking'] = false;
+        }
+      }
+    } else if (reasoningDisabled) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       // Provider buildRequest doesn't auto-inject `enable_thinking`, so a
       // guarded `in typed` check would never fire for default qwen3 configs.
@@ -947,6 +1262,15 @@ export class ContentGenerationPipeline {
           };
         }
       }
+      if (!thinkingMandatory) {
+        if (reasoningCapabilities?.disableField === 'reasoning_effort') {
+          delete typed['enable_thinking'];
+          delete typed['thinking_budget'];
+          typed['reasoning_effort'] = 'none';
+        } else if (reasoningCapabilities?.disableField === 'enable_thinking') {
+          typed['enable_thinking'] = false;
+        }
+      }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.
       // The provider hook (e.g. DeepSeekOpenAICompatibleProvider.buildRequest
@@ -959,13 +1283,26 @@ export class ContentGenerationPipeline {
       if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
+      const gptReasoning = getGptReasoningCapabilities(model);
+      if (
+        gptReasoning &&
+        !reasoningCapabilities &&
+        !gptReasoning.thinkingMandatory &&
+        !thinkingMandatory &&
+        !isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning_effort'] = 'none';
+      }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
       // the effort knob alone leaves thinking on. Emit the explicit
       // `thinking: { type: 'disabled' }` shape from DeepSeek's API spec.
       // Hostname-gated: self-hosted DeepSeek (sglang/vllm) or older
       // DeepSeek versions may not accept the V4 thinking parameter, so
       // we don't push it there. See https://api-docs.deepseek.com/.
-      if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+      if (
+        isDeepSeekHostname(this.contentGeneratorConfig) ||
+        reasoningCapabilities?.disableField === 'thinking'
+      ) {
         typed['thinking'] = { type: 'disabled' };
       }
       // OpenRouter's thinking switch is the provider-level `reasoning`
@@ -1005,6 +1342,13 @@ export class ContentGenerationPipeline {
       if (typed['reasoning_effort'] === 'none') {
         delete typed['reasoning_effort'];
       }
+      const thinking = asObject(typed['thinking']);
+      if (thinking?.['type'] === 'disabled') {
+        const remaining = { ...thinking };
+        delete remaining['type'];
+        if (Object.keys(remaining).length > 0) typed['thinking'] = remaining;
+        else delete typed['thinking'];
+      }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
         | undefined;
@@ -1030,12 +1374,12 @@ export class ContentGenerationPipeline {
     // they are opaque parameters that do not put the request in thinking
     // mode (GLM reads `thinking.enabled`, DeepSeek `thinking.type`), and
     // dropping `required` there only degrades their forced-tool side
-    // queries. `thinkingMandatory` stays ungated: it is explicit
+    // queries. `explicitThinkingMandatory` stays ungated: it is explicit
     // "thinking is on" knowledge, model-agnostic by design.
     if (
       isDashScope &&
       typed['tool_choice'] === 'required' &&
-      (thinkingMandatory ||
+      (explicitThinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
             (thinkingBudget != null && typed['enable_thinking'] !== false) ||
@@ -1044,7 +1388,7 @@ export class ContentGenerationPipeline {
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, explicitThinkingMandatory },
       );
       delete typed['tool_choice'];
     }
@@ -1143,6 +1487,21 @@ export class ContentGenerationPipeline {
     // So `prompt + max_tokens ≤ window` holds for samplingParams users too,
     // matching the Anthropic path.
     if (configSamplingParams !== undefined) {
+      const rawEffort = {
+        ...configSamplingParams,
+        ...this.contentGeneratorConfig.extra_body,
+      }['reasoning_effort'];
+      const samplingParams =
+        getGptReasoningCapabilities(
+          request.model || this.contentGeneratorConfig.model,
+        ) &&
+        configSamplingParams['reasoning'] === undefined &&
+        (isReasoningEffortPlaceholder(
+          configSamplingParams['reasoning_effort'],
+        ) ||
+          isReasoningEffortPlaceholder(rawEffort))
+          ? { ...this.buildReasoningConfig(request), ...configSamplingParams }
+          : configSamplingParams;
       const requestMaxTokens = request.config?.maxOutputTokens;
       const maxTokens =
         reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
@@ -1156,8 +1515,8 @@ export class ContentGenerationPipeline {
       // max_completion_tokens must not leak the provider key unclamped.
       return clampProviderOutputBudgetKeys(
         maxTokens !== undefined
-          ? { ...configSamplingParams, max_tokens: maxTokens }
-          : { ...configSamplingParams },
+          ? { ...samplingParams, max_tokens: maxTokens }
+          : { ...samplingParams },
         requestMaxTokens,
       );
     }
@@ -1198,7 +1557,7 @@ export class ContentGenerationPipeline {
     //   - deepseek-reasoner — thinking is enabled by default and cannot be disabled
     //   - glm-4.7 — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
     //   - kimi-k2-thinking — thinking is enabled by default and cannot be disabled
-    //   - gpt-5.x series — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - gpt-5.x / gpt-6-astra — defaults and disable support depend on the model
     //   - qwen3 series — model-dependent; emitted as `enable_thinking: false`
     //                           on DashScope endpoints when reasoning is disabled
     //
@@ -1210,7 +1569,14 @@ export class ContentGenerationPipeline {
       return {};
     }
 
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    const reasoning = getEffectiveReasoning(
+      this.contentGeneratorConfig,
+      resolveReasoningForModel(
+        this.config.cliConfig,
+        this.contentGeneratorConfig,
+        request.model,
+      ),
+    );
 
     if (reasoning === false || reasoning === undefined) {
       return {};
@@ -1234,11 +1600,11 @@ export class ContentGenerationPipeline {
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
     let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
-    const executeAttempt = async () => {
+    const executeAttempt = async (attemptContext: RequestContext = context) => {
       openaiRequest = await this.buildRequest(
         request,
         userPromptId,
-        context,
+        attemptContext,
         isStreaming,
       );
 
@@ -1249,12 +1615,20 @@ export class ContentGenerationPipeline {
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
       const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
-      return executor(openaiRequest, context, telemetryAttempt);
+      return executor(openaiRequest, attemptContext, telemetryAttempt);
     };
 
     try {
       return await executeAttempt();
     } catch (error) {
+      // Omni delivery-cache hygiene: when a request carrying oss:// media
+      // fails with a provider-side resolution error, drop the cached URL(s)
+      // so the user's retry re-uploads instead of resending a dead
+      // reference. Deliberately no automatic in-pipeline resend — the next
+      // interaction is the retry (design: omni-s3 D2). Conservative
+      // matching; never throws, so awaiting cannot mask the original error,
+      // and it must complete before a fast retry can race the file write.
+      await this.invalidateOmniOssCacheOnError(openaiRequest, error);
       const model = context.model.toLowerCase();
       const wireRequest = openaiRequest as Record<string, unknown> | undefined;
       const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
@@ -1281,6 +1655,30 @@ export class ContentGenerationPipeline {
           return await this.handleError(retryError, context, request);
         }
       }
+      // A 400 on a request that actually carries inline media can be the
+      // route rejecting the media shape (inline data-URL image, the
+      // re-encoded JPEG, its size) rather than anything a retry of the
+      // identical history can fix. Retry once with all input modalities
+      // disabled so the converter reuses its existing
+      // unsupportedModalityPlaceholder path — the same in-band degradation
+      // as an explicit modality-off config (QwenLM/qwen-code#10693). If the
+      // degraded retry also fails, media was not the blocker and the error
+      // surfaces as before.
+      if (
+        request.config?.abortSignal?.aborted !== true &&
+        getErrorStatus(error) === 400 &&
+        wireRequestHasMediaContent(wireRequest)
+      ) {
+        debugLogger.warn(
+          'Media-bearing request rejected with 400; retrying once with media degraded to placeholders',
+          { model, originalError: getErrorMessage(error) },
+        );
+        try {
+          return await executeAttempt({ ...context, modalities: {} });
+        } catch (retryError) {
+          return await this.handleError(retryError, context, request);
+        }
+      }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
     }
@@ -1290,6 +1688,68 @@ export class ContentGenerationPipeline {
    * Shared error handling logic for both executeWithErrorHandling and processStreamWithLogging
    * This centralizes the common error processing steps to avoid duplication
    */
+  /**
+   * Upload-cache invalidation for failed oss deliveries. Never throws
+   * (internal try/catch), so callers can await it without masking the
+   * original error.
+   */
+  private async invalidateOmniOssCacheOnError(
+    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined,
+    error: unknown,
+  ): Promise<void> {
+    try {
+      if (!this.config.cliConfig.isOmniEnabled?.()) return;
+      // Throttling must never churn the cache: a 429 on a request that
+      // happens to carry oss media says nothing about the media's health
+      // (and some providers phrase quota errors as RESOURCE_EXHAUSTED).
+      if (getErrorStatus(error) === 429) return;
+      const message = getErrorMessage(error);
+      // Dead-media provider errors either quote the oss URL — the cached
+      // URLs always carry the scheme — or describe the media download step
+      // (DashScope: "Download the media resource timed out"). Require the
+      // full "oss://" scheme rather than the bare word so messages like
+      // "connection loss" or "across" cannot nuke healthy cache entries.
+      // This trades conservative false negatives: a phrasing like "Failed
+      // to fetch the media resource" (no URL, no "download") is
+      // deliberately missed.
+      if (
+        !/oss:\/\//i.test(message) &&
+        !(/download/i.test(message) && /resource|media/i.test(message))
+      ) {
+        return;
+      }
+      const urls = new Set<string>();
+      for (const m of openaiRequest?.messages ?? []) {
+        const content = (m as { content?: unknown }).content;
+        if (!Array.isArray(content)) continue;
+        for (const part of content) {
+          const p = part as {
+            image_url?: { url?: string };
+            video_url?: { url?: string };
+            input_audio?: { data?: string };
+          };
+          for (const u of [
+            p.image_url?.url,
+            p.video_url?.url,
+            p.input_audio?.data,
+          ]) {
+            if (typeof u === 'string' && u.startsWith('oss://')) urls.add(u);
+          }
+        }
+      }
+      if (urls.size === 0) return;
+      const { OmniUploadCache } = await import('../../omni/upload-cache.js');
+      const { OmniObjectStore } = await import('../../omni/storage.js');
+      const store = new OmniObjectStore(
+        this.config.cliConfig.storage.getQwenDir(),
+      );
+      const cache = new OmniUploadCache(store.getOmniRootDir());
+      for (const u of urls) await cache.invalidateByUrl(u);
+    } catch {
+      // Hygiene only — never mask the original error.
+    }
+  }
+
   private async handleError(
     error: unknown,
     context: RequestContext,
@@ -1312,7 +1772,7 @@ export class ContentGenerationPipeline {
       ? new StreamingToolCallParser()
       : undefined;
     const responseParsingOptions =
-      this.config.provider.getResponseParsingOptions?.();
+      this.config.provider.getResponseParsingOptions?.(effectiveModel);
     const taggedThinkingParser =
       isStreaming && responseParsingOptions?.taggedThinkingTags
         ? new TaggedThinkingParser()

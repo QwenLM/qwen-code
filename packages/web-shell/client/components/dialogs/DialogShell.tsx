@@ -6,7 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon, XIcon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
 import { Button } from '../ui/button';
@@ -20,7 +20,7 @@ import {
 } from '../ui/dialog';
 import styles from './DialogShell.module.css';
 
-type DialogSize = 'sm' | 'md' | 'lg' | 'xl';
+type DialogSize = 'sm' | 'md' | 'lg' | 'xl' | 'auto';
 
 interface DialogShellProps {
   title: string;
@@ -37,6 +37,18 @@ const sizeClass: Record<DialogSize, string> = {
   md: 'sm:max-w-[560px]',
   lg: 'sm:max-w-[720px]',
   xl: 'sm:max-w-[900px]',
+  // Width follows the content instead of a fixed step, for bodies holding
+  // something with a real intrinsic width — the plan DAG lays out fixed 240px
+  // lanes, so a fixed panel scrolls it sideways while the screen still has
+  // room. `w-max` wins over DialogContent's base `w-full` through
+  // tailwind-merge. The floor keeps small graphs from collapsing to a narrow
+  // panel; the ceiling keeps large ones from spanning a wide monitor.
+  // The floor uses the same 2rem gutter the base ceiling
+  // (`max-w-[calc(100%-2rem)]`) reserves: twMerge keeps both classes, and
+  // below `sm:` a bare `min(100%,560px)` floor outranks that ceiling, so the
+  // panel rendered flush to both screen edges on a phone while every fixed
+  // size kept its gutter.
+  auto: 'w-max min-w-[min(calc(100%-2rem),560px)] sm:max-w-[min(calc(100vw-2rem),1120px)]',
 };
 
 const FOCUSABLE_SELECTOR = [
@@ -176,16 +188,17 @@ export function DialogShell({
             onMouseUp: handleBackdropMouseUp,
             onClick: handleBackdropClick,
           }}
-          className={`${themeClass} ${
+          className={`${styles.viewportPanel} ${themeClass} ${
             theme === WebShellThemeId.Dark ? 'dark' : ''
-          } flex max-h-[min(80vh,calc(100vh-48px))] flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
+          } flex flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
             fullscreen
-              ? 'h-[calc(100vh-32px)] max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
+              ? 'max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
               : sizeClass[size]
           }`}
           aria-label={title}
           data-keyboard-scope
           data-web-shell-dialog
+          data-fullscreen={fullscreen ? 'true' : undefined}
           data-web-shell-dialog-title={title}
           onPointerDownOutside={(event) => event.preventDefault()}
           onEscapeKeyDown={(event) => {
@@ -231,7 +244,7 @@ export function DialogShell({
                   fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
                 )}
               >
-                {fullscreen ? <Minimize2Icon /> : <Maximize2Icon />}
+                {fullscreen ? <ShrinkIcon /> : <ExpandIcon />}
               </Button>
             )}
             {dismissible && (

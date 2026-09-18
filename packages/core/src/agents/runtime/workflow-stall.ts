@@ -37,6 +37,10 @@
  */
 
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
+import {
+  WORKFLOW_ABORT_REASON_STALLED,
+  WorkflowAgentFailedError,
+} from './workflow-agent-failure.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 
@@ -165,7 +169,7 @@ export function attachStallWatchdog(
         `[Workflow] agent dispatch stalled — no progress for ${stallMs}ms; aborting.`,
       );
       try {
-        controller.abort('stalled');
+        controller.abort(WORKFLOW_ABORT_REASON_STALLED);
       } catch (e) {
         debugLogger.warn('stall watchdog abort threw:', e);
       }
@@ -290,9 +294,10 @@ export async function runStallResilient<T>(
         continue;
       }
       if (watchdog.stalled()) {
-        throw new Error(
+        throw new WorkflowAgentFailedError(
           `agent "${label ?? 'workflow-agent'}" stalled on all ` +
             `${MAX_STALL_ATTEMPTS} attempts (no progress for ${stallMs}ms each).`,
+          'stalled',
         );
       }
       throw err;

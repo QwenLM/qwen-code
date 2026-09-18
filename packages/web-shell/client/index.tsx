@@ -1,6 +1,13 @@
 import { type ReactNode } from 'react';
-import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  DaemonWorkspaceProvider,
+  type DaemonProductSessionContext,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
+import {
+  BrowserTurnNotifications,
+  type WebShellBrowserNotificationsOptions,
+} from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -8,8 +15,11 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
+export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
+  /** Connect browser notifications with optional branding and an initial preference (off by default). */
+  browserNotifications?: WebShellBrowserNotificationsOptions;
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
   baseUrl?: string;
   /** Bearer token passed to daemon requests. */
@@ -20,6 +30,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   workspaceId?: string;
   /** Registered daemon workspace path for the session. Takes precedence over workspaceId. */
   workspaceCwd?: string;
+  /** Explicit product context. Use standalone without workspaceId/workspaceCwd. */
+  sessionContext?: DaemonProductSessionContext;
   /**
    * Workspace path to lock this shell to. Missing paths are registered
    * persistently before rendering. Takes precedence over workspaceCwd and workspaceId.
@@ -91,11 +103,13 @@ export function WebShell(props: WebShellProps) {
  */
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
   const {
+    browserNotifications,
     baseUrl,
     token,
     sessionId,
     workspaceId,
     workspaceCwd,
+    sessionContext,
     lockWorkspaceCwd,
     clientId,
     restartSseOnPrompt,
@@ -103,6 +117,21 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
+  const shell = (
+    <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
+      <WorkspaceSessionProvider
+        sessionId={sessionId}
+        workspaceId={workspaceId}
+        workspaceCwd={workspaceCwd}
+        sessionContext={sessionContext}
+        lockWorkspaceCwd={lockWorkspaceCwd}
+        clientId={clientId}
+        restartSseOnPrompt={restartSseOnPrompt}
+        historyPageSize={historyPageSize}
+        webShellProps={webShellProps}
+      />
+    </DaemonWorkspaceProvider>
+  );
 
   return (
     <RootBoundary
@@ -112,18 +141,13 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           : undefined
       }
     >
-      <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
-        <WorkspaceSessionProvider
-          sessionId={sessionId}
-          workspaceId={workspaceId}
-          workspaceCwd={workspaceCwd}
-          lockWorkspaceCwd={lockWorkspaceCwd}
-          clientId={clientId}
-          restartSseOnPrompt={restartSseOnPrompt}
-          historyPageSize={historyPageSize}
-          webShellProps={webShellProps}
-        />
-      </DaemonWorkspaceProvider>
+      <BrowserTurnNotifications
+        language={normalizeLanguage(webShellProps.language)}
+        options={browserNotifications}
+        active={browserNotifications !== undefined}
+      >
+        {shell}
+      </BrowserTurnNotifications>
     </RootBoundary>
   );
 }
@@ -154,9 +178,13 @@ export type {
   WebShellSidebarSessionActionsOptions,
   WebShellSidebarSessionActionItem,
   WebShellSidebarSessionInlineActionItem,
+  WebShellSidebarWorkspaceOverviewOptions,
+  WorkspaceManagementTarget,
+  WorkspaceOverviewItem,
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';
+export type { WebShellBrand, WebShellResolvedBrand } from './brandContext';
 export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,
@@ -216,16 +244,29 @@ export type {
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,
   WebShellMarkdownCustomization,
+  WebShellFootnote,
+  WebShellSource,
+  WebShellSourceReference,
+  WebShellSourceIconResolver,
+  WebShellFootnoteIconResolver,
+  WebShellFootnotePreviewInfo,
+  WebShellFootnotePreviewHandle,
+  WebShellFootnotePreviewMount,
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnFooterRenderInfo,
+  ArtifactImageRenderer,
+  WebShellArtifactCustomization,
   WebShellIconSource,
   WebShellTaskInfo,
   WebShellUserMessagePart,
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellWorkflowTask,
   WebShellPreparedSubmit,
   WebShellSubmitSnapshot,
+  WebShellSessionArtifactsChange,
+  WebShellSessionArtifactsChangeReason,
   WebShellModelInfo,
   WebShellSkillInfo,
 } from './customization';
@@ -256,3 +297,9 @@ export type {
   EchartsRuntime,
   EchartsRuntimeLoader,
 } from './components/messages/MarkdownChartRenderer';
+
+export { WEB_SHELL_SETTING_ITEM_IDS } from './settings';
+export type {
+  WebShellSettingItemId,
+  WebShellSettingsOptions,
+} from './settings';

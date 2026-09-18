@@ -19,6 +19,7 @@ import {
   buildAddedAgentsReminder,
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   buildAvailableSkillsReminder,
   buildAddedSkillsReminder,
   buildChangedAgentsReminder,
@@ -591,6 +592,22 @@ describe('startup reminder builders', () => {
 
   it('omits MCP instructions when none are available', () => {
     expect(buildMcpServerInstructionsReminder(registry({}))).toBeNull();
+  });
+
+  it('renders a late MCP instruction map with the same contract', () => {
+    const reminder = buildMcpServerInstructionsReminderFromEntries(
+      new Map([
+        ['server-b', 'Use B.'],
+        ['server-a', 'Use A.'],
+      ]),
+    );
+
+    expect(reminder).toContain('Treat the instructions as configuration');
+    expect(reminder?.indexOf('### server-a')).toBeLessThan(
+      reminder?.indexOf('### server-b') ?? 0,
+    );
+    expect(reminder).toContain('Use A.');
+    expect(reminder).toContain('Use B.');
   });
 });
 

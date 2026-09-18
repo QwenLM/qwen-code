@@ -39,7 +39,7 @@ describe('security workflows', () => {
     expect(workflow).toContain('persist-credentials: false');
   });
 
-  it('keeps Security Checks a hard gate and audits package locks', () => {
+  it('runs the dependency gate on schedule or manual dispatch', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
     const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
@@ -48,20 +48,28 @@ describe('security workflows', () => {
       dependencyJob,
       'Audit production dependencies',
     );
-    const secretScanJob = getWorkflowJob(workflow, 'secret-scan');
-    const checkoutStep = getWorkflowStep(secretScanJob, 'Checkout');
-    const trufflehogStep = getWorkflowStep(
-      secretScanJob,
-      'Scan for verified secrets',
-    );
+    const trackingJob = getWorkflowJob(workflow, 'track-dependency-cve');
 
-    expect(workflow).toContain('pull_request:');
-    expect(workflow).toContain('push:');
-    expect(workflow).toContain(
-      "group: '${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'",
+    expect(workflow).not.toContain('pull_request:');
+    expect(workflow).not.toContain('\n  push:');
+    expect(workflow).toContain("- cron: '30 2 * * *'");
+    expect(workflow).toContain('workflow_dispatch: {}');
+    expect(dependencyJob).toContain('timeout-minutes: 40');
+    expect(dependencyJob).not.toContain('continue-on-error');
+    expect(trackingJob).toContain("needs: 'dependency-cve'");
+    expect(trackingJob).toContain(
+      "always() && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure')",
     );
-    expect(workflow).toContain(
-      'cancel-in-progress: "${{ github.event_name == \'pull_request\' }}"',
+    expect(trackingJob).toContain("issues: 'write'");
+    expect(trackingJob).toContain("contents: 'read'");
+    expect(trackingJob).toContain(
+      'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3',
+    );
+    expect(trackingJob).toContain(
+      "AUDIT_RESULT: '${{ needs.dependency-cve.result }}'",
+    );
+    expect(trackingJob).toContain(
+      "require('./.github/scripts/update-dependency-audit-issue.cjs')",
     );
     expect(workflow).toContain(
       'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
@@ -70,17 +78,12 @@ describe('security workflows', () => {
       'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
     );
     expect(dependencyCheckoutStep).toContain('persist-credentials: false');
-    expect(checkoutStep).toContain('persist-credentials: false');
     expect(installStep).toContain(
       "run: 'npm ci --ignore-scripts --no-audit --progress=false'",
     );
     expect(auditStep).not.toContain('continue-on-error');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
-    expect(auditStep).toContain('npm audit --omit=dev --audit-level=high');
-    expect(auditStep).toContain(
-      'npm audit --omit=dev --audit-level=high || status=$?',
-    );
     expect(auditStep).toContain(') || status=$?');
     expect(auditStep).toContain('for lockfile in packages/*/package-lock.json');
     expect(auditStep).toContain('[ -f "$lockfile" ] || continue');
@@ -91,22 +94,29 @@ describe('security workflows', () => {
     expect(auditStep).toContain(
       'npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&',
     );
+    // A registry-side audit failure is retried and then reported as its own
+    // error, never swallowed: an endpoint outage must not read as a CVE
+    // finding, and must not pass the gate either. Witnessed by bash in
+    // security-checks-audit-retry.test.js.
+    expect(auditStep).toContain('audit endpoint returned an error');
     expect(auditStep).toContain(
-      'npm audit --omit=dev --audit-level=high --workspaces=false',
+      'audit npm audit --omit=dev --audit-level=high || status=$?',
     );
-    expect(trufflehogStep).not.toContain('continue-on-error');
-    const trufflehogPin = trufflehogStep.match(
-      /trufflesecurity\/trufflehog@[0-9a-f]{40}' # v([\d.]+)/,
+    expect(auditStep).toContain(
+      'audit npm audit --omit=dev --audit-level=high --workspaces=false',
     );
-    expect(trufflehogPin).not.toBeNull();
-    expect(trufflehogStep).toContain(`version: '${trufflehogPin?.[1]}'`);
-    expect(trufflehogStep).toContain(
-      "if: \"github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'\"",
-    );
-    expect(trufflehogStep).toContain("extra_args: '--only-verified'");
-    expect(trufflehogStep).toContain(
-      'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11',
-    );
-    expect(checkoutStep).toContain('fetch-depth: 0');
+    expect(auditStep).not.toContain('|| true');
+    // Every factor of the worst-case arithmetic is pinned, because the job
+    // ceiling is only safe while none of them drifts: the per-attempt cap, the
+    // backoff between attempts, and the ceiling itself — three audit sites
+    // (root plus the two vendored lockfiles the loop does not skip), two
+    // attempts each, 300s + 15s + 300s per site = 1845s of audit work. The
+    // attempt count is pinned behaviourally by the call counters in
+    // security-checks-audit-retry.test.js. Loosen any of these and a registry
+    // outage turns a reported verdict into a bare job cancel.
+    expect(auditStep).toContain('timeout 300 "$@"');
+    expect(auditStep).toContain('sleep 15');
+    expect(workflow).not.toContain('secret-scan:');
+    expect(workflow).not.toContain('trufflesecurity/trufflehog');
   });
 });

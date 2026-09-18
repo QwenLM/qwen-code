@@ -231,6 +231,7 @@ export interface OpenDialogActionReturn {
     | 'permissions'
     | 'approval-mode'
     | 'effort'
+    | 'output-style'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -465,9 +466,19 @@ export interface SlashCommand {
   /** Usage examples shown in Help and completion. */
   examples?: string[];
 
+  /**
+   * The documented `/name` of a saved-workflow command. `CommandService` may
+   * rename an extension workflow on a collision; a `slashCommands.disabled`
+   * entry written with this name still matches the renamed command.
+   */
+  workflowName?: string;
+
   /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
   skillDetail?: {
     name: string;
+    // The manifest spelling when `name` carries an owner prefix; carried
+    // because the extension-skill store and the manifest both key on it.
+    authoredName?: string;
     description?: string;
     body?: string;
     filePath?: string;

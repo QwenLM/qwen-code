@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   ChatCompressionService,
   COMPACT_MAX_OUTPUT_TOKENS,
@@ -13,6 +16,7 @@ import {
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
+  PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
 } from './chatCompressionService.js';
 import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
@@ -838,6 +842,205 @@ describe('ChatCompressionService', () => {
     expect(serialized).not.toContain('AAAAAAAA');
     // Placeholder is present.
     expect(serialized).toContain('[image: image/png]');
+  });
+
+  it('truncates oversized tool-result text in the side-query when the compaction is payload-overflow driven (#10380)', async () => {
+    // The side-query travels through the same byte-limited gateway that
+    // rejected the main request with a 413, so its tool-result payloads
+    // must be trimmed instead of shipped verbatim.
+    const hugeOutput = 'O'.repeat(50_000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'context msg' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'run_shell_command',
+              response: { output: hugeOutput },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 200,
+        candidatesTokenCount: 50,
+        totalTokenCount: 250,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      requestPayloadTooLarge: true,
+    });
+
+    const call = mockGenerateText.mock.calls[0]?.[0] as { contents: Content[] };
+    expect(call).toBeDefined();
+    const serialized = JSON.stringify(call.contents);
+    expect(serialized).not.toContain(
+      'O'.repeat(PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP + 1),
+    );
+    expect(serialized).toContain('[...truncated for compaction]');
+  });
+
+  it('does not account payload-overflow compaction from slimmed side-query usage (#10380)', async () => {
+    const hugeOutput = 'O'.repeat(50_000);
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'context msg' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'run_shell_command',
+              response: { output: hugeOutput },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ]);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: vi.fn().mockResolvedValue({
+        text: 'Summary',
+        usage: {
+          promptTokenCount: 2_000,
+          candidatesTokenCount: 50,
+          totalTokenCount: 2_050,
+        },
+      }),
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      requestPayloadTooLarge: true,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCount).toBeGreaterThan(0);
+  });
+
+  it('reports payload_overflow as the trigger reason for 413-driven compactions (#10380)', async () => {
+    // 413 recoveries fire BELOW the token threshold; reporting
+    // 'token_limit' makes the CLI notice claim a token overflow that
+    // never happened and pollutes the recorded payload (#10380).
+    // A real 413 payload carries a large visible history; the
+    // estimate-based accounting only reports a reduction when that
+    // history out-sizes the post-compact visible content.
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: `context msg ${'X'.repeat(60_000)}` }],
+      },
+      { role: 'model', parts: [{ text: 'ack' }] },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      90_000,
+    );
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      // Small output keeps the summary well below the visible-history
+      // estimate so the compression reports a reduction.
+      usage: {
+        promptTokenCount: 90_000,
+        candidatesTokenCount: 50,
+        totalTokenCount: 90_050,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      requestPayloadTooLarge: true,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.triggerReason).toBe('payload_overflow');
+  });
+
+  it('keeps tool-result text intact in the side-query for token-driven compactions (#10380)', async () => {
+    const hugeOutput = 'O'.repeat(50_000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'context msg' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionResponse: {
+              id: 'tool-1',
+              name: 'run_shell_command',
+              response: { output: hugeOutput },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 200,
+        candidatesTokenCount: 50,
+        totalTokenCount: 250,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    const call = mockGenerateText.mock.calls[0]?.[0] as { contents: Content[] };
+    expect(call).toBeDefined();
+    expect(JSON.stringify(call.contents)).toContain(hugeOutput);
   });
 
   it('passes getCompactionModel to runSideQuery for compression', async () => {
@@ -3047,6 +3250,49 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(generateText).not.toHaveBeenCalled();
     expect(coldSpy).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps payload-overflow recoveries on the slimmed cold path (#10380)', async () => {
+    // Every other canShareCache conjunct holds in this fixture (main
+    // model, cache control enabled, provider-reported anchor, window
+    // headroom), but the shared request is built from the UNSLIMMED
+    // history — the exact payload a 413 gateway just rejected.
+    // Re-uploading it would 413 again (and log a misleading cache-sharing
+    // failure) before the slimmed cold path recovers anyway. Removing the
+    // requestPayloadTooLarge conjunct makes generateText reappear (red).
+    // The history must be visibly large so the estimate-based accounting
+    // reports a reduction (a real 413 payload dwarfs the summary).
+    const { chat, config, generateText } = makeFixture({
+      history: [
+        { role: 'user', parts: [{ text: `message-0 ${'X'.repeat(60_000)}` }] },
+        { role: 'model', parts: [{ text: 'message-1' }] },
+        { role: 'user', parts: [{ text: 'message-2' }] },
+        { role: 'model', parts: [{ text: 'message-3' }] },
+      ],
+    });
+    const coldSpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: '<state_snapshot>cold summary</state_snapshot>',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'p',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      requestPayloadTooLarge: true,
+    });
+
+    expect(generateText).not.toHaveBeenCalled();
+    expect(coldSpy).toHaveBeenCalledTimes(1);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+  });
 });
 
 describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () => {
@@ -3917,6 +4163,167 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     // Assertion 3: Image metadata header mentions the source tool and args.
     expect(flatText).toContain('mcp__node-repl__node_repl');
     expect(flatText).toContain('"app":"Safari"');
+  });
+
+  it('suppresses restoration attachments when compaction is payload-overflow driven (#10380)', async () => {
+    // The 413 recovery exists because the serialized request exceeded the
+    // gateway BYTE limit. Restoration re-embeds full-size image payloads the
+    // slimmed side-query never carried, which would re-inflate the rebuilt
+    // retry request straight back over the same limit and 413 it again.
+    const bigImage = 'B'.repeat(60_000);
+    const screenshot = (data: string): Content => ({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'mcp__node-repl__node_repl',
+            response: { output: 'ok' },
+            parts: [{ inlineData: { mimeType: 'image/png', data } }],
+          } as unknown as NonNullable<
+            Content['parts']
+          >[number]['functionResponse'],
+        },
+      ],
+    });
+    const callScreenshot = (app: string): Content => ({
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            name: 'mcp__node-repl__node_repl',
+            args: { app },
+          },
+        },
+      ],
+    });
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'open Safari' }] },
+      callScreenshot('Safari'),
+      screenshot(bigImage),
+      callScreenshot('Safari'),
+      screenshot(bigImage),
+      callScreenshot('Safari'),
+      screenshot(bigImage),
+    ];
+
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: 'SUMMARY of the screenshot session',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 170_500,
+      },
+    } as never);
+
+    const service = new ChatCompressionService();
+    const result = await service.compress(makeFakeChat(history), {
+      promptId: 'p',
+      force: true,
+      config: makeFakeConfig(),
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      trigger: 'auto',
+      requestPayloadTooLarge: true,
+    });
+
+    expect(result.newHistory).not.toBeNull();
+    // The rebuilt retry request must be dominated by the summary that just
+    // fit: no restored inlineData image payloads, no file-restoration blocks.
+    const serialized = JSON.stringify(result.newHistory);
+    expect(serialized).not.toContain('inlineData');
+    expect(serialized).not.toContain(bigImage);
+    expect(serialized).toContain('SUMMARY of the screenshot session');
+  });
+
+  it('suppresses file-restoration blocks too when compaction is payload-overflow driven (#10380)', async () => {
+    // The suppression has two halves; the test above pins maxImages: 0 via
+    // screenshots only. Large sessions are dominated by read_file blocks
+    // (~20KB each) — re-embedding them through the maxFiles half would
+    // re-inflate the rebuilt retry request past the same gateway byte
+    // limit. Goes red if maxFiles reverts to tuning.maxRecentFiles.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-10408-restore-'));
+    const filePath = join(dir, 'notes.md');
+    const fileBody = 'W3_FILE_RESTORATION_MARKER ' + 'x'.repeat(2_000);
+    writeFileSync(filePath, fileBody, 'utf8');
+    try {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'inspect the notes file' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: filePath },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'file content read ok' },
+              } as unknown as NonNullable<
+                Content['parts']
+              >[number]['functionResponse'],
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'I read the notes.' }] },
+        { role: 'user', parts: [{ text: 'final fresh user message' }] },
+        { role: 'model', parts: [{ text: 'final model reply' }] },
+      ];
+
+      vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+        text: 'SUMMARY of the file-reading session',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+      const service = new ChatCompressionService();
+      // Restoration skips file paths outside the workspace root
+      // (Finding 4 guard), so point the fake workspace at the temp dir
+      // that holds the fixture file.
+      const baseOpts = {
+        promptId: 'p',
+        force: true,
+        config: { ...makeFakeConfig(), getTargetDir: () => dir } as Config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        trigger: 'auto' as const,
+      };
+
+      // Control: on the token-driven path the recent read_file result IS
+      // re-embedded (the fixture is alive).
+      const restored = await service.compress(makeFakeChat(history), {
+        ...baseOpts,
+      });
+      expect(JSON.stringify(restored.newHistory)).toContain(
+        'W3_FILE_RESTORATION_MARKER',
+      );
+
+      // Payload-overflow path: file restoration suppressed (maxFiles: 0).
+      const suppressed = await service.compress(makeFakeChat(history), {
+        ...baseOpts,
+        requestPayloadTooLarge: true,
+      });
+      expect(suppressed.newHistory).not.toBeNull();
+      const serializedSuppressed = JSON.stringify(suppressed.newHistory);
+      expect(serializedSuppressed).not.toContain('W3_FILE_RESTORATION_MARKER');
+      expect(serializedSuppressed).not.toContain('Recently accessed file');
+      expect(serializedSuppressed).toContain(
+        'SUMMARY of the file-reading session',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

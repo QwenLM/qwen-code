@@ -16,6 +16,7 @@ import type {
   TaskListResultDisplay,
   TeamResultDisplay,
   TodoResultDisplay,
+  ToolResultDisplay,
 } from '../tools/tools.js';
 import {
   compactStringForHistory,
@@ -46,6 +47,82 @@ function hasUnpairedSurrogate(value: string): boolean {
 }
 
 describe('toolResultDisplayCompaction', () => {
+  it.each([
+    { answers: [] },
+    { text: 42, answers: [] },
+    { text: null, answers: [] },
+    { text: 'fallback' },
+    { text: 'fallback', answers: null },
+    { text: 'fallback', answers: {} },
+    { text: 'fallback', answers: [null] },
+    { text: 'fallback', answers: ['answer'] },
+    { text: 'fallback', answers: [{ answer: 'Yes' }] },
+    { text: 'fallback', answers: [{ question: 'Question?' }] },
+    { text: 'fallback', answers: [{ question: 42, answer: 'Yes' }] },
+    { text: 'fallback', answers: [{ question: 'Question?', answer: 42 }] },
+  ])('preserves malformed question display unchanged: %j', (fields) => {
+    const display = {
+      type: 'ask_user_question_answers',
+      ...fields,
+    } as unknown as ToolResultDisplay;
+
+    expect(compactToolResultDisplayForHistory(display)).toBe(display);
+    expect(compactToolResultDisplayForRecording(display)).toBe(display);
+  });
+
+  it('preserves valid question displays with no answers', () => {
+    const display = {
+      type: 'ask_user_question_answers' as const,
+      text: 'No valid answers were provided.',
+      answers: [],
+    };
+
+    expect(compactToolResultDisplayForHistory(display)).toEqual(display);
+    expect(compactToolResultDisplayForRecording(display)).toEqual(display);
+  });
+
+  it.each([
+    ['history', compactToolResultDisplayForHistory],
+    ['recording', compactToolResultDisplayForRecording],
+  ] as const)(
+    'bounds question display fields for %s without changing answers at source',
+    (purpose, compact) => {
+      const long = `start-${'😀'.repeat(20_000)}-end`;
+      const display = {
+        type: 'ask_user_question_answers' as const,
+        text: long,
+        answers: [
+          { question: long, answer: long },
+          { question: 'Short question?', answer: 'Yes\n**Header**: literal' },
+        ],
+      };
+      const original = structuredClone(display);
+      const result = compact(display);
+
+      expect(result.type).toBe(display.type);
+      expect(result.answers).toHaveLength(2);
+      expect(result.answers[1]).toEqual(display.answers[1]);
+      for (const value of [
+        result.text,
+        result.answers[0].question,
+        result.answers[0].answer,
+      ]) {
+        expect(value.length).toBeLessThanOrEqual(
+          MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+        );
+        expect(value).toContain('start-');
+        expect(value).toContain('-end');
+        expect(value).toContain(
+          purpose === 'history'
+            ? 'CLI history display'
+            : 'saved session preview',
+        );
+        expect(hasUnpairedSurrogate(value)).toBe(false);
+      }
+      expect(display).toEqual(original);
+    },
+  );
+
   it('keeps short strings unchanged', () => {
     const value = 'short output';
 
@@ -480,7 +557,7 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedTeam.teamName).toContain('truncated from');
   });
 
-  it('drops MCP App HTML and tool results from retained displays', () => {
+  it('drops MCP App HTML and tool results from retained history displays', () => {
     const marker = 'PROBE_MCP_APP_HTML_UNIQUE_MARKER';
     const display: McpAppResultDisplay = {
       type: 'mcp_app',
@@ -498,6 +575,88 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.toolResult).toEqual({});
     expect(compacted.fallbackText).toBe('Dashboard ready');
     expect(JSON.stringify(compacted)).not.toContain(marker);
+  });
+
+  // The recording purpose feeds the replayed transcript, and the Web Shell
+  // mounts the MCP App iframe only when `html` is non-empty (it never
+  // re-fetches the `ui://` resource). See #10369.
+  it('keeps MCP App HTML and tool results in recorded displays', () => {
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: '<main>PROBE_MCP_APP_HTML_UNIQUE_MARKER</main>',
+      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.html).toBe(display.html);
+    expect(compacted.toolResult).toEqual(display.toolResult);
+    expect(compacted.toolArguments).toEqual(display.toolArguments);
+    expect(compacted.fallbackText).toBe('Dashboard ready');
+  });
+
+  it('still bounds an oversized MCP App fallbackText when recording', () => {
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: '<main>app</main>',
+      toolResult: {},
+      toolArguments: {},
+      fallbackText: `head-${'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS)}-tail`,
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.html).toBe(display.html);
+    expect(compacted.fallbackText.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(compacted.fallbackText).toContain(
+      'truncated for saved session preview',
+    );
+  });
+
+  // `toolResult` is unbounded at the producer (`content[].data` base64,
+  // `structuredContent`) and the record is the only full copy once the
+  // transcript offload drops `persistedOutputFiles`, so an over-budget payload
+  // must not be persisted verbatim. Removing the bound reds this test.
+  it('drops an oversized MCP App toolResult when recording', () => {
+    const marker = 'PROBE_MCP_APP_TOOL_RESULT_UNIQUE_MARKER';
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: '<main>PROBE_MCP_APP_HTML_UNIQUE_MARKER</main>',
+      toolResult: {
+        content: [
+          {
+            type: 'text',
+            text: `${marker}${'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS)}`,
+          },
+        ],
+        structuredContent: {
+          rows: 'y'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS),
+        },
+      },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.toolResult).toEqual({});
+    expect(JSON.stringify(compacted)).not.toContain(marker);
+    // The mounted iframe only needs `html`, which the producer already caps at
+    // 1 MiB, so replay can still render the app.
+    expect(compacted.html).toBe(display.html);
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS * 2,
+    );
   });
 });
 

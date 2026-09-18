@@ -834,7 +834,10 @@ describe('exportCommand', () => {
         expect.anything(),
       );
       expect(normalizeSessionData).toHaveBeenCalled();
-      expect(toHtml).toHaveBeenCalled();
+      expect(toHtml).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'test-session-id' }),
+        mockSessionData.conversation.messages,
+      );
       expect(generateExportFilename).toHaveBeenCalledWith('html');
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.html'),

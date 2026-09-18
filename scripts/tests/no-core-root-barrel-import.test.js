@@ -40,6 +40,7 @@ describe('no-core-root-barrel-import', () => {
       'packages/core/src/core/client.ts',
       '@qwen-code/qwen-code-core/dist/index.js',
     ],
+    ['packages/core/src/core/client.ts', '@qwen-code/qwen-code-core/index.js'],
     // .ts spelling of the exports-map src subpath
     [
       'packages/core/src/core/client.ts',

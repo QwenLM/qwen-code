@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -284,6 +285,35 @@ describe('useMessageQueue', () => {
       turnId: 'turn-copy',
     });
     expect(goalSubmission.permit).not.toBe(permit);
+  });
+
+  it('carries the runtime spend figures onto the queued Goal turn', () => {
+    // The field is optional on both sides of this hop, so dropping the copy
+    // typechecks: the prompt would simply lose its budget line on this host
+    // and nowhere else.
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-usage',
+      revision: 2,
+      turnId: 'turn-usage',
+    };
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit,
+        continuationContext: 'report the figures',
+        usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+      });
+    });
+
+    let claimed: unknown;
+    act(() => {
+      claimed = result.current.claimGoalTurn();
+    });
+
+    expect(claimed).toMatchObject({
+      kind: 'goal',
+      usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+    });
   });
 
   it('creates a stable direct-user admission that claims a hidden Goal', () => {

@@ -15,10 +15,11 @@ import path from 'node:path';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   ApprovalMode,
+  deriveAgentConfig,
+  deriveApprovalModeConfig,
+  installSessionWorkflowRevisionWriteThrough,
   type Config,
   type DerivedApprovalModeConfigHooks,
-  deriveApprovalModeConfig,
-  deriveAgentConfig,
 } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
 import { type ContentGenerator } from '../../core/contentGenerator.js';
@@ -598,6 +599,12 @@ async function createPerAgentConfig(
   });
   const override = handle.config;
   const cleanup = approvalHandle.cleanup;
+  // Session Workflow plan-revision state is session-global on the root
+  // Config; the registry rebuilt below binds TodoWriteTool to this
+  // wrapper, so a divergent todo_write would shadow the revision here
+  // unless the shim forwards to the base (see
+  // installSessionWorkflowRevisionWriteThrough).
+  installSessionWorkflowRevisionWriteThrough(override, base);
   let dedicatedContentGenerator: ContentGenerator | undefined;
   let contentGeneratorError: string | undefined;
   let runtimeView: RuntimeContentGeneratorView | undefined;

@@ -100,7 +100,10 @@ export interface KeepaliveBridge {
   markSessionCatalogChanged?(): void;
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    },
   ): unknown;
 }
 
@@ -194,6 +197,7 @@ async function bindAndNameSessions(
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: scheduledTaskSessionName(task.prompt),
+          titleSource: 'auto',
         });
         renamed.add(sessionId);
       } catch {
@@ -243,6 +247,7 @@ async function bindAndNameSessions(
     try {
       bridge.updateSessionMetadata(sessionId, {
         displayName: scheduledTaskSessionName(task.prompt),
+        titleSource: 'auto',
       });
       renamed.add(sessionId);
     } catch (err) {

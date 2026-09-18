@@ -394,7 +394,7 @@ describe('LiveSessionCoordinator', () => {
     });
     expect(harness.bridge.updateSessionMetadata).toHaveBeenCalledWith(
       'live-new',
-      { displayName: 'Voice chat' },
+      { displayName: 'Voice chat', titleSource: 'auto' },
     );
     expect(harness.host.setCallState).toHaveBeenLastCalledWith(1, 'listening');
 
@@ -864,6 +864,61 @@ describe('LiveSessionCoordinator', () => {
     );
   });
 
+  it('excludes inline-consumed background status from the coordinator answer', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    harness.callbacks.onDelegateCall?.({
+      callEpoch: 1,
+      responseId: 'response-1',
+      callId: 'handoff-1',
+      request: '执行任务',
+      activeTranscript: [{ role: 'user', text: '执行任务' }],
+    });
+    await waitFor(() => expect(harness.pendingTurns).toHaveLength(1));
+    const promptId = harness.pendingTurns[0]!.promptId;
+
+    harness.publish({
+      type: 'session_update',
+      promptId,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'answer' },
+        },
+      },
+    });
+    // A same-turn background result consumed inline rides the live RPC's
+    // promptId; the discrete marker is what keeps it out of the answer.
+    harness.publish({
+      type: 'session_update',
+      promptId,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'Background agent "worker" completed.' },
+          _meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: { taskId: 'worker-1' },
+          },
+        },
+      },
+    });
+    await harness.finishTurn(0, [{ type: 'message', text: ' tail' }]);
+
+    await waitFor(() =>
+      expect(harness.realtime.sendHandoffUpdate).toHaveBeenLastCalledWith({
+        callEpoch: 1,
+        callId: 'handoff-1',
+        output: 'answer tail',
+      }),
+    );
+  });
+
   it('starts an accepted steering request as the next turn when it misses the final drain', async () => {
     const harness = makeHarness({ enqueueAccepted: true });
     await harness.coordinator.start({
@@ -1065,6 +1120,132 @@ describe('LiveSessionCoordinator', () => {
           sessionId: 'worker-1',
         },
       ]),
+    );
+  });
+
+  it('forwards both an overflow summary and its surviving worker notification', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    const active = (
+      harness.coordinator as unknown as {
+        active?: { workerIds: Set<string> };
+      }
+    ).active;
+    active?.workerIds.add('worker-1');
+
+    harness.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            text: 'Dropped 1 background notification (queue full).',
+          },
+          _meta: {
+            source: 'background_notification',
+            backgroundTask: { kind: 'queue', status: 'dropped' },
+          },
+        },
+      },
+    });
+    harness.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text: 'Worker completed.' },
+          _meta: {
+            source: 'background_notification',
+            backgroundTask: {
+              taskId: 'worker-1',
+              kind: 'agent',
+              status: 'completed',
+            },
+          },
+        },
+      },
+    });
+    harness.publish({
+      type: 'background_notification_turn_complete',
+      data: { sessionId: 'live-new', reason: 'end_turn' },
+    });
+
+    await waitFor(() =>
+      expect(harness.realtime.sendBackendContext).toHaveBeenCalledOnce(),
+    );
+    const spoken = (
+      harness.realtime.sendBackendContext.mock.calls as unknown as Array<
+        [string]
+      >
+    )[0]?.[0];
+    expect(spoken).toContain('Dropped 1 background notification');
+    expect(spoken).toContain('Worker completed.');
+  });
+
+  it('keeps the executing turn reply when a second result is consumed inline', async () => {
+    const harness = makeHarness();
+    await harness.coordinator.start({
+      epoch: 1,
+      callId: 'call-1',
+      mode: 'new',
+    });
+    const active = (
+      harness.coordinator as unknown as {
+        active?: { workerIds: Set<string> };
+      }
+    ).active;
+    active?.workerIds.add('worker-1');
+
+    const chunk = (
+      text: string,
+      meta: Record<string, unknown>,
+    ): Omit<BridgeEvent, 'v'> => ({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { text },
+          _meta: meta,
+        },
+      },
+    });
+    // The executing turn's own announcement, its first reply segment, then
+    // a same-execution inline consumption of a task that is NOT a tracked
+    // worker, then the remaining reply.
+    harness.publish(
+      chunk('Background agent "worker-1" completed.', {
+        source: 'background_notification',
+        backgroundTask: { taskId: 'worker-1', kind: 'agent' },
+      }),
+    );
+    harness.publish(
+      chunk('First half. ', { source: 'background_notification_response' }),
+    );
+    harness.publish(
+      chunk('Background agent "worker-2" completed.', {
+        source: 'background_notification',
+        backgroundTask: { taskId: 'worker-2', kind: 'agent' },
+      }),
+    );
+    harness.publish(
+      chunk('Second half.', { source: 'background_notification_response' }),
+    );
+    harness.publish({
+      type: 'background_notification_turn_complete',
+      data: { sessionId: 'live-new', reason: 'end_turn' },
+    });
+
+    await waitFor(() =>
+      expect(harness.realtime.sendBackendContext).toHaveBeenCalledOnce(),
+    );
+    // The inline consumption must not reset the accumulated reply nor re-key
+    // the worker gate to the untracked task.
+    expect(harness.realtime.sendBackendContext).toHaveBeenCalledWith(
+      'First half. Second half.',
     );
   });
 

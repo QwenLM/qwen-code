@@ -15,6 +15,13 @@ import {
 } from './tokenLimits.js';
 
 describe('normalize', () => {
+  it('keeps unrecognized batch routing tags out of token lookup', () => {
+    expect(normalize('google/gemini-2.5-flash:batch')).toBe('batch');
+    expect(
+      knownTokenLimit('google/gemini-2.5-flash:batch', 'output'),
+    ).toBeUndefined();
+  });
+
   it('should lowercase and trim the model string', () => {
     expect(normalize('  GEMINI-1.5-PRO  ')).toBe('gemini-1.5-pro');
   });
@@ -249,6 +256,13 @@ describe('tokenLimit', () => {
     it('should return 1M for DeepSeek V4 models', () => {
       expect(tokenLimit('deepseek-v4-flash')).toBe(1000000);
       expect(tokenLimit('deepseek-v4-pro')).toBe(1000000);
+    });
+
+    it('should return 1M/384K for the official API deepseek-flash name', () => {
+      // api.deepseek.com serves V4 flash as `deepseek-flash`; the DashScope
+      // spelling `deepseek-v4.1-flash` is rejected by the official endpoint.
+      expect(tokenLimit('deepseek-flash')).toBe(1000000);
+      expect(tokenLimit('deepseek-flash', 'output')).toBe(384000);
     });
 
     it('should return 128K for DeepSeek models', () => {

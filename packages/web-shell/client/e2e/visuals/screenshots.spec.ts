@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
+import { devices, expect, test, type Page } from '@playwright/test';
+import type {
+  DaemonEvent,
+  DaemonSessionSummary,
+  DaemonSessionContextUsageStatus,
+  DaemonSettingDescriptor,
+} from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -13,6 +18,7 @@ import {
   toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
+  type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
@@ -20,6 +26,7 @@ import {
   fillComposer,
   gotoNewSession,
   gotoSession,
+  gotoSettingsHarness,
   installScenario,
   resolveBaseURL,
   submitLocalCommand,
@@ -31,8 +38,298 @@ const THEMES: readonly VisualTheme[] = ['dark', 'light'];
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
+function createTerminalTurnErrorScenario(sessionId: string) {
+  return createWebShellDaemonScenario({
+    sessionId,
+    events: [
+      userTextEvent('Summarize the current workspace.', { id: 1 }),
+      {
+        id: 2,
+        v: 1,
+        type: 'turn_error',
+        data: {
+          sessionId,
+          message:
+            'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
+          promptId: 'prompt-turn-error-visual',
+        },
+      },
+    ],
+  });
+}
+
+function createTerminalGoalStatusEvent(
+  status: 'blocked' | 'usage_limited',
+  objective: string,
+  lastReason: string,
+): DaemonEvent {
+  return {
+    id: 2,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalState: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: `goal-visual-${status.replace('_', '-')}`,
+              revision: 2,
+              objective,
+              status,
+              ...(status === 'usage_limited'
+                ? { limitKind: 'token_budget' }
+                : {}),
+              evidenceCursor: { recordId: 'goal-visual-record' },
+              turnCount: 4,
+              activeTimeMs: 5000,
+              tokensUsed: 1000,
+              createdAt: 1234,
+              updatedAt: 2345,
+              lastReason,
+            },
+          },
+          goalStatus: {
+            kind: 'aborted',
+            condition: objective,
+            iterations: 4,
+            durationMs: 5000,
+            lastReason,
+          },
+        },
+      },
+    },
+  };
+}
+
+/**
+ * The settings panel's host-driven exclusions only exist when the host passes
+ * the `settings` prop, which the standalone entry never does — so these
+ * scenarios render the shell through the settings harness page, which maps
+ * `?exclude=` onto that prop.
+ */
+function createSettingsPanelScenario(
+  theme: VisualTheme,
+): WebShellDaemonScenario {
+  const descriptors: DaemonSettingDescriptor[] = [
+    {
+      key: 'general.enableAutoUpdate',
+      type: 'boolean',
+      label: 'Auto-update',
+      category: 'General',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'general.showSessionRecap',
+      type: 'boolean',
+      label: 'Session Recap',
+      category: 'General',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'ui.theme',
+      type: 'enum',
+      label: 'Theme',
+      category: 'UI',
+      requiresRestart: false,
+      default: 'Qwen Dark',
+      options: [
+        { value: 'Qwen Dark', label: 'Qwen Dark' },
+        { value: 'Qwen Light', label: 'Qwen Light' },
+      ],
+      values: {
+        effective: theme === 'light' ? 'Qwen Light' : 'Qwen Dark',
+      },
+    },
+    {
+      key: 'output.showTimestamps',
+      type: 'boolean',
+      label: 'Show Timestamps',
+      // The real schema files this under General; the panel must render the
+      // category set a daemon actually serves.
+      category: 'General',
+      requiresRestart: false,
+      default: false,
+      values: { effective: false },
+    },
+    {
+      key: 'tools.webSearch.enabled',
+      type: 'boolean',
+      label: 'Web Search',
+      category: 'Tools',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'fastModel',
+      type: 'string',
+      label: 'Fast Model',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    },
+    {
+      key: 'modelFallbacks',
+      type: 'string',
+      label: 'Model Fallbacks',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    },
+  ];
+  return createWebShellDaemonScenario({
+    settings: { settings: descriptors },
+  });
+}
+
+async function openSettingsPanel(page: Page): Promise<void> {
+  await submitLocalCommand(page, '/settings');
+  const nav = page.getByRole('navigation', { name: 'Settings' });
+  await expect(nav).toBeVisible();
+  // Rows render only for the active category, and which category is active
+  // follows the fixture's descriptor order — gate on a descriptor-derived nav
+  // button instead, which renders for every group. Only a General descriptor
+  // creates one, so this still cannot resolve before the settings fetch lands.
+  await expect(nav.getByRole('button', { name: /^General/ })).toBeVisible();
+}
+
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('context usage', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        supportedCommands: {
+          availableCommands: [
+            {
+              name: 'compress',
+              description: 'Compress context',
+              input: null,
+              _meta: { source: 'builtin-command' },
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 5_000,
+                memoryFiles: 5_000,
+                skills: 10_000,
+                messages: 20_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [{ name: 'read_file', tokens: 10_000 }],
+              mcpTools: [{ name: 'mcp__github__create_issue', tokens: 5_000 }],
+              memoryFiles: [{ path: '/workspace/QWEN.md', tokens: 5_000 }],
+              skills: [
+                {
+                  name: 'review',
+                  tokens: 5_000,
+                  loaded: true,
+                  bodyTokens: 5_000,
+                },
+              ],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await expect(
+        panel.getByRole('button', { name: 'Compress context', exact: true }),
+      ).toBeEnabled();
+      await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
+    test('session overview', async ({ page }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          {
+            displayName: 'Review release approval',
+            isWaitingForPermission: true,
+          },
+          {
+            displayName: 'Choose the export format',
+            isWaitingForUserQuestion: true,
+          },
+          { displayName: 'Run the browser tests', hasActivePrompt: true },
+          { displayName: 'Update session documentation' },
+        ].map((session, index) => ({
+          ...session,
+          sessionId: `overview-${index}`,
+          workspaceCwd,
+          updatedAt: '2026-07-01T12:00:00.000Z',
+          branch: {
+            name:
+              index === 0
+                ? 'feature/session-overview-with-complete-metadata-in-constrained-viewports'
+                : 'feature/session-overview',
+            baseBranch: 'main',
+          },
+        })),
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-session-panel]'),
+      ).toContainText('Review release approval');
+      await captureScreenshot(page, `session-overview-${theme}`);
+      await page
+        .getByRole('button', {
+          name: 'Details for Review release approval',
+          exact: true,
+        })
+        .click();
+      await expect(
+        page.getByRole('dialog', {
+          name: 'Review release approval',
+          exact: true,
+        }),
+      ).toBeVisible();
+      await captureScreenshot(page, `session-overview-details-${theme}`);
+    });
+
     test(`session transcript`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
@@ -62,6 +359,150 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`usage-limited goal status`, async ({ page }, testInfo) => {
+      // Seed the compatibility card together with its canonical V2 state, as
+      // emitted by both live goal updates and transcript replay.
+      const usageLimitedGoalEvent = createTerminalGoalStatusEvent(
+        'usage_limited',
+        'Finish the evaluation suite',
+        'Token budget reached',
+      );
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Finish the evaluation suite.', { id: 1 }),
+          usageLimitedGoalEvent,
+          turnCompleteEvent('prompt-goal-usage-limited', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).toContainText('Token budget reached');
+      await captureScreenshot(page, `goal-usage-limited-${theme}`);
+    });
+
+    test(`blocked goal status`, async ({ page }, testInfo) => {
+      const blockedGoalEvent = createTerminalGoalStatusEvent(
+        'blocked',
+        'Wait for deployment approval',
+        'User authority is required',
+      );
+      const scenario = createWebShellDaemonScenario({
+        events: [
+          userTextEvent('Wait for deployment approval.', { id: 1 }),
+          blockedGoalEvent,
+          turnCompleteEvent('prompt-goal-blocked', { id: 3 }),
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const messageList = page.locator('[data-web-shell-message-list]');
+      await expect(messageList).toContainText('Goal blocked');
+      await expect(messageList).toContainText('User authority is required');
+      await expect(messageList).not.toContainText('Goal aborted');
+      await captureScreenshot(page, `goal-blocked-${theme}`);
+    });
+
+    // Assertions only, no captures. This scenario injects a fake turn_error so
+    // the error row's Copy affordance (#10001) can be exercised. It is the only
+    // visual test that hovers a message row DELIBERATELY, and its four captures
+    // meant every web-shell preview led with full-height red error images no
+    // matter what the PR touched -- readers repeatedly took the preview for a
+    // live failure.
+    //
+    // Dropping them does not blind the hover timestamp entirely: the parallel
+    // agents test leaves the cursor resting on the group header after
+    // `summary.click()`, so `parallel-agents-expanded` paints the chip through
+    // residual hover and moves when the chip moves. That is incidental rather
+    // than intended coverage, and `visual-capture-contracts.test.ts` is what
+    // actually pins the chip's anchor and background.
+    //
+    // The reveal/hide behaviour is pinned by the opacity assertions below on
+    // every viewport and on touch; the captures added a misleading preview,
+    // not coverage.
+    test(`terminal turn error`, async ({ browser, page }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const scenario = createTerminalTurnErrorScenario(
+        'turn-error-copy-visual',
+      );
+      const daemon = await installScenario(page, scenario, baseURL);
+      await gotoSession(page, scenario, daemon, theme);
+
+      const errorRow = page
+        .locator('[data-web-shell-message-row]')
+        .filter({ hasText: 'The model provider closed the response stream' });
+      const copyButton = errorRow.getByRole('button', {
+        name: 'Copy',
+        exact: true,
+      });
+      const actions = errorRow.locator('[data-web-shell-message-actions]');
+      await expect(actions).toHaveCSS('opacity', '0');
+      await copyButton.focus();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await copyButton.evaluate((button) => button.blur());
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+
+      await page.setViewportSize({ width: 720, height: 800 });
+      await page.mouse.move(0, 0);
+      await expect(actions).toHaveCSS('opacity', '0');
+      await errorRow.hover();
+      await expect(actions).toHaveCSS('opacity', '1');
+
+      const touchContext = await browser.newContext({
+        ...devices['Pixel 7'],
+        baseURL,
+      });
+      try {
+        const touchPage = await touchContext.newPage();
+        const touchScenario = createTerminalTurnErrorScenario(
+          'turn-error-copy-touch-visual',
+        );
+        const touchDaemon = await installScenario(
+          touchPage,
+          touchScenario,
+          baseURL,
+        );
+        await gotoSession(touchPage, touchScenario, touchDaemon, theme);
+        expect(
+          await touchPage.evaluate(
+            () => window.matchMedia('(hover: none)').matches,
+          ),
+        ).toBe(true);
+        const touchErrorRow = touchPage
+          .locator('[data-web-shell-message-row]')
+          .filter({ hasText: 'The model provider closed the response stream' });
+        const touchCopyButton = touchErrorRow.getByRole('button', {
+          name: 'Copy',
+          exact: true,
+        });
+        await expect(
+          touchErrorRow.locator('[data-web-shell-message-actions]'),
+        ).toHaveCSS('opacity', '1');
+        await expect(touchCopyButton).toBeVisible();
+        // No screenshot here on purpose. Touch is `hover: none`, so the hover
+        // timestamp chip never renders and this view carries zero coverage of
+        // it -- proven by a run that moved the chip and left these two captures
+        // at 0% diff. The assertions above are what guard the touch behaviour
+        // (#10001: actions stay visible without hover); the captures only added
+        // two full-height error screenshots to every preview.
+      } finally {
+        await touchContext.close();
+      }
     });
 
     test(`parallel agents group`, async ({ page }, testInfo) => {
@@ -785,9 +1226,33 @@ for (const theme of THEMES) {
       // turn this into a cryptic "not visible" failure.
       const primaryCwd = '/tmp/qwen-web-shell-e2e';
       const primarySessionName = 'Run auth migration';
+      const secondaryCwd = '/tmp/qwen-api-service';
+      const secondarySessionName = 'Audit API retries';
+      const sessions = [
+        {
+          sessionId: 'workspace-primary-session',
+          workspaceCwd: primaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: primarySessionName,
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'workspace-secondary-session',
+          workspaceCwd: secondaryCwd,
+          createdAt: '2026-07-03T00:00:00.000Z',
+          updatedAt: '2026-07-03T00:00:00.000Z',
+          displayName: secondarySessionName,
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ] satisfies DaemonSessionSummary[];
       const scenario = createWebShellDaemonScenario({
         workspaceCwd: primaryCwd,
         displayName: primarySessionName,
+        sessions,
+        sessionId: 'workspace-primary-session',
         capabilities: {
           workspaces: [
             {
@@ -798,7 +1263,7 @@ for (const theme of THEMES) {
             },
             {
               id: 'ws-api',
-              cwd: '/tmp/qwen-api-service',
+              cwd: secondaryCwd,
               primary: false,
               trusted: true,
             },
@@ -823,12 +1288,15 @@ for (const theme of THEMES) {
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
+      const sessionRow = (name: string) =>
+        sidebar.locator('[data-web-shell-session-title]').filter({
+          hasText: name,
+        });
+      await expect(sessionRow(primarySessionName)).toHaveCount(1);
+      await expect(sessionRow(secondarySessionName)).toHaveCount(1);
       await expect(
-        sidebar.getByRole('button', {
-          name: primarySessionName,
-          exact: true,
-        }),
-      ).toBeVisible();
+        sessionRow(primarySessionName).locator('..'),
+      ).toHaveAttribute('aria-current', 'page');
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
     });
 
@@ -928,6 +1396,88 @@ for (const theme of THEMES) {
       await submitLocalCommand(page, '/theme');
       await expect(page.locator('[data-web-shell-theme-dialog]')).toBeVisible();
       await captureScreenshot(page, `theme-dialog-${theme}`);
+    });
+
+    test(`settings panel`, async ({ page }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      // The mock daemon has no GET /workspace/models route; answer with an
+      // empty list so the model block renders providers without an error hint.
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ json: { models: [] } });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme);
+      await openSettingsPanel(page);
+
+      const nav = page.getByRole('navigation', { name: 'Settings' });
+      await expect(nav.getByRole('button', { name: /^UI/ })).toBeVisible();
+      await expect(nav.getByRole('button', { name: /^Tools/ })).toBeVisible();
+      await nav.getByRole('button', { name: /^Model/ }).click();
+      await expect(page.getByText('Fast Model', { exact: true })).toBeVisible();
+      await expect(page.getByTestId('model-management')).toBeVisible();
+      await captureScreenshot(page, `settings-panel-${theme}`);
+    });
+
+    test(`settings panel with host exclusions`, async ({ page }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ json: { models: [] } });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme, [
+        'builtin:chat-width',
+        'builtin:model-management',
+        'setting:fast-model',
+        'setting:timestamps',
+        'setting:web-search',
+      ]);
+      await openSettingsPanel(page);
+
+      // Excluded rows vanish, and a category left with nothing visible —
+      // here Tools — drops out of the nav entirely.
+      const nav = page.getByRole('navigation', { name: 'Settings' });
+      await expect(nav.getByRole('button', { name: /^Tools/ })).toHaveCount(0);
+      // Rows render only for the active category, so the chat-width absence
+      // is observable only after opening UI — pin the category itself first.
+      await nav.getByRole('button', { name: /^UI/ }).click();
+      await expect(page.getByText('Theme', { exact: true })).toBeVisible();
+      await expect(page.getByText('Chat width', { exact: true })).toHaveCount(
+        0,
+      );
+      // General lost only `setting:timestamps`, so the category keeps its nav
+      // button and its surviving rows while the excluded row leaves.
+      await nav.getByRole('button', { name: /^General/ }).click();
+      await expect(
+        page.getByText('Auto-update', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText('Show Timestamps', { exact: true }),
+      ).toHaveCount(0);
+      await nav.getByRole('button', { name: /^Model/ }).click();
+      await expect(
+        page.getByText('Model Fallbacks', { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText('Fast Model', { exact: true })).toHaveCount(
+        0,
+      );
+      await expect(page.getByTestId('model-management')).toHaveCount(0);
+      await captureScreenshot(page, `settings-panel-exclusions-${theme}`);
     });
 
     test(`permission panel`, async ({ page }, testInfo) => {

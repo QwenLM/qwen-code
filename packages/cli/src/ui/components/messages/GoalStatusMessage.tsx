@@ -8,8 +8,10 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import { ICON } from '../../constants.js';
 import { formatDuration } from '../../utils/formatters.js';
+import { formatTokenCount } from '../../statusLinePresets.js';
 import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
 interface LegacyGoalStatusMessageProps {
@@ -108,15 +110,34 @@ const GoalStateCard: React.FC<GoalStateMessageProps> = ({
   })();
   const stats: string[] = [];
   if (goal.turnCount > 0) {
-    stats.push(`${goal.turnCount} ${pluralTurns(goal.turnCount)}`);
+    stats.push(
+      goal.turnBudget === undefined
+        ? `${goal.turnCount} ${pluralTurns(goal.turnCount)}`
+        : `${goal.turnCount}/${goal.turnBudget} ${pluralTurns(goal.turnBudget)}`,
+    );
   }
   if (goal.activeTimeMs > 0) {
-    stats.push(formatDuration(goal.activeTimeMs, { hideTrailingZeros: true }));
+    const used = formatDuration(goal.activeTimeMs, { hideTrailingZeros: true });
+    stats.push(
+      goal.activeTimeBudgetMs === undefined
+        ? used
+        : `${used}/${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })}`,
+    );
+  }
+  if (goal.tokensUsed > 0) {
+    const used = formatTokenCount(goal.tokensUsed);
+    stats.push(
+      goal.tokenBudget === undefined
+        ? `${used} tokens`
+        : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
+    );
   }
   const subtitle = stats.length > 0 ? stats.join(' · ') : null;
+  // This renderer writes straight to the terminal, so the reason is
+  // sanitized here: a pause reason can embed a raw provider error.
   const reason =
     goal.status !== 'active' || snapshot.activity === 'verifying'
-      ? goal.lastReason?.trim()
+      ? sanitizeTerminalText(goal.lastReason ?? '').trim()
       : undefined;
 
   return (

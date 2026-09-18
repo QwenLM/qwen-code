@@ -32,7 +32,13 @@ import { t } from '../../i18n/index.js';
 type ExportFormat = {
   extension: string;
   displayName: string;
-  format: (sessionData: ExportSessionData) => string;
+  // Required for the same reason as `ExportFormatDefinition.render` in
+  // serve/server/session-export.ts: HTML projects from the original records,
+  // and the remaining formatters ignore this argument.
+  format: (
+    sessionData: ExportSessionData,
+    records: readonly unknown[],
+  ) => string;
 };
 
 const EXPORT_DIR_OUT_OF_CWD =
@@ -317,7 +323,7 @@ async function exportSessionAction(
       config,
     );
 
-    const content = exportFormat.format(normalizedData);
+    const content = exportFormat.format(normalizedData, conversation.messages);
 
     if (target.outputDirKind === 'custom') {
       try {

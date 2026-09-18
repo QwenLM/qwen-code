@@ -327,7 +327,10 @@ function extractDiffContent(
     return [
       {
         type: 'diff',
-        path: display['fileName'] as string,
+        path:
+          typeof display['filePath'] === 'string'
+            ? display['filePath']
+            : (display['fileName'] as string),
         oldText: (display['originalContent'] as string) ?? '',
         newText: display['newContent'] as string,
       },

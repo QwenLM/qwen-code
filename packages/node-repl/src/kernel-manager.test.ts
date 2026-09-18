@@ -86,6 +86,64 @@ afterEach(() => {
 });
 
 describe('NodeReplKernelManager', () => {
+  it('preserves bounded error diagnostics without invoking getters or custom inspectors', async () => {
+    const result = await run(`
+      var invoked = 0;
+      var details = {
+        action: { operation: 'fill', performed: true },
+        verification: { status: 'failed', reason: 'value_mismatch' },
+        image: 'x'.repeat(100_000),
+        get unsafe() { invoked++; throw new Error('getter ran'); },
+        [Symbol.for('nodejs.util.inspect.custom')]() { invoked++; throw new Error('inspector ran'); },
+      };
+      details.self = details;
+      throw Object.assign(new Error('Verification failed'), { code: 'verification_failed', details });
+    `);
+    expect(result.status).toBe('error');
+    expect(result.error?.code).toBe('verification_failed');
+    expect(result.error?.details).toContain("operation: 'fill'");
+    expect(result.error?.details).toContain('performed: true');
+    expect(result.error?.details).toContain("reason: 'value_mismatch'");
+    expect(result.error?.details).toContain('Circular');
+    expect(result.error?.details?.length).toBeLessThan(4200);
+    const followUp = await run('nodeRepl.write(invoked);');
+    expect(followUp.error).toBeUndefined();
+    expect(texts(followUp)).toContain('0');
+  });
+
+  it('keeps the original error when optional diagnostics are unreadable', async () => {
+    const result = await run(`
+      var invoked = 0;
+      throw Object.defineProperties(new Error('original'), {
+        code: { get() { invoked++; throw new Error('code getter'); } },
+        details: { get() { invoked++; throw new Error('details getter'); } },
+      });
+    `);
+    expect(result.error?.message).toBe('original');
+    expect(result.error?.code).toBeUndefined();
+    expect(result.error?.details).toBeUndefined();
+    expect(texts(await run('nodeRepl.write(invoked);'))).toContain('0');
+  });
+
+  it(
+    'executes compact and nested await operands without merging tokens',
+    async () => {
+      createEsmPackage(
+        path.join(workDir, 'node_modules'),
+        'smoke-sdk',
+        'export class ComputerUse { static async create() { return 42; } }',
+      );
+      const result = await run(
+        'var computer=await(await import("smoke-sdk")).ComputerUse.create();' +
+          'nodeRepl.write(computer);' +
+          'nodeRepl.write(await(Promise.resolve(7)));',
+      );
+      expect(result.status).toBe('ok');
+      expect(texts(result)).toEqual(['42', '7']);
+    },
+    TEST_TIMEOUT,
+  );
+
   it(
     'persists declarations without returning ordinary expressions',
     async () => {
@@ -115,12 +173,246 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'keeps an earlier closure when a later cell assigns its carried binding',
+    'keeps earlier closures on the same binding when later cells assign it',
     async () => {
       await run('let x = 1; const readX = () => x;');
       const result = await run('x = 2; nodeRepl.write(`${readX()}|${x}`);');
       expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual(['1|2']);
+      expect(texts(result)).toEqual(['2|2']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'refreshes observation helpers and shares writes in both directions',
+    async () => {
+      await run(
+        'var state = {token:"old"}; let count=0; const read=()=>state.token; const next=()=>++count;',
+      );
+      expect(
+        texts(
+          await run(
+            'state={token:"fresh"}; nodeRepl.write([read(),state.token,next(),count]);',
+          ),
+        ),
+      ).toEqual(["[ 'fresh', 'fresh', 1, 1 ]"]);
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write([state={token:"newer"},read(),++count,next(),count].slice(1));',
+          ),
+        ),
+      ).toEqual(["[ 'newer', 2, 3, 3 ]"]);
+      expect(
+        texts(
+          await run('var state={token:"redeclared"}; nodeRepl.write(read());'),
+        ),
+      ).toEqual(['redeclared']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps carried assignments live in destructuring and loop declarations',
+    async () => {
+      await run('var value=1; const read=()=>value;');
+      expect(
+        texts(
+          await run(
+            'var {value, other=read()}={value:2}; nodeRepl.write([read(),other]);',
+          ),
+        ),
+      ).toEqual(['[ 2, 2 ]']);
+      expect(
+        texts(
+          await run(
+            'var [value, last=read()]=[3]; nodeRepl.write([read(),last]);',
+          ),
+        ),
+      ).toEqual(['[ 3, 3 ]']);
+      expect(
+        texts(
+          await run(
+            'for(var value=4;value<6;value++) { nodeRepl.write(read()); }',
+          ),
+        ),
+      ).toEqual(['4', '5']);
+      expect(
+        texts(
+          await run(
+            'for(var {value, inside=read()} of [{value:7}]) nodeRepl.write([read(),inside]);',
+          ),
+        ),
+      ).toEqual(['[ 7, 7 ]']);
+      expect(
+        texts(await run('for(var value in {key:0}) nodeRepl.write(read());')),
+      ).toEqual(['key']);
+      expect(
+        manager
+          .getBindingNames()
+          .some((name) => name.startsWith('__qwen_repl_')),
+      ).toBe(false);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'preserves inner scopes, parameter defaults and bare-call receivers',
+    async () => {
+      await run(
+        'let value=10; function plain(){return this===undefined;} const old=()=>value;',
+      );
+      const result = await run(
+        [
+          'value=11;',
+          'const local=(value)=>value+1;',
+          'function defaulted(v=value){var value=99; return v;}',
+          'const named=function value(){return typeof value;};',
+          'const object={value, [value](value){return value;}};',
+          'nodeRepl.write([local(2),defaulted(),named(),object.value,object[11](3),plain(),plain?.(),old()]);',
+          'nodeRepl.write([(plain)(),((plain))?.(),plain`tag`]);',
+          '{let value=88; nodeRepl.write(value);}',
+          'try{throw 77;}catch(value){nodeRepl.write(value);}',
+          'for(let value of [66]) nodeRepl.write(value);',
+          'nodeRepl.write(value);',
+        ].join('\n'),
+      );
+      expect(result.status).toBe('ok');
+      expect(texts(result)).toEqual([
+        "[ 3, 11, 'function', 11, 3, true, true, 11 ]",
+        '[ true, true, true ]',
+        '88',
+        '77',
+        '66',
+        '11',
+      ]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'does not expose carried bindings as globals or to imported modules',
+    async () => {
+      fs.writeFileSync(
+        path.join(workDir, 'private-probe.mjs'),
+        'export const result=[typeof privateCell,typeof Buffer];',
+      );
+      await run(
+        'globalThis.privateCell="global"; let privateCell=1; let Buffer="shadow"; const read=()=>privateCell;',
+      );
+      const result = await run(
+        'privateCell=2; const probe=await import("./private-probe.mjs"); nodeRepl.write([read(),globalThis.privateCell,Buffer,...probe.result]);',
+      );
+      expect(texts(result)).toEqual([
+        "[ 2, 'global', 'shadow', 'string', 'function' ]",
+      ]);
+      await run('let __proto__=3; const protoRead=()=>__proto__;');
+      expect(
+        texts(await run('__proto__=4; nodeRepl.write(protoRead());')),
+      ).toEqual(['4']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'restores live closures to error checkpoints and cell-entry cancellation values',
+    async () => {
+      await run('let value=0; const read=()=>value;');
+      expect(
+        (await run('value=1; {value=2;throw Error("stop");}')).status,
+      ).toBe('error');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+      const controller = new AbortController();
+      const pending = manager.exec({
+        code: 'value=3; await new Promise(()=>{});',
+        timeoutMs: 15000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 200);
+      expect((await pending).status).toBe('cancelled');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+      expect((await run('value=4; while(true){}', 100)).status).toBe('timeout');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'retains identifier early errors and shorthand property semantics',
+    async () => {
+      await run('var x=1; const read=()=>x; var __proto__={marker:2};');
+      for (const code of [
+        'x=2; delete x;',
+        'x=3; delete (x);',
+        'x=9; delete (/*comment*/x);',
+      ]) {
+        const result = await run(code);
+        expect(result.status).toBe('error');
+        expect(result.error?.message).toContain(
+          'Delete of an unqualified identifier',
+        );
+        expect(texts(await run('nodeRepl.write([x,read()]);'))).toEqual([
+          '[ 1, 1 ]',
+        ]);
+      }
+      expect(
+        texts(
+          await run(
+            'const object={__proto__}; nodeRepl.write([Object.hasOwn(object,"__proto__"),object.__proto__.marker,Object.getPrototypeOf(object)===Object.prototype]);',
+          ),
+        ),
+      ).toEqual(['[ true, 2, true ]']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'preserves inferred names before class static initialization',
+    async () => {
+      await run('var fn; var C;');
+      expect(texts(await run('fn=()=>{}; nodeRepl.write(fn.name);'))).toEqual([
+        'fn',
+      ]);
+      expect(
+        texts(await run('var fn=function(){}; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('fn=null; fn ||= ()=>{}; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(
+          await run(
+            'C=class{static n=this.name;}; nodeRepl.write([C.name,C.n]);',
+          ),
+        ),
+      ).toEqual(["[ 'C', 'C' ]"]);
+      expect(
+        texts(await run('({fn=()=>{}}={}); nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('[fn=function*(){}]=[]; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('fn=(/*comment*/()=>{}); nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(
+          await run(
+            'C=(/*comment*/class{static n=this.name;}); nodeRepl.write([C.name,C.n]);',
+          ),
+        ),
+      ).toEqual(["[ 'C', 'C' ]"]);
+      expect(
+        texts(
+          await run('({fn=(/*comment*/()=>{})}={}); nodeRepl.write(fn.name);'),
+        ),
+      ).toEqual(['fn']);
     },
     TEST_TIMEOUT,
   );
@@ -1043,31 +1335,181 @@ describe('NodeReplKernelManager', () => {
     TEST_TIMEOUT,
   );
 
+  it.each([
+    {
+      name: 'a timed-out cancellation barrier',
+      code: 'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+      status: 'timeout',
+    },
+    {
+      name: 'an explicitly cancelled barrier',
+      code: 'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+      status: 'cancelled',
+    },
+    {
+      name: 'a blocked event loop after an asynchronous boundary',
+      code: 'await new Promise(resolve => setTimeout(resolve, 1)); while (true) {}',
+      status: 'timeout',
+    },
+  ])(
+    'recovers from $name within a bounded cancellation interval',
+    async ({ code, status }) => {
+      await run('const retainedBeforeHang = 42;');
+      const pid = manager.getKernelPid();
+      const generation = manager.getGeneration();
+      const readyFile = path.join(workDir, 'hang-started');
+      const controller = new AbortController();
+      const pending = manager.exec({
+        code: `const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready'); nodeRepl.write('before hang'); ${code}`,
+        timeoutMs: status === 'cancelled' ? 60_000 : 200,
+        signal: controller.signal,
+      });
+      await expect.poll(() => fs.existsSync(readyFile)).toBe(true);
+      if (status === 'cancelled') controller.abort();
+      const queued = run('nodeRepl.write(typeof retainedBeforeHang);');
+
+      const outcome = await pending;
+      expect(outcome.status).toBe(status);
+      expect(outcome.stats.kernelReplaced).toBe(true);
+      expect(outcome.stats.pid).toBe(pid);
+      expect(outcome.error?.message).toMatch(/bindings were lost/);
+      expect(outcome.error?.message).toMatch(/external.*state/i);
+      expect(texts(outcome)).toContain('before hang');
+
+      const recovered = await queued;
+      expect(recovered.status).toBe('ok');
+      expect(texts(recovered)).toEqual(['undefined']);
+      expect(manager.getKernelPid()).not.toBe(pid);
+      expect(manager.getGeneration()).toBeGreaterThan(generation);
+    },
+    10_000,
+  );
+
   it(
-    'kills timed-out and cancelled generations without replaying source',
+    'interrupts timed-out and cancelled cells without replacing the kernel',
     async () => {
-      await run('const oldBinding = "gone";');
-      const timeoutPid = manager.getKernelPid();
-      const timedOut = await run('while (true) {}', 500);
+      await run(
+        'globalThis.oldObject = { value: "retained", afterBarrier: false, caughtAfterCancel: false, finallyAfterCancel: false }; const oldBinding = globalThis.oldObject;',
+      );
+      const timeoutPid = manager.getKernelPid()!;
+      const generation = manager.getGeneration();
+      const timedOut = await run(
+        'setTimeout(() => { oldBinding.value = "timeout-late"; }, 100); while (true) {}',
+        500,
+      );
       expect(timedOut.status).toBe('timeout');
-      expect(timedOut.stats.kernelReplaced).toBe(true);
-      expect(manager.getKernelPid()).toBeNull();
+      expect(timedOut.stats.kernelReplaced).toBe(false);
+      expect(manager.getKernelPid()).toBe(timeoutPid);
+      expect(manager.getGeneration()).toBe(generation);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(texts(await run('nodeRepl.write(oldBinding.value);'))).toEqual([
+        'retained',
+      ]);
 
       const controller = new AbortController();
       const pending = manager.exec({
-        code: 'await new Promise((resolve) => setTimeout(resolve, 60_000));',
+        code: 'const { setTimeout: sleepAfterCancel } = await import("node:timers/promises"); setTimeout(() => nodeRepl.write("late-cancel"), 500); try { await sleepAfterCancel(400); } catch { oldBinding.caughtAfterCancel = true; } finally { oldBinding.finallyAfterCancel = true; } oldBinding.value = "cancel-late"; const mustNotCommit = true;',
         timeoutMs: 120_000,
         signal: controller.signal,
       });
       setTimeout(() => controller.abort(), 200);
       const cancelled = await pending;
       expect(cancelled.status).toBe('cancelled');
-      expect(cancelled.stats.kernelReplaced).toBe(true);
-      expect(cancelled.stats.pid).not.toBe(timeoutPid);
+      expect(cancelled.stats.kernelReplaced).toBe(false);
+      expect(cancelled.stats.pid).toBe(timeoutPid);
+      expect(manager.getKernelPid()).toBe(timeoutPid);
+      expect(manager.getGeneration()).toBe(generation);
 
-      const recovered = await run('nodeRepl.write(typeof oldBinding);');
-      expect(texts(recovered)).toEqual(['undefined']);
-      expect(recovered.stats.pid).not.toBe(cancelled.stats.pid);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      const recovered = await run(
+        'nodeRepl.write(`${oldBinding === globalThis.oldObject}|${oldBinding.value}|${oldBinding.caughtAfterCancel}|${oldBinding.finallyAfterCancel}|${typeof mustNotCommit}`);',
+      );
+      expect(texts(recovered)).toEqual(['true|retained|false|false|undefined']);
+      expect(texts(recovered)).not.toContain('late-cancel');
+      expect(recovered.stats.pid).toBe(timeoutPid);
+
+      await run(
+        'setTimeout(async () => { const { setTimeout: sleepInTimer } = await import("node:timers/promises"); await sleepInTimer(20); oldBinding.value = "background-await-completed"; }, 20);',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(texts(await run('nodeRepl.write(oldBinding.value);'))).toEqual([
+        'background-await-completed',
+      ]);
+      await run('oldBinding.value = "retained";');
+
+      const iterableController = new AbortController();
+      const iterableCell = manager.exec({
+        code: 'const guardedStream = { [Symbol.asyncIterator]() { return this; }, next() { return import("node:timers/promises").then(({ setTimeout: sleep }) => sleep(400)).then(() => ({ done: false, value: 1 })); } }; for await (const value of guardedStream) { oldBinding.value = `iterable-${value}`; break; }',
+        timeoutMs: 30_000,
+        signal: iterableController.signal,
+      });
+      setTimeout(() => iterableController.abort(), 50);
+      expect((await iterableCell).status).toBe('cancelled');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(texts(await run('nodeRepl.write(oldBinding.value);'))).toEqual([
+        'retained',
+      ]);
+
+      const barrierController = new AbortController();
+      let barrierSettled = false;
+      const barrierCell = manager
+        .exec({
+          code: 'const { setTimeout: sleep } = await import("node:timers/promises"); await nodeRepl.signal.waitUntil(sleep(400)); oldBinding.afterBarrier = true; const barrierBinding = true;',
+          timeoutMs: 30_000,
+          signal: barrierController.signal,
+        })
+        .finally(() => {
+          barrierSettled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      barrierController.abort();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(barrierSettled).toBe(false);
+      const barrierCancelled = await barrierCell;
+      expect(barrierCancelled.status).toBe('cancelled');
+      expect(barrierCancelled.stats.pid).toBe(timeoutPid);
+      expect(manager.getGeneration()).toBe(generation);
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write(`${typeof barrierBinding}|${oldBinding.afterBarrier}`);',
+          ),
+        ),
+      ).toEqual(['undefined|false']);
+
+      const operationModule = path.join(workDir, 'terminal-operation.mjs');
+      fs.writeFileSync(
+        operationModule,
+        [
+          'import { setTimeout as sleep } from "node:timers/promises";',
+          'export async function dispatch(signal, state) {',
+          '  await signal.waitUntil(sleep(400));',
+          '  const result = "committed";',
+          '  state.operation = result;',
+          '  return result;',
+          '}',
+        ].join('\n'),
+      );
+      await run(
+        'globalThis.nativeLifecycle = { operation: "dispatched", userContinuation: false };',
+      );
+      const nativeController = new AbortController();
+      const nativeCell = manager.exec({
+        code: `const { dispatch } = await import(${JSON.stringify(pathToFileURL(operationModule).href)}); await dispatch(nodeRepl.signal, nativeLifecycle); nativeLifecycle.userContinuation = true;`,
+        timeoutMs: 30_000,
+        signal: nativeController.signal,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      nativeController.abort();
+      expect((await nativeCell).status).toBe('cancelled');
+      expect(
+        texts(
+          await run(
+            'await new Promise(resolve => setTimeout(resolve, 5500)); nodeRepl.write(`${nativeLifecycle.operation}|${nativeLifecycle.userContinuation}`);',
+          ),
+        ),
+      ).toEqual(['committed|false']);
     },
     TEST_TIMEOUT,
   );
@@ -1174,7 +1616,7 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'revokes a cold kernel if cancellation lands during startup',
+    'retains a cold kernel if cancellation lands during startup',
     async () => {
       const controller = new AbortController();
       const pending = manager.exec({
@@ -1186,9 +1628,12 @@ describe('NodeReplKernelManager', () => {
       const cancelled = await pending;
       expect(cancelled.status).toBe('cancelled');
       expect(cancelled.events).toEqual([]);
-      expect(cancelled.stats.kernelReplaced).toBe(true);
-      expect(manager.getKernelPid()).toBeNull();
-      expect(texts(await run('nodeRepl.write("alive");'))).toEqual(['alive']);
+      expect(cancelled.stats.kernelReplaced).toBe(false);
+      const pid = manager.getKernelPid();
+      expect(pid).not.toBeNull();
+      const alive = await run('nodeRepl.write("alive");');
+      expect(texts(alive)).toEqual(['alive']);
+      expect(alive.stats.pid).toBe(pid);
     },
     TEST_TIMEOUT,
   );
