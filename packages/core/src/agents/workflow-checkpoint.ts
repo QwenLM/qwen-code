@@ -388,14 +388,14 @@ export async function claimInterruptedWorkflowRuns(
  * snapshot if the process running it exited before it settled, and return
  * it; otherwise leave it alone and return `undefined`. For a caller about to
  * act on one run from its history, whose snapshot is otherwise older than
- * the attempt that was interrupted.
+ * the attempt that was interrupted. An id that is not a run id has no
+ * checkpoint path, so nothing is read for it.
  */
 export async function claimInterruptedWorkflowRun(
   config: Config,
   runId: string,
   options: { isProcessRunning?: (pid: number) => boolean } = {},
 ): Promise<InterruptedWorkflowRun | undefined> {
-  if (!config.storage || !isWorkflowRunId(runId)) return undefined;
   return claimIfInterrupted(
     config,
     runId,
