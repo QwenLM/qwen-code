@@ -116,7 +116,7 @@ export function useLiveBrowserHost({
   const phaseRef = useRef<LiveBrowserHostPhase>('idle');
   const generationRef = useRef(0);
   const resourcesRef = useRef<HostResources>({});
-  const statusRef = useRef<DaemonLiveStatus>();
+  const statusRef = useRef<DaemonLiveStatus | undefined>(undefined);
   const epochRef = useRef(0);
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
