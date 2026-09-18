@@ -328,6 +328,29 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
 };
 
 /**
+ * `run_in_background` semantics that hold whatever the team feature is set
+ * to: the default, the foreground/inline switch, fork behaviour, and the
+ * three cases where an explicit value is rejected.
+ */
+const RUN_IN_BACKGROUND_DESCRIPTION =
+  'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true.';
+
+/**
+ * The teammate half, appended only when `isAgentTeamEnabled()`. It is about
+ * the `name` parameter, which is itself only declared under that flag — so
+ * sending it unconditionally told the model how to combine
+ * `run_in_background` with a parameter it had not been given.
+ */
+const TEAM_RUN_IN_BACKGROUND_NOTE =
+  ' Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.';
+
+function runInBackgroundDescription(teamEnabled: boolean): string {
+  return teamEnabled
+    ? `${RUN_IN_BACKGROUND_DESCRIPTION}${TEAM_RUN_IN_BACKGROUND_NOTE}`
+    : RUN_IN_BACKGROUND_DESCRIPTION;
+}
+
+/**
  * Resolves the effective permission mode for a sub-agent.
  *
  * Rules (matching claw-code):
@@ -755,8 +778,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         run_in_background: {
           type: 'boolean',
           default: true,
-          description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
+          description: runInBackgroundDescription(config.isAgentTeamEnabled()),
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -957,10 +979,19 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
         read_only?: typeof TEAM_AGENT_READ_ONLY_PROPERTY;
+        run_in_background?: { description: string };
       };
     };
     if (schema.properties) {
-      if (this.config.isAgentTeamEnabled()) {
+      const teamEnabled = this.config.isAgentTeamEnabled();
+      // The teammate note tracks the flag here too: `isAgentTeamEnabled()`
+      // is re-read on every refresh, so a mid-session toggle that adds or
+      // removes `name` has to move the note with it.
+      if (schema.properties.run_in_background) {
+        schema.properties.run_in_background.description =
+          runInBackgroundDescription(teamEnabled);
+      }
+      if (teamEnabled) {
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
         schema.properties.plan_mode_required =
           TEAM_AGENT_PLAN_REQUIRED_PROPERTY;

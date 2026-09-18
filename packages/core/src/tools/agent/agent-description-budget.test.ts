@@ -168,7 +168,7 @@ describe('AgentTool per-turn size budgets', () => {
   // `getAvailableModelGrades()` is non-empty, which this fixture leaves
   // empty.
   it.each<[string, number]>([
-    ['run_in_background', 1_200],
+    ['run_in_background', 850],
     ['fork_tools', 600],
     ['working_dir', 600],
     ['isolation', 350],
@@ -186,16 +186,57 @@ describe('AgentTool per-turn size budgets', () => {
   );
 
   /**
+   * `run_in_background`'s teammate half is about the `name` parameter,
+   * which is only declared when `isAgentTeamEnabled()`. It used to be sent
+   * unconditionally, so a default install paid 341 characters explaining
+   * how to combine this parameter with one it had not been given — the same
+   * shape as a prompt naming a tool the model was not offered (#12032).
+   *
+   * Asserting the exact delta rather than a bound: the note either tracks
+   * the flag or it does not.
+   */
+  it('appends the teammate note only when the team feature is on', async () => {
+    const [withTeam, withoutTeam] = await Promise.all([
+      buildTool({ team: true }),
+      buildTool({ team: false }),
+    ]);
+    const off = paramDescription(withoutTeam, 'run_in_background');
+    const on = paramDescription(withTeam, 'run_in_background');
+
+    expect(off).not.toContain('Named teammates');
+    expect(on).toContain('Named teammates');
+    expect(on.length - off.length).toBe(341);
+    // What must survive the gating: the rules that hold either way.
+    for (const clause of [
+      'Defaults to true for top-level regular subagents',
+      'Nested agents run in the foreground',
+      'Unnamed caller-owned working_dir launches run in the foreground',
+      'A configured default comes from a subagent definition',
+    ]) {
+      expect(off).toContain(clause);
+      expect(on).toContain(clause);
+    }
+  });
+
+  it('keeps run_in_background within its budget with the team note on', async () => {
+    const tool = await buildTool({ team: true });
+    expect(
+      paramDescription(tool, 'run_in_background').length,
+    ).toBeLessThanOrEqual(1_200);
+  });
+
+  /**
    * The total is what the request actually carries, and it is the number
    * #12054 asks to track. Kept as a separate assertion because the
    * description and the schema can trade places without either
    * per-part budget noticing.
    */
   it('keeps the whole model-visible surface within its budget', async () => {
-    // Description plus serialized schema, default shape. Measured at
-    // ~14,100 characters — roughly 3,500 tokens at 4 chars/token, on
-    // every request of every session.
+    // Description plus serialized schema, default shape. Was ~14,100
+    // characters before the teammate note moved behind the team flag,
+    // ~13,760 after — roughly 3,400 tokens at 4 chars/token, on every
+    // request of every session.
     const tool = await buildTool();
-    expect(surfaceLength(tool)).toBeLessThanOrEqual(15_000);
+    expect(surfaceLength(tool)).toBeLessThanOrEqual(14_200);
   });
 });
