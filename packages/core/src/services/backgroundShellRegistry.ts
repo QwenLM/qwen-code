@@ -30,7 +30,11 @@ import {
   stripDisplayControlChars,
   truncateNotificationLabel,
 } from '../utils/terminalSafe.js';
-import { escapeXml } from '../utils/xml.js';
+import {
+  escapeXml,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_SHELLS');
 const MAX_NOTIFICATION_MODEL_COMMAND_LENGTH = 500;
@@ -516,7 +520,7 @@ export class BackgroundShellRegistry {
     const displayText = `Background shell "${commandLabel}" ${statusText}.`;
 
     const xmlParts: string[] = [
-      '<task-notification>',
+      TASK_NOTIFICATION_OPEN,
       `<task-id>${escapeXml(entry.shellId)}</task-id>`,
       '<kind>shell</kind>',
       `<status>${escapeXml(entry.status)}</status>`,
@@ -549,7 +553,7 @@ export class BackgroundShellRegistry {
     }
     xmlParts.push(
       `<output-file>${escapeXml(stripDisplayControlChars(entry.outputFile))}</output-file>`,
-      '</task-notification>',
+      TASK_NOTIFICATION_CLOSE,
     );
 
     const meta: ShellNotificationMeta = {

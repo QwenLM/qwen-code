@@ -38,11 +38,15 @@
 import { randomUUID } from 'node:crypto';
 import {
   createDebugLogger,
-  escapeXml,
   SessionService,
   Storage,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
+import {
+  escapeXml,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '@qwen-code/qwen-code-core/utils/xml.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
@@ -268,14 +272,14 @@ function buildSentCompletionNotification(
   const modelSessionId = truncateCodePoints(sessionId, 256);
   const modelLabel = truncateCodePoints(label, 256);
   const modelTextPrefix = [
-    '<task-notification>',
+    TASK_NOTIFICATION_OPEN,
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
     `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
     `<session-link>qwen-session://${escapeXml(modelSessionId)}</session-link>`,
     '<result>',
   ].join('');
-  const modelTextSuffix = '</result></task-notification>';
+  const modelTextSuffix = `</result>${TASK_NOTIFICATION_CLOSE}`;
   const resultBudget = Math.max(
     0,
     MAX_SENT_COMPLETION_MODEL_TEXT_CHARS -
