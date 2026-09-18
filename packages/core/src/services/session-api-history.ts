@@ -9,6 +9,7 @@ import type {
   ChatCompressionRecordPayload,
   ChatRecord,
   GoalTurnEndRecordPayload,
+  SlashCommandRecordPayload,
 } from './chatRecordingService.js';
 
 const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
@@ -188,6 +189,36 @@ export class SessionApiHistoryAccumulator {
 
   add(record: ChatRecord): void {
     if (record.type === 'system') {
+      if (record.subtype === 'slash_command') {
+        const payload = record.systemPayload as
+          | SlashCommandRecordPayload
+          | undefined;
+        const previous = this.lastMaterialRecord;
+        const parts = previous?.message?.parts;
+        // ACP records local command input as user and its output as a system
+        // result. Neither belongs in model history. TUI invocations fence off
+        // earlier input, including custom commands submitted to the model.
+        if (
+          payload?.phase === 'result' &&
+          payload.sentToModel !== true &&
+          Array.isArray(payload.outputHistoryItems) &&
+          payload.outputHistoryItems.length > 0 &&
+          payload.outputHistoryItems.every(
+            (item) => item?.['type'] === 'assistant',
+          ) &&
+          previous?.type === 'user' &&
+          previous.subtype === undefined &&
+          previous.message?.role === 'user' &&
+          parts?.length === 1 &&
+          typeof parts[0].text === 'string' &&
+          Object.keys(parts[0]).length === 1 &&
+          parts[0].text === payload.rawCommand
+        ) {
+          this.history.pop();
+        }
+        if (previous?.type === 'user') this.lastMaterialRecord = undefined;
+        return;
+      }
       if (record.subtype === 'goal_turn_end') {
         const payload = record.systemPayload as
           | GoalTurnEndRecordPayload

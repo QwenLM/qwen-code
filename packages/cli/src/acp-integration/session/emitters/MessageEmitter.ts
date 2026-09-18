@@ -222,12 +222,19 @@ export class MessageEmitter extends BaseEmitter {
   async emitSlashCommandOutput(
     text: string,
     timestamp?: string | number,
+    /**
+     * Extra `_meta` keys for clients that render slash-command output
+     * themselves. Spread first, so a payload can never displace `source`, nor
+     * the `timestamp` this emitter adds when the caller supplied one.
+     */
+    extra?: Record<string, unknown>,
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       _meta: {
+        ...extra,
         source: 'slash_command',
         ...(epochMs != null ? { timestamp: epochMs } : {}),
       },

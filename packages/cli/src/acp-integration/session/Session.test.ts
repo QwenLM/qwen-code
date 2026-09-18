@@ -10686,6 +10686,67 @@ describe('Session', () => {
       ]);
     });
 
+    it.each(['read both', ''])(
+      'records original resource links independently of model expansion (%j)',
+      async (text) => {
+        const links = [
+          {
+            type: 'resource_link' as const,
+            uri: 'transit://resource-a',
+            name: 'notes.md',
+            mimeType: 'text/markdown',
+            size: 0,
+            title: 'First notes',
+            description: 'Original reference',
+            annotations: { audience: ['user' as const], priority: 0.5 },
+            _meta: { preview: { version: 1 } },
+          },
+          {
+            type: 'resource_link' as const,
+            uri: 'https://example.com/notes.md',
+            name: 'notes.md',
+          },
+        ];
+        const expectedLinks = structuredClone(links);
+        const trustedContext: core.InvocationContextV1 = {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'resource-prompt',
+        };
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              ...(text ? [{ type: 'text' as const, text }] : []),
+              ...links,
+            ],
+          },
+          trustedContext,
+          undefined,
+          'model-only instruction',
+        );
+        links[0]._meta!.preview.version = 2;
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          text,
+          undefined,
+          {
+            displayText: text,
+            hookContext: '',
+            resourceLinks: expectedLinks,
+          },
+          trustedContext.promptId,
+        );
+        expect(textParts(firstSentMessage())).toEqual([
+          'model-only instruction',
+        ]);
+      },
+    );
+
     it('records daemon attachment references for transcript replay', async () => {
       const imageReference = {
         type: 'image' as const,
@@ -26893,6 +26954,184 @@ describe('Session', () => {
             _meta: { source: 'slash_command' },
           },
         });
+      });
+
+      it('forwards the structured compression result and records it for replay', async () => {
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: true,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> ~100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The English sentence still reaches text-only ACP hosts; the payload
+        // rides alongside it for hosts that render the result themselves.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(2, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Context compressed (200 -> ~100).',
+            },
+            _meta: { source: 'slash_command', contextCompression: compression },
+          },
+        });
+        // Replay rebuilds the structured line from the record, so it travels
+        // with the joined text rather than replacing it.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> ~100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('carries a compression notice on its own meta key and record item', async () => {
+        const notice = { phase: 'notice' as const, instructionsLimit: 2000 };
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: false,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compression instructions were truncated to 2000 chars.',
+              contextCompressionNotice: notice,
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> 100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The notice rides its own `_meta` key: the reducer folds this turn into
+        // one block and spreads `_meta` key by key, so a shared key would hide
+        // the note behind the compression payload that follows.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Compression instructions were truncated to 2000 chars.',
+            },
+            _meta: {
+              source: 'slash_command',
+              contextCompressionNotice: notice,
+            },
+          },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                // Newline kept so the folded block still reads as two lines.
+                text: 'Compression instructions were truncated to 2000 chars.\n',
+                contextCompressionNotice: notice,
+              },
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> 100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('records a terminal no-op result for replay', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context (fast)...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'No compression needed.',
+              contextCompression: { phase: 'noop' as const },
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress-fast' }],
+        });
+
+        // The no-op is terminal, so it is recorded like the result: replay
+        // rebuilds the row in the client's language instead of leaving the
+        // joined English sentences.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context (fast)...\nNo compression needed.',
+                contextCompression: { phase: 'noop' },
+              },
+            ],
+          }),
+        );
       });
 
       it('emits canonical Goal state for an ACP /goal status query', async () => {
@@ -48350,7 +48589,7 @@ describe('Session', () => {
       let userInputDelivered = false;
       mockGuardBridge(() => {
         // The drain right after Stop 2 delivers user input, which discards
-        // that Stop's allow before it is applied.
+        // that Stop's block before it is applied.
         if (stopCalls === 2 && !userInputDelivered) {
           userInputDelivered = true;
           return {
@@ -48368,7 +48607,7 @@ describe('Session', () => {
           }
           stopCalls++;
           stopActiveFlags.push(request.input?.stop_hook_active);
-          return stopCalls === 1 || stopCalls === 3
+          return stopCalls <= 3
             ? {
                 success: true,
                 output: { decision: 'block', reason: `block ${stopCalls}` },
@@ -48384,7 +48623,7 @@ describe('Session', () => {
       await runGuardPrompt();
 
       expect(userInputDelivered).toBe(true);
-      expect(stopActiveFlags.slice(0, 3)).toEqual([false, true, false]);
+      expect(stopActiveFlags.slice(0, 4)).toEqual([false, true, false, true]);
       // Stop 3 blocked the user's turn: one block, not two consecutive ones.
       expect(stopCalls).toBeGreaterThanOrEqual(4);
       expect(agentMessageChunks()).not.toContain(

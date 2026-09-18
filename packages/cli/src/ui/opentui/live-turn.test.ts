@@ -287,7 +287,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       result.current.submit('look @notes.md');
     });
-    expect(result.current.queueLength).toBe(1);
+    expect(result.current.messageQueue).toEqual(['look @notes.md']);
 
     await act(async () => {
       for (const wake of live.waiters.splice(0)) wake();
@@ -302,7 +302,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(live.turns[1]?.options).toMatchObject({
       submittedPrompt: 'look @notes.md',
     });
-    expect(result.current.queueLength).toBe(0);
+    expect(result.current.messageQueue).toEqual([]);
   });
 
   it('consumes only its own submission when a replayed turn declines (R2-2)', async () => {
@@ -324,7 +324,10 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       result.current.submit('then do the other thing');
     });
-    expect(result.current.queueLength).toBe(2);
+    expect(result.current.messageQueue).toEqual([
+      'look @notes.md',
+      'then do the other thing',
+    ]);
 
     await act(async () => {
       for (const wake of live.waiters.splice(0)) wake();
@@ -333,7 +336,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
 
     expect(live.turns[1]?.prompt).toBe('look @notes.md');
     expect(live.turns[2]?.prompt).toBe('then do the other thing');
-    expect(result.current.queueLength).toBe(0);
+    expect(result.current.messageQueue).toEqual([]);
   });
 
   it('restores a dropped steering batch at the front of the queue', () => {
@@ -351,7 +354,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       result.current.submit('queued after');
     });
-    expect(result.current.queueLength).toBe(1);
+    expect(result.current.messageQueue).toEqual(['queued after']);
 
     const { restoreSteering } = live.turns[0]?.options as unknown as {
       restoreSteering: (texts: readonly string[]) => void;
@@ -359,15 +362,40 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     act(() => {
       restoreSteering(['  steer me  ', '', 'then @b.ts']);
     });
-    expect(result.current.queueLength).toBe(3);
+    expect(result.current.messageQueue).toEqual([
+      'steer me',
+      'then @b.ts',
+      'queued after',
+    ]);
 
     let popped: string | null = null;
     act(() => {
       popped = result.current.popQueue();
     });
 
-    expect(result.current.queueLength).toBe(0);
+    expect(result.current.messageQueue).toEqual([]);
     expect(popped).toBe('steer me\n\nthen @b.ts\n\nqueued after');
+  });
+
+  it('drops the visible queue rows when the transcript resets', () => {
+    // `/clear` and a session switch rebuild the transcript. A stale row would
+    // keep advertising a prompt the following turn never runs.
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+
+    act(() => {
+      result.current.submit('first prompt');
+    });
+    act(() => {
+      result.current.submit('queued after');
+    });
+    expect(result.current.messageQueue).toEqual(['queued after']);
+
+    act(() => {
+      result.current.resetTranscript([]);
+    });
+    expect(result.current.messageQueue).toEqual([]);
   });
 });
 

@@ -1929,7 +1929,7 @@ describe('WorkflowOrchestrator', () => {
       expect(dispatch).toHaveBeenCalledOnce();
       expect(entries.map((entry) => entry.type)).toEqual(['started', 'result']);
       expect(
-        entries.some((entry) => entry.type !== 'source' && entry.key === keyB),
+        entries.some((entry) => 'key' in entry && entry.key === keyB),
       ).toBe(false);
       expect(respawns).toEqual([]);
     } finally {
@@ -3498,7 +3498,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   });
 
   type StubSubagentCall = {
-    config: { name?: string; model?: string; disallowedTools?: string[] };
+    config: {
+      name?: string;
+      model?: string;
+      disallowedTools?: string[];
+      tools?: string[];
+    };
     runtimeContextSame: boolean;
     /** The exact Config the dispatch handed to the runtime agent. */
     runtimeContext: Config;
@@ -3517,6 +3522,17 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   function fakeConfigWithMgr(opts: {
     transcriptDir?: string;
+    /**
+     * Tools this session's registry holds beyond the built-ins, such as MCP
+     * tools. Built-in tools always count as known, registered here or not,
+     * the way the real manager treats them.
+     */
+    registeredTools?: Array<{ name: string; displayName?: string }>;
+    /**
+     * Tools that background MCP discovery registers: absent from the registry
+     * until `waitForMcpReady` settles.
+     */
+    discoveredTools?: Array<{ name: string; displayName?: string }>;
     findSubagentByName?: (name: string) => Promise<{
       name: string;
       description: string;
@@ -3525,6 +3541,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       tools?: string[];
       disallowedTools?: string[];
       model?: string;
+      mcpServers?: Record<string, unknown>;
     } | null>;
     onCreate?: (
       call: StubSubagentCall,
@@ -3556,6 +3573,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     // The override carries the result. We don't care about the registry contents in unit
     // tests — only that the override flow doesn't crash on the missing methods — so the
     // stub registry just answers the API surface those helpers call.
+    const registered = [...(opts.registeredTools ?? [])];
     const fakeRegistry = {
       copyDiscoveredToolsFrom: () => {},
       registerTool: () => {},
@@ -3563,6 +3581,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      waitForMcpReady: vi.fn(async () => {
+        registered.push(...(opts.discoveredTools ?? []));
+      }),
       // Session Workflow plan-revision state mirroring Config's shape: an
       // own field mutated by methods that assign `this.<field>` (config.ts
       // set/clearSessionWorkflowPlanRevision). On an un-shimmed
@@ -3602,14 +3623,33 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
-        // Mirrors the real manager for everything a unit test can know: MCP
-        // patterns and built-in tools match, anything else is unmatched. The
-        // schema-deny refusal resolves names itself and does not use this.
-        findUnmatchedToolNames: async (names: string[]) =>
+        // Mirrors the real manager over a session registry of the built-ins
+        // plus `registeredTools`: MCP entries are exempt unless the caller
+        // asks for them to be checked, built-in tools match, and anything else
+        // matches only a registered name or display name. The schema-deny
+        // refusal resolves names itself and does not use this.
+        findUnmatchedToolNames: async (
+          names: string[],
+          options: { checkMcpNames?: boolean } = {},
+        ) =>
           names.filter(
             (name) =>
-              !name.startsWith('mcp__') &&
-              resolveBuiltinToolName(name) === undefined,
+              (options.checkMcpNames === true || !name.startsWith('mcp__')) &&
+              resolveBuiltinToolName(name) === undefined &&
+              !registered.some(
+                (tool) => tool.name === name || tool.displayName === name,
+              ),
+          ),
+        // Same registry: a registered name or display name becomes the tool
+        // name, a built-in spelling its tool name, anything else as given.
+        resolveToolNames: async (names: string[]) =>
+          names.map(
+            (name) =>
+              registered.find(
+                (tool) => tool.name === name || tool.displayName === name,
+              )?.name ??
+              resolveBuiltinToolName(name) ??
+              name,
           ),
         createAgentHeadless: async (
           subagentConfig: {
@@ -4491,6 +4531,353 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     },
   );
 
+  describe('tools allowlist', () => {
+    const warehouse = [
+      {
+        name: 'mcp__warehouse__query',
+        displayName: 'query (warehouse MCP Server)',
+      },
+    ];
+    const ok = async () => ({ finalText: 'ok', terminateMode: 'GOAL' });
+
+    it('narrows the agent to the named tools and leaves execution to its declarations', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await createProductionDispatch(config)('scan', {
+        tools: ['run_shell_command', 'ReadFile'],
+      });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.config.tools).toEqual([
+        'run_shell_command',
+        'read_file',
+      ]);
+      expect(calls[0]!.config).not.toHaveProperty('executionAllowedTools');
+    });
+
+    // Denies apply after the allowlist, so a floor tool stays out.
+    it('never brings back a floor tool', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await createProductionDispatch(config)('scan', {
+        tools: ['agent', 'ask_user_question', 'read_file'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['read_file']);
+      expect(calls[0]!.config.disallowedTools).toEqual(
+        expect.arrayContaining(['agent', 'ask_user_question']),
+      );
+    });
+
+    it('bounds the list by the agent type allowlist, each side named by display name', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        findSubagentByName: async () => ({
+          name: 'Analyst',
+          description: 'analysis',
+          systemPrompt: 'analyse',
+          level: 'project',
+          tools: ['ReadFile', 'query (warehouse MCP Server)'],
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('analyse', {
+        agentType: 'Analyst',
+        tools: ['read_file', 'Shell', 'mcp__warehouse__query'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual([
+        'read_file',
+        'mcp__warehouse__query',
+      ]);
+    });
+
+    it('accepts an MCP tool by display name and hands the agent its tool name', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('analyse', {
+        tools: ['query (warehouse MCP Server)'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['mcp__warehouse__query']);
+    });
+
+    // An agent type that lists no tools, or lists '*', inherits every tool,
+    // so it does not bound the call's list.
+    it.each([
+      ['no allowlist', undefined],
+      ['an empty allowlist', []],
+      ['a wildcard allowlist', ['*']],
+    ])(
+      'does not bound the list by an agent type with %s',
+      async (_label, agentTypeTools) => {
+        const { config, calls } = fakeConfigWithMgr({
+          findSubagentByName: async () => ({
+            name: 'Open',
+            description: 'inherits',
+            systemPrompt: 'open',
+            level: 'project',
+            ...(agentTypeTools !== undefined ? { tools: agentTypeTools } : {}),
+          }),
+          onCreate: ok,
+        });
+
+        await createProductionDispatch(config)('scan', {
+          agentType: 'Open',
+          tools: ['read_file'],
+        });
+
+        expect(calls[0]!.config.tools).toEqual(['read_file']);
+      },
+    );
+
+    // The agent type's list is definition-authored and echoed in the refusal.
+    it('strips control characters from the lists a refusal echoes', async () => {
+      const { config } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Reader',
+          description: 'read-only',
+          systemPrompt: 'read',
+          level: 'project',
+          tools: ['Read\u0085File'],
+        }),
+        onCreate: ok,
+      });
+
+      const error = (await createProductionDispatch(config)('scan', {
+        agentType: 'Reader',
+        tools: ['run_shell_command'],
+      }).catch((e: unknown) => e)) as Error;
+
+      expect(error.message).toContain('("ReadFile")');
+      expect(error.message).not.toMatch(/[\u007f-\u009f]/);
+    });
+
+    // MCP discovery runs in the background; a correct MCP name must not be
+    // refused because the dispatch came before discovery settled.
+    it.each([['mcp__warehouse__query'], ['query (warehouse MCP Server)']])(
+      'waits for MCP discovery before judging %s',
+      async (name) => {
+        const { config, calls } = fakeConfigWithMgr({
+          discoveredTools: warehouse,
+          onCreate: ok,
+        });
+
+        await createProductionDispatch(config)('analyse', { tools: [name] });
+
+        expect(config.waitForMcpReady).toHaveBeenCalledOnce();
+        expect(calls[0]!.config.tools).toEqual(['mcp__warehouse__query']);
+      },
+    );
+
+    it('refuses an MCP name discovery did not register, after waiting for it', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await expect(
+        createProductionDispatch(config)('analyse', {
+          tools: ['mcp__warehouse__query'],
+        }),
+      ).rejects.toThrow(/"mcp__warehouse__query" names no tool/);
+      expect(config.waitForMcpReady).toHaveBeenCalledOnce();
+      expect(calls).toHaveLength(0);
+    });
+
+    it('does not wait for discovery when every entry is a built-in tool', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await createProductionDispatch(config)('scan', {
+        tools: ['Shell', 'read_file'],
+      });
+
+      expect(config.waitForMcpReady).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+    });
+
+    // The agent's own servers are judged by its own registry, so their names
+    // give this session's discovery nothing to wait for.
+    it('does not wait for discovery for names its agent type serves itself', async () => {
+      const { config } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Db',
+          description: 'db agent',
+          systemPrompt: 'db',
+          level: 'project',
+          mcpServers: { agentdb: { command: 'agentdb' } },
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('query', {
+        agentType: 'Db',
+        tools: ['mcp__agentdb__query'],
+      });
+
+      expect(config.waitForMcpReady).not.toHaveBeenCalled();
+    });
+
+    it('refuses a list that shares no tool with the agent type, naming both as written', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Reader',
+          description: 'read-only',
+          systemPrompt: 'read',
+          level: 'project',
+          tools: ['ReadFile'],
+        }),
+        onCreate: ok,
+      });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          agentType: 'Reader',
+          tools: ['run_shell_command'],
+        }),
+      ).rejects.toThrow(
+        'agent({tools, agentType}): none of "run_shell_command" is among the tools the agent type allows ("ReadFile").',
+      );
+      expect(calls).toHaveLength(0);
+    });
+
+    it.each([
+      ['a name no tool has', ['Bash', 'read_file'], /"Bash" names no tool/],
+      [
+        'an MCP tool this session does not register',
+        ['mcp__warehouse__drop'],
+        /"mcp__warehouse__drop" names no tool/,
+      ],
+    ])('refuses %s before spawning', async (_label, tools, message) => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        onCreate: ok,
+      });
+
+      await expect(
+        createProductionDispatch(config)('scan', { tools }),
+      ).rejects.toThrow(message);
+      expect(calls).toHaveLength(0);
+    });
+
+    // Its own servers' tools exist only in the registry built for the agent,
+    // so this session's registry cannot judge those names.
+    it('leaves mcp__ names to the agent when its type brings its own MCP servers', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        findSubagentByName: async () => ({
+          name: 'Db',
+          description: 'db agent',
+          systemPrompt: 'db',
+          level: 'project',
+          mcpServers: { agentdb: { command: 'agentdb' } },
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('query', {
+        agentType: 'Db',
+        tools: ['mcp__agentdb__query'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['mcp__agentdb__query']);
+    });
+
+    // A deny is resolved the way the agent's own config resolves it, so a
+    // display name in the agent type's denies removes that tool here too.
+    it('removes a tool the agent type denies by display name', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        registeredTools: warehouse,
+        findSubagentByName: async () => ({
+          name: 'Analyst',
+          description: 'analysis',
+          systemPrompt: 'analyse',
+          level: 'project',
+          disallowedTools: ['query (warehouse MCP Server)'],
+        }),
+        onCreate: ok,
+      });
+
+      await createProductionDispatch(config)('analyse', {
+        agentType: 'Analyst',
+        tools: ['mcp__warehouse__query', 'read_file'],
+      });
+
+      expect(calls[0]!.config.tools).toEqual(['read_file']);
+    });
+
+    it('refuses a list whose every tool is denied', async () => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          tools: ['WriteFile'],
+          disallowedTools: ['write_file'],
+        }),
+      ).rejects.toThrow(/every tool in "write_file" is denied for this agent/);
+      expect(calls).toHaveLength(0);
+    });
+
+    it('gives a schema agent structured_output', async () => {
+      const { config, calls } = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: '', terminateMode: 'CANCELLED' }),
+      });
+
+      await createProductionDispatch(config)('extract', {
+        schema: { type: 'object' },
+        tools: ['read_file'],
+      }).catch(() => undefined);
+
+      expect(calls[0]!.config.tools).toEqual([
+        'read_file',
+        'structured_output',
+      ]);
+    });
+
+    // The host re-checks what the sandbox refuses, for a caller that reaches
+    // the dispatch directly.
+    it.each([
+      [
+        'a bare string',
+        'read_file',
+        /must be a non-empty array of tool-name strings/,
+      ],
+      ['an empty list', [], /must be a non-empty array of tool-name strings/],
+      ['a wildcard', ['*'], /"\*" is a pattern/],
+      ['an MCP server', ['mcp__warehouse'], /names a whole MCP server/],
+      ['exec', ['exec'], /is the code-mode surface/],
+    ])(
+      'refuses a host-supplied allowlist that is %s before spawning',
+      async (_label, tools, message) => {
+        const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+        await expect(
+          createProductionDispatch(config)('scan', {
+            tools: tools as unknown as string[],
+          }),
+        ).rejects.toThrow(message);
+        expect(calls).toHaveLength(0);
+      },
+    );
+
+    // Name refusals are decided before any worktree is provisioned.
+    it.each([
+      ['an unknown name', { tools: ['Bash'] }],
+      ['a fully denied list', { tools: ['edit'], disallowedTools: ['edit'] }],
+    ])('refuses %s before provisioning a worktree', async (_label, extra) => {
+      const { config, calls } = fakeConfigWithMgr({ onCreate: ok });
+
+      await expect(
+        createProductionDispatch(config)('scan', {
+          isolation: 'worktree',
+          ...extra,
+        }),
+      ).rejects.toThrow(/agent\(\{tools\}\)/);
+      expect(worktreeStubs.instances).toHaveLength(0);
+      expect(calls).toHaveLength(0);
+    });
+  });
+
   // Every option the resume key projects must also keep a dispatch off the
   // fast path. The guard is driven by the same list, so an option added there
   // cannot be silently dropped by a fast path that ignores it.
@@ -4505,6 +4892,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         agentType: 'Scanner',
         workingDir: '/nonexistent/worktree',
         disallowedTools: ['edit'],
+        tools: ['read_file'],
       };
       expect(samples).toHaveProperty(key);
       const { config } = fakeConfigWithMgr({

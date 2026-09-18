@@ -140,9 +140,11 @@ const { mockPreloadContentGenerator } = vi.hoisted(() => ({
   mockPreloadContentGenerator: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { mockListWorkflowSnapshots } = vi.hoisted(() => ({
-  mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
-}));
+const { mockListWorkflowSnapshots, mockClaimInterruptedWorkflowRuns } =
+  vi.hoisted(() => ({
+    mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
+    mockClaimInterruptedWorkflowRuns: vi.fn().mockResolvedValue([]),
+  }));
 const { mockListSavedWorkflows } = vi.hoisted(() => ({
   mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
 }));
@@ -271,6 +273,19 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  getModelsForProviderProtocol: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getModelsForProviderProtocol,
+  resolveModelSelectionAuthType: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveModelSelectionAuthType,
+  resolveModelProtocol: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).resolveModelProtocol,
+  tryResolveModelProtocol: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).tryResolveModelProtocol,
+
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceService,
@@ -387,6 +402,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).extractAndStripMeta,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
+  claimInterruptedWorkflowRuns: mockClaimInterruptedWorkflowRuns,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
   withDaemonSpan: mockWithDaemonSpan,
@@ -448,6 +464,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   AuthType: {
     QWEN_OAUTH: 'qwen-oauth',
     USE_OPENAI: 'openai',
+    USE_OPENAI_RESPONSES: 'openai-responses',
     USE_ANTHROPIC: 'anthropic',
     USE_GEMINI: 'gemini',
     USE_VERTEX_AI: 'vertex-ai',
@@ -558,6 +575,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         ownsModel: (model: { envKey?: string }) =>
           typeof model.envKey === 'string' &&
           model.envKey.startsWith('QWEN_CUSTOM_API_KEY_'),
+        mergeModelsByIdentity: true,
       };
     }
     return undefined;
@@ -975,20 +993,6 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
   ),
 }));
 
-vi.mock('./authMethods.js', () => {
-  const buildAuthMethods = vi.fn();
-  return {
-    buildAuthMethods,
-    pickAuthMethodsForAuthRequired: vi.fn((selectedType?: string) => {
-      const authMethods = buildAuthMethods();
-      if (!selectedType) return authMethods;
-      const matched = authMethods.filter(
-        (method: { id: string }) => method.id === selectedType,
-      );
-      return matched.length ? matched : authMethods;
-    }),
-  };
-});
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
@@ -1153,6 +1157,8 @@ import {
   tokenLimit,
   McpBudgetWouldExceedError,
   buildInstallPlan,
+  findExistingProviderModels,
+  getDefaultBaseUrlForProtocol,
   applyProviderInstallPlan,
   Storage,
   SessionTranscriptReader,
@@ -1230,7 +1236,6 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
 import { getCurrentLanguage, setLanguageAsync } from '../i18n/index.js';
-import { buildAuthMethods } from './authMethods.js';
 import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_MIN_INTERVAL_MS,
@@ -2375,6 +2380,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   };
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
+    authenticate: (args: { methodId: string }) => Promise<void>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
     setSessionConfigOption: (args: Record<string, unknown>) => Promise<unknown>;
     beginManagedShutdown: () => {
@@ -2493,6 +2499,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
       reloadModelProvidersConfig: vi.fn(),
+      syncModelSelection: vi.fn(),
       getModelProvidersConfig: vi.fn(),
       getProviderProtocolConfig: vi.fn().mockReturnValue({}),
       setImageModel: vi.fn(),
@@ -4732,14 +4739,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it('does not return discontinued qwen-oauth as the only ACP auth option', async () => {
-    vi.mocked(buildAuthMethods).mockReturnValue([
-      {
-        id: 'openai',
-        name: 'Use OpenAI API key',
-        description: 'Requires setting OPENAI_API_KEY',
-      },
-    ]);
-
     const innerConfig = makeInnerConfig();
     vi.mocked(innerConfig.getModelsConfig).mockReturnValue({
       getCurrentAuthType: vi.fn().mockReturnValue('qwen-oauth'),
@@ -5047,6 +5046,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       reloadScopeFromDisk: vi.fn(),
       reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       forScope: vi.fn().mockReturnValue({ settings: { mcpServers: {} } }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -5064,6 +5064,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const settings = {
       merged,
       user,
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
       setValue: vi.fn((_scope: string, key: string, value: unknown) => {
@@ -5157,6 +5158,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         settings: workspaceSettings,
       },
       isTrusted: true,
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
       forScope: vi.fn((scope: string) =>
@@ -6216,6 +6218,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
       forScope: vi.fn().mockReturnValue({ settings: { mcpServers: {} } }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -9739,7 +9742,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('lists workspace hooks from the registry with their stored config and state', async () => {
+  it('lists workspace hooks from the registry with their stored config and state, without subagent entries', async () => {
     const getAllSessionHooks = vi.fn().mockReturnValue([
       {
         hookId: 'session-hook-1',
@@ -9756,6 +9759,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getBareMode: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('workspace-session'),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue({
         getAllHooks: () => [
           {
@@ -9775,6 +9779,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             eventName: 'Stop',
             source: 'session',
             agentScope: 'agent-1',
+            enabled: true,
+            config: {
+              type: 'http',
+              url: 'https://hooks.example.com/agent-stop',
+            },
+          },
+          {
+            eventName: 'Stop',
+            source: 'project',
             enabled: true,
             config: {
               type: 'http',
@@ -9831,7 +9844,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             headers: { 'X-Team': 'core' },
             once: true,
           },
-          source: 'session',
+          source: 'project',
           enabled: true,
         },
       ],
@@ -13240,6 +13253,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         workflowStepId: true,
         runSavedArgs: true,
         runScript: true,
+        nameOnly: false,
       },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
@@ -13354,6 +13368,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).toHaveBeenCalledOnce();
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
+    // A host reads the lock from here to know the model is restricted while
+    // its own run-script still starts runs.
+    Object.assign(innerConfig, { isWorkflowNameOnly: () => true });
+    mockListSavedWorkflows.mockResolvedValueOnce([]);
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSupportedCommands, {
+        sessionId,
+      }),
+    ).resolves.toMatchObject({
+      workflowToolFeatures: { runScript: true, nameOnly: true },
+    });
+
     dateNowSpy.mockRestore();
     mockConnectionState.resolve();
     await agentPromise;
@@ -13435,6 +13461,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(2);
+    // A run the previous process left unfinished becomes history before the
+    // session first reads it.
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledOnce();
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledWith(innerConfig);
+    expect(
+      mockClaimInterruptedWorkflowRuns.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockListWorkflowSnapshots.mock.invocationCallOrder[0]!);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -21538,7 +21571,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         apiKey: 'sk-test',
         modelIds: ['deepseek-chat'],
       }),
-      settings.merged.modelProviders?.['openai'],
+      settings.merged.modelProviders?.['openai'] ?? [],
+      { authType: undefined, id: undefined, baseUrl: undefined },
     );
     expect(applyProviderInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: 'deepseek' }),
@@ -21548,6 +21582,307 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    {
+      label: 'canonical Responses only',
+      userAuthType: undefined,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: false,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'Responses with a Chat sibling',
+      userAuthType: undefined,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'selected Chat with a Responses sibling',
+      userAuthType: undefined,
+      providerId: 'gateway',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI,
+    },
+    {
+      label: 'explicit legacy Responses method',
+      userAuthType: undefined,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI_RESPONSES,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'User Responses preserved',
+      userAuthType: AuthType.USE_OPENAI_RESPONSES,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'Workspace Responses does not leak to User Chat',
+      userAuthType: AuthType.USE_OPENAI,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI_RESPONSES,
+    },
+    {
+      label: 'Workspace Chat does not overwrite User Responses',
+      userAuthType: AuthType.USE_OPENAI_RESPONSES,
+      providerId: 'openai',
+      initialAuthType: AuthType.USE_OPENAI,
+      withChat: true,
+      methodId: AuthType.USE_OPENAI,
+      expected: AuthType.USE_OPENAI,
+    },
+  ])(
+    'authenticate preserves API routing for $label',
+    async ({
+      initialAuthType,
+      userAuthType,
+      providerId,
+      withChat,
+      methodId,
+      expected,
+    }) => {
+      const actual = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      const baseUrl = 'https://api.example/v1';
+      const modelProviders = {
+        [providerId]: [
+          ...(withChat
+            ? [{ id: 'same', baseUrl, wireApi: 'chat-completions' as const }]
+            : []),
+          { id: 'same', baseUrl, wireApi: 'responses' as const },
+        ],
+      };
+      const providerProtocol = { gateway: 'openai' as const };
+      const models = new actual.ModelsConfig({
+        initialAuthType,
+        generationConfig: { model: 'same', baseUrl },
+        modelProvidersConfig: modelProviders,
+        providerProtocolConfig: providerProtocol,
+      });
+      const refreshAuth = vi.fn(async (authType: AuthType) => {
+        models.syncAfterAuthRefresh(authType, models.getModel());
+      });
+      mockConfig = {
+        ...mockConfig,
+        getModel: () => models.getModel(),
+        getAuthType: () => undefined,
+        getCurrentAuthType: () => models.getCurrentAuthType(),
+        getCurrentModelRegistryBaseUrl: () =>
+          models.getCurrentRegistryBaseUrl(),
+        refreshAuth,
+      } as unknown as Config;
+      const settings = {
+        ...makeSessionSettings({ modelProviders, providerProtocol }),
+        forScope: vi.fn((scope: SettingScope) => ({
+          settings: {
+            security: {
+              auth: {
+                selectedType:
+                  scope === SettingScope.User ? userAuthType : initialAuthType,
+              },
+            },
+          },
+        })),
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        expect(
+          await agent.initialize({ clientCapabilities: {} }),
+        ).toMatchObject({
+          authMethods: [
+            {
+              id: AuthType.USE_OPENAI,
+              name: 'Use OpenAI API key',
+              _meta: { args: ['--auth-type=openai'] },
+            },
+          ],
+        });
+        await agent.authenticate({ methodId });
+        expect(refreshAuth).toHaveBeenCalledWith(expected, undefined);
+        expect(models.getCurrentAuthType()).toBe(expected);
+        expect(settings.setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'security.auth.selectedType',
+          userAuthType === AuthType.USE_OPENAI_RESPONSES
+            ? userAuthType
+            : methodId,
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('authenticate tolerates an invalid api elsewhere in modelProviders and stays on the session wire', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/qwen-code-core')
+    >('@qwen-code/qwen-code-core');
+    const baseUrl = 'https://api.example/v1';
+    // The session's own models are valid; an unrelated bucket carries a
+    // hand-edited invalid `wireApi`, so the wire resolver throws over the merged
+    // settings even though the session itself is healthy.
+    const cleanProviders = {
+      openai: [{ id: 'same', baseUrl, wireApi: 'responses' as const }],
+    };
+    const modelProviders = {
+      ...cleanProviders,
+      idealab: [
+        {
+          id: 'other',
+          baseUrl: 'https://other.example/v1',
+          wireApi: 'invalid' as never,
+        },
+      ],
+    };
+    const providerProtocol = { idealab: 'openai' as const };
+    const models = new actual.ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI_RESPONSES,
+      generationConfig: { model: 'same', baseUrl },
+      modelProvidersConfig: cleanProviders,
+    });
+    const refreshAuth = vi.fn(async (authType: AuthType) => {
+      models.syncAfterAuthRefresh(authType, models.getModel());
+    });
+    mockConfig = {
+      ...mockConfig,
+      getModel: () => models.getModel(),
+      getAuthType: () => undefined,
+      getCurrentAuthType: () => models.getCurrentAuthType(),
+      getCurrentModelRegistryBaseUrl: () => models.getCurrentRegistryBaseUrl(),
+      refreshAuth,
+    } as unknown as Config;
+    const settings = {
+      ...makeSessionSettings({ modelProviders, providerProtocol }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    try {
+      await agent.initialize({ clientCapabilities: {} });
+      await agent.authenticate({ methodId: AuthType.USE_OPENAI });
+      // The invalid unrelated entry must not re-authenticate the session onto
+      // the requested wire: the fallback preserves the wire the session's
+      // models actually live on.
+      expect(refreshAuth).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI_RESPONSES,
+        undefined,
+      );
+      expect(models.getCurrentAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(settings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'security.auth.selectedType',
+        AuthType.USE_OPENAI,
+      );
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it.each([{ protocol: 'openai', wireApi: 'responses' }])(
+    'qwen/providers/connect forwards OpenAI API selection: %j',
+    async (selection) => {
+      const { agent, agentPromise } = await bootCoreSettingsAgent(
+        makeSessionSettings({
+          model: { name: 'saved', baseUrl: 'https://saved.example/v1' },
+          security: { auth: { selectedType: AuthType.USE_OPENAI_RESPONSES } },
+        }),
+      );
+      try {
+        await expect(
+          agent.extMethod('qwen/providers/connect', {
+            providerId: 'custom-openai-compatible',
+            apiKey: 'sk-test',
+            baseUrl: 'https://api.example/v1',
+            modelIds: ['same'],
+            ...selection,
+          }),
+        ).resolves.toMatchObject({ success: true });
+        expect(buildInstallPlan).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining(selection),
+          [],
+          {
+            authType: AuthType.USE_OPENAI_RESPONSES,
+            id: 'saved',
+            baseUrl: 'https://saved.example/v1',
+          },
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('qwen/providers/connect defaults a blank baseUrl to the effective route endpoint', async () => {
+    const { agent, agentPromise } = await bootCoreSettingsAgent(
+      makeSessionSettings(),
+    );
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        apiKey: 'sk-test',
+        modelIds: ['same'],
+        protocol: 'openai',
+        wireApi: 'responses',
+      }),
+    ).resolves.toMatchObject({ success: true });
+    // The Responses wire dials the /v1-less default endpoint; the blank-input
+    // default must be derived from the EFFECTIVE route, not the raw bucket
+    // protocol (which would hand the Chat Completions default).
+    expect(getDefaultBaseUrlForProtocol).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    { protocol: 'openai', wireApi: 'invalid' },
+    { protocol: 'openai', wireApi: null },
+    { protocol: 'anthropic', wireApi: 'responses' },
+  ])(
+    'qwen/providers/connect rejects invalid API before writing: %j',
+    async (selection) => {
+      const { agent, agentPromise } = await bootCoreSettingsAgent(
+        makeSessionSettings(),
+      );
+      vi.mocked(buildInstallPlan).mockClear();
+      vi.mocked(applyProviderInstallPlan).mockClear();
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.example/v1',
+          modelIds: ['same'],
+          ...selection,
+        }),
+      ).rejects.toThrow(/api/i);
+      expect(buildInstallPlan).not.toHaveBeenCalled();
+      expect(applyProviderInstallPlan).not.toHaveBeenCalled();
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('qwen/providers/connect returns preserved model when adapter getValue returns a non-empty string', async () => {
     vi.mocked(createLoadedSettingsAdapter).mockImplementationOnce(
@@ -21586,6 +21921,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['openai'])(
+    'qwen/providers/list exposes API prefill for %s',
+    async (providerId) => {
+      const actual = await vi.importActual<
+        typeof import('@qwen-code/qwen-code-core')
+      >('@qwen-code/qwen-code-core');
+      vi.mocked(findExistingProviderModels).mockImplementationOnce(
+        actual.findExistingProviderModels,
+      );
+      const settings = makeSessionSettings({
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          [providerId]: [
+            {
+              id: 'same',
+              name: '[DeepSeek] same',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+              ...(providerId === 'openai' ? { wireApi: 'responses' } : {}),
+            },
+          ],
+        },
+      });
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      const result = await agent.extMethod('qwen/providers/list', {});
+      expect(result).toMatchObject({
+        providers: [
+          expect.objectContaining({
+            existingConfig: expect.objectContaining({
+              protocol: 'openai',
+              wireApi: 'responses',
+              hasApiKey: true,
+            }),
+          }),
+        ],
+      });
+      expect(JSON.stringify(result)).not.toContain('sk-existing');
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('qwen/providers/list includes existing provider settings', async () => {
     const settings = {
@@ -21626,6 +22003,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           id: 'deepseek',
           existingConfig: {
             protocol: 'openai',
+            wireApi: 'chat-completions',
             baseUrl: 'https://api.deepseek.com/v1',
             hasApiKey: true,
             modelIds: ['deepseek-chat'],
@@ -22065,6 +22443,103 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/connect keeps a canonical Responses key for the same endpoint only', async () => {
+    const baseUrl = 'https://api.example/v1';
+    const settings = makeSessionSettings({
+      env: {
+        QWEN_CUSTOM_API_KEY_RESPONSES: 'sk-responses',
+        QWEN_CUSTOM_API_KEY_openai_https___api_example_v1: 'sk-chat',
+      },
+      modelProviders: {
+        openai: [
+          {
+            id: 'same',
+            baseUrl,
+            wireApi: 'responses',
+            envKey: 'QWEN_CUSTOM_API_KEY_RESPONSES',
+          },
+        ],
+      },
+    });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    try {
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          wireApi: 'responses',
+          baseUrl,
+          modelIds: ['same'],
+        }),
+      ).resolves.toMatchObject({ success: true });
+      expect(buildInstallPlan).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          apiKey: 'sk-responses',
+          wireApi: 'responses',
+        }),
+        settings.merged.modelProviders!['openai'],
+        { authType: undefined, id: undefined, baseUrl: undefined },
+      );
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          wireApi: 'responses',
+          baseUrl: 'https://other.example/v1',
+          modelIds: ['same'],
+        }),
+      ).rejects.toThrow('Invalid or missing apiKey');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it.each([
+    { order: ['openai', 'idealab'], expected: 'sk-mine' },
+    { order: ['idealab', 'openai'], expected: 'sk-team' },
+  ])(
+    'qwen/providers/connect reuses the first identity twin key across mapped buckets: $order',
+    async ({ order, expected }) => {
+      const baseUrl = 'https://gw.example/v1';
+      const buckets: Record<string, unknown> = {
+        openai: [{ id: 'gpt-4o', baseUrl, envKey: 'QWEN_CUSTOM_API_KEY_MINE' }],
+        idealab: [{ id: 'gpt-4o', baseUrl, envKey: 'TEAM_GATEWAY_KEY' }],
+      };
+      const settings = makeSessionSettings({
+        env: {
+          QWEN_CUSTOM_API_KEY_MINE: 'sk-mine',
+          TEAM_GATEWAY_KEY: 'sk-team',
+        },
+        modelProviders: Object.fromEntries(
+          order.map((id) => [id, buckets[id]]),
+        ),
+        providerProtocol: { idealab: 'openai' },
+      });
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        await expect(
+          agent.extMethod('qwen/providers/connect', {
+            providerId: 'custom-openai-compatible',
+            protocol: 'openai',
+            baseUrl,
+            modelIds: ['gpt-4o'],
+          }),
+        ).resolves.toMatchObject({ success: true });
+        expect(buildInstallPlan).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'custom-openai-compatible' }),
+          expect.objectContaining({ apiKey: expected, baseUrl }),
+          expect.anything(),
+          { authType: undefined, id: undefined, baseUrl: undefined },
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('qwen/providers/connect reuses the stored apiKey when the client omits it', async () => {
     const settings = {
       ...makeSessionSettings(),
@@ -22103,6 +22578,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ id: 'deepseek' }),
       expect.objectContaining({ apiKey: 'sk-existing' }),
       settings.merged.modelProviders?.['openai'],
+      { authType: undefined, id: undefined, baseUrl: undefined },
     );
 
     mockConnectionState.resolve();
@@ -22150,6 +22626,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           expect.objectContaining({ id: 'custom-openai-compatible' }),
           expect.objectContaining({ apiKey: 'stored-service-secret' }),
           models,
+          { authType: undefined, id: undefined, baseUrl: undefined },
         );
         vi.mocked(buildInstallPlan).mockClear();
         await expect(
@@ -22231,6 +22708,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         baseUrl: secondBaseUrl,
       }),
       settings.merged.modelProviders?.['openai'],
+      { authType: undefined, id: undefined, baseUrl: undefined },
     );
     expect(buildInstallPlan).not.toHaveBeenCalledWith(
       expect.anything(),
@@ -24336,6 +24814,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
       // through a config these tests do not stage; this suite is about
       // session routing, so it turns the switch off.
       merged: { mcpServers: {}, agents: { crossSessionMessaging: false } },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -26238,6 +26717,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   function makeRestoreSettings() {
     return {
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -26618,6 +27098,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           return mergedSettings;
         },
         reloadScopesFromDiskAtomically,
+        getSystemHooks: vi.fn().mockReturnValue(undefined),
         getUserHooks: vi.fn().mockReturnValue({}),
         getProjectHooks: vi.fn().mockReturnValue({}),
       } as unknown as LoadedSettings;
@@ -26718,6 +27199,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         .fn()
         .mockReturnValueOnce(true)
         .mockReturnValueOnce(false),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -29714,6 +30196,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers },
       forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -29783,6 +30266,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         },
       },
       forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -29906,6 +30390,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
       forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -29930,6 +30415,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         mcp: { allowed: ['some-other-server'] },
       },
       forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -29992,6 +30478,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
       forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -30016,6 +30503,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         mcp: { allowed: ['some-other-server'] },
       },
       forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -30056,6 +30544,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     } as unknown as Config;
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -30198,6 +30687,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         },
       })),
       setValue,
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -30595,6 +31085,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -30700,6 +31191,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -30789,6 +31281,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -30880,6 +31373,7 @@ describe('sessionLanguage multi-session propagation', () => {
         };
         return true;
       }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31018,6 +31512,7 @@ describe('sessionLanguage multi-session propagation', () => {
       reloadScopeFromDisk: vi.fn(() => {
         mergedSettings = { modelProviders: providerConfig };
       }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31100,6 +31595,7 @@ describe('sessionLanguage multi-session propagation', () => {
       reloadScopeFromDisk: vi.fn(() => {
         mergedSettings = { tools: { approvalMode: nextMode } };
       }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31206,6 +31702,7 @@ describe('sessionLanguage multi-session propagation', () => {
       reloadScopeFromDisk: vi.fn(() => {
         mergedSettings = { experimental: { sessionWorkflow: nextEnabled } };
       }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31320,6 +31817,7 @@ describe('sessionLanguage multi-session propagation', () => {
       reloadScopeFromDisk: vi.fn(() => {
         viewEnabled = true; // the UI write persisted true behind the child's back
       }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31425,6 +31923,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31491,6 +31990,7 @@ describe('sessionLanguage multi-session propagation', () => {
       workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
       isTrusted: true,
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31523,6 +32023,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31589,6 +32090,7 @@ describe('sessionLanguage multi-session propagation', () => {
       workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
       isTrusted: true,
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31641,6 +32143,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31753,6 +32256,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31876,6 +32380,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -31990,6 +32495,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32082,6 +32588,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32175,6 +32682,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32310,6 +32818,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32394,6 +32903,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32473,6 +32983,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32561,6 +33072,7 @@ describe('sessionLanguage multi-session propagation', () => {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32653,6 +33165,7 @@ describe('sessionLanguage multi-session propagation', () => {
       reloadScopeFromDisk: vi.fn(() => {
         mergedSettings = reloadedSettings;
       }),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32756,6 +33269,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const bootstrapSettings = {
       merged: {},
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32837,6 +33351,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const bootstrapSettings = {
       merged: {},
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -32979,6 +33494,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const bootstrapSettings = {
       merged: { mcpServers: {} },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -33095,6 +33611,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -33200,6 +33717,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -33278,6 +33796,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
     vi.mocked(loadSettings).mockReturnValue({
       merged: { mcpServers: {} },
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
@@ -33330,6 +33849,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const settings = {
       merged: { mcpServers: {} },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -33374,6 +33894,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const settings = {
       merged: { mcpServers: {} },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -33421,6 +33942,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const settings = {
       merged: { mcpServers: {} },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -33495,6 +34017,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const settings = {
       merged: { mcpServers: {} },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
@@ -33552,6 +34075,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const settings = {
       merged: { mcpServers: {} },
       reloadScopeFromDisk: vi.fn(),
+      getSystemHooks: vi.fn().mockReturnValue(undefined),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;

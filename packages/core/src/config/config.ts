@@ -232,12 +232,7 @@ import {
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
-import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
@@ -1141,13 +1136,6 @@ export interface ConfigParameters {
    */
   goalMaxActiveMinutes?: number;
   /**
-   * Ceiling on one Goal evidence-checkpoint verifier call, in seconds.
-   * Absent or invalid falls back to
-   * `GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS`. See
-   * `normalizeGoalCheckpointTimeoutSeconds`.
-   */
-  goalCheckpointTimeoutSeconds?: number;
-  /**
    * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
    * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
    * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
@@ -1260,6 +1248,12 @@ export interface ConfigParameters {
    * (`tools.workflowSizeGuideline`). Unset or unrecognised means the default.
    */
   workflowSizeGuideline?: string;
+  /**
+   * Restrict the model's Workflow calls to named workflows
+   * (`tools.workflowNameOnly`). `QWEN_CODE_WORKFLOW_NAME_ONLY=1` turns it on
+   * too.
+   */
+  workflowNameOnly?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -1466,6 +1460,12 @@ export interface ConfigParameters {
    */
   stopHookBlockingCap?: number;
   /**
+   * System-level hooks configuration (from the System and SystemDefaults
+   * settings files). Administrator configuration, so these hooks are loaded
+   * regardless of folder trust status.
+   */
+  systemHooks?: Record<string, unknown>;
+  /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
    */
@@ -1477,6 +1477,11 @@ export interface ConfigParameters {
    */
   projectHooks?: Record<string, unknown>;
 
+  /**
+   * Legacy merged hooks, read only when none of `systemHooks`, `userHooks`
+   * and `projectHooks` is supplied (a Config built straight from merged
+   * settings). It carries no scope, so it never counts as system hooks.
+   */
   hooks?: Record<string, unknown>;
   /** Glob patterns to exclude from .qwen/rules/ loading. */
   contextRuleExcludes?: string[];
@@ -1725,56 +1730,6 @@ export function normalizeGoalMaxActiveMinutes(value: unknown): number {
     return Number.POSITIVE_INFINITY;
   }
   return value * 60_000;
-}
-
-/**
- * Largest accepted `model.goalCheckpointTimeoutSeconds`, in seconds.
- *
- * Derived from the stream lifetime cap rather than picked as a round number,
- * because the checkpoint call is streamed: past that cap the guard throws
- * `StreamLifetimeExceededError` and the verifier's own timer never fires, so
- * a larger ceiling is a timer that cannot go off. Accepting one would let the
- * setting promise a wait the default wire does not honour -- an operator who
- * raised it to survive a slow model would wait the lifetime cap, get no
- * checkpoint, and see exactly the behaviour they had before touching it.
- *
- * The bound is the shipped default, resolved once here rather than per
- * request, so raising `QWEN_STREAM_MAX_LIFETIME_MS` (or an embedder's
- * `ContentGeneratorConfig.streamMaxLifetimeMs`) does not raise it: a
- * deployment that has lifted the lifetime guard still cannot set a longer
- * ceiling through this setting. That is deliberate -- the accepted range
- * stays the one every deployment can honour, instead of validating against
- * a wire bound the process cannot know at construction time. This also keeps
- * the typo-guard role `GOAL_TOKEN_BUDGET_CAP` plays for its sibling.
- */
-export const GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP =
-  DEFAULT_STREAM_MAX_LIFETIME_MS / 1000;
-
-/**
- * True for the values `normalizeGoalCheckpointTimeoutSeconds` honours: a
- * positive integer number of seconds up to the cap.
- */
-export function isValidGoalCheckpointTimeoutSeconds(
-  value: unknown,
-): value is number {
-  return (
-    typeof value === 'number' &&
-    Number.isInteger(value) &&
-    value >= 1 &&
-    value <= GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP
-  );
-}
-
-/**
- * The checkpoint verifier timeout to arm, in milliseconds: the setting when
- * it is valid, else the built-in default.
- */
-export function normalizeGoalCheckpointTimeoutSeconds(
-  value: number | undefined,
-): number {
-  return isValidGoalCheckpointTimeoutSeconds(value)
-    ? value * 1000
-    : GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS;
 }
 
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
@@ -2635,6 +2590,8 @@ export class Config {
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
+  private readonly initialAuthType?: AuthType;
+  private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
@@ -2832,7 +2789,6 @@ export class Config {
   private readonly goalTokenBudgetGrant: number;
   private readonly goalTurnBudgetGrant: number;
   private readonly goalActiveTimeBudgetGrantMs: number;
-  private readonly goalCheckpointTimeoutMs: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
@@ -2920,6 +2876,7 @@ export class Config {
   private goalProposalTurnKey: string | undefined;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
+  private readonly workflowNameOnly: boolean;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -3019,6 +2976,8 @@ export class Config {
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
+  /** System-level hooks (always loaded regardless of trust) */
+  private systemHooks?: Record<string, unknown>;
   /** User-level hooks (always loaded regardless of trust) */
   private userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -3027,6 +2986,7 @@ export class Config {
   private hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly messageBusListeners = new Set<(bus: MessageBus) => void>();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
   // True on the Config that claimed the process-global QWEN_CODE_MODEL slot
@@ -3231,17 +3191,6 @@ export class Config {
         `Ignoring invalid goalMaxActiveMinutes ${String(params.goalMaxActiveMinutes)}: expected an integer between 1 and ${GOAL_MAX_ACTIVE_MINUTES_CAP}, or -1 for no time ceiling; Goals will run with no time ceiling.`,
       );
     }
-    this.goalCheckpointTimeoutMs = normalizeGoalCheckpointTimeoutSeconds(
-      params.goalCheckpointTimeoutSeconds,
-    );
-    if (
-      params.goalCheckpointTimeoutSeconds !== undefined &&
-      !isValidGoalCheckpointTimeoutSeconds(params.goalCheckpointTimeoutSeconds)
-    ) {
-      this.debugLogger.warn(
-        `Ignoring invalid goalCheckpointTimeoutSeconds ${String(params.goalCheckpointTimeoutSeconds)}: expected an integer between 1 and ${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}; using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}.`,
-      );
-    }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
@@ -3304,6 +3253,13 @@ export class Config {
     )
       ? params.workflowSizeGuideline
       : undefined;
+    // Decided once: the Workflow tool builds its description and schema from
+    // it at startup, and a lock that changed under them would leave the model
+    // holding a contract the tool no longer honours.
+    this.workflowNameOnly =
+      params.workflowNameOnly === true ||
+      process.env['QWEN_CODE_WORKFLOW_NAME_ONLY'] === '1';
+    this.workflowRunRegistry.setNameOnly(this.workflowNameOnly);
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -3449,8 +3405,9 @@ export class Config {
     // Prefer params.authType over generationConfig.authType because:
     // - params.authType preserves undefined (user hasn't selected yet)
     // - generationConfig.authType may have a default value from resolvers
+    this.initialAuthType = params.authType ?? params.generationConfig?.authType;
     this.modelsConfig = new ModelsConfig({
-      initialAuthType: params.authType ?? params.generationConfig?.authType,
+      initialAuthType: this.initialAuthType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
       generationConfig: {
@@ -3462,6 +3419,7 @@ export class Config {
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
     });
+    this.initialResolvedAuthType = this.modelsConfig.getCurrentAuthType();
 
     // Publish the active model id for shell subprocesses. Every Config
     // publishes its own session's model — publishModelEnv registers it per
@@ -3598,10 +3556,12 @@ export class Config {
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
       params.stopHookBlockingCap,
     );
-    // Store user and project hooks separately for proper source attribution
+    // Store system, user and project hooks separately for proper source
+    // attribution
+    this.systemHooks = params.systemHooks;
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
-    // Legacy: fall back to merged hooks if new fields are not provided
+    // Legacy: merged hooks, read only if no per-scope hooks are provided
     this.hooks = params.hooks;
     this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
@@ -4135,6 +4095,9 @@ export class Config {
         },
       );
 
+      // Announce only now that the HOOK_EXECUTION_REQUEST subscription is in
+      // place: an observer that receives a bus must be able to run hooks on it.
+      this.announceMessageBus(this.messageBus);
       this.debugLogger.debug('MessageBus initialized with hook subscription');
     } else {
       this.debugLogger.debug('Hook system disabled, skipping initialization');
@@ -5113,10 +5076,22 @@ export class Config {
     return this.modelsConfig.getProviderProtocolConfig();
   }
 
+  syncModelSelection(
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ): void {
+    this.modelsConfig.syncAfterAuthRefresh(authType, modelId, baseUrl);
+    this.initialResolvedAuthType = undefined;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    if (!this.contentGenerator && authMethod === this.initialAuthType) {
+      authMethod = this.initialResolvedAuthType ?? authMethod;
+    }
     // The global reasoning effort (settings.model.reasoningEffort, seeded into
     // the generation config by the CLI) is NOT a provider field, but
     // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
@@ -5131,7 +5106,7 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
-    // Sync modelsConfig state for this auth refresh
+    // Sync modelsConfig state for this auth refresh.
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
@@ -6334,6 +6309,7 @@ export class Config {
     authType: AuthType,
     requiresRefresh: boolean,
   ): Promise<void> {
+    this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
       return;
     }
@@ -6558,15 +6534,6 @@ export class Config {
    */
   getGoalActiveTimeBudgetGrantMs(): number {
     return this.goalActiveTimeBudgetGrantMs;
-  }
-
-  /**
-   * Ceiling on one Goal evidence-checkpoint verifier call, in milliseconds:
-   * `goalCheckpointTimeoutSeconds` when it was valid, else the built-in
-   * default.
-   */
-  getGoalCheckpointTimeoutMs(): number {
-    return this.goalCheckpointTimeoutMs;
   }
 
   getMaxSubagentDepth(): number {
@@ -9268,6 +9235,17 @@ export class Config {
   }
 
   /**
+   * Whether the model may run only named workflows: its Workflow calls with an
+   * inline `script` or a `scriptPath` are refused, and a script cannot nest
+   * `workflow({scriptPath})`. Runs the host starts itself (ACP `run-saved`,
+   * `run-script`, retry, rerun) are not the model's and are not restricted.
+   * Fixed for the life of the session.
+   */
+  isWorkflowNameOnly(): boolean {
+    return this.workflowNameOnly;
+  }
+
+  /**
    * Apply a guideline the user changed mid-session. Runs started afterwards use
    * it; the tool description keeps its startup value, so the caller also tells
    * the model.
@@ -9587,10 +9565,61 @@ export class Config {
 
   /**
    * Set the message bus instance.
-   * This is called by the CLI layer to inject the MessageBus.
+   * This is called by the CLI layer to inject the MessageBus. The caller must
+   * install the bus's HOOK_EXECUTION_REQUEST subscription BEFORE calling this,
+   * because observers registered with {@link onMessageBusChange} are notified
+   * here and may use the bus right away.
    */
   setMessageBus(messageBus: MessageBus): void {
+    if (this.messageBus === messageBus) {
+      return;
+    }
     this.messageBus = messageBus;
+    this.announceMessageBus(messageBus);
+  }
+
+  /**
+   * Observes the hook MessageBus. The listener is called immediately when a
+   * bus already exists, and again whenever a different bus replaces it.
+   *
+   * A bus is only ever announced AFTER its HOOK_EXECUTION_REQUEST subscription
+   * is installed, so "I have a bus" always implies "this bus can run hooks".
+   * Returns a disposer; a throwing listener is logged and ignored, because a
+   * progress observer must never break hook initialization.
+   */
+  onMessageBusChange(listener: (bus: MessageBus) => void): () => void {
+    this.messageBusListeners.add(listener);
+    if (this.messageBus) {
+      this.notifyMessageBusListener(listener, this.messageBus);
+    }
+    return () => {
+      this.messageBusListeners.delete(listener);
+    };
+  }
+
+  private notifyMessageBusListener(
+    listener: (bus: MessageBus) => void,
+    bus: MessageBus,
+  ): void {
+    try {
+      // An async function is assignable to this listener type, and it runs
+      // from inside initialize(), so a rejection must be handled here too.
+      const result: unknown = listener(bus);
+      if (result instanceof Promise) {
+        result.catch((error: unknown) => {
+          this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+        });
+      }
+    } catch (error) {
+      this.debugLogger.debug(`MessageBus observer failed: ${error}`);
+    }
+  }
+
+  private announceMessageBus(bus: MessageBus): void {
+    // Copy first: a listener may dispose itself (or another) while notified.
+    for (const listener of [...this.messageBusListeners]) {
+      this.notifyMessageBusListener(listener, bus);
+    }
   }
 
   /**
@@ -9606,8 +9635,9 @@ export class Config {
     if (!this.isTrustedFolder()) {
       return undefined;
     }
-    // Prefer new projectHooks field, fall back to hooks for backward compatibility
-    const hooks = this.projectHooks ?? this.hooks;
+    // The legacy merged `hooks` stands in only when no scope was supplied.
+    const hooks =
+      this.projectHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
@@ -9620,24 +9650,56 @@ export class Config {
     if (this.getBareMode() || this.isSafeMode()) {
       return undefined;
     }
-    // Prefer new userHooks field, fall back to hooks for backward compatibility
-    const hooks = this.userHooks ?? this.hooks;
+    // The legacy merged `hooks` stands in only when no scope was supplied.
+    const hooks =
+      this.userHooks ?? (this.hasScopedHooks() ? undefined : this.hooks);
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
+  /**
+   * Get system-level hooks configuration.
+   * Returns hooks from the System and SystemDefaults settings files, always
+   * available regardless of folder trust. There is deliberately no fallback to
+   * the legacy merged `hooks`: it carries no scope, and reading it here would
+   * promote user or project hooks to administrator hooks.
+   */
+  getSystemHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode() || this.isSafeMode()) {
+      return undefined;
+    }
+    return this.systemHooks as
+      | { [K in HookEventName]?: HookDefinition[] }
+      | undefined;
+  }
+
+  /**
+   * True when the caller supplied per-scope hooks, so the legacy merged
+   * `hooks` must not be read as a second copy of them: the registry's
+   * duplicate key includes the source, so each copy would register again.
+   */
+  private hasScopedHooks(): boolean {
+    return (
+      this.systemHooks !== undefined ||
+      this.userHooks !== undefined ||
+      this.projectHooks !== undefined
+    );
   }
 
   /**
    * Replaces the settings-derived hook maps captured at construction. The CLI
    * calls this after re-reading the settings files so that
-   * `HookSystem.reload()` sees edits made since startup. All three fields are
+   * `HookSystem.reload()` sees edits made since startup. All four fields are
    * replaced together, as at construction, so a stale legacy `hooks` snapshot
    * can never resurface through the fallback in the getters. The bare, safe
    * mode and folder trust gates in the getters still apply.
    */
   setHooksFromSettings(hooks: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
     hooks?: Record<string, unknown>;
   }): void {
+    this.systemHooks = hooks.systemHooks;
     this.userHooks = hooks.userHooks;
     this.projectHooks = hooks.projectHooks;
     this.hooks = hooks.hooks;
@@ -10124,9 +10186,9 @@ export class Config {
       // are recorded rather than reconstructed from session totals.
       ledger: recorder,
       verifier: createGoalVerifier(this),
-      checkpointVerifier: createGoalCheckpointVerifier(this, {
-        timeoutMs: this.goalCheckpointTimeoutMs,
-      }),
+      // No checkpoint verifier: the terminal verifier reads the transcript
+      // tail directly, so nothing consumes checkpoint claims any more, and a
+      // checkpoint that stalled three times used to stop the Goal for it.
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
@@ -10153,10 +10215,7 @@ export class Config {
     // migrated goal is dropped and goal persistence is bricked for the
     // whole resumed session. Wait for the writer instead.
     if (restoreRuntime) {
-      const preparation = runtime.prepareRestore(
-        records ?? [],
-        restoreRuntime.goalCheckpointWindow,
-      );
+      const preparation = runtime.prepareRestore(records ?? []);
       let resolveActivation!: () => void;
       let rejectActivation!: (reason?: unknown) => void;
       const activation = new Promise<void>((resolve, reject) => {

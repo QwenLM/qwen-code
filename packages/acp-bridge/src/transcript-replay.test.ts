@@ -416,6 +416,96 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
+  it('carries a recorded compression payload back through replay', () => {
+    const contextCompression = {
+      phase: 'done',
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('compress-1', {
+        type: 'assistant',
+        text: 'Compressing context...\nContext compressed (200 -> ~100).',
+        contextCompression,
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: {
+        type: 'text',
+        text: 'Compressing context...  \nContext compressed (200 -> ~100).',
+      },
+    });
+    expect(projected[0]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompression,
+    });
+  });
+
+  it('replays a recorded notice on its own key', () => {
+    const notice = { phase: 'notice', instructionsLimit: 2000 };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord(
+        'compress-notice-1',
+        {
+          type: 'assistant',
+          text: 'Compression instructions were truncated to 2000 characters.\n',
+          contextCompressionNotice: notice,
+        },
+        {
+          type: 'assistant',
+          text: 'Context compressed (200 -> 100).',
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 200,
+            newTokenCount: 100,
+          },
+        },
+      ),
+    );
+
+    // Both keys replay exactly as recorded, so the folded block keeps the note
+    // beside the result without borrowing a marker other clients interpret.
+    expect(projected).toHaveLength(2);
+    expect(projected[0]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompressionNotice: notice,
+    });
+    expect(projected[0]?._meta).not.toHaveProperty('qwenDiscreteMessage');
+    expect(projected[0]?._meta).not.toHaveProperty('contextCompression');
+    expect(
+      projected
+        .map((update) =>
+          update.sessionUpdate === 'agent_message_chunk' &&
+          update.content.type === 'text'
+            ? update.content.text
+            : '',
+        )
+        .join(''),
+    ).toBe(
+      'Compression instructions were truncated to 2000 characters.  \nContext compressed (200 -> 100).',
+    );
+    expect(projected[1]?._meta).toMatchObject({
+      source: 'slash_command',
+      contextCompression: { phase: 'done' },
+    });
+  });
+
+  it('keeps a slash-command record without a compression payload unchanged', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalCardRecord('command-1', { type: 'assistant', text: 'Plain output.' }),
+    );
+
+    expect(projected[0]?._meta).not.toHaveProperty('contextCompression');
+  });
+
   it('skips checkpoint bookkeeping goal_state records during replay', () => {
     const machine = createTranscriptReplayMachine();
 
@@ -434,7 +524,9 @@ describe('createTranscriptReplayMachine', () => {
       updates(machine, goalStateRecord('goal-turn', 'turn_finished', turned)),
     ).toHaveLength(1);
 
-    const checkpointed: GoalRecord = {
+    // As a build that still compressed evidence into checkpoints journaled
+    // it: the parser accepts the old key and leaves it behind.
+    const checkpointed: GoalRecord & { evidenceCheckpoint: unknown } = {
       ...turned,
       evidenceCursor: { recordId: 'checkpoint-1' },
       evidenceCheckpoint: {
@@ -460,7 +552,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    const rejected: GoalRecord = {
+    const rejected = {
       ...checkpointed,
       lastReason: 'More work remains',
     };
@@ -471,7 +563,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toHaveLength(1);
 
-    const recommitted: GoalRecord = {
+    const recommitted = {
       ...rejected,
       activeTimeMs: 2900,
       tokensUsed: 0,
@@ -488,7 +580,8 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+    const { evidenceCheckpoint: _legacy, ...parsed } = recommitted;
+    expect(machine.snapshot().goalState?.goal).toEqual(parsed);
   });
 
   it('persists goalCause so bookkeeping suppression survives a page boundary', () => {
@@ -922,6 +1015,99 @@ describe('createTranscriptReplayMachine', () => {
   describe('UserPromptSubmit hook context provenance', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    it.each(['read both', ''])(
+      'replays original resource links with unchanged URIs and metadata (%j)',
+      (text) => {
+        const resourceLinks = [
+          {
+            type: 'resource_link',
+            uri: 'transit://resource-a',
+            name: 'notes.md',
+            mimeType: 'text/markdown',
+            size: 0,
+            title: 'First notes',
+            description: 'Original reference',
+            annotations: { audience: ['user'], priority: 0.5 },
+            _meta: { preview: { version: 1 } },
+          },
+          {
+            type: 'resource_link',
+            uri: 'https://example.com/notes.md',
+            name: 'notes.md',
+            mimeType: null,
+          },
+        ];
+        const projected = updates(
+          createTranscriptReplayMachine(),
+          record('user-resource', 'user', {
+            daemonPromptId: 'resource-prompt',
+            message: {
+              role: 'user',
+              parts: [{ text: 'expanded model input' }],
+            },
+            systemPayload: {
+              displayText: text,
+              hookContext: '',
+              resourceLinks,
+            },
+          }),
+        );
+
+        expect(
+          projected.map((update) =>
+            'content' in update ? update.content : update,
+          ),
+        ).toEqual([
+          ...(text ? [{ type: 'text', text }] : []),
+          ...resourceLinks,
+        ]);
+        for (const update of projected) {
+          expect(update._meta).toMatchObject({
+            promptId: 'resource-prompt',
+            qwenTranscript: { sourceRecordIds: ['user-resource'] },
+          });
+        }
+        const lastUpdate = projected.at(-1)!;
+        expect(
+          'content' in lastUpdate ? lastUpdate.content : lastUpdate,
+        ).not.toBe(resourceLinks[1]);
+      },
+    );
+
+    it('ignores invalid resource references and does not infer them from fileData', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-resource', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'read' },
+              { fileData: { fileUri: 'https://example.com/video.mp4' } },
+            ],
+          },
+          systemPayload: {
+            displayText: 'read',
+            hookContext: '',
+            resourceLinks: [
+              null,
+              { type: 'resource_link', uri: 'transit://x' },
+              {
+                type: 'resource_link',
+                uri: '',
+                name: 'empty',
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(
+        projected.map((update) =>
+          'content' in update ? update.content : update,
+        ),
+      ).toEqual([{ type: 'text', text: 'read' }]);
+    });
 
     it('replays daemon attachment references without embedding base64', () => {
       const projected = updates(
