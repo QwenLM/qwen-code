@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isTaskExecutionMode } from '@qwen-code/sdk/daemon';
+import {
+  isTaskExecutionMode,
+  parseDaemonBackgroundTurn,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -29,6 +32,7 @@ import {
   projectTerminalBackgroundAgentTool,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
+import { parseContextCompressionMeta } from '../utils/contextCompression.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -62,32 +66,75 @@ interface TranscriptMessageOptions {
 
 interface BackgroundAgentTaskUpdate {
   status: string;
+  awaitingProcessing: boolean;
   endTime: number;
 }
 
-function collectBackgroundAgentTaskUpdates(
+function collectBackgroundTaskUpdates(
   blocks: readonly DaemonTranscriptBlock[],
-): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
-  const updates = new Map<string, BackgroundAgentTaskUpdate>();
-  for (const block of blocks) {
-    if (block.kind !== 'assistant' && block.kind !== 'user') continue;
-    const meta = getRecord(block.meta);
-    if (
-      meta?.['source'] !== 'background_notification' ||
-      meta['qwenDiscreteMessage'] !== true
-    ) {
-      continue;
+) {
+  const agentUpdates = new Map<string, BackgroundAgentTaskUpdate>();
+  const latestTasks = new Map<string, Record<string, unknown>>();
+  const tasksByExecution = new Map<
+    string,
+    Record<string, unknown> | undefined
+  >();
+  const lastConsumedTaskIndex = new Map<string, number>();
+  const automaticTaskIds = new Set<string>();
+  for (const [index, block] of blocks.entries()) {
+    const meta = getRecord((block as ExtendedDaemonTextTranscriptBlock).meta);
+    const source = block.kind === 'status' ? block.source : meta?.['source'];
+    const completed = source === 'background_task_completed';
+    const task = getRecord(
+      block.kind === 'status' ? block.data : meta?.['backgroundTask'],
+    );
+    const taskId = getString(task, 'taskId');
+    if (task && taskId && (completed || source === 'background_notification')) {
+      latestTasks.set(taskId, task);
+      if (!completed) lastConsumedTaskIndex.set(taskId, index);
+      const toolUseId = getString(task, 'toolUseId');
+      const status = getString(task, 'status');
+      if (
+        task['kind'] === 'agent' &&
+        toolUseId &&
+        status &&
+        (block.kind === 'status' || meta?.['qwenDiscreteMessage'] === true)
+      ) {
+        agentUpdates.set(toolUseId, {
+          status,
+          awaitingProcessing: completed,
+          endTime:
+            (!completed ? agentUpdates.get(toolUseId)?.endTime : undefined) ??
+            block.serverTimestamp ??
+            block.clientReceivedAt,
+        });
+      }
     }
-    const task = getRecord(meta['backgroundTask']);
-    const toolUseId = getString(task, 'toolUseId');
-    const status = getString(task, 'status');
-    if (task?.['kind'] !== 'agent' || !toolUseId || !status) continue;
-    updates.set(toolUseId, {
-      status,
-      endTime: block.serverTimestamp ?? block.clientReceivedAt,
-    });
+    const turn = parseDaemonBackgroundTurn(
+      block.backgroundTurn ?? meta?.['backgroundTurn'],
+    );
+    if (
+      !turn ||
+      completed ||
+      ('parentToolCallId' in block && block.parentToolCallId) ||
+      tasksByExecution.has(turn.turnId)
+    )
+      continue;
+    lastConsumedTaskIndex.set(turn.taskId, index);
+    automaticTaskIds.add(turn.taskId);
+    const result = latestTasks.get(turn.taskId);
+    tasksByExecution.set(turn.turnId, result);
+    const agentUpdate = agentUpdates.get(
+      turn.toolUseId ?? getString(result, 'toolUseId') ?? '',
+    );
+    if (agentUpdate) agentUpdate.awaitingProcessing = false;
   }
-  return updates;
+  return {
+    agentUpdates,
+    tasksByExecution,
+    lastConsumedTaskIndex,
+    automaticTaskIds,
+  };
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
@@ -396,13 +443,26 @@ export function transcriptBlocksToDaemonMessages(
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const serverStartTimes = new Map<string, number>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
-  const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
+  const {
+    agentUpdates: backgroundAgentTaskUpdates,
+    tasksByExecution: backgroundTasksByExecution,
+    lastConsumedTaskIndex,
+    automaticTaskIds,
+  } = collectBackgroundTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
   let currentThinkingIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
   // the next top-level assistant/thought block must start a fresh assistant
   // message instead of being appended to text that appeared before the tool.
   let needsNewContentMessage = false;
+  let previousPromptId: string | undefined;
+  const backgroundResultMarkers = new Set<string>();
+  const loadedToolIds = new Set(
+    blocks.flatMap((block) =>
+      block.kind === 'tool' ? [block.toolCallId] : [],
+    ),
+  );
+  const completedTaskIds = new Set<string>();
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -410,6 +470,106 @@ export function transcriptBlocksToDaemonMessages(
     // message. Prefer the daemon-authoritative stamp so every client agrees;
     // fall back to the local receive time when the daemon left it unset.
     const blockTime = block.serverTimestamp ?? block.clientReceivedAt;
+    const blockMeta = getRecord(
+      (block as ExtendedDaemonTextTranscriptBlock).meta,
+    );
+    const backgroundTurn = parseDaemonBackgroundTurn(
+      block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
+    );
+    const promptId = backgroundTurn?.turnId ?? block.promptId;
+    if (
+      promptId !== undefined &&
+      previousPromptId !== undefined &&
+      promptId !== previousPromptId
+    ) {
+      currentAssistantIdx = null;
+      currentThinkingIdx = null;
+      needsNewContentMessage = true;
+    }
+    if (promptId !== undefined) previousPromptId = promptId;
+    if (
+      backgroundTurn &&
+      blockMeta?.['source'] !== 'background_task_completed' &&
+      !(
+        block.kind === 'status' && block.source === 'background_task_completed'
+      ) &&
+      !('parentToolCallId' in block && block.parentToolCallId) &&
+      !backgroundResultMarkers.has(backgroundTurn.turnId)
+    ) {
+      backgroundResultMarkers.add(backgroundTurn.turnId);
+      messages.push({
+        id: `background-turn:${backgroundTurn.turnId}`,
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: backgroundTurn.label ?? backgroundTurn.kind,
+        data: {
+          ...backgroundTurn,
+          backgroundTask: backgroundTasksByExecution.get(backgroundTurn.turnId),
+        },
+        backgroundTurn,
+        timestamp: backgroundTurn.startedAt,
+        sourceBlockIds: [block.id],
+      });
+      currentAssistantIdx = null;
+      currentThinkingIdx = null;
+      needsNewContentMessage = true;
+    }
+    if (
+      blockMeta?.['source'] === 'background_notification_turn_started' ||
+      (block.kind === 'status' &&
+        block.source === 'background_notification_turn_started')
+    )
+      continue;
+    if (
+      (block.kind === 'status' &&
+        block.source === 'background_task_completed') ||
+      ((block.kind === 'assistant' || block.kind === 'user') &&
+        blockMeta?.['source'] === 'background_task_completed')
+    ) {
+      const task = getRecord(
+        block.kind === 'status' ? block.data : blockMeta?.['backgroundTask'],
+      );
+      const taskId = getString(task, 'taskId');
+      if (taskId) completedTaskIds.add(taskId);
+      const awaitingProcessing =
+        (lastConsumedTaskIndex.get(taskId ?? '') ?? -1) <= i;
+      if (
+        !awaitingProcessing ||
+        (task?.['kind'] === 'agent' &&
+          loadedToolIds.has(getString(task, 'toolUseId') ?? ''))
+      )
+        continue;
+      messages.push({
+        id: block.id,
+        role: 'system',
+        variant: 'info',
+        source: 'background_task_completed',
+        content: block.text,
+        data: {
+          ...task,
+          awaitingProcessing,
+        },
+        timestamp: blockTime,
+        sourceBlockIds: [block.id],
+      });
+      currentAssistantIdx = null;
+      currentThinkingIdx = null;
+      needsNewContentMessage = true;
+      continue;
+    }
+    const notificationTaskId = getString(
+      getRecord(blockMeta?.['backgroundTask']),
+      'taskId',
+    );
+    if (
+      blockMeta?.['source'] === 'background_notification' &&
+      notificationTaskId &&
+      (backgroundTurn ||
+        completedTaskIds.has(notificationTaskId) ||
+        automaticTaskIds.has(notificationTaskId))
+    )
+      continue;
 
     switch (block.kind) {
       case 'user': {
@@ -516,6 +676,61 @@ export function transcriptBlocksToDaemonMessages(
             ...(meta['visionBridgeNotice'] !== undefined
               ? { data: meta['visionBridgeNotice'] }
               : {}),
+            timestamp: blockTime,
+          });
+          break;
+        }
+        const noticePayload = meta?.['contextCompressionNotice'];
+        const notice = parseContextCompressionMeta(noticePayload);
+        const compressionPayload = meta?.['contextCompression'];
+        const compression = parseContextCompressionMeta(compressionPayload);
+        // A payload this client cannot read means it and the daemon disagree on
+        // the schema. Take the ordinary path then and let the block's own text
+        // through: rendering only the half that still parses would drop the
+        // other half's sentence, and `content` carries both.
+        const unreadable =
+          (noticePayload !== undefined && notice === undefined) ||
+          (compressionPayload !== undefined && compression === undefined);
+        if ((notice || compression) && !unreadable) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          // The invocation note keeps its own `_meta` key, so folding the turn
+          // into one block cannot overwrite it; it renders as the row ahead of
+          // the compression it belongs to.
+          if (notice) {
+            messages.push({
+              id: `${block.id}-notice`,
+              role: 'system',
+              content: textBlock.text,
+              variant: 'info',
+              source: 'context_compression',
+              data: noticePayload,
+              timestamp: blockTime,
+            });
+          }
+          if (!compression) break;
+          // One block carries the whole compression: the progress frame creates
+          // it and the result merges into the same id, flipping `phase` to
+          // 'done', so the row is replaced in place rather than doubled. A block
+          // that stopped streaming without a result is a failed or cancelled
+          // run — its turn reports that itself, and a stale "compressing" row
+          // would only contradict it.
+          if (
+            compression.phase === 'progress' &&
+            textBlock.streaming !== true
+          ) {
+            break;
+          }
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'context_compression',
+            // The raw payload, not the parsed view: SystemMessage falls back to
+            // `content` when it meets a payload this client cannot read.
+            data: compressionPayload,
             timestamp: blockTime,
           });
           break;
@@ -713,12 +928,18 @@ export function transcriptBlocksToDaemonMessages(
         if (toolBlock.serverTimestamp !== undefined) {
           serverStartTimes.set(toolCall.callId, toolBlock.serverTimestamp);
         }
+        if (backgroundAgentUpdate) {
+          toolCall.backgroundResultPending =
+            backgroundAgentUpdate.awaitingProcessing;
+        }
         const parentSubAgent = toolCall.parentToolCallId
           ? toolsByCallId.get(toolCall.parentToolCallId)
           : undefined;
         const existingTool = toolsByCallId.get(toolCall.callId);
 
         if (existingTool) {
+          existingTool.backgroundResultPending =
+            toolCall.backgroundResultPending;
           mergeToolCall(existingTool, toolCall, {
             replaceArgs:
               safeToolProjection ||
@@ -1048,8 +1269,39 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   synchronizeToolGroupSourceIdentity(messages);
+  attachTurnPromptIds(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
+}
+
+/**
+ * Copies the daemon-stamped per-turn `promptId` from contributing blocks onto
+ * the messages built from them.
+ *
+ * A block id is only an ordinal within one projection, so it cannot identify a
+ * turn across a reload; `promptId` can. It is attached regardless of
+ * `includeSourceIdentity`, which governs the tool-group record identity that
+ * host source references use, not turn identity.
+ */
+function attachTurnPromptIds(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const promptIdByBlockId = new Map<string, string>();
+  for (const block of blocks) {
+    if (block.promptId) promptIdByBlockId.set(block.id, block.promptId);
+  }
+  if (promptIdByBlockId.size === 0) return;
+  for (const message of messages) {
+    if (message.promptId) continue;
+    for (const id of [message.id, ...(message.sourceBlockIds ?? [])]) {
+      const promptId = promptIdByBlockId.get(id);
+      if (promptId) {
+        message.promptId = promptId;
+        break;
+      }
+    }
+  }
 }
 
 function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {

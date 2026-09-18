@@ -8,7 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { SubagentManager } from './subagent-manager.js';
+import { SubagentManager, loadSubagentFromDir } from './subagent-manager.js';
 import {
   type SubagentConfig,
   SubagentError,
@@ -20,6 +20,8 @@ import { ApprovalMode } from '../config/approval-mode.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { ExecutionEnvironment } from '../services/execution-environment.js';
+import { Storage } from '../config/storage.js';
 
 // Mock file system operations
 vi.mock('fs/promises');
@@ -34,10 +36,15 @@ vi.mock('../utils/bash-search-tools.js', () => ({
   isBashSearchAvailable: mockIsBashSearchAvailable,
 }));
 
-vi.mock('../utils/yaml-parser.js', () => ({
-  parse: mockParseYaml,
-  stringify: mockStringifyYaml,
-}));
+vi.mock('../utils/yaml-parser.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/yaml-parser.js')>();
+  return {
+    parse: mockParseYaml,
+    stringify: mockStringifyYaml,
+    sanitizeValue: actual.sanitizeValue,
+  };
+});
 
 // Mock dependencies - create mock functions at the top level
 const mockValidateConfig = vi.hoisted(() => vi.fn());
@@ -385,6 +392,368 @@ description: A test subagent
 
 You are a helpful assistant.
 `;
+
+  describe('execution backend definitions', () => {
+    beforeEach(async () => {
+      const yaml = await vi.importActual<
+        typeof import('../utils/yaml-parser.js')
+      >('../utils/yaml-parser.js');
+      mockParseYaml.mockImplementation(yaml.parse);
+      mockStringifyYaml.mockImplementation(yaml.stringify);
+    });
+
+    it.each(
+      [
+        'executionBackend: container',
+        'executor: {kind: invalid, command: runner}',
+      ].flatMap((declaration) =>
+        [
+          ['Reviewer', 'Explore'],
+          ['Reviewer', "'Explore'", 'Last'],
+          ['First', "'Explore'", '"Plan"', 'Last'],
+        ].map((names) => ({ declaration, names })),
+      ),
+    )(
+      'reserves every duplicate name on refusal: $declaration $names',
+      async ({ declaration, names }) => {
+        const declaredNames = names.map((name) =>
+          name.replace(/^["']|["']$/g, ''),
+        );
+        const projectDir = path.join(
+          mockConfig.getProjectRoot(),
+          '.qwen',
+          'agents',
+        );
+        const content = `---\n${names.map((name) => `name: ${name}`).join('\n')}\ndescription: Project agent\n${declaration}\n---\nReview the project.\n`;
+        vi.mocked(fs.readdir).mockImplementation(
+          async (directory) =>
+            (directory === projectDir ? ['reviewer.md'] : []) as never,
+        );
+        vi.mocked(fs.readFile).mockResolvedValue(content);
+        for (const name of declaredNames) {
+          await expect(manager.loadSubagent(name)).rejects.toMatchObject({
+            message: expect.stringMatching(
+              /invalid (executionBackend declaration|executor block)/,
+            ),
+          });
+        }
+        const refusals = new Map<string, SubagentError>();
+        expect(await loadSubagentFromDir(projectDir, refusals)).toEqual([]);
+        expect([...refusals.keys()].sort()).toEqual(
+          declaredNames.map((name) => name.toLowerCase()).sort(),
+        );
+
+        vi.mocked(fs.readFile).mockResolvedValue(
+          content.replace(`${declaration}\n`, ''),
+        );
+        const local = await manager.loadSubagent(declaredNames.at(-1)!);
+        expect(local).toMatchObject({
+          name: declaredNames.at(-1),
+          level: 'project',
+        });
+        expect(local?.executionBackend).toBeUndefined();
+      },
+    );
+
+    it.each(
+      ['|', '>'].flatMap((style) =>
+        [
+          'executor:\n\tcommand: acp-reviewer',
+          'executionBackend: container\nmetadata:\n\tcommand: example',
+        ].map((declaration) => ({ style, declaration })),
+      ),
+    )(
+      'does not reserve names from $style prose on refusal: $declaration',
+      async ({ style, declaration }) => {
+        const projectDir = path.join(
+          mockConfig.getProjectRoot(),
+          '.qwen',
+          'agents',
+        );
+        vi.mocked(fs.readdir).mockImplementation(
+          async (directory) =>
+            (directory === projectDir ? ['reviewer.md'] : []) as never,
+        );
+        vi.mocked(fs.readFile).mockResolvedValue(
+          `---\nname: reviewer\ndescription: ${style}\n  This agent documents other agents.\n  name: explore\n${declaration}\n---\nReview the project carefully.\n`,
+        );
+
+        const refusals = new Map<string, SubagentError>();
+        expect(await loadSubagentFromDir(projectDir, refusals)).toEqual([]);
+        expect.soft([...refusals.keys()]).toEqual(['reviewer']);
+        await expect(manager.loadSubagent('Explore')).resolves.toMatchObject({
+          name: 'Explore',
+          isBuiltin: true,
+        });
+        await expect(manager.loadSubagent('reviewer')).rejects.toMatchObject({
+          subagentName: 'reviewer',
+        });
+      },
+    );
+
+    it('retains the lenient refusal name when the AST name cannot resolve', async () => {
+      const projectDir = path.join(
+        mockConfig.getProjectRoot(),
+        '.qwen',
+        'agents',
+      );
+      vi.mocked(fs.readdir).mockResolvedValue(['reviewer.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: *missing\ndescription: Project agent\nexecutor: {kind: invalid, command: runner}\n---\nReview the project.\n',
+      );
+
+      const refusals = new Map<string, SubagentError>();
+      expect(await loadSubagentFromDir(projectDir, refusals)).toEqual([]);
+      expect([...refusals.keys()]).toEqual(['*missing']);
+      expect(refusals.get('*missing')?.subagentName).toBe('*missing');
+    });
+
+    it.each([
+      { yamlName: '123', name: '123' },
+      { yamlName: 'true', name: 'true' },
+      { yamlName: '[Explore]', name: 'Explore' },
+      { yamlName: '[true]', name: 'true' },
+      { yamlName: '[Explore, null]', name: 'Explore' },
+      { yamlName: '*agentName', name: 'Explore' },
+      { yamlName: '*agentName', name: 'Explore', anchor: '[Explore, null]' },
+    ])(
+      'uses the accepted name for refusals and valid controls: $yamlName',
+      async ({ yamlName, name, anchor }) => {
+        const { SubagentValidator } =
+          await vi.importActual<typeof import('./validation.js')>(
+            './validation.js',
+          );
+        const validator = new SubagentValidator();
+        mockValidateConfig.mockImplementation((config: SubagentConfig) =>
+          validator.validateConfig(config),
+        );
+        const projectDir = path.join(
+          mockConfig.getProjectRoot(),
+          '.qwen',
+          'agents',
+        );
+        const userDir = path.join(Storage.getGlobalQwenDir(), 'agents');
+        const projectFile = path.join(projectDir, `${name}.md`);
+        const userFile = path.join(userDir, 'lower-priority.md');
+        const frontmatter = `alias: &agentName ${anchor ?? 'Explore'}\nname: ${yamlName}`;
+        let projectContent = `---\n${frontmatter}\ndescription: Project agent\nexecutionBackend: null\n---\nComplete the project task.\n`;
+        const userContent = `---\nname: '${name}'\ndescription: User agent\n---\nComplete the user task.\n`;
+        vi.mocked(fs.readdir).mockImplementation(
+          async (directory) =>
+            (directory === projectDir
+              ? [`${name}.md`]
+              : directory === userDir
+                ? ['lower-priority.md']
+                : []) as never,
+        );
+        vi.mocked(fs.readFile).mockImplementation(async (file) => {
+          if (file === projectFile) return projectContent;
+          if (file === userFile) return userContent;
+          throw new Error(`Unexpected file read: ${String(file)}`);
+        });
+
+        expect(await manager.loadSubagent(name, 'user')).toMatchObject({
+          name,
+          level: 'user',
+          systemPrompt: 'Complete the user task.',
+        });
+        await expect(manager.loadSubagent(name)).rejects.toMatchObject({
+          subagentName: name,
+          message: expect.stringContaining(
+            'invalid executionBackend declaration',
+          ),
+        });
+
+        projectContent = `---\n${frontmatter}\ndescription: Project agent\nexecutionBackend: *missing\n---\nComplete the project task.\n`;
+        await expect(manager.loadSubagent(name)).rejects.toMatchObject({
+          subagentName: name,
+          message: expect.stringContaining(
+            'invalid executionBackend declaration',
+          ),
+        });
+
+        projectContent = `---\n${frontmatter}\nexecutionBackend: container\n---\nComplete the project task.\n`;
+        await expect(manager.loadSubagent(name)).rejects.toMatchObject({
+          subagentName: name,
+          message: expect.stringContaining(
+            'invalid executionBackend declaration',
+          ),
+        });
+
+        projectContent = `---\n${frontmatter}\ndescription: Project agent\nexecutionBackend: container\n---\nComplete the project task.\n`;
+        expect(await manager.loadSubagent(name)).toMatchObject({
+          name,
+          level: 'project',
+          executionBackend: 'container',
+          systemPrompt: 'Complete the project task.',
+        });
+
+        projectContent =
+          '---\nname: {invalid: name}\ndescription: Project agent\nexecutionBackend: null\n---\nComplete the project task.\n';
+        expect(await manager.loadSubagent(name)).toMatchObject({
+          name,
+          level: 'user',
+          systemPrompt: 'Complete the user task.',
+        });
+      },
+    );
+
+    it.each([
+      'name: Explore\ndescription: Test\nexecutionBackend: null',
+      'name: Explore\ndescription: Test\nexecutionBackend: local',
+      "name: 'Explore'\ndescription: Test\nexecutionBackend: false",
+      'name: Explore\ndescription: Test\nexecutionBackend: container\nexecutionBackend: local',
+      'name: Explore\ndescription: bad: yaml\nexecutionBackend: container',
+      'name: Explore\ndescription: Test\n\texecutionBackend: container',
+      'name: Explore\nexecutionBackend: container',
+    ])(
+      'reserves an invalid higher-priority declaration instead of resolving a builtin: %s',
+      async (frontmatter) => {
+        vi.mocked(fs.readdir).mockResolvedValue([
+          'different-filename.md',
+        ] as never);
+        vi.mocked(fs.readFile).mockResolvedValue(
+          `---\n${frontmatter}\n---\nComplete the task.`,
+        );
+        await expect(manager.loadSubagent('explore')).rejects.toMatchObject({
+          subagentName: 'Explore',
+          message: expect.stringContaining(
+            'invalid executionBackend declaration',
+          ),
+        });
+        expect(await manager.isNameAvailable('Explore')).toBe(false);
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+      },
+    );
+
+    it('records later validation failure and clears a stale backend refusal after removal', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue(['explore.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\ndescription: Test\nexecutionBackend: container\n---\nPrompt',
+      );
+      mockValidateConfig.mockReturnValue({
+        isValid: false,
+        errors: ['Invalid prompt'],
+        warnings: [],
+      });
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        'invalid executionBackend declaration',
+      );
+      vi.mocked(fs.readdir).mockRejectedValue(new Error('ENOENT'));
+      expect((await manager.loadSubagent('Explore'))?.isBuiltin).toBe(true);
+    });
+
+    it('carries an actual extension-loader backend refusal through named resolution', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue(['agent.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(
+        '---\nname: Explore\ndescription: Test\nexecutionBackend: null\n---\nPrompt',
+      );
+      const refusals = new Map<string, SubagentError>();
+      const agents = await loadSubagentFromDir('/extension/agents', refusals);
+      expect(agents).toEqual([]);
+      expect(refusals.has('explore')).toBe(true);
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        { agents, agentExecutorRefusals: refusals } as never,
+      ]);
+      vi.mocked(fs.readdir).mockResolvedValue([] as never);
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        'invalid executionBackend declaration',
+      );
+    });
+
+    it('round-trips a backend through serialization and unrelated updates', async () => {
+      const original = manager.parseSubagentContent(
+        '---\nname: test-agent\ndescription: Test\nexecutionBackend: container\n---\nComplete the task.',
+        validConfig.filePath!,
+        'project',
+      );
+      expect(original.executionBackend).toBe('container');
+      const serialized = manager.serializeSubagent(original);
+      expect(serialized).toContain('executionBackend: container');
+      vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as never);
+      vi.mocked(fs.readFile).mockResolvedValue(serialized);
+      await manager.updateSubagent('test-agent', { description: 'Updated' });
+      const saved = vi.mocked(fs.writeFile).mock.calls[0][1];
+      expect(typeof saved).toBe('string');
+      expect(
+        manager.parseSubagentContent(
+          saved as string,
+          validConfig.filePath!,
+          'project',
+        ),
+      ).toMatchObject({
+        description: 'Updated',
+        executionBackend: 'container',
+      });
+    });
+
+    it.each([null, 'local', false])(
+      'rejects invalid direct serialization %j before writing',
+      (executionBackend) => {
+        expect(() =>
+          manager.serializeSubagent({
+            ...validConfig,
+            executionBackend,
+          } as unknown as SubagentConfig),
+        ).toThrow('invalid executionBackend declaration');
+        expect(fs.writeFile).not.toHaveBeenCalled();
+      },
+    );
+
+    it('retains invalid session objects so named dispatch refuses rather than falling through', async () => {
+      manager.loadSessionSubagents([
+        {
+          ...validConfig,
+          name: 'Explore',
+          executionBackend: null,
+        } as unknown as SubagentConfig,
+      ]);
+      await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+        'invalid executionBackend declaration',
+      );
+      expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+    });
+
+    it.each(['definition', 'operator'] as const)(
+      'refuses %s-required execution without an environment at both consumption points',
+      async (source) => {
+        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'getAgentExecutionBackend').mockReturnValue(
+          source === 'operator' ? 'container' : undefined,
+        );
+        const config =
+          source === 'definition'
+            ? { ...validConfig, executionBackend: 'container' as const }
+            : validConfig;
+        await expect(
+          manager.createAgentHeadless(config, mockConfig),
+        ).rejects.toThrow('requires a container execution environment');
+        await expect(manager.convertToRuntimeConfig(config)).rejects.toThrow(
+          'requires a container execution environment',
+        );
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+      },
+    );
+
+    it('permits definition conversion with an actual environment while retaining the operator floor', async () => {
+      vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getAgentExecutionBackend').mockReturnValue(
+        'container',
+      );
+      vi.spyOn(mockConfig, 'getExecutionEnvironment').mockReturnValue(
+        {} as ExecutionEnvironment,
+      );
+      await expect(
+        manager.convertToRuntimeConfig({
+          ...validConfig,
+          executionBackend: 'container',
+        }),
+      ).resolves.toMatchObject({
+        promptConfig: { systemPrompt: validConfig.systemPrompt },
+      });
+      expect(mockConfig.getAgentExecutionBackend()).toBe('container');
+    });
+  });
 
   describe('parseSubagentContent', () => {
     it.each([
@@ -3009,6 +3378,23 @@ bad`);
         expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
       });
 
+      it.each(['executor', 'mcpServers', 'hooks'] as const)(
+        'refuses container-incompatible %s for direct manager callers',
+        async (field) => {
+          mockConfig.getExecutionEnvironment = () =>
+            ({}) as ExecutionEnvironment;
+          const definition = {
+            ...executorConfig,
+            executor: undefined,
+            [field]: field === 'executor' ? executorConfig.executor : {},
+          };
+          await expect(
+            manager.createAgentHeadless(definition, mockConfig),
+          ).rejects.toThrow('container execution does not support');
+          expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        },
+      );
+
       it('preserves external factory errors without AgentHeadless labeling', async () => {
         const error = new Error('spawn ENOENT');
         vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
@@ -3342,6 +3728,52 @@ bad`);
             'run_shell',
           ]),
         ).resolves.toEqual(['Bash', 'run_shell']);
+      });
+
+      // An allowlist holds exact names, so its caller asks for mcp__ entries
+      // to be looked up too rather than waved through as patterns.
+      it('looks up mcp__ entries when asked to check MCP names', async () => {
+        vi.mocked(mockToolRegistry.getAllTools).mockReturnValue([
+          { name: 'read_file', displayName: 'Read File' },
+          {
+            name: 'mcp__warehouse__query',
+            displayName: 'query (warehouse MCP Server)',
+          },
+        ] as unknown as ReturnType<ToolRegistry['getAllTools']>);
+
+        await expect(
+          manager.findUnmatchedToolNames(
+            [
+              'mcp__warehouse__query',
+              'query (warehouse MCP Server)',
+              'mcp__warehouse__drop',
+              'Shell',
+            ],
+            { checkMcpNames: true },
+          ),
+        ).resolves.toEqual(['mcp__warehouse__drop']);
+        await expect(
+          manager.findUnmatchedToolNames(['mcp__warehouse__drop']),
+        ).resolves.toEqual([]);
+      });
+
+      // Callers that narrow a pool resolve their lists the way the agent's own
+      // config does: tool name first, then display name, anything else as given.
+      it('resolves tool and display names to tool names and keeps the rest', async () => {
+        await expect(
+          manager.resolveToolNames([
+            'read_file',
+            'Write File',
+            'mcp__github__*',
+            'Bash',
+          ]),
+        ).resolves.toEqual([
+          'read_file',
+          'write_file',
+          'mcp__github__*',
+          'Bash',
+        ]);
+        expect(mockToolRegistry.warmAll).toHaveBeenCalled();
       });
 
       it('should pass the agent runtimeView to AgentHeadless.create', async () => {

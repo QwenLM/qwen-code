@@ -19,6 +19,8 @@ import {
   getPlanModeSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
+import { createMinimalSettings } from '../config/settings.js';
+import { getAvailableCommands } from '../nonInteractiveCliCommands.js';
 import type { CLIUserMessage, PermissionMode } from './types.js';
 import type { JsonOutputAdapterInterface } from './io/BaseJsonOutputAdapter.js';
 import {
@@ -387,6 +389,7 @@ describe('computeUsageFromMetrics', () => {
 
 describe('buildSystemMessage', () => {
   let mockConfig: Config;
+  const settings = createMinimalSettings();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -413,8 +416,15 @@ describe('buildSystemMessage', () => {
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
+      settings,
     );
 
+    expect(getAvailableCommands).toHaveBeenCalledWith(
+      mockConfig,
+      expect.any(AbortSignal),
+      'non_interactive',
+      settings,
+    );
     expect(result).toEqual({
       type: 'system',
       subtype: 'init',
@@ -444,6 +454,7 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
+      settings,
     );
 
     expect(result.tools).toEqual([]);
@@ -459,6 +470,7 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
+      settings,
     );
 
     expect(result.mcp_servers).toEqual([]);
@@ -474,6 +486,7 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
+      settings,
     );
 
     expect(result.qwen_code_version).toBe('unknown');
@@ -484,6 +497,7 @@ describe('buildSystemMessage', () => {
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
+      settings,
     );
 
     // Should include: 'commit' (prompt), 'compress', 'init', 'summary' (local+ACP)
@@ -501,6 +515,7 @@ describe('buildSystemMessage', () => {
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
+      settings,
     );
 
     // 'help' (local-jsx) and 'memory' (local without ACP) should be excluded

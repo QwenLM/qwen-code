@@ -178,6 +178,7 @@ export type ArtifactPanelTab =
       id: string;
       kind: 'file';
       title: string;
+      previewVersion?: number;
       workspacePath: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -1129,6 +1130,7 @@ export function ArtifactPanel({
             <WorkspaceFilePreview
               key={activeTab.id}
               workspacePath={activeTab.workspacePath}
+              artifactVersion={String(activeTab.previewVersion ?? 0)}
               workspaceActions={activeWorkspaceActions!}
               previewContent={activeTab.previewContent}
               previewData={activeTab.previewData}
@@ -3069,6 +3071,7 @@ function SourceDetail({
   const [attempt, setAttempt] = useState(0);
   const [data, setData] = useState<Blob>();
   const [error, setError] = useState<string>();
+  const [downloadUrl, setDownloadUrl] = useState<string>();
   const source = tab.source;
   const locator = source.locator;
   const valid =
@@ -3091,6 +3094,7 @@ function SourceDetail({
     let cancelled = false;
     setData(undefined);
     setError(undefined);
+    setDownloadUrl(undefined);
     if (!valid || locator.type === 'url') return;
     const load = async () => {
       if (locator.type === 'attachment') {
@@ -3167,15 +3171,29 @@ function SourceDetail({
         <span className="truncate text-xs text-muted-foreground" title={path}>
           {path}
         </span>
-        {error && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setAttempt((value) => value + 1)}
-          >
-            {t('common.retry')}
-          </Button>
-        )}
+        <div className="flex shrink-0 items-center gap-1">
+          {downloadUrl && (
+            <Button variant="ghost" size="icon-sm" asChild>
+              <a
+                href={downloadUrl}
+                download={source.title}
+                aria-label={`Download ${source.title}`}
+                title={t('common.download')}
+              >
+                <DownloadIcon />
+              </a>
+            </Button>
+          )}
+          {error && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setAttempt((value) => value + 1)}
+            >
+              {t('common.retry')}
+            </Button>
+          )}
+        </div>
       </div>
       {error ? (
         <div className={styles.previewError} role="alert">
@@ -3209,6 +3227,8 @@ function SourceDetail({
         <SourceBlobPreview
           data={data}
           title={source.title}
+          onDownloadUrl={setDownloadUrl}
+          showDownload={false}
           image={
             Boolean(getImageMimeTypeFromPath(path)) &&
             data.type.startsWith('image/')
@@ -3239,17 +3259,22 @@ function SourceBlobPreview({
   data,
   title,
   image,
+  onDownloadUrl,
+  showDownload = true,
 }: {
   data: Blob;
   title: string;
   image: boolean;
+  onDownloadUrl?: (url: string) => void;
+  showDownload?: boolean;
 }) {
   const [url, setUrl] = useState<string>();
   useEffect(() => {
     const objectUrl = URL.createObjectURL(data);
     setUrl(objectUrl);
+    onDownloadUrl?.(objectUrl);
     return () => URL.revokeObjectURL(objectUrl);
-  }, [data]);
+  }, [data, onDownloadUrl]);
   return url ? (
     <div className={styles.imagePreviewWrap}>
       {image ? (
@@ -3261,9 +3286,11 @@ function SourceBlobPreview({
           size={data.size}
         />
       )}
-      <a href={url} download={title} aria-label={`Download ${title}`}>
-        <DownloadIcon />
-      </a>
+      {showDownload && (
+        <a href={url} download={title} aria-label={`Download ${title}`}>
+          <DownloadIcon />
+        </a>
+      )}
     </div>
   ) : null;
 }

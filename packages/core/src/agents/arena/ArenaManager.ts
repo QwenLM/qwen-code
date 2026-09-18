@@ -301,6 +301,12 @@ export class ArenaManager {
     // Validate options
     this.validateStartOptions(options);
 
+    if (this.config.getAgentExecutionBackend?.() === 'container') {
+      throw new Error(
+        'Container execution is required; team and Arena agents are unsupported.',
+      );
+    }
+
     // Use caller-provided terminal size if available
     if (options.cols && options.cols > 0) {
       this.terminalCols = options.cols;

@@ -354,11 +354,11 @@ describe('package scripts', () => {
       );
     });
 
-    it('counts a spec-scoped allowBuilds key as a decision for the package', () => {
+    it('accepts an allowBuilds key scoped to the version npm locks', () => {
       const result = runCheckLockfile((fixtureRoot) =>
         mutatePnpmWorkspace(fixtureRoot, (workspace) => {
-          delete workspace.allowBuilds.esbuild;
-          workspace.allowBuilds['esbuild@^0.25.0'] = true;
+          delete workspace.allowBuilds.keytar;
+          workspace.allowBuilds['keytar@7.9.0'] = true;
         }),
       );
 
@@ -366,6 +366,53 @@ describe('package scripts', () => {
       expect(result.stdout).toContain(
         'pnpm build approvals cover every install script.',
       );
+    });
+
+    it('rejects an allowBuilds key scoped to another version', () => {
+      // pnpm matches a version-scoped key exactly, so an approval written for
+      // one version says nothing about the one npm actually locks.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          delete workspace.allowBuilds.keytar;
+          workspace.allowBuilds['keytar@7.0.0'] = true;
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('no allowBuilds entry');
+      expect(result.stderr).toContain('- keytar@7.9.0');
+    });
+
+    it('accepts a union of exact versions', () => {
+      // pnpm writes this shape itself when it merges version-scoped rules:
+      // the name once, then bare exact versions joined by `||`.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          delete workspace.allowBuilds.keytar;
+          workspace.allowBuilds['keytar@7.0.0 || 7.9.0'] = true;
+        }),
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        'pnpm build approvals cover every install script.',
+      );
+    });
+
+    it('ignores a range-scoped allowBuilds key, which decides nothing', () => {
+      // A range is not a version scope: pnpm's parseVersionPolicyRule throws
+      // INVALID_VERSION_UNION ('Use exact versions only') on `esbuild@^0.25.0`,
+      // so this key decides nothing and the gate stays red for that tree.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          delete workspace.allowBuilds.esbuild;
+          workspace.allowBuilds['esbuild@^0.25.0'] = true;
+        }),
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('no allowBuilds entry');
+      expect(result.stderr).toContain('- esbuild@');
     });
 
     it('ignores an allowBuilds placeholder that decides nothing', () => {
@@ -380,6 +427,23 @@ describe('package scripts', () => {
       expect(result.stderr).toContain('no allowBuilds entry');
       expect(result.stderr).toContain('- esbuild');
     });
+  });
+
+  it('checks undeclared imports in web-shell shipped sources', () => {
+    // web-shell is published and keeps its shipped sources in client/, so the
+    // src/ globs reach none of it. Pinning the glob inside this block keeps a
+    // published package from silently dropping out of the check.
+    const config = readFileSync(path.join(root, 'eslint.config.js'), 'utf8');
+    const start = config.indexOf(
+      'A package must declare what its own sources import',
+    );
+    const end = config.indexOf('export-html and insight carry', start);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(config.slice(start, end)).toContain(
+      "'packages/web-shell/client/**/*.{ts,tsx}'",
+    );
   });
 
   it('keeps the internal release-age exception independent of the version', () => {
@@ -826,6 +890,33 @@ describe('package scripts', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'ignores a PATH entry that cannot be executed',
+    () => {
+      // A `corepack` left without its exec bit by a half-removed toolchain
+      // used to be chosen anyway, and the spawn then died with EACCES instead
+      // of the actionable message below.
+      const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-noexec-'));
+      const env = { ...process.env, PATH: binDir };
+
+      try {
+        writeFileSync(path.join(binDir, 'corepack'), '#!/bin/sh\nexit 0\n');
+        chmodSync(path.join(binDir, 'corepack'), 0o644);
+
+        const result = spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/setup-worktree.js')],
+          { cwd: root, encoding: 'utf8', env },
+        );
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('Corepack is required');
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('falls back to registry access when the pnpm store is incomplete', () => {
     const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-worktree-fallback-'));
     const logFile = path.join(binDir, 'corepack.log');
@@ -1009,6 +1100,7 @@ describe('package scripts', () => {
       'packages/*/package.json',
       '!packages/desktop-shell/package.json',
       '!packages/live-host/package.json',
+      '!packages/mobile-shell/package.json',
       'packages/channels/*/package.json',
       'integrations/*/package.json',
       'patches/**',
@@ -1680,6 +1772,7 @@ describe('package scripts', () => {
       'packages/mobile-mcp',
       'packages/node-repl',
       'packages/sdk-typescript',
+      'packages/web-shell',
     ]) {
       const packageJson = JSON.parse(
         readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),
