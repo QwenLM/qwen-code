@@ -18,7 +18,7 @@ import {
   type ContextMemoryDetail,
   type ContextSkillDetail,
 } from '../types.js';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import {
   DiscoveredMCPTool,
   uiTelemetryService,
@@ -31,6 +31,7 @@ import {
   getStartupContextLength,
   isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
+  resolveSlimmingConfig,
   formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
@@ -166,12 +167,51 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
 }
 
 /**
+ * Estimate of a tool response. Only the text-bearing envelope is serialized:
+ * qwen-code attaches media to `functionResponse.parts` (an extension to the
+ * `@google/genai` schema; see `coreToolScheduler.createFunctionResponsePart`),
+ * and `JSON.stringify`ing the whole part would bill that raw base64 as ASCII
+ * text — a single ~100 KB screenshot alone is enough to push the estimate past
+ * the provider total and deflate every category row through `scale`. Nested
+ * media is charged at the flat per-image budget core uses for the same carrier
+ * (`estimatePartChars` in `compactionInputSlimming`).
+ */
+function estimateFunctionResponseTokens(
+  part: Part,
+  imageTokenEstimate: number,
+): number {
+  const response = part.functionResponse!;
+  let tokens = estimateContextTextTokens(
+    JSON.stringify({
+      id: response.id,
+      name: response.name,
+      response: response.response,
+    }),
+  );
+  // Same carrier core's slimmer strips, read the same way.
+  const nested = (response as { parts?: unknown }).parts;
+  if (Array.isArray(nested)) {
+    for (const inner of nested as Part[]) {
+      if (inner.inlineData || inner.fileData) {
+        tokens += imageTokenEstimate;
+      } else if (typeof inner.text === 'string') {
+        tokens += estimateContextTextTokens(inner.text);
+      }
+    }
+  }
+  return tokens;
+}
+
+/**
  * Content estimate of the conversation after the startup prelude. Skill tool
  * responses are skipped because the bodies they carry are billed under
- * `skills`. Media parts have no text to estimate; the provider still counts
- * them, so their cost surfaces as `unattributed`.
+ * `skills`. A top-level media part has no text to estimate; the provider still
+ * counts it, so its cost surfaces as `unattributed`.
  */
-function estimateConversationTokens(conversation: Content[]): number {
+function estimateConversationTokens(
+  conversation: Content[],
+  imageTokenEstimate: number,
+): number {
   let tokens = 0;
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
@@ -183,9 +223,7 @@ function estimateConversationTokens(conversation: Content[]): number {
         part.functionResponse &&
         part.functionResponse.name !== ToolNames.SKILL
       ) {
-        tokens += estimateContextTextTokens(
-          JSON.stringify(part.functionResponse),
-        );
+        tokens += estimateFunctionResponseTokens(part, imageTokenEstimate);
       }
     }
   }
@@ -223,11 +261,19 @@ export async function collectContextData(
 
   // The startup prelude and the conversation after it are billed request
   // content, so both are measured from the history the chat will send.
-  const history = activeChat?.getHistory?.() ?? [];
+  // `getHistory()` is `structuredClone(this.history)` — a full deep copy of
+  // every base64 payload for a caller that only reads. Prefer the shallow
+  // reader (core's own pattern, `client.ts`), falling back for chat objects
+  // that don't implement it. Never pass `curated: true`: curation merges the
+  // prelude into the first user prompt, which would defeat
+  // `getStartupContextLength` and bill the whole prelude to `messages`.
+  const history =
+    activeChat?.getHistoryShallow?.() ?? activeChat?.getHistory?.() ?? [];
   const preludeLength = getStartupContextLength(history);
   const prelude = measureStartupPrelude(history.slice(0, preludeLength));
   const conversationTokens = estimateConversationTokens(
     history.slice(preludeLength),
+    resolveSlimmingConfig(config.getChatCompression?.()).imageTokenEstimate,
   );
 
   const systemPromptText = getMainSessionBaseSystemPrompt(config);
@@ -362,6 +408,9 @@ export async function collectContextData(
     skillListing.tokens +
     loadedBodiesTokens +
     startupContextTokens;
+  // Everything the session already holds, measured locally: the request
+  // overhead plus the conversation after the startup prelude.
+  const rawContent = rawOverhead + conversationTokens;
 
   const hasTokenCount = apiTotalTokens > 0;
   const isEstimated =
@@ -399,10 +448,10 @@ export async function collectContextData(
     displayMcpTools = mcpToolsTotalTokens;
     displayMemoryFiles = memoryFilesTokens;
     messagesTokens = 0;
-    freeSpace = Math.max(
-      0,
-      contextWindowSize - rawOverhead - autocompactBuffer,
-    );
+    // Include the conversation: a `/model` switch, `/restore` or a resume
+    // zeroes the provider count while leaving `this.history` intact, and such a
+    // session must not report a 100K history as free window.
+    freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
     detailMcpTools = mcpTools;
     detailMemoryFiles = memoryFiles;
@@ -415,8 +464,16 @@ export async function collectContextData(
     // when they fall short, the gap is reported as `unattributed` rather than
     // folded into another category. The cached count is never subtracted: a
     // cache hit spans several categories, so it is only an annotation.
-    const rawContent = rawOverhead + conversationTokens;
-    const scale = rawContent > totalTokens ? totalTokens / rawContent : 1;
+    // `totalTokens` is not always provider-reported: `compressFast()` and resume
+    // seeding write a count derived from core's char/4 `estimateContentTokens`
+    // and stamp it estimated. The categories here are measured with the
+    // CJK-aware estimator, which on CJK-heavy text runs up to ~6x higher, so
+    // dividing one by the other deflates every row — including the ASCII
+    // system-prompt row — by that factor. Scale only against a provider-reported
+    // total; when the total is itself an estimate, `messages` absorbs the
+    // residual instead (below).
+    const scale =
+      !isEstimated && rawContent > totalTokens ? totalTokens / rawContent : 1;
 
     displaySystemPrompt = Math.round(systemPromptTokens * scale);
     const scaledAllTools = Math.round(allToolsTokens * scale);
@@ -444,7 +501,16 @@ export async function collectContextData(
       // sum to the total exactly.
       messagesTokens = Math.max(0, totalTokens - attributedOverhead);
     } else {
-      messagesTokens = conversationTokens;
+      // Unscaled, an estimated total can sit below the conversation estimate
+      // (the two use different units), so cap `messages` at what is left after
+      // the overhead rows rather than letting the rows overshoot the total. For
+      // a provider-reported total this cap is a no-op — there
+      // `rawContent <= totalTokens` already implies it. A genuine shortfall
+      // still surfaces as `unattributed`.
+      messagesTokens = Math.min(
+        conversationTokens,
+        Math.max(0, totalTokens - attributedOverhead),
+      );
       unattributedTokens = Math.max(
         0,
         totalTokens - attributedOverhead - messagesTokens,
@@ -481,23 +547,23 @@ export async function collectContextData(
 
   // Tier classification: prefer the API-reported total when available.
   // When no API call has happened yet (first /context, --continue resume,
-  // sub-agent inheritance), classify against `rawOverhead` so a session
-  // dominated by system prompt / skills / MCP tools doesn't silently show
-  // "safe". (R2.2)
+  // sub-agent inheritance, or a `/model` switch that zeroes the count while
+  // leaving the history intact), classify against everything the session
+  // already holds — overhead plus conversation — so neither a system-prompt-
+  // heavy nor a history-heavy session silently shows "safe" on the render right
+  // before the cheap gate compacts. (R2.2)
   //
-  // SCOPE GAP (R5.1): `rawOverhead` excludes `messagesTokens` — the actual
-  // chat history. A `--continue` restore with 100K of historical messages
-  // (but small overhead) will still display "safe" here, even though the
-  // cheap-gate inside chatCompressionService will trigger compression on
-  // the very next send (it uses `estimatePromptTokens(history, ...)` which
-  // walks the real history). This is a UI/runtime divergence — for a
-  // single render — that resolves the moment any send happens.
+  // SCOPE GAP (R5.1): `estimateConversationTokens` is still not the cheap
+  // gate's estimator — this file measures with the CJK-aware
+  // `estimateContextTextTokens` and skips `skill` responses, while
+  // chatCompressionService uses `estimatePromptTokens(history, ...)` over the
+  // real history. The tier can therefore land on the far side of a threshold
+  // from the runtime's own answer, for a single render, until a send replaces
+  // the estimate with a provider count.
   //
-  // TODO: plumb the chat history into collectContextData and use
-  // estimatePromptTokens(history, undefined, 0, 0, imageTokenEstimate) here
-  // for same-source-of-truth as the cheap-gate. Defer because Config
-  // doesn't expose the active chat instance today.
-  const tierTokens = hasTokenCount ? apiTotalTokens : rawOverhead;
+  // TODO: use estimatePromptTokens(history, undefined, 0, 0,
+  // imageTokenEstimate) here for same-source-of-truth as the cheap gate.
+  const tierTokens = hasTokenCount ? apiTotalTokens : rawContent;
 
   const breakdown: ContextCategoryBreakdown = {
     systemPrompt: displaySystemPrompt,

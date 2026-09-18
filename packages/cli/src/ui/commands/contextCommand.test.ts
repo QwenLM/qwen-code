@@ -212,6 +212,34 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.breakdown.cachedTokens).toBe(0);
   });
 
+  it('reads the history through the shallow reader, not a deep clone', async () => {
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const getHistoryShallow = vi.fn().mockReturnValue(history);
+    const getHistory = vi.fn().mockReturnValue(history);
+    const config = {
+      ...makeMockConfig(200_000),
+      getLlmClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount: vi.fn().mockReturnValue(0),
+          isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+          getHistoryShallow,
+          getHistory,
+        }),
+      }),
+    } as unknown as Config;
+
+    await collectContextData(config, false);
+
+    // `getHistory()` is `structuredClone(this.history)` — a full deep copy of
+    // every base64 payload for a caller that only reads. The shallow reader
+    // shares leaves, and must be called with no `curated` flag: curation merges
+    // the prelude into the first user prompt and would defeat
+    // `getStartupContextLength`.
+    expect(getHistoryShallow).toHaveBeenCalledWith();
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
   describe('category identity (#12033)', () => {
     const skillEntry =
       '<skill>\n<name>\nreport-builder\n</name>\n<description>\nBuild reports (project)\n</description>\n<location>\nproject\n</location>\n</skill>';
@@ -235,6 +263,8 @@ describe('collectContextData (contextCommand)', () => {
       total: number;
       cached?: number;
       history: Content[];
+      /** True when the count came from core's estimator, not the provider. */
+      estimated?: boolean;
     }): Config {
       return {
         ...makeMockConfig(200_000),
@@ -255,7 +285,9 @@ describe('collectContextData (contextCommand)', () => {
             getLastCachedContentTokenCount: vi
               .fn()
               .mockReturnValue(options.cached ?? 0),
-            isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+            isLastPromptTokenCountEstimated: vi
+              .fn()
+              .mockReturnValue(options.estimated ?? false),
             getHistory: vi.fn().mockReturnValue(options.history),
           }),
         }),
@@ -326,6 +358,86 @@ describe('collectContextData (contextCommand)', () => {
 
       expect(data.breakdown.unattributed).toBe(0);
       expect(sumRows(data.breakdown)).toBe(5_000);
+    });
+
+    it('charges nested tool media at the flat image budget, not as base64 text', async () => {
+      // Tool media rides on `functionResponse.parts[k].inlineData.data` — the
+      // carrier core's tools actually use. Serializing the whole part bills
+      // 400,000 ASCII chars (~100,000 tokens) against a 40,000 provider total,
+      // which collapses `scale` and deflates every row, including this
+      // ASCII-only one.
+      const withScreenshot = [
+        prelude,
+        {
+          role: 'model',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'ok' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'A'.repeat(400_000),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as Content,
+      ];
+
+      const billed = await collectContextData(
+        makeChatConfig({ total: 40_000, history: withScreenshot }),
+        false,
+      );
+      const control = await collectContextData(
+        makeChatConfig({ total: 40_000, history: [prelude] }),
+        false,
+      );
+
+      // The screenshot must never reach `scale`, so no overhead row moves.
+      expect(control.breakdown.systemPrompt).toBeGreaterThan(1_000);
+      expect(billed.breakdown.systemPrompt).toBe(
+        control.breakdown.systemPrompt,
+      );
+      expect(billed.breakdown.skills).toBe(control.breakdown.skills);
+      // Charged at the flat per-image budget rather than at chars/4.
+      expect(billed.breakdown.messages).toBeLessThan(5_000);
+      expect(sumRows(billed.breakdown)).toBe(40_000);
+    });
+
+    it('does not deflate rows when the total is itself a char/4 estimate', async () => {
+      // `compressFast()` and resume seeding stamp a total measured by core's
+      // char/4 estimator. These categories use the CJK-aware one, up to ~6x
+      // larger on CJK text, so dividing the two deflated every row.
+      const cjk = '中'.repeat(100_000);
+      const history = [prelude, { role: 'user', parts: [{ text: cjk }] }];
+      const estimatedTotal = Math.ceil(cjk.length / 4);
+
+      // Reference: the same config with no provider count renders the raw,
+      // unscaled estimates.
+      const unscaled = await collectContextData(
+        makeChatConfig({ total: 0, history }),
+        false,
+      );
+      const data = await collectContextData(
+        makeChatConfig({ total: estimatedTotal, history, estimated: true }),
+        false,
+      );
+
+      expect(unscaled.breakdown.systemPrompt).toBeGreaterThan(1_000);
+      expect(unscaled.breakdown.startupContext).toBeGreaterThan(0);
+      expect(data.breakdown.systemPrompt).toBe(unscaled.breakdown.systemPrompt);
+      expect(data.breakdown.startupContext).toBe(
+        unscaled.breakdown.startupContext,
+      );
+      expect(data.breakdown.skills).toBe(unscaled.breakdown.skills);
+      // The rows still close against the estimated total.
+      expect(sumRows(data.breakdown)).toBe(estimatedTotal);
     });
 
     it('never derives messages from the cached count', async () => {
@@ -745,11 +857,42 @@ describe('/context shows three-tier thresholds', () => {
     expect(text).toMatch(/Current tier:\s+auto/);
   });
 
+  it('classifies a history-heavy no-API-data session by its conversation too', async () => {
+    // A `/model` switch (`adoptTokenCountsForRoute`), `/restore` or a resume
+    // zeroes lastPromptTokenCount while leaving the history intact. 200K window
+    // → warn at 147,000; 600,000 ASCII chars ≈ 150,000 tokens of conversation,
+    // so the session sits past `warn` even though its overhead alone is tiny —
+    // which is the render right before the cheap gate compacts on the next send.
+    const config = {
+      ...makeMockConfig(200_000),
+      getLlmClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount: vi.fn().mockReturnValue(0),
+          isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'user', parts: [{ text: 'a'.repeat(600_000) }] },
+            ]),
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.totalTokens).toBe(0);
+    expect(data.breakdown.currentTier).not.toBe('safe');
+    // Free space has to account for the conversation as well.
+    expect(data.breakdown.freeSpace).toBeLessThan(50_000);
+  });
+
   it('treats no-API-data sessions as safe and omits the threshold section from text', async () => {
     // lastPromptTokenCount = 0 → collectContextData uses the estimated branch
-    // (classifies against `rawOverhead`, not apiTotalTokens). With these
-    // default fixtures rawOverhead lands well below `warn`, so currentTier
-    // resolves to `safe`. On heavy system-prompt / skill / MCP loads the
+    // (classifies against `rawContent` — overhead plus conversation — not
+    // apiTotalTokens). With these default fixtures there is no chat and no
+    // history, so rawContent lands well below `warn` and currentTier resolves
+    // to `safe`. On heavy system-prompt / skill / MCP loads the
     // estimated branch can return warn/auto/hard — this test only covers
     // the default-fixture safe case. formatContextUsageText must NOT emit
     // the "Compaction thresholds" section because the estimated path
