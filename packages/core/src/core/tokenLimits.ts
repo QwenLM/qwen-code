@@ -243,7 +243,10 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // DeepSeek
   // -------------------
-  [/^deepseek-v4/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
+  // The official DeepSeek API serves V4 flash as `deepseek-flash` (the
+  // `deepseek-v4.1-flash` spelling is DashScope's); both V4 names carry the
+  // 1M window, so flash must not fall through to the 128K family rule.
+  [/^deepseek-(?:v4|flash)/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
   [/^deepseek/, LIMITS['128k']],
 
   // -------------------
@@ -301,7 +304,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
 
   // DeepSeek
-  [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
+  [/^deepseek-(?:v4|flash)/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
