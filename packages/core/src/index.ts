@@ -821,6 +821,7 @@ export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export { buildHooksListing } from './hooks/hooks-listing.js';
 export type {
   HooksListing,
+  HooksListingDisabledReason,
   HooksListingOrigin,
   HooksListingRow,
 } from './hooks/hooks-listing.js';

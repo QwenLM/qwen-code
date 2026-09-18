@@ -15,6 +15,26 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
 
 /**
+ * The identity the registry uses to spot a duplicate hook within one source,
+ * event, matcher and `sequential` setting: the hook's name when it has one,
+ * otherwise its full command, URL, function id or prompt. Exported so a
+ * listing read straight from settings collapses the same entries the registry
+ * would.
+ */
+export function hookRegistryIdentity(config: HookConfig): string {
+  if (config.name) return config.name;
+  if (config.type === 'command')
+    return (config as { command?: string }).command || 'unknown-command';
+  if (config.type === 'http')
+    return (config as { url?: string }).url || 'unknown-url';
+  if (config.type === 'function')
+    return (config as { id?: string }).id || 'unknown-function';
+  if (config.type === 'prompt')
+    return (config as { prompt?: string }).prompt || 'prompt-hook';
+  return 'unknown-hook';
+}
+
+/**
  * Extension with hooks support
  */
 export interface ExtensionWithHooks {
@@ -210,17 +230,7 @@ export class HookRegistry {
   private getHookIdentity(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    const config = entry.config;
-    if (config.name) return config.name;
-    if (config.type === 'command')
-      return (config as { command?: string }).command || 'unknown-command';
-    if (config.type === 'http')
-      return (config as { url?: string }).url || 'unknown-url';
-    if (config.type === 'function')
-      return (config as { id?: string }).id || 'unknown-function';
-    if (config.type === 'prompt')
-      return (config as { prompt?: string }).prompt || 'prompt-hook';
-    return 'unknown-hook';
+    return hookRegistryIdentity(entry.config);
   }
 
   /**

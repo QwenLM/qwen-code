@@ -179,6 +179,30 @@ export async function writeWorkflowSnapshot(
 }
 
 /**
+ * The persisted snapshot of one run, or `undefined` when there is none, it
+ * cannot be read, or it is not a snapshot. For a caller that has a run id and
+ * no registry entry to ask — a resume after a restart — and needs what the run
+ * recorded about itself.
+ */
+export async function readWorkflowSnapshot(
+  config: Config,
+  runId: string,
+): Promise<WorkflowSnapshot | undefined> {
+  const storage = config.storage;
+  if (!storage) return undefined;
+  try {
+    const raw = await fs.readFile(
+      storage.getWorkflowRunSnapshotPath(runId),
+      'utf8',
+    );
+    const parsed: unknown = JSON.parse(raw);
+    return isWorkflowSnapshot(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Load all persisted snapshots, newest-first by `startTime`. Tolerates a
  * missing directory and skips unparseable files.
  */
