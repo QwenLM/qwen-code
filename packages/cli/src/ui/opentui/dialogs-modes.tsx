@@ -137,25 +137,37 @@ export function OpenTuiApprovalModeDialog(props: {
   const [sel, setSel] = useState(
     Math.max(0, modes.indexOf(current as ApprovalMode)),
   );
+  const [error, setError] = useState<string | null>(null);
   useEsc(onClose);
   const pick = () => {
     const mode = modes[sel];
-    if (mode) {
-      try {
-        // ink defaults the persist scope to User (its scope picker) — an
-        // untrusted workspace never receives writes; the runtime applies the
-        // merged setting (useApprovalModeCommand parity).
-        settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
-        config?.setApprovalMode?.(settings.merged.tools?.approvalMode ?? mode);
-        onApprovalModeChanged(mode);
-      } catch {
-        /* trust gate */
-      }
+    if (!mode) {
+      onClose();
+      return;
+    }
+    try {
+      // Let the trust gate rule before anything reaches disk — persisting
+      // first would leave a refused privileged mode at User scope, where it
+      // applies in every workspace the user has trusted. The runtime then
+      // applies the merged setting (useApprovalModeCommand parity).
+      config?.setApprovalMode?.(mode);
+      settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
+      onApprovalModeChanged(mode);
+    } catch (e) {
+      // Keep the dialog open and show the refusal: an empty catch here made a
+      // gate rejection indistinguishable from an accepted choice.
+      setError((e as Error).message);
+      return;
     }
     onClose();
   };
   return (
     <Shell title="Approval Mode">
+      {error && (
+        <box marginTop={1}>
+          <text fg={C.red}>{error}</text>
+        </box>
+      )}
       <RadioList
         items={modes.map((m) => ({
           key: m,
