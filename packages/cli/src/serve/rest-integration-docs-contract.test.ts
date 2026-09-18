@@ -587,7 +587,7 @@ describe('REST integration documentation contract', () => {
   it('keeps the quickstart versioned and lifecycle-complete', () => {
     const quickstart = readFileSync(QUICKSTART, 'utf8');
     const sdkVersion = quickstart.match(
-      /against Qwen Code `v\d+\.\d+\.\d+` and `@qwen-code\/sdk@(\d+\.\d+\.\d+)`/,
+      /targets Qwen Code `v\d+\.\d+\.\d+` and\s+`@qwen-code\/sdk@(\d+\.\d+\.\d+)`/,
     )?.[1];
     expect(sdkVersion).toBeTruthy();
     expect(quickstart).toContain(`npm install @qwen-code/sdk@${sdkVersion}`);

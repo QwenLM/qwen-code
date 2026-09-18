@@ -4,8 +4,8 @@ A minimal end-to-end example: start an API-only `qwen serve` daemon in another t
 
 ## Setup
 
-The API calls and install command in this walkthrough are contract-checked
-against Qwen Code `v0.24.0` and `@qwen-code/sdk@0.1.12`.
+This walkthrough targets Qwen Code `v0.24.0` and
+`@qwen-code/sdk@0.1.12`.
 
 In one terminal:
 
@@ -124,16 +124,18 @@ function handleEvent(event: DaemonEvent): void {
 ## Restore, poll status, and read history
 
 Closing a live session does not delete its persisted transcript. Save the id,
-close the live owner, then restore it. Use `loadSession` for an ordinary saved
-conversation; use `resumeSession` only when the persisted session contains an
-interrupted turn that should continue without a new user message.
+close the live owner, then restore it. Use `loadSession` when the client needs
+persisted turns replayed into its SSE stream; use `resumeSession` when the
+client already has those turns rendered and only needs the daemon-side handle
+restored. Neither method continues an interrupted turn; call `continueSession`
+separately when that is required.
 
 ```ts
 const savedSessionId = session.sessionId;
 await client.closeSession(savedSessionId, session.clientId);
 
 const restored =
-  process.env.RESUME_INTERRUPTED === '1'
+  process.env.HISTORY_ALREADY_RENDERED === '1'
     ? await client.resumeSession(savedSessionId, {
         workspaceCwd: selectedWorkspace.cwd,
       })
