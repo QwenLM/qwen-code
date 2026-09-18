@@ -524,6 +524,37 @@ describe('release workflow', () => {
       .filter((name) => name !== 'base')
       .sort();
     expect(published).toEqual(guarded);
+
+    // The channel loop is not the whole allowlist: `publish_package` is also
+    // called with a literal directory for every non-channel package, and that
+    // shape is invisible to the channel-only comparison above. #12178 added
+    // `publish_package 'packages/web-shell'` without adding the name to
+    // `PUBLISHED_PACKAGES`, so the package became CI-published while the
+    // guard never probed it — a release shipped only as
+    // @qwen-code/web-shell read as unshipped, the version-collision bump did
+    // not fire, and the force push could proceed over it. Resolve each
+    // literal target through the package.json it publishes instead of a
+    // second hardcoded directory-to-name mapping, so an addition of any
+    // future shape fails here too.
+    const publishStep = releaseStepScript.slice(
+      releaseStepScript.indexOf('\n  publish-packages)'),
+      releaseStepScript.indexOf('\n  verify-archives)'),
+    );
+    const literalTargets = [
+      ...publishStep.matchAll(/publish_package '([^']+)'/g),
+    ].map(([, directory]) => directory);
+    expect(literalTargets.length).toBeGreaterThan(1);
+    const guardedNames = new Set(PUBLISHED_PACKAGES);
+    for (const directory of literalTargets) {
+      // `dist` is the root package's bundle output rather than a workspace
+      // directory, and does not exist in a source checkout.
+      const manifest =
+        directory === 'dist' ? 'package.json' : `${directory}/package.json`;
+      const { name } = JSON.parse(readFileSync(manifest, 'utf8'));
+      expect(guardedNames.has(name), `${directory} publishes ${name}`).toBe(
+        true,
+      );
+    }
   });
 
   it('keeps the workflow focused on orchestration', () => {
