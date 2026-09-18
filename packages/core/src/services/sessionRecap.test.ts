@@ -72,4 +72,41 @@ describe('generateSessionRecap', () => {
     expect(serialized).toContain('fix session title pollution');
     expect(serialized).toContain('continue with recap coverage');
   });
+
+  it('asks the recap to match the conversation language by default', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Исправь гонку в retry-логике' }] },
+      { role: 'model', parts: [{ text: 'Смотрю на обработчик ретраев.' }] },
+    ];
+
+    let systemInstruction: unknown = null;
+    const generateText = vi.fn(
+      async (opts: { contents: Content[]; systemInstruction: unknown }) => {
+        systemInstruction = opts.systemInstruction;
+        return {
+          text: '<recap>Чиним гонку в retry. Далее: добавить тест.</recap>',
+          usage: undefined,
+        };
+      },
+    );
+    const config = {
+      getFastModel: vi.fn(() => 'qwen-turbo'),
+      getModel: vi.fn(() => 'qwen-plus'),
+      getLlmClient: vi.fn(() => ({
+        getHistoryShallow: () => history,
+      })),
+      getBaseLlmClient: vi.fn(() => ({ generateText })),
+      getOutputLanguageFilePath: vi.fn(() => undefined),
+    } as unknown as Config;
+
+    const result = await generateSessionRecap(
+      config,
+      new AbortController().signal,
+    );
+
+    expect(result).toBe('Чиним гонку в retry. Далее: добавить тест.');
+    expect(String(systemInstruction)).toContain(
+      'same language as the conversation',
+    );
+  });
 });
