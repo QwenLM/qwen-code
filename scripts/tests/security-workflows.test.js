@@ -43,6 +43,7 @@ describe('security workflows', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
     const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
+    const setupNodeStep = getWorkflowStep(dependencyJob, 'Set up Node');
     const auditStep = getWorkflowStep(
       dependencyJob,
       'Audit production dependencies',
@@ -79,6 +80,11 @@ describe('security workflows', () => {
     expect(dependencyCheckoutStep).toContain('persist-credentials: false');
     // pnpm audit reads pnpm-lock.yaml, so the root tree is never installed.
     expect(dependencyJob).not.toContain("- name: 'Install dependencies'");
+    // And the root package-lock.json is retired, so an npm cache here would
+    // key off a file that no longer exists and fail the step — on a job no
+    // pull_request run ever reaches.
+    expect(setupNodeStep).toContain('package-manager-cache: false');
+    expect(setupNodeStep).not.toContain("cache: 'npm'");
     expect(auditStep).not.toContain('continue-on-error');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
