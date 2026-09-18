@@ -263,27 +263,43 @@ export async function executeBwrap(
               status = { state: 'confirmed', exitCode: record['exitCode'] };
             else if (record['state'] === 'interrupted')
               status = { state: 'interrupted' };
-            else
+            else {
+              // Preserve the attestation exactly as written: an absent or
+              // non-boolean field means "unknown", never "did not run"
+              // (PR #12067 review, round 2).
+              const attested = record['payloadExitObserved'];
               status = {
                 state: 'unconfirmed',
-                payloadExitObserved: record['payloadExitObserved'] === true,
+                ...(typeof attested === 'boolean'
+                  ? { payloadExitObserved: attested }
+                  : {}),
               };
+            }
           } catch {
             /* Missing/partial receipt never proves that the payload did not run. */
           }
         }
-        // Retain the dirs only when the payload may genuinely have run:
-        // either the receipt attests a payload exit record (payload past
-        // exec, correlation failed), or the receipt exists but is
-        // unreadable (relay died mid-payload). A missing receipt means the
-        // relay died before spawning bwrap, and an attested no-exec
-        // unconfirmed means setup failed before exec — a missing bwrap or
-        // payload binary — so both clean up (PR #12067 review: retaining
-        // those leaked a dir pair per invocation).
+        // Retain the dirs unless the payload provably did not run. Two
+        // positive proofs allow cleanup: the receipt attests no payload
+        // exit record (spawn failure, or a wire showing the payload never
+        // got past exec — missing bwrap or payload binary), or the receipt
+        // file is absent, which means the relay died before its O_EXCL
+        // create and therefore before spawning bwrap. Everything else —
+        // an attested exit record, an unreadable receipt, or an
+        // unattested unconfirmed — is unknown and retains (PR #12067
+        // review: the coarse key leaked a dir pair per pre-exec failure,
+        // while collapsing "unknown" into "did not run" inverts the
+        // fail-safe for a retry-deciding caller).
+        const attestedNoExec =
+          receiptExisted &&
+          receiptParsed &&
+          status.state === 'unconfirmed' &&
+          status.payloadExitObserved === false;
+        const relayDiedBeforeSpawn = !receiptExisted;
         const retain =
           status.state === 'unconfirmed' &&
-          receiptExisted &&
-          (!receiptParsed || status.payloadExitObserved === true);
+          !attestedNoExec &&
+          !relayDiedBeforeSpawn;
         if (retain) {
           debugLogger.warn(
             'Sandbox termination is unconfirmed; retaining temporary directories',

@@ -42,10 +42,12 @@ describe('bwrap execution receipts', () => {
       ).toEqual({ state: 'confirmed', exitCode: code });
     },
   );
-  // payloadExitObserved marks whether the wire carries a well-formed bwrap
-  // exit-code record — bwrap only emits it once the payload is past exec,
-  // so it separates "payload ran but evidence is inconclusive" (retain the
-  // dirs) from "setup failed before exec" (safe to clean up).
+  // payloadExitObserved is a three-way attestation and the test must
+  // discriminate all three: true = the wire carries a well-formed bwrap
+  // exit-code record (payload ran; retain), false = positively attested
+  // no-exec (safe to clean up), undefined/absent = unknown (oversized or
+  // partial wire — must never be collapsed into "did not run", PR #12067
+  // review round 2).
   it.each([
     ['', undefined],
     ['{ "child-pid": 120 }\n', false],
@@ -63,7 +65,13 @@ describe('bwrap execution receipts', () => {
       expect(status.state).toBe('unconfirmed');
       const observed =
         status.state === 'unconfirmed' ? status.payloadExitObserved : undefined;
-      expect(observed ?? false).toBe(payloadExitObserved ?? false);
+      // Strict identity: an absent field must stay absent, not coerce to
+      // false — the finalizer and the caller-facing message treat those
+      // two differently.
+      expect(observed).toBe(payloadExitObserved);
+      expect('payloadExitObserved' in status).toBe(
+        payloadExitObserved !== undefined,
+      );
     },
   );
 });

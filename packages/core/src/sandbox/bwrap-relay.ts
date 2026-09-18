@@ -30,6 +30,10 @@ const child = spawn(bwrap, ['--json-status-fd', '3', ...args], {
 let wire = '';
 let bytes = 0;
 let failed = false;
+// Only a bwrap spawn error proves the payload never ran. A status-stream
+// transport error or a wire overflow can happen after the payload has
+// executed, so those must stay unattested (PR #12067 review, round 2).
+let spawnFailed = false;
 const statusStream = child.stdio[3] as Readable;
 statusStream.on('data', (chunk: Buffer) => {
   bytes += chunk.length;
@@ -41,16 +45,20 @@ statusStream.on('error', () => {
 });
 child.on('error', () => {
   failed = true;
+  spawnFailed = true;
 });
 child.on('close', (code, signal) => {
   clearInterval(parentWatch);
-  // A spawn/transport failure of bwrap itself (failed=true) means the
-  // payload provably never ran — attest that explicitly so the finalizer
-  // can clean up instead of retaining the dirs for inspection.
+  // A spawn failure of bwrap itself means the payload provably never ran —
+  // attest that explicitly so the finalizer can clean up instead of
+  // retaining the dirs for inspection. Every other failure mode leaves the
+  // field absent: absence of evidence is not evidence of absence.
   const status = signal
     ? { state: 'interrupted' }
     : failed
-      ? { state: 'unconfirmed', payloadExitObserved: false }
+      ? spawnFailed
+        ? { state: 'unconfirmed', payloadExitObserved: false }
+        : { state: 'unconfirmed' }
       : parseBwrapStatus(wire, code);
   writeFileSync(fd, JSON.stringify(status));
   closeSync(fd);

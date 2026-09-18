@@ -12,8 +12,10 @@ export type BwrapStatus =
        * True when the status wire carried a well-formed bwrap exit-code
        * record — i.e. the payload got past exec and ran to an exit, so the
        * run may genuinely have happened and its dirs are worth retaining.
-       * Absent/false when the wire shows the payload never executed
-       * (missing bwrap, missing payload binary) or was unintelligible.
+       * False is a positive attestation that the payload never executed
+       * (a bwrap spawn failure, or a wire with no exit-code record).
+       * Absent means unknown — an oversized or partial wire, or a
+       * non-spawn relay failure — and must never be read as "did not run".
        */
       payloadExitObserved?: boolean;
     }
@@ -23,12 +25,13 @@ export const MAX_STATUS_BYTES = 16 * 1024;
 
 export function sandboxStatusError(status: BwrapStatus): Error | undefined {
   if (status.state === 'unconfirmed') {
-    // A receipt that positively attests no payload exit means the failure
-    // happened before exec (e.g. bubblewrap or the payload binary is not
-    // installed) — say so instead of reading as a transient sandbox fault.
+    // Only a positive no-exec attestation gets the definitive message;
+    // unknown stays on the cautious "may have run" wording so a
+    // retry-deciding caller is never told the payload did not run without
+    // evidence (PR #12067 review, round 2).
     if (status.payloadExitObserved === false) {
       return new Error(
-        'Sandbox payload did not run: setup failed before execution (is bubblewrap installed?).',
+        'Sandbox payload did not run: setup failed before execution (bubblewrap or the payload binary may be missing).',
       );
     }
     return new Error(

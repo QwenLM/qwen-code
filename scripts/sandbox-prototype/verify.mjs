@@ -603,6 +603,10 @@ async function verify() {
         assert.notEqual(result.exitCode, 0);
         assert.deepEqual(JSON.parse(readFileSync(statusPath, 'utf8')), {
           state: 'unconfirmed',
+          // bwrap forked (child-pid on the wire) but the mount setup failed
+          // before exec, so there is no exit-code record — a positive
+          // no-exec attestation (PR #12067 review, round 2).
+          payloadExitObserved: false,
         });
         assert.ok(!existsSync(marker));
         rmSync(control, { recursive: true });
