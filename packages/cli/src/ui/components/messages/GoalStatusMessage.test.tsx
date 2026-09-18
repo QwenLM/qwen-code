@@ -8,7 +8,8 @@ import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
 import { GOAL_STATUS_KINDS, MessageType } from '../../types.js';
-import { GoalStatusMessage } from './GoalStatusMessage.js';
+import { theme } from '../../semantic-colors.js';
+import { GoalStatusMessage, goalCardThemeColor } from './GoalStatusMessage.js';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
@@ -258,5 +259,31 @@ describe('<GoalStatusMessage />', () => {
     );
 
     expect(lastFrame()).not.toContain('tokens');
+  });
+
+  it('maps every palette slot of a card view to its theme colour', () => {
+    expect({
+      secondary: goalCardThemeColor('secondary'),
+      accent: goalCardThemeColor('accent'),
+      warning: goalCardThemeColor('warning'),
+      error: goalCardThemeColor('error'),
+      success: goalCardThemeColor('success'),
+    }).toEqual({
+      secondary: theme.text.secondary,
+      accent: theme.text.accent,
+      warning: theme.status.warning,
+      error: theme.status.error,
+      success: theme.status.success,
+    });
+    // Five slots, five colours: no two states may look alike.
+    expect(
+      new Set([
+        theme.text.secondary,
+        theme.text.accent,
+        theme.status.warning,
+        theme.status.error,
+        theme.status.success,
+      ]).size,
+    ).toBe(5);
   });
 });
