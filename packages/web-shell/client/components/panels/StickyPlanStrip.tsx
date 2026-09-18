@@ -43,22 +43,26 @@ export const StickyPlanStrip = memo(function StickyPlanStrip({
   hasLiveActivity = true,
 }: StickyPlanStripProps) {
   const { t } = useI18n();
-  const ordered = getOrderedStickyTodos(todos);
+  // Same split as the terminal: order, then drop completed items for the visible
+  // rows — but keep the unsorted list for the step counter, whose number must
+  // match the item's position in the plan rather than in the sorted order.
+  const ordered = getOrderedStickyTodos(todos).filter(
+    (todo) => todo.status !== 'completed',
+  );
   if (ordered.length === 0) return null;
 
-  const inProgressIdx = ordered.findIndex(
+  const inProgressIdx = todos.findIndex(
     (todo) => todo.status === 'in_progress',
   );
-  const pendingIdx = ordered.findIndex((todo) => todo.status === 'pending');
-  const currentIdx =
-    inProgressIdx >= 0 ? inProgressIdx : pendingIdx >= 0 ? pendingIdx : -1;
-  const current = currentIdx >= 0 ? currentIdx + 1 : ordered.length;
+  const pendingIdx = todos.findIndex((todo) => todo.status === 'pending');
+  const currentIdx = inProgressIdx >= 0 ? inProgressIdx : pendingIdx;
+  const current = currentIdx >= 0 ? currentIdx + 1 : todos.length;
 
   const visible = ordered.slice(0, STICKY_TODO_MAX_VISIBLE_ITEMS);
   const hiddenCount = ordered.length - visible.length;
   const progressLabel = t('todo.stepProgress', {
     current,
-    total: ordered.length,
+    total: todos.length,
   });
 
   return (

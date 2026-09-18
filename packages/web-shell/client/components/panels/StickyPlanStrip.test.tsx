@@ -49,7 +49,7 @@ describe('StickyPlanStrip', () => {
     expect(container.textContent).toBe('');
   });
 
-  it('orders open items first and caps the visible list', () => {
+  it('counts steps from the plan order and caps the visible open items', () => {
     const todos = [
       todo('1', 'completed'),
       todo('2', 'pending'),
@@ -67,14 +67,34 @@ describe('StickyPlanStrip', () => {
       />,
     );
 
-    expect(container.textContent).toContain('Step 1 / 7');
-    expect(container.textContent).toContain('Step 3');
-    expect(container.textContent).toContain(
-      `... ${todos.length - STICKY_TODO_MAX_VISIBLE_ITEMS} more`,
-    );
+    // The step number is the position in the plan (index 2), not the position
+    // in the sorted list, which would always be 1 while any item is open.
+    expect(container.textContent).toContain('Step 3 / 7');
+    // Completed items are dropped before the cap, so six open items leave one
+    // over the five-row limit rather than hiding behind the completed row.
+    expect(container.textContent).toContain('... 1 more');
     expect(container.querySelectorAll('li')).toHaveLength(
       STICKY_TODO_MAX_VISIBLE_ITEMS + 1,
     );
+  });
+
+  it('keeps completed items out of the visible rows and the overflow count', () => {
+    const todos = [
+      todo('1', 'completed'),
+      todo('2', 'completed'),
+      todo('3', 'in_progress'),
+    ];
+    const container = render(
+      <StickyPlanStrip
+        todos={todos}
+        collapsed={false}
+        onToggleCollapsed={vi.fn()}
+      />,
+    );
+
+    expect(container.textContent).toContain('Step 3 / 3');
+    expect(container.textContent).not.toContain('...');
+    expect(container.querySelectorAll('li')).toHaveLength(1);
   });
 
   it('hides the list while collapsed and toggles on click', () => {
