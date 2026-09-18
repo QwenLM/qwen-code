@@ -1213,8 +1213,39 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   synchronizeToolGroupSourceIdentity(messages);
+  attachTurnPromptIds(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
+}
+
+/**
+ * Copies the daemon-stamped per-turn `promptId` from contributing blocks onto
+ * the messages built from them.
+ *
+ * A block id is only an ordinal within one projection, so it cannot identify a
+ * turn across a reload; `promptId` can. It is attached regardless of
+ * `includeSourceIdentity`, which governs the tool-group record identity that
+ * host source references use, not turn identity.
+ */
+function attachTurnPromptIds(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const promptIdByBlockId = new Map<string, string>();
+  for (const block of blocks) {
+    if (block.promptId) promptIdByBlockId.set(block.id, block.promptId);
+  }
+  if (promptIdByBlockId.size === 0) return;
+  for (const message of messages) {
+    if (message.promptId) continue;
+    for (const id of [message.id, ...(message.sourceBlockIds ?? [])]) {
+      const promptId = promptIdByBlockId.get(id);
+      if (promptId) {
+        message.promptId = promptId;
+        break;
+      }
+    }
+  }
 }
 
 function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {
