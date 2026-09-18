@@ -356,6 +356,43 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('opens the main-menu entry the arrows of one read reached (#122)', async () => {
+    renderDialog();
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    // Two downs land on Custom Provider. The cursor the handler was registered
+    // with still pointed at Alibaba ModelStudio, whose Enter opens the
+    // access-method sub-menu instead.
+    expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
+    expect(screen.queryByText(/Access Method/)).toBeNull();
+  });
+
+  it('wraps the main-menu cursor from the first row to the last (#160)', async () => {
+    renderDialog();
+    // ink builds this list on DescriptiveRadioButtonSelect, whose useSelectionList
+    // steps modulo the row count; a clamp would stay on Alibaba ModelStudio and
+    // Enter would open the access-method sub-menu instead.
+    await press('up');
+    await press('return');
+    expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
+    expect(screen.queryByText(/Access Method/)).toBeNull();
+  });
+
+  it('wraps the main-menu cursor from the last row to the first (#160)', async () => {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('down');
+    await press('return');
+    expect(
+      screen.getByText('Alibaba ModelStudio · Access Method'),
+    ).toBeTruthy();
+  });
+
   it('keeps authentication open when only service models were saved', async () => {
     const servicePlan = coreRuntime.buildInstallPlan(
       coreRuntime.minimaxProvider,
@@ -448,7 +485,28 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('return'); // empty submit → flow sets modelIdsError
     expect(screen.getByText(/Model IDs cannot be empty/)).toBeTruthy();
     // the error is non-fatal: the step stays mounted
-    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+    expect(
+      screen.getByText(/Enter model IDs separated by commas/),
+    ).toBeTruthy();
+  });
+
+  it("renders ink's no-recommendations branch for a provider without models", async () => {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await typeText('https://api.example.com/v1');
+    await press('return'); // baseUrl → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models
+    expect(
+      screen.getByText(
+        (_, element) => element?.textContent === '> model-id-1, model-id-2',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText('Recommended models')).toBeNull();
+    expect(screen.queryByText('Search')).toBeNull();
   });
 
   it('keeps the dialog open and shows the error when the plan fails', async () => {
@@ -586,7 +644,9 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     ).toBeTruthy();
     // the burst is what the wizard carries forward, not its last character
     await press('return'); // apiKey → models
-    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+    expect(
+      screen.getByText(/Enter model IDs separated by commas/),
+    ).toBeTruthy();
   });
 
   it('submits the burst that shares one batch with its Enter', async () => {
@@ -595,7 +655,9 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     // Before the fix the Enter read the flow's state, which no render had
     // refreshed yet, and the step refused the key it was showing; the submit now
     // reads the editor's live text, so the burst lands on the models step.
-    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+    expect(
+      screen.getByText(/Enter model IDs separated by commas/),
+    ).toBeTruthy();
   });
 
   it('carries the URL typed in the same batch as its Enter to the review', async () => {
@@ -749,7 +811,9 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     expect(screen.getByText('sk-pasted-key')).toBeTruthy();
     // the pasted key is what the wizard carries forward, not a lost paste
     await press('return'); // apiKey → models
-    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+    expect(
+      screen.getByText(/Enter model IDs separated by commas/),
+    ).toBeTruthy();
   });
 
   it('keeps a pasted line break out of the field row', async () => {
@@ -1042,6 +1106,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
 
   const SPACE = { name: 'space', sequence: ' ' };
   const ENTER = { name: 'return', sequence: '\r' };
+  const DOWN = { name: 'down', sequence: '\x1b[B' };
 
   /** Every key of one stdin read, dispatched without a render in between. */
   async function pressBatched(
@@ -1054,22 +1119,31 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
   }
 
   /**
-   * Walk the DeepSeek wizard to the model-IDs step with the recommended list
-   * holding focus. A custom provider ships no recommended list, so a preset is
+   * Walk the DeepSeek wizard to the model-IDs step, where the custom-ID input
+   * holds focus. A custom provider ships no recommended list, so a preset is
    * the only route to the checkboxes.
    */
-  async function runToRecommendedList(): Promise<void> {
+  async function runToModelsStep(): Promise<void> {
     renderDialog();
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select, DeepSeek on top
     await press('return'); // DeepSeek → apiKey
     await typeText('sk-test');
     await press('return'); // apiKey → models (custom-ID input focused)
+  }
+
+  async function runToRecommendedList(): Promise<void> {
+    await runToModelsStep();
+    await press('tab'); // → search field
     await press('tab'); // → recommended list, first row
   }
 
+  // Rows carry ink's formatted label (the id padded out to the description
+  // column), so the id only ever matches as a prefix; the radio lives in a
+  // sibling box one level up from the label.
   function recommendedRow(id: string): string {
-    const row = screen.getByText(id).parentElement;
+    const label = screen.getByText(new RegExp(`^${id}(\\s|$)`));
+    const row = label.parentElement?.parentElement;
     if (!row) throw new Error(`the ${id} row is not mounted`);
     return row.textContent ?? '';
   }
@@ -1097,5 +1171,29 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     } finally {
       build.mockRestore();
     }
+  });
+
+  it('lands the Space on the row the arrows of the same read reached', async () => {
+    await runToModelsStep();
+    // Custom-ID field → search field → first row, all out of one read. Read
+    // from the render that armed the handler, the Space would still see the
+    // custom-ID field and type a space into it instead of toggling a row.
+    await pressBatched([DOWN, DOWN, SPACE]);
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.CIRCLE_EMPTY);
+  });
+
+  it('toggles the row an arrow of the same read moved to', async () => {
+    await runToRecommendedList();
+    await pressBatched([DOWN, SPACE]);
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
+    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.CIRCLE_EMPTY);
+  });
+
+  it('filters the recommended list from the search field one Tab away', async () => {
+    await runToModelsStep();
+    await press('tab'); // custom-ID input → search field
+    await typeText('flash');
+    expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
+    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.RADIO_FILLED);
   });
 });

@@ -19,8 +19,22 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
-import { nextEnabledIndex, readHooksEnabled } from './dialogs-misc.js';
+import { readHooksEnabled, Shell } from './dialogs-misc.js';
+import { C } from './theme.js';
 import type { LoadedSettings } from '../../config/settings.js';
+
+describe('Shell (ink dialog chrome)', () => {
+  it('frames with a rounded border.default outline and a bold primary title', () => {
+    const frame = Shell({ title: 'Resume Session' }) as unknown as {
+      props: Record<string, unknown> & { children: unknown[] };
+    };
+    expect(frame.props['borderStyle']).toBe('rounded');
+    expect(frame.props['borderColor']).toBe(C.borderDefault);
+    const title = frame.props.children[0] as { props: Record<string, unknown> };
+    expect(title.props['fg']).toBe(C.text);
+    expect(title.props['attributes']).toBe(1);
+  });
+});
 
 const settingsWith = (merged: Record<string, unknown>): LoadedSettings =>
   ({ merged }) as unknown as LoadedSettings;
@@ -49,29 +63,5 @@ describe('readHooksEnabled (the real disableAllHooks switch)', () => {
         settingsWith({ disableAllHooks: false }),
       ),
     ).toBe(false);
-  });
-});
-
-describe('nextEnabledIndex (ink BaseSelectionList parity)', () => {
-  const items = [
-    { disabled: false },
-    { disabled: true },
-    { disabled: false },
-    { disabled: false },
-  ];
-
-  it('moves to the next enabled entry, skipping disabled ones', () => {
-    expect(nextEnabledIndex(items, 0, 1)).toBe(2);
-    expect(nextEnabledIndex(items, 2, -1)).toBe(0);
-  });
-
-  it('clamps at the edges', () => {
-    expect(nextEnabledIndex(items, 0, -1)).toBe(0);
-    expect(nextEnabledIndex(items, 3, 1)).toBe(3);
-  });
-
-  it('stays put when only disabled entries remain in that direction', () => {
-    const tail = [{ disabled: false }, { disabled: true }, { disabled: true }];
-    expect(nextEnabledIndex(tail, 0, 1)).toBe(0);
   });
 });

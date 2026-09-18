@@ -15,8 +15,7 @@
  * the same write path useAuth.handleProviderSubmit drives) mirror the ink
  * implementation; only the view layer is OpenTUI.
  *
- * Known simplifications vs ink (recorded in the gap tracker):
- *  - the models step omits the recommended-list search box (list is short);
+ * Known simplification vs ink (recorded in the gap tracker):
  *  - documentation/TOS links render as plain text (no OSC 8 in dialogs).
  */
 
@@ -55,13 +54,23 @@ import {
   type SetupStep,
 } from '../auth/useProviderSetupFlow.js';
 import { normalizeModelIds } from '../auth/useAuth.js';
+import {
+  MAX_MODELS_TO_SHOW,
+  MODEL_CUSTOM_INPUT_FOCUS_INDEX,
+  MODEL_SEARCH_INPUT_FOCUS_INDEX,
+  formatModelOptionLabel,
+  modelOptionSearchText,
+  type ModelOption,
+} from '../auth/ProviderSetupSteps.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
 import { normalizePastedText } from './input-prompt-model.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { caretSpans, useLineEdit } from './line-edit.js';
 import { Shell } from './dialogs-misc.js';
+import { findNextEnabledIndex } from './dialogs-core.js';
 import { C } from './theme.js';
+import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
 // ---------------------------------------------------------------------------
 // Types & static data (AuthDialog parity)
@@ -193,22 +202,19 @@ function RadioList({ items, cursor }: { items: RadioItem[]; cursor: number }) {
             flexDirection="column"
             marginTop={i === 0 ? 0 : 1}
           >
-            <box flexDirection="row">
-              <text fg={selected ? C.accent : C.dim}>
-                {selected ? '› ' : '  '}
-              </text>
-              <text
-                fg={selected ? C.text : C.dim}
-                attributes={selected ? 1 : 0}
-              >
-                {item.label}
-              </text>
-            </box>
-            {item.description ? (
-              <box flexDirection="row" paddingLeft={2}>
-                <text fg={C.dim}>{item.description}</text>
+            <box flexDirection="row" alignItems="flex-start">
+              <box minWidth={2} flexShrink={0}>
+                <text fg={selected ? C.green : C.text}>
+                  {selected ? '›' : ' '}
+                </text>
               </box>
-            ) : null}
+              <box flexDirection="column" flexGrow={1}>
+                <text fg={selected ? C.green : C.text}>{item.label}</text>
+                {item.description ? (
+                  <text fg={C.dim}>{item.description}</text>
+                ) : null}
+              </box>
+            </box>
           </box>
         );
       })}
@@ -263,14 +269,17 @@ function InputLine({
   caret,
   placeholder,
   active,
+  marginTop = 1,
 }: {
   value: string;
   caret: number;
   placeholder?: string;
   active?: boolean;
+  marginTop?: number;
 }) {
   return (
-    <box flexDirection="row" marginTop={1} paddingLeft={1}>
+    <box flexDirection="row" marginTop={marginTop}>
+      <text fg={C.accent}>{'> '}</text>
       <FieldText
         value={value}
         caret={caret}
@@ -333,15 +342,13 @@ function ProtocolStep({ flow }: { flow: ProviderSetupFlow }) {
       protocolOpts.includes(p.value as AuthType),
     );
   }, [provider]);
-  const [cursor, setCursor] = useState(0);
+  const { cursor, cursorRef, setCursor } = useBatchSafeCursor();
   useKeyboard((key) => {
     const o = toOriginalKey(key);
-    if (o.name === 'up') {
-      setCursor((c) => Math.max(0, c - 1));
-    } else if (o.name === 'down') {
-      setCursor((c) => Math.min(items.length - 1, c + 1));
+    if (o.name === 'up' || o.name === 'down') {
+      setCursor(findNextEnabledIndex(items, cursorRef.current, o.name));
     } else if (o.name === 'return') {
-      const item = items[cursor];
+      const item = items[cursorRef.current];
       if (item) flow.selectProtocol(item.value as AuthType);
     }
   });
@@ -369,21 +376,20 @@ function BaseUrlSelectStep({
     description: opt.url,
     value: opt.url,
   }));
-  const [cursor, setCursor] = useState(flow.state.baseUrlOptionIndex);
+  const { cursor, cursorRef, setCursor } = useBatchSafeCursor(
+    flow.state.baseUrlOptionIndex,
+  );
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'up' || o.name === 'down') {
-      const next =
-        o.name === 'up'
-          ? Math.max(0, cursor - 1)
-          : Math.min(items.length - 1, cursor + 1);
+      const next = findNextEnabledIndex(items, cursorRef.current, o.name);
       setCursor(next);
       // ink onHighlight parity: remember the highlighted option so a
       // go-back later restores the cursor.
       const item = items[next];
       if (item) flow.highlightBaseUrl(item.value);
     } else if (o.name === 'return') {
-      const item = items[cursor];
+      const item = items[cursorRef.current];
       if (item) flow.selectBaseUrl(item.value);
     }
   });
@@ -483,16 +489,13 @@ function ApiKeyStep({
   );
 }
 
-const MODEL_CUSTOM_INPUT_FOCUS_INDEX = -2;
-
 function uniqueIds(ids: string[]): string[] {
   return [...new Set(ids)];
 }
 
 /**
- * Model IDs step. Simplified vs ink: no search box over the recommended
- * list; custom IDs and recommended multi-select both feed the shared
- * flow.state.modelIds like the ink ModelIdsStep.
+ * Model IDs step. Custom IDs and the recommended multi-select both feed the
+ * shared flow.state.modelIds, exactly like the ink ModelIdsStep this mirrors.
  */
 function ModelsStep({
   provider,
@@ -503,8 +506,17 @@ function ModelsStep({
   flow: ProviderSetupFlow;
   retrySeq: number;
 }) {
-  const modelOptions = useMemo(
-    () => provider.models?.map((m) => m.id) ?? [],
+  // ink ModelIdsStep parity: rows carry the formatted label (id padded to the
+  // description column plus context/thinking/modality details), the list is a
+  // search-filtered window of MAX_MODELS_TO_SHOW rows, and focus is conveyed by
+  // colour alone — ink draws no cursor glyph here.
+  const modelOptions = useMemo<ModelOption[]>(
+    () =>
+      provider.models?.map((model) => ({
+        key: model.id,
+        value: model.id,
+        label: formatModelOptionLabel(model),
+      })) ?? [],
     [provider.models],
   );
   const hasSelectableModels = modelOptions.length > 0;
@@ -512,19 +524,32 @@ function ModelsStep({
     () => normalizeModelIds(flow.state.modelIds),
     [flow.state.modelIds],
   );
-  const recommendedIds = useMemo(() => new Set(modelOptions), [modelOptions]);
-  const [focus, setFocus] = useState(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
+  const recommendedIds = useMemo(
+    () => new Set(modelOptions.map((item) => item.key)),
+    [modelOptions],
+  );
+  // The handler below reads the mirror, not this value: arrows and the Space
+  // that follows them arrive in one stdin read, against the render that
+  // registered the handler.
+  const {
+    cursor: focus,
+    cursorRef: focusRef,
+    setCursor: setFocus,
+  } = useBatchSafeCursor(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
   const [customText, setCustomText] = useState(() =>
     selectedModelIds.filter((id) => !recommendedIds.has(id)).join(', '),
   );
-  const [checked, setChecked] = useState<ReadonlySet<string>>(
-    () => new Set(selectedModelIds.filter((id) => recommendedIds.has(id))),
-  );
-
   // Keystrokes of one burst are handled against the render that registered the
   // handler, whose `checked` set is already stale by the second Space. The
   // mirror is written synchronously so each tick sees the previous one.
-  const checkedRef = useRef<ReadonlySet<string>>(checked);
+  const {
+    value: checked,
+    ref: checkedRef,
+    setValue: setChecked,
+  } = useBatchSafeState<ReadonlySet<string>>(
+    () => new Set(selectedModelIds.filter((id) => recommendedIds.has(id))),
+  );
+  const [searchText, setSearchText] = useState('');
 
   const syncModelIds = useCallback(
     (custom: string, keys: ReadonlySet<string>) => {
@@ -540,7 +565,7 @@ function ModelsStep({
       setCustomText(next);
       syncModelIds(next, checkedRef.current);
     },
-    [syncModelIds],
+    [syncModelIds, checkedRef],
   );
 
   // ink keeps this field in a TextInput whose buffer survives the list taking
@@ -549,17 +574,40 @@ function ModelsStep({
   // flow, so its Enter only fires the install, and a rejected install leaves
   // this very step mounted with the latch that Enter armed.
   const custom = useLineEdit(customText, updateCustom, retrySeq);
+  const search = useLineEdit(searchText, setSearchText, retrySeq);
+
+  const filtered = useMemo(() => {
+    const query = searchText.trim().toLowerCase();
+    if (!query) return modelOptions;
+    return modelOptions.filter((item) =>
+      modelOptionSearchText(item).includes(query),
+    );
+  }, [modelOptions, searchText]);
+
+  const scrollOffset =
+    focus < 0
+      ? 0
+      : Math.max(
+          0,
+          Math.min(
+            focus - MAX_MODELS_TO_SHOW + 1,
+            filtered.length - MAX_MODELS_TO_SHOW,
+          ),
+        );
+  const visible = filtered.slice(
+    scrollOffset,
+    scrollOffset + MAX_MODELS_TO_SHOW,
+  );
 
   const toggleRecommended = useCallback(
     (id: string) => {
       const next = new Set(checkedRef.current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      checkedRef.current = next;
       setChecked(next);
       syncModelIds(custom.text, next);
     },
-    [custom, syncModelIds],
+    [custom, syncModelIds, checkedRef, setChecked],
   );
 
   const submit = useCallback(() => {
@@ -573,29 +621,42 @@ function ModelsStep({
     ) {
       custom.settle();
     }
-  }, [custom, flow]);
+  }, [custom, flow, checkedRef]);
 
   useKeyboard((key) => {
     if (custom.settled) return;
     const o = toOriginalKey(key);
-    if (focus >= 0) {
+    const focused = focusRef.current;
+    if (focused >= 0) {
       if (o.name === 'tab') {
         setFocus(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
       } else if (o.name === 'up') {
-        setFocus((f) => (f <= 0 ? MODEL_CUSTOM_INPUT_FOCUS_INDEX : f - 1));
+        setFocus(focused <= 0 ? MODEL_SEARCH_INPUT_FOCUS_INDEX : focused - 1);
       } else if (o.name === 'down') {
-        setFocus((f) => Math.min(f + 1, modelOptions.length - 1));
+        setFocus(Math.max(0, Math.min(focused + 1, filtered.length - 1)));
       } else if (o.name === 'space') {
-        const id = modelOptions[focus];
-        if (id) toggleRecommended(id);
+        const item = filtered[focused];
+        if (item) toggleRecommended(item.key);
       } else if (o.name === 'return') {
         submit();
       }
       return;
     }
+    if (focused === MODEL_SEARCH_INPUT_FOCUS_INDEX) {
+      if (o.name === 'up') {
+        setFocus(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
+      } else if (o.name === 'tab' || o.name === 'down') {
+        if (filtered.length > 0) setFocus(0);
+      } else if (o.name === 'return' || o.name === 'enter') {
+        submit();
+      } else if (!search.handleKey(o) && isPrintableKeyInput(key)) {
+        search.insert(key.sequence);
+      }
+      return;
+    }
     // Custom-ID input focus.
     if (o.name === 'tab' || o.name === 'down') {
-      if (hasSelectableModels) setFocus(0);
+      if (hasSelectableModels) setFocus(MODEL_SEARCH_INPUT_FOCUS_INDEX);
       return;
     }
     if (o.name === 'return' || o.name === 'enter') {
@@ -606,71 +667,130 @@ function ModelsStep({
       custom.insert(key.sequence);
     }
   });
-  // Pastes land in the custom-ID input only when it owns focus; while the
-  // recommended list is focused there is no text field to receive them.
+  // Pastes land in whichever text field owns focus; while the recommended list
+  // is focused there is no text field to receive them.
   usePaste((event: PasteEvent) => {
-    if (focus >= 0) return;
+    const focused = focusRef.current;
+    const target =
+      focused === MODEL_CUSTOM_INPUT_FOCUS_INDEX
+        ? custom
+        : focused === MODEL_SEARCH_INPUT_FOCUS_INDEX
+          ? search
+          : null;
+    if (!target) return;
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    custom.insert(text);
+    target.insert(text);
   });
+
+  if (!hasSelectableModels) {
+    const defaultIds = (provider.models ?? [])
+      .map((model) => model.id)
+      .join(', ');
+    return (
+      <box flexDirection="column" marginTop={1}>
+        <box marginTop={1}>
+          <text fg={C.dim}>
+            {defaultIds
+              ? t(
+                  'Enter model IDs separated by commas. Examples: {{modelIds}}',
+                  {
+                    modelIds: defaultIds,
+                  },
+                )
+              : t('Enter model IDs separated by commas.')}
+          </text>
+        </box>
+        <InputLine
+          value={customText}
+          caret={custom.caret}
+          placeholder={defaultIds || 'model-id-1, model-id-2'}
+          active
+        />
+        {flow.state.modelIdsError && (
+          <box marginTop={1}>
+            <text fg={C.red}>{flow.state.modelIdsError}</text>
+          </box>
+        )}
+        <box marginTop={1}>
+          <text fg={C.dim}>{NAV_HINT_INPUT}</text>
+        </box>
+      </box>
+    );
+  }
 
   return (
     <box flexDirection="column" marginTop={1}>
-      <text fg={C.text}>
-        {t(
-          'Enter model IDs directly. Use commas to configure multiple models.',
-        )}
-      </text>
+      <box marginTop={1}>
+        <text fg={C.dim}>
+          {t(
+            'Enter model IDs directly. Use commas to configure multiple models.',
+          )}
+        </text>
+      </box>
       <InputLine
         value={customText}
         caret={custom.caret}
         placeholder="model-id"
-        active={focus < 0}
+        active={focus === MODEL_CUSTOM_INPUT_FOCUS_INDEX}
       />
+      <box>
+        <text fg={C.dim}>
+          {t(
+            'Checked recommended models are applied on submit but not copied into the input.',
+          )}
+        </text>
+      </box>
+      <box marginTop={1}>
+        <text fg={C.dim}>{t('Recommended models')}</text>
+      </box>
+      <box flexDirection="column">
+        <text fg={C.dim}>{t('Search')}</text>
+        <InputLine
+          value={searchText}
+          caret={search.caret}
+          placeholder="search"
+          active={focus === MODEL_SEARCH_INPUT_FOCUS_INDEX}
+          marginTop={0}
+        />
+      </box>
+      <box flexDirection="column" marginTop={1}>
+        {visible.length > 0 ? (
+          visible.map((item, visibleIndex) => {
+            const modelIndex = scrollOffset + visibleIndex;
+            const isFocused = focus === modelIndex;
+            const isSelected = checked.has(item.key);
+            const color = isFocused ? C.green : isSelected ? C.accent : C.text;
+            return (
+              <box key={item.key} flexDirection="row" alignItems="flex-start">
+                <box minWidth={4} flexShrink={0}>
+                  <text fg={color}>
+                    {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
+                  </text>
+                </box>
+                <box flexGrow={1}>
+                  <text fg={color}>{item.label}</text>
+                </box>
+              </box>
+            );
+          })
+        ) : (
+          <text fg={C.dim}>{t('No recommended models match.')}</text>
+        )}
+      </box>
       {flow.state.modelIdsError && (
         <box marginTop={1}>
           <text fg={C.red}>{flow.state.modelIdsError}</text>
         </box>
       )}
-      {hasSelectableModels ? (
-        <>
-          <box marginTop={1}>
-            <text fg={C.dim}>{t('Recommended models')}</text>
-          </box>
-          <box flexDirection="column" marginTop={1}>
-            {modelOptions.map((id, i) => {
-              const isChecked = checked.has(id);
-              const focused = i === focus;
-              return (
-                <box key={id} flexDirection="row">
-                  <text fg={focused ? C.accent : C.dim}>
-                    {focused ? '› ' : '  '}
-                  </text>
-                  <text fg={focused ? C.accent : C.dim}>
-                    {isChecked
-                      ? `${ICON.RADIO_FILLED} `
-                      : `${ICON.CIRCLE_EMPTY} `}
-                  </text>
-                  <text fg={focused ? C.text : C.dim}>{id}</text>
-                </box>
-              );
-            })}
-          </box>
-          <box marginTop={1}>
-            <text fg={C.dim}>
-              {t(
-                'Tab toggles input/list, Space toggles a model, Enter to continue, Esc to go back',
-              )}
-            </text>
-          </box>
-        </>
-      ) : (
-        <box marginTop={1}>
-          <text fg={C.dim}>{NAV_HINT_INPUT}</text>
-        </box>
-      )}
+      <box marginTop={1}>
+        <text fg={C.dim}>
+          {t(
+            'Enter to submit, ↑↓/Tab to switch input, search, and recommendations, Space to toggle recommendations, Esc to go back',
+          )}
+        </text>
+      </box>
     </box>
   );
 }
@@ -1096,34 +1216,40 @@ function AuthDialogFlow({
 
   const mainCursor = mainIndex ?? defaultMainIndex;
   const subCursor = activeSubMenu ? (subMenuIndex[viewLevel] ?? 0) : 0;
+  // A burst of keys reaches the handler registered by the last render, so the
+  // cursors it reads must be written synchronously by the movers below.
+  const mainCursorRef = useRef(mainCursor);
+  mainCursorRef.current = mainCursor;
+  const subCursorRef = useRef(subCursor);
+  subCursorRef.current = subCursor;
+  const moveMain = (index: number) => {
+    mainCursorRef.current = index;
+    setMainIndex(index);
+  };
+  const moveSub = (index: number) => {
+    subCursorRef.current = index;
+    setSubMenuIndex((prev) => ({ ...prev, [viewLevel]: index }));
+  };
 
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (viewLevel === 'main') {
-      if (o.name === 'up') {
-        setMainIndex(Math.max(0, mainCursor - 1));
-      } else if (o.name === 'down') {
-        setMainIndex(Math.min(MAIN_ITEMS.length - 1, mainCursor + 1));
+      if (o.name === 'up' || o.name === 'down') {
+        moveMain(
+          findNextEnabledIndex(MAIN_ITEMS, mainCursorRef.current, o.name),
+        );
       } else if (o.name === 'return') {
-        const item = MAIN_ITEMS[mainCursor];
+        const item = MAIN_ITEMS[mainCursorRef.current];
         if (item) handleMainSelect(item.value as MainOption);
       }
       return;
     }
     if (activeSubMenu) {
       const items = activeSubMenu;
-      if (o.name === 'up') {
-        setSubMenuIndex((prev) => ({
-          ...prev,
-          [viewLevel]: Math.max(0, subCursor - 1),
-        }));
-      } else if (o.name === 'down') {
-        setSubMenuIndex((prev) => ({
-          ...prev,
-          [viewLevel]: Math.min(items.length - 1, subCursor + 1),
-        }));
+      if (o.name === 'up' || o.name === 'down') {
+        moveSub(findNextEnabledIndex(items, subCursorRef.current, o.name));
       } else if (o.name === 'return') {
-        const item = items[subCursor];
+        const item = items[subCursorRef.current];
         if (item) handleProviderSelect(item.value);
       }
     }
@@ -1194,12 +1320,12 @@ function AuthDialogFlow({
   // -- Render -------------------------------------------------------------------
 
   return (
-    <Shell title={viewTitle} onClose={onClose}>
+    <Shell title={viewTitle} onClose={onClose} borderStyle="single">
       {viewLevel === 'main' && (
         <>
           <RadioList items={MAIN_ITEMS} cursor={mainCursor} />
-          <box marginTop={2}>
-            <text fg={C.dim}>{'─'.repeat(60)}</text>
+          <box marginTop={1}>
+            <text fg={C.borderDefault}>{'─'.repeat(80)}</text>
           </box>
           <box marginTop={1}>
             <text
@@ -1207,7 +1333,7 @@ function AuthDialogFlow({
             >{`${t('Terms of Services and Privacy Notice')}:`}</text>
           </box>
           <box>
-            <text fg={C.purple}>
+            <text fg={C.dim} attributes={8}>
               {
                 'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/'
               }

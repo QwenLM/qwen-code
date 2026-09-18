@@ -13,22 +13,13 @@ import {
   type Config,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 const mocks = vi.hoisted(() => {
   const loadSessionOutputStyles = vi.fn();
   const state = {
-    inputHandlers: [] as Array<(sequence: string) => boolean>,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
-  };
-  const renderer = {
-    addInputHandler(handler: (sequence: string) => boolean) {
-      state.inputHandlers.push(handler);
-    },
-    removeInputHandler(handler: (sequence: string) => boolean) {
-      const index = state.inputHandlers.indexOf(handler);
-      if (index >= 0) state.inputHandlers.splice(index, 1);
-    },
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -54,19 +45,39 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { state, renderer, buildJsxRuntime, loadSessionOutputStyles };
+  return { state, buildJsxRuntime, loadSessionOutputStyles };
 });
 
-vi.mock('@opentui/react', () => ({
-  useKeyboard: (handler: (key: unknown) => void) => {
-    mocks.state.keyboardHandlers.push(handler);
-  },
-  useRenderer: () => mocks.renderer,
+vi.mock('@opentui/react', async () => {
+  const React = await import('react');
+  return {
+    // opentui registers one stable listener per hook instance (useEffectEvent)
+    // on an emitter that fires for every listener, so each mounted list sees
+    // each key and its own `focused` flag decides whether it acts.
+    useKeyboard: (handler: (key: unknown) => void) => {
+      const latest = React.useRef(handler);
+      latest.current = handler;
+      const stable = React.useRef<((key: unknown) => void) | undefined>(
+        undefined,
+      );
+      if (!stable.current) {
+        stable.current = (key: unknown) => latest.current(key);
+        mocks.state.keyboardHandlers.push(stable.current);
+      }
+    },
+  };
+});
+vi.mock('@opentui/core', () => ({
+  SyntaxStyle: { fromStyles: () => ({}) },
+  MouseButton: { LEFT: 0 },
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 vi.mock('./key-map.js', () => ({
-  toOriginalKey: (key: { name?: string }) => ({ name: key.name ?? '' }),
+  toOriginalKey: (key: { name?: string; shift?: boolean }) => ({
+    name: key.name ?? '',
+    shift: key.shift ?? false,
+  }),
 }));
 vi.mock('./theme.js', () => ({
   C: new Proxy({}, { get: () => '#ffffff' }),
@@ -81,6 +92,7 @@ vi.mock('../commands/output-style-utils.js', async (importOriginal) => ({
 }));
 
 import {
+  OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
   OpenTuiOutputStyleDialog,
 } from './dialogs-modes.js';
@@ -89,6 +101,35 @@ const CONCISE = BUILT_IN_OUTPUT_STYLES.find(
   (style) => style.name === 'Concise',
 );
 if (!CONCISE) throw new Error('missing Concise output style');
+
+function press(name: string, shift = false) {
+  if (mocks.state.keyboardHandlers.length === 0) {
+    throw new Error('no keyboard handler registered');
+  }
+  act(() => {
+    for (const handler of [...mocks.state.keyboardHandlers]) {
+      handler({ name, shift });
+    }
+  });
+}
+
+/** The row's text: marker, then the number column, then the label. */
+function rowText(labelPrefix: string): string {
+  const label = screen.getByText((content) =>
+    content.startsWith(labelPrefix),
+  ) as HTMLElement;
+  return (label.parentElement?.parentElement?.textContent ?? '').trim();
+}
+
+function isSelected(labelPrefix: string): boolean {
+  return rowText(labelPrefix).startsWith('›');
+}
+
+function queryRow(labelPrefix: string): string | null {
+  return screen.queryByText((content) => content.startsWith(labelPrefix))
+    ? rowText(labelPrefix)
+    : null;
+}
 
 function createHarness(
   options: {
@@ -128,25 +169,116 @@ function createHarness(
   };
 }
 
-function press(name: string) {
-  const handler = mocks.state.keyboardHandlers.at(-1);
-  if (!handler) throw new Error('no keyboard handler registered');
-  act(() => handler({ name }));
-}
+describe('OpenTuiApprovalModeDialog', () => {
+  function renderModeDialog(options: { current?: ApprovalMode } = {}) {
+    const setValue = vi.fn();
+    const onClose = vi.fn();
+    const onApprovalModeChanged = vi.fn();
+    let approvalMode = options.current ?? ApprovalMode.DEFAULT;
+    const config = {
+      getApprovalMode: () => approvalMode,
+      setApprovalMode: (mode: ApprovalMode) => {
+        approvalMode = mode;
+      },
+    } as unknown as Config;
+    const settings = {
+      isTrusted: true,
+      merged: { tools: {} },
+      forScope: () => ({ settings: {} }),
+      setValue,
+    } as unknown as LoadedSettings;
+    render(
+      <OpenTuiApprovalModeDialog
+        config={config}
+        settings={settings}
+        onClose={onClose}
+        onApprovalModeChanged={onApprovalModeChanged}
+      />,
+    );
+    return { setValue, onClose, onApprovalModeChanged };
+  }
 
-async function pressEsc(): Promise<boolean> {
-  const handler = mocks.state.inputHandlers.at(-1);
-  if (!handler) throw new Error('no raw input handler registered');
-  let consumed = false;
-  await act(async () => {
-    consumed = handler('\x1b');
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
   });
-  return consumed;
-}
+
+  it("labels every mode with ink's display name, description and row number", () => {
+    renderModeDialog({ current: ApprovalMode.YOLO });
+
+    // ink builds `${formatApprovalModeName} - ${formatApprovalModeDescription}`
+    // and numbers the rows; a hand-written label set drifts from both.
+    expect(rowText('plan mode - ')).toBe(
+      '1.plan mode - Analyze only, do not modify files or execute commands',
+    );
+    expect(rowText('YOLO mode - ')).toBe(
+      '›5.YOLO mode - Automatically approve all tools',
+    );
+    expect(isSelected('YOLO mode - ')).toBe(true);
+  });
+
+  it('wraps from the last row to the first, like ink useSelectionList', () => {
+    renderModeDialog({ current: ApprovalMode.YOLO });
+
+    press('down');
+
+    expect(isSelected('plan mode - ')).toBe(true);
+  });
+
+  it('persists to the scope picked in the Tab step', () => {
+    const harness = renderModeDialog({ current: ApprovalMode.DEFAULT });
+
+    press('tab');
+    expect(queryRow('Workspace Settings')).not.toBeNull();
+    press('down');
+    press('return');
+
+    // ink's handleScopeSelect only records the scope and steps back; the mode
+    // row's Enter is what writes.
+    expect(harness.setValue).not.toHaveBeenCalled();
+    expect(queryRow('Ask permissions - ')).not.toBeNull();
+
+    press('down');
+    press('return');
+
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'tools.approvalMode',
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(harness.onApprovalModeChanged).toHaveBeenCalledWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(harness.onClose).toHaveBeenCalled();
+  });
+
+  it('restores the highlighted row after the scope trip, like ink', () => {
+    renderModeDialog({ current: ApprovalMode.DEFAULT });
+
+    press('down'); // Ask permissions → auto-accept edits
+    expect(isSelected('auto-accept edits - ')).toBe(true);
+
+    press('tab'); // → scope step
+    press('down'); // User Settings → Workspace, so the trip actually changes the scope
+    press('return'); // → mode step, which re-syncs the list cursor
+
+    // ink seeds the remounted list from the mode its arrows last highlighted,
+    // not from the mode the config still holds.
+    expect(isSelected('auto-accept edits - ')).toBe(true);
+    expect(isSelected('Ask permissions - ')).toBe(false);
+  });
+
+  it('closes on Esc without writing', () => {
+    const harness = renderModeDialog();
+
+    press('escape');
+
+    expect(harness.onClose).toHaveBeenCalledTimes(1);
+    expect(harness.setValue).not.toHaveBeenCalled();
+  });
+});
 
 describe('OpenTuiOutputStyleDialog', () => {
   beforeEach(() => {
-    mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
     mocks.loadSessionOutputStyles.mockReset();
     mocks.loadSessionOutputStyles.mockResolvedValue(BUILT_IN_OUTPUT_STYLES);
@@ -182,19 +314,10 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Reviewer')).not.toBeNull());
-    await waitFor(() =>
-      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
-        '› Reviewer',
-      ),
-    );
+    await waitFor(() => expect(isSelected('Reviewer — ')).toBe(true));
     // Labelled with its source, as the ink picker does.
-    expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
-      '(user)',
-    );
-    expect(
-      screen.getByText('default').parentElement?.textContent,
-    ).not.toContain('› default');
+    expect(rowText('Reviewer — ')).toContain('(user)');
+    expect(isSelected('default — ')).toBe(false);
   });
 
   it('labels a project style with its own source and leaves built-ins unlabelled', async () => {
@@ -221,13 +344,9 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('TeamVoice')).not.toBeNull());
-    expect(screen.getByText('TeamVoice').parentElement?.textContent).toContain(
-      '(project)',
-    );
-    expect(
-      screen.getByText('Concise').parentElement?.textContent,
-    ).not.toContain('(');
+    await waitFor(() => expect(queryRow('TeamVoice — ')).not.toBeNull());
+    expect(rowText('TeamVoice — ')).toContain('(project)');
+    expect(rowText('Concise — ')).not.toContain('(');
   });
 
   it('keeps the configured style selected while a system prompt override is active', async () => {
@@ -246,11 +365,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-        '› Concise',
-      ),
-    );
+    await waitFor(() => expect(isSelected('Concise — ')).toBe(true));
     press('return');
 
     await waitFor(() =>
@@ -281,7 +396,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    await waitFor(() => expect(queryRow('Concise — ')).not.toBeNull());
     press('down');
     press('return');
 
@@ -303,11 +418,7 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-        '› Concise',
-      ),
-    );
+    await waitFor(() => expect(isSelected('Concise — ')).toBe(true));
     press('return');
 
     await waitFor(() =>
@@ -338,14 +449,10 @@ describe('OpenTuiOutputStyleDialog', () => {
 
     // Wait for the selection marker, not just the row: the catalog text
     // renders with the mount-time selection (index 0) and the pre-selection
-    // of the active style lands in a later passive-effect commit. Pressing
-    // keys on text presence alone can interleave as up-then-derive-then-
-    // return, which picks Concise instead of default.
-    await waitFor(() =>
-      expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-        '› Concise',
-      ),
-    );
+    // of the active style lands in a later commit. Pressing keys on text
+    // presence alone can interleave as up-then-derive-then-return, which
+    // picks Concise instead of default.
+    await waitFor(() => expect(isSelected('Concise — ')).toBe(true));
     press('up');
     press('return');
 
@@ -373,13 +480,14 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    expect(await pressEsc()).toBe(true);
+    press('escape');
+
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(harness.setOutputStyle).not.toHaveBeenCalled();
     expect(harness.setValue).not.toHaveBeenCalled();
   });
 
-  it('does not mount selectable rows before the catalog is ready', async () => {
+  it('does not offer selectable rows before the catalog is ready', async () => {
     const custom: OutputStyleDefinition = {
       name: 'Reviewer',
       description: 'Reviews without editing',
@@ -405,19 +513,17 @@ describe('OpenTuiOutputStyleDialog', () => {
     );
 
     expect(screen.queryByText('Loading output styles…')).not.toBeNull();
-    expect(mocks.state.keyboardHandlers).toHaveLength(0);
-    expect(screen.queryByText('default')).toBeNull();
+    expect(screen.queryByText(/default — /)).toBeNull();
+    // The list is mounted but empty, so Enter has no row to commit.
+    press('return');
+    expect(harness.setOutputStyle).not.toHaveBeenCalled();
 
     await act(async () => {
       releaseLoad?.();
       await Promise.resolve();
     });
 
-    await waitFor(() =>
-      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
-        '› Reviewer',
-      ),
-    );
+    await waitFor(() => expect(isSelected('Reviewer — ')).toBe(true));
     expect(harness.setOutputStyle).not.toHaveBeenCalled();
     expect(harness.setValue).not.toHaveBeenCalled();
   });
@@ -437,8 +543,11 @@ describe('OpenTuiOutputStyleDialog', () => {
     );
 
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
-    expect(notify).toHaveBeenCalledWith(expect.stringContaining('EACCES'));
-    expect(screen.queryByText('default')).toBeNull();
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining('EACCES'),
+      'error',
+    );
+    expect(screen.queryByText(/default — /)).toBeNull();
     expect(harness.setOutputStyle).not.toHaveBeenCalled();
     expect(harness.setValue).not.toHaveBeenCalled();
   });
@@ -458,10 +567,19 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    await waitFor(() => expect(queryRow('Concise — ')).not.toBeNull());
     press('return');
 
-    await waitFor(() => expect(notify).toHaveBeenCalledWith('disk full'));
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringContaining('disk full'),
+        'error',
+      ),
+    );
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining('general.outputStyle'),
+      'error',
+    );
     expect(harness.setOutputStyle).not.toHaveBeenCalled();
     expect(harness.refreshSystemInstruction).not.toHaveBeenCalled();
   });
@@ -484,11 +602,9 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    await waitFor(() => expect(queryRow('Concise — ')).not.toBeNull());
     press('down');
-    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '› Concise',
-    );
+    expect(isSelected('Concise — ')).toBe(true);
 
     await act(async () => {
       view.rerender(
@@ -504,9 +620,7 @@ describe('OpenTuiOutputStyleDialog', () => {
     });
 
     expect(mocks.loadSessionOutputStyles).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
-      '› Concise',
-    );
+    expect(isSelected('Concise — ')).toBe(true);
     press('return');
     await waitFor(() =>
       expect(harness.setOutputStyle).toHaveBeenCalledWith(CONCISE),
@@ -537,14 +651,8 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
-        '› Reviewer',
-      ),
-    );
-    expect(
-      screen.getByText('default').parentElement?.textContent,
-    ).not.toContain('› default');
+    await waitFor(() => expect(isSelected('Reviewer — ')).toBe(true));
+    expect(isSelected('default — ')).toBe(false);
 
     press('return');
     await waitFor(() =>
@@ -583,13 +691,11 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText('reviewer').parentElement?.textContent).toContain(
-        '› reviewer',
-      ),
-    );
-    expect(screen.getAllByText('reviewer')).toHaveLength(1);
-    expect(screen.queryByText('Reviewer')).toBeNull();
+    await waitFor(() => expect(isSelected('reviewer — ')).toBe(true));
+    expect(
+      screen.getAllByText((content) => content.startsWith('reviewer — ')),
+    ).toHaveLength(1);
+    expect(queryRow('Reviewer — ')).toBeNull();
   });
 });
 
@@ -601,38 +707,60 @@ describe('OpenTuiEffortDialog', () => {
     disableField: 'thinking',
   } as const;
 
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+  });
+
   function renderEffortDialog(reasoningEffort: string | undefined) {
+    const setValue = vi.fn();
+    const notify = vi.fn();
+    let applied = reasoningEffort;
+    const setReasoningEffort = vi.fn((tier: string) => {
+      applied = tier;
+    });
     const config = {
       getModel: () => 'deepseek-v4-pro',
       getAuthType: () => 'openai',
-      getReasoningEffort: () => reasoningEffort,
+      getReasoningEffort: () => applied,
+      setReasoningEffort,
       getResolvedModelConfig: () => ({
         capabilities: { reasoning: capability },
       }),
     } as unknown as Config;
     const settings = {
       isTrusted: true,
+      user: { settings: {} },
       workspace: { settings: { general: {} } },
-      setValue: vi.fn(),
+      merged: {},
+      setValue,
     } as unknown as LoadedSettings;
     render(
       <OpenTuiEffortDialog
         config={config}
         settings={settings}
         onClose={vi.fn()}
+        notify={notify}
       />,
     );
+    return { setValue, setReasoningEffort, notify };
   }
 
-  it('lists only the tiers the resolved model exposes', () => {
+  it('lists only the tiers the resolved model exposes, with ink labels', () => {
     renderEffortDialog(undefined);
 
-    expect(screen.queryByText('low')).toBeNull();
-    expect(screen.queryByText('medium')).toBeNull();
-    expect(screen.queryByText('xhigh')).toBeNull();
-    expect(screen.getByText('high').parentElement?.textContent).toContain(
-      '\u203a high',
+    expect(queryRow('low — ')).toBeNull();
+    expect(queryRow('medium — ')).toBeNull();
+    expect(queryRow('xhigh — ')).toBeNull();
+    expect(rowText('high — ')).toBe(
+      '›1.high — Default — strong reasoning for hard tasks.',
     );
+    // No tier is configured, so the picker says so rather than implying that
+    // the highlighted row is live.
+    expect(
+      screen.getByText(
+        'No effort configured — using the model/provider default.',
+      ),
+    ).not.toBeNull();
   });
 
   it('reports a configured tier the resolved model does not expose', () => {
@@ -643,5 +771,34 @@ describe('OpenTuiEffortDialog', () => {
     expect(
       screen.getByText(/xhigh is not available for this model/),
     ).not.toBeNull();
+    // ink clamps to the first row and lets that dim line carry the truth.
+    expect(isSelected('high — ')).toBe(true);
+  });
+
+  it('wraps from the last tier to the first and persists the reached row', () => {
+    const harness = renderEffortDialog('max');
+
+    expect(isSelected('max — ')).toBe(true);
+    press('down');
+    expect(isSelected('high — ')).toBe(true);
+    press('return');
+
+    expect(harness.setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+    );
+  });
+
+  it('reports the applied tier with ink effort-hook message', () => {
+    const harness = renderEffortDialog('max');
+    press('down');
+    press('return');
+
+    expect(harness.notify).toHaveBeenCalledTimes(1);
+    expect(harness.notify).toHaveBeenCalledWith(
+      'Reasoning effort: high (requested; the effective tier depends on the active provider/model).',
+    );
   });
 });
