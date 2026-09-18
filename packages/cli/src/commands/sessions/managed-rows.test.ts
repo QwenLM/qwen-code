@@ -16,7 +16,7 @@ import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 
 const isPidAlive = vi.fn((pid: number) => pid > 0);
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core/utils/process-liveness.js', () => ({
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
 }));
 

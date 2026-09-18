@@ -20,10 +20,8 @@
  * be printed — is an input the tests control like any other.
  */
 
-import {
-  isPidAlive,
-  type SessionRegistryRecord,
-} from '@qwen-code/qwen-code-core';
+import { isPidAlive } from '@qwen-code/qwen-code-core/utils/process-liveness.js';
+import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 import type {
   AgentViewSessionSnapshot,
   AgentViewWorkerFile,

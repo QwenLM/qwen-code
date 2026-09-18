@@ -22,6 +22,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   // something to lay out in a column.
   describeSessionKind: (kind: string | undefined) =>
     kind === undefined || kind.length === 0 ? 'tui' : kind,
+}));
+
+// `managed-rows.ts` takes `isPidAlive` from the core module that defines it
+// rather than the package root, so the probe is mocked where it is imported.
+vi.mock('@qwen-code/qwen-code-core/utils/process-liveness.js', () => ({
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
 }));
 
