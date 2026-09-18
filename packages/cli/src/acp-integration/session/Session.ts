@@ -5518,13 +5518,28 @@ export class Session implements SessionContext {
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
     const recoveryPlan = this.#getRecoveryPlan(false);
-    // A prompt (or an earlier continuation) is still in flight: there is no
-    // settled turn to continue. Reject rather than abort the live turn.
+    // A turn is still in flight, so there is no settled turn to continue.
+    // `pendingPrompt` alone misses the automatic turns: notification and cron
+    // turns run their own streaming loop under `notificationAbortController` /
+    // `cronAbortController` and never install it. Accepting there is not
+    // neutral — the bridge drives an accepted continuation through normal
+    // prompt admission, which aborts both controllers, so the recovery button
+    // would kill a healthy running turn.
+    //
+    // `closing` is checked alongside rather than by adopting `isTurnIdle()`:
+    // no `#hasActiveTurn()` member is set while a close gate is held
+    // (`beginClose()` / `dispose()`), yet `assertCanStartTurn()` rejects on it
+    // first — so accepting there is the same round trip this guard exists to
+    // prevent, just failing later. `isTurnIdle()` would also require
+    // `channelTaskCaptures.size === 0`, which `assertCanStartTurn()` does NOT
+    // reject, so taking it wholesale would suppress recovery while a channel
+    // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
       canContinue:
         recoveryPlan?.canContinue === true &&
-        !(this.pendingPrompt && !this.pendingPrompt.signal.aborted),
+        !this.closing &&
+        !this.#hasActiveTurn(),
     };
   }
 
@@ -5546,6 +5561,34 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
     const recovery = this.getRecoveryStatus();
+    if (!recovery.canContinue && recovery.kind !== 'clean') {
+      // Name the veto that fired. `canContinue` collapses `closing` plus the
+      // ten `#hasActiveTurn()` members into one boolean and the only UI
+      // consumer renders nothing for it, so without this a leaked flag —
+      // recovery disabled for the rest of the session — is indistinguishable
+      // from a healthy automatic turn in flight. Logged here rather than in
+      // `getRecoveryStatus()` to stay off the per-poll
+      // `buildSessionContextStatus` path, and gated on a non-clean kind so
+      // the ordinary "nothing to continue" no-op stays quiet.
+      debugLogger.debug('[Session] recovery canContinue vetoed', {
+        kind: recovery.kind,
+        closing: this.closing,
+        pendingPrompt: Boolean(this.pendingPrompt),
+        pendingPromptCompletion: Boolean(this.pendingPromptCompletion),
+        historyMutation: this.historyMutationActive,
+        notification: Boolean(
+          this.notificationProcessing ||
+            this.notificationAbortController ||
+            this.notificationCompletion,
+        ),
+        cron: Boolean(
+          this.cronProcessing ||
+            this.cronAbortController ||
+            this.cronCompletion,
+        ),
+        goal: this.goalProcessing,
+      });
+    }
     return {
       accepted: recovery.canContinue,
       interruption:

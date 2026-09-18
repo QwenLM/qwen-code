@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -201,6 +202,9 @@ let mermaidRenderId = 0;
 const MAX_MERMAID_TEXT_CHARS = 50_000;
 const MAX_MERMAID_EDGES = 500;
 const MERMAID_RENDER_TIMEOUT_MS = 10_000;
+// Must match `.mermaidZoomWrapper`'s padding in Markdown.module.css: the canvas
+// height is set from the diagram's own height plus this both sides.
+const MERMAID_CANVAS_PADDING_PX = 16;
 
 function MermaidBlock({ code }: { code: string }) {
   const { t } = useI18n();
@@ -216,13 +220,27 @@ function MermaidBlock({ code }: { code: string }) {
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
   const [copied, flashCopied] = useCopiedFlash();
   const [zoom, setZoom] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
+  // The canvas is the viewport: panning moves its scroll position, so a drag
+  // and the scrollbar are one mechanism, and the reachable range is the one the
+  // browser already reports for the scaled diagram.
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [isPanned, setIsPanned] = useState(false);
+  // Whether the diagram reaches past the canvas, i.e. whether dragging it has
+  // anywhere to go.
+  const [canPan, setCanPan] = useState(false);
+  // The box the zoom scales, and the height the canvas is held at so that
+  // zooming never reflows the transcript. Both are read off the rendered svg.
+  const [diagramBox, setDiagramBox] = useState<{
+    stageWidth: number;
+    canvasHeight: number;
+  } | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{
     startX: number;
     startY: number;
-    origX: number;
-    origY: number;
+    startLeft: number;
+    startTop: number;
   } | null>(null);
   const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
 
@@ -240,40 +258,103 @@ function MermaidBlock({ code }: { code: string }) {
     dragRef.current = null;
     setIsDragging(false);
     setZoom(1);
-    setOffset({ x: 0, y: 0 });
+    const viewport = viewportRef.current;
+    if (viewport) {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    }
+    setIsPanned(false);
   }, []);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      setIsDragging(true);
-      dragRef.current = {
-        startX: e.clientX,
-        startY: e.clientY,
-        origX: offset.x,
-        origY: offset.y,
-      };
-    },
-    [offset],
-  );
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    e.preventDefault();
+    setIsDragging(true);
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: viewport.scrollLeft,
+      startTop: viewport.scrollTop,
+    };
+  }, []);
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollLeft, scrollTop } = e.currentTarget;
+    setIsPanned(scrollLeft !== 0 || scrollTop !== 0);
+  }, []);
+
+  const syncViewport = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    setCanPan(
+      viewport.scrollWidth > viewport.clientWidth ||
+        viewport.scrollHeight > viewport.clientHeight,
+    );
+    setIsPanned(viewport.scrollLeft !== 0 || viewport.scrollTop !== 0);
+  }, []);
+
+  // Mermaid sizes every diagram it renders in a `viewBox`, and that is the size
+  // it designed: the box the zoom scales, and the height the canvas keeps.
+  // Outside `flowchart` — where this component asks for `useMaxWidth: false` —
+  // mermaid also marks the svg `width="100%"`, so those diagrams shrink to the
+  // canvas instead of sitting at their design size. Measuring them here is what
+  // keeps both cases working: a `fit-content` box cannot resolve that percentage
+  // and falls back to the 300x150 default object size.
+  const measureDiagram = useCallback(() => {
+    const viewport = viewportRef.current;
+    const svgEl = stageRef.current?.querySelector('svg');
+    if (!viewport || !svgEl) return;
+    const [, , boxWidth, boxHeight] = (svgEl.getAttribute('viewBox') ?? '')
+      .split(/[\s,]+/)
+      .map(Number);
+    const declaredWidth = (svgEl.getAttribute('width') ?? '').trim();
+    const declaredHeight = Number.parseFloat(
+      svgEl.getAttribute('height') ?? '',
+    );
+    const hasViewBox = boxWidth > 0 && boxHeight > 0;
+    const width = hasViewBox ? boxWidth : Number.parseFloat(declaredWidth);
+    const height = hasViewBox ? boxHeight : declaredHeight;
+    if (!(width > 0) || !(height > 0)) {
+      setDiagramBox(null);
+      return;
+    }
+    const available = viewport.clientWidth - MERMAID_CANVAS_PADDING_PX * 2;
+    const stageWidth =
+      declaredWidth.endsWith('%') && available > 0
+        ? Math.min(width, available)
+        : width;
+    // A classic (space-taking) scrollbar would otherwise be taken out of the
+    // height the canvas is held at, and hide the bottom of a diagram that
+    // exactly fills it. Overlay scrollbars measure zero.
+    const scrollbar = Math.max(
+      0,
+      viewport.offsetHeight - viewport.clientHeight,
+    );
+    setDiagramBox({
+      stageWidth,
+      canvasHeight:
+        (stageWidth * height) / width +
+        MERMAID_CANVAS_PADDING_PX * 2 +
+        scrollbar,
+    });
+  }, []);
 
   useEffect(() => {
     if (!isDragging) return;
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!dragRef.current) return;
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      // Clamp Y to prevent dragging into overflow-y: hidden clipped area.
-      // X is unclamped — overflow-x: auto provides native horizontal scroll.
-      const PAN_LIMIT = 1500;
-      setOffset({
-        x: dragRef.current.origX + dx,
-        y: Math.max(
-          -PAN_LIMIT,
-          Math.min(PAN_LIMIT, dragRef.current.origY + dy),
-        ),
-      });
+      const viewport = viewportRef.current;
+      const drag = dragRef.current;
+      if (!viewport || !drag) return;
+      // Grab semantics: the diagram follows the pointer, so the scroll position
+      // moves against it. The browser clamps at both ends, which is what keeps
+      // the leading edge of an over-wide diagram reachable.
+      viewport.scrollLeft = drag.startLeft - (e.clientX - drag.startX);
+      viewport.scrollTop = drag.startTop - (e.clientY - drag.startY);
+      // Scroll events arrive asynchronously, so report the position the browser
+      // just settled on (assignments are clamped) instead of waiting for one.
+      setIsPanned(viewport.scrollLeft !== 0 || viewport.scrollTop !== 0);
     };
 
     const onMouseUp = () => {
@@ -292,9 +373,29 @@ function MermaidBlock({ code }: { code: string }) {
   }, [isDragging]);
 
   useEffect(() => {
-    setZoom(1);
-    setOffset({ x: 0, y: 0 });
-  }, [code]);
+    resetZoomAndPan();
+  }, [code, resetZoomAndPan]);
+
+  // Both the box and the drag affordance follow the rendered diagram, so they are
+  // re-read when it arrives, when the zoom changes (a diagram can reach past the
+  // canvas at one zoom and not another), and when the view is remounted.
+  useLayoutEffect(() => {
+    measureDiagram();
+    syncViewport();
+  }, [svg, zoom, viewMode, measureDiagram, syncViewport]);
+
+  // A narrower column changes both a `width="100%"` diagram's size and whether
+  // there is anything to pan, without either of those React values changing.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(() => {
+      measureDiagram();
+      syncViewport();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [svg, viewMode, measureDiagram, syncViewport]);
 
   useEffect(() => {
     let cancelled = false;
@@ -409,7 +510,7 @@ function MermaidBlock({ code }: { code: string }) {
                 className={styles.codeBlockCopy}
                 onClick={resetZoomAndPan}
                 title={t('mermaid.zoomReset')}
-                disabled={zoom === 1 && offset.x === 0 && offset.y === 0}
+                disabled={zoom === 1 && !isPanned}
               >
                 {t('mermaid.zoomReset')}
               </button>
@@ -450,15 +551,25 @@ function MermaidBlock({ code }: { code: string }) {
         </div>
       ) : (
         <div
-          className={`${styles.mermaidZoomWrapper} ${isDragging ? styles.mermaidDragging : ''}`}
+          className={`${styles.mermaidZoomWrapper} ${canPan ? styles.mermaidPannable : ''} ${
+            canPan && isDragging ? styles.mermaidDragging : ''
+          }`}
+          ref={viewportRef}
+          style={diagramBox ? { height: diagramBox.canvasHeight } : undefined}
           onMouseDown={handleMouseDown}
           onDoubleClick={resetZoomAndPan}
+          onScroll={handleScroll}
         >
           <div
-            className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
+            className={`${styles.mermaidBlock} ${styles.mermaidStage}`}
+            ref={stageRef}
             style={{
-              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
-              transformOrigin: 'top center',
+              ...(diagramBox ? { width: diagramBox.stageWidth } : {}),
+              // `zoom` rather than a transform: it resizes the layout, so the
+              // scroll range follows the scaled diagram. Scaling by transform
+              // leaves Chrome computing that range from the full-size box, which
+              // lets a zoomed-out diagram be scrolled off its own canvas.
+              ...(zoom === 1 ? {} : { zoom }),
             }}
             dangerouslySetInnerHTML={{ __html: svg }}
           />
