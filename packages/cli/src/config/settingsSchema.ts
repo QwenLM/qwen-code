@@ -2011,6 +2011,17 @@ const SETTINGS_SCHEMA = {
               { value: 'string', label: 'String' },
             ],
           },
+          toolParametersMandatory: {
+            type: 'boolean',
+            label: 'Require Tool Parameters',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: false,
+            description:
+              'When true, a tool that declares no arguments is still sent with `"parameters": { "type": "object" }` instead of omitting the field. Servers that type `tools[].function.parameters` as a required field reject the request with a validation error when a parameterless tool omits it (for example TabbyAPI `Field required`). Leave false by default: llama.cpp / LM Studio / vLLM reject the replacement shapes (QwenLM/qwen-code#11431, #11410), so enable it only for an endpoint that rejects the omitted field. It is read when the request provider for that route is built, so it takes effect on the next model switch or restart.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           schemaCompliance: {
             type: 'enum',
             label: 'Tool Schema Compliance',

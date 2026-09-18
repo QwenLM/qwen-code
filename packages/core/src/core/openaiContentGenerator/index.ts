@@ -20,6 +20,7 @@ import {
   MistralOpenAICompatibleProvider,
   CerebrasOpenAICompatibleProvider,
   FireworksOpenAICompatibleProvider,
+  ToolParametersMandatoryOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -37,6 +38,7 @@ export {
   MistralOpenAICompatibleProvider,
   CerebrasOpenAICompatibleProvider,
   FireworksOpenAICompatibleProvider,
+  ToolParametersMandatoryOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -124,6 +126,19 @@ export function determineProvider(
   // Check for Fireworks provider
   if (FireworksOpenAICompatibleProvider.isFireworksProvider(config)) {
     return new FireworksOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Checked after every vendor hostname so a provider that injects its own
+  // parameterless shape (MiniMax) still wins over this opt-in.
+  if (
+    ToolParametersMandatoryOpenAICompatibleProvider.isToolParametersMandatory(
+      config,
+    )
+  ) {
+    return new ToolParametersMandatoryOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );
