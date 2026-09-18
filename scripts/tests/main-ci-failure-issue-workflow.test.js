@@ -253,15 +253,24 @@ describe('main CI failure issue workflow', () => {
     expect(suite).toMatch(
       /describe\.skipIf\(!canRunStep\)\(\s*'main CI failure issue log-download execution'/,
     );
-    // And every bash-spawning case stays behind the gate.
+    // And every bash-spawning case stays behind the gate, quantified over the
+    // whole file: the boundary keeps tokens that merely contain `it(`
+    // (exit(, split() green, while the `test(` and `it.each(` spellings of a
+    // case count too.
     const gate = suite.indexOf('describe.skipIf(!canRunStep)(');
-    expect(suite.slice(0, gate)).not.toContain('it(');
-    for (const title of [
-      'downloads the colourised log because the step passes --allow-escape-sequences',
-      'warns and drops the log when the download genuinely fails',
-      'models gh refusing the escape-carrying log on every attempt without the flag',
-    ]) {
-      expect(suite.indexOf(title), title).toBeGreaterThan(gate);
+    expect(gate, 'the gate wrapper').toBeGreaterThan(-1);
+    for (const m of suite.matchAll(/(^|[^\w.])(it|test)(\.each)?\s*\(/g)) {
+      expect(m.index, 'a case outside the capability gate').toBeGreaterThan(
+        gate,
+      );
     }
+    // An index comparison cannot catch a case appended AFTER the gated
+    // describe — its index is greater than the gate's too — so pin the tail:
+    // the gated describe closes as `\n);` and must stay the last top-level
+    // construct in the file (a benign trailing statement reddens this too).
+    expect(
+      suite.trimEnd().endsWith('\n);'),
+      'the gated describe is the last top-level construct in the file',
+    ).toBe(true);
   });
 });
