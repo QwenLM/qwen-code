@@ -36,7 +36,6 @@ import {
   goalPauseReasonForFailure,
   goalRequiresExactPermit,
   PAUSED_GOAL_SYSTEM_REMINDER,
-  type GoalSnapshotV2,
   type GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import {
@@ -291,37 +290,10 @@ function sameGoalPermit(
   );
 }
 
-type ActiveGoalEventValue = Exclude<
-  Extract<ServerLlmStreamEvent, { type: LlmEventType.ActiveGoal }>['value'],
-  null
->;
-
 type GoalStateStreamEvent = Extract<
   ServerLlmStreamEvent,
   { type: LlmEventType.GoalState }
 >;
-
-function projectActiveGoal(
-  snapshot: GoalSnapshotV2 | undefined,
-): ActiveGoalEventValue | undefined {
-  const goal = snapshot?.goal;
-  if (goal?.status !== 'active') return undefined;
-  return {
-    condition: goal.objective,
-    iterations: goal.turnCount,
-    setAt: goal.createdAt,
-    tokensAtStart: 0,
-    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
-    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
-  };
-}
-
-function sameActiveGoalProjection(
-  left: ActiveGoalEventValue | undefined,
-  right: ActiveGoalEventValue | undefined,
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
 
 /**
  * Handle for a non-blocking auto-memory recall prefetch.
@@ -3044,8 +3016,6 @@ export class LlmClient {
         value: message,
       });
     };
-    let hasEmittedActiveGoalProjection = false;
-    let lastEmittedActiveGoal: ActiveGoalEventValue | undefined;
     const closeGoalStateEvents = () => {
       const unsubscribe = unsubscribeGoalState;
       unsubscribeGoalState = undefined;
@@ -3070,31 +3040,9 @@ export class LlmClient {
         0,
         pendingGoalSettlementMessages.length,
       );
-      for (const stateEvent of pendingGoalStateEvents.splice(
-        0,
-        pendingGoalStateEvents.length,
-      )) {
-        events.push(stateEvent);
-        const nextActiveGoal = projectActiveGoal(stateEvent.value);
-        if (!hasEmittedActiveGoalProjection) {
-          hasEmittedActiveGoalProjection = true;
-          lastEmittedActiveGoal = nextActiveGoal;
-          if (nextActiveGoal) {
-            events.push({
-              type: LlmEventType.ActiveGoal,
-              value: nextActiveGoal,
-            });
-          }
-        } else if (
-          !sameActiveGoalProjection(lastEmittedActiveGoal, nextActiveGoal)
-        ) {
-          lastEmittedActiveGoal = nextActiveGoal;
-          events.push({
-            type: LlmEventType.ActiveGoal,
-            value: nextActiveGoal ?? null,
-          });
-        }
-      }
+      events.push(
+        ...pendingGoalStateEvents.splice(0, pendingGoalStateEvents.length),
+      );
       return events;
     };
     const loadGoalRuntime = async (

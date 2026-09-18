@@ -635,7 +635,7 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
-    it('ignores the legacy active_goal projection (ink parity)', () => {
+    it('ignores an event type it does not know', () => {
       const map = createEventMapper();
       expect(
         map({

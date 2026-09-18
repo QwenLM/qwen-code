@@ -7,8 +7,8 @@
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fakeToolCall } from './fake-openai-server.js';
-import { runForcedToolCallScenario, TestRig } from './test-helper.js';
+import { fakeToolCall } from '../fake-openai-server.js';
+import { runForcedToolCallScenario, TestRig } from '../test-helper.js';
 
 describe('Glob ignore-cache rollover', () => {
   let rig: TestRig;

@@ -55,7 +55,7 @@ describe('projectGoalStateToLegacy', () => {
     },
   );
 
-  it('projects completion as achieved and stops active_goal', () => {
+  it('projects completion as achieved with no active goal', () => {
     const projected = projectGoalStateToLegacy(payload('complete', 'complete'));
 
     expect(projected.goalStatus.kind).toBe('achieved');

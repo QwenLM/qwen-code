@@ -27,7 +27,6 @@ export {
   projectGoalStateToLegacy,
 } from './goal-legacy-projection.js';
 export type {
-  ActiveGoal,
   LegacyActiveGoal,
   LegacyGoalProjection,
   LegacyGoalStatus,

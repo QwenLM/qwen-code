@@ -1508,7 +1508,7 @@ export function createServeApp(
         'Live provider settings could not be loaded.',
       );
     }
-    return resolveLiveProviderCredential(settings);
+    return resolveLiveProviderCredential(settings, { env: daemonEnv });
   };
   const liveCoordinator =
     deps.liveCoordinator ??
@@ -2395,6 +2395,7 @@ export function createServeApp(
       installer: liveHostInstaller,
       getEnabled: () => liveVoiceEnabled,
       setEnabled: setLiveVoiceEnabled,
+      env: daemonEnv,
       ...(deps.persistSettings
         ? {
             persistSettings: async (writes) => {
