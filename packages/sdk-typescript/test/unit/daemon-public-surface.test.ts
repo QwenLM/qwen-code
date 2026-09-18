@@ -179,6 +179,9 @@ import {
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
 } from '../../src/daemon/index.js';
 import type {
+  DaemonResourceLink,
+  DaemonUiUserResourceLinkEvent,
+  PromptContentBlock,
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
@@ -187,6 +190,35 @@ import type {
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
+
+describe('resource-link public surface', () => {
+  it('keeps the ACP discriminator and nullable metadata in the daemon API', () => {
+    const resourceLink: DaemonResourceLink = {
+      type: 'resource_link',
+      uri: 'transit://attachment',
+      name: 'report.pdf',
+      mimeType: null,
+      size: null,
+      description: null,
+      title: null,
+      annotations: {
+        audience: null,
+        lastModified: null,
+        priority: null,
+        _meta: null,
+      },
+      _meta: null,
+    };
+    const event: DaemonUiUserResourceLinkEvent = {
+      type: 'user.resource_link.delta',
+      resourceLink,
+    };
+    const promptContent: PromptContentBlock[] = [resourceLink];
+    expect(event.resourceLink).toBe(resourceLink);
+    expect(promptContent[0]).toBe(resourceLink);
+    expectTypeOf(event.resourceLink.type).toEqualTypeOf<'resource_link'>();
+  });
+});
 
 describe('continuation compatibility', () => {
   it('accepts an older daemon response without an event epoch', () => {
@@ -577,6 +609,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
   });
 
   it('exposes the workspace session live-state surface at the public entry', () => {
+    expect(typeof Public.parseDaemonBackgroundTurn).toBe('function');
     // The prototype checks execute under vitest (type-only imports are
     // erased). The type shape assertions pin the wire contract via the
     // package typecheck, which compiles this file through
@@ -596,6 +629,8 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       clientCount: number;
       hasActivePrompt: boolean;
       activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+      backgroundTurn?: Public.DaemonBackgroundTurn;
+      hasRunningBackgroundTasks?: boolean;
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
       updatedAt?: string;

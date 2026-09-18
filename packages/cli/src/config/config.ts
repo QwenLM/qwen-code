@@ -43,6 +43,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type OmniPolicyToolsSettings,
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
@@ -52,13 +53,20 @@ import {
   loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
+  validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import {
+  agentExecutionBackend,
+  agentExecutionFactory,
+} from './agent-execution.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
+import { getSettingsSchema } from './settingsSchema.js';
+import { resolveHookSettingsForConfig } from './hook-settings.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -93,6 +101,7 @@ import { sessionsCommand } from '../commands/sessions.js';
 import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
+import { sandboxCommand } from '../commands/sandbox.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -103,7 +112,6 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
-  validateGoalCheckpointTimeoutSeconds,
   validateGoalMaxActiveMinutes,
   validateGoalMaxTurns,
   validateGoalTokenBudget,
@@ -883,7 +891,9 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(sessionsCommand)
     .command(batchCommand)
     // Register update command
-    .command(updateCommand);
+    .command(updateCommand)
+    // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
+    .command(sandboxCommand);
 
   for (const [option, message] of Object.entries(
     TOP_LEVEL_DEPRECATED_OPTIONS,
@@ -917,18 +927,19 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
-      result._[0] === 'update')
+      result._[0] === 'update' ||
+      result._[0] === 'sandbox')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
     // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
-    // execution and exit. `batch` must be here for a second reason: the main
+    // execution and exit. Returning here would let the main interactive flow
+    // run, which would prompt for stdin input despite the user having already
+    // invoked a subcommand. `batch` must be here for a second reason: the main
     // flow below relaunches the process for a larger heap, and a second parse
     // would run the subcommand handler again — submitting (and billing) a
-    // duplicate batch job whose id the user never sees. Returning here would let the main interactive
-    // flow run, which would prompt for stdin input despite the user
-    // having already invoked a subcommand.
+    // duplicate batch job whose id the user never sees.
     process.exit(process.exitCode ?? 0);
   }
 
@@ -1168,18 +1179,6 @@ function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
   }
 }
 
-function resolveGoalCheckpointTimeoutSeconds(
-  settings: Settings,
-): number | undefined {
-  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
-  if (fromSettings === undefined) return undefined;
-  try {
-    return validateGoalCheckpointTimeoutSeconds(fromSettings);
-  } catch (err) {
-    throw new Error(`settings.json: ${(err as Error).message}`);
-  }
-}
-
 /**
  * Resolves the tool-call budget for a run. Returns the validated count
  * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
@@ -1349,6 +1348,70 @@ export function buildDisabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
   return () => resolveSkillSettings(loadedSettings).disabledNames;
+}
+
+/**
+ * Reject unknown keys directly under `omni`.
+ *
+ * The generic settings loader only scans TOP-LEVEL keys, and only writes a
+ * debug line — so a nested typo is caught by nothing: `omni.memoryy` or
+ * `omni.processingg` leaves `settings.omni?.memory` / `?.processing`
+ * undefined, every downstream normalizer sees "not configured" and returns
+ * defaults, and the session silently runs with the operator's entire
+ * configuration discarded (probe: `omni.memoryy.recall.mode = sideQuery`
+ * still registered the active-mode recall tool). The omni namespace's
+ * declared stance is that a misconfiguration must fail loud, so this
+ * mirrors the nested checks its own normalizers already perform.
+ *
+ * The allowed set is derived from the settings schema rather than
+ * hardcoded, so it cannot drift as the namespace grows.
+ */
+function assertKnownOmniSettingKeys(settings: Settings): void {
+  const omni = settings.omni;
+  if (omni === undefined || omni === null || typeof omni !== 'object') return;
+  const schemaOmni = getSettingsSchema()['omni'] as
+    | { properties?: Record<string, unknown> }
+    | undefined;
+  // No schema properties resolved (unexpected): stay silent rather than
+  // rejecting every valid key.
+  if (Object.keys(schemaOmni?.properties ?? {}).length === 0) return;
+
+  // Walk nested object settings too: the deletion-controlling knobs live
+  // at `omni.storage.*`, and a typo there would silently leave the GC on
+  // defaults. Free-form map nodes (fixedPolicies, policyTools — schema
+  // nodes without `properties`) stop the walk: their keys are
+  // user-defined.
+  const walk = (
+    value: unknown,
+    schemaNode: { properties?: Record<string, unknown> } | undefined,
+    label: string,
+  ): void => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return;
+    }
+    const props = schemaNode?.properties;
+    if (!props || Object.keys(props).length === 0) return;
+    const allowed = new Set(Object.keys(props));
+    const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Invalid settings: unknown key(s) under "${label}": ` +
+          `${unknown.map((k) => `"${k}"`).join(', ')}. ` +
+          `Allowed: ${[...allowed].sort().join(', ')}. ` +
+          `An unrecognized ${label} entry would be silently ignored, ` +
+          `leaving the session running with defaults instead of your ` +
+          `configuration.`,
+      );
+    }
+    for (const [key, child] of Object.entries(value)) {
+      walk(
+        child,
+        props[key] as { properties?: Record<string, unknown> } | undefined,
+        `${label}.${key}`,
+      );
+    }
+  };
+  walk(omni, schemaOmni, 'omni');
 }
 
 export function buildEnabledSkillNamesProvider(
@@ -1525,6 +1588,7 @@ export async function loadCliConfig(
    * If provided, these override settings.hooks for hook loading.
    */
   hooksConfig?: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
@@ -1583,6 +1647,7 @@ export async function loadCliConfig(
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
+  assertKnownOmniSettingKeys(settings);
   const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
@@ -2004,7 +2069,27 @@ export async function loadCliConfig(
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
-  // Unified resolution of generation config with source attribution
+  // Validate provider protocols and per-model `wireApi` fields up front. The
+  // registry resolver throws a bare Error, and every startup shape passes
+  // through here, even without a selected model/auth type — classify it as a
+  // FatalConfigError so the user gets the message and the "please fix the
+  // configuration file(s)" hint instead of a stack trace before the TUI
+  // starts.
+  try {
+    validateModelProvidersConfig(
+      settings.modelProviders,
+      settings.providerProtocol,
+    );
+  } catch (err) {
+    throw new FatalConfigError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Unified resolution of generation config with source attribution. Note the
+  // up-front provider validation above is what classifies invalid configuration;
+  // this call's own settings reads must not re-wrap a resolver
+  // defect as a user config error, so it stays unwrapped.
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {
       model: argv.model,
@@ -2374,7 +2459,6 @@ export async function loadCliConfig(
     goalTokenBudget: resolveGoalTokenBudget(settings),
     goalMaxTurns: resolveGoalMaxTurns(settings),
     goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
-    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2414,12 +2498,42 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
+    omniEnabled: settings.omni?.enabled ?? false,
+    omniMaxUploadFileBytes:
+      settings.omni?.processing?.transportGuard?.maxUploadFileBytes,
+    omniMaxEstimatedTokens:
+      settings.omni?.processing?.transportGuard?.maxEstimatedTokens,
+    omniMaxDurationSeconds:
+      settings.omni?.processing?.transportGuard?.maxDurationSeconds,
+    omniUrlDownloadMaxFileBytes:
+      settings.omni?.ingestion?.localization?.url?.maxFileBytes,
+    omniUploadUrlTtlHours: settings.omni?.delivery?.upload?.urlTtlHours,
+    omniUploadBaseUrl: settings.omni?.delivery?.upload?.baseUrl,
+    omniUploadApiKeyEnv: settings.omni?.delivery?.upload?.apiKeyEnv,
+    omniUploadModel: settings.omni?.delivery?.upload?.model,
+    omniPolicyTools: settings.omni?.processing?.policyTools as
+      | OmniPolicyToolsSettings
+      | undefined,
+    omniFixedPolicies: settings.omni?.processing?.fixedPolicies as
+      | Record<string, unknown>
+      | undefined,
+    omniTransportGuardPolicies: settings.omni?.processing?.transportGuard
+      ?.policies as Record<string, unknown> | undefined,
+    omniProcessingLimits: settings.omni?.processing?.limits as
+      | Record<string, unknown>
+      | undefined,
+    omniQuarantineRetentionDays:
+      settings.omni?.storage?.quarantine?.retentionDays,
+    omniQuarantineMaxBytes: settings.omni?.storage?.quarantine?.maxBytes,
+    omniStorageRetentionDays: settings.omni?.storage?.retentionDays,
+    omniStorageMaxTotalBytes: settings.omni?.storage?.maxTotalBytes,
+    omniMemory: settings.omni?.memory as Record<string, unknown> | undefined,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType: selectedAuthType,
+    authType: resolvedCliConfig.authType,
     inputFormat,
     outputFormat,
     includePartialMessages,
@@ -2450,6 +2564,8 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
+    workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
@@ -2512,12 +2628,11 @@ export async function loadCliConfig(
       settings.modelFallbacks,
     ),
     // Use separated hooks if provided, otherwise fall back to merged hooks
-    userHooks:
-      bareMode || safeMode
-        ? undefined
-        : (hooksConfig?.userHooks ?? settings.hooks),
-    projectHooks: bareMode || safeMode ? undefined : hooksConfig?.projectHooks,
-    hooks: bareMode || safeMode ? undefined : settings.hooks,
+    ...resolveHookSettingsForConfig(
+      settings.hooks,
+      hooksConfig,
+      bareMode || safeMode,
+    ),
     disableAllHooks:
       bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
     stopHookBlockingCap:
@@ -2567,6 +2682,8 @@ export async function loadCliConfig(
         }
       : undefined,
     settingsWatcher,
+    agentExecutionBackend: agentExecutionBackend(),
+    executionEnvironmentFactory: agentExecutionFactory(),
   };
 
   const config = new Config(configParams);

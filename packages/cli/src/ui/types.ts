@@ -138,6 +138,51 @@ export interface CompressionProps {
   newTokenCountIsEstimated?: boolean;
 }
 
+/**
+ * Structured companion to the `/compress` sentences a command streams over ACP.
+ *
+ * The English sentence stays on the wire so text-only ACP hosts keep rendering
+ * something, but a host that owns its own UI language renders the outcome from
+ * this instead. Token counts travel as numbers (never preformatted) so the
+ * consumer picks its own grouping and estimated marker.
+ */
+export type ContextCompressionMeta =
+  | {
+      phase: 'progress';
+    }
+  | {
+      /**
+       * Terminal, like `done`: the fast path had nothing to strip. The session
+       * merges it into the progress block so the pending row is replaced in
+       * place, which is why it carries no counts.
+       */
+      phase: 'noop';
+    }
+  | {
+      phase: 'done';
+      originalTokenCount: number;
+      newTokenCount: number;
+      originalTokenCountIsEstimated?: boolean;
+      newTokenCountIsEstimated?: boolean;
+      /** Server-authored advisory; free-form text, not a translation key. */
+      warning?: string;
+    };
+
+/**
+ * A note about the invocation itself, emitted before the compression starts.
+ *
+ * It rides on its own `_meta` key rather than on `contextCompression`: the
+ * reducer folds a turn's text frames into one block and spreads `_meta` key by
+ * key, so a note sharing that key would be overwritten by the result frame that
+ * follows. A host that reads this key renders the note as its own row beside
+ * the compression it belongs to.
+ */
+export interface ContextCompressionNotice {
+  phase: 'notice';
+  /** Instruction budget the caller was clipped to. */
+  instructionsLimit: number;
+}
+
 export interface SummaryProps {
   isPending: boolean;
   stage: 'generating' | 'saving' | 'completed';
@@ -398,6 +443,9 @@ export interface ToolDefinition {
   name: string;
   displayName: string;
   description?: string;
+  /** Omni media-policy tool that only runs via fixed policies: it is hidden
+   * from the model's declarations, so /tools annotates it for the human. */
+  fixedOnly?: boolean;
   /**
    * Registered, but its schema is not in the eager model request — the tool
    * is reached on demand via `tool_search`. Set for `shouldDefer` tools and

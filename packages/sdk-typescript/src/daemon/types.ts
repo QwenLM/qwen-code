@@ -60,9 +60,9 @@ export interface GoalRecord {
   turnCount: number;
   activeTimeMs: number;
   /**
-   * Model tokens billed to this Goal's own turns, as the daemon's Goal meter
-   * counts them: subagent work and the verifier's own checks are not
-   * included. Optional because a daemon older than the field sends a snapshot
+   * Model tokens billed to Goal turns, direct foreground subagents, and the
+   * Goal's verifier and checkpoint checks. Nested/background agents, other side
+   * queries, cron and notification turns are excluded. Optional because an older daemon sends a snapshot
    * without it.
    */
   tokensUsed?: number;
@@ -87,20 +87,12 @@ export interface GoalRecord {
   createdAt: number;
   updatedAt: number;
   /**
-   * Consecutive evidence checkpoints that failed to relieve an overflowing
-   * window; the Goal stops when this reaches three. Absent means zero, which
-   * is also what an older daemon's snapshot looks like.
+   * @deprecated Goals no longer run evidence checkpoints, so a current daemon
+   * never sends this. Kept so a snapshot from an older daemon still types.
    */
   checkpointStalls?: number;
   /**
-   * A one-line diagnostic for the most recent checkpoint check that gave no
-   * relief: `ErrorName: message` for a check that failed, or the runtime's own
-   * phrase for one that answered with a full claim list while the window
-   * overflowed, so it does not always mean the check threw. Cleared by a check
-   * that finds room or writes a checkpoint without stalling, by every control
-   * action that clears `checkpointStalls`, and by a checkpoint stop whose cause
-   * is not itself a check, so it can be absent while `checkpointStalls` is
-   * still non-zero. Also absent when the daemon predates the field.
+   * @deprecated See `checkpointStalls`: only an older daemon sends this.
    */
   lastCheckpointFailure?: string;
   lastReason?: string;
@@ -128,9 +120,9 @@ export interface GoalSnapshotV2 {
 export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
 
 /**
- * How many consecutive stalled evidence checkpoints stop a Goal, duplicated so
- * a client can show `checkpointStalls` against it. It must match
- * `GOAL_CHECKPOINT_STALL_LIMIT` in `packages/core/src/goals/goal-protocol.ts`.
+ * @deprecated Goals no longer run evidence checkpoints, so there is no stall
+ * streak to show against this, and core no longer defines the limit it used
+ * to mirror. Kept only because it is part of the published surface.
  */
 export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
 
@@ -336,6 +328,14 @@ export interface DaemonGitLogEntry {
   parents: string[];
 }
 
+/** Optional filters for `GET /workspace/git/log`. */
+export interface DaemonGitLogOptions {
+  /** Walk every local branch, remote branch, and tag instead of HEAD only. */
+  all?: boolean;
+  /** Keep only commits whose message, author, or hash matches. */
+  search?: string;
+}
+
 /** Response from `GET /workspace/git/log`. */
 export interface DaemonGitLog {
   v: 1;
@@ -458,6 +458,42 @@ export interface DaemonGitPullResult {
 export interface DaemonGitCommitResult {
   sha: string;
   subject: string;
+}
+
+/** A single configured remote. `pushUrl` equals `fetchUrl` unless a
+ * push-URL override is configured (`git remote set-url --push`). */
+export interface DaemonGitRemoteInfo {
+  name: string;
+  fetchUrl: string;
+  pushUrl: string;
+  /** Configured fetch URLs beyond the first (multi-fetch remotes). */
+  extraFetchUrls: number;
+  /** Configured push URLs beyond the first (mirror-push remotes). */
+  extraPushUrls: number;
+  /** The remote feeds a partial clone (`remote.<name>.promisor`). */
+  promisor: boolean;
+  /** `remote.<name>.partialclonefilter` value when configured. */
+  partialCloneFilter?: string;
+  /** A configured fetch refspec differs from git's add-time default. */
+  customRefspec: boolean;
+  /** Other `remote.<name>.*` settings (proxy, mirror, tagopt, …) that
+   * removal destroys and re-adding cannot restore. */
+  otherSettings: number;
+}
+
+/** Response from `GET /workspaces/:workspace/git/remotes`. */
+export interface DaemonGitRemotesResult {
+  v: 1;
+  workspaceCwd: string;
+  available: boolean;
+  remotes: DaemonGitRemoteInfo[];
+}
+
+/** Response from the remote add/remove mutations: the fresh list. */
+export interface DaemonGitRemoteMutationResult {
+  v: 1;
+  workspaceCwd: string;
+  remotes: DaemonGitRemoteInfo[];
 }
 
 /** Review decision for an open pull request, lowercased from GitHub's enum. */
@@ -851,19 +887,18 @@ export interface DaemonStatusReport {
     maxJournalEvents: number;
     maxJournalBytes: number;
     /**
-     * The daemon's resolved memory figures, observed and reported only.
+     * The daemon's resolved memory model and admission policy.
      * Additive — older daemons omit it, and it is `null` on paths that resolve
      * none.
      */
     memory?: {
       /**
-       * False, and required — scoped to the child-heap model: nothing in
-       * this section except `journalGrowth` is applied to a process.
+       * False, and required: modeled child heap ceilings are not applied.
+       * Count enforcement is reported separately by `childHeap.admissionEnforced`.
        */
       enforced: false;
       /**
-       * Adaptive live-journal growth derived from the budget — the one
-       * figure with runtime effect: session journal caps really do grow
+       * Adaptive live-journal growth derived from the budget: session journal caps really do grow
        * within this daemon-wide pool mid-turn. `null` when growth is
        * disabled; absent on daemons predating it.
        */
@@ -878,7 +913,8 @@ export interface DaemonStatusReport {
        * `null` when no policy was built; absent on daemons predating it.
        */
       childHeap?: {
-        mode: 'off' | 'observe';
+        mode: 'off' | 'observe' | 'admit';
+        admissionEnforced?: boolean;
         /**
          * `null` under `off`, which models nothing — distinct from `0`,
          * a computed answer meaning the pool hosts no child.
@@ -903,7 +939,7 @@ export interface DaemonStatusReport {
       availableMemoryMb: number;
       availableMemorySource: 'constrained' | 'host';
       insufficientMemory: boolean;
-      /** Derived figures for a capacity policy that has not shipped. */
+      /** Memory model used for child-count admission, not reserved memory. */
       modeled: {
         rootReserveMb: number;
         childPoolMb: number;
@@ -978,6 +1014,7 @@ export interface DaemonStatusReport {
        * started even if the child has not exited. Not a process-tree count.
        */
       activeAcpChildren: number;
+      committedAcpChildren?: number | null;
       /**
        * Which children the daemon's RSS sampling covers, and only while an
        * SSE/WS watcher is active; with no client observing, nothing is
@@ -1192,6 +1229,42 @@ export interface DaemonSessionIssueInfo {
   state?: 'open' | 'completed' | 'not_planned';
 }
 
+export interface DaemonBackgroundTurn {
+  turnId: string;
+  taskId: string;
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  toolUseId?: string;
+  sourceTurnId?: string;
+  label?: string;
+  startedAt: number;
+}
+
+export function parseDaemonBackgroundTurn(
+  value: unknown,
+): DaemonBackgroundTurn | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record['turnId'] !== 'string' ||
+    !record['turnId'] ||
+    typeof record['taskId'] !== 'string' ||
+    !record['taskId'] ||
+    (record['kind'] !== 'agent' &&
+      record['kind'] !== 'monitor' &&
+      record['kind'] !== 'shell' &&
+      record['kind'] !== 'workflow') ||
+    typeof record['startedAt'] !== 'number' ||
+    !Number.isFinite(record['startedAt']) ||
+    record['startedAt'] < 0 ||
+    ['toolUseId', 'sourceTurnId', 'label'].some(
+      (key) => record[key] !== undefined && typeof record[key] !== 'string',
+    )
+  )
+    return undefined;
+  return value as DaemonBackgroundTurn;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -1210,6 +1283,8 @@ export interface DaemonSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  backgroundTurn?: DaemonBackgroundTurn;
+  hasRunningBackgroundTasks?: boolean;
   /**
    * Epoch token of the session's event bus. Newer daemons stamp it on the
    * create/attach response; older daemons omit it and the first subscription
@@ -1445,6 +1520,8 @@ export interface DaemonSessionSummary {
   hasActivePrompt?: boolean;
   /** Per-session active-work observation from the owning runtime. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+  backgroundTurn?: DaemonBackgroundTurn;
+  hasRunningBackgroundTasks?: boolean;
   isWaitingForPermission?: boolean;
   isWaitingForUserQuestion?: boolean;
   pendingInteractionCount?: number;
@@ -1481,6 +1558,8 @@ export interface DaemonSessionExportResult {
 }
 
 export interface DaemonSessionTranscriptPageOptions {
+  /** Projection of persisted replay; defaults to full. */
+  compactedReplayMode?: 'full' | 'summary';
   cursor?: string;
   /** Start a forward page containing this persisted navigation turn UUID. */
   atRecordId?: string;
@@ -1627,7 +1706,7 @@ export interface DaemonSessionListPageOptions {
    * opaque and activity-based.
    */
   parentSessionId?: string;
-  /** Restrict the page to sessions attributed to this source type. */
+  /** Filter by source; `default` includes legacy and `qwen-live` tasks. */
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
@@ -1671,6 +1750,8 @@ export interface DaemonSessionLiveState {
   hasActivePrompt: boolean;
   /** Absent when talking to an older daemon. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
+  backgroundTurn?: DaemonBackgroundTurn;
+  hasRunningBackgroundTasks?: boolean;
   isWaitingForPermission: boolean;
   isWaitingForUserQuestion: boolean;
   /**
@@ -2886,10 +2967,25 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
   /** Whether Workflow is available for this session. */
   workflowsEnabled?: boolean;
+  workflowToolFeatures?: {
+    sourceRef: boolean;
+    agentStepId: boolean;
+    workflowStepId: boolean;
+    /** Whether `run-saved` reads `args` and `sourceRef` from the request. */
+    runSavedArgs?: boolean;
+    /** Whether the `run-script` action exists. */
+    runScript?: boolean;
+    /**
+     * Whether the session's model may run named workflows only. The host's
+     * own `run-saved`, `run-script`, `retry` and `rerun` are not restricted.
+     */
+    nameOnly?: boolean;
+  };
   /** Reusable workflow definitions visible to this session. */
   savedWorkflows?: Array<{
     name: string;
-    source: 'project' | 'user';
+    /** `extension` definitions are named `<extension>:<workflow>`. */
+    source: 'project' | 'user' | 'extension';
   }>;
 }
 
@@ -2906,7 +3002,7 @@ export interface DaemonSessionSavedWorkflowDetail {
   v: 1;
   sessionId: string;
   name: string;
-  source: 'project' | 'user';
+  source: 'project' | 'user' | 'extension';
   /** Absolute path of the `.js` file the definition was read from. */
   scriptPath: string;
   /** Full script source, `export const meta` included. */
@@ -3032,6 +3128,8 @@ export type DaemonWorkflowDispatchStatus =
   | 'cached';
 
 export interface DaemonWorkflowDispatchStatusEntry {
+  stepId?: string;
+  workflowCallId?: string;
   id: string;
   phaseVisitId: string | null;
   label: string;
@@ -3096,7 +3194,51 @@ export type DaemonWorkflowEvent =
       error: string;
     });
 
+/**
+ * A workflow run's large-run flag: the first size threshold it crossed. Mirrors
+ * the daemon's `ServeWorkflowSizeWarning`.
+ */
+export interface DaemonWorkflowSizeWarning {
+  axis: 'agents' | 'tokens';
+  /** Dispatches issued by the run, excluding journal replays. */
+  scheduledAgents: number;
+  totalTokens: number;
+  projectedTokens: number;
+  agentCap: number;
+  tokenCap: number;
+  /** Whether the agent threshold came from the size guideline setting. */
+  capFromGuideline: boolean;
+  at: number;
+}
+
+export interface DaemonWorkflowCallTrace {
+  id: string;
+  stepId?: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: number;
+  endedAt?: number;
+  error?: string;
+}
+
+/**
+ * Start input for the `run-saved` and `run-script` workflow actions. The
+ * control actions ignore it: a retry or rerun replays the original run's own
+ * `args` and `sourceRef`. Mirrors the daemon's `ServeWorkflowActionInput`.
+ */
+export interface DaemonWorkflowActionInput {
+  /** Bound to the script's `args` global; any JSON value. */
+  args?: unknown;
+  /** The caller's own definition id and revision, recorded on the run. */
+  sourceRef?: { id: string; revision: string };
+  /** `run-script` only: the script source to run. */
+  script?: string;
+}
+
 export interface DaemonSessionWorkflowTaskStatus {
+  sourceRef?: { id: string; revision: string };
+  workflowCalls?: DaemonWorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   kind: 'workflow';
   id: string;
   /** Tool call in the parent session that launched this workflow. */
@@ -3122,6 +3264,8 @@ export interface DaemonSessionWorkflowTaskStatus {
   agentsCompleted: number;
   /** Calls re-run from a prior failed or interrupted attempt. */
   agentsRespawned?: number;
+  /** Present once the run crossed a large-run threshold. */
+  sizeWarning?: DaemonWorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   recentLogs: string[];
@@ -3576,7 +3720,7 @@ export interface DaemonModelConfiguration {
   envKey?: string;
   contextWindowSize?: number;
   canEditContextWindow?: boolean;
-  purpose: 'chat' | 'image' | 'voice';
+  purpose: 'chat' | 'image' | 'voice' | 'realtime';
   imageModel?: string;
   advisorModel?: string;
 }
@@ -3717,6 +3861,11 @@ export interface DaemonLiveStatus {
   host?: {
     version?: string;
     protocolVersion?: number;
+    /**
+     * Present as `'browser'` when the Web Shell page itself holds the Host
+     * lease over WS `/live/web`. Absent for the native macOS Host.
+     */
+    kind?: 'native' | 'browser';
   };
 }
 
@@ -3744,6 +3893,10 @@ export interface DaemonLiveSetupStatus {
   enabled: boolean;
   keyConfigured: boolean;
   model: string;
+  /** Absent on daemons that predate selectable Live Voice models. */
+  voice?: string;
+  /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
+  models?: Array<{ id: string; provider: string; name?: string }>;
   shortcut: string;
   install: DaemonLiveHostInstallStatus;
   live: DaemonLiveStatus;
@@ -3757,6 +3910,9 @@ export interface DaemonLiveSetupUpdate {
   enabled?: boolean;
   shortcut?: string;
   apiKey?: DaemonLiveSetupApiKeyMutation;
+  /** `modelId` or `provider:modelId` of a `realtimeOnly` route. */
+  model?: string;
+  voice?: string;
 }
 
 export interface DaemonLiveMuteUpdate {
@@ -4643,7 +4799,9 @@ export interface DaemonAuthProviderDescriptor {
     flowTitle?: string;
     baseUrlStepTitle?: string;
   };
-  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+  steps: Array<
+    'protocol' | 'wireApi' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'
+  >;
 }
 
 export interface DaemonAuthProviderCatalog {
@@ -4661,6 +4819,7 @@ export interface DaemonAuthProviderCatalog {
 export interface DaemonAuthProviderInstallRequest {
   providerId: string;
   protocol?: string;
+  wireApi?: 'chat-completions' | 'responses';
   baseUrl?: string;
   apiKey: string;
   modelIds?: string[];

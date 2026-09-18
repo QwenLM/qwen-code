@@ -4,36 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type {
-  GoalTerminalEvent,
-  GoalTerminalKind,
-  GoalTerminalObserver,
-} from './activeGoalStore.js';
-export {
-  activeGoalEquals,
-  getActiveGoal,
-  setActiveGoal,
-  clearActiveGoal,
-  recordGoalIteration,
-  setGoalTerminalObserver,
-  clearGoalTerminalObserver,
-  notifyGoalTerminal,
-  getLastGoalTerminal,
-  setLastGoalTerminal,
-  __resetActiveGoalStoreForTests,
-} from './activeGoalStore.js';
-export {
-  MAX_GOAL_ITERATIONS,
-  GOAL_HOOK_TIMEOUT_MS,
-  GOAL_HOOK_TIMEOUT_SECONDS,
-  getStopHookContinuationReason,
-  createGoalStopHookCallback,
-  abortGoalForStopHookCap,
-  registerGoalHook,
-  unregisterGoalHook,
-} from './goalHook.js';
-export { judgeGoal } from './goalJudge.js';
-export type { GoalJudgeOutcome, JudgeResult } from './goalJudge.js';
 export * from './goal-protocol.js';
 export {
   GoalConflictError,
@@ -51,12 +21,12 @@ export type {
   GoalTurnFinishedTransition,
 } from './goal-reducer.js';
 export * from './goal-persistence.js';
+export * from './goal-legacy-cards.js';
 export {
   isGoalCheckpointBookkeepingRecord,
   projectGoalStateToLegacy,
 } from './goal-legacy-projection.js';
 export type {
-  ActiveGoal,
   LegacyActiveGoal,
   LegacyGoalProjection,
   LegacyGoalStatus,
@@ -65,8 +35,6 @@ export type {
 } from './goal-legacy-projection.js';
 export * from './goal-evidence.js';
 export * from './goal-tool-result-provenance.js';
-export * from './goal-checkpoint.js';
-export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
 export {

@@ -141,6 +141,21 @@ async function setup(supported = true, cursorOnly = false, turnCount = 4) {
     onReloadTranscript: vi.fn(),
     onLoadOlderHistory: legacyLoad,
     hasOlderHistory: true,
+    sourceEntries: [
+      {
+        type: 'source',
+        source: {
+          id: 'source',
+          title: 'Source',
+          kind: 'link',
+          locator: { type: 'url', url: 'https://example.com/source' },
+          createdAt: '2025-01-01',
+          updatedAt: '2025-01-01',
+        },
+      },
+    ],
+    sourceSessionId: 'session',
+    onSourceOpen: vi.fn(),
   };
   act(() => root!.render(<TranscriptViewport {...props} ref={ref} />));
   const click = async (key: string) => {
@@ -269,6 +284,9 @@ describe('TranscriptViewport', () => {
   it('switches only visible rows, disables historical mutations and returns live through the forwarded handle', async () => {
     const { props, ref, click } = await setup();
     expect(observed.props?.messages).toBe(live);
+    expect(observed.props?.sourceEntries).toBe(props.sourceEntries);
+    expect(observed.props?.sourceSessionId).toBe('session');
+    expect(observed.props?.onSourceOpen).toBe(props.onSourceOpen);
     await click('history.openEarlier');
     expect(
       container
@@ -285,6 +303,9 @@ describe('TranscriptViewport', () => {
     expect(observed.props?.onBranchSession).toBeUndefined();
     expect(observed.props?.onRetryClick).toBeUndefined();
     expect(observed.props?.onReloadTranscript).toBeUndefined();
+    expect(observed.props?.sourceEntries).toBeUndefined();
+    expect(observed.props?.sourceSessionId).toBeUndefined();
+    expect(observed.props?.onSourceOpen).toBeUndefined();
     const historical = observed.props?.messages;
     const nextLive: Message[] = [
       ...live,
@@ -299,6 +320,9 @@ describe('TranscriptViewport', () => {
     act(() => ref.current?.scrollToBottom());
     expect(observed.props?.messages).toBe(nextLive);
     expect(observed.props?.onEditUserMessage).toBe(props.onEditUserMessage);
+    expect(observed.props?.sourceEntries).toBe(props.sourceEntries);
+    expect(observed.props?.sourceSessionId).toBe('session');
+    expect(observed.props?.onSourceOpen).toBe(props.onSourceOpen);
   });
 
   it('preserves the original loader with turn navigation enabled', async () => {

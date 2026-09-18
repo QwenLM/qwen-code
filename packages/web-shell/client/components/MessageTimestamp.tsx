@@ -10,6 +10,7 @@ import styles from './MessageTimestamp.module.css';
 interface MessageTimestampProps {
   /** Wall-clock epoch ms of the message; omitted for synthetic messages. */
   timestamp?: number;
+  hideTimestamp?: boolean;
   children: ReactNode;
   /** When true, show the timestamp permanently at bottom-right instead of hover tooltip. */
   chatMode?: boolean;
@@ -28,6 +29,7 @@ interface MessageTimestampProps {
  */
 export function MessageTimestamp({
   timestamp,
+  hideTimestamp = false,
   children,
   chatMode = false,
   toolGroupSpacing = false,
@@ -77,7 +79,7 @@ export function MessageTimestamp({
     : toolGroupSpacing
       ? `${styles.row} ${styles.toolGroupSpacing}`
       : styles.row;
-  if (timestamp === undefined) {
+  if (timestamp === undefined || hideTimestamp) {
     return (
       <div className={rowClassName}>
         {children}

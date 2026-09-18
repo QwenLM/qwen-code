@@ -157,6 +157,8 @@ export type ContentGeneratorConfig = {
     // (e.g. `max_completion_tokens` for GPT-5 / o-series, `reasoning_effort`).
     [key: string]: unknown;
   };
+  reasoningSnapshot?: import('./reasoning-overrides.js').ReasoningSnapshot;
+  reasoningRouteBaseUrl?: string | null;
   reasoning?:
     | false
     | {
@@ -262,6 +264,12 @@ export function resolveContentGeneratorConfigWithSources(
   const newContentGeneratorConfig: Partial<ContentGeneratorConfig> = {
     ...(generationConfig || {}),
     authType,
+    reasoningSnapshot:
+      generationConfig?.reasoningSnapshot ?? config?.getReasoningSnapshot?.(),
+    reasoningRouteBaseUrl:
+      generationConfig && 'reasoningRouteBaseUrl' in generationConfig
+        ? generationConfig.reasoningRouteBaseUrl
+        : config?.getCurrentModelRegistryBaseUrl?.(),
     proxy: config?.getProxy(),
   };
 

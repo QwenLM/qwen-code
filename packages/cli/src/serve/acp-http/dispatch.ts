@@ -46,6 +46,7 @@ import type {
   SessionRestoreTimeoutError,
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
+import { WorkspaceRuntimeInitializationError } from '../workspace-runtime-coordinator.js';
 import {
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
@@ -62,6 +63,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
@@ -75,6 +77,7 @@ import {
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
+  AcpChildCapacityExceededError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -654,6 +657,20 @@ export function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const capacityError =
+    err instanceof WorkspaceRuntimeInitializationError ? err.cause : err;
+  if (capacityError instanceof AcpChildCapacityExceededError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: capacityError.message,
+      data: {
+        errorKind: capacityError.code,
+        httpStatus: 503,
+        maxConcurrentChildren: capacityError.maxConcurrentChildren,
+        committedAcpChildren: capacityError.committedAcpChildren,
+      },
+    };
+  }
   if (err instanceof InvalidRequestedSessionIdError) {
     return {
       code: RPC.INVALID_PARAMS,
@@ -694,8 +711,9 @@ export function toRpcError(err: unknown): {
     };
   }
   if (err instanceof StandaloneSessionServiceError) {
-    const httpStatus =
-      err.code === 'invalid_request'
+    const httpStatus = err.capacity
+      ? 503
+      : err.code === 'invalid_request'
         ? 400
         : err.code === 'standalone_session_not_found'
           ? 404
@@ -714,12 +732,25 @@ export function toRpcError(err: unknown): {
         errorKind: err.code,
         httpStatus,
         retryable: err.retryable,
+        ...(err.capacity ? { capacity: err.capacity } : {}),
         ...(err.sessionId !== undefined ? { sessionId: err.sessionId } : {}),
       },
     };
   }
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
+  if (
+    isObject(err) &&
+    isObject(err['data']) &&
+    err['data']['errorKind'] === 'workflow_invalid_params' &&
+    typeof err['message'] === 'string'
+  ) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err['message'],
+      data: { errorKind: 'workflow_invalid_params', httpStatus: 400 },
+    };
+  }
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -2350,6 +2381,8 @@ export class AcpDispatcher {
               ...(s.activeWorkState !== undefined
                 ? { activeWorkState: s.activeWorkState }
                 : {}),
+              hasRunningBackgroundTasks: s.hasRunningBackgroundTasks,
+              ...(s.backgroundTurn ? { backgroundTurn: s.backgroundTurn } : {}),
               isArchived: s.isArchived === true,
               ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
@@ -3891,14 +3924,15 @@ export class AcpDispatcher {
               action !== 'retry' &&
               action !== 'rerun' &&
               action !== 'delete-history' &&
-              action !== 'run-saved'
+              action !== 'run-saved' &&
+              action !== 'run-script'
             ) {
               if (id !== undefined) {
                 conn.sendConn(
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+                    '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
                   ),
                 );
               }
@@ -3913,6 +3947,7 @@ export class AcpDispatcher {
               taskId,
               action,
               this.sessionCtx(conn, sessionId, loopback),
+              readServeWorkflowActionInput(params),
             );
             this.replyConn(conn, id, result as unknown);
           });
@@ -5116,6 +5151,11 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/agents/create`: {
+          if ('executionBackend' in params) {
+            throw new AcpParamError(
+              'Daemon agents do not support executionBackend.',
+            );
+          }
           const scope = params['scope'];
           if (scope !== 'workspace' && scope !== 'global') {
             if (id !== undefined)
@@ -5198,6 +5238,11 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/agents/update`: {
+          if ('executionBackend' in params) {
+            throw new AcpParamError(
+              'Daemon agents do not support executionBackend.',
+            );
+          }
           const agentType = String(params['agentType'] ?? '');
           if (!agentType) {
             if (id !== undefined)
@@ -5862,7 +5907,9 @@ export class AcpDispatcher {
         sessionId,
         // SECURITY NOTE: `params.sessionId` already equals the routing
         // `sessionId` (both from the same params), so there's no routing
-        // divergence today. If the bridge ever trusts an additional
+        // divergence today. eventDetailMode is an intentional daemon extension:
+        // like REST prompt, it controls this turn's shared retention/delivery.
+        // If the bridge ever trusts an additional privileged
         // `sendPrompt` field by name (e.g. a priority/temperature override),
         // force-stamp it here like the REST surface does (`{ ...body,
         // sessionId, prompt }`) so it can't become client-controlled.

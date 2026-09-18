@@ -42,6 +42,9 @@ const NODE_REPL_DESCRIPTION = [
   'you can build up state incrementally. Top-level await is supported; the',
   'default execution limit is 10 minutes. A call yields with a cell ID when',
   'work is still running; use node_repl_wait or node_repl_cancel with that ID.',
+  'Omit yield_time_ms for ordinary calls to use the 10-second wait. Shorter',
+  'yields do not make a cell faster and can require an extra wait call; use',
+  'them only when you need to regain control before the cell completes.',
   '',
   'Output: plain expression results are NOT returned — use nodeRepl.write(value)',
   'for explicit text and nodeRepl.emitImage(png|jpeg|webp) for images; console.*',
@@ -206,7 +209,7 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
           .max(MAX_YIELD_TIME_MS)
           .optional()
           .describe(
-            `Wait before yielding a running cell ID (default ${DEFAULT_YIELD_TIME_MS}ms).`,
+            `Wait before yielding a running cell ID (default ${DEFAULT_YIELD_TIME_MS}ms). Omit for ordinary calls; a shorter wait does not speed up execution.`,
           ),
         title: z
           .string()

@@ -23,6 +23,14 @@ import {
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import {
+  SubagentManager,
+  loadSubagentFromDir,
+} from '../subagents/subagent-manager.js';
+import type { SubagentError } from '../subagents/types.js';
+import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
+import { loadExtensionWorkflows } from '../agents/runtime/workflow-extension.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -664,6 +672,86 @@ describe('convertClaudePluginPackage', () => {
     // Clean up
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
+
+  it.each([
+    ['executionBackend: container', true],
+    ['executionBackend: null', false],
+    ['executionBackend: local', false],
+    ['executionBackend: container\nexecutionBackend: local', false],
+    ['executionBackend: container\nbroken: [', false],
+  ] as const)(
+    'preserves backend intent through plugin conversion and actual extension loading: %s',
+    async (declaration, valid) => {
+      const pluginSourceDir = path.join(testDir, 'backend-plugin');
+      const agentsDir = path.join(pluginSourceDir, 'agents');
+      const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+      fs.mkdirSync(agentsDir, { recursive: true });
+      fs.mkdirSync(marketplaceDir, { recursive: true });
+      const source = `---\nname: Explore\ndescription: Review files\n${declaration}\n---\nComplete the requested task.\n`;
+      const sourceFile = path.join(agentsDir, 'agent.md');
+      fs.writeFileSync(sourceFile, source);
+      fs.writeFileSync(
+        path.join(marketplaceDir, 'marketplace.json'),
+        JSON.stringify({
+          name: 'marketplace',
+          owner: { name: 'Test' },
+          plugins: [
+            {
+              name: 'backend-plugin',
+              version: '1.0.0',
+              source: './',
+              strict: false,
+              agents: ['./agents/agent.md'],
+            },
+          ],
+        }),
+      );
+      const result = await convertClaudePluginPackage(
+        pluginSourceDir,
+        'backend-plugin',
+      );
+      const homeSpy = vi
+        .spyOn(Storage, 'getGlobalQwenDir')
+        .mockReturnValue(path.join(testDir, 'global'));
+      try {
+        const installedDir = path.join(result.convertedDir, 'agents');
+        const installed = fs.readFileSync(
+          path.join(installedDir, 'agent.md'),
+          'utf8',
+        );
+        expect(fs.readFileSync(sourceFile, 'utf8')).toBe(source);
+        if (!valid) expect(installed).toBe(source);
+        const refusals = new Map<string, SubagentError>();
+        const agents = await loadSubagentFromDir(installedDir, refusals);
+        const manager = new SubagentManager({
+          getProjectRoot: () => path.join(testDir, 'workspace'),
+          getActiveExtensions: () => [
+            { agents, agentExecutorRefusals: refusals },
+          ],
+          getAgentsSettings: () => ({}),
+          getSdkMode: () => false,
+          isSafeMode: () => false,
+        } as unknown as Config);
+        if (valid) {
+          expect(installed).toContain('executionBackend: container');
+          expect(refusals.size).toBe(0);
+          expect(await manager.loadSubagent('Explore')).toMatchObject({
+            level: 'extension',
+            executionBackend: 'container',
+          });
+        } else {
+          expect(agents).toEqual([]);
+          expect(refusals.has('explore')).toBe(true);
+          await expect(manager.loadSubagent('Explore')).rejects.toThrow(
+            'invalid executionBackend declaration',
+          );
+        }
+      } finally {
+        homeSpy.mockRestore();
+        fs.rmSync(result.convertedDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('should populate commands/skills/agents when marketplace references the whole folder (deep-wiki shape)', async () => {
     // Regression test for https://github.com/QwenLM/qwen-code/issues/4452.
@@ -1591,5 +1679,272 @@ describe('normalizeClaudeMcpServer', () => {
     expect(norm({ description: 'metadata only' })).toEqual({
       description: 'metadata only',
     });
+  });
+});
+
+describe('convertClaudePluginPackage — workflows', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-wf-'));
+    vi.mocked(downloadFromGitHubRelease).mockReset();
+    vi.mocked(cloneFromGit).mockReset();
+  });
+
+  const convertedDirs: string[] = [];
+
+  afterEach(() => {
+    fs.rmSync(testDir, { recursive: true, force: true });
+    for (const dir of convertedDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  async function convert(source: string) {
+    const result = await convertClaudePluginPackage(source, 'wf-plugin');
+    convertedDirs.push(result.convertedDir);
+    return result;
+  }
+
+  function writePlugin(
+    entry: Partial<ClaudeMarketplacePluginConfig> = {},
+  ): string {
+    const source = path.join(testDir, 'plugin-source');
+    fs.mkdirSync(path.join(source, '.claude-plugin'), { recursive: true });
+    const marketplace: ClaudeMarketplaceConfig = {
+      name: 'wf-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [
+        {
+          name: 'wf-plugin',
+          version: '1.0.0',
+          source: './',
+          strict: false,
+          ...entry,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(source, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify(marketplace, null, 2),
+    );
+    return source;
+  }
+
+  function writeFile(
+    root: string,
+    rel: string,
+    body = `export const meta = { name: '${path.basename(rel, '.js')}', description: 'Test workflow' };\nreturn 1;\n`,
+  ): void {
+    const filePath = path.join(root, rel);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, body);
+  }
+
+  async function convertedWorkflows(result: {
+    convertedDir: string;
+    config: { name: string; workflows?: string | string[] };
+  }): Promise<string[]> {
+    const workflows = await loadExtensionWorkflows(
+      result.convertedDir,
+      result.config,
+      result.config.workflows,
+    );
+    return workflows.map((workflow) => workflow.name);
+  }
+
+  it('keeps the plugin workflows directory when none are declared', async () => {
+    const source = writePlugin();
+    writeFile(source, 'workflows/audit.js');
+
+    const result = await convert(source);
+
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:audit']);
+  });
+
+  it('collects one directory level and declares its preserved paths instead of the default', async () => {
+    const source = writePlugin({ workflows: ['./flows'] });
+    writeFile(source, 'workflows/default.js');
+    writeFile(source, 'flows/deploy.js');
+    writeFile(source, 'flows/nested/deeper.js');
+    writeFile(source, 'flows/readme.md');
+
+    const result = await convert(source);
+
+    expect(result.config.workflows).toEqual(['flows/deploy.js']);
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:deploy']);
+  });
+
+  it('collects a declared single .js file', async () => {
+    const source = writePlugin({ workflows: './extra/one.js' });
+    writeFile(source, 'extra/one.js');
+
+    const result = await convert(source);
+
+    expect(result.config.workflows).toEqual(['extra/one.js']);
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:one']);
+  });
+
+  it('ignores declared paths that escape the plugin', async () => {
+    const source = writePlugin({ workflows: ['../outside'] });
+    writeFile(testDir, 'outside/leak.js');
+
+    const result = await convert(source);
+
+    expect(result.config.workflows).toEqual([]);
+    expect(await convertedWorkflows(result)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'skips symlinked files inside a declared directory',
+    async () => {
+      const source = writePlugin({ workflows: ['./flows'] });
+      writeFile(source, 'flows/real.js');
+      writeFile(testDir, 'outside/leak.js');
+      fs.symlinkSync(
+        path.join(testDir, 'outside', 'leak.js'),
+        path.join(source, 'flows', 'leak.js'),
+      );
+
+      const result = await convert(source);
+
+      expect(await convertedWorkflows(result)).toEqual(['wf-plugin:real']);
+    },
+  );
+
+  it.each([
+    {
+      workflows: ['./first', './second'],
+      expected: ['wf-plugin:child-one', 'wf-plugin:child-two'],
+    },
+    { workflows: './first', expected: ['wf-plugin:child-one'] },
+    { workflows: [], expected: [] },
+    { workflows: undefined, expected: ['wf-plugin:from-plugin'] },
+    // `null` reads as undeclared, so the plugin's own declaration stands.
+    {
+      workflows: null as unknown as undefined,
+      expected: ['wf-plugin:from-plugin'],
+    },
+  ])(
+    'merges marketplace workflows $workflows with plugin.json',
+    async ({ workflows, expected }) => {
+      const source = writePlugin({ workflows });
+      writeFile(
+        source,
+        '.claude-plugin/plugin.json',
+        JSON.stringify({
+          name: 'wf-plugin',
+          version: '1.0.0',
+          workflows: './plugin-flows',
+        }),
+      );
+      writeFile(source, 'plugin-flows/from-plugin.js');
+      writeFile(source, 'workflows/default.js');
+      writeFile(
+        source,
+        'first/same.js',
+        "export const meta = { name: 'child-one', description: 'First' };\nreturn 1;\n",
+      );
+      writeFile(
+        source,
+        'second/same.js',
+        "export const meta = { name: 'child-two', description: 'Second' };\nreturn 2;\n",
+      );
+
+      const result = await convert(source);
+
+      expect(await convertedWorkflows(result)).toEqual(expected);
+    },
+  );
+
+  it('preserves distinct workflows with the same basename through conversion and discovery', async () => {
+    const source = writePlugin({ workflows: ['./first', './second'] });
+    const first =
+      "export const meta = { name: 'child-one', description: 'First' };\nreturn 1;\n";
+    const second =
+      "export const meta = { name: 'child-two', description: 'Second' };\nreturn 2;\n";
+    writeFile(source, 'first/same.js', first);
+    writeFile(source, 'second/same.js', second);
+
+    const result = await convert(source);
+
+    expect(result.config.workflows).toEqual([
+      'first/same.js',
+      'second/same.js',
+    ]);
+    expect(await convertedWorkflows(result)).toEqual([
+      'wf-plugin:child-one',
+      'wf-plugin:child-two',
+    ]);
+    expect(
+      fs.readFileSync(path.join(result.convertedDir, 'first/same.js'), 'utf8'),
+    ).toBe(first);
+    expect(
+      fs.readFileSync(path.join(result.convertedDir, 'second/same.js'), 'utf8'),
+    ).toBe(second);
+    expect(
+      JSON.parse(
+        fs.readFileSync(
+          path.join(result.convertedDir, 'qwen-extension.json'),
+          'utf8',
+        ),
+      ).workflows,
+    ).toEqual(result.config.workflows);
+  });
+
+  it('restores declared workflow files inside a remapped resource directory', async () => {
+    const source = writePlugin({
+      commands: './other',
+      workflows: './commands/child.js',
+    });
+    writeFile(source, 'commands/child.js');
+    writeFile(source, 'other/command.md', 'A command');
+
+    const result = await convert(source);
+
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:child']);
+  });
+
+  it('keeps an explicit empty declaration from enabling the default directory', async () => {
+    const source = writePlugin({ workflows: [] });
+    writeFile(source, 'workflows/default.js');
+
+    const result = await convert(source);
+
+    expect(result.config.workflows).toEqual([]);
+    expect(await convertedWorkflows(result)).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'copies an in-plugin symlink in a declared directory as a regular file',
+    async () => {
+      const source = writePlugin({ workflows: ['./flows'] });
+      writeFile(source, 'shared/linked.js');
+      fs.mkdirSync(path.join(source, 'flows'), { recursive: true });
+      fs.symlinkSync(
+        path.join(source, 'shared', 'linked.js'),
+        path.join(source, 'flows', 'linked.js'),
+      );
+
+      const result = await convert(source);
+
+      expect(result.config.workflows).toEqual(['flows/linked.js']);
+      expect(
+        fs
+          .lstatSync(path.join(result.convertedDir, 'flows', 'linked.js'))
+          .isSymbolicLink(),
+      ).toBe(false);
+      expect(await convertedWorkflows(result)).toEqual(['wf-plugin:linked']);
+    },
+  );
+
+  it('treats a null workflows declaration as undeclared', async () => {
+    const source = writePlugin({ workflows: null as unknown as string[] });
+    writeFile(source, 'workflows/default.js');
+
+    const result = await convert(source);
+
+    expect(result.config.workflows).toBeUndefined();
+    expect(await convertedWorkflows(result)).toEqual(['wf-plugin:default']);
   });
 });

@@ -109,6 +109,16 @@ function createHarness({
 describe('standalone session routes', () => {
   beforeEach(() => vi.restoreAllMocks());
 
+  it('rejects invalid standalone compacted replay mode', async () => {
+    const { app, service } = createHarness();
+    const response = await request(app)
+      .post(`/standalone/sessions/${sessionId}/load`)
+      .send({ compactedReplayMode: 'invalid' });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_request');
+    expect(service.load).not.toHaveBeenCalled();
+  });
+
   it('returns session options without accepting workspace inputs', async () => {
     const { app, service } = createHarness();
 
@@ -336,6 +346,7 @@ describe('standalone session routes', () => {
         .send({
           historyPageSize: 20,
           liveReplayMode: 'summary',
+          compactedReplayMode: 'summary',
           hideInheritedHistory: true,
         });
 
@@ -344,6 +355,7 @@ describe('standalone session routes', () => {
         clientId: 'client-1',
         historyPageSize: 20,
         liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
         hideInheritedHistory: true,
       });
 
