@@ -5,8 +5,38 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import * as vm from 'node:vm';
+import { execFileSync } from 'node:child_process';
 import { prepareNodeReplCell } from './cell-transform.js';
+
+/**
+ * Compile `source` the way the kernel does: in a child process started with
+ * `--experimental-vm-modules`, parsed by `vm.SourceTextModule` (see
+ * `kernel-manager.ts`). Doing it in a child keeps the flag out of the test runner's
+ * pool configuration, which cannot carry it when the suite is launched from the
+ * repository root.
+ */
+function compileInChild(source: string, identifier: string): void {
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        '--experimental-vm-modules',
+        '--input-type=module',
+        '-e',
+        "import * as vm from 'node:vm';" +
+          "let source='';" +
+          'for await (const chunk of process.stdin) source += chunk;' +
+          'new vm.SourceTextModule(source, { identifier: process.argv[1] });',
+      ],
+      { input: source, stdio: ['pipe', 'ignore', 'pipe'] },
+    );
+  } catch (error) {
+    const stderr = (error as { stderr?: Buffer }).stderr?.toString().trim();
+    throw new Error(
+      `${identifier} does not compile: ${stderr || String(error)}`,
+    );
+  }
+}
 
 describe('prepareNodeReplCell', () => {
   it('carries previous bindings through @prev and exports current bindings', async () => {
@@ -42,25 +72,20 @@ describe('prepareNodeReplCell', () => {
     // carried-reference tail, and the commit itself — and the commit must sort last
     // among them. A leading `;` is what makes that true whatever the user wrote.
     //
-    // The oracle is the parser the kernel uses (`vm.SourceTextModule`), not a token
-    // class: a token class only covers the endings someone enumerated, while the shape
-    // that ends a cell is arbitrary (`... 1`, `... 'literal'`, `... }`). The fixtures
-    // below pick one representative per route to a shared offset.
+    // Each route to a shared offset gets a fixture, because each fails differently:
+    // an expression statement, a declaration in a fresh kernel (the hoisted `var`
+    // seed), a statement ending in a quote, one ending in a backtick, an assignment to
+    // a carried reference, and an unterminated `await`, where the guard's closing
+    // paren shares the commit's offset.
     const cases = {
-      // Path 1: an unterminated expression statement. `activeBindings` is seeded from
-      // `previousBindings`, so every cell after the first one has a non-empty commit.
       expression: await prepareNodeReplCell('next', {
         previousBindings: [{ name: 'previous', kind: 'const' }],
         cellId: 'cell-omit-semicolon',
       }),
-      // Path 2: an unterminated declaration in a fresh kernel. Here the hoisted `var`
-      // seed alone makes `activeBindings` non-empty, and the declarator marker lands at
-      // the same offset as the commit.
       declaration: await prepareNodeReplCell('var next = 1', {
         previousBindings: [],
         cellId: 'cell-omit-semicolon-declaration',
       }),
-      // Tails a token class tends to miss: the last character is a quote.
       literal: await prepareNodeReplCell("'literal'", {
         previousBindings: [{ name: 'previous', kind: 'const' }],
         cellId: 'cell-omit-semicolon-literal',
@@ -69,33 +94,48 @@ describe('prepareNodeReplCell', () => {
         previousBindings: [{ name: 'previous', kind: 'const' }],
         cellId: 'cell-omit-semicolon-template',
       }),
-      // The carried-reference family: `})["name"]` is a shape no other fixture
-      // produces, and it shares the commit's offset.
       carried: await prepareNodeReplCell('handler = () => 1', {
         previousBindings: [{ name: 'handler', kind: 'let' }],
         cellId: 'cell-omit-semicolon-carried',
       }),
+      guard: await prepareNodeReplCell('await load()', {
+        previousBindings: [{ name: 'previous', kind: 'const' }],
+        cellId: 'cell-omit-semicolon-guard',
+      }),
     };
 
-    // The kernel compiles exactly this source, so compile it the same way.
     for (const [name, { source }] of Object.entries(cases)) {
-      expect(
-        () => new vm.SourceTextModule(source, { identifier: `cell:${name}` }),
-        `${name} must compile`,
-      ).not.toThrow();
+      expect(() => compileInChild(source, `cell:${name}`), name).not.toThrow();
     }
 
-    // Compiling is necessary but not sufficient: a fix that simply *skips* the commit
-    // for unterminated statements compiles too, and would silently drop the
-    // statement-boundary snapshot the commit exists for. These pin the commit itself,
-    // on the physical line the one-line prelude cannot reach, keyed on the `;` that
-    // discriminates it from the declarator marker.
+    // Compiling is not enough on its own, because two weakenings of the terminator
+    // compile perfectly:
+    //   * gluing an identifier tail — `next__qwen_repl_…_snapshot[…] = …` — is a legal
+    //     assignment to a legal identifier, so the cell parses and only fails at
+    //     evaluation with `ReferenceError: next__qwen_repl_…_snapshot is not defined`,
+    //     with the user's own expression never run. Identifier tails are the most
+    //     common way a model-written cell ends without a `;`.
+    //   * dropping the commit for a specific tail shape (quotes, backticks) leaves the
+    //     statement terminated and the source parseable, while silently losing the
+    //     statement-boundary snapshot the commit exists for.
+    // So every fixture must also show the terminator and the commit on the user's own
+    // physical line — the line the one-line prelude cannot reach.
     const bodyLine = (source: string): string => source.split('\n')[1] ?? '';
-    expect(bodyLine(cases.expression.source)).toContain('["previous"] = {binding:');
+    for (const [name, { source }] of Object.entries(cases)) {
+      expect(bodyLine(source), `${name}: terminator before the commit`).toMatch(
+        /;__qwen_repl_\w+__snapshot\[/,
+      );
+    }
+
+    // Two ties are about edit order rather than the `;` alone, so pin them explicitly:
+    // the commit must follow the declarator marker's `undefined)`, and the
+    // carried-reference tail's `})["handler"]`.
     expect(bodyLine(cases.declaration.source)).toMatch(
       /undefined\);__qwen_repl_\w+__snapshot\["next"\] = \{binding:/,
     );
-    expect(bodyLine(cases.carried.source)).toContain('})["handler"];__qwen_repl_');
+    expect(bodyLine(cases.carried.source)).toContain(
+      '})["handler"];__qwen_repl_',
+    );
 
     // LINE_OFFSET invariant: the prelude occupies exactly one physical line, so the
     // user's first line stays physical line 2 and stack traces keep lining up with the
@@ -103,7 +143,9 @@ describe('prepareNodeReplCell', () => {
     expect(bodyLine(cases.expression.source)).toContain('next');
     expect(bodyLine(cases.declaration.source)).toContain('var next = 1');
     // The carried-reference rewrite keeps the user's code on physical line 2 too.
-    expect(bodyLine(cases.carried.source)).toContain('({["handler"]:() => 1})["handler"];');
+    expect(bodyLine(cases.carried.source)).toContain(
+      '({["handler"]:() => 1})["handler"];',
+    );
   });
 
   it('carries a previous binding with its declaration kind so conflicts are native', async () => {
