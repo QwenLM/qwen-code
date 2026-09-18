@@ -70,6 +70,7 @@ import {
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
+import { resolveAgentExecutionBackend } from '../subagents/execution-backend.js';
 import {
   EXCLUDED_TOOLS_FOR_SUBAGENTS,
   extractParentToolNames,
@@ -109,6 +110,8 @@ const WORKTREE_ISOLATION_BLOCKED_REASON =
   'Background task worktree isolation cannot be reconstructed after session restore.';
 const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
   'Background task isolation metadata is incompatible.';
+const CONTAINER_EXECUTION_BLOCKED_REASON =
+  'Container background tasks cannot be resumed. Start a new container agent to continue.';
 
 /**
  * Returns true when the subagent's effective tool surface will include the
@@ -521,6 +524,11 @@ export class BackgroundAgentResumeService {
         ) {
           retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
         } else if (
+          meta.isolation === 'container' ||
+          meta.executionBackend !== undefined
+        ) {
+          retainedStateBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
+        } else if (
           meta.isolation !== undefined &&
           meta.isolation !== 'worktree'
         ) {
@@ -686,10 +694,15 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
-    if (!readAgentMeta(entry.metaPath)) {
+    const meta = readAgentMeta(entry.metaPath);
+    if (!meta) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
       );
+      return undefined;
+    }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      entry.resumeBlockedReason = CONTAINER_EXECUTION_BLOCKED_REASON;
       return undefined;
     }
     if (!jsonl.exists(entry.outputFile)) {
@@ -795,6 +808,12 @@ export class BackgroundAgentResumeService {
 
     const meta = readAgentMeta(metaPath);
     if (!meta) {
+      return undefined;
+    }
+    if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
+      this.restorePausedEntry(agentId, {
+        resumeBlockedReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      });
       return undefined;
     }
 
@@ -1547,6 +1566,13 @@ export class BackgroundAgentResumeService {
     executor?: AgentMeta['executor'],
     ...legacyModels: Array<string | undefined>
   ): Promise<ResolvedResumeTarget> {
+    if (resolveAgentExecutionBackend(this.config) === 'container') {
+      return {
+        agentName: subagentName,
+        isFork: false,
+        unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+      };
+    }
     // Older external runs wrote a synthetic model label instead of provenance.
     // It can deny replay, but never authorizes selecting an executor.
     if (
@@ -1573,6 +1599,17 @@ export class BackgroundAgentResumeService {
       subagentConfig = await this.config
         .getSubagentManager()
         .loadSubagent(subagentName);
+      if (
+        subagentConfig &&
+        resolveAgentExecutionBackend(this.config, subagentConfig) ===
+          'container'
+      ) {
+        return {
+          agentName: subagentName,
+          isFork: false,
+          unavailableReason: CONTAINER_EXECUTION_BLOCKED_REASON,
+        };
+      }
     } catch (error) {
       // loadSubagent throws a recorded executor-block refusal (R10-2/R11) when a
       // same-named definition failed to load. This is resume *discovery*, not a
