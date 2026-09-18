@@ -2729,7 +2729,9 @@ export class SessionTranscriptReader {
       const entry = index.byUuid.get(uuid);
       if (
         position === compressionPosition ||
-        ((entry?.type !== 'system' || entry?.subtype === 'goal_turn_end') &&
+        ((entry?.type !== 'system' ||
+          entry?.subtype === 'goal_turn_end' ||
+          entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
       ) {
         modelSet.add(uuid);

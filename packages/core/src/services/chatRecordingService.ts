@@ -5,6 +5,7 @@
  */
 
 import type { SessionSourcesSnapshot } from './session-sources.js';
+import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
 import {
@@ -312,6 +313,7 @@ export interface ChatRecord {
     | 'custom_title'
     | 'parent_session'
     | 'session_source'
+    | 'omni_recall'
     | 'session_model'
     | 'rewind'
     | 'agent_bootstrap'
@@ -451,13 +453,15 @@ export interface UserPromptRecordPayload {
   /**
    * Core/headless: submitted projection, otherwise expanded pre-hook text.
    * ACP: display projection or raw request text before expansion. ACP omits
-   * this payload when neither a projection nor attachment references exist.
+   * this payload when no projection, attachment references, or resource links exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
   /** Daemon-owned attachment references used to restore prompt previews. */
   attachmentReferences?: UserPromptAttachmentReference[];
+  /** Original ACP resource references, independent of model-input expansion. */
+  resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
 }
 
 export interface UserPromptAttachmentReference {
@@ -2131,7 +2135,10 @@ export class ChatRecordingService {
     turnId: string,
     usage: GenerateContentResponseUsageMetadata,
   ): void {
-    const total = usage.totalTokenCount;
+    this.billGoalTurnTokens(turnId, usage.totalTokenCount ?? 0);
+  }
+
+  billGoalTurnTokens(turnId: string, total: number): void {
     if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) {
       return;
     }
@@ -2478,6 +2485,28 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving slash command record:', error);
+    }
+  }
+
+  /**
+   * Records the omni passive media-memory recall payload injected into the
+   * model-bound request (memory design M §9.3, D10 sideQuery mode). The
+   * reminder is assembled AFTER the user record is persisted, so without
+   * this record the transcript would never show what memory the model was
+   * given — the trajectory exporter reads it back as `turn.recall`.
+   */
+  recordOmniRecallReminder(payload: unknown): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'omni_recall',
+        systemPayload: payload as ChatRecord['systemPayload'],
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving omni recall record:', error);
     }
   }
 

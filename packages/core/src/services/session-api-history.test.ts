@@ -7,12 +7,160 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatRecord } from './chatRecordingService.js';
 import { CompressionStatus } from '../core/turn.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
 } from './session-api-history.js';
 
 const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+
+describe('completed local slash commands', () => {
+  function commandRecords(command = '/docs'): ChatRecord[] {
+    const base = {
+      sessionId: 'session',
+      timestamp: '2026-09-17T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    return [
+      {
+        ...base,
+        uuid: 'user',
+        parentUuid: null,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: command }] },
+      },
+      {
+        ...base,
+        uuid: 'output',
+        parentUuid: 'user',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: command,
+          outputHistoryItems: [{ type: 'assistant', text: 'Done.' }],
+        },
+      },
+    ];
+  }
+
+  it.each(['/docs', '/export md', '/effort', '/summary', '/model --fast test'])(
+    'excludes completed %s from model history without changing the transcript',
+    (command) => {
+      const messages = commandRecords(command);
+      const original = structuredClone(messages);
+      const history = buildApiHistoryFromConversation({ messages });
+      expect(history).toEqual([]);
+      expect(detectTurnInterruption(history).kind).toBe('none');
+      expect(messages).toEqual(original);
+    },
+  );
+
+  it('preserves unanswered input before and after a completed command', () => {
+    const [user, output] = commandRecords();
+    const pending: ChatRecord = {
+      ...user,
+      uuid: 'pending',
+      message: { role: 'user', parts: [{ text: 'unfinished request' }] },
+    };
+    for (const messages of [
+      [pending, user, output, output],
+      [user, output, pending],
+    ]) {
+      const history = buildApiHistoryFromConversation({ messages });
+      expect(history).toEqual([pending.message]);
+      expect(detectTurnInterruption(history).kind).toBe('interrupted_prompt');
+    }
+    expect(buildApiHistoryFromConversation({ messages: [user] })).toEqual([
+      user.message,
+    ]);
+    expect(
+      buildApiHistoryFromConversation({ messages: [user, pending, output] }),
+    ).toEqual([user.message, pending.message]);
+  });
+
+  it.each([true, false])(
+    'does not pair a TUI invocation (sentToModel=%s) with old input',
+    (sentToModel) => {
+      const [user, output] = commandRecords('/custom');
+      const invocation: ChatRecord = {
+        ...output,
+        uuid: 'invocation',
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/custom',
+          sentToModel,
+        },
+      };
+      expect(
+        buildApiHistoryFromConversation({
+          messages: [user, invocation, output],
+        }),
+      ).toEqual([user.message]);
+    },
+  );
+
+  it.each(['info', 'away_recap', 'error'])(
+    'does not mistake %s output for an ACP command result',
+    (type) => {
+      const [user, output] = commandRecords();
+      output.systemPayload = {
+        phase: 'result',
+        rawCommand: '/docs',
+        outputHistoryItems: [{ type, text: 'display only' }],
+      };
+      expect(
+        buildApiHistoryFromConversation({ messages: [user, output] }),
+      ).toEqual([user.message]);
+    },
+  );
+
+  it('does not discard unrelated results or merged mid-turn input', () => {
+    const [user, output] = commandRecords();
+    const unrelated = commandRecords('/other')[1];
+    expect(
+      buildApiHistoryFromConversation({ messages: [user, unrelated] }),
+    ).toEqual([user.message]);
+    const midTurn: ChatRecord = {
+      ...user,
+      uuid: 'mid',
+      subtype: 'mid_turn_user_message',
+    };
+    expect(
+      buildApiHistoryFromConversation({ messages: [user, midTurn, output] }),
+    ).toEqual([
+      {
+        role: 'user',
+        parts: [...user.message!.parts!, ...midTurn.message!.parts!],
+      },
+    ]);
+  });
+
+  it('does not pop a compression snapshot when the old command result arrives', () => {
+    const [user, output] = commandRecords();
+    const compressedHistory = [{ role: 'model', parts: [{ text: 'summary' }] }];
+    const compression: ChatRecord = {
+      ...output,
+      uuid: 'compression',
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory,
+      },
+    };
+    expect(
+      buildApiHistoryFromConversation({
+        messages: [user, compression, output],
+      }),
+    ).toEqual(compressedHistory);
+  });
+});
 
 function records(toolCallId = 'finish'): ChatRecord[] {
   const base = {
