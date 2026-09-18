@@ -4,6 +4,9 @@ A minimal end-to-end example: start an API-only `qwen serve` daemon in another t
 
 ## Setup
 
+The API calls and install command in this walkthrough are contract-checked
+against Qwen Code `v0.24.0` and `@qwen-code/sdk@0.1.12`.
+
 In one terminal:
 
 ```bash
@@ -20,7 +23,7 @@ The token-less loopback default is intended for a single-user workstation. On a 
 In another:
 
 ```bash
-npm install @qwen-code/sdk
+npm install @qwen-code/sdk@0.1.12
 ```
 
 ## Hello daemon
@@ -117,6 +120,47 @@ function handleEvent(event: DaemonEvent): void {
   }
 }
 ```
+
+## Restore, poll status, and read history
+
+Closing a live session does not delete its persisted transcript. Save the id,
+close the live owner, then restore it. Use `loadSession` for an ordinary saved
+conversation; use `resumeSession` only when the persisted session contains an
+interrupted turn that should continue without a new user message.
+
+```ts
+const savedSessionId = session.sessionId;
+await client.closeSession(savedSessionId, session.clientId);
+
+const restored =
+  process.env.RESUME_INTERRUPTED === '1'
+    ? await client.resumeSession(savedSessionId, {
+        workspaceCwd: selectedWorkspace.cwd,
+      })
+    : await client.loadSession(savedSessionId, {
+        workspaceCwd: selectedWorkspace.cwd,
+        historyPageSize: 100,
+      });
+
+const status = await client.sessionStatus(
+  restored.sessionId,
+  restored.clientId,
+);
+console.log({
+  active: status.hasActivePrompt,
+  waitingForPermission: status.isWaitingForPermission,
+});
+
+const history = await client.getSessionTranscriptPage(restored.sessionId, {
+  limit: 100,
+  clientId: restored.clientId,
+});
+console.log(`history events=${history.events.length} more=${history.hasMore}`);
+```
+
+`sessionStatus` reads only a live owner. `getSessionTranscriptPage` reads
+persisted history and returns an opaque `nextCursor` when another page is
+available; pass that value back as `cursor` rather than constructing one.
 
 ## Workspace file helpers
 

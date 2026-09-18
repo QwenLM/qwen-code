@@ -16,6 +16,8 @@ SDK 方法，才能确认基本接口信息。REST 接入指南筛选出的接�
 ## 目标
 
 - 为 REST 接入指南作为受支持接入面列出的 25 个路由发布 OpenAPI 3.1 定义。
+- 让每个已有独立协议章节的其他 HTTP 操作都能从人类可读索引中找到，同时不把它
+  加入稳定 OpenAPI 契约。
 - 为每个操作写明请求参数或请求体、成功及通用错误响应、所需 capability、所有权
   作用域、稳定性，以及存在时对应的 TypeScript SDK 方法。
 - 补齐 8 个缺失的协议章节，并让 quickstart 命令可以直接运行。
@@ -31,11 +33,12 @@ SDK 方法，才能确认基本接口信息。REST 接入指南筛选出的接�
 
 ## 公共接口面
 
-公共 REST Reference 就是 `docs/developers/rest-api-integration.md` 已列出且由
+稳定 REST 接入契约就是 `docs/developers/rest-api-integration.md` 已列出且由
 `rest-integration-docs-contract.test.ts` 守护的 25 个操作，覆盖发现、Session
 生命周期、prompt 与 SSE、权限以及只读工作区上下文。当前 daemon 还为第一方 UI
 和条件功能注册了大量其他路由；将它们写入 OpenAPI 会错误地把实现面变成兼容性
-承诺。
+承诺。人类可读索引可以链接已有独立协议章节的路由，但必须把它们标为稳定 OpenAPI
+集合之外的条件或管理接口面。
 
 ## 产物
 
@@ -62,6 +65,9 @@ SDK 方法，才能确认基本接口信息。REST 接入指南筛选出的接�
 `docs/developers/daemon-rest-api-reference.md` 说明如何使用 OpenAPI 产物，并按
 能力提供一份操作索引。详细行为继续放在 `qwen-serve-protocol.md` 中，Reference
 通过链接复用，而不复制数千行生命周期说明。
+
+索引明确分为两层：25 个操作组成的稳定 OpenAPI 契约，以及其他已记录的 v1 路由。
+第二层只用于发现，不会把第一方或条件路由提升为稳定契约。
 
 接入指南继续面向任务，链接到 Reference，并保留可运行的完整生命周期示例。
 
@@ -92,6 +98,9 @@ SDK 方法，才能确认基本接口信息。REST 接入指南筛选出的接�
 无需加载完整 daemon，就能发现路由重命名和不完整的新 Reference 条目。由于 handler
 目前没有共用的运行时 schema 系统，详细字段语义仍需正常代码评审。
 
+同一个测试还会比较人类可读索引中的操作链接与所有拥有独立协议标题的操作。这样
+无需扩大 OpenAPI 操作集合，也能保证更广的发现索引完整。
+
 ## 文档站交接
 
 本次变更合并后，`qwen-code-docs` 将通过独立变更把 OpenAPI 产物复制到静态站点、
@@ -116,6 +125,8 @@ SDK 方法，才能确认基本接口信息。REST 接入指南筛选出的接�
 ## 验收标准
 
 - 25 个接入操作在 OpenAPI 中各出现一次，并各有独立协议章节。
+- 每个拥有独立协议标题的其他操作都出现在人类可读索引中，并明确保持在稳定
+  OpenAPI 集合之外。
 - 接入指南不再包含“尚无独立参考章节”的提示。
 - 最小流程会赋值 `SID`、把 SSE 放在另一个终端，并说明如何从
   `permission_request` 得到 `REQUEST_ID`。
