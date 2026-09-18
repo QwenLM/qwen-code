@@ -496,6 +496,30 @@ const EN: Messages = {
   'live.noFallback':
     'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
+  'live.browser.connect': 'Talk in this browser',
+  'live.browser.connecting': 'Connecting microphone…',
+  'live.browser.requirement.host': 'This browser tab',
+  'live.browser.requirement.runtime': 'Live runtime',
+  'live.browser.takeOver': 'Take over in this tab',
+  'live.browser.disconnect': 'Release microphone',
+  'live.browser.setupDescription':
+    'Use this browser tab as the microphone and speaker for Live Voice.',
+  'live.browser.readyDescription':
+    'This tab is the microphone and speaker for Live Voice.',
+  'live.browser.otherTabDescription':
+    'Another Web Shell tab is the microphone and speaker for Live Voice.',
+  'live.browser.headphonesHint':
+    'Headphones give the best result: they keep the reply out of the microphone.',
+  'live.browser.closed.occupied':
+    'Another Live Voice endpoint is already connected.',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host took over Live Voice from this tab.',
+  'live.browser.closed.supersededTab':
+    'Another Web Shell tab took over Live Voice.',
+  'live.browser.closed.refused':
+    'Live Voice is turned off, or this workspace is not trusted.',
+  'live.browser.closed.microphone': 'The microphone could not be opened.',
+  'live.browser.closed.lost': 'The Live Voice connection was lost.',
   'settings.liveShortcut.capture': 'Press shortcut',
   'settings.liveShortcut.clear': 'Clear',
   'settings.liveShortcut.off': 'Off',
@@ -503,6 +527,8 @@ const EN: Messages = {
   'settings.liveSetup.experimental': 'Experimental',
   'settings.liveSetup.description':
     'Talk to Qwen from anywhere on this Mac with Realtime voice, Appshot, and task handoff.',
+  'settings.liveSetup.browserDescription':
+    'Talk to Qwen with Realtime voice and task handoff, using this browser as the microphone and speaker.',
   'settings.liveSetup.enable': 'Enable Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
@@ -4421,6 +4447,27 @@ const ZH: Messages = {
   'live.noFallback':
     '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
+  'live.browser.connect': '在此浏览器中通话',
+  'live.browser.connecting': '正在连接麦克风…',
+  'live.browser.requirement.host': '此浏览器标签页',
+  'live.browser.requirement.runtime': 'Live 运行时',
+  'live.browser.takeOver': '在此标签页接管',
+  'live.browser.disconnect': '释放麦克风',
+  'live.browser.setupDescription':
+    '将此浏览器标签页用作实时语音的麦克风和扬声器。',
+  'live.browser.readyDescription': '此标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.otherTabDescription':
+    '另一个 Web Shell 标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.headphonesHint':
+    '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
+  'live.browser.closed.occupied': '已有其他实时语音端连接。',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host 已从此标签页接管实时语音。',
+  'live.browser.closed.supersededTab':
+    '另一个 Web Shell 标签页已接管实时语音。',
+  'live.browser.closed.refused': '实时语音未开启，或此工作区不受信任。',
+  'live.browser.closed.microphone': '无法打开麦克风。',
+  'live.browser.closed.lost': '实时语音连接已断开。',
   'settings.liveShortcut.capture': '请按下快捷键',
   'settings.liveShortcut.clear': '清除',
   'settings.liveShortcut.off': '关闭',
@@ -4428,6 +4475,8 @@ const ZH: Messages = {
   'settings.liveSetup.experimental': '实验性',
   'settings.liveSetup.description':
     '在这台 Mac 的任意界面通过 Realtime 语音、Appshot 和任务交接与 Qwen 对话。',
+  'settings.liveSetup.browserDescription':
+    '通过 Realtime 语音和任务交接与 Qwen 对话，由此浏览器充当麦克风和扬声器。',
   'settings.liveSetup.enable': '启用 Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
