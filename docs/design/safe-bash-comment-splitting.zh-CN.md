@@ -33,7 +33,9 @@
 
 - 工具是 `run_shell_command`，即被扫描的字符串正是 shell 将执行的文本；
 - 当前 shell 是 `bash`；
-- 命令只有一个物理行；
+- 命令只有一个物理行：`splitCommands` 会在 fragment 进入该路径前按 LF
+  与 CRLF 切分，而快速路径自身的 `command.includes('\r')` 检查也会拒绝残留的
+  lone CR；
 - 引号外的 `#` 位于空格或制表符之后，且其前面存在非空白代码——若 `#` 之前只有空白，整个 segment 就是一条注释，无法再匹配任何 `Bash(...)` 规则，折叠它会静默丢掉用户显式配置的规则；
 - `#` 之前的代码不包含 shell operator、转义、展开、substitution、分组或重定向语法。
 

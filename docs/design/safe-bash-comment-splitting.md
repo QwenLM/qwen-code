@@ -33,7 +33,9 @@ The wrapper keeps the original command as one segment only when all of these are
 
 - the tool is `run_shell_command`, so the scanned string is literally the text the shell will execute;
 - the active shell is `bash`;
-- the command is one physical line;
+- the command is one physical line: `splitCommands` already separates LF and
+  CRLF before its fragments reach this path, while the fast path's own
+  `command.includes('\r')` guard also rejects a remaining lone CR;
 - a `#` outside quotes starts after a space or tab and has non-whitespace code before it — a segment whose only content before that `#` is whitespace is entirely a comment, so it can no longer match any `Bash(...)` rule and collapsing it would silently drop an explicit user rule;
 - the code before that `#` contains no shell operator, escape, expansion, substitution, grouping, or redirection syntax.
 

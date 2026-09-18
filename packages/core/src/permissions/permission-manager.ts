@@ -115,8 +115,8 @@ function splitCommandForRules(command: string, toolName: string): string[] {
       // whether it sits at index 0 or behind leading spaces/tabs: the whole
       // segment would be a comment, so no `Bash(...)` rule could match it any
       // more and an explicit user rule would silently stop applying.
-      command.slice(0, i).trim() !== '' &&
-      (command[i - 1] === ' ' || command[i - 1] === '\t')
+      (command[i - 1] === ' ' || command[i - 1] === '\t') &&
+      command.slice(0, i).trim() !== ''
     ) {
       return [command];
     }
