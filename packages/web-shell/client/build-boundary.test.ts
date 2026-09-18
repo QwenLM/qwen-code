@@ -48,7 +48,10 @@ describe('web-shell package build boundary', () => {
       shouldExternalizeWebShellDependency('react/jsx-runtime', 'transcript'),
     ).toBe(true);
     expect(
-      shouldExternalizeWebShellDependency('@qwen-code/sdk/browser', 'transcript'),
+      shouldExternalizeWebShellDependency(
+        '@qwen-code/sdk/browser',
+        'transcript',
+      ),
     ).toBe(true);
     expect(
       shouldExternalizeWebShellDependency('echarts/core', 'transcript'),
@@ -60,10 +63,16 @@ describe('web-shell package build boundary', () => {
       ),
     ).toBe(true);
     expect(
-      shouldExternalizeWebShellDependency('@codemirror/view/internal', 'transcript'),
+      shouldExternalizeWebShellDependency(
+        '@codemirror/view/internal',
+        'transcript',
+      ),
     ).toBe(true);
     expect(
-      shouldExternalizeWebShellDependency('katex/dist/katex.js', 'transcript'),
+      shouldExternalizeWebShellDependency(
+        'katex/dist/katex.js',
+        'transcript',
+      ),
     ).toBe(true);
   });
 
