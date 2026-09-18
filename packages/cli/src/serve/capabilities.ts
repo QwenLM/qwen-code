@@ -254,6 +254,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // and its auth is reported per-request through the
   // `github_cli_unavailable` / `github_prs_failed` error codes.
   workspace_github_prs: { since: 'v1' },
+  // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
+  // workspace's repository, `GET .../git/worktrees/status?path=` reads one
+  // worktree's working-tree counters, and `POST .../git/worktrees/remove`
+  // removes a linked worktree. Removal refuses the main worktree and any
+  // registered workspace outright, and a dirty or session-hosting worktree
+  // unless the body carries `force: true` (409 `worktree_dirty` /
+  // `worktree_in_use`).
+  workspace_git_worktrees: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live

@@ -56,6 +56,7 @@ interface EnvironmentPanelProps {
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
   onOpenGitCommit?: () => void;
+  onOpenGitWorktrees?: () => void;
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
   onOpenAgentWorkflow?: () => void;
   onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
@@ -162,6 +163,7 @@ export function EnvironmentPanel({
   items = DEFAULT_ENVIRONMENT_PANEL_ITEMS,
   onOpenGitDiff,
   onOpenGitCommit,
+  onOpenGitWorktrees,
   onOpenAgent,
   onOpenAgentWorkflow,
   onOpenTask,
@@ -313,6 +315,7 @@ export function EnvironmentPanel({
                   status={gitStatus}
                   onOpenDiff={onOpenGitDiff}
                   onOpenCommit={onOpenGitCommit}
+                  onOpenWorktrees={onOpenGitWorktrees}
                 >
                   <button
                     type="button"

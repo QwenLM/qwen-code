@@ -108,6 +108,9 @@ import type {
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
+  DaemonGitWorktreesResult,
+  DaemonGitWorktreeStatus,
+  DaemonGitWorktreeRemoveResult,
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
@@ -7036,6 +7039,40 @@ export class WorkspaceDaemonClient {
       suffix,
       'POST /workspaces/:workspace/git/branch',
       { method: 'POST', body: { name, startPoint }, mode: 'rest' },
+    );
+  }
+
+  workspaceGitWorktrees(): Promise<DaemonGitWorktreesResult> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreesResult>(
+      this.workspaceSelector,
+      '/git/worktrees',
+      'GET /workspaces/:workspace/git/worktrees',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitWorktreeStatus(path: string): Promise<DaemonGitWorktreeStatus> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreeStatus>(
+      this.workspaceSelector,
+      `/git/worktrees/status?path=${urlEncode(path)}`,
+      'GET /workspaces/:workspace/git/worktrees/status',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitRemoveWorktree(
+    path: string,
+    opts?: { force?: boolean },
+  ): Promise<DaemonGitWorktreeRemoveResult> {
+    return this.client.workspaceJsonRequest<DaemonGitWorktreeRemoveResult>(
+      this.workspaceSelector,
+      '/git/worktrees/remove',
+      'POST /workspaces/:workspace/git/worktrees/remove',
+      {
+        method: 'POST',
+        body: { path, force: opts?.force === true },
+        mode: 'rest',
+      },
     );
   }
 
