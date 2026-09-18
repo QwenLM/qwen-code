@@ -1429,6 +1429,11 @@ export class ExtensionManager {
    * commands, agents, hooks, and context files are NOT loaded, so this costs
    * one manifest read per extension instead of a full subresource scan.
    *
+   * With `names` the load is restricted to those extension names, mirroring
+   * `refreshCacheWithSnapshot`'s filter. A name-filtered refresh leaves the
+   * cache partial and therefore does not commit the directory fingerprint
+   * baseline — a full refresh after it still runs.
+   *
    * The cache and snapshot state this populates are the same objects a full
    * `refreshCacheWithSnapshot` maintains, but the cached `Extension` entries
    * carry no subresources. **After calling this, the manager's cache is
@@ -1437,11 +1442,10 @@ export class ExtensionManager {
    * shared with such consumers. Callers that only read identity fields
    * (`id`, `name`, `version`, `installMetadata`) are unaffected.
    *
-   * Like the full refresh, a full (unfiltered) refresh commits the directory
-   * fingerprint baseline; a name-filtered refresh does not. The fingerprint
-   * covers only install metadata and manifests — never skill files — so a
-   * skill-only edit does not trigger a catalog refresh, which is exactly the
-   * desired behavior: the catalog reads nothing from skill files.
+   * An unfiltered refresh commits the directory fingerprint baseline. The
+   * fingerprint covers only install metadata and manifests — never skill
+   * files — so a skill-only edit does not trigger a catalog refresh, which is
+   * exactly the desired behavior: the catalog reads nothing from skill files.
    */
   async refreshCatalogSnapshot(options?: {
     names?: string[];
@@ -1451,53 +1455,22 @@ export class ExtensionManager {
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
-        const manifestOnly = async (
-          extensionsDir: string,
-          workspaceDir: string,
-        ): Promise<Extension[]> => {
-          let subdirs: string[];
-          try {
-            subdirs = fs.readdirSync(extensionsDir);
-          } catch {
-            return [];
-          }
-          // Same fail-closed semantics as `loadExtensionsFromExtensionsDir`:
-          // per-extension errors surface as nulls, but a broken entry stat
-          // (dangling symlink) fails the whole load. Sequential on purpose:
-          // the head reads one manifest file per entry, where the scan cost
-          // dominates and concurrency would buy nothing.
-          const loaded: Extension[] = [];
-          for (const subdir of subdirs) {
-            const extensionDir = path.join(extensionsDir, subdir);
-            if (!fs.statSync(extensionDir).isDirectory()) {
-              continue;
-            }
-            try {
-              const { extension } = await this.loadExtensionManifestHead(
-                { extensionDir, workspaceDir },
-                { loadMcpServers: false },
-              );
-              loaded.push(extension);
-            } catch {
-              // Corrupt manifest — same null treatment the full load gives.
-            }
-          }
-          return loaded;
-        };
-        let loaded: Extension[];
-        if (requestedNames.length > 0) {
-          // One head-only scan, filtered to the requested names — a name-
-          // filtered catalog refresh must not silently do a full subresource
-          // load via `loadExtensionByName`.
-          const wanted = new Set(
-            requestedNames.map((name) => name.toLowerCase()),
-          );
-          loaded = (
-            await manifestOnly(this.configDir, this.workspaceDir)
-          ).filter((extension) => wanted.has(extension.name.toLowerCase()));
-        } else {
-          loaded = await manifestOnly(this.configDir, this.workspaceDir);
-        }
+        // Default: load all extensions from QWEN_HOME-aware user extensions
+        // dir, then filter names from the head-only result so a filtered
+        // catalog refresh never falls back to a full subresource load.
+        const loadedAll = await this.loadExtensionsFromExtensionsDir(
+          this.configDir,
+          this.workspaceDir,
+          { manifestOnly: true },
+        );
+        const loaded =
+          requestedNames.length > 0
+            ? loadedAll.filter((extension) =>
+                requestedNames.some(
+                  (name) => name.toLowerCase() === extension.name.toLowerCase(),
+                ),
+              )
+            : loadedAll;
         return {
           value: loaded,
           extensions: loaded.map((extension) => ({
@@ -1713,6 +1686,7 @@ export class ExtensionManager {
   private async loadExtensionsFromExtensionsDir(
     extensionsDir: string,
     workspaceDir: string,
+    options: { manifestOnly?: boolean } = {},
   ): Promise<Extension[]> {
     let subdirs: string[];
     try {
@@ -1724,10 +1698,27 @@ export class ExtensionManager {
     const extensions: Extension[] = [];
     for (const subdir of subdirs) {
       const extensionDir = path.join(extensionsDir, subdir);
-      const extension = await this.loadExtension({
-        extensionDir,
-        workspaceDir,
-      });
+      let extension: Extension | null;
+      if (options.manifestOnly) {
+        // Catalog-style loads share the full load's traversal and fail
+        // semantics: the entry stat sits outside the catch, so a dangling
+        // symlink at the extensions root fails the whole load, while a
+        // corrupt manifest is skipped like the full load skips it.
+        if (!fs.statSync(extensionDir).isDirectory()) {
+          continue;
+        }
+        extension = await this.loadExtensionManifestHead(
+          { extensionDir, workspaceDir },
+          { loadMcpServers: false },
+        )
+          .then(({ extension: loaded }) => loaded)
+          .catch(() => null);
+      } else {
+        extension = await this.loadExtension({
+          extensionDir,
+          workspaceDir,
+        });
+      }
       if (extension != null) {
         extensions.push(extension);
       }

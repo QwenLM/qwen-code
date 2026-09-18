@@ -2882,9 +2882,9 @@ describe('extension tests', () => {
         version: '1.2.3',
         installMetadata: {
           type: 'git',
+          source: 'test-source',
           credentialPersistence: 'stored',
-          originSource: 'test',
-        } as Extension['installMetadata'],
+        },
       });
       createAgentPlugin(path.join(userExtensionsDir, 'plugin-ext'), {
         name: 'plugin-ext',
@@ -2989,6 +2989,19 @@ describe('extension tests', () => {
       await manager.refreshCatalogSnapshot();
 
       expect(fs.existsSync(path.join(storeDir, 'plugin-data'))).toBe(false);
+    });
+
+    it('commits the fingerprint baseline so an unchanged directory skips the next refresh', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-a',
+      });
+      const manager = createExtensionManager();
+      await manager.refreshCatalogSnapshot();
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
+
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(false);
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
     });
 
     it('a name-filtered refresh does not commit the fingerprint baseline', async () => {
