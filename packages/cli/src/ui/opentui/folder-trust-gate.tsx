@@ -98,13 +98,13 @@ export function OpenTuiFolderTrustGate({
 
   // useFolderTrust.handleFolderTrustSelect parity (FolderTrustChoice maps 1:1
   // onto TrustLevel): persist the decision, then either close the gate or
-  // flip into the restart flow. A first run treats the workspace as trusted
-  // (isTrusted ?? true), so only a "don't trust" answer relaunches.
+  // flip into the restart flow. An undecided workspace starts untrusted,
+  // so granting trust relaunches to load its settings.
   const select = useCallback(
     (choice: TrustLevel) => {
       const trustedFolders = loadTrustedFolders();
       const cwd = process.cwd();
-      const wasTrusted = isTrusted ?? true;
+      const wasTrusted = isTrusted ?? false;
       try {
         trustedFolders.setValue(cwd, choice);
       } catch (error) {

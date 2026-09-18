@@ -1269,7 +1269,7 @@ export function loadSettings(
       undefined,
       realWorkspaceDir,
     ).isTrusted ??
-    true;
+    false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

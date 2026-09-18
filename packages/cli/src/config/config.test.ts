@@ -101,9 +101,7 @@ const createNativeLspServiceInstance = () => ({
 });
 
 vi.mock('./trustedFolders.js', () => ({
-  isWorkspaceTrusted: vi
-    .fn()
-    .mockReturnValue({ isTrusted: true, source: 'file' }), // Default to trusted
+  isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -5681,11 +5679,11 @@ describe('loadCliConfig approval mode', () => {
   });
 
   // --- Untrusted Folder Scenarios ---
-  describe('when folder is NOT trusted', () => {
+  describe.each([false, undefined])('when folder trust is %s', (isTrusted) => {
     beforeEach(() => {
       vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
+        isTrusted,
+        source: isTrusted === undefined ? undefined : 'file',
       });
     });
 

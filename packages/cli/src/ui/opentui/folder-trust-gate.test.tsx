@@ -15,10 +15,9 @@
  *  - the gate only opens for an undecided workspace and renders the three
  *    trust options with the cwd-derived labels;
  *  - Enter / digits select the highlighted option, persist it through
- *    loadTrustedFolders().setValue, and close the gate without a restart
- *    (a first run already assumes trusted);
- *  - Esc selects DO_NOT_TRUST, which flips the trust state and drives the
- *    250ms relaunch flow, ignoring further keys while restarting.
+ *    loadTrustedFolders().setValue, and restart to load trusted settings;
+ *  - Esc selects DO_NOT_TRUST and closes the gate without restarting;
+ *  - the 250ms relaunch flow ignores further keys while restarting.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -205,19 +204,26 @@ describe('OpenTuiFolderTrustGate (#56 startup gate)', () => {
     expect(screen.queryByText('Do you trust this folder?')).toBeNull();
   });
 
-  it('Enter persists the highlighted option and closes without restart', async () => {
-    const onOpenChange = await renderGate(undefined);
-    await press('return');
-    expect(trust.setValue).toHaveBeenCalledWith(
-      '/home/user/project',
-      TrustLevel.TRUST_FOLDER,
-    );
-    expect(onOpenChange).toHaveBeenCalledWith(false);
-    expect(trust.relaunchApp).not.toHaveBeenCalled();
-    expect(
-      screen.queryByText(/restarting to apply the trust changes/),
-    ).toBeNull();
-    expect(screen.queryByText('Do you trust this folder?')).toBeNull();
+  it('Enter trusts the folder and relaunches to load workspace settings', async () => {
+    vi.useFakeTimers();
+    try {
+      const onOpenChange = await renderGate(undefined);
+      await press('return');
+      expect(trust.setValue).toHaveBeenCalledWith(
+        '/home/user/project',
+        TrustLevel.TRUST_FOLDER,
+      );
+      expect(onOpenChange).not.toHaveBeenCalledWith(false);
+      expect(
+        screen.getByText(/Qwen Code is restarting to apply the trust changes/),
+      ).toBeTruthy();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300);
+      });
+      expect(trust.relaunchApp).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('arrow keys move the highlight and Enter picks the parent option', async () => {
@@ -239,33 +245,23 @@ describe('OpenTuiFolderTrustGate (#56 startup gate)', () => {
     );
   });
 
-  it('Esc selects DO_NOT_TRUST, shows the restart notice, and relaunches', async () => {
-    vi.useFakeTimers();
-    try {
-      await renderGate(undefined);
-      const consumed = await pressEsc();
-      expect(consumed).toBe(true);
-      expect(trust.setValue).toHaveBeenCalledWith(
-        '/home/user/project',
-        TrustLevel.DO_NOT_TRUST,
-      );
-      expect(
-        screen.getByText(/Qwen Code is restarting to apply the trust changes/),
-      ).toBeTruthy();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(300);
-      });
-      expect(trust.relaunchApp).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('Esc declines trust and closes without restarting', async () => {
+    const onOpenChange = await renderGate(undefined);
+    expect(await pressEsc()).toBe(true);
+    expect(trust.setValue).toHaveBeenCalledWith(
+      '/home/user/project',
+      TrustLevel.DO_NOT_TRUST,
+    );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(trust.relaunchApp).not.toHaveBeenCalled();
+    expect(screen.queryByText('Do you trust this folder?')).toBeNull();
   });
 
   it('ignores Esc and Enter while restarting', async () => {
     vi.useFakeTimers();
     try {
       await renderGate(undefined);
-      await pressEsc(); // -> DO_NOT_TRUST, restarting
+      await press('return'); // -> TRUST_FOLDER, restarting
       await pressEsc();
       await press('return');
       expect(trust.setValue).toHaveBeenCalledTimes(1);

@@ -1681,7 +1681,7 @@ export async function loadCliConfig(
   const ideMode = settings.ide?.enabled ?? false;
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
+  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.

@@ -345,7 +345,7 @@ export function findEnvFiles(
       workspaceTrusted !== undefined && workspaceDir === realStartDir
         ? workspaceTrusted
         : isWorkspaceTrusted(settings, undefined, workspaceDir).isTrusted;
-    return trusted !== false;
+    return trusted === true;
   };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy

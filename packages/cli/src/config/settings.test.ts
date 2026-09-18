@@ -3288,38 +3288,44 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.ui?.theme).toBe('dark');
     });
 
-    it('should NOT merge workspace settings when workspace is not trusted', () => {
-      vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
-      });
-      (mockFsExistsSync as Mock).mockReturnValue(true);
-      const userSettingsContent = {
-        ui: { theme: 'dark' },
-        tools: { sandbox: false },
-        context: { fileName: 'USER.md' },
-      };
-      const workspaceSettingsContent = {
-        tools: { sandbox: true },
-        context: { fileName: 'WORKSPACE.md' },
-      };
+    it.each([false, undefined])(
+      'should NOT merge workspace settings when trust is %s',
+      (isTrusted) => {
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        const userSettingsContent = {
+          ui: { theme: 'dark' },
+          security: { folderTrust: { enabled: true } },
+          tools: { sandbox: false },
+          context: { fileName: 'USER.md' },
+        };
+        const workspaceSettingsContent = {
+          tools: { sandbox: true },
+          security: { folderTrust: { enabled: false } },
+          context: { fileName: 'WORKSPACE.md' },
+        };
 
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify(workspaceSettingsContent);
+            return '{}';
+          },
+        );
 
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.merged.tools?.sandbox).toBe(false); // User setting
-      expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
-      expect(settings.merged.ui?.theme).toBe('dark'); // User setting
-    });
+        expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+        expect(settings.merged.tools?.sandbox).toBe(false); // User setting
+        expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
+        expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      },
+    );
 
     it('should use an explicit runtime trust decision instead of cached folder trust', () => {
       vi.mocked(isWorkspaceTrusted).mockReturnValue({
@@ -5069,46 +5075,49 @@ describe('Settings Loading and Merging', () => {
       expect(process.env['TESTTEST']).toEqual('1234');
     });
 
-    it('does not load project .env files from untrusted workspaces', () => {
-      delete process.env['PROJECT_ENV_VAR'];
-      const cwdSpy = vi
-        .spyOn(process, 'cwd')
-        .mockReturnValue(MOCK_WORKSPACE_DIR);
+    it.each([false, undefined])(
+      'does not load project .env files when trust is %s',
+      (isTrusted) => {
+        delete process.env['PROJECT_ENV_VAR'];
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
 
-      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+        const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
 
-      vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
-      });
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-        [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
-      );
-      const userSettingsContent: Settings = {
-        ui: {
-          theme: 'dark',
-        },
-        security: {
-          folderTrust: {
-            enabled: true,
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
+        );
+        const userSettingsContent: Settings = {
+          ui: {
+            theme: 'dark',
           },
-        },
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
-          return '{}';
-        },
-      );
+          security: {
+            folderTrust: {
+              enabled: true,
+            },
+          },
+        };
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
+            return '{}';
+          },
+        );
 
-      loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
-      // Project .env should NOT be loaded when workspace is untrusted
-      expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
-      cwdSpy.mockRestore();
-    });
+        // Project .env should NOT be loaded when workspace is untrusted
+        expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+        cwdSpy.mockRestore();
+      },
+    );
 
     it('uses user .qwen/.env as fallback when the project .env lacks an API key', () => {
       delete process.env['OPENCODE_GO_API_KEY'];
