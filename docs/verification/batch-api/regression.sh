@@ -92,6 +92,10 @@ start_server failed 8901
 start_server stuck 8902
 
 cd "${ROOT}" || exit 1
+# R1 asserts "exactly one batch", which only means anything with the relaunch
+# enabled. An outer qwen shell exports QWEN_CODE_NO_RELAUNCH to its children,
+# and with the relaunch off the unfixed code also creates exactly one batch.
+unset QWEN_CODE_NO_RELAUNCH
 export HOME="${SCR}/home"
 export OPENAI_API_KEY=sk-fake
 export OPENAI_MODEL=qwen-plus
