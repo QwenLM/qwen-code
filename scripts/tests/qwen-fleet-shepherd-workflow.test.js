@@ -1775,9 +1775,10 @@ exit 1`;
     expect(workflow).toContain('select((.created_at // "") > $term)');
     // Tick summary and dashboard header report the same counters (R1-12).
     expect(workflow).toContain(
-      '✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS})',
+      '✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS} noop_notices=${NOTICES} closes=${CLOSES})',
     );
     expect(workflow).toContain('cleanups: ${CLEANUPS}');
+    expect(workflow).toContain('no-op notices: ${NOTICES} · closes: ${CLOSES}');
     // Dynamic note text is sanitized before it reaches the printf '%b'
     // table: backslashes first (else %b expands them), then pipes.
     expect(workflow).toContain('SAFE_NOTE="${NOTE//\\\\/\\\\\\\\}"');
@@ -2358,5 +2359,383 @@ exit 1`;
         { conclusion: 'FAILURE', name: 'Lint', detailsUrl: 'u1' },
       ]),
     ).toBe('');
+  });
+
+  it('closes a proven no-op in two ticks, on the conflict lever’s rails', () => {
+    // The lever exists, is capped, and is documented in the header list.
+    expect(workflow).toContain("MAX_NOOP_CLOSES_PER_TICK: '3'");
+    expect(workflow).toContain('• no-op merge      → close it.');
+    // The probe reads GitHub's OWN test merge (one GraphQL call, no
+    // checkout) and compares its tree with its BASE parent's tree —
+    // parents(first: 1) is the base side of a test merge.
+    expect(workflow).toContain('potentialMergeCommit {');
+    expect(workflow).toContain('parents(first: 1) { nodes { tree { oid } } }');
+    expect(workflow).toContain(
+      '-f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="${pr}"',
+    );
+    // Lever ordering: only on a MERGEABLE snapshot (CONFLICTING has no test
+    // merge; UNKNOWN is still computing), after the conflict lever and
+    // BEFORE the stale-base sync, and it does not gate on PENDING — the
+    // close is what cancels a review run spent on an empty diff.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{MERGEABLE\}" == "CONFLICTING" \]\]; then[\s\S]*?elif \[\[ "\$\{MERGEABLE\}" == "MERGEABLE" \]\] && noop_merge "\$\{PR\}"; then\n\s+STATUS_NOTE='no-op vs main'\n\s+noop_close_lever "\$\{PR\}" "\$\{HEAD\}"\n\n\s+# 3\) stale base[\s\S]{0,400}elif \[\[ "\$\{MERGEABLE\}" == "MERGEABLE" && "\$\{BEHIND\}" -ge/,
+    );
+    // Markers: bot-authored, keyed by head SHA, one per tick of the pair.
+    expect(workflow).toContain('<!-- fleet-shepherd noop-notice sha=%s -->');
+    expect(workflow).toContain('<!-- fleet-shepherd noop-close sha=%s -->');
+    expect(workflow).toContain(
+      '*"<!-- fleet-shepherd noop-notice sha=${head} -->"*',
+    );
+    // Rails, in order: unreadable history defers; unknown busy-state
+    // defers; a live address run for THIS PR defers; the close budget is
+    // checked BEFORE the PAT-backed live label read; the live label read
+    // precedes BOTH writes; the live head is re-read right before the close.
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{BUSY_OK\}" != "true" \]\]; then\n\s+ACTION_NOTE='busy-state unknown \(runs or jobs read failed\) — deferring no-op close'\n\s+elif \[\[ "\$\{SHEP_BUSY\}" == \*" \$\{pr\} "\* \]\]; then/,
+    );
+    expect(workflow).toMatch(
+      /if live_skip "\$\{pr\}"; then\n\s+ACTION_NOTE="\$\(skip_note 'no-op notice'\)"\n\s+elif act "#\$\{pr\}: post no-op notice"/,
+    );
+    expect(workflow).toMatch(
+      /CLOSES\}" -ge "\$\{MAX_NOOP_CLOSES_PER_TICK\}" \]\]; then[\s\S]{0,120}elif live_skip "\$\{pr\}"; then[\s\S]{0,120}elif ! live="\$\(gh api "repos\/\$\{REPO\}\/pulls\/\$\{pr\}"/,
+    );
+    // The live head rides REST — the sole `gh pr view` stays live_skip's.
+    expect(workflow).toContain(
+      'gh api "repos/${REPO}/pulls/${pr}" --jq \'"\\(.state) \\(.head.sha)"\'',
+    );
+    expect(workflow).toContain(
+      'gh pr close "${pr}" --repo "${REPO}" --comment',
+    );
+    // Counters move only on a write that HAPPENED (act's real rc).
+    expect(workflow).toMatch(
+      /elif act "#\$\{pr\}: post no-op notice"[\s\S]*?; then\n\s+NOTICES=\$\(\( NOTICES \+ 1 \)\)/,
+    );
+    expect(workflow).toMatch(
+      /elif act "#\$\{pr\}: close as no-op"[\s\S]*?; then\n\s+CLOSES=\$\(\( CLOSES \+ 1 \)\)/,
+    );
+    expect(workflow).toContain('NOTICES=0');
+    expect(workflow).toContain('CLOSES=0');
+    // An unreadable probe is deferral, reported on the row — never "has a
+    // diff" — and the note is appended right before the row is rendered.
+    expect(workflow).toContain("NOOP_STATE=''");
+    expect(workflow).toMatch(
+      /if \[\[ "\$\{NOOP_STATE\}" == 'unreadable' \]\]; then\n\s+ACTION_NOTE="\$\{ACTION_NOTE\} · no-op probe unreadable — close lever deferred this tick"\n\s+fi\n\n\s+echo "🐑 #\$\{PR\} \[\$\{STATUS_NOTE\}\]/,
+    );
+  });
+
+  it('behaviorally proves noop_merge() answers no-op ONLY for an equal-tree test merge', () => {
+    const fn = workflow.match(/noop_merge\(\) \{[\s\S]*?\n {10}\}/)?.[0];
+    expect(fn).toBeTruthy();
+    const probe = ({ pmc, rc = 0 }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'noop-merge-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            // One log line per call: fold the newlines that a multi-line
+            // GraphQL query or a bilingual comment body would otherwise
+            // spread over several lines.
+            'printf \'%s\\n\' "${*//$\'\\n\'/ }" >> "$GH_LOG"',
+            'printf \'%s\' "$PMC_JSON"',
+            `exit ${rc}`,
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail\n${fn.replace(/\n {10}/g, '\n')}\nif noop_merge 7; then echo RC=0; else echo RC=$?; fi\necho "STATE=$NOOP_STATE"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              GH_LOG: join(dir, 'gh.log'),
+              PMC_JSON:
+                typeof pmc === 'string'
+                  ? pmc
+                  : JSON.stringify({
+                      data: {
+                        repository: {
+                          pullRequest: { potentialMergeCommit: pmc },
+                        },
+                      },
+                    }),
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          rc: out.match(/^RC=(\d+)$/m)?.[1],
+          state: out.match(/^STATE=(.*)$/m)?.[1],
+          log: readFileSync(join(dir, 'gh.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const merge = (mtree, btree) => ({
+      tree: { oid: mtree },
+      parents: { nodes: [{ tree: { oid: btree } }] },
+    });
+    const equal = probe({ pmc: merge('t1', 't1') });
+    expect(equal.rc).toBe('0');
+    expect(equal.state).toBe('noop');
+    // ONE GraphQL read with a numeric PR variable, asking for the test
+    // merge's tree and its base parent's tree.
+    expect(equal.log.trim().split('\n')).toHaveLength(1);
+    expect(equal.log).toMatch(
+      /^api graphql .*-F pr=7 .*potentialMergeCommit[\s\S]*parents\(first: 1\)/,
+    );
+    expect(probe({ pmc: merge('t1', 't2') })).toMatchObject({
+      rc: '1',
+      state: 'changes',
+    });
+    // Every non-answer is UNREADABLE, never "no-op": a null test merge
+    // (still generating, or a CONFLICTING snapshot), missing parents, an
+    // API failure — even one that printed an equal-tree body — and garbage.
+    expect(probe({ pmc: null })).toMatchObject({
+      rc: '1',
+      state: 'unreadable',
+    });
+    expect(
+      probe({ pmc: { tree: { oid: 't1' }, parents: { nodes: [] } } }),
+    ).toMatchObject({ rc: '1', state: 'unreadable' });
+    expect(probe({ pmc: merge('t1', 't1'), rc: 1 })).toMatchObject({
+      rc: '1',
+      state: 'unreadable',
+    });
+    expect(probe({ pmc: 'not json' })).toMatchObject({
+      rc: '1',
+      state: 'unreadable',
+    });
+  });
+
+  it('behaviorally proves the no-op close lever notices first, closes second, and defers on every unreadable or busy state', () => {
+    const lever = workflow.match(
+      /noop_close_lever\(\) \{[\s\S]*?\n {10}\}/,
+    )?.[0];
+    const act = workflow.match(/act\(\) \{[\s\S]*?\n {10}\}/)?.[0];
+    const liveSkip = workflow.match(/live_skip\(\) \{[\s\S]*?\n {10}\}/)?.[0];
+    const skipNote = workflow.match(/skip_note\(\) \{[\s\S]*?\n {10}\}/)?.[0];
+    expect(lever).toBeTruthy();
+    expect(act).toBeTruthy();
+    expect(liveSkip).toBeTruthy();
+    expect(skipNote).toBeTruthy();
+    const HEAD = 'a'.repeat(40);
+    const NOTICE = `<!-- fleet-shepherd noop-notice sha=${HEAD} -->`;
+    const bot = (body) => ({ user: { login: 'qwen-code-dev-bot' }, body });
+    const human = (body) => ({ user: { login: 'wenshao' }, body });
+    const run = ({
+      comments = [],
+      commentsFail = false,
+      live = `open ${HEAD}`,
+      liveFail = false,
+      labels = [],
+      labelsFail = false,
+      busyOk = 'true',
+      busy = ' ',
+      closes = '0',
+      dryRun = 'false',
+      closeRc = 0,
+      commentRc = 0,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'noop-lever-'));
+      try {
+        writeFileSync(join(dir, 'comments.json'), JSON.stringify(comments));
+        writeFileSync(join(dir, 'labels.json'), JSON.stringify({ labels }));
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            // One log line per call: fold the newlines that a multi-line
+            // GraphQL query or a bilingual comment body would otherwise
+            // spread over several lines.
+            'printf \'%s\\n\' "${*//$\'\\n\'/ }" >> "$GH_LOG"',
+            'case "$1 $2" in',
+            '  "pr view") [[ "$LABELS_FAIL" == true ]] && exit 1; cat "$FIX/labels.json" ;;',
+            '  "pr comment") exit "$COMMENT_RC" ;;',
+            '  "pr close") exit "$CLOSE_RC" ;;',
+            '  "api repos/QwenLM/qwen-code/issues/7/comments") [[ "$COMMENTS_FAIL" == true ]] && exit 1; cat "$FIX/comments.json" ;;',
+            '  "api repos/QwenLM/qwen-code/pulls/7") [[ "$LIVE_FAIL" == true ]] && exit 1; printf \'%s\\n\' "$LIVE_OUT" ;;',
+            '  *) echo "unexpected gh $*" >&2; exit 99 ;;',
+            'esac',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        // Production's shared /tmp/noop-ic.json is rewritten into THIS
+        // case's temp dir (R10-2): concurrent suite runs on one machine
+        // must not corrupt each other's comment fixtures.
+        const fns = [act, liveSkip, skipNote, lever]
+          .map((f) => f.replace(/\n {10}/g, '\n'))
+          .join('\n')
+          .replaceAll('/tmp/noop-ic.json', join(dir, 'noop-ic.json'));
+        expect(fns).not.toContain('/tmp/noop-ic.json');
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail\n${fns}\nBUSY_OK='${busyOk}'\nSHEP_BUSY='${busy}'\nCLOSES=${closes}\nNOTICES=0\nnoop_close_lever 7 ${HEAD}\necho "NOTE=$ACTION_NOTE"\necho "NOTICES=$NOTICES CLOSES=$CLOSES"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              REPO: 'QwenLM/qwen-code',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              SKIP_LABEL: 'autofix/skip',
+              MAX_NOOP_CLOSES_PER_TICK: '3',
+              DRY_RUN: dryRun,
+              GH_LOG: join(dir, 'gh.log'),
+              FIX: dir,
+              LIVE_OUT: live,
+              LIVE_FAIL: String(liveFail),
+              COMMENTS_FAIL: String(commentsFail),
+              LABELS_FAIL: String(labelsFail),
+              CLOSE_RC: String(closeRc),
+              COMMENT_RC: String(commentRc),
+            },
+            encoding: 'utf8',
+          },
+        );
+        const log = readFileSync(join(dir, 'gh.log'), 'utf8').split('\n');
+        return {
+          note: out.match(/^NOTE=(.*)$/m)?.[1],
+          counters: out
+            .match(/^NOTICES=(\d+) CLOSES=(\d+)$/m)
+            ?.slice(1)
+            .join('/'),
+          writes: log.filter((l) => /^pr (comment|close) /.test(l)),
+          views: log.filter((l) => l.startsWith('pr view ')).length,
+          liveReads: log.filter((l) =>
+            l.startsWith('api repos/QwenLM/qwen-code/pulls/7 '),
+          ).length,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Tick 1: no notice on the PR → the bot posts one keyed by the head,
+    // bilingual, and closes nothing (no live head read is spent either).
+    let r = run({});
+    expect(r.note).toBe(
+      'no-op notice posted — closes next tick unless the head moves',
+    );
+    expect(r.counters).toBe('1/0');
+    expect(r.writes).toHaveLength(1);
+    expect(r.writes[0]).toMatch(
+      /^pr comment 7 --repo QwenLM\/qwen-code --body 🫥 No-op detected/,
+    );
+    expect(r.writes[0]).toContain(NOTICE);
+    expect(r.writes[0]).toContain('中文说明');
+    expect(r.writes[0]).toContain('add the `autofix/skip` label');
+    expect(r.liveReads).toBe(0);
+    // Tick 2: the bot's notice for THIS head is on the PR and the head is
+    // still the live head of an open PR → close, with the close marker.
+    r = run({ comments: [bot(`… ${NOTICE}`)] });
+    expect(r.note).toBe('closed as no-op');
+    expect(r.counters).toBe('0/1');
+    expect(r.writes).toHaveLength(1);
+    expect(r.writes[0]).toMatch(
+      /^pr close 7 --repo QwenLM\/qwen-code --comment 🫥 Closed as a no-op/,
+    );
+    expect(r.writes[0]).toContain(
+      `<!-- fleet-shepherd noop-close sha=${HEAD} -->`,
+    );
+    expect(r.writes[0]).toContain('中文说明');
+    expect(r.liveReads).toBe(1);
+    // A notice for ANOTHER head is stale: a fresh notice, never a close.
+    r = run({
+      comments: [
+        bot(`… <!-- fleet-shepherd noop-notice sha=${'b'.repeat(40)} -->`),
+      ],
+    });
+    expect(r.note).toContain('no-op notice posted');
+    expect(r.writes[0]).toMatch(/^pr comment /);
+    // Only the BOT's own notice counts: a human pasting the marker cannot
+    // pull the close forward by a tick.
+    r = run({ comments: [human(NOTICE)] });
+    expect(r.note).toContain('no-op notice posted');
+    expect(r.writes[0]).toMatch(/^pr comment /);
+    // The head moved since the notice → no close (that push would have
+    // landed on a closed PR); the notice for the new head follows next tick.
+    r = run({ comments: [bot(NOTICE)], live: `open ${'c'.repeat(40)}` });
+    expect(r.note).toBe(
+      'head moved since the notice (now ccccccccc) — re-evaluating next tick',
+    );
+    expect(r.writes).toHaveLength(0);
+    // Closed by someone else meanwhile → nothing to close.
+    r = run({ comments: [bot(NOTICE)], live: `closed ${HEAD}` });
+    expect(r.note).toBe('PR no longer open (closed) — nothing to close');
+    expect(r.writes).toHaveLength(0);
+    // Every unreadable input defers in the fail-closed direction, with NO
+    // write: the live head, the comment history (pipefail carries the gh
+    // failure through the jq merge), the busy-state snapshot.
+    r = run({ comments: [bot(NOTICE)], liveFail: true });
+    expect(r.note).toBe('live head unreadable — fail closed, no close');
+    expect(r.writes).toHaveLength(0);
+    r = run({ comments: [bot(NOTICE)], commentsFail: true });
+    expect(r.note).toBe('marker read failed — deferring no-op close');
+    expect(r.writes).toHaveLength(0);
+    expect(r.views).toBe(0);
+    // A page that is not a comment array (the marks jq then fails) is the
+    // same deferral — and, because the lever runs in the loop BODY under
+    // errexit, the assignment must sit inside the condition or a garbled
+    // page would abort the whole tick instead of deferring one PR.
+    r = run({ comments: { message: 'boom' } });
+    expect(r.note).toBe('marker read failed — deferring no-op close');
+    expect(r.writes).toHaveLength(0);
+    r = run({ comments: [bot(NOTICE)], busyOk: 'false' });
+    expect(r.note).toBe(
+      'busy-state unknown (runs or jobs read failed) — deferring no-op close',
+    );
+    expect(r.writes).toHaveLength(0);
+    // A live review-address run for THIS PR defers; one for another PR
+    // (token match, not substring: 17 is not 7) does not.
+    r = run({ comments: [bot(NOTICE)], busy: ' 7 ' });
+    expect(r.note).toBe('review-address in flight — deferring no-op close');
+    expect(r.writes).toHaveLength(0);
+    r = run({ comments: [bot(NOTICE)], busy: ' 17 ' });
+    expect(r.note).toBe('closed as no-op');
+    // The budget is checked BEFORE the PAT-backed live label read and the
+    // live head read — an exhausted tick spends no more API calls.
+    r = run({ comments: [bot(NOTICE)], closes: '3' });
+    expect(r.note).toBe('close budget reached this tick');
+    expect(r.views).toBe(0);
+    expect(r.liveReads).toBe(0);
+    expect(r.writes).toHaveLength(0);
+    // The live label recheck precedes BOTH writes, reason-aware, and an
+    // unreadable label state fails closed.
+    r = run({ comments: [bot(NOTICE)], labels: [{ name: 'autofix/skip' }] });
+    expect(r.note).toBe(
+      'autofix/skip present (live) — consent withdrawn, no no-op close',
+    );
+    expect(r.writes).toHaveLength(0);
+    r = run({ labels: [{ name: 'autofix/skip' }] });
+    expect(r.note).toBe(
+      'autofix/skip present (live) — consent withdrawn, no no-op notice',
+    );
+    expect(r.writes).toHaveLength(0);
+    r = run({ labelsFail: true });
+    expect(r.note).toBe(
+      'label state unreadable — fail closed, no no-op notice',
+    );
+    expect(r.writes).toHaveLength(0);
+    // A failed write never counts (act propagates the real rc) and is
+    // retried next tick.
+    r = run({ comments: [bot(NOTICE)], closeRc: 1 });
+    expect(r.note).toBe('no-op close FAILED — will retry next tick');
+    expect(r.counters).toBe('0/0');
+    r = run({ commentRc: 1 });
+    expect(r.note).toBe('no-op notice post FAILED — will retry next tick');
+    expect(r.counters).toBe('0/0');
+    // Dry-run performs no write on either tick.
+    r = run({ comments: [bot(NOTICE)], dryRun: 'true' });
+    expect(r.writes).toHaveLength(0);
+    r = run({ dryRun: 'true' });
+    expect(r.writes).toHaveLength(0);
   });
 });

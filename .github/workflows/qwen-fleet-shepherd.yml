@@ -10,6 +10,15 @@ name: 'Fleet Shepherd'
 #   • stale base       → update-branch when far behind main (fresh CI signal +
 #                        propagates workflow/skill fixes; self-limiting since
 #                        behind_by resets to 0 after the sync)
+#   • no-op merge      → close it. GitHub's test merge of the head has the
+#                        same tree as main, so merging would change nothing:
+#                        main already carries every hunk, usually through
+#                        another PR that landed the same fix first (#11376,
+#                        #11379, #12109 each sat open 10–188 h that way while
+#                        the loop and the reviewer kept spending rounds on
+#                        them). Two ticks: a notice keyed by head SHA, then
+#                        the close on the next tick only if that head is
+#                        still live and still a no-op.
 #   • scan liveness    → if no autofix full scan (schedule/dispatch) ran
 #                        recently, dispatch one (GitHub cron is unreliable).
 #                        A run wedged in `queued` past ZOMBIE_QUEUED_MINUTES
@@ -85,6 +94,9 @@ env:
   ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || '30' }}"
   MAX_SYNCS_PER_TICK: '3'
   MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
+  # No-op closes per tick. Notices are uncapped: they are marker-deduped per
+  # head SHA and bounded by the 50-PR fleet window.
+  MAX_NOOP_CLOSES_PER_TICK: '3'
   DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
   # Maintainer opt-out label, honored at every engagement path (mirrors
   # qwen-autofix.yml's SKIP_LABEL).
@@ -142,6 +154,8 @@ jobs:
           DASH_ROWS=''
           SYNCS=0
           DISPATCHES=0
+          NOTICES=0
+          CLOSES=0
           NOW_EPOCH="$(date -u +%s)"
 
           act() {
@@ -557,6 +571,106 @@ jobs:
             jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "$1"
           }
 
+          # Would merging this PR change main at all? GitHub computes a test
+          # merge (potentialMergeCommit) for every MERGEABLE PR; when its tree
+          # equals its base parent's tree the merge adds nothing — main
+          # already carries every hunk the branch proposes. One GraphQL read,
+          # no checkout. Verified against the three no-ops that were closed
+          # by hand (#11376, #11379, #12109: all equal-tree) and the open
+          # fleet (all differ), and against a DUPLICATE PR (#10452, differs:
+          # a twin of another OPEN PR is not a no-op and stays a human call).
+          # Returns 0 ONLY for a proven no-op. A diff, a null test merge
+          # (still being generated — every branch sync resets it — or the
+          # snapshot went stale mid-tick), and an API failure all return 1,
+          # with NOOP_STATE naming which, so a failed read can never
+          # masquerade as "no-op" (fail closed: the lever it feeds is a PR
+          # close).
+          noop_merge() {
+            local pr="$1" pmc mtree btree
+            NOOP_STATE='unreadable'
+            if ! pmc="$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="${pr}" -f query='
+              query($owner: String!, $name: String!, $pr: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $pr) {
+                    potentialMergeCommit {
+                      tree { oid }
+                      parents(first: 1) { nodes { tree { oid } } }
+                    }
+                  }
+                }
+              }' 2> /dev/null)"; then
+              return 1
+            fi
+            mtree="$(jq -r '.data.repository.pullRequest.potentialMergeCommit.tree.oid // ""' <<< "${pmc}" 2> /dev/null || true)"
+            btree="$(jq -r '.data.repository.pullRequest.potentialMergeCommit.parents.nodes[0].tree.oid // ""' <<< "${pmc}" 2> /dev/null || true)"
+            if [[ -z "${mtree}" || -z "${btree}" ]]; then
+              return 1
+            fi
+            if [[ "${mtree}" == "${btree}" ]]; then
+              NOOP_STATE='noop'
+              return 0
+            fi
+            NOOP_STATE='changes'
+            return 1
+          }
+
+          # The no-op close, in two ticks. Tick N posts a notice keyed by the
+          # head SHA; tick N+1 (one schedule interval later) closes ONLY if
+          # that same head is still the live head of a still-open PR and
+          # still a no-op — a push in between moves the head, which voids the
+          # notice and starts over, and a head that regains a diff simply
+          # never re-enters this lever. Same rails as the conflict lever:
+          # only the bot's own markers count, unreadable history / busy-state
+          # / labels defer (fail closed), a live review-address run for the
+          # PR defers (its push would land on a closed PR), the live label
+          # recheck precedes every write, closes are capped per tick, and the
+          # budget is checked BEFORE the PAT-backed live read. The outcome
+          # lands in ACTION_NOTE.
+          noop_close_lever() {
+            local pr="$1" head="$2" marks live live_head
+            # This function runs in the loop BODY (errexit live), so every
+            # read that may fail sits in a condition: a garbled page would
+            # otherwise abort the whole tick from inside the marks jq.
+            if ! gh api "repos/${REPO}/issues/${pr}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/noop-ic.json \
+              || ! marks="$(jq -r --arg ab "${AUTOFIX_BOT}" '[.[] | select((.user.login // "") == $ab) | .body // ""] | join("\n")' /tmp/noop-ic.json 2> /dev/null)"; then
+              ACTION_NOTE='marker read failed — deferring no-op close'
+              return 0
+            fi
+            if [[ "${BUSY_OK}" != "true" ]]; then
+              ACTION_NOTE='busy-state unknown (runs or jobs read failed) — deferring no-op close'
+            elif [[ "${SHEP_BUSY}" == *" ${pr} "* ]]; then
+              ACTION_NOTE='review-address in flight — deferring no-op close'
+            elif [[ "${marks}" != *"<!-- fleet-shepherd noop-notice sha=${head} -->"* ]]; then
+              if live_skip "${pr}"; then
+                ACTION_NOTE="$(skip_note 'no-op notice')"
+              elif act "#${pr}: post no-op notice" \
+                gh pr comment "${pr}" --repo "${REPO}" --body "$(printf '🫥 No-op detected: GitHub'"'"'s test merge of head `%s` into `main` has the same tree as `main`, so merging this PR would change nothing — `main` already carries every change it proposes (usually because another PR landed the same fix first). Unless the head moves, the Fleet Shepherd closes this PR on its next tick (about 15 minutes). To keep it open, add the `%s` label.\n\n<details>\n<summary>中文说明</summary>\n\n🫥 检测到空壳：GitHub 对 head `%s` 与 `main` 的试合并结果和 `main` 的树完全相同，合入本 PR 不会改变任何内容 —— `main` 已包含本 PR 提出的全部改动（通常是另一个 PR 先合入了相同的修复）。若 head 不再变动，Fleet Shepherd 将在下一个 tick（约 15 分钟后）关闭本 PR。如需保留，请添加 `%s` 标签。\n\n</details>\n\n<!-- fleet-shepherd noop-notice sha=%s -->' "${head}" "${SKIP_LABEL}" "${head}" "${SKIP_LABEL}" "${head}")"; then
+                NOTICES=$(( NOTICES + 1 ))
+                ACTION_NOTE='no-op notice posted — closes next tick unless the head moves'
+              else
+                ACTION_NOTE='no-op notice post FAILED — will retry next tick'
+              fi
+            elif [[ "${CLOSES}" -ge "${MAX_NOOP_CLOSES_PER_TICK}" ]]; then
+              ACTION_NOTE='close budget reached this tick'
+            elif live_skip "${pr}"; then
+              ACTION_NOTE="$(skip_note 'no-op close')"
+            elif ! live="$(gh api "repos/${REPO}/pulls/${pr}" --jq '"\(.state) \(.head.sha)"' 2> /dev/null)"; then
+              ACTION_NOTE='live head unreadable — fail closed, no close'
+            elif [[ "${live%% *}" != "open" ]]; then
+              ACTION_NOTE="PR no longer open (${live%% *}) — nothing to close"
+            elif [[ "${live#* }" != "${head}" ]]; then
+              live_head="${live#* }"
+              ACTION_NOTE="head moved since the notice (now ${live_head:0:9}) — re-evaluating next tick"
+            elif act "#${pr}: close as no-op" \
+              gh pr close "${pr}" --repo "${REPO}" --comment "$(printf '🫥 Closed as a no-op: merging head `%s` into `main` would change nothing (its test merge has the same tree as `main`), and the head did not move since the notice above. Nothing is lost — the branch stays in place and the PR can be reopened. If the linked issue is still open, a human should confirm that `main` already resolves it.\n\n<details>\n<summary>中文说明</summary>\n\n🫥 已作为空壳关闭：将 head `%s` 合入 `main` 不会改变任何内容（试合并结果与 `main` 的树相同），且自上方通知以来 head 未再变动。不会丢失任何东西 —— 分支仍在，PR 可以重新打开。若关联的 issue 仍然开着，需要人工确认 `main` 是否已经解决了它。\n\n</details>\n\n<!-- fleet-shepherd noop-close sha=%s -->' "${head}" "${head}" "${head}")"; then
+              CLOSES=$(( CLOSES + 1 ))
+              ACTION_NOTE='closed as no-op'
+            else
+              ACTION_NOTE='no-op close FAILED — will retry next tick'
+            fi
+          }
+
           # ---- walk the bot fleet (one list call carries all per-PR meta) --
           # autofix/skip is the maintainer opt-out honored at every
           # engagement path — a skip-labeled PR gets no shepherd levers and
@@ -598,6 +712,7 @@ jobs:
 
             STATUS_NOTE='idle'
             ACTION_NOTE='—'
+            NOOP_STATE=''
             # A bot PR the loop stopped on (round cap or a breaker) carries
             # the escalation label — prefix its state so the pause is visible
             # on the dashboard instead of only on the PR page.
@@ -678,7 +793,21 @@ jobs:
                 fi
               fi
 
-            # 2) stale base → sync. Self-limiting: behind_by resets on sync.
+            # 2) no-op merge → close (notice on one tick, close on the next).
+            # Probed only on a MERGEABLE snapshot: CONFLICTING has no test
+            # merge, and UNKNOWN is GitHub still computing one (every sync
+            # below resets it) — both fall through to the other levers. The
+            # probe runs ahead of the stale-base sync on purpose: syncing a
+            # branch that main already contains only re-triggers CI on
+            # nothing, and closing is the terminal action either way. Checks
+            # in flight do NOT defer this lever — the review run a fresh
+            # sync just started would spend hours on an empty diff, and the
+            # close is what cancels it.
+            elif [[ "${MERGEABLE}" == "MERGEABLE" ]] && noop_merge "${PR}"; then
+              STATUS_NOTE='no-op vs main'
+              noop_close_lever "${PR}" "${HEAD}"
+
+            # 3) stale base → sync. Self-limiting: behind_by resets on sync.
             # expected_head_sha makes the sync a compare-and-swap: if the loop
             # pushed between our read and this call, GitHub rejects it and the
             # next tick re-evaluates the fresh head.
@@ -698,7 +827,7 @@ jobs:
                 fi
               fi
 
-            # 3) red CI → reruns are owned by the CI Failure Patrol
+            # 4) red CI → reruns are owned by the CI Failure Patrol
             # (qwen-ci-flaky-rerun.yml): it has its own markers, caps, and a
             # tested classifier, and a second scheduled rerun owner here raced
             # it. The shepherd only surfaces the state on the dashboard.
@@ -709,6 +838,11 @@ jobs:
               ACTION_NOTE='reruns owned by CI Failure Patrol'
             elif [[ "${PENDING}" != "0" ]]; then
               STATUS_NOTE="checks in flight (${PENDING})"
+            fi
+            # A probe that could not be read is deferral, not "has a diff":
+            # say so on the row rather than let the PR read as merely idle.
+            if [[ "${NOOP_STATE}" == 'unreadable' ]]; then
+              ACTION_NOTE="${ACTION_NOTE} · no-op probe unreadable — close lever deferred this tick"
             fi
 
             echo "🐑 #${PR} [${STATUS_NOTE}] → ${ACTION_NOTE}"
@@ -1192,7 +1326,7 @@ jobs:
           {
             echo "Auto-maintained by the Fleet Shepherd workflow — do not edit by hand."
             echo
-            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · scan-signal age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES} · releases: ${RELEASES} · cleanups: ${CLEANUPS}"
+            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · scan-signal age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES} · releases: ${RELEASES} · cleanups: ${CLEANUPS} · no-op notices: ${NOTICES} · closes: ${CLOSES}"
             echo
             # Surfaced on the dashboard, not just in a log nobody opens: a
             # wedged queue is the shape of a dead loop that still reports
@@ -1246,4 +1380,4 @@ jobs:
               echo "::warning::dashboard update failed; will retry next tick"
             fi
           fi
-          echo "✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS})"
+          echo "✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS} noop_notices=${NOTICES} closes=${CLOSES})"
