@@ -1957,6 +1957,11 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
       toolResultsNumToKeep: 1,
     });
 
+    expect(result.history[1]).not.toBe(history[1]);
+    expect(result.history[1].parts?.[0]?.functionResponse).toMatchObject({
+      id: 'c0',
+      response: { output: MICROCOMPACT_CLEARED_MESSAGE },
+    });
     expect(result.meta).toBeDefined();
     expect(result.meta!.toolsCleared).toBe(1);
     // Only the blanked (oldest) file is reported; the kept one is not.

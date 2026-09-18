@@ -616,6 +616,11 @@ function projectSubagentToolUpdate(
   const subagentColor = boundedString(rawOutput?.['subagentColor'], 80);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const taskStatus = status ?? event.status;
+  const settled =
+    taskStatus === 'completed' ||
+    taskStatus === 'failed' ||
+    taskStatus === 'cancelled';
   const executionMode = rawOutput?.['executionMode'];
   const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
   const skills = Array.isArray(rawOutput?.['skills'])
@@ -652,30 +657,33 @@ function projectSubagentToolUpdate(
           ? { subagentSessionReady: rawOutput['subagentSessionReady'] }
           : {}),
         ...(terminateReason ? { terminateReason } : {}),
-        ...(typeof rawOutput['tokenCount'] === 'number'
+        ...(skills.length > 0 ? { skills } : {}),
+        ...(settled && typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
           : {}),
-        ...(skills.length > 0 ? { skills } : {}),
         ...(executionSummary
           ? {
               executionSummary: {
+                ...(settled
+                  ? Object.fromEntries(
+                      [
+                        'inputTokens',
+                        'outputTokens',
+                        'thoughtTokens',
+                        'cachedTokens',
+                        'totalTokens',
+                      ]
+                        .filter(
+                          (key) => typeof executionSummary[key] === 'number',
+                        )
+                        .map((key) => [key, executionSummary[key]]),
+                    )
+                  : {}),
                 ...(typeof executionSummary['totalToolCalls'] === 'number'
                   ? { totalToolCalls: executionSummary['totalToolCalls'] }
                   : {}),
                 ...(typeof executionSummary['totalDurationMs'] === 'number'
                   ? { totalDurationMs: executionSummary['totalDurationMs'] }
-                  : {}),
-                ...(typeof executionSummary['outputTokens'] === 'number'
-                  ? { outputTokens: executionSummary['outputTokens'] }
-                  : {}),
-                ...(typeof executionSummary['inputTokens'] === 'number'
-                  ? { inputTokens: executionSummary['inputTokens'] }
-                  : {}),
-                ...(typeof executionSummary['cachedTokens'] === 'number'
-                  ? { cachedTokens: executionSummary['cachedTokens'] }
-                  : {}),
-                ...(typeof executionSummary['totalTokens'] === 'number'
-                  ? { totalTokens: executionSummary['totalTokens'] }
                   : {}),
               },
             }
@@ -699,11 +707,7 @@ function projectSubagentToolUpdate(
 function projectMainTranscriptEvents(events: DaemonUiEvent[]): DaemonUiEvent[] {
   const projected: DaemonUiEvent[] = [];
   for (const event of events) {
-    if (
-      'parentToolCallId' in event &&
-      event.parentToolCallId &&
-      event.type !== 'assistant.usage'
-    ) {
+    if ('parentToolCallId' in event && event.parentToolCallId) {
       continue;
     }
     projected.push(
@@ -1427,7 +1431,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               getTurnIndexPage: (options) =>
                 connectedSession.getTurnIndexPage(options),
               getTranscriptPage: (options) =>
-                connectedSession.getTranscriptPage(options),
+                connectedSession.getTranscriptPage({
+                  ...options,
+                  ...(subagentTranscriptModeRef.current === 'summary'
+                    ? { compactedReplayMode: 'summary' as const }
+                    : {}),
+                }),
               materializeTranscriptEvents:
                 materializeNavigationTranscriptEvents,
             },
@@ -2123,7 +2132,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : {}),
               ...(!shouldResumeRequestedSession &&
               subagentTranscriptModeRef.current === 'summary'
-                ? { liveReplayMode: 'summary' as const }
+                ? {
+                    liveReplayMode: 'summary' as const,
+                    compactedReplayMode: 'summary' as const,
+                  }
                 : {}),
               ...(historyPaginationSupported &&
               (!restoreSessionId || restoreMode === 'load') &&
@@ -4651,6 +4663,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         settleRestoredActivePrompt: () =>
           settleCurrentSessionRestoredPromptRef.current(),
         flushTranscript: () => flushCurrentTranscriptRef.current(),
+        getEventDetailMode: () => subagentTranscriptModeRef.current,
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
           settleCurrentSessionRestoredPromptRef.current = () => false;
@@ -4854,6 +4867,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let terminalFailure = false;
       try {
         const page = await activeSession.getTranscriptPage({
+          ...(subagentTranscriptModeRef.current === 'summary'
+            ? { compactedReplayMode: 'summary' as const }
+            : {}),
           ...(history.cursor !== undefined
             ? { cursor: history.cursor }
             : history.beforeRecordId !== undefined
@@ -5673,11 +5689,6 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
     );
   }
 
-  const terminal = normalizeGoalTerminal(meta['goalTerminal']);
-  if (terminal) {
-    return createGoalStatusUiEvent(event, terminal);
-  }
-
   // Per-iteration "checking" events are deliberately not turned into
   // transcript cards: one card per stop-hook turn floods the transcript, and
   // the active goal state is already visible in the status bar. Which kinds do
@@ -5685,7 +5696,7 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   // admits `paused`, `cleared` and `usage_limited` as well as the terminal
   // kinds, and dropping any of them regresses the bug recorded beside its
   // `paused` entry. This return is only the fallthrough for an event that
-  // carried neither a status nor a terminal.
+  // carried no card.
   return null;
 }
 
@@ -5750,26 +5761,6 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     ...(iterations !== undefined ? { iterations } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(setAt !== undefined ? { setAt } : {}),
-    ...(lastReason ? { lastReason } : {}),
-  };
-}
-
-function normalizeGoalTerminal(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
-  const kind = getString(value, 'kind');
-  if (kind !== 'achieved' && kind !== 'failed' && kind !== 'aborted') {
-    return null;
-  }
-  const condition = getString(value, 'condition');
-  if (!condition) return null;
-  const iterations = getNumber(value, 'iterations');
-  const durationMs = getNumber(value, 'durationMs');
-  const lastReason = getString(value, 'lastReason');
-  return {
-    kind,
-    condition,
-    ...(iterations !== undefined ? { iterations } : {}),
-    ...(durationMs !== undefined ? { durationMs } : {}),
     ...(lastReason ? { lastReason } : {}),
   };
 }

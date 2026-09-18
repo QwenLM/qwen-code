@@ -110,7 +110,7 @@ import type {
 } from './agent-events.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import { canonicalToolName, ToolNames } from '../../tools/tool-names.js';
 import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
@@ -633,6 +633,12 @@ export class AgentCore {
     // AgentInteractive.start(), since fixed to establish its frame).
     const isExcluded = (name: string | undefined): boolean => {
       if (!name) return false;
+      if (
+        name === ToolNames.TASK_STOP &&
+        this.runtimeContext.getExecutionEnvironment?.()
+      ) {
+        return false;
+      }
       return isToolExcludedForCurrentContext(
         name,
         this.runtimeContext.getMaxSubagentDepth(),
@@ -645,9 +651,7 @@ export class AgentCore {
 
     const isDisallowed = (name: string): boolean =>
       this.toolConfig?.disallowedTools?.some((pattern) =>
-        name.startsWith('mcp__')
-          ? matchesMcpPattern(pattern, name)
-          : pattern === name,
+        matchesToolPattern(pattern, name),
       ) === true;
 
     if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
@@ -784,9 +788,7 @@ export class AgentCore {
       return toolsList.filter((t) => {
         if (!t.name) return true;
         return !disallowed.some((pattern) =>
-          t.name!.startsWith('mcp__')
-            ? matchesMcpPattern(pattern, t.name!)
-            : pattern === t.name,
+          matchesToolPattern(pattern, t.name!),
         );
       });
     }
@@ -1010,6 +1012,9 @@ export class AgentCore {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
 
+        if (this.runtimeContext.getExecutionEnvironment?.()) {
+          toolsList = await this.prepareTools();
+        }
         const messageParams = {
           message: currentMessages[0]?.parts || [],
           config: {
@@ -1639,8 +1644,7 @@ export class AgentCore {
   /**
    * The per-agent `toolConfig.disallowedTools` blocklist, mirroring
    * prepareTools()'s declaration-level filter with the exact same match
-   * semantics (MCP server-level patterns via matchesMcpPattern, exact match
-   * otherwise). Re-checked at invocation level because the tool_call bridge
+   * semantics. Re-checked at invocation level because the tool_call bridge
    * makes invocation independent of declaration — a direct call to an
    * undeclared (blocklisted) tool synthesizes "Tool not found", but a
    * bridged call resolves around the declaration list, so the blocklist
@@ -1652,11 +1656,7 @@ export class AgentCore {
     if (!disallowed?.length) {
       return false;
     }
-    return disallowed.some((pattern) =>
-      toolName.startsWith('mcp__')
-        ? matchesMcpPattern(pattern, toolName)
-        : pattern === toolName,
-    );
+    return disallowed.some((pattern) => matchesToolPattern(pattern, toolName));
   }
 
   /**

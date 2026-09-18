@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
+
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
@@ -348,10 +350,6 @@ import {
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
 import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../../ui/utils/restoreGoal.js';
-import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
 } from '../../ui/commands/types.js';
@@ -410,11 +408,19 @@ import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
-import { MessageEmitter } from './emitters/MessageEmitter.js';
-import type { HistoryItemGoalStatus } from '../../ui/types.js';
+import {
+  buildGoalStatusUpdate,
+  MessageEmitter,
+} from './emitters/MessageEmitter.js';
+import type {
+  ContextCompressionMeta,
+  ContextCompressionNotice,
+} from '../../ui/types.js';
 import {
   goalPublicationKey,
+  legacyGoalSupersession,
   renderPreparedGoalUpdate,
+  unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import {
@@ -650,6 +656,7 @@ interface AcpGoalTurn extends GoalContinuationTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   modelStarted: boolean;
+  endingToolCallId?: string;
 }
 
 function sameGoalPermit(
@@ -2485,21 +2492,20 @@ export class Session implements SessionContext {
    *
    * Goal recovery runs from the `Config` constructor, long before this
    * Session exists, so `restore()`'s correction broadcast reaches zero
-   * listeners — and replay streams the pre-migration records, emitting the
-   * legacy `set` card. Clients that derive the live goal from goal cards
-   * (both web-shell and the daemon provider do) are therefore left showing a
-   * goal as running when the migrated goal is `paused` and nothing drives
-   * it; only a second reload self-corrected. Republishing here puts the
-   * authoritative state *after* the replayed card, which is the ordering
-   * that matters. `#publishGoalState` de-duplicates on `(cause, snapshot)`,
-   * so this is a no-op when the subscription already delivered it.
+   * listeners, and replay streams the transcript's records as they were
+   * written. Republishing here puts the authoritative state *after* the
+   * replayed cards, which is the ordering that matters. `#publishGoalState`
+   * de-duplicates on `(cause, snapshot)`, so this is a no-op when the
+   * subscription already delivered it.
    *
-   * When recovery failed outright — a malformed or future-schema
-   * `goal_state` record makes `recoverGoalFromRecords` return `unsupported`
-   * — there is no state to publish and no in-session command can correct the
-   * stream, because a degraded `/goal` answers without a cause. That case
-   * gets the same trailing `cleared` card the replay-time
-   * `supersedeUnrestorableGoal` used to emit.
+   * Two cases publish a trailing `cleared` card instead of state. When
+   * recovery failed outright (a malformed or future-schema `goal_state`
+   * record makes `recoverGoalFromRecords` return `unsupported`) there is no
+   * state to publish and no in-session command can correct the stream,
+   * because a degraded `/goal` answers without a cause. When nothing was
+   * recovered and the replay ended on a running card a build before #7895
+   * wrote, the card would otherwise be the last word on a Goal nothing
+   * drives; see `legacyGoalSupersession` for when that applies.
    */
   async publishRecoveredGoalState(
     replayedRecords?: readonly ChatRecord[],
@@ -2514,9 +2520,44 @@ export class Session implements SessionContext {
       return;
     }
     const cause = runtime.getRecoveryCause?.();
-    // Nothing was recovered, so the replay already told the whole story.
-    if (!cause) return;
+    if (!cause) {
+      const status = legacyGoalSupersession(
+        runtime.getSnapshot(),
+        replayedRecords,
+      );
+      if (status) await this.messageEmitter.emitGoalStatus(status);
+      return;
+    }
     await this.#queueGoalState(runtime.getSnapshot(), cause);
+  }
+
+  /**
+   * The trailing `cleared` card a live replay appends when the page ends on
+   * a running card a build before #7895 wrote and this session drives no
+   * Goal. Empty otherwise; see `legacyGoalSupersession`.
+   *
+   * Reads the runtime as it is rather than waiting for it: a live session's
+   * Goal is already published, and a restore still pending behind the
+   * session writer cannot recover anything from a page that ends on a
+   * legacy card.
+   */
+  renderLegacyGoalSupersession(
+    replayedRecords: readonly ChatRecord[],
+  ): SessionUpdate[] {
+    if (this.disposed || this.closing) return [];
+    let runtime;
+    try {
+      runtime = this.config.getGoalRuntime();
+    } catch (error) {
+      if (!(error instanceof GoalPersistenceUnavailableError)) throw error;
+      return [];
+    }
+    if (runtime.getRecoveryCause?.()) return [];
+    const status = legacyGoalSupersession(
+      runtime.getSnapshot(),
+      replayedRecords,
+    );
+    return status ? [buildGoalStatusUpdate(status)] : [];
   }
 
   async renderRecoveredGoalUpdates(
@@ -2562,8 +2603,8 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Emit a trailing `cleared` card for an active legacy goal the runtime
-   * refused to recover.
+   * Emit a trailing `cleared` card for an active goal whose saved state the
+   * runtime could not read.
    *
    * Emitted, not recorded: the transcript keeps its `set` card, so a later
    * resume that can recover the goal still finds it.
@@ -2571,32 +2612,9 @@ export class Session implements SessionContext {
   async #supersedeUnrestorableGoal(
     replayedRecords?: readonly ChatRecord[],
   ): Promise<void> {
-    const status = this.#unrestorableGoalStatus(replayedRecords);
+    const status = unrestorableGoalStatus(replayedRecords);
     if (!status) return;
     await this.messageEmitter.emitGoalStatus(status);
-  }
-
-  /**
-   * The `cleared` card for an active legacy goal the runtime refused to
-   * recover, or `undefined` when there is nothing to supersede. Shared by the
-   * streaming and rendering recovery paths so they cannot drift.
-   */
-  #unrestorableGoalStatus(
-    replayedRecords?: readonly ChatRecord[],
-  ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
-    if (!replayedRecords?.length) return undefined;
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(replayedRecords),
-    );
-    if (!active) return undefined;
-    return {
-      kind: 'cleared',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-      lastReason:
-        'Goal not restored: its saved state could not be read, so this session is not driving it.',
-    };
   }
 
   async #publishGoalState(
@@ -2847,6 +2865,29 @@ export class Session implements SessionContext {
           await runtime.releaseTurn(turn.turnKey, { requeue: false });
         } else {
           await runtime.releaseTurn(turn.turnKey);
+        }
+      }
+      if (
+        turn.endingToolCallId &&
+        result?.stopReason === 'end_turn' &&
+        failureMessage === undefined &&
+        !turn.controller.signal.aborted
+      ) {
+        const recorder = this.config.getChatRecordingService();
+        if (recorder) {
+          try {
+            await recorder.recordGoalTurnEnd(
+              turn.endingToolCallId,
+              turn.permit,
+            );
+            const chat = this.#getCurrentChat();
+            chat.setCompletedToolCallIds([
+              ...chat.getCompletedToolCallIds(),
+              turn.endingToolCallId,
+            ]);
+          } catch (error) {
+            debugLogger.warn('Failed to record ACP Goal turn end:', error);
+          }
         }
       }
     } catch (error) {
@@ -5338,6 +5379,19 @@ export class Session implements SessionContext {
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
+      // Refresh the process-global cache-safe slot at the turn boundary.
+      // `#recordPromptCompletionEffects` only captures on a fresh user turn
+      // with managed auto-memory on, but the slot's other consumer —
+      // `generatePromptSuggestion`, reached through
+      // `#maybeEmitFollowupSuggestion` below — has no freshness check and
+      // prefers the slot over the live history tail it is handed. Without
+      // this, a continue/retry turn that still ends `end_turn` would get a
+      // suggestion generated from a transcript missing that turn. Mirrors the
+      // interactive path, which captures on every main turn in
+      // `LlmClient.sendMessageStream`.
+      if (completedResult.stopReason === 'end_turn') {
+        this.config.getLlmClient().captureCacheSafeParams();
+      }
       this.#maybeEmitFollowupSuggestion(completedResult);
       if (channelDelivery && completedResult.stopReason === 'end_turn') {
         this.#scheduleChannelDelivery({
@@ -5454,6 +5508,7 @@ export class Session implements SessionContext {
         : undefined);
     return buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
+      completedToolCallIds: chat.getCompletedToolCallIds?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
         : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
@@ -5466,13 +5521,28 @@ export class Session implements SessionContext {
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
     const recoveryPlan = this.#getRecoveryPlan(false);
-    // A prompt (or an earlier continuation) is still in flight: there is no
-    // settled turn to continue. Reject rather than abort the live turn.
+    // A turn is still in flight, so there is no settled turn to continue.
+    // `pendingPrompt` alone misses the automatic turns: notification and cron
+    // turns run their own streaming loop under `notificationAbortController` /
+    // `cronAbortController` and never install it. Accepting there is not
+    // neutral — the bridge drives an accepted continuation through normal
+    // prompt admission, which aborts both controllers, so the recovery button
+    // would kill a healthy running turn.
+    //
+    // `closing` is checked alongside rather than by adopting `isTurnIdle()`:
+    // no `#hasActiveTurn()` member is set while a close gate is held
+    // (`beginClose()` / `dispose()`), yet `assertCanStartTurn()` rejects on it
+    // first — so accepting there is the same round trip this guard exists to
+    // prevent, just failing later. `isTurnIdle()` would also require
+    // `channelTaskCaptures.size === 0`, which `assertCanStartTurn()` does NOT
+    // reject, so taking it wholesale would suppress recovery while a channel
+    // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
       canContinue:
         recoveryPlan?.canContinue === true &&
-        !(this.pendingPrompt && !this.pendingPrompt.signal.aborted),
+        !this.closing &&
+        !this.#hasActiveTurn(),
     };
   }
 
@@ -5494,6 +5564,34 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
     const recovery = this.getRecoveryStatus();
+    if (!recovery.canContinue && recovery.kind !== 'clean') {
+      // Name the veto that fired. `canContinue` collapses `closing` plus the
+      // ten `#hasActiveTurn()` members into one boolean and the only UI
+      // consumer renders nothing for it, so without this a leaked flag —
+      // recovery disabled for the rest of the session — is indistinguishable
+      // from a healthy automatic turn in flight. Logged here rather than in
+      // `getRecoveryStatus()` to stay off the per-poll
+      // `buildSessionContextStatus` path, and gated on a non-clean kind so
+      // the ordinary "nothing to continue" no-op stays quiet.
+      debugLogger.debug('[Session] recovery canContinue vetoed', {
+        kind: recovery.kind,
+        closing: this.closing,
+        pendingPrompt: Boolean(this.pendingPrompt),
+        pendingPromptCompletion: Boolean(this.pendingPromptCompletion),
+        historyMutation: this.historyMutationActive,
+        notification: Boolean(
+          this.notificationProcessing ||
+            this.notificationAbortController ||
+            this.notificationCompletion,
+        ),
+        cron: Boolean(
+          this.cronProcessing ||
+            this.cronAbortController ||
+            this.cronCompletion,
+        ),
+        goal: this.goalProcessing,
+      });
+    }
     return {
       accepted: recovery.canContinue,
       interruption:
@@ -5968,15 +6066,21 @@ export class Session implements SessionContext {
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
+              const resourceLinks = params.prompt
+                .filter((block) => block.type === 'resource_link')
+                .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
               recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
-                promptDisplayText !== undefined || attachmentReferences
+                promptDisplayText !== undefined ||
+                  attachmentReferences ||
+                  resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
                       ...(attachmentReferences ? { attachmentReferences } : {}),
+                      ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
                   : undefined,
                 daemonPromptId,
@@ -8711,6 +8815,9 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
+    goalTurn.endingToolCallId = toolRun.parts.findLast(
+      (part) => part.functionResponse?.id,
+    )?.functionResponse?.id;
     return true;
   }
 
@@ -8733,6 +8840,7 @@ export class Session implements SessionContext {
     ) {
       return;
     }
+    this.config.getLlmClient().captureCacheSafeParams();
     const memoryManager = this.config.getMemoryManager();
     const history = this.#getCurrentChat().getHistoryShallow();
     void memoryManager
@@ -13237,6 +13345,34 @@ export class Session implements SessionContext {
           );
         }
 
+        // ---- Media-policy modelAccess gate (mirrors CoreToolScheduler) ----
+        // Every ACP-originated call is a model call: there is no in-process
+        // fixed_policy caller on this path, so the origin is pinned rather
+        // than read from the (untrusted) protocol payload.
+        const mediaPolicyGate = evaluateMediaPolicyToolCall({
+          config: this.config,
+          tool,
+          args,
+          executionOrigin: { kind: 'model' },
+        });
+        if (mediaPolicyGate.outcome === 'reject') {
+          return earlyErrorResponse(
+            new Error(mediaPolicyGate.message),
+            toolName,
+            {
+              status: 'error',
+              executionStatus: 'not_started',
+              errorType:
+                mediaPolicyGate.reason === 'invalid_params'
+                  ? ToolErrorType.INVALID_TOOL_PARAMS
+                  : ToolErrorType.EXECUTION_DENIED,
+              recordInvalidToolParams:
+                mediaPolicyGate.reason === 'invalid_params',
+            },
+          );
+        }
+        args = mediaPolicyGate.args;
+
         // Detect TodoWriteTool early - route to plan updates instead of tool_call events
         const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
         // Core exposes TodoWriteTool as a type only. The bundle's keepNames
@@ -13382,6 +13518,7 @@ export class Session implements SessionContext {
                   invocation,
                   policyToolName,
                   toolParams,
+                  activeToolAbortSignal,
                 );
           const permissionFlowCancellation =
             cancelBeforeExecutionIfAborted(toolName);
@@ -14818,6 +14955,46 @@ export class Session implements SessionContext {
             : toolResult.error
               ? 'error'
               : 'success';
+          // ACP runs its own tool executor, so it must capture the policy
+          // artifact batch itself and call the SAME core memory boundary
+          // the scheduler and the fixed-policy orchestrator use (memory
+          // design M §17). Captured from the tool's OWN result, before any
+          // PostToolUse hook artifacts are merged below — hook artifacts
+          // must never impersonate policy outputs. Never throws; a
+          // collection failure cannot affect the tool result (D12).
+          if (
+            status === 'success' &&
+            !nestedPermissionCancelled &&
+            tool.mediaPolicyDescriptor &&
+            toolResult.artifacts &&
+            toolResult.artifacts.length > 0
+          ) {
+            // Deep subpath, not the root or `omni` barrel: both are
+            // statically imported across the CLI, so re-exporting this
+            // through either drags the whole policy graph — and, via
+            // iconvHelper's top-level iconv-lite import, its ~550 KB of
+            // encoding tables — into the ACP agent's static closure
+            // (scripts/check-serve-fast-path-bundle.js enforces that).
+            const { collectModelPolicyCall } = await import(
+              '@qwen-code/qwen-code-core/omniPolicyCollection'
+            );
+            await collectModelPolicyCall({
+              config: this.config,
+              batch: {
+                toolName,
+                invocationId: callId,
+                // Same pin as the modelAccess gate above: every
+                // ACP-originated call is a model call. Recording 'client'
+                // here made the PolicyExecution provenance contradict the
+                // gate that admitted the very same call.
+                executionOrigin: { kind: 'model' },
+                artifacts: toolResult.artifacts,
+              },
+              descriptor: tool.mediaPolicyDescriptor,
+              args,
+              signal: activeToolAbortSignal ?? abortSignal,
+            });
+          }
 
           if (isTrustedTodoWriteTool && !toolResult.error) {
             this.todoStopGuard.observeTodoWrite(
@@ -14939,6 +15116,22 @@ export class Session implements SessionContext {
             }
           }
 
+          // Omni second normalization trigger point (parity with
+          // CoreToolScheduler.processToolResultImages, design §8.2):
+          // inline tool-result media becomes oss:// fileData before the
+          // vision bridge runs, which then skips the converted parts.
+          if (this.config.isOmniEnabled?.()) {
+            // Dynamic import: keeps omni out of the ACP static closure
+            // (serve fast-path bundle-closure CI check).
+            const { processToolResultOmniMedia } = await import(
+              '@qwen-code/qwen-code-core/omni'
+            );
+            responseParts = await processToolResultOmniMedia(
+              responseParts,
+              this.config,
+              activeToolAbortSignal,
+            );
+          }
           const visionBridgeNotices: string[] = [];
           responseParts = await bridgeToolResultImages({
             config: this.config,
@@ -15307,27 +15500,80 @@ export class Session implements SessionContext {
         // Command returns multiple messages via async generator (ACP-preferred)
         // Stream all messages to the client as agent message chunks.
         const chunks: string[] = [];
+        // The invocation note rides its own `_meta` key: the reducer folds this
+        // turn's text frames into one block and spreads `_meta` key by key, so a
+        // note sharing `contextCompression` would be overwritten by the result
+        // that follows. Its own key survives the fold, and a client that reads it
+        // renders the note as a row beside the compression it belongs to.
+        const standalone: Array<{
+          text: string;
+          contextCompressionNotice: ContextCompressionNotice;
+        }> = [];
+        let contextCompression: ContextCompressionMeta | undefined;
         for await (const msg of result.messages) {
           if (msg.messageType === 'error') {
             throw new Error(msg.content || 'Slash command failed.');
           }
+          const content = msg.content || '';
+          const notice = msg.contextCompressionNotice;
           await this.messageEmitter.emitSlashCommandOutput(
-            (msg.content || '').replace(/\n/g, '  \n'),
+            content.replace(/\n/g, '  \n'),
+            undefined,
+            notice
+              ? { contextCompressionNotice: notice }
+              : msg.contextCompression
+                ? { contextCompression: msg.contextCompression }
+                : undefined,
           );
-          chunks.push(msg.content || '');
+          if (notice) {
+            // Recorded with a trailing newline so a replay's folded block still
+            // reads as two lines.
+            standalone.push({
+              text: `${content}\n`,
+              contextCompressionNotice: notice,
+            });
+            continue;
+          }
+          chunks.push(content);
+          // Both terminal phases are recorded: replay then rebuilds the row the
+          // live turn showed instead of falling back to the English sentence.
+          if (
+            msg.contextCompression?.phase === 'done' ||
+            msg.contextCompression?.phase === 'noop'
+          ) {
+            contextCompression = msg.contextCompression;
+          }
         }
         // Write a system/slash_command record for history replay (same reason as
         // 'message' case — system records are invisible to model history).
-        if (chunks.length > 0) {
+        // Standalone frames are recorded as their own items so replay rebuilds
+        // the same rows the live turn showed.
+        const outputHistoryItems: Array<Record<string, unknown>> = [
+          ...standalone.map((frame) => ({
+            type: 'assistant',
+            text: frame.text,
+            contextCompressionNotice: frame.contextCompressionNotice,
+          })),
+          ...(chunks.length > 0
+            ? [
+                {
+                  type: 'assistant',
+                  text: chunks.join('\n'),
+                  // Replayed alongside the joined text so a restarted session
+                  // re-renders the same localized line the live turn showed.
+                  ...(contextCompression ? { contextCompression } : {}),
+                },
+              ]
+            : []),
+        ];
+        if (outputHistoryItems.length > 0) {
           recorder?.recordSlashCommand({
             phase: 'result',
             rawCommand: originalPrompt
               .filter((b) => b.type === 'text')
               .map((b) => (b.type === 'text' ? b.text : ''))
               .join(' '),
-            outputHistoryItems: [
-              { type: 'assistant', text: chunks.join('\n') },
-            ],
+            outputHistoryItems,
           });
         }
 

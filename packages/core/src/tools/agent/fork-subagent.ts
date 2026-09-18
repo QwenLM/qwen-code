@@ -112,7 +112,7 @@ export function buildForkExecutionAllowlist(
   advertisedTools: readonly string[] = inheritedExecutionTools,
 ): string[] {
   const allowedTools = new Set(requestedTools ?? inheritedExecutionTools);
-  if (requestedTools !== undefined) {
+  if (requestedTools !== undefined && requestedTools.length > 0) {
     for (const bridgeTool of [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]) {
       if (advertisedTools.includes(bridgeTool)) {
         allowedTools.add(bridgeTool);

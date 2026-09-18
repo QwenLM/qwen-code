@@ -130,10 +130,12 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'file_history_snapshot',
   'session_source',
   'session_model',
+  'omni_recall',
   'session_sources_snapshot',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
+  'goal_turn_end',
   'turn_result',
   ...ARTIFACT_RECORD_SUBTYPES,
 ]);

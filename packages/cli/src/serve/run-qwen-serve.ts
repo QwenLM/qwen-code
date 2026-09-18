@@ -47,12 +47,14 @@ import {
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { MAX_CHANNEL_CONTROL_WORKSPACES } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { assertChannelControlWorkspaceCapacity } from './channel-control-capacity.js';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 import type {
   NdJsonMessageObservation,
   NdJsonQueueSaturationInfo,
 } from '@qwen-code/acp-bridge/ndJsonStream';
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
+import { getEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
@@ -2056,6 +2058,7 @@ function buildProviderSetupInputs(
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
+    ...(req.wireApi ? { wireApi: req.wireApi } : {}),
     baseUrl,
     apiKey: req.apiKey.trim(),
     modelIds: normalizeInstallModelIds(
@@ -5232,6 +5235,7 @@ async function runQwenServeImpl(
     const workspaceTrustOperationGate = new PathMutexRegistry();
     const runWorkspaceTrustOperation = <T>(operation: () => Promise<T>) =>
       workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
+    const idleReclaimerRef: { current?: IdleAcpReclaimer } = {};
     const processRegistry = new runtime.ProcessRegistry();
     managedProcessRegistry = processRegistry;
     // One policy for the whole daemon, beside the one registry it reads. Both
@@ -5274,6 +5278,9 @@ async function runQwenServeImpl(
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
       childHeapPolicy,
+      reclaimIdleChild: async (signal) => {
+        await idleReclaimerRef.current?.(daemonWorkspaceHash, signal);
+      },
       pipeLimits: runtime.daemonAcpNdJsonLimits,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
@@ -6286,6 +6293,9 @@ async function runQwenServeImpl(
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        reclaimIdleChild: async (signal) => {
+          await idleReclaimerRef.current?.(secondaryWorkspaceHash, signal);
+        },
         pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
@@ -6946,6 +6956,9 @@ async function runQwenServeImpl(
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
         childHeapPolicy,
+        reclaimIdleChild: async (signal) => {
+          await idleReclaimerRef.current?.(wsHash, signal);
+        },
         pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
@@ -7803,6 +7816,7 @@ async function runQwenServeImpl(
       primaryWorkspaceTrusted: trustedWorkspace,
       primaryRuntimeEnv,
       daemonEnv: daemonRuntimeBaseEnv,
+      modelSelectionBaseEnv: getEnvironmentBeforeLoad() ?? daemonRuntimeBaseEnv,
       runtimePlatform: deps.runtimePlatform,
       daemonLog,
       getChannelWorkerSnapshot,
@@ -7866,6 +7880,8 @@ async function runQwenServeImpl(
             managedChildProcesses: {
               registry: processRegistry,
               policy: childHeapPolicy,
+              ownsBridge: (candidate: AcpSessionBridge) =>
+                runtimeBridges.includes(candidate),
             },
           }
         : {}),
@@ -7914,9 +7930,16 @@ async function runQwenServeImpl(
             const plan = core.buildInstallPlan(
               provider,
               inputs,
-              fresh.merged.modelProviders?.[
-                inputs.protocol ?? provider.protocol
-              ],
+              core.getModelsForProviderProtocol(
+                fresh.merged.modelProviders,
+                inputs.protocol ?? provider.protocol,
+                fresh.merged.providerProtocol,
+              ),
+              {
+                authType: fresh.merged.security?.auth?.selectedType,
+                id: fresh.merged.model?.name,
+                baseUrl: fresh.merged.model?.baseUrl,
+              },
             );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
@@ -7960,6 +7983,9 @@ async function runQwenServeImpl(
           },
         ),
     });
+    idleReclaimerRef.current = app.locals['reclaimIdleAcp'] as
+      | IdleAcpReclaimer
+      | undefined;
     serveAppForRuntimeLifecycle.current = app;
     invalidatePrimaryServeFeaturesCache =
       (

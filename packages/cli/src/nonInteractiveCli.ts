@@ -15,12 +15,12 @@ import type {
   GoalTurnHost,
   GoalContinuationTurn,
   GoalTurnPermit,
-  ActiveGoal,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
   ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
+import { formatDuration } from './ui/utils/formatters.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -81,7 +81,6 @@ import {
   getErrorType,
   getActiveInteractionSpan,
   buildGoalContinuationParts,
-  goalCheckpointHealthLine,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -244,19 +243,6 @@ function sameGoalPermit(
   );
 }
 
-function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
-  const goal = snapshot.goal;
-  if (goal?.status !== 'active') return null;
-  return {
-    condition: goal.objective,
-    iterations: goal.turnCount,
-    setAt: goal.createdAt,
-    tokensAtStart: 0,
-    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
-    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
-  };
-}
-
 /**
  * The TEXT rendering of a Goal control's outcome.
  *
@@ -279,7 +265,15 @@ export function formatGoalState(
   // scrollback and piped into scripts, neither of which is helped by `1.2k`.
   const usage: string[] = [];
   if (goal.turnCount > 0) {
-    usage.push(`${goal.turnCount} ${goal.turnCount === 1 ? 'turn' : 'turns'}`);
+    const turns = goal.turnBudget ?? goal.turnCount;
+    usage.push(
+      `${goal.turnCount}${goal.turnBudget === undefined ? '' : ` of ${goal.turnBudget}`} ${turns === 1 ? 'turn' : 'turns'}`,
+    );
+  }
+  if (goal.activeTimeMs > 0 && goal.activeTimeBudgetMs !== undefined) {
+    usage.push(
+      `${formatDuration(goal.activeTimeMs, { hideTrailingZeros: true })} of ${formatDuration(goal.activeTimeBudgetMs, { hideTrailingZeros: true })} active`,
+    );
   }
   if (goal.tokensUsed > 0) {
     const used = goal.tokensUsed.toLocaleString('en-US');
@@ -294,15 +288,11 @@ export function formatGoalState(
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
-  // Both lines are written to stdout as they are, so both are sanitized: a
-  // pause reason can embed a raw provider error.
+  // Written to stdout as it is, so it is sanitized: a pause reason can embed
+  // a raw provider error.
   if (goal.status !== 'active' && goal.lastReason) {
     lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
   }
-  // The checkpoint line the interactive cards show, in the same words: a
-  // checkpoint stop reason names the kind of failure, only this says which.
-  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
-  if (checkpoint !== undefined) lines.push(`Checkpoint: ${checkpoint}`);
   return lines.join('\n');
 }
 
@@ -664,10 +654,6 @@ export async function runNonInteractive(
       adapter.processEvent({
         type: LlmEventType.GoalState,
         value: snapshot,
-      });
-      adapter.processEvent({
-        type: LlmEventType.ActiveGoal,
-        value: projectLegacyActiveGoal(snapshot),
       });
     };
     const observeGoalRuntime = (runtime: GoalRuntime) => {
@@ -1135,6 +1121,7 @@ export async function runNonInteractive(
         config,
         sessionId,
         permissionMode,
+        settings,
       );
       adapter.emitMessage(systemMessage);
 
@@ -1175,6 +1162,7 @@ export async function runNonInteractive(
         const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
           sessionId,
           apiHistory: llmClient.getChat().getHistory(),
+          completedToolCallIds: llmClient.getChat().getCompletedToolCallIds?.(),
         });
         debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
           kind: recoveryPlan.kind,
@@ -2598,6 +2586,12 @@ export async function runNonInteractive(
           // Process fallback metadata only after the abandoned attempt has
           // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
+          if (
+            event.type === LlmEventType.HookSystemMessage &&
+            outputFormat === OutputFormat.TEXT
+          ) {
+            process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
+          }
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
@@ -2921,6 +2915,14 @@ export async function runNonInteractive(
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
+                if (
+                  event.type === LlmEventType.HookSystemMessage &&
+                  outputFormat === OutputFormat.TEXT
+                ) {
+                  process.stderr.write(
+                    `${sanitizeTerminalText(event.value)}\n`,
+                  );
+                }
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }

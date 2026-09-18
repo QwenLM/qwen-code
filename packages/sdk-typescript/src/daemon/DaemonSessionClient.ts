@@ -64,6 +64,7 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
@@ -1005,12 +1006,16 @@ export class DaemonSessionClient {
     message: string,
     opts?: {
       signal?: AbortSignal;
+      eventDetailMode?: 'full' | 'summary';
       messageId?: string;
       content?: PromptContentBlock[];
     },
   ): Promise<DaemonMidTurnMessageResult> {
     return this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(opts?.eventDetailMode !== undefined
+        ? { eventDetailMode: opts.eventDetailMode }
+        : {}),
       ...(opts?.messageId ? { messageId: opts.messageId } : {}),
       ...(opts?.content && opts.content.length > 0
         ? { content: opts.content }
@@ -1187,7 +1192,15 @@ export class DaemonSessionClient {
 
   controlWorkflowTask(
     taskId: string,
-    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved'
+      | 'run-script',
+    input?: DaemonWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: DaemonSessionWorkflowTaskStatus['status'];
@@ -1198,6 +1211,7 @@ export class DaemonSessionClient {
       taskId,
       action,
       this.clientId,
+      input,
     );
   }
 
