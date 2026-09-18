@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import {
   checkpointFromTask,
+  claimInterruptedWorkflowRun,
   claimInterruptedWorkflowRuns,
   INTERRUPTED_WORKFLOW_ERROR,
   readWorkflowCheckpoint,
@@ -426,5 +427,68 @@ describe('claimInterruptedWorkflowRuns', () => {
     ).toEqual([]);
     await fs.rm(root, { recursive: true, force: true });
     expect(await claimInterruptedWorkflowRuns(config, stopped)).toEqual([]);
+  });
+});
+
+describe('claimInterruptedWorkflowRun', () => {
+  const OTHER_RUN = 'wf_4567cdef';
+
+  it('claims the one run it is asked about, and no other', async () => {
+    await leaveRun(checkpoint());
+    await leaveRun(checkpoint({ runId: OTHER_RUN }));
+
+    const claimed = await claimInterruptedWorkflowRun(config, RUN_ID, stopped);
+
+    expect(claimed?.snapshot).toMatchObject({
+      runId: RUN_ID,
+      status: 'failed',
+      error: INTERRUPTED_WORKFLOW_ERROR,
+    });
+    expect(await readWorkflowCheckpoint(config, RUN_ID)).toBeUndefined();
+    expect(await readWorkflowCheckpoint(config, OTHER_RUN)).toBeDefined();
+    expect(await readWorkflowSnapshot(config, OTHER_RUN)).toBeUndefined();
+  });
+
+  it('leaves a run alone while the process that wrote it is running', async () => {
+    await leaveRun(checkpoint());
+
+    expect(
+      await claimInterruptedWorkflowRun(config, RUN_ID, {
+        isProcessRunning: () => true,
+      }),
+    ).toBeUndefined();
+    expect(await readWorkflowCheckpoint(config, RUN_ID)).toBeDefined();
+  });
+
+  it('returns nothing for a run with no checkpoint', async () => {
+    expect(
+      await claimInterruptedWorkflowRun(config, RUN_ID, stopped),
+    ).toBeUndefined();
+  });
+
+  // The id reaches here from a client; it is a path segment below.
+  it('touches no path for an id that is not a run id', async () => {
+    const outside = path.join(root, '..', `escape-${path.basename(root)}`);
+    await fs.mkdir(outside, { recursive: true });
+    try {
+      await fs.writeFile(
+        path.join(outside, 'checkpoint.json'),
+        JSON.stringify(checkpoint({ runId: `../${path.basename(outside)}` })),
+      );
+
+      expect(
+        await claimInterruptedWorkflowRun(
+          config,
+          `../${path.basename(outside)}`,
+          stopped,
+        ),
+      ).toBeUndefined();
+      await expect(
+        fs.access(path.join(outside, 'checkpoint.json')),
+      ).resolves.toBeUndefined();
+      expect(await fs.readdir(root)).toEqual([]);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 });

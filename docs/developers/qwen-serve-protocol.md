@@ -2282,7 +2282,18 @@ alongside the control actions.
 
 A started run is session-owned: it runs in the background without an approval
 prompt, and its completion reaches the session's completion channel. It is a
-`retry`/`rerun` target afterwards like any other run. `run-script` passes no
+`retry`/`rerun` target afterwards like any other run.
+
+`retry` and `rerun` also accept a run restored from history (`isHistorical` in
+`GET /session/:id/tasks`), such as one a daemon restart interrupted: the run is
+started again from its snapshot's script, `args` and `sourceRef`, and it
+registers in, and reports its completion to, the session that sent the
+action. A `retry` resumes the run's journal under the same run id and applies
+to a `failed` run that no process is still running; a `rerun` starts a new run
+id from any finished run. A history entry carrying `argsOmitted` was launched
+with `args` too large to keep, so neither action applies to it. Snapshots
+written before `args` were kept carry neither field and are started without
+`args`. `run-script` passes no
 definition name, so the run is labelled by the script's own
 `export const meta` — a compiled script should declare one, or the run shows
 only its id.
@@ -2305,12 +2316,22 @@ unknown `action`, a `run-script` with no `script`, a `sourceRef` that is not
 because of invalid syntax or a determinism violation. Workflow start input
 errors carry `workflow_invalid_params` and retain the rejection message.
 
+Two refusals come from the run's stored state rather than the request, and
+are a `409` (`-32602` over ACP, with `data.httpStatus: 409`):
+
+| `code` / `errorKind`           | When                                                                   | What to do                                                     |
+| ------------------------------ | ---------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `workflow_journal_unavailable` | a `retry` whose run has no journal on disk, or one that cannot be read | `rerun` it, which starts it from the beginning                 |
+| `workflow_args_unavailable`    | a `retry` or `rerun` of a history entry that carries `argsOmitted`     | start it again with `run-saved` or `run-script` and its `args` |
+
 `workflowToolFeatures` in `GET /session/:id/supported-commands` advertises
 `runSavedArgs` and `runScript`; a daemon without them accepts neither the start
 input nor the `run-script` action. It also carries `nameOnly`, true when the
 session's model may run named workflows only (`tools.workflowNameOnly`): the
 model's own `script` and `scriptPath` calls are refused, while every action
-above, `run-script` included, still starts runs.
+above, `run-script` included, still starts runs. `retryHistorical` is true when
+`retry` and `rerun` accept a run restored from history; an older daemon answers
+them with `{"changed": false}`.
 
 ### `GET /session/:id/lsp`
 
