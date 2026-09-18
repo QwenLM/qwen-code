@@ -693,14 +693,18 @@ describe('e2e build artifact download retry (consumer legs)', () => {
       // missing — stays red through both attempts.
       assert.equal(first.id, 'download-build');
       assert.equal(first['continue-on-error'], true);
-      // An absorbed stall must not burn the job budget unbounded — the
-      // sandbox:none shard retry prices job time to the second (the 2100s
-      // gate in run-e2e-tests.sh) — so the first attempt is time-boxed
-      // and a hang converts into a retryable failure. The download sits
-      // between that leg's 'Record job start epoch' and 'Run E2E tests',
-      // so up to 600s of absorbed stall is charged to the 2100s, flipping
-      // the shard-retry decision only when pre-stall elapsed already sits
-      // in the 1500–2100s window.
+      // An absorbed stall must not burn the job budget unbounded, so the
+      // first attempt is time-boxed and a hang converts into a retryable
+      // failure. The 2100s coupling is leg-scoped: only e2e-test-linux
+      // records E2E_JOB_START_EPOCH and runs run-e2e-tests.sh, whose
+      // sandbox:none shard retry is budget-gated on the 2100s — that
+      // leg's 60-minute job timeout minus a 25-minute reserve. There the
+      // download sits between 'Record job start epoch' and 'Run E2E
+      // tests', so up to 600s of absorbed stall is charged to the 2100s,
+      // flipping the shard-retry decision only when pre-stall elapsed
+      // already sits in the 1500–2100s window. The other legs have no
+      // shard-retry budget; there the box only bounds how long a stall
+      // can delay the retry.
       assert.equal(
         first['timeout-minutes'],
         10,
@@ -791,8 +795,15 @@ describe('e2e build artifact download retry (consumer legs)', () => {
         (s) => s.name === 'Download build artifact (retry)',
       );
       assert.ok(
-        steps.indexOf(retry) < steps.indexOf(announce),
-        `${jobName} announce must run after the retry so it fires only for the absorbed failure`,
+        retry,
+        `${jobName} must have a 'Download build artifact (retry)' step`,
+      );
+      const unpack = steps.find((s) => s.name === 'Unpack build artifact');
+      assert.ok(unpack, `${jobName} must have an 'Unpack build artifact' step`);
+      assert.ok(
+        steps.indexOf(retry) < steps.indexOf(announce) &&
+          steps.indexOf(announce) < steps.indexOf(unpack),
+        `${jobName} announce must sit between the retry and unpack: after unpack it inherits the leg's failures through the implicit success() gate and goes quiet on exactly the red legs the watch needs`,
       );
     }
   });
