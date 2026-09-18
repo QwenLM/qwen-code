@@ -118,7 +118,20 @@ export const sandboxCommand: CommandModule = {
       : writeStdoutLine;
     const cwd = process.cwd();
     const bare = isBareMode(args.bare);
-    const settings = bare ? {} : loadSettings(cwd, false).merged;
+    let settings;
+    try {
+      settings = bare ? {} : loadSettings(cwd, false).merged;
+    } catch (error) {
+      // Same failure shape as the probe rejections below: a settings problem
+      // (e.g. a missing or unusable HOME) is exactly what someone running this
+      // subcommand needs explained, so report it rather than letting it escape
+      // as a raw stack behind yargs' failure help.
+      writeStderrLine(
+        `Sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     const effectiveSettings =
       bare || (args.safeMode ?? isSafeModeEnv()) ? {} : settings;
 

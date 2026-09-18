@@ -230,6 +230,30 @@ describe('qwen sandbox', () => {
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
+  // loadSettings runs before the probe try/catch, so a settings failure
+  // (e.g. a missing or unusable HOME) escapes as a raw rejection instead of
+  // taking the reported failure shape the two later error sources use.
+  it('reports a settings-load failure instead of rejecting with a stack', async () => {
+    loadSandboxConfigMock.mockResolvedValue({ command: 'bwrap' });
+    loadSettingsMock.mockImplementation(() => {
+      throw new Error(
+        'Could not find the user settings directory: HOME is not set',
+      );
+    });
+
+    await run();
+
+    expect(writeStderrLineMock.mock.calls[0]?.[0]).toContain(
+      'Sandbox unavailable',
+    );
+    expect(writeStderrLineMock.mock.calls[0]?.[0]).toContain(
+      'Could not find the user settings directory',
+    );
+    expect(process.exitCode).toBe(1);
+    expect(loadSandboxConfigMock).not.toHaveBeenCalled();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
   it('rejects command flags before -- instead of silently dropping them', () => {
     const handler = vi.fn();
     expect(() =>
