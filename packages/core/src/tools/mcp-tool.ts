@@ -1312,39 +1312,42 @@ async function boundInlineImageParts(
   parts: Part[],
   signal: AbortSignal,
 ): Promise<Part[]> {
-  return Promise.all(
-    parts.map(async (part) => {
-      const inline = part.inlineData;
-      if (!inline?.data || !inline.mimeType?.startsWith('image/')) {
-        return part;
-      }
-      try {
-        const view = await boundImageBuffer(
-          Buffer.from(inline.data, 'base64'),
-          inline.mimeType,
-          signal,
+  const boundedParts: Part[] = [];
+  for (const part of parts) {
+    const inline = part.inlineData;
+    if (!inline?.data || !inline.mimeType?.startsWith('image/')) {
+      boundedParts.push(part);
+      continue;
+    }
+    try {
+      const view = await boundImageBuffer(
+        Buffer.from(inline.data, 'base64'),
+        inline.mimeType,
+        signal,
+      );
+      boundedParts.push(
+        view
+          ? {
+              inlineData: {
+                ...inline,
+                data: view.bytes.toString('base64'),
+                mimeType: view.mimeType,
+              },
+            }
+          : part,
+      );
+    } catch (error) {
+      if (error instanceof ImageViewError) {
+        debugLogger.debug(
+          `Forwarding MCP image unbounded: ${getErrorMessage(error)}`,
         );
-        if (!view) {
-          return part;
-        }
-        return {
-          inlineData: {
-            ...inline,
-            data: view.bytes.toString('base64'),
-            mimeType: view.mimeType,
-          },
-        };
-      } catch (error) {
-        if (error instanceof ImageViewError) {
-          debugLogger.debug(
-            `Forwarding MCP image unbounded: ${getErrorMessage(error)}`,
-          );
-          return part;
-        }
-        throw error;
+        boundedParts.push(part);
+        continue;
       }
-    }),
-  );
+      throw error;
+    }
+  }
+  return boundedParts;
 }
 
 function transformResourceBlock(

@@ -31,6 +31,7 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../utils/invocation-context.js';
+import * as imageView from '../utils/image-view.js';
 
 vi.mock('node:fs/promises');
 
@@ -766,6 +767,40 @@ describe('DiscoveredMCPTool', () => {
       expect(
         Math.ceil(bounded.width / 28) * Math.ceil(bounded.height / 28),
       ).toBeLessThanOrEqual(1568);
+    });
+
+    it('bounds images sequentially', async () => {
+      const mockBoundImageBuffer = vi.spyOn(imageView, 'boundImageBuffer');
+      let releaseFirst!: () => void;
+      const first = new Promise<null>((resolve) => {
+        releaseFirst = () => resolve(null);
+      });
+      mockBoundImageBuffer
+        .mockImplementationOnce(() => first)
+        .mockResolvedValueOnce(null);
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                { type: 'image', data: 'first', mimeType: 'image/png' },
+                { type: 'image', data: 'second', mimeType: 'image/png' },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const execution = tool
+        .build({ param: 'screenshots' })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(mockBoundImageBuffer).toHaveBeenCalled());
+      const callsBeforeRelease = mockBoundImageBuffer.mock.calls.length;
+      releaseFirst();
+      await execution;
+      expect(callsBeforeRelease).toBe(1);
+      expect(mockBoundImageBuffer).toHaveBeenCalledTimes(2);
     });
 
     it('leaves an in-budget image from an MCP tool untouched', async () => {
