@@ -281,7 +281,11 @@ test('falls back to a per-commit issue when no test can be identified', () => {
 
 test('the per-commit path leaves an already-filed body untouched', () => {
   const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
-  const existingBody = 'whatever the previous run wrote\n';
+  // A real already-filed body opens with the machine block; the verbatim
+  // return is what a human's notes around it rely on. A body with NO
+  // readable machine block is not echoed but re-rendered and preserved —
+  // that fail-closed path is pinned beside the class-flip tests.
+  const existingBody = `${renderIssueBody({ analysis, occurrence: OCCURRENCE })}\nTriage note.\n`;
   assert.equal(
     renderIssueBody({ analysis, occurrence: OCCURRENCE, existingBody }),
     existingBody,
@@ -1034,6 +1038,63 @@ test('a class flip preserves notes written below the displaced body', () => {
   assert.ok(body.includes('runner-fleet'));
   assert.ok(body.includes('Pool host was replaced at 03:00Z.'));
   assert.ok(body.includes('`Test (windows-latest, Node 22.x)`'));
+});
+
+test('a class flip survives notes written ABOVE the machine block', () => {
+  // The mirror of the notes-below case: the machine block is anchored on its
+  // opening marker line, not on an absolute offset, so prose a human
+  // prepends must not push the class markers out of the read window — a
+  // two-line prepend used to make a fleet body read as ordinary, and the
+  // stale stand-down notice was echoed back under the ordinary run's route.
+  const fleetBody = renderIssueBody({
+    analysis: analyzeLogs(
+      'E2E Tests',
+      [],
+      [],
+      [{ name: 'E2E Test (Linux) - sandbox:docker - shard 1/1', steps: 0 }],
+    ),
+    occurrence: OCCURRENCE,
+  });
+  const withNote = `Pool host hk4-30 was replaced at 03:00Z.\n\n${fleetBody}`;
+  const body = renderIssueBody({
+    analysis: analyzeLogs(
+      'Qwen Code CI',
+      ['npm error code ERESOLVE'],
+      [WINDOWS_JOB],
+    ),
+    occurrence: OCCURRENCE,
+    existingBody: withNote,
+  });
+
+  // The fresh ordinary pitch leads…
+  assert.ok(body.includes('labeled for autofix'));
+  assert.ok(body.indexOf('labeled for autofix') < body.indexOf('<details>'));
+  // …the prepended note survives…
+  assert.ok(body.includes('Pool host hk4-30 was replaced at 03:00Z.'));
+  // …and the displaced fleet body is preserved verbatim in the collapsed
+  // block.
+  assert.ok(body.includes(fleetBody.trim()));
+});
+
+test('a body whose machine block is unreadable is re-rendered and preserved', () => {
+  // Fail closed: with no marker line at all the class cannot be read, so the
+  // body is never echoed under this run's route on a guess — the fresh
+  // render leads and the unclassifiable prose is kept in the collapsed
+  // block.
+  const foreign = 'A human opened this issue by hand.\n\nNo markers here.\n';
+  const body = renderIssueBody({
+    analysis: analyzeLogs(
+      'Qwen Code CI',
+      ['npm error code ERESOLVE'],
+      [WINDOWS_JOB],
+    ),
+    occurrence: OCCURRENCE,
+    existingBody: foreign,
+  });
+
+  assert.ok(body.includes('labeled for autofix'));
+  assert.ok(body.includes('<details>'));
+  assert.ok(body.includes(foreign.trim()));
 });
 
 test('a preserved fleet block does not reclassify the ordinary body carrying it', () => {

@@ -446,32 +446,35 @@ function cappedTestLines(tests) {
 }
 
 /**
- * The class of an existing per-commit body is read from its OPENING marker
- * lines only: a cross-class re-render preserves the displaced body in a
+ * The class and arm of an existing per-commit body are read from its machine
+ * block only: a cross-class re-render preserves the displaced body in a
  * collapsed block below, and a whole-body substring check would see that
  * preserved fleet marker and reclassify the carrier — every later ordinary
- * run would re-render and wipe the notes the merge exists to keep.
+ * run would re-render and wipe the notes the merge exists to keep. The block
+ * is anchored on its opening marker line, not on an absolute offset, so prose
+ * a human prepends above it cannot push the markers out of the read window;
+ * the fresh block always precedes the preserved one, so the first
+ * marker-prefixed line opens the live block. An ordinary body — or a fleet
+ * body older than the arm markers — reads arm as null and re-renders once,
+ * with the displaced prose preserved. A body with no marker line at all
+ * returns null, and the caller fails closed — re-render and preserve —
+ * rather than echoing prose whose class could not be read.
  */
-function existingBodyIsFleet(existingBody) {
-  return existingBody
-    .split('\n')
-    .slice(0, 3)
-    .some((line) => line.includes(FLEET_BODY_MARKER));
-}
-
-/**
- * The arm of an existing fleet body, read from the same opening window as the
- * class marker: a preserved block carries the displaced body's markers deeper
- * in the body, so only the first lines are safe to read. An ordinary body —
- * or a fleet body older than the arm markers — reads as null and re-renders
- * once, with the displaced prose preserved.
- */
-function existingBodyFleetArm(existingBody) {
-  const opening = existingBody.split('\n').slice(0, 3);
-  for (const [arm, marker] of Object.entries(FLEET_ARM_MARKERS)) {
-    if (opening.some((line) => line.includes(marker))) return arm;
+function existingFleetClass(existingBody) {
+  const lines = existingBody.split('\n');
+  const start = lines.findIndex((line) =>
+    line.startsWith(`<!-- ${LEGACY_MARKER_PREFIX}`),
+  );
+  if (start === -1) return null;
+  const block = lines.slice(start, start + 3);
+  if (!block.some((line) => line.includes(FLEET_BODY_MARKER))) {
+    return { fleet: false, arm: null };
   }
-  return null;
+  for (const [arm, marker] of Object.entries(FLEET_ARM_MARKERS)) {
+    if (block.some((line) => line.includes(marker)))
+      return { fleet: true, arm };
+  }
+  return { fleet: true, arm: null };
 }
 
 /**
@@ -504,12 +507,14 @@ export function renderIssueBody({
       // route labels follow this run's class; an arm flip re-renders because
       // a frozen body would keep asserting the FIRST arm's causal claim over
       // a recurrence that arm does not describe.
-      const sameClass =
-        existingBodyIsFleet(existingBody) === Boolean(analysis.neverStarted);
-      const sameArm =
-        existingBodyFleetArm(existingBody) ===
-        (analysis.neverStarted ? fleetArm(analysis.failedJobs) : null);
-      if (sameClass && sameArm) return existingBody;
+      const existing = existingFleetClass(existingBody);
+      if (existing) {
+        const sameClass = existing.fleet === Boolean(analysis.neverStarted);
+        const sameArm =
+          existing.arm ===
+          (analysis.neverStarted ? fleetArm(analysis.failedJobs) : null);
+        if (sameClass && sameArm) return existingBody;
+      }
       const fresh = renderPerCommitBody({ analysis, occurrence });
       return [
         fresh.trimEnd(),

@@ -238,6 +238,9 @@ jobs:
       actions: 'write'
     outputs:
       superseded: '${{ steps.rerun.outputs.superseded }}'
+      stand_down: '${{ steps.rerun.outputs.stand_down }}'
+      observed_attempt: '${{ steps.rerun.outputs.observed_attempt }}'
+      observed_conclusion: '${{ steps.rerun.outputs.observed_conclusion }}'
     steps:
       - name: 'Re-run the failed jobs once'
         id: 'rerun'
@@ -277,10 +280,20 @@ jobs:
           # created inside the check-to-POST gap is displaced by this re-run
           # and its `cancelled` conclusion never passes analyze's gate.
           # Re-check after the POST so a displacement at least names the run.
+          # The re-check cannot key on `queued` alone: the re-run's arrival
+          # cancels the group's previously pending run, and whether that run
+          # still reads `queued` when this query runs races the cancellation
+          # landing — once it reads `completed`/`cancelled`, a queued-only
+          # predicate misses the very displacement this re-check exists to
+          # name. Count a newer same-event run that is still queued OR has
+          # already concluded cancelled; either state means the pending slot
+          # turned over around this POST. (The pre-POST gate keeps the
+          # queued-only predicate: a cancelled run cannot be displaced, so
+          # counting it there would suppress re-runs over nothing.)
           displaced="$(
             gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?branch=main&per_page=10" \
               | jq --arg id "${WORKFLOW_RUN_ID}" --arg created "${WORKFLOW_RUN_CREATED_AT}" --arg event "${WORKFLOW_RUN_EVENT}" \
-                '[.workflow_runs[] | select((.id | tostring) != $id and .created_at > $created and .status == "queued" and .event == $event)] | length'
+                '[.workflow_runs[] | select((.id | tostring) != $id and .created_at > $created and .event == $event and (.status == "queued" or .conclusion == "cancelled"))] | length'
           )"
           if [[ "${displaced}" != "0" ]]; then
             echo "::warning::The re-run of ${WORKFLOW_RUN_URL} may have displaced a newer main run that queued in its concurrency group after the supersession check — check the workflow's pending queue"
@@ -316,7 +329,39 @@ jobs:
             echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
-          echo "::error::Re-run of ${WORKFLOW_RUN_URL} ended '${conclusion:-unknown}' — filing the fleet failure issue instead of absorbing it"
+          # The class analyze computed describes attempt 1, but the poll
+          # may have watched a LATER attempt end: a re-run that ran the suite
+          # and failed is a commit-level failure, and routing it by attempt
+          # 1's fleet class would rewrite the record to deny commit
+          # causation. Record what the poll observed…
+          echo "observed_attempt=${attempt}" >> "${GITHUB_OUTPUT}"
+          echo "observed_conclusion=${conclusion:-unknown}" >> "${GITHUB_OUTPUT}"
+          if [[ "${attempt}" =~ ^[0-9]+$ && "${attempt}" -ge 2 && "${status}" == 'completed' ]]; then
+            # …and re-derive the stand-down from the observed attempt's jobs
+            # (the jobs endpoint returns the latest attempt) with the same
+            # projections analyze runs: zero repository steps over every
+            # non-passing job keeps the stand-down — a re-run cancelled
+            # before it started ran no code either — while any executed
+            # repository step, or a failed job naming its failed step, files
+            # ON the autofix route. A fetch failure leaves the output unset
+            # and file_issue keeps analyze's class.
+            rerun_jobs="${RUNNER_TEMP}/rerun-jobs.json"
+            if gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" \
+              --paginate > "${rerun_jobs}"; then
+              stand_down="$(
+                jq -r -s '
+                  [.[].jobs[]] as $jobs
+                  | ([$jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | ([.steps[]? | select(.name != "Set up job" and .name != "Complete job" and .conclusion != "skipped")] | length)]) as $counts
+                  | ([$jobs[] | select(.conclusion == "failure") | .steps[]? | select(.conclusion == "failure")] | length) as $failed_steps
+                  | (($counts | length) > 0 and ([$counts[] | select(. != 0)] | length) == 0 and $failed_steps == 0)
+                ' "${rerun_jobs}"
+              )"
+              echo "stand_down=${stand_down}" >> "${GITHUB_OUTPUT}"
+            else
+              echo "::warning::Could not list the jobs of the observed re-run attempt — the filing keeps attempt 1's classification"
+            fi
+          fi
+          echo "::error::Re-run of ${WORKFLOW_RUN_URL} ended '${conclusion:-unknown}' — filing the failure issue instead of absorbing it"
           exit 1
 
   # Every GitHub write happens here, as the autofix bot. This job deliberately
@@ -331,10 +376,12 @@ jobs:
     # observed to pass. A skipped rerun job (an ordinary failure with steps,
     # or an attempt-2+ recurrence) and a failed one (the re-run request
     # errored, or the observed re-run did not pass) both fall through to
-    # filing, where the body and route follow never_started — as does a
-    # re-run skipped because a newer main run supersedes this commit (the
-    # superseded output): the fleet failure is filed rather than displacing
-    # the newer run.
+    # filing, as does a re-run skipped because a newer main run supersedes
+    # this commit (the superseded output): the fleet failure is filed rather
+    # than displacing the newer run. The body is analyze's render of the
+    # triggering attempt; the ROUTE follows the stand-down the rerun job
+    # re-derived from the attempt its poll observed end non-pass, falling
+    # back to analyze's class when no later attempt was observed.
     # always() is load-bearing: without a status check function Actions
     # implicitly prepends success(), and a skipped rerun_never_started is not
     # a success, so the condition below would never be evaluated.
@@ -355,6 +402,9 @@ jobs:
           ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
           ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
           STAND_DOWN: '${{ needs.analyze.outputs.stand_down }}'
+          RERUN_STAND_DOWN: '${{ needs.rerun_never_started.outputs.stand_down }}'
+          RERUN_OBSERVED_ATTEMPT: '${{ needs.rerun_never_started.outputs.observed_attempt }}'
+          RERUN_OBSERVED_CONCLUSION: '${{ needs.rerun_never_started.outputs.observed_conclusion }}'
           SEARCH_MARKER: '${{ needs.analyze.outputs.search_marker }}'
           AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
           BUG_LABEL: 'type/bug'
@@ -398,9 +448,22 @@ jobs:
               --add-assignee "${AUTOFIX_BOT}"
           }
 
+          # The route follows the attempt the re-run job OBSERVED: when its
+          # poll watched a later attempt end non-pass it re-derived the
+          # stand-down from that attempt's jobs, and the derivation — not
+          # analyze's attempt-1 class — decides. An empty override means no
+          # later attempt was observed (job skipped, superseded, the poll
+          # outlived its loop, or the re-fetch failed) and analyze's class
+          # stands.
+          if [[ -n "${RERUN_STAND_DOWN}" ]]; then
+            echo "::notice::The re-run was observed ending '${RERUN_OBSERVED_CONCLUSION}' on attempt ${RERUN_OBSERVED_ATTEMPT} — the route follows that attempt's re-derived class (stand_down=${RERUN_STAND_DOWN}), not attempt 1's"
+            STAND_DOWN="${RERUN_STAND_DOWN}"
+          fi
+
           body_file="${RUNNER_TEMP}/issue-body.md"
           printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
 
+          late_match=''
           if [[ -z "${EXISTING_ISSUE}" ]]; then
             # analyze's dedupe snapshot predates the re-run poll (up to the
             # poll's length), so a second watcher on this commit can have
@@ -414,16 +477,32 @@ jobs:
                 --json number \
                 --jq '.[0].number // ""'
             )"
+            # A number that came from this re-check names an issue this run
+            # never read — remember where it came from so the update branch
+            # below appends instead of overwriting.
+            late_match="${EXISTING_ISSUE:+true}"
           fi
 
           if [[ -n "${EXISTING_ISSUE}" ]]; then
-            # The title follows the CURRENT run's class and workflow: a class
-            # flip re-renders the body, and keeping the first filer's title
-            # would name one failure over prose describing another.
-            gh issue edit "${EXISTING_ISSUE}" \
-              --repo "${REPO}" \
-              --title "${ISSUE_TITLE}" \
-              --body-file "${body_file}"
+            if [[ "${late_match}" == 'true' ]]; then
+              # A number from the re-check names an issue THIS run never
+              # read: the body above was rendered before the lookup ran, so
+              # editing it in would overwrite the other filer's title, job
+              # list, run link and any notes with an unmerged render. Append
+              # this run's body as a comment instead — the route below still
+              # applies this run's class to the found issue.
+              gh issue comment "${EXISTING_ISSUE}" \
+                --repo "${REPO}" \
+                --body-file "${body_file}"
+            else
+              # The title follows the CURRENT run's class and workflow: a
+              # class flip re-renders the body, and keeping the first filer's
+              # title would name one failure over prose describing another.
+              gh issue edit "${EXISTING_ISSUE}" \
+                --repo "${REPO}" \
+                --title "${ISSUE_TITLE}" \
+                --body-file "${body_file}"
+            fi
             echo "Recorded this run on issue #${EXISTING_ISSUE}."
             apply_autofix_route "${EXISTING_ISSUE}"
             exit 0

@@ -121,10 +121,12 @@ describe('main CI failure issue workflow', () => {
     expect(download).toContain(
       'if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate > "${jobs_json}"; then echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}" fi',
     );
-    // Counted over the whole workflow: both projections read the file this one
-    // fetch wrote, so the payload must be fetched exactly once.
+    // Counted over the analyze step: both projections read the file this
+    // one fetch wrote, so the payload must be fetched exactly once. (The
+    // rerun job re-fetches the OBSERVED attempt's jobs after its poll — a
+    // separate fetch for a separate payload, pinned in the rerun test.)
     expect(
-      (workflow.match(/actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/jobs/g) ?? [])
+      (download.match(/actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/jobs/g) ?? [])
         .length,
     ).toBe(1);
     // The ids projection is bound to the array the download loop iterates and to
@@ -431,6 +433,20 @@ describe('main CI failure issue workflow', () => {
     expect(rerunRun).toMatch(
       /if \[\[ "\$\{superseded\}" != "0" \]\]; then[\s\S]*?exit 0\n[\s\S]*?fi\n[\s\S]*?gh api -X POST/,
     );
+    // The post-POST re-check cannot key on `queued` alone: the re-run's
+    // arrival cancels the group's previously pending run, and whether that
+    // run still reads `queued` when the re-check runs races the cancellation
+    // landing — once it reads `completed`/`cancelled`, a queued-only
+    // predicate misses the very displacement the re-check exists to name.
+    // The annotation query counts a newer same-event run still queued OR
+    // already cancelled; the PRE-POST gate keeps the queued-only predicate
+    // (a cancelled run cannot be displaced, so counting it there would
+    // suppress re-runs over nothing). Reverting the post-POST predicate to
+    // queued-only must red this pin.
+    const postPost = rerunRun.slice(rerunRun.indexOf('gh api -X POST'));
+    expect(postPost).toContain(
+      '.status == "queued" or .conclusion == "cancelled"',
+    );
     // The predicate counts only a run this re-run could actually DISPLACE:
     // one still queued in the same event-scoped concurrency group (e2e.yml
     // keys the group on workflow + event + ref). Counting any newer run
@@ -562,6 +578,101 @@ describe('main CI failure issue workflow', () => {
     expect(routeRun).not.toContain('AUTOFIX_SKIP_LABEL');
   });
 
+  it('routes the filing by the attempt the re-run poll observed, not attempt 1', () => {
+    // analyze classifies attempt 1, but the poll can watch attempt 2 end
+    // non-pass: a re-run that ran the suite and failed IS a commit-level
+    // failure, and routing it by attempt 1's fleet class rewrites the record
+    // to deny commit causation. The rerun step records what it observed and
+    // re-derives the stand-down from the observed attempt's jobs — with the
+    // same select terms analyze's projections use — and file_issue routes on
+    // that derivation instead of the stale attempt-1 binding. Removing the
+    // derivation (or the file_issue override) must red this test.
+    const rerun = jobs.rerun_never_started;
+    const rerunRun = String(rerun.steps[0].run);
+
+    // The observation is exported BEFORE the failing exit so file_issue's
+    // result-gate can read it through the job outputs.
+    const errorAt = rerunRun.lastIndexOf('::error::Re-run of');
+    const attemptExport = rerunRun.indexOf(
+      'echo "observed_attempt=${attempt}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(attemptExport).toBeGreaterThan(-1);
+    expect(attemptExport).toBeLessThan(errorAt);
+    expect(
+      rerunRun.indexOf(
+        'echo "observed_conclusion=${conclusion:-unknown}" >> "${GITHUB_OUTPUT}"',
+      ),
+    ).toBeGreaterThan(attemptExport);
+
+    // The derivation is gated on an OBSERVED later attempt and re-fetches
+    // that attempt's jobs…
+    const deriveAt = rerunRun.indexOf(
+      'echo "stand_down=${stand_down}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(deriveAt).toBeGreaterThan(attemptExport);
+    expect(deriveAt).toBeLessThan(errorAt);
+    const observed = rerunRun.slice(attemptExport, errorAt);
+    expect(observed).toContain(
+      '"${attempt}" -ge 2 && "${status}" == \'completed\'',
+    );
+    expect(observed).toContain(
+      'gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100"',
+    );
+    // …with the same select terms analyze's two projections use, so the two
+    // halves of the classifier cannot drift apart…
+    const download = String(
+      jobs.analyze.steps.find(
+        (step) => step.name === 'Download failed job logs',
+      ).run,
+    );
+    for (const term of [
+      '.conclusion != "success" and .conclusion != "skipped"',
+      '.name != "Set up job" and .name != "Complete job" and .conclusion != "skipped"',
+      'select(.conclusion == "failure")',
+    ]) {
+      expect(observed, term).toContain(term);
+      expect(download, term).toContain(term);
+    }
+    // …and the result crosses to file_issue through the job outputs, along
+    // with the observation itself so the filing's record says which attempt
+    // it routed on. The superseded output keeps its own pin in the test
+    // above.
+    expect(rerun.outputs.stand_down).toBe(
+      '${{ steps.rerun.outputs.stand_down }}',
+    );
+    expect(rerun.outputs.observed_attempt).toBe(
+      '${{ steps.rerun.outputs.observed_attempt }}',
+    );
+    expect(rerun.outputs.observed_conclusion).toBe(
+      '${{ steps.rerun.outputs.observed_conclusion }}',
+    );
+
+    // file_issue consumes the derivation INSTEAD of the stale attempt-1
+    // binding: the override sits before both route calls it feeds. Every
+    // non-pass outcome still files — the derivation changes the CLASS, never
+    // the fail-closed tail.
+    const env = jobs.file_issue.steps[0].env;
+    expect(env.RERUN_STAND_DOWN).toBe(
+      '${{ needs.rerun_never_started.outputs.stand_down }}',
+    );
+    expect(env.RERUN_OBSERVED_ATTEMPT).toBe(
+      '${{ needs.rerun_never_started.outputs.observed_attempt }}',
+    );
+    const fileRun = String(jobs.file_issue.steps[0].run);
+    const overrideAt = fileRun.indexOf('STAND_DOWN="${RERUN_STAND_DOWN}"');
+    expect(overrideAt).toBeGreaterThan(-1);
+    expect(
+      fileRun.indexOf('if [[ -n "${RERUN_STAND_DOWN}" ]]; then'),
+    ).toBeGreaterThan(-1);
+    expect(overrideAt).toBeLessThan(
+      fileRun.indexOf('apply_autofix_route "${EXISTING_ISSUE}"'),
+    );
+    expect(overrideAt).toBeLessThan(
+      fileRun.indexOf('apply_autofix_route "${issue_url}"'),
+    );
+    expect(rerunRun.trimEnd().endsWith('exit 1')).toBe(true);
+  });
+
   it('re-reads an existing issue so recorded recurrences survive the update', () => {
     expect(workflow).toContain('gh issue view "${existing_issue}"');
     expect(workflow).toContain('--existing "${existing_body}"');
@@ -607,6 +718,27 @@ describe('main CI failure issue workflow', () => {
     expect(routeRun.indexOf('if [[ -z "${EXISTING_ISSUE}" ]]')).toBeLessThan(
       routeRun.indexOf('gh issue create'),
     );
+    // A number the re-check produced names an issue THIS run never read: the
+    // body was rendered before the lookup ran and never merged the found
+    // body, so `gh issue edit --title --body-file` would overwrite the other
+    // filer's report — its job list, run link and any notes — with an
+    // unmerged render. The lookup branch records where the number came from,
+    // and on that path the update branch appends this run's body as a
+    // COMMENT, leaving the found issue's title and body alone; only an
+    // analyze-sourced number (whose body was re-planned with --existing) may
+    // reach the edit call. Deleting the late_match gate, or moving the edit
+    // ahead of the comment branch, must red this.
+    expect(lookup).toContain('late_match="${EXISTING_ISSUE:+true}"');
+    const updateBranch = routeRun.match(
+      /if \[\[ -n "\$\{EXISTING_ISSUE\}" \]\]; then(?<branch>[\s\S]*?)\nfi/,
+    )?.groups?.branch;
+    expect(updateBranch).toBeDefined();
+    expect(updateBranch).toMatch(
+      /if \[\[ "\$\{late_match\}" == 'true' \]\]; then[\s\S]*?gh issue comment "\$\{EXISTING_ISSUE\}"[\s\S]*?--body-file "\$\{body_file\}"[\s\S]*?else[\s\S]*?gh issue edit "\$\{EXISTING_ISSUE\}"[\s\S]*?--title "\$\{ISSUE_TITLE\}"[\s\S]*?--body-file "\$\{body_file\}"/,
+    );
+    // The route call stays on both paths: this run's class decision is
+    // applied to the found issue either way.
+    expect(updateBranch).toContain('apply_autofix_route "${EXISTING_ISSUE}"');
   });
 
   it('uses a random heredoc delimiter for the multiline body output', () => {
