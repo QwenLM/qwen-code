@@ -75,6 +75,24 @@ P_OUT=4 CACHE_RATIO=0.2 node docs/verification/batch-api/02-cache.mjs
 应看到 stderr 打出 `[batch] submitted batch_xxx`，等待后正常完成一轮工具调用。
 TUI 下 `--batch` 会被 `.check()` 拒绝；QWEN_OAUTH 下会在第一次请求时报错。
 
+## 本地回归（不花钱、不联网）
+
+`fake-dashscope.mjs` 是一个假的百炼兼容服务（`/files`、`/batches`、`/batches/:id/cancel`、
+`/files/:id/content`、`/chat/completions`），按场景推进 batch 状态并记录每条请求；
+`regression.sh` 驱动**真实 CLI 进程**跑完 happy / tools / failed / slow / stuck 五个场景，
+断言退出码、stdout 与请求序列：
+
+```sh
+bash docs/verification/batch-api/regression.sh   # 约 5 分钟，26 条断言
+```
+
+覆盖：submit 只创建一个 batch（不被内存重启重复提交）、四个子命令退出码为 0 且不掉进主流程、
+鉴权门禁、`--batch` 对 `-i` 的拒绝、`--batch` 两跳工具调用端到端、失败时透出服务端原因且不重试、
+未 settle 时拒绝 fetch、SIGINT 触发服务端 cancel。
+
+它证明的是 qwen-code 这一侧的进程行为，**不能**替代上面三个线上探针——百炼是否接受这些请求、
+工具调用能否穿过 batch body、batch 内是否命中缓存，只有真打接口才知道。
+
 ## 判定
 
 | 01   | 02   | 结论                                                 |

@@ -916,13 +916,17 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
       result._[0] === 'board' ||
+      result._[0] === 'batch' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
     // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
-    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
-    // execution and exit. Returning here would let the main interactive
+    // MCP/Extensions/Auth/Hooks/Channel/Review/Batch commands handle their own
+    // execution and exit. `batch` must be here for a second reason: the main
+    // flow below relaunches the process for a larger heap, and a second parse
+    // would run the subcommand handler again — submitting (and billing) a
+    // duplicate batch job whose id the user never sees. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
     process.exit(process.exitCode ?? 0);

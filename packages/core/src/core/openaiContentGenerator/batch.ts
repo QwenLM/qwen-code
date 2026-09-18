@@ -50,6 +50,59 @@ async function readLines(
 }
 
 /**
+ * First error message in a batch's error file, or undefined when there is no
+ * error file or it cannot be read — a download failure must not mask the
+ * batch status the caller is about to report.
+ */
+async function failureDetail(
+  client: OpenAI,
+  errorFileId: string | null | undefined,
+): Promise<string | undefined> {
+  try {
+    const [failure] = await readLines(client, errorFileId);
+    return (
+      failure?.error?.message ??
+      (failure?.response?.body as { error?: { message?: string } } | undefined)
+        ?.error?.message
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Upload the single-line JSONL input file and return the created file id.
+ *
+ * Not `client.files.create`: the SDK rejects multipart whenever the client
+ * carries a custom `fetch`, and every Node run installs one (undici's fetch,
+ * pinned to the timeout-free dispatcher in runtimeFetchOptions.ts). The SDK
+ * probes support by serializing a global `FormData` through that fetch's
+ * `Response` class, gets back "[object FormData]", and throws "The provided
+ * fetch function does not support file uploads". The global fetch used here
+ * takes the same route `qwen batch submit` already uses.
+ */
+async function uploadInputFile(
+  client: OpenAI,
+  jsonl: string,
+  signal?: AbortSignal,
+): Promise<{ id: string }> {
+  const form = new FormData();
+  form.append('purpose', 'batch');
+  form.append('file', new File([jsonl], 'turn.jsonl'));
+  const res = await fetch(`${client.baseURL.replace(/\/+$/, '')}/files`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${client.apiKey}` },
+    body: form,
+    signal,
+  });
+  if (!res.ok) {
+    const detail = (await res.text()).slice(0, 500);
+    throw new Error(`POST /files -> HTTP ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as { id: string };
+}
+
+/**
  * Run one chat-completions request through the OpenAI-compatible Batch API:
  * upload a single-line JSONL, create the batch, poll until it settles, read
  * the output file. Batch has no streaming, so `stream` is stripped and the
@@ -70,10 +123,7 @@ export async function runBatchCompletion(
     url: '/v1/chat/completions',
     body,
   });
-  const file = await client.files.create(
-    { file: new File([line + '\n'], 'turn.jsonl'), purpose: 'batch' },
-    { signal },
-  );
+  const file = await uploadInputFile(client, line + '\n', signal);
   const fileIds = [file.id];
   let batch = await client.batches.create(
     {
@@ -100,15 +150,20 @@ export async function runBatchCompletion(
     if (batch.output_file_id) fileIds.push(batch.output_file_id);
     if (batch.error_file_id) fileIds.push(batch.error_file_id);
     if (batch.status !== 'completed') {
-      throw new Error(`Batch ${batch.id} ${batch.status}`);
+      // Read the error file before `finally` deletes it: a settled-but-failed
+      // batch carries its reason only there, and a bare "failed" leaves
+      // nothing to debug with once the remote file is gone.
+      const detail = await failureDetail(client, batch.error_file_id);
+      throw new Error(
+        `Batch ${batch.id} ${batch.status}${detail ? `: ${detail}` : ''}`,
+      );
     }
     const [output] = await readLines(client, batch.output_file_id);
     if (output?.response?.status_code === 200) {
       return output.response.body as OpenAI.Chat.ChatCompletion;
     }
-    const [failure] = await readLines(client, batch.error_file_id);
     const detail =
-      failure?.error?.message ??
+      (await failureDetail(client, batch.error_file_id)) ??
       output?.error?.message ??
       (output?.response?.body as { error?: { message?: string } } | undefined)
         ?.error?.message ??

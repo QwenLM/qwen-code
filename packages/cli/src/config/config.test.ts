@@ -896,6 +896,20 @@ describe('parseArguments', () => {
     expect(argv.batch).toBe(true);
   });
 
+  it('exits after a `batch` subcommand instead of falling through to the main flow', async () => {
+    // Falling through would reach the memory relaunch, whose child parses argv
+    // again and would submit (and bill) a second batch job.
+    process.argv = ['node', 'script.js', 'batch', 'status', 'batch_x'];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    mockExit.mockRestore();
+  });
+
   it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
     // True interactive invocation with no prompt anywhere → fail fast.
     process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
