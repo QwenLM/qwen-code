@@ -491,6 +491,7 @@ export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
+export * from './agents/workflow-checkpoint.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
