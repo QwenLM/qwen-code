@@ -524,6 +524,28 @@ describe('release workflow', () => {
       .filter((name) => name !== 'base')
       .sort();
     expect(published).toEqual(guarded);
+
+    // Non-channel packages are literal calls, so verify those against the
+    // guard too. Resolve their names from package.json to avoid a second map.
+    const publishStep = releaseStepScript.slice(
+      releaseStepScript.indexOf('\n  publish-packages)'),
+      releaseStepScript.indexOf('\n  verify-archives)'),
+    );
+    const literalTargets = [
+      ...publishStep.matchAll(/publish_package '([^']+)'/g),
+    ].map(([, directory]) => directory);
+    expect(literalTargets.length).toBeGreaterThan(1);
+    const guardedNames = new Set(PUBLISHED_PACKAGES);
+    for (const directory of literalTargets) {
+      // `dist` is the root package's bundle output rather than a workspace
+      // directory, and does not exist in a source checkout.
+      const manifest =
+        directory === 'dist' ? 'package.json' : `${directory}/package.json`;
+      const { name } = JSON.parse(readFileSync(manifest, 'utf8'));
+      expect(guardedNames.has(name), `${directory} publishes ${name}`).toBe(
+        true,
+      );
+    }
   });
 
   it('keeps the workflow focused on orchestration', () => {
@@ -598,6 +620,7 @@ describe('release workflow', () => {
       mkdirSync(bin);
       for (const path of [
         'dist',
+        'packages/web-shell',
         'packages/channels/base',
         ...channels.map((channel) => `packages/channels/${channel}`),
       ]) {
@@ -643,12 +666,13 @@ describe('release workflow', () => {
         expect(publishCalls.map(([cwd]) => cwd)).toEqual([
           join(canonicalDirectory, 'dist'),
           join(canonicalDirectory, 'packages/channels/base'),
+          join(canonicalDirectory, 'packages/web-shell'),
         ]);
         // The dist-tag is the reason NPM_TAG is set in this child env at all.
         // Without it `npm publish` defaults to `latest`, so the 21:00 UTC
         // nightly would take over the tag every end-user install and the ECS
         // fleet updater resolve through. `--access public` is here for the
-        // same reason: one array feeds all twelve published packages.
+        // same reason: one array feeds all thirteen published packages.
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
           expect(args, cwd).toContain('--tag=latest');
