@@ -7,7 +7,6 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   HELD_EXPIRY_OPTIONS,
@@ -360,14 +359,16 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
-    it('should keep cross-session messaging off by default', () => {
-      // The default is the entire security posture of the feature: shipping
-      // it flipped on would open every session on the box to peer messages.
+    it('should keep cross-session messaging on by default', () => {
+      // On by default since docs/design/2026-09-14-cross-session-messaging-default-on.md.
+      // This value is not what bounds a peer: the inbound gate is (review-class
+      // parity, an explicit hold or refuse), with the tighten-only workspace
+      // ranking and the per-session inbox token around it.
       const crossSessionMessaging =
         getSettingsSchema().agents.properties.crossSessionMessaging;
 
       expect(crossSessionMessaging.type).toBe('boolean');
-      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.default).toBe(true);
       expect(crossSessionMessaging.requiresRestart).toBe(true);
       expect(crossSessionMessaging.showInDialog).toBe(false);
     });
@@ -445,7 +446,8 @@ describe('SettingsSchema', () => {
       expect(timeout.category).toBe('Model');
       expect(timeout.default).toBeUndefined();
       expect(timeout.minimum).toBe(1);
-      expect(timeout.maximum).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP);
+      expect(timeout.maximum).toBe(900);
+      expect(timeout.description).toMatch(/^Deprecated\./);
       expect(timeout.requiresRestart).toBe(false);
       expect(timeout.showInDialog).toBe(false);
     });

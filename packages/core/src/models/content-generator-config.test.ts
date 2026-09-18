@@ -491,8 +491,8 @@ describe('buildAgentContentGeneratorConfig', () => {
       const config = createMockConfig(parentConfig, {
         capabilities: {
           reasoning: {
-            thinking: true,
-            disableField: 'reasoning_effort',
+            profile: 'openai-effort',
+            defaultEffort: 'high',
             efforts: ['low', 'medium', 'high'],
           },
         },

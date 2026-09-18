@@ -119,14 +119,11 @@ describe('review runner schedule', () => {
 // The planner's own entry path, driven through a fake `gh` that logs every
 // label call and serves PROBE_RUNNERS as the runner listing.
 const writeFakeGh = (dir) => {
-  writeFileSync(
-    join(dir, 'package.json'),
-    JSON.stringify({ type: 'commonjs' }),
-  );
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
   writeFileSync(
     join(dir, 'gh'),
     `#!/usr/bin/env node
-const fs = require('node:fs');
+import fs from 'node:fs';
 const args = process.argv.slice(2);
 const method = args[args.indexOf('--method') + 1];
 if (!args.includes('--method')) {

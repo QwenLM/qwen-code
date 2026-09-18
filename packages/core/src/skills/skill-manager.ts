@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -628,7 +629,7 @@ export class SkillManager {
   stopWatching(): void {
     debugLogger.info('Stopping skill directory watchers...');
     for (const watcher of this.watchers.values()) {
-      void watcher.close().catch((error) => {
+      void closeFileWatcher(watcher).catch((error) => {
         debugLogger.warn('Failed to close skills watcher:', error);
       });
     }
@@ -1242,15 +1243,14 @@ export class SkillManager {
 
     for (const existingPath of this.watchers.keys()) {
       if (!watchTargets.has(existingPath)) {
-        void this.watchers
-          .get(existingPath)
-          ?.close()
-          .catch((error) => {
+        void closeFileWatcher(this.watchers.get(existingPath)).catch(
+          (error) => {
             debugLogger.warn(
               `Failed to close skills watcher for ${existingPath}:`,
               error,
             );
-          });
+          },
+        );
         this.watchers.delete(existingPath);
       }
     }
