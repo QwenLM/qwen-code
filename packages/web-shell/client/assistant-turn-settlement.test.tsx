@@ -45,6 +45,7 @@ function assistantBlock(
     promptId?: string;
     parentToolCallId?: string;
     streaming?: boolean;
+    meta?: { source?: string };
   } = {},
 ): DaemonTranscriptBlock {
   return {
@@ -183,6 +184,89 @@ describe('assistant turn settlement projection', () => {
     expect(settled.message).toMatchObject({
       id: 'assistant-1',
       content: 'Delegating now.',
+    });
+  });
+
+  it('does not publish a prompt-stamped vision bridge notice as the turn answer', () => {
+    // `emitVisionBridgeNotice` sends `role: 'assistant'` with
+    // `qwenDiscreteMessage: true`, so the notice survives as its own top-level
+    // assistant block and the bridge stamps it with this prompt's id. The
+    // renderer shows it as a `role: 'system'` notice, never as the answer, so
+    // it must not win the backward scan — dropping either `meta.source` term
+    // from the guard turns this red.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-live',
+      }),
+      assistantBlock('notice-2', 'Vision bridge: converted 1 image', {
+        promptId: 'prompt-live',
+        meta: { source: 'vision_bridge_notice' },
+      }),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
+    });
+
+    // A turn that ends before the model produces any assistant text (cancel
+    // right after the notice, `max_tokens` with no stream, hard `turn_error`)
+    // leaves the notice as the only stamped block. Publishing it would certify
+    // a system notice as an answer that never existed, uncorrectably.
+    cleanupReact();
+    published = [];
+    harness.blocks = [
+      assistantBlock('notice-1', 'Vision bridge: converted 1 image', {
+        promptId: 'prompt-live',
+        meta: { source: 'vision_bridge_notice' },
+      }),
+    ];
+
+    const noticeOnly = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'cancelled',
+      stopReason: 'cancelled',
+    });
+
+    expect(noticeOnly).not.toHaveProperty('message');
+  });
+
+  it('does not publish a prompt-stamped background notification as the turn answer', () => {
+    // The inline drain of `#takeCurrentTurnBackgroundParts` runs inside the
+    // foreground turn, so `bridgeClient` stamps the summary with the
+    // foreground prompt's id even though it renders as a system notice.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'The answer is 42.', {
+        promptId: 'prompt-live',
+      }),
+      assistantBlock('assistant-2', 'Background task finished', {
+        promptId: 'prompt-live',
+        meta: { source: 'background_notification' },
+      }),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'The answer is 42.',
+      isStreaming: false,
+      timestamp: 1,
     });
   });
 

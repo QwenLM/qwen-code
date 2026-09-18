@@ -43,13 +43,21 @@ function getSettledAssistantMessage(
     const block = blocks[index];
     // A subagent block belongs to its parent tool call; an unstamped block
     // belongs to a turn that never crossed the `session/prompt` boundary
-    // setting `entry.activePromptId` (goal-runtime, background notification) or
-    // to restored history, which is unstamped by construction; a block stamped
-    // with another prompt id belongs to that prompt. None is this answer.
+    // setting `entry.activePromptId` (goal-runtime) or to restored history,
+    // which is unstamped by construction; a block stamped with another prompt
+    // id belongs to that prompt. A notice this package renders as
+    // `role: 'system'` is not an answer either, even though the bridge stamps
+    // it with the foreground prompt's id: an inline background-notification
+    // drain and the pre-model vision-bridge notice both are. That exclusion set
+    // is the sibling implementation's, not the SDK's — the SDK's
+    // `findFinalVisibleAssistantForPrompt` has no `meta.source` term
+    // (`turn-notification-context.ts` does). None is this answer.
     if (
       block?.kind !== 'assistant' ||
       block.parentToolCallId !== undefined ||
-      block.promptId !== promptId
+      block.promptId !== promptId ||
+      block.meta?.source === 'background_notification' ||
+      block.meta?.source === 'vision_bridge_notice'
     ) {
       continue;
     }
