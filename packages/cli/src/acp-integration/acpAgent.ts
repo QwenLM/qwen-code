@@ -5665,13 +5665,26 @@ class QwenAgent implements Agent {
             // live session's Goal is already published, so the only thing
             // to append is the card that supersedes a running legacy card
             // the page ended on. Nothing, for any transcript this build
-            // wrote.
-            const goalUpdates = liveSession.renderLegacyGoalSupersession(
-              replayPage.records,
-            );
+            // wrote. A partial replay gets nothing either: the page did not
+            // end where the transcript does. The card is presentation, so
+            // failing to render it is logged, never a failed load.
+            let goalUpdates: SessionUpdate[] = [];
+            if (replay.replayError === undefined) {
+              try {
+                goalUpdates = liveSession.renderLegacyGoalSupersession(
+                  replayPage.records,
+                );
+              } catch (error) {
+                debugLogger.debug(
+                  `Failed to render the legacy Goal supersession: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              }
+            }
             if (!bulkReplay) {
               try {
-                for (const update of [...replay.updates, ...goalUpdates]) {
+                for (const update of replay.updates) {
                   await liveSession.sendUpdate(update);
                 }
               } finally {
@@ -5686,12 +5699,24 @@ class QwenAgent implements Agent {
               if (replay.replayError !== undefined) {
                 throw RequestError.internalError(undefined, replay.replayError);
               }
+              for (const update of goalUpdates) {
+                try {
+                  await liveSession.sendUpdate(update);
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to send the legacy Goal supersession: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
+              }
               return withRestoreHint(liveSession, response);
             }
 
+            const enforceLimits = restoreOptions.replay.kind === 'recent';
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
-              updates: [...replay.updates, ...goalUpdates],
+              updates: replay.updates,
               ...(replayPage.anchorRecordId
                 ? { anchorRecordId: replayPage.anchorRecordId }
                 : {}),
@@ -5703,11 +5728,25 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
-            validateLoadReplayEnvelope(
-              sessionId,
-              envelope,
-              restoreOptions.replay.kind === 'recent',
-            );
+            validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
+            if (goalUpdates.length > 0) {
+              // The page was cut to the limits before the card existed; a
+              // page already at a limit ships without the card rather than
+              // failing the load over it.
+              const withGoal = {
+                ...envelope,
+                updates: [...envelope.updates, ...goalUpdates],
+              };
+              try {
+                validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
+                envelope.updates = withGoal.updates;
+              } catch (error) {
+                if (!(error instanceof HistoryReplayLimitError)) throw error;
+                debugLogger.debug(
+                  `Dropped the legacy Goal supersession from a full replay page: ${error.message}`,
+                );
+              }
+            }
             return withRestoreHint(liveSession, {
               ...response,
               _meta: {

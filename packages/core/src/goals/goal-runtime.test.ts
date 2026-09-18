@@ -3534,6 +3534,53 @@ describe('goal runtime', () => {
     });
   });
 
+  it('treats a record whose blockedAudit does not parse as unreadable, and blocks writes', async () => {
+    // Everything `prepareRestore` reads comes out of
+    // `parseGoalStateRecordPayloadV2`, which rejects the whole record when
+    // any part of it is malformed; there is no partially parsed record
+    // for the restore to trip over, so a malformed audit is the
+    // unsupported case, not an exception.
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-audit',
+          revision: 3,
+          objective: 'ship it',
+          status: 'paused',
+          evidenceCursor: { recordId: 'restore-record' },
+          turnCount: 3,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+      'blocked',
+    );
+    const malformedAudit: RuntimeRecord = {
+      ...record,
+      systemPayload: {
+        ...(record.systemPayload as Record<string, unknown>),
+        blockedAudit: { fingerprint: 42, count: 3, turnIds: ['t1'] },
+      },
+    };
+
+    await expect(runtime.restore([malformedAudit])).rejects.toThrow(
+      GoalPersistenceUnavailableError,
+    );
+    await expect(
+      runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
+    ).rejects.toThrow(GoalPersistenceUnavailableError);
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(journal.appended).toEqual([]);
+  });
+
   it('refuses a restore preparation that was still queued when the runtime was disposed', async () => {
     // A restore itself writes nothing, but it queues behind whatever the
     // runtime is already doing. Disposal while it waits must reach it

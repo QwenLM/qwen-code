@@ -1185,6 +1185,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  LOAD_REPLAY_MAX_UPDATES,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
@@ -29588,6 +29589,91 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       replayUpdate,
       supersession,
     ]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('live load keeps the legacy Goal supersession off a partial replay and a full page, and survives it failing', async () => {
+    const initialMessages = [{ role: 'user', parts: [{ text: 'first' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: initialMessages },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock!;
+    const supersession = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalStatus: { kind: 'cleared', condition: 'old goal', iterations: 1 },
+      },
+    };
+    firstSession.renderLegacyGoalSupersession.mockReturnValue([supersession]);
+    const replayUpdate = { sessionUpdate: 'agent_message_chunk' };
+
+    // A partial replay: the page did not end where the transcript does, so
+    // the card that supersedes its last record has nothing to supersede.
+    mockHistoryReplay.mockImplementation(async (context) => {
+      await context.sendUpdate(replayUpdate);
+      throw new Error('replay boom');
+    });
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).rejects.toThrow('replay boom');
+    expect(firstSession.renderLegacyGoalSupersession).not.toHaveBeenCalled();
+    expect(
+      firstSession.sendUpdate.mock.calls.map(([update]) => update),
+    ).toEqual([replayUpdate]);
+
+    // A page already at the update limit ships without the card rather
+    // than failing the load over it.
+    mockHistoryReplay.mockImplementation(async (context) => {
+      for (let index = 0; index < LOAD_REPLAY_MAX_UPDATES; index += 1) {
+        await context.sendUpdate(replayUpdate);
+      }
+    });
+    const full = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+        'qwen.session.loadReplayPageSize': 50,
+      },
+    })) as LoadSessionResponse & {
+      _meta?: Record<string, { updates: unknown[] }>;
+    };
+    expect(firstSession.renderLegacyGoalSupersession).toHaveBeenCalledTimes(1);
+    const fullUpdates = full._meta?.['qwen.session.loadReplay']?.updates ?? [];
+    expect(fullUpdates).toHaveLength(LOAD_REPLAY_MAX_UPDATES);
+    expect(fullUpdates.at(-1)).toBe(replayUpdate);
+
+    // The card is presentation: failing to render it is not a failed load.
+    firstSession.renderLegacyGoalSupersession.mockImplementation(() => {
+      throw new Error('runtime gone');
+    });
+    firstSession.sendUpdate.mockClear();
+    mockHistoryReplay.mockImplementation(async (context) => {
+      await context.sendUpdate(replayUpdate);
+    });
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    expect(
+      firstSession.sendUpdate.mock.calls.map(([update]) => update),
+    ).toEqual([replayUpdate]);
 
     mockConnectionState.resolve();
     await agentPromise;
