@@ -198,6 +198,31 @@ describe('runBatchCompletion', () => {
     expect(client.batches.create).not.toHaveBeenCalled();
   });
 
+  it('deletes the uploaded input file when `batches.create` fails', async () => {
+    // The file is already uploaded — and billed — by the time create runs, so
+    // a create failure must not orphan it.
+    client.batches.create.mockRejectedValue(new Error('quota exceeded'));
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow('quota exceeded');
+    expect(client.files.delete).toHaveBeenCalledWith('file-in');
+    expect(client.batches.cancel).not.toHaveBeenCalled();
+  });
+
+  it('reports the abort and cleans up when aborted during create', async () => {
+    const ac = new AbortController();
+    client.batches.create.mockImplementation(async () => {
+      ac.abort();
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    });
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, ac.signal, 0),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(client.files.delete).toHaveBeenCalledWith('file-in');
+    // No batch exists to cancel.
+    expect(client.batches.cancel).not.toHaveBeenCalled();
+  });
+
   it('cancels the batch and throws an AbortError when aborted while waiting', async () => {
     client.batches.create.mockResolvedValue({
       id: 'b4',

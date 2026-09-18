@@ -80,6 +80,12 @@ async function failureDetail(
  * `Response` class, gets back "[object FormData]", and throws "The provided
  * fetch function does not support file uploads". The global fetch used here
  * takes the same route `qwen batch submit` already uses.
+ *
+ * Costs of the bypass: no `maxRetries`, no proxy/`QWEN_TLS_INSECURE`
+ * dispatcher, no SDK default or user `customHeaders`, and a hand-formatted
+ * error instead of a typed `APIError`. Deliberate — it keeps this line for
+ * line consistent with the `qwen batch submit` uploader in
+ * packages/cli/src/commands/batch.ts, so both halves fail the same way.
  */
 async function uploadInputFile(
   client: OpenAI,
@@ -125,23 +131,28 @@ export async function runBatchCompletion(
   });
   const file = await uploadInputFile(client, line + '\n', signal);
   const fileIds = [file.id];
-  let batch = await client.batches.create(
-    {
-      input_file_id: file.id,
-      endpoint: '/v1/chat/completions',
-      completion_window: '24h',
-    },
-    { signal },
-  );
-  // Written to stderr, not only debug-logged: if this process dies mid-wait
-  // the id is the only handle left (`qwen batch fetch <id>`).
-  const dueBy = batch.expires_at
-    ? new Date(batch.expires_at * 1000).toISOString()
-    : 'unknown';
-  process.stderr.write(
-    `[batch] submitted ${batch.id}; results due by ${dueBy}\n`,
-  );
+  // Declared outside the `try` because `create` is inside it: the `finally`
+  // must also cover a failed `create`, or the already-uploaded (and billed)
+  // input file is orphaned, and the `catch` needs to tell "create threw"
+  // (nothing to cancel) from "polling threw" without hitting a TDZ.
+  let batch: Awaited<ReturnType<typeof client.batches.create>> | undefined;
   try {
+    batch = await client.batches.create(
+      {
+        input_file_id: file.id,
+        endpoint: '/v1/chat/completions',
+        completion_window: '24h',
+      },
+      { signal },
+    );
+    // Written to stderr, not only debug-logged: if this process dies mid-wait
+    // the id is the only handle left (`qwen batch fetch <id>`).
+    const dueBy = batch.expires_at
+      ? new Date(batch.expires_at * 1000).toISOString()
+      : 'unknown';
+    process.stderr.write(
+      `[batch] submitted ${batch.id}; results due by ${dueBy}\n`,
+    );
     while (!SETTLED.has(batch.status)) {
       await sleep(pollMs, signal);
       batch = await client.batches.retrieve(batch.id, { signal });
@@ -170,7 +181,7 @@ export async function runBatchCompletion(
       'no output';
     throw new Error(`Batch ${batch.id} request failed: ${detail}`);
   } catch (error) {
-    if (signal?.aborted && !SETTLED.has(batch.status)) {
+    if (signal?.aborted && batch && !SETTLED.has(batch.status)) {
       await client.batches.cancel(batch.id).catch(() => undefined);
     }
     throw error;
