@@ -1455,6 +1455,7 @@ interface AppProps extends WebShellProps {
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
+    getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     approvalMode?: string;
     sourceType?: string;
@@ -3639,6 +3640,8 @@ export function App({
   >(initialSelectedWorkspaceCwd);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
+  const lockedWorkspaceCwdRef = useRef(lockedWorkspaceCwd);
+  lockedWorkspaceCwdRef.current = lockedWorkspaceCwd;
   const resolveWorkspaceMaintenanceTargetCwd = useCallback(() => {
     const preferredCwd = lockedWorkspaceCwd ?? selectedWorkspaceCwdRef.current;
     if (preferredCwd) {
@@ -9735,6 +9738,25 @@ export function App({
   useEffect(() => {
     if (mainView !== 'goals') strandedGoalSessionRef.current = undefined;
   }, [mainView]);
+  const getComposerWorkspaceCwd = useCallback(() => {
+    const productContext =
+      pendingSessionContextRef.current ?? connectionRef.current.sessionContext;
+    if (productContext && productContext.kind !== 'workspace') {
+      return undefined;
+    }
+    if (connectionRef.current.sessionId) {
+      return productContext?.kind === 'workspace'
+        ? productContext.cwd
+        : connectionRef.current.workspaceCwd;
+    }
+    return (
+      workspacesRef.current.find(
+        (entry) => entry.cwd === lockedWorkspaceCwdRef.current,
+      )?.cwd ??
+      selectedWorkspaceCwdRef.current ??
+      workspacesRef.current.find((entry) => entry.primary)?.cwd
+    );
+  }, []);
   const ensureSessionForPrompt = useCallback(() => {
     const currentSessionId = connectionRef.current.sessionId;
     if (createSessionPromiseRef.current) {
@@ -9866,6 +9888,7 @@ export function App({
             }
           },
           getCurrentSessionId: () => connectionRef.current.sessionId,
+          getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
         }).then((result) => {
           if (pendingManualTitleRef.current === pendingManualTitle) {
             pendingManualTitleRef.current = undefined;
@@ -9911,6 +9934,7 @@ export function App({
     void promise.then(clearPreparation, clearPreparation);
     return promise;
   }, [
+    getComposerWorkspaceCwd,
     lockedWorkspaceCwd,
     sessionActions,
     sessionCatalogController,
@@ -9923,24 +9947,6 @@ export function App({
   prepareSubmitRef.current = prepareSubmit;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
-  const getComposerWorkspaceCwd = useCallback(() => {
-    const productContext =
-      pendingSessionContextRef.current ?? connectionRef.current.sessionContext;
-    if (productContext && productContext.kind !== 'workspace') {
-      return undefined;
-    }
-    if (connectionRef.current.sessionId) {
-      return productContext?.kind === 'workspace'
-        ? productContext.cwd
-        : connectionRef.current.workspaceCwd;
-    }
-    return (
-      workspacesRef.current.find((entry) => entry.cwd === lockedWorkspaceCwd)
-        ?.cwd ??
-      selectedWorkspaceCwdRef.current ??
-      workspacesRef.current.find((entry) => entry.primary)?.cwd
-    );
-  }, [lockedWorkspaceCwd]);
   const retryOwnerIsCurrent = useCallback(
     (owner: CancelledRetryOwner) =>
       retryOwnerMatchesCurrent(
@@ -10347,7 +10353,10 @@ export function App({
         pendingManualTitleRef.current = undefined;
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
-        ).createSession({ workspaceCwd: cwd });
+        ).createSession({
+          workspaceCwd: cwd,
+          getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
+        });
         sessionCatalogController.sessionCreated(cwd, result.sessionId);
         return result.sessionId;
       } catch {
@@ -10355,6 +10364,7 @@ export function App({
       }
     },
     [
+      getComposerWorkspaceCwd,
       connection.sessionId,
       activeWorkspaceCwd,
       sessionCatalogController,
