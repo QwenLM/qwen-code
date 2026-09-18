@@ -68,6 +68,14 @@ const SESSION_RECORDING_DEGRADED_MESSAGE =
 
 const ATTACHMENT_UNAVAILABLE_TEXT = '[Attachment is no longer available]';
 
+// Wire close-reason tokens are internal identifiers; render known ones as
+// copy and never echo an unknown token into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
+
 export function normalizeDaemonEvent(
   event: DaemonEvent,
   opts: NormalizeDaemonEventOptions = {},
@@ -153,7 +161,9 @@ export function normalizeDaemonEvent(
           text:
             getString(event.data, 'cause') === 'workspace_runtime_stop'
               ? 'Workspace runtime stopped.'
-              : `Session closed: ${getString(event.data, 'reason') ?? 'closed'}`,
+              : (SESSION_CLOSED_REASON_COPY[
+                  getString(event.data, 'reason') ?? ''
+                ] ?? 'Session closed'),
         },
       ];
     case 'session_recording_degraded': {

@@ -51,4 +51,14 @@ describe('workspace runtime stop terminal events', () => {
       }),
     ]);
   });
+  it('renders an ordinary close without leaking the wire reason token', () => {
+    const frame = terminal();
+    delete (frame.data as Record<string, unknown>).persistenceUnconfirmed;
+    delete (frame.data as Record<string, unknown>).cause;
+    const events = normalizeDaemonEvent(frame);
+    expect(events).toEqual([
+      expect.objectContaining({ type: 'status', text: 'Session closed' }),
+    ]);
+    expect(JSON.stringify(events)).not.toContain('client_close');
+  });
 });
