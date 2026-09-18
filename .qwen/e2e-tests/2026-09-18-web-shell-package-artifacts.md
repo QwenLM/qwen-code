@@ -6,7 +6,8 @@ Issue: #12185
 
 1. Build `@qwen-code/web-shell` from upstream `main` through declaration emit, before any alias-rewrite step.
 2. Confirm emitted declarations under `packages/web-shell/dist/types` contain repository-only `@/` specifiers.
-3. Confirm the six runtime dependencies named in #12185 are not externalized by the upstream library config.
+3. Confirm `verify:package` rejects that unrevised declaration output.
+4. Confirm the six runtime dependencies named in #12185 are not externalized by the upstream library config.
 
 ## Fixed behavior
 
