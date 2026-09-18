@@ -804,6 +804,73 @@ describe('WorkflowRunner', () => {
     }
   });
 
+  // A fresh run's `launched` record is queued without being awaited. A start
+  // cancelled while it is still in flight fails on the next synchronous check
+  // and removes the journal; the removal has to wait for that append, or the
+  // append lands afterwards and leaves a run id that never registered with a
+  // non-empty journal, which a later resume would accept.
+  it('leaves no journal behind when a start is cancelled with its launch record in flight', async () => {
+    const { config, registry } = configWithRegistry();
+    const root = await makeStorageRoot();
+    stubStorage(config, root);
+    resolveSavedWorkflowScriptMock.mockResolvedValueOnce({
+      name: 'audit',
+      savedWorkflowName: 'audit',
+      scriptPath: '/tmp/audit.js',
+      script: 'return await agent("work")',
+    });
+    // The real append, a beat late, so it is still in flight when the start
+    // fails and cleans up.
+    const { writeLine } = await vi.importActual<
+      typeof import('../../utils/jsonl-utils.js')
+    >('../../utils/jsonl-utils.js');
+    let appendSettled!: () => void;
+    const appended = new Promise<void>((resolve) => {
+      appendSettled = resolve;
+    });
+    writeLineMock.mockImplementation(async (file: string, entry: unknown) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      try {
+        await writeLine(file, entry);
+      } finally {
+        appendSettled();
+      }
+    });
+    // The cancel lands while the journal is being created, so the launch
+    // record is queued and the very next check fails the start.
+    const ensureExists = WorkflowJournal.prototype.ensureExists;
+    vi.spyOn(WorkflowJournal.prototype, 'ensureExists').mockImplementationOnce(
+      async function (this: WorkflowJournal) {
+        const created = await ensureExists.call(this);
+        registry.abortAll();
+        return created;
+      },
+    );
+    const dispatch = vi.fn(async () => 'live');
+
+    await expect(
+      WorkflowRunner.start({
+        config,
+        signal: new AbortController().signal,
+        scriptPath: '/tmp/audit.js',
+        args: undefined,
+        runInBackground: true,
+        dispatch,
+      }),
+    ).rejects.toThrow('Workflow start was cancelled.');
+    await appended;
+
+    // The launch record was really written; it just must not outlive the
+    // cleanup.
+    expect(writeLineMock).toHaveBeenCalledTimes(1);
+    expect(writeLineMock.mock.calls[0][1]).toEqual({
+      type: 'launched',
+      version: 1,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    await expect(fs.readdir(root)).resolves.toEqual([]);
+  });
+
   it('rejects a cancellation that lands while the inline script is persisted', async () => {
     const { config, registry } = configWithRegistry();
     const root = await makeStorageRoot();

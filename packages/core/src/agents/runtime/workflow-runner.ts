@@ -414,9 +414,11 @@ export class WorkflowRunner {
       }
       // Queued before anything else so the journal of a run that launched is
       // never empty: a later resume can then tell a run interrupted before its
-      // first result from one whose journal is gone. Not awaited, like every
-      // other journal write on the start path: appends are serialized, so it
-      // still lands first, and a slow disk must not hold the launch.
+      // first result from one whose journal is gone. Not awaited, so a slow
+      // disk does not hold the launch: appends are serialized, so it still
+      // lands before the `source` record below and every dispatch's lines, and
+      // a start that fails from here on reaches `journal.remove()`, which waits
+      // for it before deleting.
       if (journal && journalPath && !options.resumeFromRunId) {
         void journal.markLaunched();
       }

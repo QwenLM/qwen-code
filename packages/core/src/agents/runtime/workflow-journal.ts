@@ -357,8 +357,16 @@ export class WorkflowJournal {
     }
   }
 
-  /** Remove a never-registered run's journal file, best-effort. */
+  /**
+   * Remove a never-registered run's journal file, best-effort.
+   *
+   * Waits for every append already queued first. An append still in flight
+   * would otherwise land after the delete and recreate the file, leaving a run
+   * id that never registered with a non-empty journal a later resume would
+   * accept.
+   */
   async remove(): Promise<void> {
+    await this.drain();
     try {
       if (await this.hasSymlinkedPath()) return;
       await fs.rm(this.path, { force: true });
