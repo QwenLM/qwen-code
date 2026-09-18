@@ -167,9 +167,12 @@ export function normalize(model: string): string {
   // Special handling for model names that include date/version as part of the model identifier
   // - Qwen models: qwen-plus-latest, qwen-flash-latest, qwen-vl-max-latest
   // - Kimi models: kimi-k2-0905, kimi-k2-0711, etc. (keep date for version distinction)
+  // - DeepSeek V4: the trailing -v4 IS the generation the limit tables key
+  //   on; stripping it drops the bare alias onto the generic ^deepseek row
   if (
     !s.match(/^qwen-(?:plus|flash|vl-max)-latest$/) &&
-    !s.match(/^kimi-k2-\d{4}$/)
+    !s.match(/^kimi-k2-\d{4}$/) &&
+    !s.match(/^deepseek-v4/)
   ) {
     // Regex breakdown:
     // -(?:...)$ - Non-capturing group for suffixes at the end of the string

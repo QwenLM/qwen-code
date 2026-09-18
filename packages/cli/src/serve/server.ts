@@ -1018,11 +1018,15 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
+  // Live Voice needs a Web Shell to control it. The audio endpoint is either
+  // the native macOS Host (`/live/host`) or the Web Shell page itself
+  // (`/live/web`), so only the native ingress is platform-bound.
   const liveVoiceSurfaceAvailable =
-    runtimePlatform === 'darwin' &&
     opts.serveWebShell !== false &&
     typeof deps.webShellDir === 'string' &&
     acpHttpEnabledAtBoot;
+  const liveNativeHostAvailable =
+    liveVoiceSurfaceAvailable && runtimePlatform === 'darwin';
   const primaryRuntimeTrustAuthoritative =
     deps.workspaceTrustHotReloadAvailable === true ||
     deps.primaryWorkspaceTrusted !== undefined ||
@@ -1122,7 +1126,13 @@ export function createServeApp(
               deps.managedScratchRoot!.canonicalRoot,
             ),
           ),
+      // `realtime_voice` keeps meaning "a native Host can attach": shipped
+      // clients answer it with a macOS install prompt.
       realtimeVoiceEnabled: () =>
+        liveNativeHostAvailable &&
+        (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
+          true,
+      realtimeVoiceWebEnabled: () =>
         (app.locals as { liveVoiceEnabled?: boolean }).liveVoiceEnabled ===
         true,
       standaloneSessionsAvailable: () => standaloneSessionsAvailable,
@@ -1498,7 +1508,7 @@ export function createServeApp(
         'Live provider settings could not be loaded.',
       );
     }
-    return resolveLiveProviderCredential(settings);
+    return resolveLiveProviderCredential(settings, { env: daemonEnv });
   };
   const liveCoordinator =
     deps.liveCoordinator ??
@@ -2385,6 +2395,7 @@ export function createServeApp(
       installer: liveHostInstaller,
       getEnabled: () => liveVoiceEnabled,
       setEnabled: setLiveVoiceEnabled,
+      env: daemonEnv,
       ...(deps.persistSettings
         ? {
             persistSettings: async (writes) => {
@@ -2844,7 +2855,12 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
-      includeLiveVoice: liveVoiceSurfaceAvailable,
+      // Shipped Web Shells render the native-Host install card as soon as
+      // `experimental.liveVoice.enabled` is listed, which is a dead end off
+      // macOS. Keep the keys native-only until the browser client that can
+      // act on them ships; until then Live Voice is enabled off macOS through
+      // settings.json.
+      includeLiveVoice: liveNativeHostAvailable,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -3457,6 +3473,32 @@ export function createServeApp(
     // listener's loopback/CSRF/bearer checks.
     extraWsRoutes: [
       ...(liveVoiceSurfaceAvailable
+        ? [
+            {
+              path: '/live/web',
+              onConnection: (ws, req) => {
+                if (!liveVoiceEnabled) {
+                  ws.close(4003, 'Live Voice is disabled.');
+                  return;
+                }
+                // Same bar as `/voice/stream`: an untrusted workspace never
+                // gets a microphone channel into the daemon.
+                if (!isPrimaryWorkspaceTrusted()) {
+                  ws.close(4003, 'Workspace is not trusted.');
+                  return;
+                }
+                liveCoordinator.attachBrowserHost(ws, {
+                  takeover:
+                    new URL(
+                      req.url ?? '/',
+                      'http://localhost',
+                    ).searchParams.get('takeover') === '1',
+                });
+              },
+            } satisfies ExtraWsRoute,
+          ]
+        : []),
+      ...(liveNativeHostAvailable
         ? [
             {
               path: '/live/host',
