@@ -1389,7 +1389,8 @@ export function BranchPickerPopover({
     t('branchPicker.action.newBranch').toLowerCase().includes(q) ||
     t('branchPicker.action.checkoutRef').toLowerCase().includes(q) ||
     t('branchPicker.action.viewChanges').toLowerCase().includes(q) ||
-    t('branchPicker.action.manageRemotes').toLowerCase().includes(q);
+    t('branchPicker.action.manageRemotes').toLowerCase().includes(q) ||
+    t('branchPicker.action.history').toLowerCase().includes(q);
 
   useEffect(() => {
     if (!actionsVisible) {

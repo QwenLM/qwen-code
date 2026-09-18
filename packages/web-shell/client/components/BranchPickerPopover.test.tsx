@@ -352,6 +352,40 @@ describe('BranchPickerPopover actions', () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it('keeps the actions visible while the search matches "History"', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mount({ onOpenLog: vi.fn() });
+    await flush();
+
+    const search = document.body.querySelector(
+      'input[type="text"], input:not([type])',
+    ) as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(search, 'hist');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector('[data-testid="branch-picker-history"]'),
+    ).not.toBeNull();
+  });
+
   it('wires "History" to onOpenLog and closes', async () => {
     workspaceGitBranches.mockResolvedValue({
       v: 1,
