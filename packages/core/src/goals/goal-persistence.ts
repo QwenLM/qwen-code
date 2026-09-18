@@ -13,6 +13,9 @@ import {
   GOAL_STATE_VERSION,
   type GoalStateRecordPayloadV2,
 } from './goal-protocol.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GOAL_PERSISTENCE');
 
 export type GoalRecovery =
   | { kind: 'v2'; payload: GoalStateRecordPayloadV2 }
@@ -28,6 +31,13 @@ export type GoalRecoveryRecord = Pick<ChatRecord, 'uuid' | 'type'> & {
 export interface GoalRecoverySelection {
   recovery: GoalRecovery;
   sourceUuid?: string;
+  /**
+   * Newer `goal_state` records that did not parse and were walked past to
+   * reach `sourceUuid`. Recovery takes the newest record that parses, so a
+   * record a later build wrote in a shape this one rejects quietly rewinds
+   * the Goal to an older transition; this names what was skipped.
+   */
+  skippedUuids: readonly string[];
 }
 
 const LEGACY_ACTIVE_KINDS = new Set(['set', 'checking']);
@@ -50,6 +60,7 @@ export function selectGoalRecoveryFromRecords(
 ): GoalRecoverySelection {
   let unsupported: GoalRecovery | undefined;
   let unsupportedSourceUuid: string | undefined;
+  const skippedUuids: string[] = [];
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
     if (record?.subtype !== 'goal_state') continue;
@@ -58,8 +69,21 @@ export function selectGoalRecoveryFromRecords(
         ? parseGoalStateRecordPayloadV2(record.systemPayload)
         : undefined;
     if (payload) {
-      return { recovery: { kind: 'v2', payload }, sourceUuid: record.uuid };
+      if (skippedUuids.length > 0) {
+        // Not an error the caller can act on -- the Goal still restores --
+        // but the one trace that a resume landed on an older transition
+        // than the transcript's newest, and which records it stepped over.
+        debugLogger.warn(
+          `Goal recovery skipped ${skippedUuids.length} newer goal_state record(s) that did not parse (${skippedUuids.join(', ')}) and restored from ${record.uuid}.`,
+        );
+      }
+      return {
+        recovery: { kind: 'v2', payload },
+        sourceUuid: record.uuid,
+        skippedUuids,
+      };
     }
+    skippedUuids.push(record.uuid);
     if (!unsupported) {
       unsupported = {
         kind: 'unsupported',
@@ -70,13 +94,17 @@ export function selectGoalRecoveryFromRecords(
   }
 
   return unsupported
-    ? { recovery: unsupported, sourceUuid: unsupportedSourceUuid }
-    : recoverLegacyGoal(records);
+    ? {
+        recovery: unsupported,
+        sourceUuid: unsupportedSourceUuid,
+        skippedUuids: skippedUuids.slice(1),
+      }
+    : { ...recoverLegacyGoal(records), skippedUuids: [] };
 }
 
 function recoverLegacyGoal(
   records: readonly GoalRecoveryRecord[],
-): GoalRecoverySelection {
+): Omit<GoalRecoverySelection, 'skippedUuids'> {
   for (
     let recordIndex = records.length - 1;
     recordIndex >= 0;

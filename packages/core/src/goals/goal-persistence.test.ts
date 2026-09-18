@@ -4,12 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const warnings = vi.hoisted(() => [] as string[]);
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: (tag?: string) => {
+      const logger = original.createDebugLogger(tag);
+      return {
+        ...logger,
+        warn: (...args: unknown[]) => {
+          if (tag === 'GOAL_PERSISTENCE') warnings.push(String(args[0]));
+          logger.warn(...args);
+        },
+      };
+    },
+  };
+});
 import type { GoalStateRecordPayloadV2 } from './goal-protocol.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
   createMigratedGoalState,
   recoverGoalFromRecords,
+  selectGoalRecoveryFromRecords,
 } from './goal-persistence.js';
 
 const ACTIVE_PAYLOAD: GoalStateRecordPayloadV2 = {
@@ -106,6 +126,48 @@ describe('recoverGoalFromRecords', () => {
       ).toEqual({ kind: 'v2', payload: ACTIVE_PAYLOAD });
     },
   );
+
+  it('names the newer records it walked past, and says so in the debug log', () => {
+    const malformed = {
+      v: 3,
+      snapshot: ACTIVE_PAYLOAD.snapshot,
+    } as unknown as GoalStateRecordPayloadV2;
+    warnings.length = 0;
+
+    const selection = selectGoalRecoveryFromRecords([
+      record('state-1', {
+        subtype: 'goal_state',
+        systemPayload: ACTIVE_PAYLOAD,
+      }),
+      record('state-2', { subtype: 'goal_state', systemPayload: malformed }),
+      record('state-3', { subtype: 'goal_state', systemPayload: malformed }),
+    ]);
+
+    // The Goal still restores, from an older transition than the newest on
+    // the transcript: that is a silent rewind unless something names it.
+    expect(selection).toEqual({
+      recovery: { kind: 'v2', payload: ACTIVE_PAYLOAD },
+      sourceUuid: 'state-1',
+      skippedUuids: ['state-3', 'state-2'],
+    });
+    expect(warnings).toEqual([
+      expect.stringContaining(
+        'skipped 2 newer goal_state record(s) that did not parse (state-3, state-2) and restored from state-1',
+      ),
+    ]);
+  });
+
+  it('stays quiet when the newest record parses', () => {
+    warnings.length = 0;
+    const selection = selectGoalRecoveryFromRecords([
+      record('state-1', {
+        subtype: 'goal_state',
+        systemPayload: ACTIVE_PAYLOAD,
+      }),
+    ]);
+    expect(selection.skippedUuids).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
 
   it('rejects a goal_state payload stored on a non-system record', () => {
     expect(
