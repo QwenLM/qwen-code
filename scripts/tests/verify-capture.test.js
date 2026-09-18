@@ -201,13 +201,13 @@ describe('verify-capture helper', () => {
     }));
 
   // font-weight="bold" rasterises as a no-op where the matched family has no
-  // bold face — the release fleet has no fonts at all — so the stroke is the
-  // only thing keeping bold visible there. The test above cannot see a
-  // dropped stroke where CI runs: a bold face resolves and satisfies it
-  // through font-weight alone (measured: the stroke-less mutant passes 23/23
-  // on a font-equipped host). Point fontconfig at an empty font list so the
-  // host's fonts cannot mask a missing stroke; with no fonts librsvg draws
-  // .notdef boxes, so this pins the stroke mechanism, not legibility.
+  // bold face, so on a font-less host the stroke is the only thing keeping
+  // bold visible. The test above cannot see a dropped stroke where CI runs:
+  // a bold face resolves and satisfies it through font-weight alone
+  // (measured: the stroke-less mutant passes 23/23 on a font-equipped host).
+  // Point fontconfig at an empty font list so the host's fonts cannot mask a
+  // missing stroke; with no fonts librsvg draws .notdef boxes, so this pins
+  // the stroke mechanism, not legibility.
   // Decoded pixels are compared, not PNG bytes — see the black-on-black test.
   it('keeps bold visible on a host with no fonts at all', async () => {
     let plain;
