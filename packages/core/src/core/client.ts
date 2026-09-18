@@ -2334,19 +2334,22 @@ export class LlmClient {
       // tool-specific text on it and `/context` can report the same set
       // (#12032). Mid-session reveals deliberately do not update this: they
       // change only the tools block, keeping the cached system prefix stable.
-      profiler.timeSync('prompt_tool_snapshot', () => {
-        // Optional call: partial Config stubs (tests, derived agent shims) do
-        // not carry the setter, and a missing snapshot simply leaves the prompt
-        // ungated rather than failing session startup.
-        this.config.setPromptToolSnapshot?.(
-          new Set(
-            toolRegistry
-              .getFunctionDeclarations()
-              .map((declaration) => declaration.name)
-              .filter((name): name is string => Boolean(name)),
-          ),
-        );
-      });
+      //
+      // Not wrapped in a profiler stage: it is a map over declarations the
+      // registry has already built, and the startup stage list is asserted in
+      // client.test.ts — a stage here would be noise in that profile.
+      //
+      // Optional call: partial Config stubs (tests, derived agent shims) do not
+      // carry the setter, and a missing snapshot simply leaves the prompt
+      // ungated rather than failing session startup.
+      this.config.setPromptToolSnapshot?.(
+        new Set(
+          toolRegistry
+            .getFunctionDeclarations()
+            .map((declaration) => declaration.name)
+            .filter((name): name is string => Boolean(name)),
+        ),
+      );
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
