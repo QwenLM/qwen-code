@@ -902,15 +902,38 @@ export function registerSessionRoutes(
     res: Response,
     sessionIds: readonly string[],
   ): boolean => {
-    const activeSessionId = sessionIds.find((sessionId) =>
+    const liveVoiceSessionId = sessionIds.find((sessionId) =>
       deps.isLiveSessionActive?.(sessionId),
     );
-    if (!activeSessionId) return false;
+    if (liveVoiceSessionId) {
+      res.status(409).json({
+        error:
+          'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+        code: 'live_session_active',
+        sessionId: liveVoiceSessionId,
+      });
+      return true;
+    }
+    // Same gap as the ACP surface: a session with a prompt in flight on any
+    // runtime is invisible to the Live Voice check, and unlinking its
+    // transcript mid-turn leaves a head-less transcript behind (#12091).
+    // An attached-but-idle session still deletes normally.
+    const attachedSessionId = sessionIds.find((sessionId) => {
+      try {
+        return (
+          deps.bridge.getSessionSummary(sessionId).hasActivePrompt === true
+        );
+      } catch (err) {
+        if (err instanceof SessionNotFoundError) return false;
+        throw err;
+      }
+    });
+    if (!attachedSessionId) return false;
     res.status(409).json({
       error:
-        'An active Live Voice session cannot be closed, deleted, or archived. Stop or replace the Live call first.',
+        'An active session cannot be closed, deleted, or archived. Stop the session first.',
       code: 'live_session_active',
-      sessionId: activeSessionId,
+      sessionId: attachedSessionId,
     });
     return true;
   };

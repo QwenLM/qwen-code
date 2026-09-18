@@ -41548,6 +41548,38 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
+  it('blocks REST delete for a session with a prompt in flight (#12091)', async () => {
+    const bridge = fakeBridge({
+      summaryImpl: (sessionId) => ({
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: sessionId === 'sess-attached',
+      }),
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+
+    const deleteAttached = await request(app)
+      .delete('/session/sess-attached')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(deleteAttached.status).toBe(409);
+    expect(deleteAttached.body).toMatchObject({
+      code: 'live_session_active',
+      sessionId: 'sess-attached',
+    });
+    expect(bridge.closeCalls).toHaveLength(0);
+
+    // An attached-but-idle session must not trip the new guard.
+    const deleteIdle = await request(app)
+      .delete('/session/sess-idle')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(
+      deleteIdle.status !== 409 ||
+        deleteIdle.body?.code !== 'live_session_active',
+    ).toBe(true);
+  });
+
   it('publishes Conversations at boot without preheating Host dependencies', async () => {
     const restoreLiveSettings = await enableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
