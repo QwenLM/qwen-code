@@ -1,6 +1,16 @@
-import { getAllowedDaemonOrigin, getDaemonBaseUrl } from './daemon';
+import {
+  confirmDaemonTarget,
+  getAllowedDaemonOrigin,
+  getDaemonBaseUrl,
+  navigateToDaemon,
+  persistDaemonToken,
+} from './daemon';
 
 const STORAGE_KEY = 'qwen-remote-connections';
+const ADD_FLOW_PARAM = 'addRemoteConnection';
+const ADD_RETURN_URL_KEY = 'qwen-remote-connection-return';
+const SETTINGS_PARAM = 'settings';
+const CONNECTIONS_SETTINGS = 'Connections';
 
 /**
  * Host and port of a daemon origin, for display. Falls back to the raw value
@@ -57,6 +67,7 @@ export function forgetRemoteConnection(origin: string): string[] {
     (connection) => connection !== origin,
   );
   storeRemoteConnections(connections);
+  persistDaemonToken('', origin);
   return connections;
 }
 
@@ -78,4 +89,107 @@ export function listRemoteComputers(): string[] {
       ...(current && current !== window.location.origin ? [current] : []),
     ]),
   );
+}
+
+export function isRemoteConnectionAddActive(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    new URLSearchParams(window.location.search).get(ADD_FLOW_PARAM) === 'verify'
+  );
+}
+
+function clearRemoteConnectionAddStep(): void {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has(ADD_FLOW_PARAM)) return;
+  url.searchParams.delete(ADD_FLOW_PARAM);
+  window.history.replaceState(null, '', url);
+}
+
+export function startRemoteConnectionAdd(
+  daemonOrigin: string,
+  token?: string,
+): boolean {
+  const returnUrl = new URL(window.location.href);
+  returnUrl.searchParams.delete(ADD_FLOW_PARAM);
+  returnUrl.searchParams.delete(SETTINGS_PARAM);
+  returnUrl.searchParams.delete('token');
+  returnUrl.hash = '';
+
+  try {
+    window.sessionStorage.setItem(ADD_RETURN_URL_KEY, returnUrl.toString());
+  } catch {
+    return false;
+  }
+
+  const started = navigateToDaemon(daemonOrigin, token, {
+    continueRemoteConnectionAdd: true,
+  });
+  if (started) return true;
+
+  try {
+    window.sessionStorage.removeItem(ADD_RETURN_URL_KEY);
+  } catch {
+    // The write above succeeded; cleanup is best-effort after a failed switch.
+  }
+  return false;
+}
+
+function returnFromRemoteConnectionAdd(): boolean {
+  let saved: string | null = null;
+  try {
+    saved = window.sessionStorage.getItem(ADD_RETURN_URL_KEY);
+    window.sessionStorage.removeItem(ADD_RETURN_URL_KEY);
+  } catch {
+    return false;
+  }
+  if (!saved) return false;
+
+  try {
+    const url = new URL(saved);
+    if (url.origin !== window.location.origin) return false;
+    url.searchParams.delete(ADD_FLOW_PARAM);
+    url.searchParams.delete('token');
+    url.searchParams.set(SETTINGS_PARAM, CONNECTIONS_SETTINGS);
+    url.hash = '';
+    const savedDaemon = url.searchParams.get('daemon');
+    const savedDaemonOrigin = savedDaemon
+      ? getAllowedDaemonOrigin(savedDaemon)
+      : url.origin;
+    if (!savedDaemonOrigin) return false;
+    confirmDaemonTarget(savedDaemonOrigin);
+    window.location.assign(url.toString());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function completeRemoteConnectionAdd(origin: string): boolean {
+  if (!isRemoteConnectionAddActive()) return false;
+  rememberRemoteConnection(origin);
+  if (returnFromRemoteConnectionAdd()) return true;
+  clearRemoteConnectionAddStep();
+  return false;
+}
+
+export function leaveRemoteConnectionAdd(): boolean {
+  if (!isRemoteConnectionAddActive()) return false;
+  if (returnFromRemoteConnectionAdd()) return true;
+  clearRemoteConnectionAddStep();
+  return false;
+}
+
+export function getInitialConnectionsSettingsCategory(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  return new URLSearchParams(window.location.search).get(SETTINGS_PARAM) ===
+    CONNECTIONS_SETTINGS
+    ? CONNECTIONS_SETTINGS
+    : undefined;
+}
+
+export function clearInitialConnectionsSettingsCategory(): void {
+  const url = new URL(window.location.href);
+  if (url.searchParams.get(SETTINGS_PARAM) !== CONNECTIONS_SETTINGS) return;
+  url.searchParams.delete(SETTINGS_PARAM);
+  window.history.replaceState(null, '', url);
 }

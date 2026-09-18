@@ -245,7 +245,9 @@ function mount(
   });
 }
 
-function mountConnections(): void {
+function mountConnections(
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void,
+): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -253,7 +255,7 @@ function mountConnections(): void {
     root!.render(
       <StandaloneContext.Provider value>
         <I18nProvider language="en">
-          <DaemonConnectionsSettings />
+          <DaemonConnectionsSettings onAddConnection={onAddConnection} />
         </I18nProvider>
       </StandaloneContext.Provider>,
     );
@@ -313,6 +315,41 @@ describe('DaemonStatusDialog', () => {
     act(() => vi.advanceTimersByTime(15_000));
     expect(summaryReload).not.toHaveBeenCalled();
     expect(fullReload).not.toHaveBeenCalled();
+  });
+
+  it('adds a new remote origin without replacing the current target', () => {
+    const onAddConnection = vi.fn(() => true);
+    mountConnections(onAddConnection);
+    const address = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-address',
+    )!;
+    const token = container!.querySelector<HTMLInputElement>(
+      '#daemon-connection-token',
+    )!;
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(address, 'https://remote.example');
+      address.dispatchEvent(new Event('input', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(token, 'secret');
+      token.dispatchEvent(new Event('input', { bubbles: true }));
+      container!
+        .querySelector('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+    });
+
+    expect(onAddConnection).toHaveBeenCalledWith(
+      'https://remote.example',
+      'secret',
+    );
+    expect(container!.textContent).toContain('Add connection');
   });
 
   it('lists, switches, and forgets connected computers', () => {

@@ -116,6 +116,60 @@ function requestBody(request: DaemonRequestRecord): Record<string, unknown> {
   return body as Record<string, unknown>;
 }
 
+test('Settings adds a verified computer and returns to Connections @smoke', async ({
+  page,
+}, testInfo) => {
+  await installHost(
+    page,
+    hostScenario(LOCAL_CWD, { '/srv': [LOCAL_FOLDER] }),
+    testInfo,
+  );
+  await installHost(
+    page,
+    hostScenario(REMOTE_CWD, { '/srv': [REMOTE_FOLDER] }),
+    testInfo,
+    REMOTE_ORIGIN,
+  );
+
+  const sourceUrl = await gotoSourceShell(page);
+  await page
+    .getByRole('button', { name: 'Settings', exact: true })
+    .first()
+    .click();
+  await page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('button', { name: /^Connections/ })
+    .click();
+  await page.getByLabel('Daemon address').fill(REMOTE_ORIGIN);
+  await page.getByRole('button', { name: 'Add connection' }).click();
+
+  await expect(page).toHaveURL(sourceUrl);
+  await expect(
+    page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('button', { name: /^Connections/ }),
+  ).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByText('127.0.0.1:5199', { exact: true })).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        JSON.parse(
+          window.localStorage.getItem('qwen-remote-connections') || '[]',
+        ),
+      ),
+    )
+    .toEqual([REMOTE_ORIGIN]);
+
+  await page.getByTestId('panel-back').click();
+  await openFolderBrowser(page);
+  await addWorkspaceDialog(page)
+    .getByRole('combobox', { name: 'Folder source' })
+    .click();
+  await expect(
+    page.getByRole('option', { name: '127.0.0.1:5199', exact: true }),
+  ).toBeVisible();
+});
+
 test('the resumed browser lists the chosen computer directories @smoke', async ({
   page,
 }, testInfo) => {

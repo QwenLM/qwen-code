@@ -270,7 +270,9 @@ import {
   selectRemoteWorkspaceLocation,
 } from './config/remote-workspace-add';
 import {
+  clearInitialConnectionsSettingsCategory,
   formatOriginHost,
+  getInitialConnectionsSettingsCategory,
   listRemoteComputers,
 } from './config/remote-connections';
 import { getDaemonToken, isPageOriginDaemon } from './config/daemon';
@@ -8713,6 +8715,9 @@ export function App({
   ]);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
+  const [initialConnectionsSettingsCategory] = useState(() =>
+    standalone ? getInitialConnectionsSettingsCategory() : undefined,
+  );
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
@@ -8728,7 +8733,7 @@ export function App({
     | 'channels'
     | 'workspaces'
     | null
-  >(null);
+  >(initialConnectionsSettingsCategory ? 'settings' : null);
   const activePanelRef = useRef(activePanel);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
@@ -8736,7 +8741,12 @@ export function App({
   // overlay auto-close, openScheduledTasks, openSplitView, ...).
   const [settingsInitialCategory, setSettingsInitialCategory] = useState<
     string | undefined
-  >();
+  >(initialConnectionsSettingsCategory);
+  useEffect(() => {
+    if (initialConnectionsSettingsCategory) {
+      clearInitialConnectionsSettingsCategory();
+    }
+  }, [initialConnectionsSettingsCategory]);
   useEffect(() => {
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
@@ -8754,7 +8764,11 @@ export function App({
     if (workspaceContextActive) return;
     splitClassificationGenerationRef.current += 1;
     if (!projectFeaturesAvailable) setSplitSessionIds([]);
-    if (!projectFeaturesAvailable && activePanel !== 'status') {
+    if (
+      !projectFeaturesAvailable &&
+      activePanel !== 'status' &&
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+    ) {
       setActivePanel(null);
     }
     setShowResumeDialog(false);
@@ -8787,6 +8801,7 @@ export function App({
     mainView,
     modelDialogMode,
     projectFeaturesAvailable,
+    initialConnectionsSettingsCategory,
     workspaceContextActive,
   ]);
   const handleUseSkill = useCallback(

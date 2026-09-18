@@ -297,7 +297,8 @@ export function buildDaemonConnectionUrl(
   return url.toString();
 }
 
-// ponytail: remember one target in this tab; no persistent host catalog.
+// Target confirmation is separate from the persistent Connections catalog:
+// only the last confirmed origin is trusted automatically in this tab.
 const DAEMON_TARGET_CONFIRMATION_KEY = 'qwen-daemon-target-confirmed';
 
 export function confirmDaemonTarget(origin: string): void {
@@ -322,7 +323,10 @@ export function isKnownDaemonTarget(origin: string): boolean {
 export function navigateToDaemon(
   raw: string,
   token?: string,
-  options?: { continueRemoteWorkspaceAdd?: boolean },
+  options?: {
+    continueRemoteWorkspaceAdd?: boolean;
+    continueRemoteConnectionAdd?: boolean;
+  },
 ): boolean {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
   const builtUrl = buildDaemonConnectionUrl(raw, window.location.href);
@@ -330,6 +334,9 @@ export function navigateToDaemon(
   const nextUrl = new URL(builtUrl);
   if (options?.continueRemoteWorkspaceAdd) {
     nextUrl.searchParams.set('addRemoteWorkspace', 'browse');
+  }
+  if (options?.continueRemoteConnectionAdd) {
+    nextUrl.searchParams.set('addRemoteConnection', 'verify');
   }
   // Read before the assign: getDaemonBaseUrl() follows the live URL.
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
@@ -358,6 +365,11 @@ export function navigateToDaemon(
     if (options?.continueRemoteWorkspaceAdd) {
       const currentUrl = new URL(window.location.href);
       currentUrl.searchParams.set('addRemoteWorkspace', 'browse');
+      window.history.replaceState(null, '', currentUrl);
+    }
+    if (options?.continueRemoteConnectionAdd) {
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set('addRemoteConnection', 'verify');
       window.history.replaceState(null, '', currentUrl);
     }
     window.location.reload();

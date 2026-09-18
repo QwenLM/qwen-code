@@ -14,10 +14,15 @@ import {
   persistDaemonToken,
 } from '../config/daemon';
 import {
+  completeRemoteConnectionAdd,
+  isRemoteConnectionAddActive,
+  leaveRemoteConnectionAdd,
+  rememberRemoteConnection,
+} from '../config/remote-connections';
+import {
   getRemoteWorkspaceAddStep,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
-import { rememberRemoteConnection } from '../config/remote-connections';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -65,6 +70,7 @@ interface AuthCopy {
   hint: string;
   local: string;
   remoteAddCancel: string;
+  connectionAddCancel: string;
 }
 
 // This gate renders before the app (and therefore before its I18nProvider), so
@@ -98,6 +104,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     connect: 'Connect',
     local: 'Return to local workspaces',
     remoteAddCancel: 'Cancel adding workspace',
+    connectionAddCancel: 'Cancel adding connection',
     retry: 'Retry',
     hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
   },
@@ -125,6 +132,7 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     connect: '连接',
     local: '返回本地工作区',
     remoteAddCancel: '取消添加工作区',
+    connectionAddCancel: '取消添加连接',
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
   },
@@ -166,12 +174,16 @@ export function StandaloneAuth({
   onChangeTarget?: (
     daemonOrigin: string,
     token?: string,
-    options?: { continueRemoteWorkspaceAdd?: boolean },
+    options?: {
+      continueRemoteWorkspaceAdd?: boolean;
+      continueRemoteConnectionAdd?: boolean;
+    },
   ) => boolean | void;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
   const remoteWorkspaceAddActive = getRemoteWorkspaceAddStep() === 'browse';
+  const remoteConnectionAddActive = isRemoteConnectionAddActive();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
@@ -254,6 +266,12 @@ export function StandaloneAuth({
           persistDaemonToken(candidate, baseUrl);
           confirmDaemonTarget(baseUrl);
           rememberRemoteConnection(baseUrl);
+          if (
+            remoteConnectionAddActive &&
+            completeRemoteConnectionAdd(baseUrl)
+          ) {
+            return;
+          }
           setAccepted({ token: candidate || undefined });
         } else if (response.status === 401) {
           setBusy(false);
@@ -318,7 +336,7 @@ export function StandaloneAuth({
         clearTimeout(timeout);
       }
     },
-    [baseUrl],
+    [baseUrl, remoteConnectionAddActive],
   );
 
   useEffect(() => {
@@ -382,7 +400,11 @@ export function StandaloneAuth({
                   ? onChangeTarget(normalizedAddress, candidate, {
                       continueRemoteWorkspaceAdd: true,
                     })
-                  : onChangeTarget(normalizedAddress, candidate);
+                  : remoteConnectionAddActive
+                    ? onChangeTarget(normalizedAddress, candidate, {
+                        continueRemoteConnectionAdd: true,
+                      })
+                    : onChangeTarget(normalizedAddress, candidate);
                 if (switched === false) {
                   setBusy(false);
                   setStatus(copy.switchUnavailable);
@@ -447,6 +469,7 @@ export function StandaloneAuth({
             </Button>
           </form>
           {(remoteWorkspaceAddActive ||
+            remoteConnectionAddActive ||
             invalidTarget ||
             baseUrl !== window.location.origin) && (
             <Button
@@ -463,10 +486,17 @@ export function StandaloneAuth({
                 if (remoteWorkspaceAddActive && leaveRemoteWorkspaceAdd()) {
                   return;
                 }
+                if (remoteConnectionAddActive && leaveRemoteConnectionAdd()) {
+                  return;
+                }
                 onChangeTarget(window.location.origin);
               }}
             >
-              {remoteWorkspaceAddActive ? copy.remoteAddCancel : copy.local}
+              {remoteWorkspaceAddActive
+                ? copy.remoteAddCancel
+                : remoteConnectionAddActive
+                  ? copy.connectionAddCancel
+                  : copy.local}
             </Button>
           )}
         </CardContent>

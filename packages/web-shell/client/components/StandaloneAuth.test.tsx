@@ -34,7 +34,10 @@ async function mount(
   onChangeTarget?: (
     daemonOrigin: string,
     token?: string,
-    options?: { continueRemoteWorkspaceAdd?: boolean },
+    options?: {
+      continueRemoteWorkspaceAdd?: boolean;
+      continueRemoteConnectionAdd?: boolean;
+    },
   ) => boolean | void,
 ) {
   await act(async () =>
@@ -210,6 +213,27 @@ it('preserves remote-add continuation when correcting the daemon target', async 
     'http://replacement.example:4170',
     undefined,
     { continueRemoteWorkspaceAdd: true },
+  );
+});
+it('preserves connection-add verification when correcting the daemon target', async () => {
+  window.history.replaceState(null, '', '/?addRemoteConnection=verify');
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn();
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    false,
+    'http://replacement.example:4170',
+    onChangeTarget,
+  );
+
+  expect(container.textContent).toContain('Cancel adding connection');
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://replacement.example:4170',
+    undefined,
+    { continueRemoteConnectionAdd: true },
   );
 });
 it('asks before probing a daemon this browser has not connected to', async () => {

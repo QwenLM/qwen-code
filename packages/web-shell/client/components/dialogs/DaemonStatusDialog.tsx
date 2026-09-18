@@ -26,6 +26,7 @@ import {
   formatOriginHost,
   readRemoteConnections,
   rememberRemoteConnection,
+  startRemoteConnectionAdd,
 } from '../../config/remote-connections';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
@@ -630,9 +631,11 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
 
 function DaemonStatusDialogInner({
   onChangeTarget,
+  onAddConnection = onChangeTarget,
   connectionsOnly = false,
 }: {
   onChangeTarget: (daemonOrigin: string, token?: string) => boolean | void;
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
   connectionsOnly?: boolean;
 }) {
   const { t } = useI18n();
@@ -640,7 +643,9 @@ function DaemonStatusDialogInner({
   // Switching targets navigates the page, which only the standalone shell
   // owns; embedders keep a read-only view of the connection.
   const standalone = useContext(StandaloneContext);
-  const [connectionAddress, setConnectionAddress] = useState(workspace.baseUrl);
+  const [connectionAddress, setConnectionAddress] = useState(
+    connectionsOnly ? '' : workspace.baseUrl,
+  );
   const [connectionToken, setConnectionToken] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [connectBusy, setConnectBusy] = useState(false);
@@ -820,7 +825,7 @@ function DaemonStatusDialogInner({
             // credential before the page reloads, so probe it first —
             // a non-success response must not destroy the working token.
             if (daemonOrigin !== workspace.baseUrl) {
-              const switched = onChangeTarget(daemonOrigin, token);
+              const switched = onAddConnection(daemonOrigin, token);
               // A switch the credential cannot ride along on is refused rather
               // than landing the shell on the new target unauthenticated.
               setConnectionError(
@@ -858,6 +863,12 @@ function DaemonStatusDialogInner({
                 }
                 rememberRemoteConnection(daemonOrigin);
                 setSavedConnections(readRemoteConnections());
+                if (connectionsOnly) {
+                  setConnectionAddress('');
+                  setConnectionToken('');
+                  setConnectionError('');
+                  return;
+                }
                 const changed = onChangeTarget(daemonOrigin, token);
                 setConnectionError(
                   changed === false
@@ -943,8 +954,16 @@ function DaemonStatusDialogInner({
             disabled={connectBusy}
           >
             {connectBusy
-              ? t('daemon.connection.status.connecting')
-              : t('daemon.connection.connect')}
+              ? t(
+                  connectionsOnly
+                    ? 'daemon.connection.status.adding'
+                    : 'daemon.connection.status.connecting',
+                )
+              : t(
+                  connectionsOnly
+                    ? 'daemon.connection.add'
+                    : 'daemon.connection.connect',
+                )}
           </Button>
         </form>
       )}
@@ -1419,8 +1438,10 @@ export function DaemonStatusDialog({
 
 export function DaemonConnectionsSettings({
   onChangeTarget = navigateToDaemon,
+  onAddConnection = startRemoteConnectionAdd,
 }: {
   onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
 } = {}) {
   const { t } = useI18n();
   return (
@@ -1435,6 +1456,7 @@ export function DaemonConnectionsSettings({
       <DaemonStatusDialogInner
         connectionsOnly
         onChangeTarget={onChangeTarget}
+        onAddConnection={onAddConnection}
       />
     </ErrorBoundary>
   );
