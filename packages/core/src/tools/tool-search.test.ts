@@ -337,9 +337,7 @@ describe('ToolSearchTool', () => {
         enabledRegistry,
       );
       enabledRegistry.registerTool(new ToolSearchTool(enabledConfig));
-      enabledRegistry.registerTool(
-        new MockTool({ name: ToolNames.TOOL_CALL }),
-      );
+      enabledRegistry.registerTool(new MockTool({ name: ToolNames.TOOL_CALL }));
       vi.spyOn(enabledConfig, 'getGeminiClient').mockReturnValue({
         setTools: vi.fn().mockResolvedValue(undefined),
       } as never);
