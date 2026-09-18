@@ -99,6 +99,7 @@ import {
 import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
@@ -1268,6 +1269,12 @@ export async function main() {
     profileCheckpoint('before_render');
 
     if (config.isInteractive()) {
+      // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      const interruptedWorkflowsNotice =
+        await getInterruptedWorkflowRunsNotice(config);
+      if (interruptedWorkflowsNotice) {
+        startupWarnings.push(interruptedWorkflowsNotice);
+      }
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
       // runNonInteractive's main/drain loops. In TUI mode the same call

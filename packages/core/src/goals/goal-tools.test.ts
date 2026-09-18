@@ -32,6 +32,10 @@ import {
   UpdateGoalTool,
   type GoalToolConfig,
 } from './goal-tools.js';
+import {
+  buildExecDescription,
+  planCodeModeBindings,
+} from '../tools/code-mode.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
@@ -410,7 +414,7 @@ describe('GetGoalTool', () => {
     expect(result.returnDisplay).toBe('Active goal · revision 3');
   });
 
-  it('collapses checkpoint claims to a count and ignores the deprecated view parameter', async () => {
+  it('returns the snapshot as it is and ignores the deprecated view parameter', async () => {
     const snapshot = {
       v: 2 as const,
       activity: 'running' as const,
@@ -425,16 +429,6 @@ describe('GetGoalTool', () => {
         tokensUsed: 0,
         createdAt: 10,
         updatedAt: 20,
-        evidenceCheckpoint: {
-          checkpointId: 'checkpoint-9',
-          createdAt: 15,
-          claims: Array.from({ length: 2 }, (_, index) => ({
-            id: `checkpoint-9:${index + 1}`,
-            proofKind: 'external_fact' as const,
-            claim: `SECRET_CLAIM_TEXT ${index}`,
-            sourceRefs: [`src-${index}`],
-          })),
-        },
       },
     };
     const tool = new GetGoalTool(
@@ -455,37 +449,21 @@ describe('GetGoalTool', () => {
     };
 
     const payload = await read({});
-    expect(payload).toEqual({
-      active: true,
-      snapshot: {
-        ...snapshot,
-        goal: {
-          ...snapshot.goal,
-          evidenceCheckpoint: {
-            checkpointId: 'checkpoint-9',
-            createdAt: 15,
-            claimCount: 2,
-          },
-        },
-      },
-    });
-    expect(JSON.stringify(payload)).not.toContain('SECRET_CLAIM_TEXT');
+    expect(payload).toEqual({ active: true, snapshot });
     expect(await read({ view: 'full' })).toEqual(payload);
   });
 
-  it('exposes the view parameter and nothing else', () => {
+  it('advertises no parameters, and still serves a call that sends the old one', () => {
     const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
     expect(tool.schema.parametersJsonSchema).toEqual({
       type: 'object',
-      properties: {
-        view: {
-          type: 'string',
-          enum: ['summary', 'full'],
-          description: expect.stringContaining('Deprecated and ignored'),
-        },
-      },
+      properties: {},
       additionalProperties: false,
     });
+    // `view` left the schema to stop paying for it on every request; a model
+    // that still sends it is served, where any other unknown key is refused.
+    expect(tool.validateToolParams({ view: 'full' })).toBeNull();
+    expect(tool.validateToolParams({ verbose: true } as never)).not.toBeNull();
   });
 });
 
@@ -511,52 +489,131 @@ describe('UpdateGoalTool', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
     const schema = tool.schema.parametersJsonSchema as {
       required: string[];
-      properties: {
-        reason: { maxLength?: number };
-        evidenceRefs: { description?: string };
-        blockerKind: { description?: string; enum?: string[] };
-      };
+      properties: Record<
+        string,
+        { description?: string; enum?: string[]; maxLength?: number }
+      >;
     };
 
     expect(tool.description).toContain(
-      "the most recent records of this Goal's transcript",
+      "only the most recent records of this Goal's transcript",
     );
     expect(tool.description).toContain(
       'run the checks that prove every objective condition immediately before calling',
     );
-    expect(tool.description).toContain('There is nothing to cite.');
+    expect(tool.description).toContain(
+      'Never tell the user the Goal is complete or blocked',
+    );
+    expect(tool.description).toContain(
+      'with no progress or completion commentary',
+    );
+    expect(tool.description).toContain('end the turn with no further text');
     expect(tool.description).not.toContain('evidenceCatalog');
-    expect(tool.description).not.toContain('checkpointRequired');
-    expect(tool.description).toContain(
-      'Do not tell the user the Goal is complete',
-    );
-    expect(tool.description).toContain(
-      'do not add progress or completion commentary',
-    );
-    expect(tool.description).toContain(
-      'end the turn without additional user-facing text',
-    );
+    expect(tool.description).not.toContain('cite');
+
     expect(schema.required).toEqual(['status', 'reason']);
-    expect(schema.properties.evidenceRefs.description).toContain(
-      'Deprecated and ignored',
-    );
-    expect(schema.properties.reason.maxLength).toBe(
+    expect(Object.keys(schema.properties)).toEqual([
+      'status',
+      'reason',
+      'blockerKind',
+    ]);
+    expect(schema.properties['reason']!.maxLength).toBe(
       GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
     );
-    expect(schema.properties.blockerKind.description).toContain(
+    // The blocker rules live in the description, once: code mode carries a
+    // tool's description but not its parameter descriptions, so a rule that
+    // lived only on the parameter would be lost there. The parameter itself
+    // just points at the description.
+    expect(schema.properties['blockerKind']!.enum).toContain('infeasible');
+    expect(schema.properties['blockerKind']!.description).toContain(
+      'the tool description says when each applies',
+    );
+    for (const fragment of [
       'three consecutive Goal turns',
-    );
-    expect(schema.properties.blockerKind.description).toContain(
       'exact same reason text',
-    );
-    expect(schema.properties.blockerKind.enum).toContain('infeasible');
-    expect(schema.properties.blockerKind.description).toContain(
       'cannot be satisfied as written',
+      'a tool result, not your own text',
+      'never for difficulty, uncertainty, information you could still obtain, or wanting to ask',
+      'why no in-scope work could satisfy the objective',
+      'The verifier may accept those three on the first turn they are proposed',
+      'a rejected proposal leaves the Goal running',
+    ]) {
+      expect(tool.description).toContain(fragment);
+      expect(schema.properties['blockerKind']!.description).not.toContain(
+        fragment,
+      );
+    }
+  });
+
+  it('carries the blocker rules into the code-mode declaration', () => {
+    const plan = planCodeModeBindings(
+      [new UpdateGoalTool(makeConfig({}))],
+      () => false,
     );
-    expect(tool.description).toContain('a tool result (not your own text)');
-    expect(tool.description).toContain(
-      'not for difficulty, uncertainty, information you could still obtain',
+    const declaration = buildExecDescription(plan);
+    expect(declaration).toContain('three consecutive Goal turns');
+    expect(declaration).toContain('never for difficulty');
+  });
+
+  it('repairs a mistyped value on the object the invocation executes with, deprecated key or not', async () => {
+    // The schema validator coerces in place (a self-hosted model can send a
+    // number for a string); the strip of a deprecated key must not leave that
+    // repair on a copy that is then discarded.
+    const recordTerminalProposal = vi.fn().mockReturnValue({
+      recorded: true,
+      readyForVerification: true,
+    });
+    const tool = new UpdateGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'Deliver the result',
+          evidenceCursor: { recordId: 'goal-created' },
+        }),
+        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+        recordTerminalProposal,
+      }),
     );
+    const invocation = goalTurnContext.run(permit, () =>
+      tool.build({
+        status: 'complete',
+        reason: 42,
+        evidenceRefs: ['stale-reference-from-an-older-contract'],
+      } as never),
+    );
+
+    await invocation.execute(new AbortController().signal);
+
+    expect(recordTerminalProposal).toHaveBeenCalledWith(permit, {
+      status: 'complete',
+      reason: '42',
+    });
+  });
+
+  it('serves a proposal that still sends evidenceRefs, and refuses any other unknown key', () => {
+    const tool = new UpdateGoalTool(makeConfig({}));
+    expect(
+      tool.validateToolParams({
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['an-old-habit'],
+      }),
+    ).toBeNull();
+    expect(
+      tool.validateToolParams({
+        status: 'complete',
+        reason: 'Delivered',
+        citations: [],
+      } as never),
+    ).not.toBeNull();
+    // A call with no arguments at all gets the schema's answer, not a throw.
+    expect(tool.validateToolParams(undefined as never)).toMatch(/must/i);
+    expect(
+      new GetGoalTool(
+        makeConfig({ getGoalForWorker: vi.fn() }),
+      ).validateToolParams(null as never),
+    ).toMatch(/must/i);
   });
 
   it('records the proposal without references and without reading a catalog', async () => {
@@ -1191,6 +1248,28 @@ describe('ProposeGoalTool', () => {
     expect(tool.description).toContain(
       'do not propose the same or a reworded objective again',
     );
+    // The tool is declared in an interactive plan-mode session and refuses at
+    // confirmation time there; the clause is the model's only static hint.
+    expect(tool.description).toContain('Not available in plan mode.');
+    // The objective format is in the description for the same reason the
+    // blocker rules are: code mode carries no parameter descriptions.
+    for (const fragment of [
+      'numbered binary "Done when" checks that name a command',
+      'what must not change',
+      'a budget',
+      'what to do when blocked',
+      `at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters`,
+      'on one line',
+    ]) {
+      expect(tool.description).toContain(fragment);
+    }
+    const declaration = buildExecDescription(
+      planCodeModeBindings([tool], () => false),
+    );
+    expect(declaration).toContain('Done when');
+    expect(declaration).toContain(
+      String(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS),
+    );
   });
 
   it('validates the objective', () => {
@@ -1215,6 +1294,27 @@ describe('ProposeGoalTool', () => {
       expect(message.split('\n').at(-1)).toBe(`/goal set ${objective}`);
       expect(message.match(/\/goal/g)).toHaveLength(1);
     }
+  });
+
+  it('keeps what the Goal tools cost every request inside a budget', () => {
+    // get_goal and update_goal are registered in every session, Goal or not,
+    // so their schemas ride along with every model request. The figure is
+    // what the three tools cost today plus room for a sentence; growing past
+    // it should be a decision, not drift. (5 860 before the descriptions
+    // were trimmed.)
+    const tools = [
+      new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
+      new UpdateGoalTool(makeConfig({})),
+      new ProposeGoalTool(proposeConfig(idleRuntime().runtime)),
+    ];
+    const advertised = tools
+      .map(
+        (tool) =>
+          tool.description + JSON.stringify(tool.schema.parametersJsonSchema),
+      )
+      .join('');
+
+    expect(advertised.length).toBeLessThan(3_800);
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
