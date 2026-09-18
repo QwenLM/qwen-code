@@ -262,6 +262,121 @@ export function getCustomSystemPrompt(
 }
 
 /**
+ * The tools a session declared to the model, used to keep tool-specific prompt
+ * text in step with the request (#12032). `declaredTools: undefined` means
+ * "assume every tool is declared" and reproduces the prompt byte for byte as it
+ * was before gating existed, which is what every caller that has no registry
+ * snapshot to offer gets.
+ */
+export interface PromptToolSurface {
+  declaredTools?: ReadonlySet<string>;
+}
+
+/**
+ * Which tools each gated line of `## Using Your Tools` talks about. A line
+ * survives only when every tool it names is declared: a line that named a
+ * missing tool would send the model after something it cannot call, which is
+ * the defect this gating exists to fix. Lines absent from this table are policy
+ * that holds regardless of the tool surface (tool fallback, parallel calls,
+ * questions, respecting denials) and are never dropped.
+ */
+const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
+  prefix: string;
+  tools: readonly string[];
+}> = [
+  { prefix: '- **Prefer Dedicated Tools:**', tools: [ToolNames.SHELL] },
+  { prefix: '  - To read files use', tools: [ToolNames.READ_FILE] },
+  { prefix: '  - To edit files use', tools: [ToolNames.EDIT] },
+  { prefix: '  - To create files use', tools: [ToolNames.WRITE_FILE] },
+  { prefix: '  - To search for files use', tools: [ToolNames.GLOB] },
+  { prefix: '  - To search the content of files', tools: [ToolNames.GREP] },
+  { prefix: '  - Reserve using the', tools: [ToolNames.SHELL] },
+  { prefix: '- **Task Management:**', tools: [ToolNames.TODO_WRITE] },
+  {
+    prefix: '- **File Paths:**',
+    tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE],
+  },
+  { prefix: '- **Background Processes:**', tools: [ToolNames.SHELL] },
+  { prefix: '- **Interactive Commands:**', tools: [ToolNames.SHELL] },
+  { prefix: '- **Subagent Delegation:**', tools: [ToolNames.AGENT] },
+  {
+    prefix: '- **Codebase Search:**',
+    tools: [ToolNames.AGENT, ToolNames.GREP, ToolNames.GLOB],
+  },
+];
+
+const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
+
+/**
+ * Drops the tool-guidance lines whose tools this session did not declare.
+ *
+ * Implemented as a line filter rather than a rebuilt template on purpose: with
+ * no snapshot the section returns unchanged, so the default prompt cannot drift
+ * while gating is added.
+ */
+function gateToolGuidance(
+  section: string,
+  surface: PromptToolSurface | undefined,
+): string {
+  const declared = surface?.declaredTools;
+  if (!declared) return section;
+
+  const kept = section.split('\n').filter((line) => {
+    const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
+      line.startsWith(entry.prefix),
+    );
+    return !gate || gate.tools.every((tool) => declared.has(tool));
+  });
+  // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
+  // goes when every tool it was going to recommend is gone.
+  const parentIndex = kept.findIndex((line) =>
+    line.startsWith(PREFER_DEDICATED_TOOLS_PREFIX),
+  );
+  if (
+    parentIndex !== -1 &&
+    !kept[parentIndex + 1]?.startsWith('  - To ') &&
+    !kept[parentIndex + 1]?.startsWith('  - Reserve using the')
+  ) {
+    kept.splice(parentIndex, 1);
+  }
+  return kept.join('\n');
+}
+
+const TOOL_CALL_IN_EXAMPLE = /\[tool_call:\s*([A-Za-z0-9_]+)/g;
+
+/**
+ * Drops `<example>` blocks that demonstrate a tool this session did not
+ * declare, so the prompt never shows the model a call it cannot make (#12032).
+ *
+ * Blocks are separated by a blank line and the heading precedes the first one;
+ * when no example survives the heading goes too, rather than leaving a section
+ * with nothing under it. Example formats that do not use the `[tool_call: …]`
+ * notation (the model-specific XML and JSON blocks) carry no detectable tool
+ * names and are left alone.
+ */
+function filterToolCallExamples(
+  examples: string,
+  surface: PromptToolSurface | undefined,
+): string {
+  const declared = surface?.declaredTools;
+  if (!declared) return examples;
+
+  const firstExample = examples.indexOf('<example>');
+  if (firstExample === -1) return examples;
+  const heading = examples.slice(0, firstExample);
+  const blocks = examples.slice(firstExample).split('\n\n');
+
+  const kept = blocks.filter((block) => {
+    if (!block.includes('<example>')) return true;
+    return [...block.matchAll(TOOL_CALL_IN_EXAMPLE)].every((match) =>
+      declared.has(match[1]!),
+    );
+  });
+  if (!kept.some((block) => block.includes('<example>'))) return '';
+  return heading + kept.join('\n\n');
+}
+
+/**
  * The workflow guidance for performing software-engineering work.
  *
  * Split out so an output style with `keepCodingInstructions: false` can drop
@@ -300,6 +415,7 @@ function getToolGuidanceSection(
   questions: string,
   codeModeOnly: boolean,
   todoWriteEnabled: boolean,
+  surface?: PromptToolSurface,
 ): string {
   const taskManagementToolGuidance = todoWriteEnabled
     ? `- **Task Management:** Use '${ToolNames.TODO_WRITE}' only when explicit tracking adds value. Keep plans concise, outcome-oriented, and current; do not create a todo list for simple or single-step work unless the user explicitly requests one.\n`
@@ -329,7 +445,10 @@ ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when re
 - **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
 `.trim();
   }
-  return `
+  // CodeModeOnly is deliberately not gated above: there the declared surface is
+  // `exec` plus a few direct controls, while the tools this section names are
+  // reached as `tools.<name>` inside `exec` and are not declarations at all.
+  const directGuidance = `
 ## Using Your Tools
 - **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Using dedicated tools allows the user to better understand and review your work. This is CRITICAL to assisting the user:
   - To read files use '${ToolNames.READ_FILE}' instead of cat, head, tail, or sed
@@ -348,6 +467,7 @@ ${taskManagementToolGuidance}- **Parallel Tool Calls:** You can call multiple to
 - **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than using '${ToolNames.GREP}' or '${ToolNames.GLOB}' directly, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.
 - **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
 `.trim();
+  return gateToolGuidance(directGuidance, surface);
 }
 
 /**
@@ -362,6 +482,7 @@ function buildDefaultBasePrompt(
   outputStyle: OutputStyleDefinition | null | undefined,
   todoWriteEnabled = false,
   codeModeOnly = false,
+  surface?: PromptToolSurface,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -394,6 +515,7 @@ When you create a todo list:
     interaction.questions,
     codeModeOnly,
     todoWriteEnabled,
+    surface,
   );
   return `
 ${coreIdentity}
@@ -515,7 +637,7 @@ ${(function () {
   return '';
 })()}
 
-${codeModeOnly ? codeModeToolCallExamples : getToolCallExamples(model || '')}
+${codeModeOnly ? codeModeToolCallExamples : filterToolCallExamples(getToolCallExamples(model || ''), surface)}
 
 # Final Reminder
 Your core function is efficient and safe assistance. Balance conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
@@ -582,6 +704,10 @@ export function getCoreSystemPrompt(
   outputStyle?: OutputStyleDefinition | null,
   todoWriteEnabled = false,
   codeModeOnly = false,
+  // Trailing options object rather than an eighth positional parameter: this
+  // function is re-exported from the package root and its arity is asserted by
+  // callers' tests (#12032).
+  options?: PromptToolSurface,
 ): string {
   const effectiveOutputStyle = resolveEffectiveOutputStyle(
     outputStyle,
@@ -628,6 +754,7 @@ export function getCoreSystemPrompt(
         effectiveOutputStyle,
         todoWriteEnabled,
         codeModeOnly,
+        options,
       );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
@@ -656,6 +783,7 @@ export function getCoreSystemPrompt(
             undefined,
             todoWriteEnabled,
             codeModeOnly,
+            options,
           ),
     );
   }

@@ -27,6 +27,7 @@ import {
 } from './output-styles.js';
 import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
+import { ToolNames } from '../tools/tool-names.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1242,6 +1243,80 @@ describe('Model-specific tool call formats', () => {
 
     expect(prompt).toContain('<|tool_call>call:run_shell_command');
     expect(prompt).not.toContain('[tool_call: run_shell_command for');
+  });
+});
+
+describe('resident tool gating (#12032)', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(false);
+  });
+
+  const promptFor = (declaredTools?: ReadonlySet<string>) =>
+    getCoreSystemPrompt(
+      undefined,
+      'gpt-4',
+      undefined,
+      'interactive',
+      undefined,
+      false,
+      false,
+      declaredTools ? { declaredTools } : undefined,
+    );
+
+  it('renders identically when every tool is declared', () => {
+    const everyTool = new Set<string>(Object.values(ToolNames));
+
+    expect(promptFor(everyTool)).toBe(promptFor());
+  });
+
+  it('drops the dedicated-tool lines for tools the session did not declare', () => {
+    const prompt = promptFor(new Set([ToolNames.SHELL, ToolNames.READ_FILE]));
+
+    expect(prompt).toContain(`To read files use '${ToolNames.READ_FILE}'`);
+    expect(prompt).not.toContain(`To search for files use '${ToolNames.GLOB}'`);
+    expect(prompt).not.toContain('- **Subagent Delegation:**');
+    expect(prompt).not.toContain('- **Codebase Search:**');
+    // Shell policy survives because the shell itself is declared.
+    expect(prompt).toContain('- **Background Processes:**');
+  });
+
+  it('drops the prefer-dedicated bullet when it would recommend nothing', () => {
+    const prompt = promptFor(new Set([ToolNames.AGENT]));
+
+    expect(prompt).not.toContain('- **Prefer Dedicated Tools:**');
+    expect(prompt).not.toContain('- **Background Processes:**');
+    expect(prompt).toContain('- **Subagent Delegation:**');
+    // Policy that does not depend on the tool surface stays either way.
+    expect(prompt).toContain('- **Tool Fallback:**');
+    expect(prompt).toContain('- **Respect Tool Decisions:**');
+  });
+
+  it('keeps every safety section regardless of the declared set', () => {
+    const prompt = promptFor(new Set([ToolNames.READ_FILE]));
+
+    expect(prompt).toContain('# Executing actions with care');
+    expect(prompt).toContain('**Denied Tool Calls:**');
+    expect(prompt).toContain('## Security and Safety Rules');
+    expect(prompt).toContain('**Report outcomes faithfully:**');
+  });
+
+  it('drops examples calling an undeclared tool, keeping prose-only ones', () => {
+    const prompt = promptFor(
+      new Set([ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.SHELL]),
+    );
+
+    expect(prompt).toContain('# Examples');
+    expect(prompt).toContain(`[tool_call: ${ToolNames.SHELL}`);
+    expect(prompt).not.toContain(`[tool_call: ${ToolNames.GLOB}`);
+    expect(prompt).not.toContain(`[tool_call: ${ToolNames.EDIT}`);
+    // An example that calls no tool at all is not about the tool surface.
+    expect(prompt).toContain('user: 1 + 2');
   });
 });
 
