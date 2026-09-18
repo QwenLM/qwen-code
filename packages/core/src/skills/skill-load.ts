@@ -18,6 +18,40 @@ const debugLogger = createDebugLogger('SKILL_LOAD');
 
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
+/**
+ * Upper bound on concurrently open manifests while loading skills or
+ * extensions. Every queued `fs.promises.readFile` opens its descriptor as
+ * soon as the libuv pool dequeues it, so an unbounded fan-out over a large
+ * extensions tree can exhaust the process file-descriptor limit under a low
+ * `RLIMIT_NOFILE`, and the per-entry skips would then silently commit a
+ * truncated load. 64 keeps peak descriptors well under typical limits while
+ * still saturating the default 4-thread pool.
+ */
+export const SKILL_LOAD_CONCURRENCY = 64;
+
+/**
+ * Order-preserving bounded-concurrency map. Per-item rejections propagate
+ * (callers that skip invalid entries handle their own errors and resolve to
+ * null instead).
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const effective = Math.max(1, limit);
+  const results: R[] = new Array(items.length);
+  for (let i = 0; i < items.length; i += effective) {
+    const slice = items.slice(i, i + effective);
+    const batch = await Promise.all(slice.map((item) => fn(item)));
+    for (let j = 0; j < batch.length; j++) {
+      results[i + j] = batch[j] as R;
+    }
+  }
+  return results;
+}
+
 export async function loadSkillsFromDir(
   baseDir: string,
 ): Promise<SkillConfig[]> {
@@ -26,8 +60,10 @@ export async function loadSkillsFromDir(
     const entries = await fs.readdir(baseDir, { withFileTypes: true });
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
-    const loaded = await Promise.allSettled(
-      entries.map(async (entry): Promise<SkillConfig | null> => {
+    const loaded = await mapWithConcurrency(
+      entries,
+      SKILL_LOAD_CONCURRENCY,
+      async (entry): Promise<SkillConfig | null> => {
         // Skip transient install artifacts (backup / staging dirs left behind
         // by a crashed reinstall). Without this filter a stale `.backup-*`
         // sibling with a valid SKILL.md would be loaded as a duplicate skill,
@@ -91,16 +127,10 @@ export async function loadSkillsFromDir(
           );
           return null;
         }
-      }),
+      },
     );
 
-    const skills: SkillConfig[] = [];
-    for (const result of loaded) {
-      if (result.status === 'fulfilled' && result.value != null) {
-        skills.push(result.value);
-      }
-    }
-    return skills;
+    return loaded.filter((skill) => skill != null);
   } catch (error) {
     // Directory doesn't exist or can't be read
     const errorMessage =

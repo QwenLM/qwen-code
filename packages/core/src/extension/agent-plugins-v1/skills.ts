@@ -10,6 +10,10 @@ import type { SkillConfig } from '../../skills/types.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { normalizeContent } from '../../utils/textUtils.js';
 import { parse as parseYaml } from '../../utils/yaml-parser.js';
+import {
+  SKILL_LOAD_CONCURRENCY,
+  mapWithConcurrency,
+} from '../../skills/skill-load.js';
 import { resolveContainedExistingPath } from './paths.js';
 
 const debugLogger = createDebugLogger('AGENT_PLUGINS_V1');
@@ -44,8 +48,10 @@ export async function loadAgentPluginSkills(
     );
     return [];
   }
-  const settled = await Promise.allSettled(
-    entries.map(async (entry): Promise<SkillConfig | null> => {
+  const loaded = await mapWithConcurrency(
+    entries,
+    SKILL_LOAD_CONCURRENCY,
+    async (entry): Promise<SkillConfig | null> => {
       const skillDir = path.join(resolvedSkillsPath, entry.name);
       try {
         const resolvedSkillDir = resolveContainedExistingPath(
@@ -67,16 +73,10 @@ export async function loadAgentPluginSkills(
         );
         return null;
       }
-    }),
+    },
   );
 
-  const skills: SkillConfig[] = [];
-  for (const result of settled) {
-    if (result.status === 'fulfilled' && result.value != null) {
-      skills.push(result.value);
-    }
-  }
-  return skills;
+  return loaded.filter((skill) => skill != null);
 }
 
 export function parseAgentPluginSkill(

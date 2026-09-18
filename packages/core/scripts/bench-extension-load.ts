@@ -8,15 +8,24 @@
  * Micro-benchmark for the extension cold-load path
  * (`ExtensionManager.refreshCacheWithSnapshot`).
  *
- * Builds a fresh fixture on each run (30 extensions x 15 skills / 5 commands
- * / 3 agents), loads it N times from a new process-external directory each
- * iteration, and reports wall-clock median / P90 / min / max.
+ * Builds a throwaway fixture under the system temp dir (100 extensions x 40
+ * skills / 10 commands / 5 agents) and refreshes the cache N times against
+ * it. Both the extensions dir and the extension store live inside the
+ * fixture root, so a run never touches the real `~/.qwen` state; the whole
+ * root is removed afterwards.
+ *
+ * Each sample is validated against the fixture constants before it is
+ * accepted — a truncated load (e.g. under a low file-descriptor limit)
+ * aborts the run instead of recording a faster median. `--baseline`
+ * persists the workload dimensions alongside the timings, and a later run
+ * whose fixture no longer matches refuses to compare.
  *
  * Usage:
  *   npx tsx packages/core/scripts/bench-extension-load.ts [--baseline] [--runs 10]
  *
- * `--baseline` stores the result in .qwen/bench-baseline.json; a later run
- * without the flag loads that file (if present) and prints the delta.
+ * `--baseline` stores the result in .qwen/bench-baseline.json at the repo
+ * root; a later run without the flag loads that file (if present) and
+ * prints the delta.
  */
 
 import * as fs from 'node:fs';
@@ -32,7 +41,11 @@ const EXTENSION_COUNT = 100;
 const SKILLS_PER_EXTENSION = 40;
 const COMMANDS_PER_EXTENSION = 10;
 const AGENTS_PER_EXTENSION = 5;
+const EXPECTED_EXTENSIONS = EXTENSION_COUNT;
+const EXPECTED_SKILLS = EXTENSION_COUNT * SKILLS_PER_EXTENSION;
 
+// import.meta.url is packages/core/scripts/bench-extension-load.ts, so three
+// dirname hops land on the repo root.
 const REPO_ROOT = path.resolve(fileURLToPath(import.meta.url), '../../..');
 const BASELINE_PATH = path.join(REPO_ROOT, '.qwen', 'bench-baseline.json');
 
@@ -53,9 +66,11 @@ interface BaselineFile {
   minMs: number;
   maxMs: number;
   runs: number;
+  extensionCount: number;
+  skillCount: number;
 }
 
-function createFixtureFixture(): string {
+function createFixture(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-bench-ext-'));
   const extensionsDir = path.join(root, 'extensions');
   fs.mkdirSync(extensionsDir, { recursive: true });
@@ -106,12 +121,12 @@ function createFixtureFixture(): string {
           `name: agent-${a}`,
           'description: Benchmark agent.',
           '---',
-          'Agent prompt body.',
+          'Agent prompt body long enough for the validator.',
         ].join('\n'),
       );
     }
   }
-  return extensionsDir;
+  return root;
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -131,7 +146,12 @@ async function runOnce(extensionsDir: string): Promise<{
   const manager = new ExtensionManager({
     workspaceDir: extensionsDir,
     isWorkspaceTrusted: true,
-    extensionStore: new ExtensionStore({ extensionsDir }),
+    extensionStore: new ExtensionStore({
+      extensionsDir,
+      // Keep the store inside the throwaway fixture root; the default would
+      // be the real ~/.qwen/extension-store.
+      storeDir: path.join(extensionsDir, '..', 'extension-store'),
+    }),
   });
   const start = performance.now();
   await manager.refreshCacheWithSnapshot();
@@ -147,13 +167,25 @@ async function runOnce(extensionsDir: string): Promise<{
   };
 }
 
+function parseRuns(args: string[]): number {
+  const runsFlagIndex = args.indexOf('--runs');
+  if (runsFlagIndex < 0) return 10;
+  const parsed = Number(args[runsFlagIndex + 1]);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(
+      `--runs must be a positive integer, got "${args[runsFlagIndex + 1]}"`,
+    );
+  }
+  return parsed;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const isBaseline = args.includes('--baseline');
-  const runsFlagIndex = args.indexOf('--runs');
-  const runs = runsFlagIndex >= 0 ? Number(args[runsFlagIndex + 1]) || 10 : 10;
+  const runs = parseRuns(args);
 
-  const extensionsDir = createFixtureFixture();
+  const fixtureRoot = createFixture();
+  const extensionsDir = path.join(fixtureRoot, 'extensions');
 
   const samples: number[] = [];
   let extensionCount = 0;
@@ -161,12 +193,21 @@ async function main(): Promise<void> {
   try {
     for (let i = 0; i < runs; i += 1) {
       const result = await runOnce(extensionsDir);
+      if (
+        result.extensionCount !== EXPECTED_EXTENSIONS ||
+        result.skillCount !== EXPECTED_SKILLS
+      ) {
+        throw new Error(
+          `run ${i}: loaded ${result.extensionCount}/${EXPECTED_EXTENSIONS} extensions, ` +
+            `${result.skillCount}/${EXPECTED_SKILLS} skills — refusing to record a truncated sample`,
+        );
+      }
       samples.push(result.elapsedMs);
       extensionCount = result.extensionCount;
       skillCount = result.skillCount;
     }
   } finally {
-    fs.rmSync(extensionsDir, { recursive: true, force: true });
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
 
   const sorted = [...samples].sort((a, b) => a - b);
@@ -198,6 +239,8 @@ async function main(): Promise<void> {
       minMs: result.minMs,
       maxMs: result.maxMs,
       runs: result.runs,
+      extensionCount: result.extensionCount,
+      skillCount: result.skillCount,
     };
     fs.writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2));
     console.log(
@@ -210,10 +253,19 @@ async function main(): Promise<void> {
     const baseline = JSON.parse(
       fs.readFileSync(BASELINE_PATH, 'utf-8'),
     ) as BaselineFile;
-    const delta =
-      ((result.medianMs - baseline.medianMs) / baseline.medianMs) * 100;
     console.log('\n--- vs baseline ---');
     console.log(`baseline date: ${baseline.date}`);
+    if (
+      baseline.extensionCount !== result.extensionCount ||
+      baseline.skillCount !== result.skillCount
+    ) {
+      console.log(
+        `workload changed (baseline: ${baseline.extensionCount} extensions / ${baseline.skillCount} skills), baseline not comparable`,
+      );
+      return;
+    }
+    const delta =
+      ((result.medianMs - baseline.medianMs) / baseline.medianMs) * 100;
     console.log(
       `baseline median: ${baseline.medianMs.toFixed(1)} ms -> now: ${result.medianMs.toFixed(1)} ms (${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%)`,
     );

@@ -98,7 +98,11 @@ import {
   ExtensionUninstallEvent,
   ExtensionUpdateEvent,
 } from '../telemetry/types.js';
-import { loadSkillsFromDir } from '../skills/skill-load.js';
+import {
+  SKILL_LOAD_CONCURRENCY,
+  loadSkillsFromDir,
+  mapWithConcurrency,
+} from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import {
   loadExtensionWorkflows,
@@ -1624,17 +1628,20 @@ export class ExtensionManager {
       return [];
     }
 
-    // Promise.all, not allSettled: loadExtension converts its own per-extension
-    // errors to null, but an entry whose stat itself throws (e.g. a dangling
-    // symlink at the extensions root) must propagate and fail the whole load —
-    // read-only consumers rely on that fail-closed signal.
-    const extensions = await Promise.all(
-      subdirs.map((subdir) =>
+    // Promise.all semantics, not allSettled: loadExtension converts its own
+    // per-extension errors to null, but an entry whose stat itself throws
+    // (e.g. a dangling symlink at the extensions root) must propagate and
+    // fail the whole load — read-only consumers rely on that fail-closed
+    // signal. The bounded map caps concurrently open manifests so a huge
+    // extensions tree cannot exhaust the file-descriptor limit.
+    const extensions = await mapWithConcurrency(
+      subdirs,
+      SKILL_LOAD_CONCURRENCY,
+      (subdir) =>
         this.loadExtension({
           extensionDir: path.join(extensionsDir, subdir),
           workspaceDir,
         }),
-      ),
     );
     return extensions.filter((extension) => extension != null);
   }
