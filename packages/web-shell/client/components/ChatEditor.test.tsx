@@ -23,6 +23,7 @@ import type {
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
+import { PASTE_TITLE_MAX_CHARS } from '../utils/largePaste';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -141,6 +142,7 @@ const composerCoreState = vi.hoisted(() => ({
   getText: vi.fn(() => ''),
   setText: vi.fn(),
   insertText: vi.fn(),
+  expandPastedText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
@@ -262,6 +264,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         removeImage: vi.fn(),
         pastedFiles: mockComposerCoreState.pastedFiles,
         removeFile: vi.fn(),
+        expandPastedText: composerCoreState.expandPastedText,
         composerTags: mockComposerCoreState.composerTags,
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
@@ -342,6 +345,7 @@ afterEach(() => {
   composerCoreState.getText.mockReset().mockReturnValue('');
   composerCoreState.setText.mockReset();
   composerCoreState.insertText.mockReset();
+  composerCoreState.expandPastedText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
@@ -380,7 +384,7 @@ interface ChatEditorRenderProps
   pastedFiles?: Array<{
     name: string;
     media_type: string;
-    text: string;
+    text?: string;
     size?: number;
   }>;
   gitBranch?: string;
@@ -1171,7 +1175,6 @@ describe('ChatEditor attachment reporting', () => {
         {
           name: 'report.html',
           media_type: 'text/html',
-          text: '<h1>Report</h1>',
         },
       ],
     });
@@ -1190,6 +1193,216 @@ describe('ChatEditor attachment reporting', () => {
     expect(
       attachments?.querySelector('button[aria-label="Remove report.html"]'),
     ).not.toBeNull();
+  });
+
+  it('shows a folded paste with its size and expands it on request', () => {
+    const text = `${'line\n'.repeat(199)}line`;
+    const onAttachmentPreview = vi.fn();
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text,
+          size: 1000,
+        },
+      ],
+      onAttachmentPreview,
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('1000 B');
+    expect(attachments?.textContent).not.toContain('lines');
+
+    // The action leads the second line and the size follows it.
+    const meta = container.querySelector<HTMLElement>(
+      '[class*="fileChipMeta"]',
+    );
+    expect(meta?.firstElementChild?.className).toContain('fileChipExpand');
+    expect(meta?.lastElementChild?.textContent).toBe('1000 B');
+
+    const buttons = Array.from(attachments?.querySelectorAll('button') ?? []);
+    expect(buttons).toHaveLength(3);
+    act(() => {
+      buttons
+        .find((button) => button.className.includes('fileChipTitle'))!
+        .click();
+    });
+    expect(onAttachmentPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'pasted-text.txt', text }),
+    );
+
+    const expand = buttons.find((button) =>
+      button.textContent?.includes('Show inline'),
+    )!;
+    expect(expand).toBeDefined();
+    act(() => {
+      expand.click();
+    });
+    expect(composerCoreState.expandPastedText).toHaveBeenCalledWith(0);
+  });
+
+  it('titles a folded paste with its first line instead of the file name', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'ERROR connection refused\nstack line\n'.repeat(100),
+          size: 4000,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    const title = container.querySelector<HTMLElement>(
+      '[class*="fileChipTitle"]',
+    );
+    expect(title?.textContent?.replace(/…$/, '')).toBe(
+      'ERROR connection refused stack line'.slice(0, PASTE_TITLE_MAX_CHARS),
+    );
+    expect(title?.getAttribute('title')).toBe(title?.textContent);
+    expect(attachments?.textContent).not.toContain('pasted-text.txt');
+  });
+
+  it('fills the title past a one-word first line', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'import\n  { spawn }\n  from child_process;\n'.repeat(50),
+          size: 2000,
+        },
+      ],
+    });
+    const title =
+      container.querySelector<HTMLElement>('[class*="fileChipTitle"]')
+        ?.textContent ?? '';
+    // The one-word first line is not the whole title: it runs into the next.
+    expect(title).toContain('import {');
+    expect(title.length).toBeLessThanOrEqual(PASTE_TITLE_MAX_CHARS + 1);
+  });
+
+  it('clips the title to a single line of bounded length', () => {
+    const firstLine = `head ${'x'.repeat(200)}`;
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: `${firstLine}\n${'tail\n'.repeat(200)}`,
+          size: 4000,
+        },
+      ],
+    });
+    const title = container.querySelector<HTMLElement>(
+      '[class*="fileChipTitle"]',
+    );
+    expect(title?.textContent?.endsWith('…')).toBe(true);
+    expect(title?.textContent).not.toContain('tail');
+    expect(title?.textContent?.length ?? 0).toBeLessThanOrEqual(
+      PASTE_TITLE_MAX_CHARS + 1,
+    );
+  });
+
+  it('falls back to the file name when there is no content to show', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: '\n\n   \n'.repeat(100),
+          size: 1200,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('pasted-text.txt');
+  });
+
+  it('leaves a pasted file without inline text without an expand action', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'photo.png',
+          media_type: 'image/png',
+          size: 2048,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).not.toContain('Show inline');
+    expect(attachments?.textContent).not.toContain('lines');
+  });
+
+  it('shows only the size, with no line count', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'x'.repeat(8000),
+          size: 8000,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('7.8 KB');
+    expect(attachments?.textContent).not.toContain('lines');
+  });
+
+  it('omits the size for a text card that carries none', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: '中文'.repeat(100),
+        },
+      ],
+    });
+    const meta = container.querySelector<HTMLElement>(
+      '[class*="fileChipMeta"]',
+    );
+    expect(meta?.textContent).not.toContain(' B');
+    // The action survives on its own when there is no size to show.
+    expect(meta?.lastElementChild?.textContent).toBe('Show inline');
+  });
+
+  it('expands the card whose action was clicked', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'first\n'.repeat(200),
+        },
+        {
+          name: 'pasted-text (1).txt',
+          media_type: 'text/plain',
+          text: 'second\n'.repeat(200),
+        },
+      ],
+    });
+    const expandButtons = Array.from(
+      container.querySelectorAll('button'),
+    ).filter((button) => button.textContent?.includes('Show inline'));
+    expect(expandButtons).toHaveLength(2);
+
+    act(() => {
+      expandButtons[1]!.click();
+    });
+
+    expect(composerCoreState.expandPastedText).toHaveBeenCalledWith(1);
   });
 
   it('reports whether the composer has tags or pasted images', () => {
@@ -1248,13 +1461,12 @@ describe('ChatEditor attachment reporting', () => {
     expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });
 
-  it('opens a text attachment preview when its chip is clicked', () => {
+  it('opens the preview when a chip without inline text is clicked', () => {
     const onAttachmentPreview = vi.fn();
     const container = renderChatEditor({
       pastedFiles: [
         {
           name: 'notes.txt',
-          text: 'hello attachment',
           media_type: 'text/plain',
           size: 16,
         },
@@ -1273,7 +1485,6 @@ describe('ChatEditor attachment reporting', () => {
     expect(onAttachmentPreview).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'notes.txt',
-        text: 'hello attachment',
       }),
     );
     expect(container.textContent).not.toContain('16 B');

@@ -26,7 +26,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
   parseGoalStateRecordPayloadV2,
-  projectGoalStateToLegacy,
+  projectGoalCard,
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
@@ -171,8 +171,8 @@ const TRANSCRIPT_GOAL_STATUS_KINDS = new Set([
   // A paused goal is not running, and dropping the card here is not neutral:
   // the replay stream is what feeds the goal renderer, so the older `set` card
   // stays newest and every surface keeps claiming autonomous work is under way.
-  // Kept in step with `GOAL_STATUS_KINDS`, which the daemon-side reader
-  // (`parseGoalStatusItem`) validates the same on-disk cards against.
+  // Kept in step with `GOAL_CARD_KINDS` in core's `goal-legacy-cards.ts`,
+  // which the daemon-side readers validate the same on-disk cards against.
   'paused',
   'checking',
 ]);
@@ -755,11 +755,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
     const references = payload?.['attachmentReferences'];
-    if (!Array.isArray(references)) return;
-    for (const reference of references) {
+    for (const reference of Array.isArray(references) ? references : []) {
       if (!isObjectRecord(reference)) continue;
       const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
       if (update) yield emit(update);
+    }
+    const resourceLinks = payload?.['resourceLinks'];
+    for (const link of Array.isArray(resourceLinks) ? resourceLinks : []) {
+      if (
+        !isObjectRecord(link) ||
+        link['type'] !== 'resource_link' ||
+        typeof link['uri'] !== 'string' ||
+        link['uri'].length === 0 ||
+        typeof link['name'] !== 'string'
+      ) {
+        continue;
+      }
+      const updateMeta = buildUpdateMeta(meta);
+      yield emit({
+        sessionUpdate: 'user_message_chunk',
+        content: structuredClone(link),
+        ...(updateMeta ? { _meta: updateMeta } : {}),
+      } as SessionUpdate);
     }
   }
 
@@ -1101,10 +1118,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         previous: this.goalState,
         next: payload.snapshot,
       });
-      const projection = projectGoalStateToLegacy(
-        payload,
-        this.goalState?.goal ?? null,
-      );
+      const goalStatus = projectGoalCard(payload, this.goalState?.goal ?? null);
       const goalControlCommand = projectGoalControlCommand(
         payload.cause,
         payload.snapshot,
@@ -1125,7 +1139,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           }),
         );
       }
-      const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
@@ -1134,9 +1147,6 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           extra: {
             goalState: payload.snapshot,
             goalStatus,
-            ...(projection.goalTerminal
-              ? { goalTerminal: projection.goalTerminal }
-              : {}),
             'qwen.session.recordId': record.uuid,
           },
         }),
@@ -1174,12 +1184,26 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         continue;
       }
       if (!isObjectRecord(item) || typeof item['text'] !== 'string') continue;
+      const contextCompression = isObjectRecord(item['contextCompression'])
+        ? item['contextCompression']
+        : undefined;
+      const contextCompressionNotice = isObjectRecord(
+        item['contextCompressionNotice'],
+      )
+        ? item['contextCompressionNotice']
+        : undefined;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
           text: item['text'].replace(/\n/g, '  \n'),
           ...meta,
-          extra: { source: 'slash_command' },
+          extra: {
+            source: 'slash_command',
+            ...(contextCompression ? { contextCompression } : {}),
+            // Replayed on its own key, exactly as it was recorded: the folded
+            // block keeps both, so the note survives beside the result.
+            ...(contextCompressionNotice ? { contextCompressionNotice } : {}),
+          },
         }),
       );
     }

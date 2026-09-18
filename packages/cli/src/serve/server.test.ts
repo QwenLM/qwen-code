@@ -185,6 +185,7 @@ import type {
   ServeWorkspaceMcpResourcesStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
+  ServeWorkflowActionInput,
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
 } from '@qwen-code/acp-bridge/status';
@@ -234,6 +235,10 @@ import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.j
 import { getActiveSseCount } from './routes/sse-events.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
+import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
+import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -814,7 +819,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
       f !== 'voice_transcribe' &&
-      f !== 'realtime_voice',
+      f !== 'realtime_voice' &&
+      f !== 'realtime_voice_web',
   ),
   'workspace_settings',
   'workspace_permissions',
@@ -886,6 +892,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'browser_automation_mcp',
   'voice_transcribe',
   'realtime_voice',
+  'realtime_voice_web',
   'web_terminal',
 ] as const;
 
@@ -1058,8 +1065,10 @@ interface FakeBridgeOpts {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved',
+      | 'run-saved'
+      | 'run-script',
     context?: BridgeClientRequestContext,
+    input?: ServeWorkflowActionInput,
   ) => Promise<{ changed: boolean; status?: string; taskId?: string }>;
   clearSessionGoalImpl?: (
     sessionId: string,
@@ -1392,8 +1401,10 @@ interface FakeBridge extends AcpSessionBridge {
       | 'retry'
       | 'rerun'
       | 'delete-history'
-      | 'run-saved';
+      | 'run-saved'
+      | 'run-script';
     context?: BridgeClientRequestContext;
+    input?: ServeWorkflowActionInput;
   }>;
   clearSessionGoalCalls: string[];
   controlSessionGoalCalls: Array<{
@@ -2663,14 +2674,27 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return cancelSessionTaskImpl(sessionId, taskId, taskKind, context);
     },
-    async controlSessionWorkflowTask(sessionId, taskId, action, context) {
+    async controlSessionWorkflowTask(
+      sessionId,
+      taskId,
+      action,
+      context,
+      input,
+    ) {
       controlSessionWorkflowTaskCalls.push({
         sessionId,
         taskId,
         action,
         ...(context ? { context } : {}),
+        ...(input ? { input } : {}),
       });
-      return controlSessionWorkflowTaskImpl(sessionId, taskId, action, context);
+      return controlSessionWorkflowTaskImpl(
+        sessionId,
+        taskId,
+        action,
+        context,
+        input,
+      );
     },
     async clearSessionGoal(sessionId) {
       clearSessionGoalCalls.push(sessionId);
@@ -3153,6 +3177,95 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
 });
 
 describe('createServeApp', () => {
+  it.each([
+    'managed',
+    'unowned',
+    'missing_activity',
+    'busy',
+    'acpConnections',
+    'memoryTasks',
+  ] as const)(
+    'wires idle reclamation with %s runtime observations',
+    async (mode) => {
+      const bridge = fakeBridge();
+      const reclaim = vi.fn().mockResolvedValue(true);
+      Object.assign(bridge, {
+        getWorkspaceRuntimeLifecycleSnapshot: () => ({
+          state: 'idle',
+          runtimeLive: true,
+          runtimeEpoch: 1,
+          activeWork: false,
+        }),
+        getIdleChannelCandidate: () => ({
+          channelId: 'primary-child',
+          runtimeEpoch: 1,
+          lastUsedAt: 1,
+        }),
+        reclaimIdleChannel: reclaim,
+      });
+      const registry = new ProcessRegistry();
+      const reservation = registry.reserve();
+      const policy = createChildHeapPolicy({
+        budget: resolveDaemonMemoryBudget({ availableMemoryMb: 2048 }),
+        mode: 'admit',
+      });
+      const runtimeRemoval = {
+        beginDrain: vi.fn(),
+        cancelDrain: vi.fn(),
+        completeDrain: vi.fn(),
+        disposeRuntime: vi.fn().mockResolvedValue(undefined),
+        getActivity: vi.fn(() => ({
+          pendingSessionStarts: mode === 'busy' ? 1 : 0,
+          channelWorkers: 0,
+          voiceSessions: 0,
+        })),
+      };
+      const app = createServeApp(
+        { ...baseOpts, childHeapMode: 'admit' },
+        undefined,
+        {
+          bridge,
+          primaryWorkspaceTrusted: true,
+          voiceCoordinator: new WorkspaceVoiceCoordinator(),
+          getSessionBridges: () => [bridge],
+          managedChildProcesses: {
+            registry,
+            policy,
+            ...(mode === 'unowned'
+              ? {}
+              : {
+                  ownsBridge: (candidate: AcpSessionBridge) =>
+                    candidate === bridge,
+                }),
+          },
+          ...(mode === 'missing_activity'
+            ? {}
+            : { workspaceRuntimeRemoval: runtimeRemoval }),
+        },
+      );
+      const acpHandle = app.locals['acpHandle'] as {
+        getWorkspaceActivity: (workspaceId: string) => {
+          acpConnections: number;
+          memoryTasks: number;
+        };
+      };
+      vi.spyOn(acpHandle, 'getWorkspaceActivity').mockReturnValue({
+        acpConnections: mode === 'acpConnections' ? 1 : 0,
+        memoryTasks: mode === 'memoryTasks' ? 1 : 0,
+      });
+      try {
+        await (app.locals['reclaimIdleAcp'] as IdleAcpReclaimer)(
+          'another-workspace',
+        );
+        expect(reclaim).toHaveBeenCalledTimes(mode === 'managed' ? 1 : 0);
+        expect(runtimeRemoval.disposeRuntime).not.toHaveBeenCalled();
+        expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+      } finally {
+        reservation.cancel();
+      }
+    },
+  );
+
   it('rejects unwired admission before creating the app', () => {
     expect(() =>
       createServeAppImpl({ ...baseOpts, childHeapMode: 'admit' }),
@@ -3915,6 +4028,20 @@ describe('createServeApp', () => {
           ).not.toContain(feature);
           continue;
         }
+        if (feature === 'realtime_voice_web') {
+          expect(
+            predicate({ acpHttpEnabled: true, realtimeVoiceWebEnabled: true }),
+          ).toBe(true);
+          expect(
+            predicate({ acpHttpEnabled: false, realtimeVoiceWebEnabled: true }),
+          ).toBe(false);
+          // The native toggle alone must not advertise the browser endpoint.
+          expect(
+            predicate({ acpHttpEnabled: true, realtimeVoiceEnabled: true }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          continue;
+        }
         if (feature === 'web_terminal') {
           expect(predicate({ acpHttpEnabled: true })).toBe(true);
           expect(predicate({ acpHttpEnabled: false })).toBe(false);
@@ -4034,6 +4161,74 @@ describe('createServeApp', () => {
       expect(res.headers['x-frame-options']).toBe('DENY');
       expect(res.headers['referrer-policy']).toBe('no-referrer');
       expect(res.headers['cache-control']).toContain('no-cache');
+    });
+
+    it('adds the validated ?daemon= origin to the shell CSP connect-src', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      const res = await request(app)
+        .get('/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170')
+        .set('Host', host);
+      expect(res.status).toBe(200);
+      expect(res.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+    });
+
+    // `createSendIndex` reads `?daemon=` from the raw query with the client's
+    // parser, so the header cannot depend on how Express was configured to
+    // parse queries. That is only observable under `'extended'`: the shipped
+    // default is `'simple'` (Node `querystring`, Express 5) and nothing in this
+    // repo sets it, and under `simple` a bracket key never reaches
+    // `req.query.daemon` at all — so the old `req.query` read and this one
+    // behave identically there and a test on the default parser cannot
+    // discriminate the change. Forcing `extended` is what makes this case bite:
+    // `qs` folds `?daemon[]=X` into `{ daemon: ['X'] }`, which the old read
+    // granted and the client never parsed.
+    it('grants connect-src from the client parser whatever the Express query parser is', async () => {
+      const app = createServeApp(baseOpts, undefined, { webShellDir });
+      app.set('query parser', 'extended');
+      expect(app.get('query parser')).toBe('extended');
+
+      const repeated = await request(app)
+        .get(
+          '/?daemon=https%3A%2F%2Fdaemon.example.com%3A4170&daemon=https%3A%2F%2Fother.example',
+        )
+        .set('Host', host);
+      expect(repeated.status).toBe(200);
+      expect(repeated.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
+      expect(repeated.headers['content-security-policy']).not.toContain(
+        'other.example',
+      );
+
+      const bracketed = await request(app)
+        .get('/?daemon%5B%5D=https%3A%2F%2Fevil.example')
+        .set('Host', host);
+      expect(bracketed.status).toBe(200);
+      expect(bracketed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(bracketed.headers['content-security-policy']).toContain(
+        "connect-src 'self';",
+      );
+
+      // The mixed shape is the one that broke functionally, not just by
+      // widening: `qs` yields `['evil', 'daemon.example.com:4170']`, so the old
+      // read granted the bracketed origin while the client connected to the
+      // plain one and found its own target CSP-blocked.
+      const mixed = await request(app)
+        .get(
+          '/?daemon%5B%5D=https%3A%2F%2Fevil.example&daemon=https%3A%2F%2Fdaemon.example.com%3A4170',
+        )
+        .set('Host', host);
+      expect(mixed.status).toBe(200);
+      expect(mixed.headers['content-security-policy']).not.toContain(
+        'evil.example',
+      );
+      expect(mixed.headers['content-security-policy']).toContain(
+        "connect-src 'self' https://daemon.example.com:4170 wss://daemon.example.com:4170",
+      );
     });
 
     it('rejects cross-origin requests for the pre-auth shell page (CORS wall runs first)', async () => {
@@ -11061,7 +11256,25 @@ describe('createServeApp', () => {
         .post('/session/s-1/tasks/deep-review/workflow-action')
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .send({ action: 'run-saved' });
+        .send({
+          action: 'run-saved',
+          args: { question: 'which tables grew?' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        });
+      const runScriptRes = await request(app)
+        .post('/session/s-1/tasks/definition-7/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          action: 'run-script',
+          script: 'return 1',
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        });
+      const badActionRes = await request(app)
+        .post('/session/s-1/tasks/task-1/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'run-anything' });
 
       expect(pauseRes.status).toBe(200);
       expect(pauseRes.body).toEqual({ changed: true, status: 'pausing' });
@@ -11075,6 +11288,12 @@ describe('createServeApp', () => {
       expect(deleteRes.body).toEqual({ changed: true, status: 'running' });
       expect(runSavedRes.status).toBe(200);
       expect(runSavedRes.body).toEqual({ changed: true, status: 'running' });
+      expect(runScriptRes.status).toBe(200);
+      expect(runScriptRes.body).toEqual({ changed: true, status: 'running' });
+      expect(badActionRes.status).toBe(400);
+      expect(badActionRes.body.error).toContain('"run-script"');
+      // The start input reaches the runtime only for the two start actions;
+      // a control action's call carries none, as it did before it existed.
       expect(bridge.controlSessionWorkflowTaskCalls).toEqual([
         {
           sessionId: 's-1',
@@ -11086,7 +11305,24 @@ describe('createServeApp', () => {
         { sessionId: 's-1', taskId: 'task-1', action: 'retry' },
         { sessionId: 's-1', taskId: 'task-1', action: 'rerun' },
         { sessionId: 's-1', taskId: 'task-1', action: 'delete-history' },
-        { sessionId: 's-1', taskId: 'deep-review', action: 'run-saved' },
+        {
+          sessionId: 's-1',
+          taskId: 'deep-review',
+          action: 'run-saved',
+          input: {
+            args: { question: 'which tables grew?' },
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        },
+        {
+          sessionId: 's-1',
+          taskId: 'definition-7',
+          action: 'run-script',
+          input: {
+            script: 'return 1',
+            sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          },
+        },
       ]);
     });
 
@@ -38872,6 +39108,81 @@ describe('auth device-flow routes', () => {
     expect(res.body.features).toContain('auth_device_flow');
   });
 
+  it.each([
+    { protocol: 'openai', wireApi: 'unknown' },
+    { protocol: 'openai', wireApi: null },
+    { protocol: 'anthropic', wireApi: 'responses' },
+    { protocol: 'gemini', wireApi: 'chat-completions' },
+  ])(
+    'POST /workspace/auth/provider rejects incompatible api before installation: %j',
+    async (selection) => {
+      const installAuthProvider = vi.fn();
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_api');
+      expect(installAuthProvider).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([{ protocol: 'openai', wireApi: 'responses' }])(
+    'POST /workspace/auth/provider accepts OpenAI API selection: %j',
+    async (selection) => {
+      const installAuthProvider = vi
+        .fn()
+        .mockResolvedValue({ v: 1, message: 'Saved' });
+      const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+        bridge: fakeBridge(),
+        installAuthProvider,
+      });
+      const res = await request(app)
+        .post('/workspace/auth/provider')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          providerId: 'custom-openai-compatible',
+          apiKey: 'sk-test',
+          ...selection,
+        });
+      expect(res.status).toBe(200);
+      expect(installAuthProvider).toHaveBeenCalledWith(
+        expect.objectContaining(selection),
+        expect.any(Function),
+      );
+    },
+  );
+
+  it('POST /workspace/auth/provider does not change a fixed provider protocol via the legacy alias', async () => {
+    const installAuthProvider = vi.fn();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge: fakeBridge(),
+      installAuthProvider,
+    });
+    const res = await request(app)
+      .post('/workspace/auth/provider')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        protocol: 'openai-responses',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_protocol');
+    expect(installAuthProvider).not.toHaveBeenCalled();
+  });
+
   it('POST /workspace/auth/provider rejects unsupported protocol values', async () => {
     const installAuthProvider = vi.fn();
     const bridge = fakeBridge();
@@ -42950,14 +43261,6 @@ describe('Live Appshot server integration', () => {
 
   it.each([
     {
-      name: 'non-macOS',
-      options: baseOpts,
-      deps: {
-        runtimePlatform: 'linux' as const,
-        webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
-      },
-    },
-    {
       name: 'API-only mode',
       options: { ...baseOpts, serveWebShell: false },
       deps: {
@@ -42980,6 +43283,7 @@ describe('Live Appshot server integration', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(capabilities.body.features).not.toContain('realtime_voice');
+      expect(capabilities.body.features).not.toContain('realtime_voice_web');
       const settings = await request(app)
         .get('/workspace/settings')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -42992,6 +43296,206 @@ describe('Live Appshot server integration', () => {
       (app.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
     }
   });
+
+  describe('browser Host ingress', () => {
+    const browserHello = {
+      type: 'host.hello',
+      kind: 'browser',
+      protocolVersion: 9,
+      hostVersion: '0.24.0',
+      bundleId: 'com.alibaba.qwen-code.web-shell',
+      instanceNonce: 'browser_tab_nonce_0001',
+      permissions: { microphone: 'granted' },
+      selfChecks: { audioInput: true, audioOutput: true },
+    };
+
+    async function withLiveDaemon(
+      options: { enabled: boolean; trusted?: boolean },
+      run: (
+        port: number,
+        app: ReturnType<typeof createServeApp>,
+      ) => Promise<void>,
+    ): Promise<void> {
+      const tmp = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-live-web-ingress-'),
+      );
+      const qwenHome = path.join(tmp, 'qwen-home');
+      await fsp.mkdir(qwenHome, { recursive: true });
+      await fsp.writeFile(
+        path.join(qwenHome, 'settings.json'),
+        JSON.stringify({
+          experimental: {
+            liveVoice: {
+              enabled: options.enabled,
+              apiKey: 'dedicated-realtime-key',
+            },
+          },
+        }),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = qwenHome;
+      resetHomeEnvBootstrapForTesting();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        daemonEnv: {},
+        runtimePlatform: 'linux',
+        webShellDir: path.join(tmp, 'web-shell'),
+        ...(options.trusted === undefined
+          ? {}
+          : { primaryWorkspaceTrusted: options.trusted }),
+      });
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const acpHandle = app.locals['acpHandle'] as AcpHttpHandle;
+      acpHandle.attachServer(server);
+      try {
+        await run((server.address() as AddressInfo).port, app);
+      } finally {
+        (app.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
+        acpHandle.dispose();
+        server.closeAllConnections?.();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tmp, { recursive: true, force: true });
+      }
+    }
+
+    function closeCodeOf(url: string): Promise<number> {
+      return new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(url, { handshakeTimeout: 2000 });
+        ws.on('close', (code) => resolve(code));
+        ws.on('error', reject);
+      });
+    }
+
+    it('welcomes the Web Shell on /live/web without the native nonce header', async () => {
+      await withLiveDaemon(
+        { enabled: true, trusted: true },
+        async (port, app) => {
+          const welcome = await new Promise<Record<string, unknown>>(
+            (resolve, reject) => {
+              const ws = new WebSocket(`ws://127.0.0.1:${port}/live/web`, {
+                handshakeTimeout: 2000,
+              });
+              ws.on('open', () => ws.send(JSON.stringify(browserHello)));
+              ws.on('message', (data) => {
+                resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+              });
+              ws.on('close', (code) =>
+                reject(new Error(`closed before welcome: ${code}`)),
+              );
+              ws.on('error', reject);
+            },
+          );
+          expect(welcome['type']).toBe('host.welcome');
+          const coordinator = app.locals[
+            'liveCoordinator'
+          ] as LiveHostCoordinator;
+          expect(coordinator.getStatus().host).toMatchObject({
+            kind: 'browser',
+          });
+        },
+      );
+    });
+
+    it('does not mount the native /live/host ingress off macOS', async () => {
+      await withLiveDaemon({ enabled: true, trusted: true }, async (port) => {
+        await expect(
+          closeCodeOf(`ws://127.0.0.1:${port}/live/host`),
+        ).rejects.toThrow();
+      });
+    });
+
+    it('closes /live/web with 4003 while Live Voice is disabled', async () => {
+      await withLiveDaemon({ enabled: false, trusted: true }, async (port) => {
+        await expect(
+          closeCodeOf(`ws://127.0.0.1:${port}/live/web`),
+        ).resolves.toBe(4003);
+      });
+    });
+
+    it('closes /live/web with 4003 in an untrusted workspace', async () => {
+      await withLiveDaemon(
+        { enabled: true, trusted: false },
+        async (port, app) => {
+          await expect(
+            closeCodeOf(`ws://127.0.0.1:${port}/live/web`),
+          ).resolves.toBe(4003);
+          const coordinator = app.locals[
+            'liveCoordinator'
+          ] as LiveHostCoordinator;
+          expect(coordinator.getStatus().host).toBeUndefined();
+        },
+      );
+    });
+  });
+
+  it.each([
+    { runtimePlatform: 'linux' as const, native: false },
+    { runtimePlatform: 'darwin' as const, native: true },
+  ])(
+    'advertises the browser Host on $runtimePlatform and the native Host only on macOS',
+    async ({ runtimePlatform, native }) => {
+      const tmp = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-live-browser-host-'),
+      );
+      const qwenHome = path.join(tmp, 'qwen-home');
+      await fsp.mkdir(qwenHome, { recursive: true });
+      await fsp.writeFile(
+        path.join(qwenHome, 'settings.json'),
+        JSON.stringify({
+          experimental: {
+            liveVoice: { enabled: true, apiKey: 'dedicated-realtime-key' },
+          },
+        }),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = qwenHome;
+      resetHomeEnvBootstrapForTesting();
+      let app: ReturnType<typeof createServeApp> | undefined;
+      try {
+        app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          persistSetting: vi.fn(async () => undefined),
+          daemonEnv: {},
+          runtimePlatform,
+          webShellDir: path.join(tmp, 'web-shell'),
+        });
+        const live = await request(app)
+          .get('/live/status')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(live.status).toBe(200);
+        expect(live.body).toMatchObject({ blocker: 'host_missing' });
+        const capabilities = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilities.body.features).toContain('realtime_voice_web');
+        expect(capabilities.body.features.includes('realtime_voice')).toBe(
+          native,
+        );
+        // Listed on every platform; `/live/setup.nativeHost` tells the Web
+        // Shell whether the install / launch / shortcut parts apply.
+        const settings = await request(app)
+          .get('/workspace/settings')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(
+          settings.body.settings.some((setting: { key: string }) =>
+            setting.key.startsWith('experimental.liveVoice.'),
+          ),
+        ).toBe(true);
+        const setup = await request(app)
+          .get('/live/setup')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(setup.body.nativeHost).toBe(native);
+      } finally {
+        (app?.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tmp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not initialize Live dependencies when disabled at daemon startup', async () => {
     const tmp = await fsp.mkdtemp(

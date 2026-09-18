@@ -5689,11 +5689,6 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
     );
   }
 
-  const terminal = normalizeGoalTerminal(meta['goalTerminal']);
-  if (terminal) {
-    return createGoalStatusUiEvent(event, terminal);
-  }
-
   // Per-iteration "checking" events are deliberately not turned into
   // transcript cards: one card per stop-hook turn floods the transcript, and
   // the active goal state is already visible in the status bar. Which kinds do
@@ -5701,7 +5696,7 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   // admits `paused`, `cleared` and `usage_limited` as well as the terminal
   // kinds, and dropping any of them regresses the bug recorded beside its
   // `paused` entry. This return is only the fallthrough for an event that
-  // carried neither a status nor a terminal.
+  // carried no card.
   return null;
 }
 
@@ -5766,26 +5761,6 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     ...(iterations !== undefined ? { iterations } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(setAt !== undefined ? { setAt } : {}),
-    ...(lastReason ? { lastReason } : {}),
-  };
-}
-
-function normalizeGoalTerminal(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
-  const kind = getString(value, 'kind');
-  if (kind !== 'achieved' && kind !== 'failed' && kind !== 'aborted') {
-    return null;
-  }
-  const condition = getString(value, 'condition');
-  if (!condition) return null;
-  const iterations = getNumber(value, 'iterations');
-  const durationMs = getNumber(value, 'durationMs');
-  const lastReason = getString(value, 'lastReason');
-  return {
-    kind,
-    condition,
-    ...(iterations !== undefined ? { iterations } : {}),
-    ...(durationMs !== undefined ? { durationMs } : {}),
     ...(lastReason ? { lastReason } : {}),
   };
 }
