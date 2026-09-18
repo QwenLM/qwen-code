@@ -37,6 +37,7 @@ import {
 } from '../team/identity.js';
 import type { TeammateIdentity } from '../team/types.js';
 import type { Config } from '../../config/config.js';
+import type { ExecutionEnvironment } from '../../services/execution-environment.js';
 import type {
   ModelConfig,
   PromptConfig,
@@ -1200,6 +1201,7 @@ describe('AgentCore.prepareTools', () => {
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
+    config: Config;
     getFunctionDeclarationsSpy: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFilteredSpy: ReturnType<typeof vi.fn>;
     isPermissionDeferredSpy: ReturnType<typeof vi.fn>;
@@ -1237,12 +1239,27 @@ describe('AgentCore.prepareTools', () => {
     return {
       core,
       debugSpy,
+      config,
       getFunctionDeclarationsSpy,
       getFunctionDeclarationsFilteredSpy,
       isPermissionDeferredSpy,
       isDeferredAndHiddenSpy,
     };
   }
+
+  it.each([true, false])(
+    'exposes worker task_stop only to contained agents (container=%s)',
+    async (contained) => {
+      const { core, config } = buildAgentForTools(undefined, [
+        { name: ToolNames.TASK_STOP },
+      ]);
+      config.getExecutionEnvironment = () =>
+        contained ? ({} as ExecutionEnvironment) : undefined;
+      expect((await core.prepareTools()).map((tool) => tool.name)).toEqual(
+        contained ? [ToolNames.TASK_STOP] : [],
+      );
+    },
+  );
 
   it('wildcard tools:["*"] inherits deferred tools (passes includeDeferred: true)', async () => {
     const fnDecls: FunctionDeclaration[] = [

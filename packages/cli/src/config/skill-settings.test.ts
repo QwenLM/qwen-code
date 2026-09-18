@@ -47,6 +47,36 @@ function fakeSettings({
 }
 
 describe('resolveSkillSettings', () => {
+  it('makes Browser Use and Computer Use available by default', () => {
+    const result = resolveSkillSettings(fakeSettings({ merged: {} }));
+
+    expect(result.disabledNames).toEqual(new Set());
+    expect(result.disablements.has('browser-use')).toBe(false);
+    expect(result.disabledNames.has('computer-use')).toBe(false);
+  });
+
+  it('lets the skills picker enable, disable, and re-enable Browser Use', () => {
+    let lists = { disabled: [] as string[], enabled: [] as string[] };
+    for (const enabled of [true, false, true]) {
+      lists = updateWorkspaceSkillSettingLists(lists, 'browser-use', enabled);
+      const result = resolveSkillSettings(fakeSettings({ merged: lists }));
+      expect(result.disabledNames.has('browser-use')).toBe(!enabled);
+    }
+  });
+
+  it('keeps a hard Browser Use disable authoritative over an explicit opt-in', () => {
+    const result = resolveSkillSettings(
+      fakeSettings({
+        merged: { disabled: ['browser-use'], enabled: [' BROWSER-USE '] },
+        user: { disabled: ['browser-use'] },
+      }),
+    );
+    expect(result.disablements.get('browser-use')).toEqual({
+      reason: 'hard',
+      lockedScope: 'user',
+    });
+  });
+
   it('lets a workspace opt-in override a user default case-insensitively', () => {
     const result = resolveSkillSettings(
       fakeSettings({

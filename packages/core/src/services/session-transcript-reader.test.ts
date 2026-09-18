@@ -89,6 +89,30 @@ import {
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
 
+/** A v2 goal_state payload with the given objective, as the runtime journals it. */
+function goalStatePayload(objective: string, recordId = 'cursor') {
+  return {
+    v: 2 as const,
+    cause: 'create' as const,
+    snapshot: {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: `goal-${objective.replace(/\W+/g, '-')}`,
+        revision: 1,
+        objective,
+        status: 'active' as const,
+        evidenceCursor: { recordId },
+        turnCount: 0,
+        activeTimeMs: 0,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    },
+  };
+}
+
 describe('SessionTranscriptReader', () => {
   let runtimeDir: string;
   let workspaceDir: string;
@@ -1726,20 +1750,10 @@ describe('SessionTranscriptReader', () => {
     const inheritedGoal: ChatRecord = {
       ...record('goal', 'a1', ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
       forkedFrom: { sessionId: 'parent', messageUuid: 'goal' },
-      systemPayload: {
-        rawCommand: '/goal inherited goal',
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'inherited goal',
-          },
-        ],
-      },
+      systemPayload: goalStatePayload('inherited goal'),
     };
     await writeRecords([
       inheritedUser,
@@ -1791,29 +1805,17 @@ describe('SessionTranscriptReader', () => {
     const visibleGoal: ChatRecord = {
       ...record('visible-goal', null, ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
-      systemPayload: {
-        rawCommand: '/goal visible goal',
-        phase: 'result',
-        outputHistoryItems: [
-          { type: 'goal_status', kind: 'set', condition: 'visible goal' },
-        ],
-      },
+      systemPayload: goalStatePayload('visible goal'),
     };
     const hiddenGoal: ChatRecord = {
       ...record('hidden-goal', 'visible-goal', ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
       forkedFrom: { sessionId: 'parent', messageUuid: 'hidden-goal' },
-      systemPayload: {
-        rawCommand: '/goal hidden goal',
-        phase: 'result',
-        outputHistoryItems: [
-          { type: 'goal_status', kind: 'set', condition: 'hidden goal' },
-        ],
-      },
+      systemPayload: goalStatePayload('hidden goal'),
     };
     await writeRecords([
       record('u0', null, 'older prompt'),
@@ -2252,6 +2254,8 @@ describe('SessionTranscriptReader', () => {
         },
       },
     };
+    // A goal_status card from a build before #7895 is history, not a
+    // recovery candidate: it is neither normalized nor carried.
     const legacy: ChatRecord = {
       ...record('legacy', 'u1', ''),
       type: 'system',
@@ -2302,15 +2306,6 @@ describe('SessionTranscriptReader', () => {
     });
     expect(projection?.runtime.goalRecoverySourceUuid).toBe('valid-goal');
     expect(projection?.runtime.goalRecords).toEqual([
-      expect.objectContaining({
-        uuid: 'legacy',
-        systemPayload: {
-          phase: 'result',
-          outputHistoryItems: [
-            { type: 'goal_status', kind: 'set', condition: 'legacy goal' },
-          ],
-        },
-      }),
       expect.objectContaining({ uuid: 'valid-goal', systemPayload: validGoal }),
       expect.objectContaining({ uuid: 'malformed-goal', systemPayload: null }),
     ]);
@@ -2418,53 +2413,6 @@ describe('SessionTranscriptReader', () => {
       'qwen-code.daemon.session_restore.index_cache_state',
       'hit',
     );
-  });
-
-  it('retains the determining legacy Goal candidate for a recent live page', async () => {
-    const legacyGoal: ChatRecord = {
-      ...record('goal', null, ''),
-      type: 'system',
-      subtype: 'slash_command',
-      message: undefined,
-      systemPayload: {
-        rawCommand: '/goal keep the live goal visible',
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'keep the live goal visible',
-            iterations: 0,
-          },
-        ],
-      },
-    };
-    await writeRecords([
-      legacyGoal,
-      record('u1', 'goal', 'one'),
-      record('a1', 'u1', 'one answer'),
-      record('u2', 'a1', 'two'),
-      record('a2', 'u2', 'two answer'),
-    ]);
-
-    const projection = await new SessionTranscriptReader(
-      workspaceDir,
-    ).readLiveRestoreProjection(sessionId, {
-      replay: {
-        kind: 'recent',
-        limit: 2,
-        hideInheritedHistory: false,
-      },
-    });
-
-    expect(projection?.replay?.records.map((item) => item.uuid)).toEqual([
-      'u2',
-      'a2',
-    ]);
-    expect(projection?.goalRecoverySourceUuid).toBe('goal');
-    expect(projection?.goalRecords).toEqual([
-      expect.objectContaining({ uuid: 'goal', subtype: 'slash_command' }),
-    ]);
   });
 
   it('keeps backward pages within a normal user turn boundary', async () => {
