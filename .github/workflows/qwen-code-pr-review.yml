@@ -988,9 +988,9 @@ jobs:
           exit 0
 
       - name: 'Prepare review scratch directory'
-        id: review_scratch
+        id: 'review_scratch'
         if: "steps.context.outputs.should_run == 'true'"
-        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
         run: |-
           scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
           echo "dir=$scratch" >> "$GITHUB_OUTPUT"
@@ -2914,10 +2914,10 @@ jobs:
       - name: 'Clean review scratch directory'
         if: "always() && steps.review_scratch.outputs.dir != ''"
         timeout-minutes: 5
-        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        shell: '/bin/bash --noprofile --norc -e -o pipefail {0}'
         env:
           REVIEW_SCRATCH: '${{ steps.review_scratch.outputs.dir }}'
-          PATH: /usr/local/bin:/usr/bin:/bin
+          PATH: '/usr/local/bin:/usr/bin:/bin'
         run: |-
           case "$REVIEW_SCRATCH" in
             "${RUNNER_TEMP:?}"/qwen-review-scratch.*)
