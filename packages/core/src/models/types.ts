@@ -98,6 +98,12 @@ export interface ModelConfig {
   voiceOnly?: boolean;
   /** When true, this model only appears in the vision model selector, not the main model list */
   visionOnly?: boolean;
+  /**
+   * When true, this route speaks a bidirectional Realtime (speech-to-speech)
+   * protocol and is only selectable as the Live Voice model, never as a chat
+   * model.
+   */
+  realtimeOnly?: boolean;
   /** Whether this route can be used by the built-in image_gen tool */
   supportsImageGeneration?: boolean;
   /** When true, this model only appears in the image generation model selector */

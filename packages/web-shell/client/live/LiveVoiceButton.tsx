@@ -20,6 +20,7 @@ import {
   DialogTrigger,
 } from '../components/ui/dialog';
 import { useI18n } from '../i18n';
+import type { LiveBrowserHostCloseReason } from './useLiveBrowserHost';
 import { useLiveVoice } from './useLiveVoice';
 import styles from './LiveVoiceButton.module.css';
 
@@ -34,6 +35,42 @@ const REQUIREMENTS = [
   ['appshot', 'live.requirement.appshot'],
   ['provider', 'live.requirement.provider'],
 ] as const;
+
+// A page owns the microphone and the speakers, nothing else: no Accessibility,
+// Screen Recording or global shortcut to grant. `appshot` stays because the
+// daemon reports its Live runtime readiness under that name.
+const BROWSER_REQUIREMENTS: ReadonlySet<string> = new Set([
+  'host',
+  'microphone',
+  'audioInput',
+  'audioOutput',
+  'appshot',
+  'provider',
+]);
+
+// In the browser form the Host is this tab, and `appshot` only ever means the
+// daemon-side Live runtime.
+const BROWSER_REQUIREMENT_LABELS = {
+  host: 'live.browser.requirement.host',
+  appshot: 'live.browser.requirement.runtime',
+} as const;
+
+/**
+ * Who holds the daemon's single Host lease, from this page's point of view.
+ * `native`: the macOS Host — this dialog is its remote control, as before.
+ * `self`: this page is the audio endpoint. `other-tab`: another Web Shell page
+ * is. `none`: nobody yet.
+ */
+type LiveHostMode = 'native' | 'self' | 'other-tab' | 'none';
+
+const CLOSE_REASON_MESSAGES: Record<LiveBrowserHostCloseReason, string> = {
+  occupied: 'live.browser.closed.occupied',
+  'superseded-native': 'live.browser.closed.supersededNative',
+  'superseded-tab': 'live.browser.closed.supersededTab',
+  refused: 'live.browser.closed.refused',
+  microphone: 'live.browser.closed.microphone',
+  lost: 'live.browser.closed.lost',
+};
 
 function LiveIcon(): React.JSX.Element {
   return (
@@ -84,6 +121,9 @@ export function LiveVoiceButton(): React.JSX.Element | null {
   const { t } = useI18n();
   const {
     supported,
+    nativeSupported,
+    browserSupported,
+    browserHost,
     status,
     loading,
     mutating,
@@ -98,6 +138,32 @@ export function LiveVoiceButton(): React.JSX.Element | null {
   const busy = loading || mutating;
   const label = active ? t('live.manage') : t('live.open');
   const requirements = status?.requirements ?? {};
+  const mode: LiveHostMode = !status?.host
+    ? 'none'
+    : status.host.kind !== 'browser'
+      ? 'native'
+      : browserHost.phase === 'connected'
+        ? 'self'
+        : 'other-tab';
+  const connecting = browserHost.phase === 'connecting';
+  // Offer this page as the audio endpoint whenever no native Host is attached.
+  const canUseBrowser =
+    browserSupported && mode !== 'native' && mode !== 'self';
+  // Where a native Host can attach it stays the default: until a Host is
+  // chosen the dialog keeps its native gate and the browser is the secondary
+  // way in. Elsewhere the browser is the only endpoint there is.
+  const browserForm =
+    browserSupported &&
+    (mode === 'self' || mode === 'other-tab' || !nativeSupported);
+  // "Qwen Live Host is not connected" is the daemon's wording for the native
+  // app. Here the missing Host is this very tab, one click away.
+  const hostMissingInBrowserForm =
+    browserForm &&
+    (status?.blocker === 'host_missing' ||
+      status?.blocker === 'host_disconnected');
+  const visibleRequirements = browserForm
+    ? REQUIREMENTS.filter(([key]) => BROWSER_REQUIREMENTS.has(key))
+    : REQUIREMENTS;
 
   return (
     <Dialog
@@ -118,23 +184,40 @@ export function LiveVoiceButton(): React.JSX.Element | null {
           <LiveIcon />
         </button>
       </DialogTrigger>
-      <DialogContent data-web-shell-live-dialog>
+      {/* Wider than the default dialog, with a wrapping footer: three footer
+          buttons do not fit 384px and used to push the requirement states
+          outside the dialog. */}
+      <DialogContent data-web-shell-live-dialog className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{t('live.title')}</DialogTitle>
           <DialogDescription>
-            {status?.available
-              ? t('live.readyDescription')
-              : t('live.setupDescription')}
+            {mode === 'self'
+              ? t('live.browser.readyDescription')
+              : mode === 'other-tab'
+                ? t('live.browser.otherTabDescription')
+                : status?.available
+                  ? t('live.readyDescription')
+                  : browserForm
+                    ? t('live.browser.setupDescription')
+                    : t('live.setupDescription')}
           </DialogDescription>
         </DialogHeader>
 
         {!status?.available ? (
           <ul className={styles.requirements}>
-            {REQUIREMENTS.map(([key, messageKey]) => {
+            {visibleRequirements.map(([key, messageKey]) => {
               const requirementState = requirements[key];
               return (
                 <li className={styles.requirement} key={key}>
-                  <span>{t(messageKey)}</span>
+                  <span>
+                    {t(
+                      browserForm && key in BROWSER_REQUIREMENT_LABELS
+                        ? BROWSER_REQUIREMENT_LABELS[
+                            key as keyof typeof BROWSER_REQUIREMENT_LABELS
+                          ]
+                        : messageKey,
+                    )}
+                  </span>
                   <span className={styles.requirementState}>
                     <span
                       className={styles.dot}
@@ -154,7 +237,7 @@ export function LiveVoiceButton(): React.JSX.Element | null {
           </div>
         )}
 
-        {status?.message ? (
+        {status?.message && !hostMissingInBrowserForm ? (
           <p className={styles.error}>{status.message}</p>
         ) : null}
         {status?.transcript ? (
@@ -167,16 +250,62 @@ export function LiveVoiceButton(): React.JSX.Element | null {
             {status.caption}
           </p>
         ) : null}
-        {status?.shortcut ? (
+        {browserHost.closeReason ? (
+          <p className={styles.error} data-live-browser-closed>
+            {browserHost.closeReason === 'microphone' &&
+            browserHost.errorMessage
+              ? browserHost.errorMessage
+              : t(CLOSE_REASON_MESSAGES[browserHost.closeReason])}
+          </p>
+        ) : null}
+        {status?.shortcut && !browserForm ? (
           <p className={styles.hint}>
             {t('live.shortcutHint', { shortcut: status.shortcut })}
           </p>
         ) : null}
-        {!status?.available ? (
+        {!status?.available && !browserSupported ? (
           <p className={styles.hint}>{t('live.noFallback')}</p>
         ) : null}
+        {browserForm ? (
+          <p className={styles.hint}>{t('live.browser.headphonesHint')}</p>
+        ) : null}
 
-        <DialogFooter>
+        {canUseBrowser || (mode === 'self' && !active) ? (
+          <div className={styles.browserActions}>
+            {canUseBrowser ? (
+              <Button
+                variant={browserForm && mode === 'none' ? 'default' : 'outline'}
+                disabled={connecting}
+                data-live-browser-connect
+                onClick={() =>
+                  browserHost.connect({
+                    takeover:
+                      mode === 'other-tab' ||
+                      browserHost.closeReason === 'occupied',
+                  })
+                }
+              >
+                {connecting
+                  ? t('live.browser.connecting')
+                  : mode === 'other-tab' ||
+                      browserHost.closeReason === 'occupied'
+                    ? t('live.browser.takeOver')
+                    : t('live.browser.connect')}
+              </Button>
+            ) : null}
+            {mode === 'self' && !active ? (
+              <Button
+                variant="outline"
+                data-live-browser-disconnect
+                onClick={() => browserHost.disconnect()}
+              >
+                {t('live.browser.disconnect')}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        <DialogFooter className="flex-wrap">
           {!status?.available ? (
             <Button variant="outline" disabled={busy} onClick={() => refresh()}>
               {t('live.refresh')}

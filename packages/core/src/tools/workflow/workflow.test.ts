@@ -31,6 +31,7 @@ import {
 import { Storage } from '../../config/storage.js';
 import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
+import { NO_JOURNAL_NO_RESUME_NOTE } from '../../agents/workflow-resume-call.js';
 import { TurnBudget } from '../../core/turn-budget.js';
 import { uiTelemetryService } from '../../telemetry/uiTelemetry.js';
 import { EVENT_API_RESPONSE } from '../../telemetry/constants.js';
@@ -220,6 +221,21 @@ describe('WorkflowTool', () => {
   // `resumeFromRunId` tells the model to edit. A change on one side that
   // leaves the other pointing at the old contract (re-send the script) is
   // the regression this catches.
+  // A resume with no journal used to run every agent again under the old id,
+  // and the schema promised exactly that.
+  it('says a resume needs its journal, and promises no live re-run without one', () => {
+    const schema = new WorkflowTool(fakeConfig()).schema
+      .parametersJsonSchema as {
+      properties: { resumeFromRunId: { description: string } };
+    };
+    const text = schema.properties.resumeFromRunId.description;
+    expect(text).toContain(
+      'A run whose journal is not on disk has nothing to resume and is refused',
+    );
+    expect(text).toContain('call again without `resumeFromRunId`');
+    expect(text).not.toContain('without one, every agent() call runs live');
+  });
+
   it('scriptPath and resumeFromRunId describe the persisted inline script', () => {
     const tool = new WorkflowTool(fakeConfig());
     const schema = tool.schema.parametersJsonSchema as {
@@ -887,8 +903,10 @@ await agent('scan package.json')
     // limits and the description the size guideline paragraph, which put the
     // fallback at 25,759. Raised again from 26,500 when the reference gained
     // `agent({tools})`, whose entry states what the allowlist refuses and what
-    // it cannot promise, which put the fallback at 26,900.
-    expect(tool.description.length).toBeLessThanOrEqual(27_500);
+    // it cannot promise, which put the fallback at 26,900. Raised again from
+    // 27,500, which the resume refusals had reached exactly, when the reference
+    // gained how a run interrupted by its process exiting is listed.
+    expect(tool.description.length).toBeLessThanOrEqual(28_000);
   });
 
   it('rejects build() when script is missing', () => {
@@ -1009,11 +1027,16 @@ await agent('scan package.json')
       await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
       const runId = first.workflowRunId;
       expect(runId).toMatch(/^wf_/);
+      // The completion callback fires from fail()/complete() while the
+      // runner's finally block still holds the run's handle; a resume that
+      // lands before releaseHandle is refused with "has not exited yet".
+      await registry.getHandle(runId!)?.completion;
 
       await tool
         .buildSessionOwnedBackground({ script, resumeFromRunId: runId })
         .execute(new AbortController().signal);
       await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(2));
+      await registry.getHandle(runId!)?.completion;
       const retryText = completion.mock.calls[1][1] as string;
       expect(retryText).toContain(
         'This reads the saved /review-and-fix workflow',
@@ -1111,7 +1134,10 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
-        return { results: new Map(), started: new Map(), failed: new Set() };
+        return {
+          kind: 'loaded' as const,
+          replay: { results: new Map(), started: new Map(), failed: new Set() },
+        };
       });
 
     try {
@@ -1156,7 +1182,10 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         expect(registry.cancelStarting('wf_1234abcd')).toBe(true);
-        return { results: new Map(), started: new Map(), failed: new Set() };
+        return {
+          kind: 'loaded' as const,
+          replay: { results: new Map(), started: new Map(), failed: new Set() },
+        };
       });
 
     try {
@@ -1194,7 +1223,10 @@ await agent('scan package.json')
       .spyOn(WorkflowJournal.prototype, 'load')
       .mockImplementation(async () => {
         caller.abort();
-        return { results: new Map(), started: new Map(), failed: new Set() };
+        return {
+          kind: 'loaded' as const,
+          replay: { results: new Map(), started: new Map(), failed: new Set() },
+        };
       });
 
     try {
@@ -2256,9 +2288,13 @@ await agent('scan package.json')
         .trim()
         .split('\n')
         .map((line) => JSON.parse(line) as Record<string, unknown>);
-      expect(lines.map((line) => line['type'])).toEqual(['started', 'failed']);
-      expect(lines[1]['key']).toBe(lines[0]['key']);
-      expect(lines[1]['agentId']).toBe(lines[0]['agentId']);
+      expect(lines.map((line) => line['type'])).toEqual([
+        'launched',
+        'started',
+        'failed',
+      ]);
+      expect(lines[2]['key']).toBe(lines[1]['key']);
+      expect(lines[2]['agentId']).toBe(lines[1]['agentId']);
     });
 
     it('carries the trailer and the last log lines on the failure path', async () => {
@@ -2479,7 +2515,10 @@ await agent('scan package.json')
         .execute(new AbortController().signal);
       const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
 
-      expect(trailer).toContain('no journal was written for this run');
+      // A resume replays the journal, so with none written the trailer says
+      // so instead of handing back a call that would be refused.
+      expect(trailer).toContain(NO_JOURNAL_NO_RESUME_NOTE);
+      expect(trailer).not.toContain('resumeFromRunId:');
       expect(trailer).not.toContain('longest unchanged prefix');
       expect(result.journalPath).toBeUndefined();
     });
