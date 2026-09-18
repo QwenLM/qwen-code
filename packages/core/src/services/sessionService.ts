@@ -28,7 +28,6 @@ import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
-  SlashCommandRecordPayload,
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
@@ -87,6 +86,7 @@ import {
   resolveBranchPoints,
 } from './branch-points.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
+import { findRunningLegacyGoalCard } from '../goals/goal-legacy-cards.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 export {
   buildApiHistoryFromConversation,
@@ -2269,11 +2269,14 @@ export class SessionService {
     records: ChatRecord[],
   ): string | undefined {
     const recovery = recoverGoalFromRecords(records);
+    // A build before #7895 journaled the Goal as a card, not state. The
+    // runtime restores no Goal from it, but the card is still the only thing
+    // that labels a session whose one prompt was `/goal`.
     const objective =
       recovery.kind === 'v2'
         ? recovery.payload.snapshot.goal?.objective
         : recovery.kind === 'none'
-          ? legacyGoalCardObjective(records)
+          ? findRunningLegacyGoalCard(records)?.condition.trim()
           : undefined;
     return objective ? this.truncatePromptForDisplay(objective) : undefined;
   }
@@ -4771,47 +4774,4 @@ export function normalizeDerivedBranchTitle(
     .replace(/(\S)\(\d+\)$/, '$1')
     .trim();
   return normalized || undefined;
-}
-
-/**
- * The objective of the newest running Goal card a build before #7895
- * journaled. The runtime no longer restores such a Goal, but the card is
- * still the only thing that labels a session whose one prompt was `/goal`;
- * this reads it for the session list and nothing else.
- */
-function legacyGoalCardObjective(records: ChatRecord[]): string | undefined {
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    const record = records[index];
-    if (record?.type !== 'system' || record.subtype !== 'slash_command') {
-      continue;
-    }
-    const payload = record.systemPayload as
-      | SlashCommandRecordPayload
-      | undefined;
-    if (
-      payload?.phase !== 'result' ||
-      !Array.isArray(payload.outputHistoryItems)
-    ) {
-      continue;
-    }
-    for (const item of [...payload.outputHistoryItems].reverse()) {
-      if (
-        typeof item !== 'object' ||
-        item === null ||
-        (item as { type?: unknown }).type !== 'goal_status'
-      ) {
-        continue;
-      }
-      const card = item as { kind?: unknown; condition?: unknown };
-      if (
-        (card.kind === 'set' || card.kind === 'checking') &&
-        typeof card.condition === 'string' &&
-        card.condition.trim()
-      ) {
-        return card.condition.trim();
-      }
-      return undefined;
-    }
-  }
-  return undefined;
 }

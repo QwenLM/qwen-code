@@ -5661,9 +5661,17 @@ class QwenAgent implements Agent {
               'qwen-code.daemon.session_restore.partial_replay',
               replay.replayError !== undefined,
             );
+            // A cold load publishes the recovered Goal after the replay; a
+            // live session's Goal is already published, so the only thing
+            // to append is the card that supersedes a running legacy card
+            // the page ended on. Nothing, for any transcript this build
+            // wrote.
+            const goalUpdates = liveSession.renderLegacyGoalSupersession(
+              replayPage.records,
+            );
             if (!bulkReplay) {
               try {
-                for (const update of replay.updates) {
+                for (const update of [...replay.updates, ...goalUpdates]) {
                   await liveSession.sendUpdate(update);
                 }
               } finally {
@@ -5683,7 +5691,7 @@ class QwenAgent implements Agent {
 
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
-              updates: replay.updates,
+              updates: [...replay.updates, ...goalUpdates],
               ...(replayPage.anchorRecordId
                 ? { anchorRecordId: replayPage.anchorRecordId }
                 : {}),

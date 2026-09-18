@@ -2397,6 +2397,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     | {
         captureHistorySnapshot: ReturnType<typeof vi.fn>;
         emitGoalStatus: ReturnType<typeof vi.fn>;
+        renderLegacyGoalSupersession: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
@@ -5231,6 +5232,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
           dispose: vi.fn(),
           emitGoalStatus: vi.fn(),
+          renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
           captureHistorySnapshot: vi
             .fn()
             .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
@@ -26507,6 +26509,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         replayHistory: ReturnType<typeof vi.fn>;
         primeTurnFromHistory: ReturnType<typeof vi.fn>;
         publishRecoveredGoalState: ReturnType<typeof vi.fn>;
+        renderLegacyGoalSupersession: ReturnType<typeof vi.fn>;
         primeRecoveredGoalPublication: ReturnType<typeof vi.fn>;
         primeTurnState: ReturnType<typeof vi.fn>;
         cumulativeUsage: {
@@ -26920,6 +26923,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           ),
         primeTurnFromHistory: vi.fn(opts.primeTurnFromHistoryImpl),
         publishRecoveredGoalState: vi.fn().mockResolvedValue(undefined),
+        renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
         primeRecoveredGoalPublication: vi.fn(),
         primeTurnState: vi.fn(opts.primeTurnStateImpl),
         cumulativeUsage: {
@@ -28371,6 +28375,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       isTurnIdle: vi.fn().mockReturnValue(true),
       sendUpdate: vi.fn().mockResolvedValue(undefined),
       clearActiveTodoPlanRevision: vi.fn(),
+      renderLegacyGoalSupersession: vi.fn().mockReturnValue([]),
     };
     const { agent, agentPromise } = await spawnAgent();
     (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
@@ -29524,6 +29529,65 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(firstSession.installRewriter).toHaveBeenCalledTimes(1);
     expect(firstSession.startCronScheduler).toHaveBeenCalledTimes(1);
     expect(firstSession.beginClose.mock.results[0]?.value).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('live load appends the legacy Goal supersession after the replayed page', async () => {
+    // A daemon session that resumed a pre-#7895 transcript drives no Goal.
+    // A client refreshing against it replays the page, which ends on the
+    // old running card; the card that supersedes it must follow the page
+    // in both the streamed and the bulk delivery.
+    const initialMessages = [{ role: 'user', parts: [{ text: 'first' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: initialMessages },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock!;
+    const supersession = {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        goalStatus: { kind: 'cleared', condition: 'old goal', iterations: 1 },
+      },
+    };
+    firstSession.renderLegacyGoalSupersession.mockReturnValue([supersession]);
+    const replayUpdate = { sessionUpdate: 'agent_message_chunk' };
+    mockHistoryReplay.mockImplementation(async (context) => {
+      await context.sendUpdate(replayUpdate);
+    });
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    expect(firstSession.renderLegacyGoalSupersession).toHaveBeenCalledWith(
+      initialMessages,
+    );
+    expect(
+      firstSession.sendUpdate.mock.calls.map(([update]) => update),
+    ).toEqual([replayUpdate, supersession]);
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    })) as LoadSessionResponse & {
+      _meta?: Record<string, { updates: unknown[] }>;
+    };
+    expect(response._meta?.['qwen.session.loadReplay']?.updates).toEqual([
+      replayUpdate,
+      supersession,
+    ]);
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -1044,41 +1044,34 @@ export function createGoalRuntime(
           recoveryError = new GoalPersistenceUnavailableError(recovery.reason);
           throw recoveryError;
         }
-        try {
-          let recoveredSnapshot: GoalSnapshotV2 | undefined;
-          let recoveredCause: GoalStateCause | undefined;
-          if (recovery.kind === 'v2') {
-            recoveredSnapshot = {
-              ...structuredClone(recovery.payload.snapshot),
-              activity: 'idle',
-            };
-            if (recoveredSnapshot.goal?.status === 'active') {
-              recoveredSnapshot.goal.updatedAt = Date.now();
-            }
-            blockedAudit = recovery.payload.blockedAudit
-              ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
-              : undefined;
-            recoveredCause = recovery.payload.cause;
-            if (recoveredCause === 'verifier_reject') {
-              nextVerifierFeedback = recoveredSnapshot.goal?.lastReason;
-            }
+        // Nothing below waits, so the availability checked above holds to
+        // the end: a restore reads the transcript and writes nothing.
+        let recoveredSnapshot: GoalSnapshotV2 | undefined;
+        let recoveredCause: GoalStateCause | undefined;
+        if (recovery.kind === 'v2') {
+          recoveredSnapshot = {
+            ...structuredClone(recovery.payload.snapshot),
+            activity: 'idle',
+          };
+          if (recoveredSnapshot.goal?.status === 'active') {
+            recoveredSnapshot.goal.updatedAt = Date.now();
           }
-          assertAvailable();
-          if (recoveredSnapshot) snapshot = recoveredSnapshot;
-          recoveryError = undefined;
-          restored = true;
-          if (recoveredSnapshot) {
-            recoveryCause = recoveredCause;
+          blockedAudit = recovery.payload.blockedAudit
+            ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
+            : undefined;
+          recoveredCause = recovery.payload.cause;
+          if (recoveredCause === 'verifier_reject') {
+            nextVerifierFeedback = recoveredSnapshot.goal?.lastReason;
           }
-          preparedRestoreHasSnapshot = recoveredSnapshot !== undefined;
-          preparedRestoreCause = recoveredCause;
-        } catch (error) {
-          if (!disposed) {
-            recoveryError =
-              error instanceof Error ? error : new Error(String(error));
-          }
-          throw error;
         }
+        if (recoveredSnapshot) snapshot = recoveredSnapshot;
+        recoveryError = undefined;
+        restored = true;
+        if (recoveredSnapshot) {
+          recoveryCause = recoveredCause;
+        }
+        preparedRestoreHasSnapshot = recoveredSnapshot !== undefined;
+        preparedRestoreCause = recoveredCause;
       });
       restorePreparation = preparation;
       return preparation.then(

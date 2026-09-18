@@ -27146,6 +27146,72 @@ describe('Session', () => {
         });
       });
 
+      // The live-restore path appends the same card from the runtime as it
+      // stands, without waiting for readiness, and only while the session
+      // drives no Goal.
+      it('renders the legacy supersession for a live replay only while no Goal is live', () => {
+        const legacyCard = {
+          uuid: 'legacy-goal',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: new Date(0).toISOString(),
+          type: 'system',
+          subtype: 'slash_command',
+          cwd: '/tmp',
+          version: 'test',
+          systemPayload: {
+            phase: 'result',
+            outputHistoryItems: [
+              {
+                type: 'goal_status',
+                kind: 'checking',
+                condition: 'ship the thing',
+                iterations: 3,
+              },
+            ],
+          },
+        } as unknown as core.ChatRecord;
+
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                iterations: 3,
+              }),
+            },
+          },
+        ]);
+        expect(
+          (
+            mockConfig as unknown as {
+              getGoalRuntimeReady: ReturnType<typeof vi.fn>;
+            }
+          ).getGoalRuntimeReady,
+        ).not.toHaveBeenCalled();
+
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'live-goal',
+            revision: 1,
+            objective: 'set after the resume',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        });
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([]);
+      });
+
       // R3-6's second trigger: `recoverGoalFromRecords` returns
       // `'unsupported'`, `restore()` latches `recoveryError`, and the replay
       // still emitted the active legacy `set` card. Nothing in-session

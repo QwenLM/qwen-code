@@ -3534,6 +3534,55 @@ describe('goal runtime', () => {
     });
   });
 
+  it('refuses a restore preparation that was still queued when the runtime was disposed', async () => {
+    // A restore itself writes nothing, but it queues behind whatever the
+    // runtime is already doing. Disposal while it waits must reach it
+    // before it commits anything.
+    let releaseAppend!: () => void;
+    const appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const runtime = createGoalRuntime({
+      journal: fakeGoalJournal({ beforeAppend: () => appendGate }),
+    });
+    const creating = runtime.dispatch({
+      action: 'create',
+      objective: 'hold the queue',
+    });
+    const preparing = runtime.prepareRestore([
+      goalStateRecord(
+        {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'g-queued',
+            revision: 1,
+            objective: 'queued restore',
+            status: 'paused',
+            evidenceCursor: { recordId: 'restore-record' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+        'pause',
+      ),
+    ]);
+
+    await Promise.resolve();
+    runtime.dispose();
+    releaseAppend();
+
+    await creating.catch(() => undefined);
+    await expect(preparing).rejects.toThrow('Goal runtime has been disposed');
+    await expect(runtime.activateRestoredWork()).rejects.toThrow(
+      'Goal runtime has been disposed',
+    );
+    expect(runtime.getSnapshot().goal?.objective).not.toBe('queued restore');
+  });
+
   it('prepares an active restore without broadcasting or starting work', async () => {
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });

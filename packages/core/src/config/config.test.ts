@@ -4209,9 +4209,9 @@ describe('Server Config (config.ts)', () => {
       };
     };
 
-    // A pre-canonical transcript whose newest Goal record is a legacy
-    // `goal_status` card. Recovering it is the one restore path that has to
-    // *write*: it journals a migrated `goal_state` record.
+    // A transcript whose newest Goal record is a paused Goal. Restoring it
+    // reads the record and writes nothing; what the deferred restore has to
+    // get right is the ordering against the session writer.
     const pausedGoalSession = (): ResumedSessionData => {
       const record = {
         uuid: 'paused-goal',
