@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getRelaunchEnvProvenance } from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   AuthType,
@@ -99,6 +100,7 @@ import {
 import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
@@ -790,7 +792,7 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: privateAcpChildEnv,
+        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
         onUpdateRelaunch,
       });
     }
@@ -1113,6 +1115,10 @@ export async function main() {
       }
     });
 
+    registerCleanup(() => config.shutdownExecutionEnvironments(), {
+      first: true,
+    });
+
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
@@ -1268,6 +1274,12 @@ export async function main() {
     profileCheckpoint('before_render');
 
     if (config.isInteractive()) {
+      // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      const interruptedWorkflowsNotice =
+        await getInterruptedWorkflowRunsNotice(config);
+      if (interruptedWorkflowsNotice) {
+        startupWarnings.push(interruptedWorkflowsNotice);
+      }
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
       // runNonInteractive's main/drain loops. In TUI mode the same call

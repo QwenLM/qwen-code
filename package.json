@@ -22,7 +22,8 @@
     "integrations/external-context",
     "integrations/external-context-mem0",
     "!packages/desktop-shell",
-    "!packages/live-host"
+    "!packages/live-host",
+    "!packages/mobile-shell"
   ],
   "repository": {
     "type": "git",

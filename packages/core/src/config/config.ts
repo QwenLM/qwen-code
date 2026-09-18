@@ -70,6 +70,11 @@ import {
   isTopLevelSession,
 } from '../agents/runtime/agent-context.js';
 import type { ExternalAgentExecutor } from '../agents/runtime/subagent-executor.js';
+import type {
+  ExecutionEnvironment,
+  ExecutionEnvironmentFactory,
+} from '../services/execution-environment.js';
+import { ExecutionCleanupError } from '../services/execution-environment.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
   DashScopeOpenAICompatibleProvider,
@@ -232,12 +237,7 @@ import {
 import type { PendingGoalProposal } from '../goals/goal-tools.js';
 import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
-import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 
 // Utils
@@ -938,6 +938,8 @@ export interface SessionWorkflowPlanRevision {
 export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 
 export interface ConfigParameters {
+  agentExecutionBackend?: 'container';
+  executionEnvironmentFactory?: ExecutionEnvironmentFactory;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
@@ -1140,13 +1142,6 @@ export interface ConfigParameters {
    * `normalizeGoalMaxActiveMinutes`.
    */
   goalMaxActiveMinutes?: number;
-  /**
-   * Ceiling on one Goal evidence-checkpoint verifier call, in seconds.
-   * Absent or invalid falls back to
-   * `GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS`. See
-   * `normalizeGoalCheckpointTimeoutSeconds`.
-   */
-  goalCheckpointTimeoutSeconds?: number;
   /**
    * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
    * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
@@ -1744,56 +1739,6 @@ export function normalizeGoalMaxActiveMinutes(value: unknown): number {
   return value * 60_000;
 }
 
-/**
- * Largest accepted `model.goalCheckpointTimeoutSeconds`, in seconds.
- *
- * Derived from the stream lifetime cap rather than picked as a round number,
- * because the checkpoint call is streamed: past that cap the guard throws
- * `StreamLifetimeExceededError` and the verifier's own timer never fires, so
- * a larger ceiling is a timer that cannot go off. Accepting one would let the
- * setting promise a wait the default wire does not honour -- an operator who
- * raised it to survive a slow model would wait the lifetime cap, get no
- * checkpoint, and see exactly the behaviour they had before touching it.
- *
- * The bound is the shipped default, resolved once here rather than per
- * request, so raising `QWEN_STREAM_MAX_LIFETIME_MS` (or an embedder's
- * `ContentGeneratorConfig.streamMaxLifetimeMs`) does not raise it: a
- * deployment that has lifted the lifetime guard still cannot set a longer
- * ceiling through this setting. That is deliberate -- the accepted range
- * stays the one every deployment can honour, instead of validating against
- * a wire bound the process cannot know at construction time. This also keeps
- * the typo-guard role `GOAL_TOKEN_BUDGET_CAP` plays for its sibling.
- */
-export const GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP =
-  DEFAULT_STREAM_MAX_LIFETIME_MS / 1000;
-
-/**
- * True for the values `normalizeGoalCheckpointTimeoutSeconds` honours: a
- * positive integer number of seconds up to the cap.
- */
-export function isValidGoalCheckpointTimeoutSeconds(
-  value: unknown,
-): value is number {
-  return (
-    typeof value === 'number' &&
-    Number.isInteger(value) &&
-    value >= 1 &&
-    value <= GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP
-  );
-}
-
-/**
- * The checkpoint verifier timeout to arm, in milliseconds: the setting when
- * it is valid, else the built-in default.
- */
-export function normalizeGoalCheckpointTimeoutSeconds(
-  value: number | undefined,
-): number {
-  return isValidGoalCheckpointTimeoutSeconds(value)
-    ? value * 1000
-    : GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS;
-}
-
 function validateMaxToolCallsPerTurn(value: number | undefined): number {
   const resolved = value ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
   if (!Number.isInteger(resolved)) {
@@ -2276,6 +2221,8 @@ export type DerivedConfigOverrides = Partial<
   Pick<
     Config,
     | 'getTargetDir'
+    | 'getExecutionEnvironment'
+    | 'getExecutionEnvironmentFactory'
     | 'getCwd'
     | 'getWorkingDir'
     | 'getProjectRoot'
@@ -2851,7 +2798,6 @@ export class Config {
   private readonly goalTokenBudgetGrant: number;
   private readonly goalTurnBudgetGrant: number;
   private readonly goalActiveTimeBudgetGrantMs: number;
-  private readonly goalCheckpointTimeoutMs: number;
   private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
@@ -2934,6 +2880,11 @@ export class Config {
    * host package. See `ExternalAgentExecutor` and `setExternalAgentExecutor`.
    */
   private externalAgentExecutor?: ExternalAgentExecutor;
+  private readonly agentExecutionBackend?: 'container';
+  private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
+  private readonly executionShutdown = new AbortController();
+  private executionCleanupPromise?: Promise<void>;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
   private goalProposalHostSupported = false;
   private goalProposalTurnKey: string | undefined;
@@ -3059,6 +3010,15 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.agentExecutionBackend = params.agentExecutionBackend;
+    const executionFactory = params.executionEnvironmentFactory;
+    this.executionEnvironmentFactory = executionFactory
+      ? (config, signal) =>
+          executionFactory(
+            config,
+            AbortSignal.any([signal, this.executionShutdown.signal]),
+          )
+      : undefined;
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.provisionalWorkspace = params.provisionalWorkspace === true;
     this.sessionId = params.sessionId ?? randomUUID();
@@ -3252,17 +3212,6 @@ export class Config {
     ) {
       this.debugLogger.warn(
         `Ignoring invalid goalMaxActiveMinutes ${String(params.goalMaxActiveMinutes)}: expected an integer between 1 and ${GOAL_MAX_ACTIVE_MINUTES_CAP}, or -1 for no time ceiling; Goals will run with no time ceiling.`,
-      );
-    }
-    this.goalCheckpointTimeoutMs = normalizeGoalCheckpointTimeoutSeconds(
-      params.goalCheckpointTimeoutSeconds,
-    );
-    if (
-      params.goalCheckpointTimeoutSeconds !== undefined &&
-      !isValidGoalCheckpointTimeoutSeconds(params.goalCheckpointTimeoutSeconds)
-    ) {
-      this.debugLogger.warn(
-        `Ignoring invalid goalCheckpointTimeoutSeconds ${String(params.goalCheckpointTimeoutSeconds)}: expected an integer between 1 and ${GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP}; using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}.`,
       );
     }
     this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
@@ -6610,15 +6559,6 @@ export class Config {
     return this.goalActiveTimeBudgetGrantMs;
   }
 
-  /**
-   * Ceiling on one Goal evidence-checkpoint verifier call, in milliseconds:
-   * `goalCheckpointTimeoutSeconds` when it was valid, else the built-in
-   * default.
-   */
-  getGoalCheckpointTimeoutMs(): number {
-    return this.goalCheckpointTimeoutMs;
-  }
-
   getMaxSubagentDepth(): number {
     return this.maxSubagentDepth;
   }
@@ -6931,6 +6871,7 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     const closeWriter = () =>
       this.closeSessionWriter().catch((error) => {
@@ -7025,6 +6966,7 @@ export class Config {
   }
 
   private async shutdownResourcesOnce(): Promise<void> {
+    let resourceError: unknown;
     try {
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
@@ -7058,26 +7000,42 @@ export class Config {
         this.goalRuntime?.dispose();
       }
 
-      if (!this.initialized) {
-        // Nothing else to clean up if not initialized.
-        return;
+      if (this.initialized) {
+        this.skillManager?.stopWatching();
+
+        if (this.toolRegistry) {
+          await this.toolRegistry.stop();
+        }
+
+        this.backgroundTaskRegistry.abortAll();
+        this.monitorRegistry.abortAll({ notify: false });
+        this.backgroundShellRegistry.abortAll();
+        this.workflowRunRegistry.abortAll();
       }
-
-      this.skillManager?.stopWatching();
-
-      if (this.toolRegistry) {
-        await this.toolRegistry.stop();
-      }
-
-      this.backgroundTaskRegistry.abortAll();
-      this.monitorRegistry.abortAll({ notify: false });
-      this.backgroundShellRegistry.abortAll();
-      this.workflowRunRegistry.abortAll();
-
+    } catch (error) {
+      resourceError = error;
+      this.debugLogger.error('Error during Config shutdown:', error);
+    }
+    try {
+      await this.shutdownExecutionEnvironments();
+    } catch (cleanupError) {
+      const errors =
+        cleanupError instanceof AggregateError
+          ? ([...cleanupError.errors] as unknown[])
+          : [cleanupError];
+      if (resourceError !== undefined) errors.unshift(resourceError);
+      throw new AggregateError(
+        errors,
+        'Container execution cleanup failed during session shutdown.',
+      );
+    }
+    if (resourceError !== undefined) throw resourceError;
+    if (!this.initialized) return;
+    try {
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();
     } catch (error) {
-      this.debugLogger.error('Error during Config shutdown:', error);
+      this.debugLogger.error('Error during session runtime cleanup:', error);
       throw error;
     }
   }
@@ -9174,6 +9132,94 @@ export class Config {
     return this.externalAgentExecutor;
   }
 
+  getAgentExecutionBackend(): 'container' | undefined {
+    return this.agentExecutionBackend;
+  }
+
+  getExecutionEnvironmentFactory(): ExecutionEnvironmentFactory | undefined {
+    return this.shutdownRequested || this.executionShutdown.signal.aborted
+      ? undefined
+      : this.executionEnvironmentFactory;
+  }
+
+  getExecutionEnvironment(): ExecutionEnvironment | undefined {
+    return undefined;
+  }
+
+  shutdownExecutionEnvironments(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      return (
+        Object.getPrototypeOf(this) as Config
+      ).shutdownExecutionEnvironments();
+    }
+    this.executionShutdown.abort();
+    if (this.executionCleanupPromise) return this.executionCleanupPromise;
+    const cleanup = Promise.allSettled(
+      [...(this.executionEnvironments ?? [])].map(async (pending) => {
+        let environment: ExecutionEnvironment;
+        try {
+          environment = await pending;
+        } catch (error) {
+          if (error instanceof ExecutionCleanupError) {
+            if (!error.retryCleanup) throw error;
+            await error.retryCleanup();
+          }
+          this.executionEnvironments?.delete(pending);
+          return;
+        }
+        await environment.dispose();
+        this.executionEnvironments?.delete(pending);
+      }),
+    ).then((results) => {
+      const errors = results.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason as unknown] : [],
+      );
+      if (errors.length)
+        throw new AggregateError(errors, errors.map(String).join('; '));
+    });
+    let timer: ReturnType<typeof setTimeout>;
+    // Finish or report before the CLI's 2-second per-cleanup exit deadline.
+    this.executionCleanupPromise = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new ExecutionCleanupError(
+              `Container cleanup is still pending for workspace ${this.getWorkingDir()}. Keep its workspace and inspect qwen-agent-* containers and qwen-agent-executor-* temporary directories before manual removal.`,
+            ),
+          ),
+        1_000,
+      );
+      cleanup.then(resolve, reject);
+    })
+      .catch((error: unknown) => {
+        // eslint-disable-next-line no-console -- exit cleanup errors must survive debug-only and best-effort callers
+        console.warn(
+          `Container execution cleanup incomplete: ${String(error)}`,
+        );
+        throw error;
+      })
+      .finally(() => clearTimeout(timer));
+    // Keep a timed-out attempt shared until its underlying work settles.
+    const clear = () => {
+      this.executionCleanupPromise = undefined;
+    };
+    void cleanup.then(clear, clear);
+    return this.executionCleanupPromise;
+  }
+
+  registerExecutionEnvironment(
+    pending: Promise<ExecutionEnvironment>,
+  ): () => void {
+    if (isDerivedConfig(this)) {
+      return (
+        Object.getPrototypeOf(this) as Config
+      ).registerExecutionEnvironment(pending);
+    }
+    this.executionEnvironments ??= new Set();
+    this.executionEnvironments.add(pending);
+    return () => this.executionEnvironments?.delete(pending);
+  }
+
   getSessionWorkflowPlanRevision(): SessionWorkflowPlanRevision | undefined {
     if (!this.isSessionWorkflowEnabled()) return undefined;
     return this.sessionWorkflowPlanRevision;
@@ -10269,9 +10315,9 @@ export class Config {
       // are recorded rather than reconstructed from session totals.
       ledger: recorder,
       verifier: createGoalVerifier(this),
-      checkpointVerifier: createGoalCheckpointVerifier(this, {
-        timeoutMs: this.goalCheckpointTimeoutMs,
-      }),
+      // No checkpoint verifier: the terminal verifier reads the transcript
+      // tail directly, so nothing consumes checkpoint claims any more, and a
+      // checkpoint that stalled three times used to stop the Goal for it.
       tokenBudgetGrant: this.goalTokenBudgetGrant,
       turnBudgetGrant: this.goalTurnBudgetGrant,
       activeTimeBudgetGrantMs: this.goalActiveTimeBudgetGrantMs,
@@ -10292,16 +10338,13 @@ export class Config {
     }
     // Under a session-writer lease the recorder starts `inactive` and
     // rejects every write until `activateChatRecording()` hands it the
-    // lease. Restoring now would push the legacy-migration journal write
-    // straight into that guard, and `restore()` latches the resulting
-    // failure as `recoveryError` for the life of the runtime — the
-    // migrated goal is dropped and goal persistence is bricked for the
-    // whole resumed session. Wait for the writer instead.
+    // lease. A restore itself writes nothing, but it is not only a read:
+    // activation replaces `sessionData` with the transcript loaded under
+    // the lease, so a restore run now would work from the constructor's
+    // possibly stale records, and a restored active Goal resumes its turn,
+    // whose first transition would hit that guard. Wait for the writer.
     if (restoreRuntime) {
-      const preparation = runtime.prepareRestore(
-        records ?? [],
-        restoreRuntime.goalCheckpointWindow,
-      );
+      const preparation = runtime.prepareRestore(records ?? []);
       let resolveActivation!: () => void;
       let rejectActivation!: (reason?: unknown) => void;
       const activation = new Promise<void>((resolve, reject) => {
@@ -10958,6 +11001,31 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
+
+    const environment = this.getExecutionEnvironment();
+    if (environment) {
+      if (this.getCodeModeOnly()) {
+        throw new Error(
+          'Container execution cannot be combined with tools.codeModeOnly.',
+        );
+      }
+      const [{ createExecutionTools }, { wrapExecutionTool }] =
+        await Promise.all([
+          import('../services/local-execution-environment.js'),
+          import('../tools/execution-tool.js'),
+        ]);
+      for (const [name, tool] of createExecutionTools(this)) {
+        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
+        await registerLazy(name as ToolName, async () =>
+          wrapExecutionTool(tool, environment, this),
+        );
+      }
+      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+        const { ToolSearchTool } = await import('../tools/tool-search.js');
+        return new ToolSearchTool(this);
+      });
+      return registry;
+    }
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode

@@ -21,6 +21,7 @@ export type {
   GoalTurnFinishedTransition,
 } from './goal-reducer.js';
 export * from './goal-persistence.js';
+export * from './goal-legacy-cards.js';
 export {
   isGoalCheckpointBookkeepingRecord,
   projectGoalStateToLegacy,
@@ -35,8 +36,6 @@ export type {
 } from './goal-legacy-projection.js';
 export * from './goal-evidence.js';
 export * from './goal-tool-result-provenance.js';
-export * from './goal-checkpoint.js';
-export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
 export {
