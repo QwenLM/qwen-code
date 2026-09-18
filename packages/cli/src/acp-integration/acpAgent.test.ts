@@ -145,6 +145,15 @@ const { mockListWorkflowSnapshots, mockClaimInterruptedWorkflowRuns } =
     mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
     mockClaimInterruptedWorkflowRuns: vi.fn().mockResolvedValue([]),
   }));
+const {
+  mockReadWorkflowSnapshot,
+  mockReadWorkflowCheckpoint,
+  mockClaimInterruptedWorkflowRun,
+} = vi.hoisted(() => ({
+  mockReadWorkflowSnapshot: vi.fn().mockResolvedValue(undefined),
+  mockReadWorkflowCheckpoint: vi.fn().mockResolvedValue(undefined),
+  mockClaimInterruptedWorkflowRun: vi.fn().mockResolvedValue(undefined),
+}));
 const { mockListSavedWorkflows } = vi.hoisted(() => ({
   mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
 }));
@@ -403,6 +412,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ).extractAndStripMeta,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
   claimInterruptedWorkflowRuns: mockClaimInterruptedWorkflowRuns,
+  claimInterruptedWorkflowRun: mockClaimInterruptedWorkflowRun,
+  readWorkflowSnapshot: mockReadWorkflowSnapshot,
+  readWorkflowCheckpoint: mockReadWorkflowCheckpoint,
+  isWorkflowRunId: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isWorkflowRunId,
+  WorkflowJournalUnavailableError: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).WorkflowJournalUnavailableError,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
   withDaemonSpan: mockWithDaemonSpan,
@@ -1181,6 +1199,7 @@ import {
   GoalInvalidTransitionError,
   sessionIdContext,
   uiTelemetryService,
+  WorkflowJournalUnavailableError,
   type Config,
   type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
@@ -13257,6 +13276,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         runSavedArgs: true,
         runScript: true,
         nameOnly: false,
+        retryHistorical: true,
       },
       savedWorkflows: [
         { name: 'deep-review', source: 'project' },
@@ -16679,6 +16699,372 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  // After a daemon restart the registry is empty and a run exists only as its
+  // snapshot. `retry` and `rerun` used to answer `{changed: false}` for it, the
+  // same shape as an unknown run id, so the host could not restart a run the
+  // restart had interrupted.
+  describe('retry and rerun of a run restored from history', () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const runId = 'wf_1234abcd';
+    const historical = (overrides: Record<string, unknown> = {}) => ({
+      runId,
+      status: 'failed',
+      workflowName: 'deep-review',
+      script: 'return await agent(args.prompt)',
+      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      args: { prompt: 'finish the review' },
+      sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      meta: null,
+      phases: [],
+      agentsDispatched: 2,
+      agentsCompleted: 1,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+      error:
+        'interrupted: the process running this workflow exited before it finished',
+      ...overrides,
+    });
+
+    async function startDaemon(
+      options: {
+        execute?: (runs: Array<{ runId: string; status: string }>) => unknown;
+      } = {},
+    ) {
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+      const runs: Array<{ runId: string; status: string }> = [];
+      const registry = {
+        get: vi.fn((id: string) => runs.find((run) => run.runId === id)),
+        getHandle: vi.fn(() => undefined),
+        isStarting: vi.fn(() => false),
+        setLineage: vi.fn(),
+      };
+      const execute = vi.fn(async () => {
+        if (options.execute) return options.execute(runs);
+        const [params] = buildSessionOwnedBackground.mock.calls.at(-1)!;
+        const started = {
+          runId: params.resumeFromRunId ?? 'wf_5678efab',
+          status: 'running',
+        };
+        runs.push(started);
+        return { llmContent: 'started', workflowRunId: started.runId };
+      });
+      const buildSessionOwnedBackground = vi.fn(
+        (_params: Record<string, unknown>, _name?: string) => ({ execute }),
+      );
+      Object.assign(innerConfig, {
+        getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getTool: vi.fn((name: string) =>
+            name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
+          ),
+        }),
+      });
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const act = (action: 'retry' | 'rerun', taskId = runId) =>
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+          sessionId,
+          taskId,
+          action,
+        });
+      const stop = async () => {
+        mockConnectionState.resolve();
+        await agentPromise;
+      };
+      return {
+        agent,
+        innerConfig,
+        registry,
+        runs,
+        execute,
+        buildSessionOwnedBackground,
+        act,
+        stop,
+      };
+    }
+
+    const actualSdk = () =>
+      vi.importActual<typeof import('@agentclientprotocol/sdk')>(
+        '@agentclientprotocol/sdk',
+      );
+
+    afterEach(() => {
+      mockReadWorkflowSnapshot.mockReset().mockResolvedValue(undefined);
+      mockReadWorkflowCheckpoint.mockReset().mockResolvedValue(undefined);
+      mockClaimInterruptedWorkflowRun.mockReset().mockResolvedValue(undefined);
+    });
+
+    it('retries a failed run from its snapshot, resuming its journal under the same run id', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        {
+          scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+          args: { prompt: 'finish the review' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          resumeFromRunId: runId,
+        },
+        'deep-review',
+      );
+      expect(daemon.execute).toHaveBeenCalledOnce();
+      // The interrupted attempt is claimed first, so the snapshot read is
+      // the one that attempt left, not an older one.
+      expect(mockClaimInterruptedWorkflowRun).toHaveBeenCalledWith(
+        daemon.innerConfig,
+        runId,
+      );
+      expect(
+        mockClaimInterruptedWorkflowRun.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockReadWorkflowSnapshot.mock.invocationCallOrder[0]!);
+      await daemon.stop();
+    });
+
+    it('reruns a finished run from its snapshot under a new run id', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(
+        historical({ status: 'completed' }),
+      );
+
+      await expect(daemon.act('rerun')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+        taskId: 'wf_5678efab',
+      });
+
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        {
+          scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+          args: { prompt: 'finish the review' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+        },
+        'deep-review',
+      );
+      expect(daemon.registry.setLineage).toHaveBeenCalledWith(
+        'wf_5678efab',
+        runId,
+        'rerun',
+      );
+      await daemon.stop();
+    });
+
+    it('runs the snapshot script when the script path can no longer be read', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      mockResolveSavedWorkflowScript.mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        {
+          script: 'return await agent(args.prompt)',
+          args: { prompt: 'finish the review' },
+          sourceRef: { id: 'definition-7', revision: 'rev-3' },
+          resumeFromRunId: runId,
+        },
+        undefined,
+      );
+      await daemon.stop();
+    });
+
+    it('starts a snapshot written before args were kept without args', async () => {
+      const daemon = await startDaemon();
+      const legacy = historical();
+      delete (legacy as { args?: unknown }).args;
+      mockReadWorkflowSnapshot.mockResolvedValue(legacy);
+
+      await expect(daemon.act('rerun')).resolves.toMatchObject({
+        changed: true,
+      });
+
+      const [params] = daemon.buildSessionOwnedBackground.mock.calls[0]!;
+      expect(params['args']).toBeUndefined();
+      await daemon.stop();
+    });
+
+    it('refuses both actions with a named error when the snapshot could not keep the args', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon();
+      const omitted = historical({ argsOmitted: true });
+      delete (omitted as { args?: unknown }).args;
+      mockReadWorkflowSnapshot.mockResolvedValue(omitted);
+
+      for (const action of ['retry', 'rerun'] as const) {
+        vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+          sdk.RequestError.invalidParams,
+        );
+        await expect(daemon.act(action)).rejects.toMatchObject({
+          code: -32602,
+          data: { errorKind: 'workflow_args_unavailable' },
+          message: expect.stringContaining('args too large to keep'),
+        });
+      }
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('retries only a failed run, and reruns any finished one', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(
+        historical({ status: 'completed' }),
+      );
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: false,
+        status: 'completed',
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+
+      await expect(daemon.act('rerun')).resolves.toMatchObject({
+        changed: true,
+      });
+      await daemon.stop();
+    });
+
+    it('does not retry a run whose checkpoint shows another process still running it', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      // The claim found its writer alive and left the checkpoint in place.
+      mockReadWorkflowCheckpoint.mockResolvedValue({ v: 1, runId, pid: 4242 });
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: false,
+        status: 'failed',
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('does not retry a run this session is already starting', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      daemon.registry.isStarting.mockReturnValue(true);
+
+      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('does not retry a run a sibling session is running', async () => {
+      const siblingId = 'bbbbbbbb-2222-2222-2222-222222222222';
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      // Session B, created second, is running the run; the session that
+      // asks has only its history.
+      vi.mocked(loadCliConfig).mockResolvedValue({
+        ...makeInnerConfig(),
+        getSessionId: vi.fn().mockReturnValue(siblingId),
+        isWorkflowsEnabled: vi.fn().mockReturnValue(true),
+        getWorkflowRunRegistry: vi.fn().mockReturnValue({
+          get: vi.fn((id: string) =>
+            id === runId ? { runId, status: 'running' } : undefined,
+          ),
+          getHandle: vi.fn().mockReturnValue(undefined),
+        }),
+      } as unknown as Config);
+      await daemon.agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('reads nothing from disk for a task id that is not a run id', async () => {
+      const daemon = await startDaemon();
+
+      for (const taskId of ['../../etc/passwd', 'wf_1234abcd/../x', 'wf_ZZ']) {
+        for (const action of ['retry', 'rerun'] as const) {
+          await expect(daemon.act(action, taskId)).resolves.toEqual({
+            changed: false,
+          });
+        }
+      }
+      expect(mockClaimInterruptedWorkflowRun).not.toHaveBeenCalled();
+      expect(mockReadWorkflowSnapshot).not.toHaveBeenCalled();
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('answers a retry with no journal to resume with a named error the host can act on', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon({
+        execute: async () => {
+          throw new WorkflowJournalUnavailableError(
+            runId,
+            'missing',
+            `No journal found for workflow run ${runId}, so there is nothing to resume.`,
+          );
+        },
+      });
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_journal_unavailable' },
+        message: expect.stringContaining(
+          'rerun it to start it from the beginning',
+        ),
+      });
+      await daemon.stop();
+    });
+
+    it('starts one retry when two arrive for the same run at once', async () => {
+      const daemon = await startDaemon();
+      let releaseRead: (() => void) | undefined;
+      mockReadWorkflowSnapshot.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseRead = () => resolve(historical());
+          }),
+      );
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+
+      const first = daemon.act('retry');
+      await vi.waitFor(() => expect(releaseRead).toBeDefined());
+      // The first retry holds the run's lock while it reads.
+      await expect(daemon.act('retry')).resolves.toEqual({ changed: false });
+      releaseRead!();
+      await expect(first).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+      // Once the run is registered, a later retry sees it and does not
+      // start it again.
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: false,
+        status: 'running',
+      });
+      expect(daemon.execute).toHaveBeenCalledOnce();
+      await daemon.stop();
+    });
   });
 
   it('reports a retry cancelled in its starting window as unchanged', async () => {

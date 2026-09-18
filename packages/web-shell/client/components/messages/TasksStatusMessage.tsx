@@ -1470,11 +1470,13 @@ function TaskDetail({
     task.isBackgrounded &&
     task.status === 'running';
   const canResume = task.kind === 'workflow' && task.status === 'paused';
-  const canRetry =
-    task.kind === 'workflow' && !task.isHistorical && task.status === 'failed';
+  // A run restored from history restarts like a live one, unless its
+  // snapshot could not keep the args it was launched with.
+  const canRestart =
+    task.kind === 'workflow' && !(task.isHistorical && task.argsOmitted);
+  const canRetry = canRestart && task.status === 'failed';
   const canRerun =
-    task.kind === 'workflow' &&
-    !task.isHistorical &&
+    canRestart &&
     (task.status === 'completed' ||
       task.status === 'failed' ||
       task.status === 'cancelled');

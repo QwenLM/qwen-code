@@ -880,7 +880,7 @@ describe('TasksStatusMessage workflow details', () => {
     expect(container.textContent).not.toContain('Retry failed path');
   });
 
-  it('shows saved workflow history while keeping restored runs read-only', () => {
+  it('shows saved workflow history and offers to restart a restored failed run', () => {
     const current = workflowTask({ id: 'workflow-current' });
     const historical = workflowTask({
       id: 'workflow-saved',
@@ -910,9 +910,33 @@ describe('TasksStatusMessage workflow details', () => {
     )?.parentElement;
     act(() => savedRow?.click());
 
-    expect(savedContainer.textContent).toContain('Saved run · read-only');
-    expect(savedContainer.textContent).not.toContain('Retry failed path');
-    expect(savedContainer.textContent).not.toContain('Rerun all');
+    expect(savedContainer.textContent).toContain('Saved run');
+    // A restart from history is how a run a daemon restart interrupted is
+    // picked up again.
+    expect(savedContainer.textContent).toContain('Retry failed path');
+    expect(savedContainer.textContent).toContain('Rerun all');
+  });
+
+  it('offers no restart for a restored run whose args were not kept', () => {
+    const container = renderPanel([
+      workflowTask({
+        id: 'workflow-saved',
+        isHistorical: true,
+        argsOmitted: true,
+        status: 'failed',
+        startTime: 500,
+        endTime: 1_000,
+        runtimeMs: 500,
+      }),
+    ]);
+    const row = Array.from(container.querySelectorAll('span')).find((node) =>
+      node.textContent?.includes('review-and-fix'),
+    )?.parentElement;
+    act(() => row?.click());
+
+    expect(container.textContent).toContain('Saved run');
+    expect(container.textContent).not.toContain('Retry failed path');
+    expect(container.textContent).not.toContain('Rerun all');
   });
 
   it('does not group workflow history by a shared display label', () => {
@@ -1016,7 +1040,7 @@ describe('TasksStatusMessage workflow details', () => {
     );
     expect(getWorkflowTasksMock).toHaveBeenCalledOnce();
     expect(getTasksMock).not.toHaveBeenCalled();
-    expect(container.textContent).not.toContain('Saved run · read-only');
+    expect(container.textContent).not.toContain('Saved run');
   });
 });
 
