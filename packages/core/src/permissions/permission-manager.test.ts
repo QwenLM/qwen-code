@@ -60,6 +60,15 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
   };
 });
 
+// `shellTypeMock` backs the file-level `vi.mock` above, so it is a mutable
+// file-global that every describe building a real PermissionManager reads.
+// Reset it for the whole file rather than only inside
+// `describe('PermissionManager')`, so the later top-level describes cannot
+// inherit a shell type left behind by an earlier test's execution order.
+beforeEach(() => {
+  shellTypeMock.value = 'bash';
+});
+
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
 describe('getToolNameAliases', () => {
@@ -1771,10 +1780,6 @@ function makeConfig(
 describe('PermissionManager', () => {
   let pm: PermissionManager;
 
-  beforeEach(() => {
-    shellTypeMock.value = 'bash';
-  });
-
   describe('basic rule evaluation', () => {
     beforeEach(() => {
       pm = new PermissionManager(
@@ -2376,14 +2381,20 @@ describe('PermissionManager', () => {
       ['bash', 'echo a#b ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo a\v# comment ; rm -rf /tmp/x', 'deny'],
       ['bash', '# noop ; rm -rf /tmp/x', 'deny'],
+      // Leading whitespace must not turn the line into one comment-only
+      // segment: Bash executes nothing for either spelling, but collapsing it
+      // leaves no text for an explicit `Bash(...)` rule to match.
+      ['bash', ' # noop ; rm -rf /tmp/x', 'deny'],
+      ['bash', '\t# noop ; rm -rf /tmp/x', 'deny'],
       ['bash', "echo 'a # b' ; rm -rf /tmp/x", 'deny'],
       ['bash', 'echo "a # b" ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi > /tmp/o # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi | tee /tmp/o # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi # c\r; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi\t# comment ; rm -rf /tmp/x', 'allow'],
+      ['bash', ' echo hi # comment ; rm -rf /tmp/x', 'allow'],
     ] as const)(
-      'handles comments conservatively for %s',
+      'handles comments conservatively for %s: %s',
       async (shell, command, expected) => {
         shellTypeMock.value = shell;
         pm = new PermissionManager(
@@ -2431,6 +2442,51 @@ describe('PermissionManager', () => {
         );
       },
     );
+
+    // `splitCommandForRules` has to drive every Bash-rule consumer, not just
+    // `evaluate()`. Each of the three below re-splits the command on its own
+    // path, so reverting any one of them to `splitCompoundCommand` would leave
+    // it silently disagreeing with `evaluate()` — citing a deny rule evaluate
+    // never applied, or hiding "Always allow" for a command that is allowed —
+    // while the rest of the suite stayed green. Every assertion pairs the bash
+    // arm (comment recognised → one segment) with the cmd arm (no Bash
+    // comments → the conservative split is expected).
+    const commented = `echo 'a' # comment ; rm -rf /tmp/x`;
+
+    const buildPm = (
+      shell: 'bash' | 'cmd',
+      rules: {
+        permissionsAllow?: string[];
+        permissionsAsk?: string[];
+        permissionsDeny?: string[];
+      },
+    ) => {
+      shellTypeMock.value = shell;
+      const manager = new PermissionManager(makeConfig(rules));
+      manager.initialize();
+      return manager;
+    };
+
+    it('findMatchingDenyRule does not cite a rule the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(buildPm('bash', deny).findMatchingDenyRule(ctx)).toBeUndefined();
+      expect(buildPm('cmd', deny).findMatchingDenyRule(ctx)).toBe('Bash(rm *)');
+    });
+
+    it('hasRelevantRules drops the segment the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(buildPm('bash', deny).hasRelevantRules(ctx)).toBe(false);
+      expect(buildPm('cmd', deny).hasRelevantRules(ctx)).toBe(true);
+    });
+
+    it('hasMatchingAskRule does not ask for a rule the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const ask = { permissionsAsk: ['Bash(rm *)'] };
+      expect(buildPm('bash', ask).hasMatchingAskRule(ctx)).toBe(false);
+      expect(buildPm('cmd', ask).hasMatchingAskRule(ctx)).toBe(true);
+    });
 
     it('three-part compound: all must pass', async () => {
       pm = new PermissionManager(

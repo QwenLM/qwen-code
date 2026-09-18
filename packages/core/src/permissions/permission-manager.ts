@@ -110,10 +110,12 @@ function splitCommandForRules(command: string, toolName: string): string[] {
       ch === '#' &&
       !inSingle &&
       !inDouble &&
-      // Bash only treats ASCII space and tab as word boundaries here. A
-      // leading `#` is deliberately not collapsed: the whole segment would
-      // start with `#`, so no `Bash(...)` rule could match it any more and an
-      // explicit user rule would silently stop applying.
+      // Bash only treats ASCII space and tab as word boundaries here. A `#`
+      // with nothing but whitespace before it is deliberately not collapsed —
+      // whether it sits at index 0 or behind leading spaces/tabs: the whole
+      // segment would be a comment, so no `Bash(...)` rule could match it any
+      // more and an explicit user rule would silently stop applying.
+      command.slice(0, i).trim() !== '' &&
       (command[i - 1] === ' ' || command[i - 1] === '\t')
     ) {
       return [command];

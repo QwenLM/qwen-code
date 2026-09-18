@@ -34,7 +34,7 @@ The wrapper keeps the original command as one segment only when all of these are
 - the tool is `run_shell_command`, so the scanned string is literally the text the shell will execute;
 - the active shell is `bash`;
 - the command is one physical line;
-- a `#` outside quotes starts after a space or tab, never at index 0 — a segment that begins with `#` can no longer match any `Bash(...)` rule, so collapsing it would silently drop an explicit user rule;
+- a `#` outside quotes starts after a space or tab and has non-whitespace code before it — a segment whose only content before that `#` is whitespace is entirely a comment, so it can no longer match any `Bash(...)` rule and collapsing it would silently drop an explicit user rule;
 - the code before that `#` contains no shell operator, escape, expansion, substitution, grouping, or redirection syntax.
 
 Every other input uses the existing splitter unchanged. Unsupported syntax can therefore retain an extra prompt, but it cannot gain a broader allow decision from this change.
@@ -48,6 +48,6 @@ The supported subset is intentionally narrow. Widening it requires evidence agai
 - The #11815 command is one segment under Bash and an allowed `echo` resolves to `allow`.
 - The same text remains split for `cmd` and PowerShell.
 - Multi-line commands, commands containing substitution syntax, and commands with an operator before the comment retain the old conservative split.
-- A command whose first character is `#` also retains it, so an explicit `deny` rule still matches the text after the comment.
+- A command whose first non-whitespace character is `#` — at index 0 or behind leading spaces/tabs — also retains it, so an explicit `deny` rule still matches the text after the comment.
 - A `monitor` command whose `#` only exists inside the wrapper's inner quotes still splits, so a separator the spawned command executes is never swallowed as comment text.
 - Existing permission-manager tests, formatting, lint, typecheck, and build checks pass.
