@@ -689,10 +689,15 @@ describe('qwen resolve workflow', () => {
     // Without this, a reworded guard makes `indexOf` return -1 and the slice
     // below silently degrades instead of failing.
     expect(staleHeadStart).toBeGreaterThan(-1);
-    const staleHeadCheck = runStep.slice(
-      staleHeadStart,
-      runStep.indexOf('PROMPT="/review ${REVIEW_URL}"'),
-    );
+    // R7-3: end the slice at the unchanged-diff skip block, not at PROMPT=.
+    // That block carries its own `exit 0` hundreds of lines past this guard,
+    // so a slice reaching PROMPT= is satisfied by it and the `exit 0` pin
+    // below stops detecting the guard losing its own. '# Unchanged-diff
+    // skip:' occurs exactly once in the workflow, and every assertion this
+    // slice must keep sits before it.
+    const skipBlockStart = runStep.indexOf('# Unchanged-diff skip:');
+    expect(skipBlockStart).toBeGreaterThan(staleHeadStart);
+    const staleHeadCheck = runStep.slice(staleHeadStart, skipBlockStart);
 
     // Both context values arrive as step env so the run body carries no
     // `${{ }}` — see the expression-length test in
@@ -714,6 +719,9 @@ describe('qwen resolve workflow', () => {
       'Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current',
     );
     expect(staleHeadCheck).toContain('exit 0');
+    // Uniqueness, so a later `exit 0` inside this slice cannot satisfy the
+    // pin above on the guard's behalf again (R7-3).
+    expect(staleHeadCheck.split('exit 0')).toHaveLength(2);
   });
 
   it('guards PR review publication against closed or stale PRs', () => {
