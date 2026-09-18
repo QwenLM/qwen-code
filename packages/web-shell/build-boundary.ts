@@ -12,77 +12,35 @@ const runtimePackages = new Set([
   ...Object.keys(pkg.peerDependencies),
 ]);
 
-// The transcript entry is an input to the versioned /export html renderer.
-// Keep its established Rollup boundary exactly: widening the public-package
-// externalization rules here makes the downstream document build resolve
-// additional dependency source graphs and can break the renderer-size budget
-// introduced by #11031. Public package entries still externalize every
-// declared runtime dependency and subpath below.
-const transcriptExternalExact = new Set([
-  'react',
-  'react/jsx-runtime',
-  'react/jsx-dev-runtime',
-  'react-dom',
-  'react-dom/client',
-  'radix-ui',
-  'lucide-react',
-  'class-variance-authority',
-  'clsx',
-  'tailwind-merge',
-  'vaul',
-  '@qwen-code/sdk',
-  '@datafe-open/markdown-chart',
-  '@datafe-open/markdown-chart-echarts',
-  '@datafe-open/markdown-chart-react',
-  'echarts',
-  'react-markdown',
-  'remark-cjk-friendly',
-  'remark-gfm',
-  'remark-math',
-  'rehype-katex',
-  'shiki',
-  'mermaid',
-  'katex',
-  'codemirror',
-]);
+// `/export html` consumes the transcript bundle and enforces a strict
+// renderer-size budget. Externalizing ext-apps makes that downstream build
+// pull its MCP/zod graph back into the document renderer and exceed the
+// budget. Keep only this dependency bundled for transcript builds; public
+// package entries still externalize every declared runtime dependency.
+const transcriptBundledPackages = new Set(['@modelcontextprotocol/ext-apps']);
 
-const transcriptExternalPrefixes = [
-  '@qwen-code/sdk/',
-  'echarts/',
-  'remark-cjk-friendly/',
-  '@codemirror/',
-];
-
-function shouldExternalizeTranscriptDependency(id: string): boolean {
-  if (bundledStyleImports.has(id)) {
-    return false;
-  }
-
-  if (transcriptExternalExact.has(id)) {
-    return true;
-  }
-
-  if (id.startsWith('katex/')) {
-    return id !== 'katex/dist/katex.min.css';
-  }
-
-  return transcriptExternalPrefixes.some((prefix) => id.startsWith(prefix));
+function packageMatches(id: string, packageName: string): boolean {
+  return id === packageName || id.startsWith(`${packageName}/`);
 }
 
 export function shouldExternalizeWebShellDependency(
   id: string,
   boundary: WebShellBuildBoundary = 'package',
 ): boolean {
-  if (boundary === 'transcript') {
-    return shouldExternalizeTranscriptDependency(id);
-  }
-
   if (bundledStyleImports.has(id)) {
     return false;
   }
 
+  if (boundary === 'transcript') {
+    for (const packageName of transcriptBundledPackages) {
+      if (packageMatches(id, packageName)) {
+        return false;
+      }
+    }
+  }
+
   for (const packageName of runtimePackages) {
-    if (id === packageName || id.startsWith(`${packageName}/`)) {
+    if (packageMatches(id, packageName)) {
       return true;
     }
   }

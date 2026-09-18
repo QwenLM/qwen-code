@@ -171,10 +171,10 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
-    // Keep the library and app on one syntax floor. Public package entries
-    // externalize declared runtime packages. The transcript build preserves
-    // its specialized bundle boundary because /export html consumes it as an
-    // input and enforces a strict renderer-size budget (#11031).
+    // Keep the library and app on one syntax floor. Public entries externalize
+    // every declared runtime package. Transcript builds use the same boundary
+    // except for the export-budget-sensitive ext-apps graph because
+    // `/export html` consumes this entry and enforces #11031's renderer budget.
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:

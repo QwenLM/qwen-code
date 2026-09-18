@@ -2,22 +2,14 @@ import { describe, expect, it } from 'vitest';
 import pkg from '../package.json' with { type: 'json' };
 import { shouldExternalizeWebShellDependency } from '../build-boundary';
 
-const transcriptBundledPackages = [
-  '@modelcontextprotocol/ext-apps',
-  '@tanstack/react-table',
-  '@tanstack/react-virtual',
-  '@xterm/addon-fit',
-  '@xterm/xterm',
-  'fzf',
+const runtimePackages = [
+  ...Object.keys(pkg.dependencies),
+  ...Object.keys(pkg.peerDependencies),
 ];
+const transcriptBundledPackages = new Set(['@modelcontextprotocol/ext-apps']);
 
 describe('web-shell package build boundary', () => {
   it('externalizes every declared runtime package and its JavaScript subpaths', () => {
-    const runtimePackages = [
-      ...Object.keys(pkg.dependencies),
-      ...Object.keys(pkg.peerDependencies),
-    ];
-
     for (const packageName of runtimePackages) {
       expect(shouldExternalizeWebShellDependency(packageName)).toBe(true);
       expect(
@@ -26,54 +18,19 @@ describe('web-shell package build boundary', () => {
     }
   });
 
-  it('preserves the transcript bundle boundary used by document export', () => {
-    for (const packageName of transcriptBundledPackages) {
+  it('keeps only the export-budget-sensitive runtime package bundled in the transcript', () => {
+    for (const packageName of runtimePackages) {
+      const expected = !transcriptBundledPackages.has(packageName);
       expect(
         shouldExternalizeWebShellDependency(packageName, 'transcript'),
-      ).toBe(false);
-      expect(shouldExternalizeWebShellDependency(packageName)).toBe(true);
+      ).toBe(expected);
+      expect(
+        shouldExternalizeWebShellDependency(
+          `${packageName}/internal`,
+          'transcript',
+        ),
+      ).toBe(expected);
     }
-
-    expect(
-      shouldExternalizeWebShellDependency('lucide-react', 'transcript'),
-    ).toBe(true);
-    expect(
-      shouldExternalizeWebShellDependency(
-        'lucide-react/internal',
-        'transcript',
-      ),
-    ).toBe(false);
-
-    expect(
-      shouldExternalizeWebShellDependency('react/jsx-runtime', 'transcript'),
-    ).toBe(true);
-    expect(
-      shouldExternalizeWebShellDependency(
-        '@qwen-code/sdk/browser',
-        'transcript',
-      ),
-    ).toBe(true);
-    expect(
-      shouldExternalizeWebShellDependency('echarts/core', 'transcript'),
-    ).toBe(true);
-    expect(
-      shouldExternalizeWebShellDependency(
-        'remark-cjk-friendly/internal',
-        'transcript',
-      ),
-    ).toBe(true);
-    expect(
-      shouldExternalizeWebShellDependency(
-        '@codemirror/view/internal',
-        'transcript',
-      ),
-    ).toBe(true);
-    expect(
-      shouldExternalizeWebShellDependency(
-        'katex/dist/katex.js',
-        'transcript',
-      ),
-    ).toBe(true);
   });
 
   it('keeps stylesheet entrypoints bundled', () => {
