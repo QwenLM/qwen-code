@@ -613,6 +613,7 @@ describe('ChatRecordingService', () => {
         '',
         undefined,
         { displayText: '', hookContext: '', resourceLinks },
+        undefined,
         'resource-prompt',
       );
       await chatRecordingService.flush();

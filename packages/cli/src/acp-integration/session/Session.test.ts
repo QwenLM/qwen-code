@@ -10739,6 +10739,7 @@ describe('Session', () => {
             hookContext: '',
             resourceLinks: expectedLinks,
           },
+          expect.stringContaining('test-session-id########'),
           trustedContext.promptId,
         );
         expect(textParts(firstSentMessage())).toEqual([
