@@ -152,7 +152,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/serve/routes/workspace-auth.ts',
   'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
   'packages/cli/src/serve/routes/workspace-extensions.ts',
-  'packages/cli/src/serve/routes/workspace-git-branches.ts',
   'packages/cli/src/serve/routes/workspace-git-diff.ts',
   'packages/cli/src/serve/routes/workspace-git-log.ts',
   'packages/cli/src/serve/routes/workspace-git.ts',

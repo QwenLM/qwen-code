@@ -20,6 +20,10 @@
  * the model, so the model can start it when a request matches that condition.
  * Every run still goes through the workflow approval.
  *
+ * In a session that runs named workflows only (`tools.workflowNameOnly`) the
+ * Workflow tool refuses a `scriptPath`, so the interactive command dispatches
+ * the workflow by name instead.
+ *
  * Enumeration, project-over-user precedence, and the name constraint all live
  * in core's `listSavedWorkflows` — the single source of truth shared with the
  * `workflow('<name>')` in-script global. This loader only adapts the
@@ -136,7 +140,11 @@ export class SavedWorkflowLoader implements ICommandLoader {
           toolName: ToolNames.WORKFLOW,
           toolArgs: {
             // The tool reads the file fresh at execution time (hot reload).
-            scriptPath: entry.scriptPath,
+            // A path keeps grants written as Workflow(scriptPath:...) working;
+            // a name-only session refuses paths, so it names the workflow.
+            ...(this.config?.isWorkflowNameOnly?.() === true
+              ? { name: entry.name }
+              : { scriptPath: entry.scriptPath }),
             ...(workflowArgs !== undefined ? { args: workflowArgs } : {}),
           },
         };

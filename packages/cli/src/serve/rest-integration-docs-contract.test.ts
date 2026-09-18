@@ -368,6 +368,38 @@ describe('REST integration documentation contract', () => {
     expect([...openApiOperations(openApi).keys()].sort()).toEqual(expected);
   });
 
+  it('links every guide operation to its own protocol section', () => {
+    const guide = readFileSync(GUIDE, 'utf8');
+    const links = guideRouteRows(guide).flatMap((row) => [
+      ...routeCell(row).matchAll(/\[`([^`]+)`\]\(([^)\s]+)\)/g),
+    ]);
+    expect(
+      links.length,
+      'guide operation links must not be empty',
+    ).toBeGreaterThan(0);
+    expect(links.map((link) => link[1]).sort()).toEqual(
+      [...GUIDE_OPERATIONS].sort(),
+    );
+
+    const headings = protocolHeadings();
+    const routePattern = new RegExp('^' + ROUTE_METHODS + ' /[^`]+$');
+    const routeLinks = [...guide.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)];
+    for (const link of routeLinks) {
+      const operation = link[1].replace(/^`([^`]+)`$/, '$1');
+      if (!routePattern.test(operation)) {
+        continue;
+      }
+      const ownHeadings = headings.filter((heading) =>
+        heading.startsWith(`\`${operation}\``),
+      );
+      expect(
+        ownHeadings,
+        `${operation} must have exactly one heading in qwen-serve-protocol.md`,
+      ).toHaveLength(1);
+      expect(link[2]).toBe(`./qwen-serve-protocol.md#${slug(ownHeadings[0])}`);
+    }
+  });
+
   it('keeps the OpenAPI contract self-describing', () => {
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
