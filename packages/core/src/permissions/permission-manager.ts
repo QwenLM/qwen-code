@@ -1048,6 +1048,25 @@ export class PermissionManager {
   /**
    * Determine the permission decision for a specific shell command string.
    *
+   * This hardcodes `toolName: 'run_shell_command'`, so the Bash comment fast
+   * path in `splitCommandForRules` applies to whatever string a caller passes,
+   * not only to text the shell will literally execute. Two production callers
+   * pass `splitCommands()` fragments instead of the original command:
+   * `checkCommandPermissions` (utils/shell-utils.ts), which first collapses
+   * whitespace with `cmd.trim().replace(/\s+/g, ' ')`, and
+   * `ShellTool.getConfirmationDetails` (tools/shell.ts), which passes them
+   * unnormalized.
+   *
+   * That collapse makes the fast path's one-physical-line guard unreachable on
+   * the `checkCommandPermissions` path. It stays sound only because both
+   * callers split with `splitCommands` first, and that scanner already treats
+   * `\n` and `\r\n` as command separators, so no fragment arriving here can
+   * still contain one. A future caller that passes a reconstruction which was
+   * NOT split that way — the `monitor` failure mode documented on
+   * `splitCommandForRules` — would inherit the comment fast path with no
+   * guard. Gate such a caller on the invocation instead of routing another
+   * reconstruction through here.
+   *
    * @param command - The shell command to evaluate.
    * @returns The PermissionDecision for this command.
    */

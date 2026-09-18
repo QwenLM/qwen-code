@@ -2472,6 +2472,18 @@ describe('PermissionManager', () => {
       ['bash', 'echo hi # c\r; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi\t# comment ; rm -rf /tmp/x', 'allow'],
       ['bash', ' echo hi # comment ; rm -rf /tmp/x', 'allow'],
+      // `\`, `$` and the backtick are disjuncts of their own on the bail line
+      // (permission-manager.ts:102), not members of the ';&|(){}<>' literal,
+      // so each one needs a row where it is the FIRST guard character the scan
+      // meets. Otherwise the scan bails on something else and deleting that
+      // single disjunct leaves the suite green: the `echo $(date)` row above
+      // cannot pin `$` for exactly that reason, because with `$` gone the scan
+      // still bails at `(`. The backtick row is the security-relevant one —
+      // without the bail, `allow` would cover a command whose substitution
+      // really does execute.
+      ['bash', 'echo `whoami` # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo $HOME # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a\\ b # c ; rm -rf /tmp/x', 'deny'],
     ] as const)(
       'handles comments conservatively for %s: %s',
       async (shell, command, expected) => {

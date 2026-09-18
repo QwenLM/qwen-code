@@ -23,7 +23,7 @@
 - 完整解析 Bash 注释或 heredoc。
 - 修改虚拟 shell operation 提取或 cwd 跟踪。
 - 把该快速路径应用到 `monitor`。那里被分析的命令是 `normalizeMonitorCommand()` 去引号后的 `safetyCommand`，而不是 monitor 实际 spawn 的文本，因此其中的 `#` 不一定是注释，按注释折叠可能吞掉 spawned 命令真正会执行的分隔符。monitor 继续使用现有切分器，并由此继续被 `Bash(...)` 规则覆盖。
-- 收敛自定义命令以及 `ShellTool.getConfirmationDetails` 使用的另一套旧切分器（确认对话框列出的子命令，以及它的「始终允许」按钮建议的规则）；该工作由 #11882 负责。
+- 收敛自定义命令以及 `ShellTool.getConfirmationDetails` 使用的另一套旧切分器（确认对话框列出的子命令，以及它的「始终允许」按钮建议的规则）；该工作由 #11882 负责。推迟这项收敛并不等于这两个消费者不受影响：两者都会调用 `PermissionManager.evaluate` / `isCommandAllowed`，而后者硬编码了 `run_shell_command`，因此它们都会进入新的注释感知切分，只是各自的子命令列表仍来自旧切分器。对自定义命令而言这改变了结果——`shellProcessor` 对同一个字符串做两重把关，其中全文的 `isAllowedBySettings` 检查现在可能返回 `allow` 而不是原先的 `ask`，于是在 merge base 上会弹确认的注入命令可以跳过确认。这个行为本身说得通（Bash 只执行注释前的文本，且 `ShellExecutionService` 通过与快速路径相同的 `getShellConfiguration()` 来 spawn），但它确实是一处真实发生的确认行为变化，并且同一个函数现在对同一字符串混用两套切分。
 
 ## 设计
 
@@ -43,9 +43,11 @@
 
 支持的子集刻意保持很窄。任何扩展都必须以真实 shell parser 的证据为基础，不能由单个 review 样例驱动。等 #11882 明确 parser ownership 后，应优先以现有异步 `parseShellCommand` parser 作为更广泛 Bash 语义的基础。
 
+该快速路径只覆盖四条 `Bash(...)` 规则路径。同一个 `evaluate()` 中的虚拟 shell-operation 通路仍然对完整命令调用 `extractShellOperationsAcrossCommand`——它必须如此，因为该调用是 `cd` 与递归 shell wrapper 下 cwd 跟踪的唯一事实来源——而 `walkCompoundCommand` 及其委托的 `splitCompoundCommandSegments` 都完全没有 `#` 处理。因此 `Read`/`Edit`/`Write`/`WebFetch` 规则仍会针对被注释掉的文本评估，被注释掉的 `rm`、`cat` 或 `curl` 可能产生一个幻影 operation 并升级判定。该残留只升不降，且早于本 PR 存在（本 PR 未触及 extractor 通路）：两个判定只有在 `DECISION_PRIORITY[virtual] > DECISION_PRIORITY[bash]` 时才合并，所以幻影 operation 只会过度 deny 或过度 ask，绝不会放宽 allow。要消除它需要两个所有者共用同一个切分决策，那属于 #11882 的 parser ownership 工作。
+
 ## 验证与验收标准
 
-- #11815 的命令在 Bash 下只有一个 segment，允许的 `echo` 判定为 `allow`。
+- #11815 的命令在 Bash 下只有一个 segment，允许的 `echo` 判定为 `allow`。该标准只针对 `Bash(...)` 规则：它假设没有任何 `Read`/`Edit`/`Write`/`WebFetch` 规则匹配被注释掉的文本，而虚拟 operation 通路仍会读取这些文本（见「风险与约束」）。
 - 同一段文本在 `cmd` 和 PowerShell 下仍会切分。
 - 多行命令、包含 substitution 语法的命令，以及注释前存在 operator 的命令保持旧的保守切分。
 - 首个非空白字符是 `#` 的命令（无论位于下标 0 还是在前导空格/制表符之后）同样保持旧的保守切分，因此显式 `deny` 规则仍能匹配注释之后的文本。
