@@ -15,6 +15,7 @@ import {
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import type { ResidentAgentContinuationResult } from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
 import {
   Config,
@@ -6201,9 +6202,11 @@ describe('AgentTool', () => {
           );
           const resident = mockRegistry.registerResidentAgent.mock
             .calls[0]?.[1] as {
-            continue: (message: string) => boolean;
+            continue: (message: string) => ResidentAgentContinuationResult;
           };
-          expect(resident.continue('Continue externally')).toBe(true);
+          // A string union now, not a boolean: 'continued' is the success
+          // value, and the other members say why a continuation did not happen.
+          expect(resident.continue('Continue externally')).toBe('continued');
           await vi.waitFor(() =>
             expect(mockAgent.execute).toHaveBeenCalledTimes(2),
           );
@@ -6776,10 +6779,22 @@ describe('AgentTool', () => {
       });
 
       const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
-        | { continue: (message: string) => boolean }
+        | {
+            continue: (input: {
+              kind: 'message';
+              text: string;
+              deliveryId: string;
+            }) => string;
+          }
         | undefined;
       expect(resident).toBeDefined();
-      expect(resident?.continue('Now inspect the helper')).toBe(true);
+      expect(
+        resident?.continue({
+          kind: 'message',
+          text: 'Now inspect the helper',
+          deliveryId: 'delivery-3',
+        }),
+      ).toBe('continued');
 
       await vi.waitFor(() => {
         expect(mockAgent.execute).toHaveBeenCalledTimes(2);
@@ -6790,8 +6805,14 @@ describe('AgentTool', () => {
         expect.any(AbortController),
       );
       expect(mockContextState.set).toHaveBeenCalledWith(
-        'task_prompt',
-        'Now inspect the helper',
+        'external_inputs_override',
+        [
+          {
+            kind: 'message',
+            text: 'Now inspect the helper',
+            deliveryId: 'delivery-3',
+          },
+        ],
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
@@ -6823,10 +6844,10 @@ describe('AgentTool', () => {
       });
 
       const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
-        | { continue: (message: string) => boolean }
+        | { continue: (message: string) => string }
         | undefined;
       expect(resident).toBeDefined();
-      expect(resident?.continue('Now inspect the helper')).toBe(true);
+      expect(resident?.continue('Now inspect the helper')).toBe('continued');
 
       // The hot continuation patch must clear run N-1's terminal summary —
       // mirroring the cold-resume patch — so a crash mid-continuation cannot
@@ -6844,6 +6865,29 @@ describe('AgentTool', () => {
         expect(mockRegistry.complete).toHaveBeenCalledTimes(2);
       });
       patchMetaSpy.mockRestore();
+    });
+
+    it('reports capacity before restarting a resident runtime', async () => {
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      mockRegistry.canStartBackgroundAgent.mockReturnValue(false);
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { continue: (message: string) => string }
+        | undefined;
+
+      expect(resident?.continue('Continue')).toBe('capacity_wait');
+      expect(mockRegistry.restartCompletedAgent).not.toHaveBeenCalled();
     });
 
     it('claims finishing-window input before publishing completion', async () => {
@@ -6969,13 +7013,13 @@ describe('AgentTool', () => {
         expect(mockRegistry.complete).toHaveBeenCalled();
       });
       const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
-        | { continue: (message: string) => boolean }
+        | { continue: (message: string) => string }
         | undefined;
       expect(resident).toBeDefined();
       expect(mockSubagentDispose).not.toHaveBeenCalled();
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
-      expect(resident?.continue('Continue')).toBe(false);
+      expect(resident?.continue('Continue')).toBe('fallback');
 
       expect(mockRegistry.unregisterResidentAgent).toHaveBeenCalled();
       expect(mockSubagentDispose).toHaveBeenCalledOnce();
