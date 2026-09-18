@@ -328,6 +328,14 @@ export interface DaemonGitLogEntry {
   parents: string[];
 }
 
+/** Optional filters for `GET /workspace/git/log`. */
+export interface DaemonGitLogOptions {
+  /** Walk every local branch, remote branch, and tag instead of HEAD only. */
+  all?: boolean;
+  /** Keep only commits whose message, author, or hash matches. */
+  search?: string;
+}
+
 /** Response from `GET /workspace/git/log`. */
 export interface DaemonGitLog {
   v: 1;
@@ -3718,7 +3726,7 @@ export interface DaemonModelConfiguration {
   envKey?: string;
   contextWindowSize?: number;
   canEditContextWindow?: boolean;
-  purpose: 'chat' | 'image' | 'voice';
+  purpose: 'chat' | 'image' | 'voice' | 'realtime';
   imageModel?: string;
   advisorModel?: string;
 }
@@ -3859,6 +3867,11 @@ export interface DaemonLiveStatus {
   host?: {
     version?: string;
     protocolVersion?: number;
+    /**
+     * Present as `'browser'` when the Web Shell page itself holds the Host
+     * lease over WS `/live/web`. Absent for the native macOS Host.
+     */
+    kind?: 'native' | 'browser';
   };
 }
 
@@ -3886,6 +3899,10 @@ export interface DaemonLiveSetupStatus {
   enabled: boolean;
   keyConfigured: boolean;
   model: string;
+  /** Absent on daemons that predate selectable Live Voice models. */
+  voice?: string;
+  /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
+  models?: Array<{ id: string; provider: string; name?: string }>;
   shortcut: string;
   install: DaemonLiveHostInstallStatus;
   live: DaemonLiveStatus;
@@ -3899,6 +3916,9 @@ export interface DaemonLiveSetupUpdate {
   enabled?: boolean;
   shortcut?: string;
   apiKey?: DaemonLiveSetupApiKeyMutation;
+  /** `modelId` or `provider:modelId` of a `realtimeOnly` route. */
+  model?: string;
+  voice?: string;
 }
 
 export interface DaemonLiveMuteUpdate {

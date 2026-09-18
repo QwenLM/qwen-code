@@ -10338,11 +10338,11 @@ export class Config {
     }
     // Under a session-writer lease the recorder starts `inactive` and
     // rejects every write until `activateChatRecording()` hands it the
-    // lease. Restoring now would push the legacy-migration journal write
-    // straight into that guard, and `restore()` latches the resulting
-    // failure as `recoveryError` for the life of the runtime — the
-    // migrated goal is dropped and goal persistence is bricked for the
-    // whole resumed session. Wait for the writer instead.
+    // lease. A restore itself writes nothing, but it is not only a read:
+    // activation replaces `sessionData` with the transcript loaded under
+    // the lease, so a restore run now would work from the constructor's
+    // possibly stale records, and a restored active Goal resumes its turn,
+    // whose first transition would hit that guard. Wait for the writer.
     if (restoreRuntime) {
       const preparation = runtime.prepareRestore(records ?? []);
       let resolveActivation!: () => void;

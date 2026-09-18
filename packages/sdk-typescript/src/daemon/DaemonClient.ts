@@ -105,6 +105,7 @@ import type {
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
@@ -1499,11 +1500,14 @@ export class DaemonClient {
     limit?: number,
     skip?: number,
     range?: string,
+    options?: DaemonGitLogOptions,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (range) params.set('range', range);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -6969,12 +6973,15 @@ export class WorkspaceDaemonClient {
     skip?: number,
     cwd?: string,
     range?: string,
+    options?: DaemonGitLogOptions,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (cwd != null) params.set('cwd', cwd);
     if (range) params.set('range', range);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
