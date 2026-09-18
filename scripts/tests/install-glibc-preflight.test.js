@@ -32,6 +32,7 @@ function runInstaller({
   useLddFallback = false,
   useUnknownLibc = false,
   unknownLibcOutput = 'musl libc (x86_64)\nVersion 1.2.5',
+  lddOutput = `ldd (GNU libc) ${glibcVersion}`,
   baseUrl = '',
   useLocalArchive = false,
 }) {
@@ -64,7 +65,9 @@ ${unknownLibcOutput}
 QWEN_TEST_LIBC
 `
         : `#!/bin/sh
-echo "ldd (GNU libc) ${glibcVersion}"
+cat <<'QWEN_TEST_LIBC'
+${lddOutput}
+QWEN_TEST_LIBC
 `,
     );
   } else {
@@ -141,6 +144,7 @@ describe('standalone installer glibc preflight', () => {
       expect(result.stderr).toContain(
         'Use --method npm with a Node.js 22+ build compatible with this system',
       );
+      expect(result.stdout).not.toContain('--base-url mirrors are checked');
       expect(existsSync(result.curlMarker)).toBe(false);
     } finally {
       cleanup(result);
@@ -179,6 +183,36 @@ describe('standalone installer glibc preflight', () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('this system has glibc 2.17');
       expect(existsSync(result.curlMarker)).toBe(false);
+    } finally {
+      cleanup(result);
+    }
+  });
+
+  itOnUnix('rejects an old distro-branded glibc banner via ldd', () => {
+    const result = runInstaller({
+      glibcVersion: '2.17',
+      useLddFallback: true,
+      lddOutput: 'ldd (Ubuntu GLIBC 2.17-0ubuntu1) 2.17',
+    });
+    try {
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('this system has glibc 2.17');
+      expect(existsSync(result.curlMarker)).toBe(false);
+    } finally {
+      cleanup(result);
+    }
+  });
+
+  itOnUnix('allows a supported distro-branded glibc banner via ldd', () => {
+    const result = runInstaller({
+      glibcVersion: '2.35',
+      useLddFallback: true,
+      lddOutput: 'ldd (Ubuntu GLIBC 2.35-0ubuntu3.4) 2.35',
+    });
+    try {
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
+      expect(existsSync(result.curlMarker)).toBe(true);
     } finally {
       cleanup(result);
     }
