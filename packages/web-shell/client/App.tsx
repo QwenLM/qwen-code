@@ -10489,6 +10489,14 @@ export function App({
       view: 'commit',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenLog = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'log',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -20299,6 +20307,11 @@ export function App({
                               ? handleOpenCommit
                               : undefined
                           }
+                          onOpenLog={
+                            gitDiffWorkspaceCwd
+                              ? handleOpenLog
+                              : undefined
+                          }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
@@ -20606,6 +20619,11 @@ export function App({
                 onOpenGitCommit={
                   workspaceContextActive && gitDiffWorkspaceCwd
                     ? handleOpenCommit
+                    : undefined
+                }
+                onOpenGitLog={
+                  workspaceContextActive && gitDiffWorkspaceCwd
+                    ? handleOpenLog
                     : undefined
                 }
                 onOpenAgent={openEnvironmentAgent}
