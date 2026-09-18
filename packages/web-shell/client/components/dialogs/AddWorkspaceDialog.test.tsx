@@ -332,7 +332,7 @@ describe('AddWorkspaceDialog', () => {
       expect(listbox()).not.toBeNull();
     });
 
-    it('navigates to an ancestor from the breadcrumb without submitting', async () => {
+    it('navigates to the parent directory without submitting', async () => {
       const onAdd = vi.fn();
       const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(
@@ -345,18 +345,13 @@ describe('AddWorkspaceDialog', () => {
         />,
       );
 
-      const crumbs = Array.from(
-        document.querySelectorAll<HTMLButtonElement>(
-          'nav[aria-label="Directory path"] button',
-        ),
-      );
-      expect(crumbs.map((crumb) => crumb.textContent)).toEqual([
-        '/',
-        'home',
-        'me',
-      ]);
-
-      act(() => crumbs[2].click());
+      act(() => {
+        document
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Parent folder"]',
+          )!
+          .click();
+      });
 
       expect(input().value).toBe('/home/me/');
       expect(onAdd).not.toHaveBeenCalled();

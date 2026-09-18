@@ -1682,7 +1682,7 @@ const EN: Messages = {
   'workspaceHost.folderOnThisComputer': 'Folder on this computer',
   'workspaceHost.browseHint':
     'Choose a folder below, or type an absolute path.',
-  'workspaceHost.pathNav': 'Directory path',
+  'workspaceHost.parent': 'Parent folder',
   'workspaceHost.addFolder': 'Add this folder',
   'workspaceHost.noFolders': 'No subfolders in this directory.',
   'workspaceHost.folderListError':
@@ -5538,7 +5538,7 @@ const ZH: Messages = {
   'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目录`,
   'workspaceHost.folderOnThisComputer': '这台电脑上的目录',
   'workspaceHost.browseHint': '请从下方选择目录，或输入绝对路径。',
-  'workspaceHost.pathNav': '目录路径',
+  'workspaceHost.parent': '上一级',
   'workspaceHost.addFolder': '添加此文件夹',
   'workspaceHost.noFolders': '此目录下没有子目录。',
   'workspaceHost.folderListError':

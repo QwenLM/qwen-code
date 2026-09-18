@@ -13,7 +13,7 @@ import {
 } from '../ui/field';
 import { Input } from '../ui/input';
 import { Switch } from '../ui/switch';
-import { ArrowLeftIcon, ChevronRightIcon, FolderOpenIcon } from 'lucide-react';
+import { ArrowLeftIcon, CornerLeftUpIcon, FolderOpenIcon } from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -57,31 +57,6 @@ const SUGGEST_DEBOUNCE_MS = 150;
 
 function isAbsoluteLike(value: string): boolean {
   return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value);
-}
-
-interface PathCrumb {
-  label: string;
-  path: string;
-}
-
-/**
- * The typed path as clickable ancestors. The separator comes from the path's
- * own root rather than the daemon's reported one, so the crumbs stay
- * self-consistent before the first lookup answers.
- */
-function splitPathCrumbs(value: string): PathCrumb[] {
-  if (!isAbsoluteLike(value)) return [];
-  const windowsRoot = /^[A-Za-z]:/.exec(value)?.[0];
-  const sep = windowsRoot ? '\\' : '/';
-  const root = windowsRoot ? `${windowsRoot}\\` : '/';
-  const crumbs: PathCrumb[] = [{ label: root, path: root }];
-  let prefix = root;
-  for (const name of value.slice(root.length).split(/[\\/]+/)) {
-    if (!name) continue;
-    prefix += `${name}${sep}`;
-    crumbs.push({ label: name, path: prefix });
-  }
-  return crumbs;
 }
 
 export function AddWorkspaceDialog({
@@ -369,7 +344,6 @@ export function AddWorkspaceDialog({
   );
 
   const showList = (browseDirectories || listOpen) && suggestions.length > 0;
-  const crumbs = browseDirectories ? splitPathCrumbs(path) : [];
 
   return (
     <DialogShell
@@ -438,6 +412,33 @@ export function AddWorkspaceDialog({
                   aria-describedby={error ? `${ERROR_ID} ${HINT_ID}` : HINT_ID}
                   aria-invalid={error ? true : undefined}
                 />
+                {browseDirectories && (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="outline"
+                    title={t('workspaceHost.parent')}
+                    aria-label={t('workspaceHost.parent')}
+                    disabled={submitting}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => {
+                      const trimmed = path.replace(/[\\/]+$/, '');
+                      if (/^[A-Za-z]:$/.test(trimmed)) {
+                        setPath(`${trimmed}\\`);
+                        return;
+                      }
+                      const index = Math.max(
+                        trimmed.lastIndexOf('/'),
+                        trimmed.lastIndexOf('\\'),
+                      );
+                      setPath(
+                        index >= 0 ? trimmed.slice(0, index + 1) : hostSep,
+                      );
+                    }}
+                  >
+                    <CornerLeftUpIcon aria-hidden="true" />
+                  </Button>
+                )}
                 {onPick && (
                   <Button
                     type="button"
@@ -451,40 +452,6 @@ export function AddWorkspaceDialog({
                   </Button>
                 )}
               </div>
-              {crumbs.length > 0 && (
-                <nav
-                  aria-label={t('workspaceHost.pathNav')}
-                  className="mt-2 flex flex-wrap items-center gap-x-0.5 gap-y-1 text-xs"
-                >
-                  {crumbs.map((crumb, index) =>
-                    index === crumbs.length - 1 ? (
-                      <span
-                        key={crumb.path}
-                        aria-current="location"
-                        className="px-1 py-0.5 font-medium"
-                      >
-                        {crumb.label}
-                      </span>
-                    ) : (
-                      <span key={crumb.path} className="flex items-center">
-                        <button
-                          type="button"
-                          className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
-                          disabled={submitting}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => setPath(crumb.path)}
-                        >
-                          {crumb.label}
-                        </button>
-                        <ChevronRightIcon
-                          className="size-3 text-muted-foreground"
-                          aria-hidden="true"
-                        />
-                      </span>
-                    ),
-                  )}
-                </nav>
-              )}
               {browseDirectories && (
                 // Above the list, because it points at it. A plain paragraph
                 // rather than FieldDescription, whose last-child margin rules
