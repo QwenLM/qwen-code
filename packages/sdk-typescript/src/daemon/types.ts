@@ -3897,6 +3897,12 @@ export interface DaemonLiveSetupStatus {
   voice?: string;
   /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
   models?: Array<{ id: string; provider: string; name?: string }>;
+  /**
+   * Whether the native macOS Host can attach on this daemon. `false` means
+   * the browser is the only endpoint, so install/launch/shortcut do not
+   * apply. Absent on older daemons, which are macOS-only.
+   */
+  nativeHost?: boolean;
   shortcut: string;
   install: DaemonLiveHostInstallStatus;
   live: DaemonLiveStatus;
