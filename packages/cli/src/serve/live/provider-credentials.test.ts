@@ -185,6 +185,20 @@ describe('Live provider credentials', () => {
       expect(credential.apiKey).toBe('env-secret');
     });
 
+    it('never reads the process environment on its own', () => {
+      const previous = process.env['DASHSCOPE_API_KEY'];
+      process.env['DASHSCOPE_API_KEY'] = 'ambient-secret';
+      try {
+        // No `env` passed: the ambient variable must not be picked up.
+        expect(() => resolveLiveProviderCredential(routed())).toThrow(
+          /requires DASHSCOPE_API_KEY/,
+        );
+      } finally {
+        if (previous === undefined) delete process.env['DASHSCOPE_API_KEY'];
+        else process.env['DASHSCOPE_API_KEY'] = previous;
+      }
+    });
+
     it('falls back to the settings env block for the key', () => {
       const credential = resolveLiveProviderCredential(
         routed({}, undefined, {

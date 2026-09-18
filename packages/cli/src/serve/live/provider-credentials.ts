@@ -265,7 +265,12 @@ export function resolveLiveProviderCredential(
   options: {
     apiKey?: string;
     allowDisabled?: boolean;
-    /** Where a route's `envKey` is read from. Defaults to `process.env`. */
+    /**
+     * Where a route's `envKey` is read from: the daemon's environment, passed
+     * in by the caller. There is deliberately no `process.env` fallback (serve
+     * code reads the process environment only through its documented seams),
+     * so an omitted `env` resolves no key and fails closed.
+     */
     env?: Readonly<Record<string, string | undefined>>;
   } = {},
 ): LiveProviderCredential {
@@ -280,7 +285,7 @@ export function resolveLiveProviderCredential(
     ({ endpoint, apiKey } = resolveRouteCredential(
       settings,
       route,
-      options.env ?? process.env,
+      options.env ?? {},
     ));
   } else {
     const configuredKey = settings.experimental?.liveVoice?.apiKey;
