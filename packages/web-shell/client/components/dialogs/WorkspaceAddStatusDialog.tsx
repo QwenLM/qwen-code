@@ -12,13 +12,11 @@ export function WorkspaceAddStatusDialog({
   tone,
   subtitle,
   onClose,
-  onBack,
 }: {
   message: string;
   tone: 'status' | 'alert';
   subtitle?: string;
   onClose: () => void;
-  onBack?: () => void;
 }) {
   const { t } = useI18n();
   return (
@@ -34,11 +32,6 @@ export function WorkspaceAddStatusDialog({
           <Button type="button" variant="outline" onClick={onClose}>
             {t('sidebar.addWorkspaceCancel')}
           </Button>
-          {onBack && (
-            <Button type="button" onClick={onBack}>
-              {t('workspaceHost.changeLocation')}
-            </Button>
-          )}
         </div>
       </div>
     </DialogShell>

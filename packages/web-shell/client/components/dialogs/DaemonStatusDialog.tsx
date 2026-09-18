@@ -630,8 +630,10 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
 
 function DaemonStatusDialogInner({
   onChangeTarget,
+  connectionsOnly = false,
 }: {
   onChangeTarget: (daemonOrigin: string, token?: string) => boolean | void;
+  connectionsOnly?: boolean;
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -696,8 +698,14 @@ function DaemonStatusDialogInner({
   // Two independent fetches: the summary drives the always-live top cards and
   // rides the auto-refresh interval; the full report backs the detail sections
   // and is only pulled on open (autoLoad) and on manual refresh.
-  const summary = useStatusReport({ autoLoad: true, detail: 'summary' });
-  const full = useStatusReport({ autoLoad: true, detail: 'full' });
+  const summary = useStatusReport({
+    autoLoad: !connectionsOnly,
+    detail: 'summary',
+  });
+  const full = useStatusReport({
+    autoLoad: !connectionsOnly,
+    detail: 'full',
+  });
   // `reload` is a stable callback; depend on it (not the hook object, which is
   // a fresh spread each render) so the poll interval is installed once rather
   // than torn down and reinstalled on every data update.
@@ -710,6 +718,7 @@ function DaemonStatusDialogInner({
   // degraded daemon could otherwise accumulate overlapping calls.
   const summaryPollInFlightRef = useRef(false);
   useEffect(() => {
+    if (connectionsOnly) return undefined;
     const timer = window.setInterval(() => {
       if (document.hidden || summaryPollInFlightRef.current) return;
       summaryPollInFlightRef.current = true;
@@ -718,7 +727,7 @@ function DaemonStatusDialogInner({
       });
     }, REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [summaryReload]);
+  }, [connectionsOnly, summaryReload]);
 
   const refreshAll = useCallback(() => {
     void summaryReload();
@@ -737,9 +746,11 @@ function DaemonStatusDialogInner({
   // when the operator needs to re-enter a token or pick another target. With a
   // report on screen only a failing (now stale) summary marks the link as
   // errored, matching the toolbar banner; with none, any load error does.
-  const connectionFailed = report
-    ? Boolean(summary.error && summary.report)
-    : Boolean(error);
+  const connectionFailed = connectionsOnly
+    ? workspace.status === 'error'
+    : report
+      ? Boolean(summary.error && summary.report)
+      : Boolean(error);
   const savedConnectionList = savedConnections.length > 0 && (
     <div
       role="group"
@@ -939,6 +950,10 @@ function DaemonStatusDialogInner({
       )}
     </Card>
   );
+
+  if (connectionsOnly) {
+    return <div className={styles.dialog}>{connectionCard}</div>;
+  }
 
   if (!report) {
     return (
@@ -1398,6 +1413,29 @@ export function DaemonStatusDialog({
       )}
     >
       <DaemonStatusDialogInner onChangeTarget={onChangeTarget} />
+    </ErrorBoundary>
+  );
+}
+
+export function DaemonConnectionsSettings({
+  onChangeTarget = navigateToDaemon,
+}: {
+  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
+} = {}) {
+  const { t } = useI18n();
+  return (
+    <ErrorBoundary
+      label="daemon-connections"
+      fallback={(error) => (
+        <div className={styles.empty}>
+          {t('daemon.loadFailed')}: {error.message}
+        </div>
+      )}
+    >
+      <DaemonStatusDialogInner
+        connectionsOnly
+        onChangeTarget={onChangeTarget}
+      />
     </ErrorBoundary>
   );
 }

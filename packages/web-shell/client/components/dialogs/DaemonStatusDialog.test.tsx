@@ -196,6 +196,7 @@ let fullState: HookState = {
   error: undefined,
 };
 const seenDetails: Array<string | undefined> = [];
+const seenAutoLoads: Array<boolean | undefined> = [];
 const workspaceState = {
   baseUrl: 'http://localhost:4170',
   status: 'connected' as const,
@@ -203,8 +204,9 @@ const workspaceState = {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
-  useStatusReport: (options: { detail?: string } = {}) => {
+  useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
     seenDetails.push(options.detail);
+    seenAutoLoads.push(options.autoLoad);
     if (options.detail === 'full') {
       return { ...fullState, data: fullState.report, reload: fullReload };
     }
@@ -216,7 +218,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   },
 }));
 
-const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
+const { DaemonConnectionsSettings, DaemonStatusDialog } = await import(
+  './DaemonStatusDialog'
+);
 const { StandaloneContext } = await import('../../config/standalone');
 
 let container: HTMLDivElement | null = null;
@@ -235,6 +239,21 @@ function mount(
       <StandaloneContext.Provider value={standalone}>
         <I18nProvider language={language}>
           <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+        </I18nProvider>
+      </StandaloneContext.Provider>,
+    );
+  });
+}
+
+function mountConnections(): void {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root!.render(
+      <StandaloneContext.Provider value>
+        <I18nProvider language="en">
+          <DaemonConnectionsSettings />
         </I18nProvider>
       </StandaloneContext.Provider>,
     );
@@ -270,6 +289,7 @@ beforeEach(() => {
   summaryState = { report: summaryReport, loading: false, error: undefined };
   fullState = { report: fullReport, loading: false, error: undefined };
   seenDetails.length = 0;
+  seenAutoLoads.length = 0;
   summaryReload.mockReset();
   summaryReload.mockImplementation(async () => undefined);
   fullReload.mockReset();
@@ -285,6 +305,16 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it('does not load status reports for the Connections settings page', () => {
+    vi.useFakeTimers();
+    mountConnections();
+
+    expect(seenAutoLoads).toEqual([false, false]);
+    act(() => vi.advanceTimersByTime(15_000));
+    expect(summaryReload).not.toHaveBeenCalled();
+    expect(fullReload).not.toHaveBeenCalled();
+  });
+
   it('lists, switches, and forgets connected computers', () => {
     window.localStorage.setItem(
       'qwen-remote-connections',

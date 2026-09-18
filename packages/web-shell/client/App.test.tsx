@@ -222,17 +222,12 @@ type AddWorkspaceDialogTestProps = {
   onSuggest?: (prefix: string) => Promise<unknown>;
   onPick?: () => Promise<string | undefined>;
   browseDirectories?: boolean;
-  onBack?: () => void;
   initialPath?: string;
-  daemonAddress?: string;
+  locations?: Array<{ origin: string; label: string; remote: boolean }>;
+  selectedLocation?: string;
+  onLocationChange?: (origin: string) => boolean | void;
   displayNameEnabled?: boolean;
   persistenceSupported?: boolean;
-};
-
-type AddRemoteWorkspaceDialogTestProps = {
-  onClose: () => void;
-  onContinueHere: () => void;
-  onConnectComputer: () => void;
 };
 
 function voiceSetting(effective: string): DaemonSettingDescriptor {
@@ -531,6 +526,7 @@ const {
     mockSessionActions,
     paneContextFixture,
     mockWorkspace: {
+      baseUrl: '',
       capabilities: {
         workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
       },
@@ -677,8 +673,6 @@ const {
         isPending: boolean;
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
-      latestAddRemoteWorkspaceDialogProps:
-        null as AddRemoteWorkspaceDialogTestProps | null,
       latestSessionOverviewProps: null as {
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
         onOpenSplit?: (sessionIds: string[]) => void;
@@ -1779,18 +1773,6 @@ vi.mock('./components/dialogs/AddWorkspaceDialog', async () => {
   };
 });
 
-vi.mock('./components/dialogs/AddRemoteWorkspaceDialog', async () => {
-  const React = await import('react');
-  return {
-    AddRemoteWorkspaceDialog: (props: AddRemoteWorkspaceDialogTestProps) => {
-      testState.latestAddRemoteWorkspaceDialogProps = props;
-      return React.createElement('div', {
-        'data-testid': 'add-remote-workspace-dialog',
-      });
-    },
-  };
-});
-
 function mockComponent(path: string, exportName: string): void {
   vi.doMock(path, async () => {
     const React = await import('react');
@@ -1866,7 +1848,16 @@ mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
 mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/tools/ToolsManagerPage', 'ToolsManagerPage');
 mockComponent('./components/skills/SkillsManagerPage', 'SkillsManagerPage');
-mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
+vi.doMock('./components/dialogs/DaemonStatusDialog', async () => {
+  const React = await import('react');
+  return {
+    DaemonStatusDialog: () => React.createElement('div'),
+    DaemonConnectionsSettings: () =>
+      React.createElement('div', {
+        'data-testid': 'daemon-connections-settings',
+      }),
+  };
+});
 vi.doMock('./components/SessionOverviewPanel', async () => {
   const React = await import('react');
   return {
@@ -10633,6 +10624,7 @@ beforeEach(() => {
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
+  mockWorkspace.baseUrl = '';
   mockUseWorkspaceSessionLiveState.mockClear();
   mockUseDaemonSessionActivityBridge.mockReset();
   mockUseDaemonSessionActivityBridge.mockImplementation(() => ({
@@ -10785,7 +10777,6 @@ beforeEach(() => {
   testState.backgroundDetails = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
-  testState.latestAddRemoteWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
@@ -17373,6 +17364,7 @@ describe('App session callbacks', () => {
     mockWorkspace.status = 'error';
     mockWorkspace.capabilities =
       undefined as unknown as typeof mockWorkspace.capabilities;
+    mockWorkspace.baseUrl = 'https://remote.example';
     mockWorkspace.refreshCapabilities.mockResolvedValue({
       features: ['standalone_sessions_v1'],
       workspaces: [
@@ -17776,9 +17768,22 @@ describe('App session callbacks', () => {
     ).toHaveLength(1);
   });
 
-  it('opens and resumes the standalone Add workspace location flow', async () => {
-    // The location step is only offered when there is a second computer to
-    // choose; with none, the folder browser opens straight away.
+  it('selects connected computers inside the standalone folder browser', async () => {
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+        'workspace_display_name',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
     window.localStorage.setItem(
       'qwen-remote-connections',
       JSON.stringify(['https://remote.example']),
@@ -17793,20 +17798,28 @@ describe('App session callbacks', () => {
     });
     expect(
       connectorView.container.querySelector(
-        '[data-testid="add-remote-workspace-dialog"]',
+        '[data-testid="add-workspace-dialog"]',
       ),
     ).not.toBeNull();
-
-    // The daemon this tab already talks to continues in place: the chooser
-    // hands over to the folder step without a navigation marker.
-    act(() => {
-      testState.latestAddRemoteWorkspaceDialogProps?.onContinueHere();
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      browseDirectories: true,
+      selectedLocation: window.location.origin,
     });
+    expect(testState.latestAddWorkspaceDialogProps?.locations).toEqual([
+      {
+        origin: window.location.origin,
+        label: 'This computer',
+        remote: false,
+      },
+      {
+        origin: 'https://remote.example',
+        label: 'remote.example',
+        remote: true,
+      },
+    ]);
     expect(
-      connectorView.container.querySelector(
-        '[data-testid="add-remote-workspace-dialog"]',
-      ),
-    ).toBeNull();
+      testState.latestAddWorkspaceDialogProps?.onLocationChange,
+    ).toBeTypeOf('function');
     expect(
       new URLSearchParams(window.location.search).has('addRemoteWorkspace'),
     ).toBe(false);
@@ -17814,6 +17827,7 @@ describe('App session callbacks', () => {
 
     mockWorkspace.capabilities =
       undefined as unknown as typeof mockWorkspace.capabilities;
+    mockWorkspace.baseUrl = 'https://remote.example';
     window.history.replaceState(
       null,
       '',
@@ -17861,15 +17875,10 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
     expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
       browseDirectories: true,
-      // Undefined for the page's own daemon: the subtitle says "this computer"
-      // rather than echoing the address back.
-      daemonAddress: undefined,
+      selectedLocation: 'https://remote.example',
       persistenceSupported: true,
       displayNameEnabled: true,
     });
-    expect(testState.latestAddWorkspaceDialogProps?.onBack).toBeTypeOf(
-      'function',
-    );
     expect(
       new URLSearchParams(window.location.search).has('addRemoteWorkspace'),
     ).toBe(false);

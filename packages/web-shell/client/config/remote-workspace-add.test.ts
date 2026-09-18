@@ -27,6 +27,7 @@ const {
   completeRemoteWorkspaceAdd,
   getRemoteWorkspaceAddStep,
   leaveRemoteWorkspaceAdd,
+  selectRemoteWorkspaceLocation,
   startRemoteWorkspaceAdd,
 } = await import('./remote-workspace-add');
 
@@ -82,18 +83,18 @@ describe('remote workspace add navigation', () => {
     );
   });
 
-  it('restores the original page and can reopen the connection step', () => {
+  it('switches folder sources without replacing the original return page', () => {
     expect(startRemoteWorkspaceAdd('https://remote.example')).toBe(true);
     setLocation(
       `${testOrigin}/?daemon=https%3A%2F%2Fremote.example&addRemoteWorkspace=browse`,
     );
 
-    expect(leaveRemoteWorkspaceAdd(true)).toBe(true);
-    expect(assign).toHaveBeenCalledWith(
-      `${testOrigin}/session/original?workspace=local&addRemoteWorkspace=connect`,
-    );
+    expect(selectRemoteWorkspaceLocation(testOrigin)).toBe(true);
+    expect(navigateToDaemon).toHaveBeenLastCalledWith(testOrigin, undefined, {
+      continueRemoteWorkspaceAdd: true,
+    });
     expect(window.sessionStorage.getItem('qwen-remote-workspace-return')).toBe(
-      null,
+      `${testOrigin}/session/original?workspace=local`,
     );
   });
 

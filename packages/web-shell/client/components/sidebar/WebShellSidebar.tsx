@@ -5943,6 +5943,7 @@ export function WebShellSidebar({
                     <Fragment key={ws.id}>
                       <WorkspaceSection
                         workspace={ws}
+                        remote={!isPageOriginDaemon(workspace.baseUrl)}
                         renderHeader={
                           lockedWorkspaceCwd && lockedWorkspaceOptions?.render
                             ? (expanded) =>

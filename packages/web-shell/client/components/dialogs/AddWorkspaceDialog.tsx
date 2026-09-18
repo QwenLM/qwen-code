@@ -12,8 +12,20 @@ import {
   FieldLabel,
 } from '../ui/field';
 import { Input } from '../ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
 import { Switch } from '../ui/switch';
-import { ArrowLeftIcon, CornerLeftUpIcon, FolderOpenIcon } from 'lucide-react';
+import {
+  CornerLeftUpIcon,
+  FolderOpenIcon,
+  LaptopIcon,
+  ServerIcon,
+} from 'lucide-react';
 
 export interface WorkspacePathSuggestion {
   name: string;
@@ -27,19 +39,21 @@ export interface WorkspacePathSuggestions {
   truncated: boolean;
 }
 
+export interface WorkspaceLocationOption {
+  origin: string;
+  label: string;
+  remote: boolean;
+}
+
 interface AddWorkspaceDialogProps {
   browseDirectories?: boolean;
-  onBack?: () => void;
   initialPath?: string;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   displayNameEnabled?: boolean;
-  /**
-   * Host of the daemon the folders come from, named in the dialog subtitle.
-   * Omit it for the page's own daemon, which the subtitle words as "this
-   * computer" instead.
-   */
-  daemonAddress?: string;
+  locations?: WorkspaceLocationOption[];
+  selectedLocation?: string;
+  onLocationChange?: (origin: string) => boolean | void;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
@@ -61,12 +75,13 @@ function isAbsoluteLike(value: string): boolean {
 
 export function AddWorkspaceDialog({
   browseDirectories = false,
-  onBack,
   initialPath = '',
   onClose,
   onAdd,
   displayNameEnabled = false,
-  daemonAddress,
+  locations,
+  selectedLocation,
+  onLocationChange,
   onSuggest,
   onPick,
   persistenceSupported = true,
@@ -348,19 +363,54 @@ export function AddWorkspaceDialog({
   return (
     <DialogShell
       title={t('sidebar.addWorkspaceTitle')}
-      subtitle={
-        browseDirectories
-          ? daemonAddress
-            ? t('workspaceHost.folderOn', { address: daemonAddress })
-            : t('workspaceHost.folderOnThisComputer')
-          : undefined
-      }
       size="md"
       dismissible={!submitting}
       onClose={onClose}
     >
       <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
         <FieldGroup>
+          {browseDirectories &&
+            locations &&
+            locations.length > 0 &&
+            selectedLocation &&
+            onLocationChange && (
+              <Field>
+                <FieldLabel id="workspace-location-label">
+                  {t('workspaceHost.source')}
+                </FieldLabel>
+                <Select
+                  value={selectedLocation}
+                  disabled={submitting}
+                  onValueChange={(origin) => {
+                    if (origin === selectedLocation) return;
+                    if (onLocationChange(origin) === false) {
+                      setError(t('workspaceHost.navigationUnavailable'));
+                    }
+                  }}
+                >
+                  <SelectTrigger
+                    className="w-full"
+                    aria-labelledby="workspace-location-label"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {locations.map((location) => {
+                      const Icon = location.remote ? ServerIcon : LaptopIcon;
+                      return (
+                        <SelectItem
+                          key={location.origin}
+                          value={location.origin}
+                        >
+                          <Icon aria-hidden="true" />
+                          {location.label}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
           <Field data-invalid={error ? true : undefined}>
             <FieldLabel htmlFor="add-workspace-path">
               {t('sidebar.addWorkspacePath')}
@@ -565,43 +615,29 @@ export function AddWorkspaceDialog({
             </Field>
           )}
         </FieldGroup>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          {onBack && (
-            <Button
-              type="button"
-              variant="ghost"
-              className="self-start"
-              onClick={onBack}
-              disabled={submitting}
-            >
-              <ArrowLeftIcon aria-hidden="true" />
-              {t('workspaceHost.changeLocation')}
-            </Button>
-          )}
-          <div className="flex w-full gap-2 sm:ml-auto sm:w-auto">
-            <Button
-              type="button"
-              variant="outline"
-              className="flex-1 sm:flex-none"
-              onClick={onClose}
-              disabled={submitting}
-            >
-              {t('sidebar.addWorkspaceCancel')}
-            </Button>
-            <Button
-              type="submit"
-              className="flex-1 sm:flex-none"
-              disabled={submitting || !path.trim()}
-            >
-              {submitting
-                ? t('sidebar.addWorkspaceAdding')
-                : t(
-                    browseDirectories
-                      ? 'workspaceHost.addFolder'
-                      : 'sidebar.addWorkspaceRegister',
-                  )}
-            </Button>
-          </div>
+        <div className="flex w-full justify-end gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            className="flex-1 sm:flex-none"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            {t('sidebar.addWorkspaceCancel')}
+          </Button>
+          <Button
+            type="submit"
+            className="flex-1 sm:flex-none"
+            disabled={submitting || !path.trim()}
+          >
+            {submitting
+              ? t('sidebar.addWorkspaceAdding')
+              : t(
+                  browseDirectories
+                    ? 'workspaceHost.addFolder'
+                    : 'sidebar.addWorkspaceRegister',
+                )}
+          </Button>
         </div>
       </form>
     </DialogShell>

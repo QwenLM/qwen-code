@@ -7,7 +7,7 @@ import {
 const FLOW_PARAM = 'addRemoteWorkspace';
 const RETURN_URL_KEY = 'qwen-remote-workspace-return';
 
-export type RemoteWorkspaceAddStep = 'connect' | 'browse';
+export type RemoteWorkspaceAddStep = 'browse';
 
 export function getRemoteWorkspaceAddStep():
   | RemoteWorkspaceAddStep
@@ -17,7 +17,7 @@ export function getRemoteWorkspaceAddStep():
   // document has no URL to carry a step.
   if (typeof window === 'undefined') return undefined;
   const step = new URLSearchParams(window.location.search).get(FLOW_PARAM);
-  return step === 'connect' || step === 'browse' ? step : undefined;
+  return step === 'browse' ? step : undefined;
 }
 
 export function clearRemoteWorkspaceAddStep(): void {
@@ -56,7 +56,23 @@ export function startRemoteWorkspaceAdd(
   return false;
 }
 
-export function leaveRemoteWorkspaceAdd(reopenConnection = false): boolean {
+export function selectRemoteWorkspaceLocation(
+  daemonOrigin: string,
+  token?: string,
+): boolean {
+  try {
+    if (window.sessionStorage.getItem(RETURN_URL_KEY)) {
+      return navigateToDaemon(daemonOrigin, token, {
+        continueRemoteWorkspaceAdd: true,
+      });
+    }
+  } catch {
+    return false;
+  }
+  return startRemoteWorkspaceAdd(daemonOrigin, token);
+}
+
+export function leaveRemoteWorkspaceAdd(): boolean {
   clearRemoteWorkspaceAddStep();
   let saved: string | null = null;
   try {
@@ -72,8 +88,7 @@ export function leaveRemoteWorkspaceAdd(reopenConnection = false): boolean {
     if (url.origin !== window.location.origin) return false;
     url.searchParams.delete('token');
     url.hash = '';
-    if (reopenConnection) url.searchParams.set(FLOW_PARAM, 'connect');
-    else url.searchParams.delete(FLOW_PARAM);
+    url.searchParams.delete(FLOW_PARAM);
     const savedDaemon = url.searchParams.get('daemon');
     const savedDaemonOrigin = savedDaemon
       ? getAllowedDaemonOrigin(savedDaemon)

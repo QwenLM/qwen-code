@@ -308,7 +308,20 @@ describe('AddWorkspaceDialog', () => {
         <AddWorkspaceDialog
           browseDirectories
           initialPath="/home/me/"
-          daemonAddress="https://remote.example:4170"
+          locations={[
+            {
+              origin: 'http://localhost',
+              label: 'This computer',
+              remote: false,
+            },
+            {
+              origin: 'https://remote.example:4170',
+              label: 'remote.example:4170',
+              remote: true,
+            },
+          ]}
+          selectedLocation="https://remote.example:4170"
+          onLocationChange={vi.fn()}
           onClose={vi.fn()}
           onAdd={vi.fn()}
           onSuggest={onSuggest}
@@ -319,10 +332,8 @@ describe('AddWorkspaceDialog', () => {
 
       expect(input().value).toBe('/home/me/');
       expect(listbox()).not.toBeNull();
-      // The computer is named in the dialog chrome, not buried in the hint.
-      expect(document.body.textContent).toContain(
-        'Folder on https://remote.example:4170',
-      );
+      expect(document.body.textContent).toContain('Folder source');
+      expect(document.body.textContent).toContain('remote.example:4170');
       expect(document.body.textContent).toContain(
         'Choose a folder below, or type an absolute path.',
       );
@@ -330,6 +341,49 @@ describe('AddWorkspaceDialog', () => {
 
       act(() => input().blur());
       expect(listbox()).not.toBeNull();
+    });
+
+    it('switches the folder source from inside the browser', async () => {
+      const onLocationChange = vi.fn();
+      mount(
+        <AddWorkspaceDialog
+          browseDirectories
+          initialPath="/home/me/"
+          locations={[
+            {
+              origin: 'http://localhost',
+              label: 'This computer',
+              remote: false,
+            },
+            {
+              origin: 'https://remote.example:4170',
+              label: 'remote.example:4170',
+              remote: true,
+            },
+          ]}
+          selectedLocation="http://localhost"
+          onLocationChange={onLocationChange}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onSuggest={vi.fn().mockResolvedValue(SUGGESTIONS)}
+        />,
+      );
+
+      act(() => {
+        document
+          .querySelector<HTMLButtonElement>(
+            'button[aria-labelledby="workspace-location-label"]',
+          )!
+          .click();
+      });
+      const remote = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((option) => option.textContent === 'remote.example:4170');
+      act(() => remote!.click());
+
+      expect(onLocationChange).toHaveBeenCalledWith(
+        'https://remote.example:4170',
+      );
     });
 
     it('navigates to the parent directory without submitting', async () => {

@@ -186,7 +186,10 @@ import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
-import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
+import {
+  DaemonConnectionsSettings,
+  DaemonStatusDialog,
+} from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
@@ -257,7 +260,6 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
-import { AddRemoteWorkspaceDialog } from './components/dialogs/AddRemoteWorkspaceDialog';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
@@ -265,12 +267,13 @@ import {
   completeRemoteWorkspaceAdd,
   getRemoteWorkspaceAddStep,
   leaveRemoteWorkspaceAdd,
+  selectRemoteWorkspaceLocation,
 } from './config/remote-workspace-add';
 import {
   formatOriginHost,
   listRemoteComputers,
 } from './config/remote-connections';
-import { isPageOriginDaemon } from './config/daemon';
+import { getDaemonToken, isPageOriginDaemon } from './config/daemon';
 import { Button } from './components/ui/button';
 import {
   isPluginShadowPanel,
@@ -3632,8 +3635,6 @@ export function App({
   const [initialRemoteWorkspaceAddStep] = useState(() =>
     standalone ? getRemoteWorkspaceAddStep() : undefined,
   );
-  const [showAddRemoteWorkspaceDialog, setShowAddRemoteWorkspaceDialog] =
-    useState(initialRemoteWorkspaceAddStep === 'connect');
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
     initialRemoteWorkspaceAddStep === 'browse',
   );
@@ -3645,12 +3646,6 @@ export function App({
   useEffect(() => {
     if (initialRemoteWorkspaceAddStep) clearRemoteWorkspaceAddStep();
   }, [initialRemoteWorkspaceAddStep]);
-  // A location step is only worth showing when there is more than one place to
-  // put the folder. Connections change in the Daemon Status panel, so re-read
-  // the catalog whenever that panel is not the one on screen.
-  const [remoteComputerCount, setRemoteComputerCount] = useState(() =>
-    standalone ? listRemoteComputers().length : 0,
-  );
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -8791,12 +8786,6 @@ export function App({
     },
     [closePanel],
   );
-  useEffect(() => {
-    // Daemon Status is where computers are connected and forgotten; re-read the
-    // catalog on the way out of it rather than on every render.
-    if (!standalone || activePanel === 'status') return;
-    setRemoteComputerCount(listRemoteComputers().length);
-  }, [standalone, activePanel]);
   // The Settings/Status panel (activePanel) and the Scheduled Tasks page
   // (mainView) are mutually-exclusive full-pane views — the latter is a
   // position:absolute overlay that would otherwise cover the former — so opening
@@ -10538,7 +10527,6 @@ export function App({
     // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
     showAuthDialog ||
-    showAddRemoteWorkspaceDialog ||
     showAddWorkspaceDialog ||
     scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
@@ -13164,33 +13152,34 @@ export function App({
     leaveRemoteWorkspaceAdd();
   }, []);
 
-  const changeRemoteWorkspaceHost = useCallback(() => {
-    setShowAddWorkspaceDialog(false);
-    workspaceBrowseActiveRef.current = false;
-    // Returns false when the browser was opened in place: there is no source
-    // page to navigate back to, so reopen the location step right here.
-    if (!leaveRemoteWorkspaceAdd(true)) setShowAddRemoteWorkspaceDialog(true);
+  const workspaceAddSelectedLocation =
+    workspace.baseUrl || window.location.origin;
+  const workspaceAddLocations = standalone
+    ? [
+        {
+          origin: window.location.origin,
+          label: t('workspaceHost.thisComputer'),
+          remote: false,
+        },
+        ...listRemoteComputers().map((origin) => ({
+          origin,
+          label: formatOriginHost(origin),
+          remote: true,
+        })),
+      ]
+    : undefined;
+  const hasRemoteWorkspaceLocation = (workspaceAddLocations?.length ?? 0) > 1;
+  const changeWorkspaceAddLocation = useCallback((origin: string) => {
+    return selectRemoteWorkspaceLocation(origin, getDaemonToken(origin));
   }, []);
 
-  const continueWorkspaceAddHere = useCallback(() => {
-    setShowAddRemoteWorkspaceDialog(false);
-    workspaceBrowseActiveRef.current = true;
-    setShowAddWorkspaceDialog(true);
-  }, []);
-
-  // Which computer the folder step is reading, for the dialog subtitle. The
-  // page's own daemon is named in words rather than by address.
+  // Which computer the folder step is reading, for loading and error states.
   const workspaceAddRemoteHost = isPageOriginDaemon(workspace.baseUrl)
     ? undefined
     : formatOriginHost(workspace.baseUrl);
   const workspaceAddLocationSubtitle = workspaceAddRemoteHost
     ? t('workspaceHost.folderOn', { address: workspaceAddRemoteHost })
     : t('workspaceHost.folderOnThisComputer');
-  // Offer the way back only when a location step exists to go back to.
-  const workspaceAddLocationStepReachable =
-    workspaceBrowseActiveRef.current && remoteComputerCount > 0
-      ? changeRemoteWorkspaceHost
-      : undefined;
 
   /**
    * Reconciles either a known committed cwd or an unknown POST outcome. Known
@@ -13300,15 +13289,9 @@ export function App({
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
   const handleOpenExistingWorkspace = useCallback(() => {
-    // The location step is a choice; with no connected computer it would be a
-    // choice of one, so go straight to the folders.
-    if (standalone && remoteComputerCount > 0) {
-      setShowAddRemoteWorkspaceDialog(true);
-      return;
-    }
     workspaceBrowseActiveRef.current = standalone;
     setShowAddWorkspaceDialog(true);
-  }, [standalone, remoteComputerCount]);
+  }, [standalone]);
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -18399,16 +18382,6 @@ export function App({
               />
             </DialogShell>
           )}
-          {showAddRemoteWorkspaceDialog && (
-            <AddRemoteWorkspaceDialog
-              onClose={() => setShowAddRemoteWorkspaceDialog(false)}
-              onContinueHere={continueWorkspaceAddHere}
-              onConnectComputer={() => {
-                setShowAddRemoteWorkspaceDialog(false);
-                openPanel('status');
-              }}
-            />
-          )}
           {!lockedWorkspaceCwd &&
             showAddWorkspaceDialog &&
             (workspaceBrowseActiveRef.current && !workspaceCapabilitiesReady ? (
@@ -18421,7 +18394,6 @@ export function App({
                 tone={workspace.status === 'error' ? 'alert' : 'status'}
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-                onBack={workspaceAddLocationStepReachable}
               />
             ) : workspaceBrowseActiveRef.current &&
               !dynamicWorkspaceRegistrationSupported ? (
@@ -18430,12 +18402,10 @@ export function App({
                 tone="alert"
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-                onBack={workspaceAddLocationStepReachable}
               />
             ) : (
               <AddWorkspaceDialog
                 browseDirectories={workspaceBrowseActiveRef.current}
-                onBack={workspaceAddLocationStepReachable}
                 initialPath={
                   workspaceBrowseActiveRef.current
                     ? workspace.capabilities?.workspaceCwd?.replace(
@@ -18446,11 +18416,9 @@ export function App({
                       '/'
                     : undefined
                 }
-                daemonAddress={
-                  workspaceBrowseActiveRef.current
-                    ? workspaceAddRemoteHost
-                    : undefined
-                }
+                locations={workspaceAddLocations}
+                selectedLocation={workspaceAddSelectedLocation}
+                onLocationChange={changeWorkspaceAddLocation}
                 onClose={closeAddWorkspaceDialog}
                 onAdd={
                   workspaceBrowseActiveRef.current
@@ -18685,7 +18653,7 @@ export function App({
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported ||
-                    (standalone && remoteComputerCount > 0)
+                    hasRemoteWorkspaceLocation
                       ? handleOpenExistingWorkspace
                       : undefined
                   }
@@ -19092,6 +19060,9 @@ export function App({
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
+                        connections={
+                          standalone ? <DaemonConnectionsSettings /> : undefined
+                        }
                         modelManagement={{
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
@@ -19197,7 +19168,7 @@ export function App({
                         onNewSession={handlePanelNewSession}
                         onAddWorkspace={
                           dynamicWorkspaceRegistrationSupported ||
-                          (standalone && remoteComputerCount > 0)
+                          hasRemoteWorkspaceLocation
                             ? handleOpenExistingWorkspace
                             : undefined
                         }

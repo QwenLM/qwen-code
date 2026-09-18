@@ -889,13 +889,18 @@ describe('WebShellSidebar workspace removal', () => {
 
     renderSidebar();
 
-    // One daemon serves every row, so the fact is stated once rather than
-    // repeated as a badge on each workspace.
+    // The host is named once, while each workspace keeps a compact remote
+    // folder mark like Codex's local/remote source distinction.
     const indicators = container.querySelectorAll(
       '[data-testid="remote-workspace-indicator"]',
     );
     expect(indicators).toHaveLength(1);
     expect(indicators[0].textContent).toContain('remote.example.com');
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(capabilities.workspaces.length);
   });
 
   it('leaves the header unmarked for the page origin daemon', () => {
@@ -905,6 +910,11 @@ describe('WebShellSidebar workspace removal', () => {
 
     expect(
       container.querySelectorAll('[data-testid="remote-workspace-indicator"]'),
+    ).toHaveLength(0);
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
     ).toHaveLength(0);
   });
 
