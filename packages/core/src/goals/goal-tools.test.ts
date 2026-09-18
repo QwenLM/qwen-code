@@ -1337,7 +1337,7 @@ describe('ProposeGoalTool', () => {
       )
       .join('');
 
-    expect(advertised.length).toBeLessThan(4_100);
+    expect(advertised.length).toBeLessThan(3_800);
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
