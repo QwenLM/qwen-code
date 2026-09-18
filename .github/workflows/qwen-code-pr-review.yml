@@ -502,11 +502,6 @@ jobs:
       contents: 'read'
       pull-requests: 'write'
       issues: 'write'
-    # Read by record-reviewed (the unchanged-diff anchor).
-    outputs:
-      review_completed: '${{ steps.review.outputs.review_completed }}'
-      salvaged: '${{ steps.review.outputs.salvaged }}'
-      unchanged_diff: '${{ steps.review.outputs.unchanged_diff }}'
     steps:
       # The runner worker dies in FinalizeJob with EACCES when it loses write
       # access to its own directories (observed: '/home/github-runner' no
@@ -1559,13 +1554,21 @@ jobs:
             skip_verdict="$(bash .github/scripts/review-unchanged-diff.sh "$REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA" "$BASE_REF_NAME")" || skip_verdict="changed check-failed"
             case "$skip_verdict" in
               unchanged\ *)
-                reviewed_anchor="${skip_verdict#unchanged }"
-                echo "Skipping review: PR #${PR_NUMBER} head ${EXPECTED_HEAD_SHA} has the same diff against ${BASE_REF_NAME} as already-reviewed ${reviewed_anchor}." | tee -a "$GITHUB_STEP_SUMMARY"
-                {
-                  echo "expected_head_sha=$EXPECTED_HEAD_SHA"
-                  echo "unchanged_diff=true"
-                } >> "$GITHUB_OUTPUT"
-                exit 0
+                read -r _ reviewed_anchor anchor_state <<< "$skip_verdict"
+                case "$anchor_state" in
+                  APPROVED) carry_event='APPROVE' ;;
+                  CHANGES_REQUESTED) carry_event='REQUEST_CHANGES' ;;
+                  COMMENTED) carry_event='COMMENT' ;;
+                  *) carry_event='' ;;
+                esac
+                if [ -n "$carry_event" ] && gh api --method POST "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+                    -f commit_id="$EXPECTED_HEAD_SHA" -f event="$carry_event" \
+                    -f body="Diff byte-identical to reviewed ${reviewed_anchor}; verdict carried forward." >/dev/null; then
+                  echo "Skipping review: PR #${PR_NUMBER} head ${EXPECTED_HEAD_SHA} has the same diff against ${BASE_REF_NAME} as already-reviewed ${reviewed_anchor}; carried its ${anchor_state} verdict forward." | tee -a "$GITHUB_STEP_SUMMARY"
+                  echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                echo "::warning::Could not carry a ${anchor_state:-missing} bot verdict from reviewed anchor ${reviewed_anchor}; running the review in full."
                 ;;
               *)
                 echo "Unchanged-diff check: ${skip_verdict:-no verdict}; running the review."
@@ -2205,18 +2208,11 @@ jobs:
           }
           cede_superseded() {
             echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
-            # BOTH of record-reviewed's stamp inputs — review_completed and
-            # unchanged_diff — are outputs of THIS step, the step the
-            # reviewed agent runs in, whose inherited real $GITHUB_OUTPUT is
-            # within the agent's reach. A planted 'true' in either must not
-            # survive a cede into the gate: within one step the last write
-            # wins, and every reader compares against the string 'true', so
-            # a false write is inert on honest paths. Writing both false is
-            # honest here, not just safe: this cede is reachable only after
-            # the skip branch declined (it exits 0 long before) and the
-            # review did not complete, so neither arm was earned.
+            # Later in-job reporting reads review_completed from this step.
+            # Retract any planted true value before a clean cede: the review
+            # did not complete, and the server-side anchor job deliberately
+            # ignores this output.
             echo "review_completed=false" >> "$GITHUB_OUTPUT"
-            echo "unchanged_diff=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
           # SUPERSEDE_FILE's premise against an unforgeable witness. The
@@ -2375,12 +2371,9 @@ jobs:
               # marker and no queued replacement to cede to, so there the
               # forgeable marker must fail loudly, not exit green.
               echo "Salvage-armed review attempt did not complete (${REASON:-unknown}); PR #${PR_NUMBER:-} head already moved — ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
-              # Same planted-output window as the shared supersede cede, and
-              # the same two inputs: overwrite a forged review_completed AND
-              # unchanged_diff last, so this cede can suppress a stamp but
-              # never enable one.
+              # Same planted-output window as the shared supersede cede:
+              # retract review_completed before later in-job reporting.
               echo "review_completed=false" >> "$GITHUB_OUTPUT"
-              echo "unchanged_diff=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             if [ "$OUTCOME" = "success" ]; then
@@ -2458,17 +2451,6 @@ jobs:
             {
               echo "salvaged=true"
               echo "salvage_moved_to=$salvage_moved_to"
-              # A third post-agent route to a stamp, and the only one that
-              # falls through instead of exiting: `salvaged=true` makes the
-              # gate's first arm false by construction, which leaves
-              # `unchanged_diff` as the one input that can still fire it —
-              # on whatever the agent left in the output file. The
-              # `review_completed=true` below IS earned here (the review ran
-              # to completion; only its verdict was drift-capped), so this
-              # arm retracts the one input it did not earn: the skip branch
-              # declined far above, and a false write is inert on every
-              # honest path.
-              echo "unchanged_diff=false"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -3131,58 +3113,66 @@ jobs:
           done
           echo "review worktrees cleaned"
 
-  # The anchor the unchanged-diff skip in review-pr's "Run review" looks
-  # for: a `qwen-review/reviewed` success status on a head whose diff received
-  # a completed, non-salvaged review (or, on a skip, was identical to a
-  # reviewed one — stamping it too keeps the next merge's lookup one commit
-  # deep). Those two are what the gate below can actually read: the CLI caps
-  # a verdict out of APPROVE for several more reasons than salvage, and none
-  # of the others is a job output. A job of
-  # its own so
-  # review-pr holds no statuses permission: its checkout persists the job's
-  # GITHUB_TOKEN where the reviewed agent can read it. The sha is the
-  # EVENT's head, never a review-pr output, so a hijacked agent can at most
-  # mark the head it was reviewing — no more than posting a clean review,
-  # which it can already do. BOTH stamp inputs in the gate below —
-  # review_completed and unchanged_diff — ARE outputs of the agent's own
-  # step, though, so all three post-agent routes out of that step retract
-  # them: the two cedes write both false before their `exit 0`, and the
-  # salvage-completion arm — which falls through to `review_completed=true`
-  # instead of exiting — writes `unchanged_diff=false` beside
-  # `salvaged=true`, leaving the gate's first arm false by construction. A
-  # planted value may suppress a stamp, never enable one. The skip script
-  # trusts only statuses created by
-  # github-actions[bot], so one written with CI_BOT_PAT (also within the
-  # agent's reach) never counts. Never fails the workflow.
+  # The anchor the unchanged-diff check looks for: a
+  # `qwen-review/reviewed` success status on a head with a server-side review
+  # from the CI bot. This job deliberately ignores every output from the step
+  # that ran the reviewed agent. It reads the PR's current head and reviews
+  # back from GitHub, requires a review by the CI_BOT_PAT credential on the
+  # event head, re-checks that the head is still current, and only then stamps
+  # it. The unchanged path re-casts the anchor's verdict before exiting, so it
+  # satisfies the same witness instead of relying on a special output-only
+  # route. The status still uses the workflow token: the lookup accepts only
+  # statuses created by github-actions[bot]. Never fails the workflow.
   record-reviewed:
     needs: ['review-pr']
     if: |-
       github.event_name == 'pull_request_target' &&
-      needs.review-pr.result == 'success' &&
-      ((needs.review-pr.outputs.review_completed == 'true' &&
-        needs.review-pr.outputs.salvaged != 'true') ||
-       needs.review-pr.outputs.unchanged_diff == 'true')
+      needs.review-pr.result == 'success'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
+      pull-requests: 'read'
       statuses: 'write'
     steps:
       - name: 'Record reviewed head'
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REVIEW_BOT_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
-          UNCHANGED_DIFF: '${{ needs.review-pr.outputs.unchanged_diff }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -uo pipefail
-          if [ "$UNCHANGED_DIFF" = "true" ]; then
-            description="Diff unchanged since a reviewed head; review skipped"
-          else
-            description="Reviewed by Qwen Code /review"
+          bot_login="$(GH_TOKEN="$REVIEW_BOT_TOKEN" gh api user --jq '.login' 2>/dev/null || true)"
+          if [ -z "$bot_login" ]; then
+            echo "::warning::Could not identify the review bot; not recording a reviewed anchor."
+            exit 0
+          fi
+          live_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+          if [ "$live_head" != "$HEAD_SHA" ]; then
+            echo "::warning::PR head is ${live_head:-unreadable}, not event head ${HEAD_SHA}; not recording a reviewed anchor."
+            exit 0
+          fi
+          reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate --slurp 2>/dev/null || true)"
+          review_state="$(printf '%s' "$reviews" | jq -r --arg sha "$HEAD_SHA" --arg who "$bot_login" '
+            [.[][]? | select(.commit_id == $sha and .user.login == $who)] as $all |
+            (([$all[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")] | sort_by(.submitted_at, .id) | last | .state) //
+             ([$all[] | select(.state == "COMMENTED" and ((.body // "") | length) > 0)] | sort_by(.submitted_at, .id) | last | .state) // empty)' 2>/dev/null || true)"
+          case "$review_state" in
+            APPROVED|CHANGES_REQUESTED|COMMENTED) ;;
+            *)
+              echo "::warning::No ${bot_login} review exists on current head ${HEAD_SHA}; not recording a reviewed anchor."
+              exit 0
+              ;;
+          esac
+          live_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+          if [ "$live_head" != "$HEAD_SHA" ]; then
+            echo "::warning::PR head moved to ${live_head:-unreadable} during review verification; not recording ${HEAD_SHA}."
+            exit 0
           fi
           if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
               -f state=success -f context='qwen-review/reviewed' \
-              -f target_url="$RUN_URL" -f description="$description" >/dev/null; then
+              -f target_url="$RUN_URL" -f description="Reviewed by Qwen Code /review; verdict=${review_state}" >/dev/null; then
             echo "Recorded qwen-review/reviewed on ${HEAD_SHA}." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::Could not record qwen-review/reviewed on ${HEAD_SHA}; the next unchanged push will be reviewed in full."

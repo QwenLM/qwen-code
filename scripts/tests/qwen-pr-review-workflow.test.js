@@ -4679,14 +4679,9 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // An earlier revision published review-pr's reviewed head as a job output
     // and read it here. The guard no longer keys on the head at all, so the
     // wiring is gone rather than left as an untested chain whose silent
-    // breakage would restore the fresh-head comparison. review-pr's only
-    // outputs are record-reviewed's three flags — no sha — and this job reads
-    // none of them.
-    expect(Object.keys(doc.jobs['review-pr'].outputs ?? {}).sort()).toEqual([
-      'review_completed',
-      'salvaged',
-      'unchanged_diff',
-    ]);
+    // breakage would restore the fresh-head comparison. review-pr publishes
+    // no job outputs, and this job reads none of them.
+    expect(doc.jobs['review-pr'].outputs).toBeUndefined();
     expect(JSON.stringify(doc.jobs['fallback-comment'])).not.toContain(
       'needs.review-pr.outputs',
     );
@@ -7101,18 +7096,11 @@ describe('review supersede salvage (#10110)', () => {
     }
   }
 
-  // The armed block also retracts `unchanged_diff` (R4-2): this is the third
-  // post-agent route to a stamp and the only one that falls through to
-  // `review_completed=true` instead of exiting, so the gate's first arm is
-  // false by construction here and its second must not be left holding
-  // whatever the agent wrote. `review_completed` itself stays honest — the
-  // review did complete, only its verdict was drift-capped.
   it('writes the salvage outputs only for an armed marker and a real move (replayed block)', () => {
     const sha = 'b'.repeat(40);
     expect(runSalvageOutputs({ movedTo: sha })).toEqual([
       'salvaged=true',
       `salvage_moved_to=${sha}`,
-      'unchanged_diff=false',
     ]);
     // No marker: an ordinary run emits no output at all (a flipped condition
     // would post the historical-head note on every run).
@@ -7126,7 +7114,6 @@ describe('review supersede salvage (#10110)', () => {
     expect(runSalvageOutputs({})).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
-      'unchanged_diff=false',
     ]);
     // Forged marker, head NEVER moved: the outputs block follows the cede
     // sites' live-head re-check — no outputs, and the historical-head
@@ -7144,7 +7131,6 @@ describe('review supersede salvage (#10110)', () => {
       expect(runSalvageOutputs({ movedToFifo: true })).toEqual([
         'salvaged=true',
         'salvage_moved_to=unknown',
-        'unchanged_diff=false',
       ]);
     },
   );
@@ -7157,12 +7143,10 @@ describe('review supersede salvage (#10110)', () => {
     expect(runSalvageOutputs({ movedTo: forged })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
-      'unchanged_diff=false',
     ]);
     expect(runSalvageOutputs({ movedTo: 'a'.repeat(41) })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
-      'unchanged_diff=false',
     ]);
   });
 
@@ -7177,11 +7161,7 @@ describe('review supersede salvage (#10110)', () => {
           movedTo: 'b'.repeat(40),
           movedToSwapOnRead: true,
         }),
-      ).toEqual([
-        'salvaged=true',
-        'salvage_moved_to=unknown',
-        'unchanged_diff=false',
-      ]);
+      ).toEqual(['salvaged=true', 'salvage_moved_to=unknown']);
     },
   );
 
@@ -7192,7 +7172,6 @@ describe('review supersede salvage (#10110)', () => {
     expect(runSalvageOutputs({ movedToHuge: true })).toEqual([
       'salvaged=true',
       'salvage_moved_to=unknown',
-      'unchanged_diff=false',
     ]);
   });
 
@@ -7456,24 +7435,21 @@ describe('qwen pr review unchanged-diff anchor', () => {
     // review-pr's checkout persists its GITHUB_TOKEN where the agent can
     // read it, so it must not hold statuses: write.
     expect(reviewPr.permissions.statuses).toBeUndefined();
-    expect(reviewPr.outputs.review_completed).toBe(
-      '${{ steps.review.outputs.review_completed }}',
-    );
-    expect(reviewPr.outputs.salvaged).toBe(
-      '${{ steps.review.outputs.salvaged }}',
-    );
-    expect(reviewPr.outputs.unchanged_diff).toBe(
-      '${{ steps.review.outputs.unchanged_diff }}',
-    );
+    expect(reviewPr.outputs).toBeUndefined();
     const job = doc.jobs['record-reviewed'];
     expect(job.needs).toEqual(['review-pr']);
-    expect(job.permissions).toEqual({ statuses: 'write' });
+    expect(job.permissions).toEqual({
+      'pull-requests': 'read',
+      statuses: 'write',
+    });
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job.if).toContain("github.event_name == 'pull_request_target'");
     expect(job.if).toContain("needs.review-pr.result == 'success'");
+    expect(job.if).not.toContain('needs.review-pr.outputs');
     const [step] = job.steps;
     // The event's head, never an output the agent's step could write.
     expect(step.env.HEAD_SHA).toBe('${{ github.event.pull_request.head.sha }}');
+    expect(step.env.REVIEW_BOT_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
     expect(step.run).toContain("-f context='qwen-review/reviewed'");
   });
 
@@ -7506,28 +7482,26 @@ describe('qwen pr review unchanged-diff anchor', () => {
     expect(run).toContain('[ "${EVENT_ACTION:-}" = "synchronize" ]');
   });
 
-  // R1-7. The skip is a three-link chain and only its ends were pinned: the
-  // gate that admits a skip into `record-reviewed` (the trust boundary),
-  // the event action the skip is keyed on, and the producer of the output
-  // the gate reads. Each assertion below fails if its link is dropped,
-  // including the `||` that joins the gate's two arms — a surviving arm
-  // alone is not the contract.
-  it('pins every link between the skip and the status it stamps', () => {
+  it('carries the anchor verdict onto an unchanged head before skipping', () => {
     const reviewPr = anchorDoc.jobs['review-pr'];
     const runStep = reviewPr.steps.find((s) => s.name === 'Run review');
-    // Whitespace-normalized: the gate is a YAML block scalar, so the line
-    // breaks around `||` are formatting, not the contract.
-    expect(anchorDoc.jobs['record-reviewed'].if.replace(/\s+/g, ' ')).toContain(
-      "(needs.review-pr.outputs.review_completed == 'true' &&" +
-        " needs.review-pr.outputs.salvaged != 'true') ||" +
-        " needs.review-pr.outputs.unchanged_diff == 'true'",
-    );
     // Without this env entry EVENT_ACTION is unset in the step and the skip
     // branch never opens.
     expect(runStep.env.EVENT_ACTION).toBe("${{ github.event.action || '' }}");
-    // An output with no writer is never 'true', so the gate above admits
-    // nothing.
-    expect(runStep.run).toContain('echo "unchanged_diff=true"');
+    expect(runStep.run).toContain(
+      'read -r _ reviewed_anchor anchor_state <<< "$skip_verdict"',
+    );
+    expect(runStep.run).toContain("APPROVED) carry_event='APPROVE'");
+    expect(runStep.run).toContain(
+      "CHANGES_REQUESTED) carry_event='REQUEST_CHANGES'",
+    );
+    expect(runStep.run).toContain("COMMENTED) carry_event='COMMENT'");
+    expect(runStep.run).toContain(
+      '-f commit_id="$EXPECTED_HEAD_SHA" -f event="$carry_event"',
+    );
+    expect(runStep.run.indexOf('-f event="$carry_event"')).toBeLessThan(
+      runStep.run.indexOf('exit 0', runStep.run.indexOf('unchanged\\ *')),
+    );
   });
 
   // R1-6. The reader's constants and the writer's identity are one contract
@@ -7557,84 +7531,109 @@ describe('qwen pr review unchanged-diff anchor', () => {
     const state = skipScript.match(/\.state == "([^"]+)"/)?.[1];
     expect(state).toBeTruthy();
     expect(step.run).toContain(`-f state=${state}`);
+    expect(step.run).toContain(
+      '-f description="Reviewed by Qwen Code /review; verdict=${review_state}"',
+    );
+    for (const verdict of ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']) {
+      expect(skipScript).toContain(
+        `'Reviewed by Qwen Code /review; verdict=${verdict}'`,
+      );
+    }
   });
 
-  // R2-2 / R3-1. record-reviewed's stamp gate has TWO arms and both read an
-  // output of the very step the reviewed agent runs in, whose real
-  // $GITHUB_OUTPUT the agent can reach. Clearing only review_completed left
-  // the unchanged_diff arm able to ENABLE a stamp on a head whose review
-  // ceded — and on a salvaged head, defeating the salvage exclusion. Every
-  // post-agent cede must overwrite a planted value last in each arm: a false
-  // write can only suppress a stamp, never enable one.
-  // R4-2. The cedes are not the whole enumeration. A third post-agent route
-  // reaches the gate without ever exiting — the salvage-COMPLETION arm falls
-  // through to `review_completed=true` at the end of the step — so a defence
-  // listed per `exit 0` site was green while that route stayed open.
-  it('overwrites every planted stamp-gate input per post-agent route', () => {
-    const run = anchorDoc.jobs['review-pr'].steps.find(
-      (s) => s.name === 'Run review',
-    ).run;
-    // Derive the arms from the gate itself instead of restating them, so a
-    // third positive arm cannot be added without its own overwrite. `!=`
-    // arms (the salvage exclusion) are not stamp inputs and stay out.
-    const gate = parse(workflow).jobs['record-reviewed'].if;
-    const overwrites = [...gate.matchAll(/outputs\.(\w+) == 'true'/g)].map(
-      (m) => `echo "${m[1]}=false" >> "$GITHUB_OUTPUT"`,
+  it('derives the stamp from a current-head server-side review', () => {
+    const job = anchorDoc.jobs['record-reviewed'];
+    const [step] = job.steps;
+    expect(job.if).not.toContain('needs.review-pr.outputs');
+    expect(step.run).toContain(
+      'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate --slurp',
     );
-    expect(overwrites).toEqual([
-      'echo "review_completed=false" >> "$GITHUB_OUTPUT"',
-      'echo "unchanged_diff=false" >> "$GITHUB_OUTPUT"',
-    ]);
-    // The shared cede function, and the salvage-armed cede that does not go
-    // through it. Each write must land before the exit, so a planted value
-    // cannot survive it (last write wins within one step).
-    const cede = run.match(/cede_superseded\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
-    expect(cede).not.toBe('');
-    const salvageCede =
-      run.match(
-        /Salvage-armed review attempt did not complete[\s\S]*?exit 0/,
-      )?.[0] ?? '';
-    expect(salvageCede).not.toBe('');
-    for (const site of [
-      ['cede_superseded', cede],
-      ['salvage-armed cede', salvageCede],
-    ]) {
-      const [name, body] = site;
-      for (const overwrite of overwrites) {
-        const at = body.indexOf(overwrite);
-        expect(at, `${name} does not write ${overwrite}`).toBeGreaterThan(-1);
-        expect(at, `${name} writes ${overwrite} after its exit`).toBeLessThan(
-          body.indexOf('exit 0'),
-        );
-      }
+    expect(step.run).toContain('.commit_id == $sha');
+    expect(step.run).toContain('.user.login == $who');
+    expect(step.run).toContain(
+      'select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")',
+    );
+    expect(step.run).toContain(
+      'select(.state == "COMMENTED" and ((.body // "") | length) > 0)',
+    );
+    expect(
+      step.run.indexOf(
+        'select(.state == "COMMENTED" and ((.body // "") | length) > 0)',
+      ),
+    ).toBeGreaterThan(
+      step.run.indexOf(
+        'select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")',
+      ),
+    );
+    expect(step.run.match(/\.head\.sha/g)).toHaveLength(2);
+    expect(step.run.indexOf('reviews?per_page=100')).toBeLessThan(
+      step.run.indexOf('statuses/${HEAD_SHA}'),
+    );
+  });
+
+  it('does not let a later inline comment downgrade the main verdict', () => {
+    const [step] = anchorDoc.jobs['record-reviewed'].steps;
+    const jqProgram =
+      step.run.match(
+        /review_state=.*?jq -r --arg sha "\$HEAD_SHA" --arg who "\$bot_login" '([\s\S]*?)' 2>\/dev\/null/,
+      )?.[1] ?? '';
+    expect(jqProgram).not.toBe('');
+    for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+      const reviews = [
+        [
+          {
+            id: 1,
+            commit_id: 'head',
+            submitted_at: '2026-01-01T00:00:00Z',
+            state,
+            user: { login: 'review-bot' },
+          },
+          {
+            id: 2,
+            commit_id: 'head',
+            body: '',
+            submitted_at: '2026-01-01T00:01:00Z',
+            state: 'COMMENTED',
+            user: { login: 'review-bot' },
+          },
+        ],
+      ];
+      const selected = execFileSync(
+        'jq',
+        ['-r', '--arg', 'sha', 'head', '--arg', 'who', 'review-bot', jqProgram],
+        { input: JSON.stringify(reviews), encoding: 'utf8' },
+      ).trim();
+      expect(selected).toBe(state);
     }
-    // R4-2, the route with no `exit 0` to order against: the
-    // salvage-COMPLETION arm writes `salvaged=true`, falls through the
-    // docs-only block and lands on `review_completed=true` at the end of the
-    // step. Arm 1 is then false by construction, so arm 2 fires on whatever
-    // `unchanged_diff` the agent left in the output file — and the stamp is
-    // permanent, becoming the anchor every later diff-identical push skips
-    // on. Pin the retraction to the arm that emits `salvaged=true`.
-    const salvageCompletion =
-      run.match(/echo "salvaged=true"[\s\S]*?\} >> "\$GITHUB_OUTPUT"/)?.[0] ??
-      '';
-    expect(salvageCompletion).not.toBe('');
-    expect(salvageCompletion).toContain('echo "unchanged_diff=false"');
-    // Only arm 2 is retracted there. `review_completed=true` stays honest —
-    // the review ran to completion, only its verdict was drift-capped — and
-    // the historical-head note's two gates plus the relay's env all read it,
-    // so a "clear both on every route" edit would silently kill them. Pin
-    // that the completion write survives, after the arm that caps it.
-    expect(run).toContain('echo "review_completed=true" >> "$GITHUB_OUTPUT"');
-    expect(run.indexOf('echo "salvaged=true"')).toBeLessThan(
-      run.indexOf('echo "review_completed=true" >> "$GITHUB_OUTPUT"'),
-    );
-    // The honest writer of unchanged_diff sits in the skip branch, which
-    // exits before the agent runs — so no cede can be reached with a true
-    // value this step wrote itself.
-    expect(run.indexOf('echo "unchanged_diff=true"')).toBeLessThan(
-      run.indexOf('cede_superseded() {'),
-    );
+
+    const inlineOnly = [
+      [
+        {
+          id: 3,
+          commit_id: 'head',
+          body: '',
+          submitted_at: '2026-01-01T00:02:00Z',
+          state: 'COMMENTED',
+          user: { login: 'review-bot' },
+        },
+      ],
+    ];
+    expect(
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'sha', 'head', '--arg', 'who', 'review-bot', jqProgram],
+        { input: JSON.stringify(inlineOnly), encoding: 'utf8' },
+      ).trim(),
+    ).toBe('');
+
+    inlineOnly[0][0].body = 'Deferring pending maintainer input.';
+    expect(
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'sha', 'head', '--arg', 'who', 'review-bot', jqProgram],
+        { input: JSON.stringify(inlineOnly), encoding: 'utf8' },
+      ).trim(),
+    ).toBe('COMMENTED');
   });
 
   // R1-3. The prose is what a reader has to go on, and both sites claimed

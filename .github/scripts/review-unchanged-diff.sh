@@ -8,7 +8,8 @@
 # has to look one commit back.
 #
 # Prints ONE verdict line on stdout, diagnostics on stderr:
-#   unchanged <reviewed-sha>   same diff as an already-reviewed ancestor
+#   unchanged <reviewed-sha> <review-state>
+#                              same diff as an already-reviewed ancestor
 #   changed <reason>           anything else — the caller reviews in full
 # Exit status is 0 for either verdict; a broken environment (no git, no gh)
 # still prints `changed <reason>` so a failure here can only cost a review,
@@ -23,12 +24,15 @@
 # reviewed agent authors every input such a lookup has, and cede/skip runs
 # make "a successful run" true without posting). A commit status written by
 # the workflow's own token from a step the agent never runs in cannot be
-# authored by the PR, so `qwen-review/reviewed` on a commit means exactly
-# "this diff was reviewed (or equals one that was)". Two narrowings make that
-# hold: the status is written by the workflow's `record-reviewed` job, not
-# by review-pr (whose GITHUB_TOKEN the agent can read), on the EVENT's head;
-# and only statuses whose creator is github-actions[bot] count here, so one
-# written with CI_BOT_PAT — also within the agent's reach — is ignored.
+# authored by the PR, so a supported `qwen-review/reviewed` status on a commit
+# means exactly "this diff was reviewed (or equals one that was)" and carries
+# the server-read review verdict needed to re-cast it. Three narrowings make
+# that hold: the status is written by the workflow's `record-reviewed` job,
+# not by review-pr (whose GITHUB_TOKEN the agent can read), on the EVENT's
+# head; only statuses whose creator is github-actions[bot] count here, so one
+# written with CI_BOT_PAT — also within the agent's reach — is ignored; and a
+# legacy status without supported verdict metadata fails closed to a full
+# review rather than becoming an incomplete skip anchor.
 #
 # WHY sha256 OF THE DIFF, NOT git patch-id. patch-id ignores whitespace, so a
 # formatting-only push would be skipped as "unchanged"; the raw diff (with
@@ -54,13 +58,14 @@
 # Env:   GH_TOKEN  read access for the commit status lookup
 set -uo pipefail
 
-# refs/replace is the one object-redirect surface a reachable `.git` can plant
-# and nothing in the review pipeline wipes: one `git replace <tree> <reviewed
-# tree>` in the checkout's common dir makes merge-base, rev-list and the
-# fingerprint's diff all resolve a head carrying new code as an already
-# reviewed ancestor. Exported, not a per-call flag, so every git call below —
-# including one added later — inherits it. Same idiom as packages/cli's
-# review worktree (GIT_NO_REPLACE_OBJECTS=1).
+# refs/replace is one object-redirect surface a reachable `.git` can plant:
+# one `git replace <tree> <reviewed tree>` in the checkout's common dir makes
+# merge-base, rev-list and the fingerprint's diff all resolve a head carrying
+# new code as an already reviewed ancestor. Exported, not a per-call flag, so
+# every git call below — including one added later — inherits it. Legacy
+# info/grafts is a separate redirect surface that this variable does not
+# disable; the fail-closed check below refuses a checkout where it is present.
+# Same idiom as packages/cli's review worktree (GIT_NO_REPLACE_OBJECTS=1).
 export GIT_NO_REPLACE_OBJECTS=1
 
 REPO="${1:-}"
@@ -93,6 +98,17 @@ esac
 # Hooks and fsmonitor off: the objects fetched below are the PR's, and the
 # repository's own hooks are irrelevant to a read-only fingerprint.
 GIT=(git -c core.hooksPath=/dev/null -c core.fsmonitor=)
+
+common_dir="$("${GIT[@]}" rev-parse --git-common-dir 2>/dev/null)" ||
+  verdict "changed no-git-common-dir"
+case "$common_dir" in
+  /*) ;;
+  *) common_dir="$PWD/$common_dir" ;;
+esac
+if [ -e "$common_dir/info/grafts" ] || [ -L "$common_dir/info/grafts" ]; then
+  log "refusing legacy grafts file at ${common_dir}/info/grafts"
+  verdict "changed grafts-present"
+fi
 
 cleanup() { "${GIT[@]}" update-ref -d "$TMP_REF" 2>/dev/null || true; }
 trap cleanup EXIT
@@ -172,9 +188,15 @@ while read -r sha; do
     log "status lookup failed for ${sha}"
     verdict "changed status-lookup-failed"
   }
-  reviewed="$(printf '%s' "$status_json" | jq -r --arg ctx "$STATUS_CONTEXT" --arg who "$STATUS_CREATOR" \
-    '[.[]? | select(.context == $ctx and .state == "success" and (.creator.login // "") == $who)] | length' 2>/dev/null)" || reviewed=0
-  if [ "${reviewed:-0}" -gt 0 ]; then
+  trusted_status="$(printf '%s' "$status_json" | jq -r --arg ctx "$STATUS_CONTEXT" --arg who "$STATUS_CREATOR" \
+    '[.[]? | select(.context == $ctx and .state == "success" and (.creator.login // "") == $who)] | sort_by(.created_at, .id) | last | if . == null then "" else (.description // "<missing>") end' 2>/dev/null)" || trusted_status=''
+  if [ -n "$trusted_status" ]; then
+    case "$trusted_status" in
+      'Reviewed by Qwen Code /review; verdict=APPROVED') reviewed_state='APPROVED' ;;
+      'Reviewed by Qwen Code /review; verdict=CHANGES_REQUESTED') reviewed_state='CHANGES_REQUESTED' ;;
+      'Reviewed by Qwen Code /review; verdict=COMMENTED') reviewed_state='COMMENTED' ;;
+      *) verdict "changed unsupported-status-metadata" ;;
+    esac
     anchor_fp="$(fingerprint "$sha")" || {
       case "$?" in
         2) verdict "changed anchor-ambiguous-merge-base" ;;
@@ -183,7 +205,7 @@ while read -r sha; do
     }
     if [ "$anchor_fp" = "$head_fp" ]; then
       log "head ${HEAD_SHA} has the same diff against ${BASE_REF} as reviewed ${sha}"
-      verdict "unchanged ${sha}"
+      verdict "unchanged ${sha} ${reviewed_state}"
     fi
     log "reviewed ancestor ${sha} has a different diff against ${BASE_REF}"
     verdict "changed diff-differs"

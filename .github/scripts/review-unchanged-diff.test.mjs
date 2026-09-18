@@ -96,8 +96,12 @@ function crissCrossAnchor(branch, tag) {
   return git(work, 'rev-parse', 'HEAD');
 }
 
-function markReviewed(sha, creator = 'github-actions[bot]') {
-  writeFileSync(join(statusDir, sha), creator);
+function markReviewed(
+  sha,
+  creator = 'github-actions[bot]',
+  verdict = 'APPROVED',
+) {
+  writeFileSync(join(statusDir, sha), `${creator}|${verdict}`);
 }
 
 // Every status lookup the script made, as the fake `gh` recorded them.
@@ -181,8 +185,10 @@ before(() => {
       'printf \'%s\\n\' "${path}" >> "${FAKE_STATUS_DIR}/calls"',
       'sha="${path#*/commits/}"; sha="${sha%%/*}"',
       'if [ -f "${FAKE_STATUS_DIR}/${sha}" ]; then',
-      '  who="$(cat "${FAKE_STATUS_DIR}/${sha}")"',
-      '  printf \'[{"context":"qwen-review/reviewed","state":"success","creator":{"login":"%s"}},{"context":"ci/other","state":"failure","creator":{"login":"x"}}]\' "$who"',
+      '  record="$(cat "${FAKE_STATUS_DIR}/${sha}")"',
+      '  who="${record%%|*}"; verdict="${record#*|}"',
+      '  if [ "$verdict" = LEGACY ]; then description="Reviewed by Qwen Code /review"; else description="Reviewed by Qwen Code /review; verdict=${verdict}"; fi',
+      '  printf \'[{"id":1,"created_at":"2026-01-01T00:00:00Z","context":"qwen-review/reviewed","state":"success","description":"%s","creator":{"login":"%s"}},{"context":"ci/other","state":"failure","creator":{"login":"x"}}]\' "$description" "$who"',
       'else',
       "  printf '[]'",
       'fi',
@@ -238,7 +244,7 @@ describe('review-unchanged-diff', () => {
     git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
     const merged = publishPrHead();
     const { verdict } = run(merged);
-    assert.equal(verdict, `unchanged ${headA}`);
+    assert.equal(verdict, `unchanged ${headA} APPROVED`);
   });
 
   it('an unreviewed real change followed by a merge of main is NOT skipped', () => {
@@ -304,7 +310,7 @@ describe('review-unchanged-diff', () => {
     git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
     const m2 = publishPrHead();
     const { verdict } = run(m2);
-    assert.equal(verdict, `unchanged ${m1}`);
+    assert.equal(verdict, `unchanged ${m1} APPROVED`);
     chain = { m1, m2 };
   });
 
@@ -319,7 +325,33 @@ describe('review-unchanged-diff', () => {
     git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
     const m3 = publishPrHead();
     const { verdict } = run(m3);
-    assert.equal(verdict, `unchanged ${chain.m1}`);
+    assert.equal(verdict, `unchanged ${chain.m1} APPROVED`);
+  });
+
+  it('refuses a legacy reviewed status without verdict metadata', () => {
+    const anchor = git(work, 'rev-parse', 'HEAD');
+    markReviewed(anchor, 'github-actions[bot]', 'LEGACY');
+    git(work, 'checkout', '-q', 'main');
+    commit(work, 'legacy.txt', 'main moved\n', 'main: legacy status');
+    git(work, 'push', '-q', 'origin', 'main');
+    git(work, 'checkout', '-q', 'pr');
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
+    const head = publishPrHead();
+    const { verdict } = run(head);
+    assert.equal(verdict, 'changed unsupported-status-metadata');
+  });
+
+  it('carries supported review verdict metadata in the unchanged result', () => {
+    const anchor = git(work, 'rev-parse', 'HEAD');
+    markReviewed(anchor, 'github-actions[bot]', 'CHANGES_REQUESTED');
+    git(work, 'checkout', '-q', 'main');
+    commit(work, 'verdict.txt', 'main moved\n', 'main: verdict metadata');
+    git(work, 'push', '-q', 'origin', 'main');
+    git(work, 'checkout', '-q', 'pr');
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
+    const head = publishPrHead();
+    const { verdict } = run(head);
+    assert.equal(verdict, `unchanged ${anchor} CHANGES_REQUESTED`);
   });
 
   it('a reachable textconv driver cannot collapse the fingerprint', () => {
@@ -489,6 +521,19 @@ describe('review-unchanged-diff', () => {
     } finally {
       git(ci, 'replace', '-d', headTree);
       git(ci, 'update-ref', '-d', plantRef);
+    }
+  });
+
+  it('refuses a reachable legacy grafts file', () => {
+    const head = git(work, 'rev-parse', 'HEAD');
+    const grafts = join(ci, '.git', 'info', 'grafts');
+    writeFileSync(grafts, `${head}\n`);
+    try {
+      const { verdict, stderr } = run(head);
+      assert.equal(verdict, 'changed grafts-present');
+      assert.match(stderr, /refusing legacy grafts file/);
+    } finally {
+      rmSync(grafts, { force: true });
     }
   });
 
