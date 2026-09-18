@@ -280,7 +280,7 @@ In order:
 1. **Admission.** Per sender: a burst of 30, then one message every two seconds. All senders together: a burst of 32, then one a second — a sender names itself on the frame, so rotating that name buys a fresh allowance from the first limit but not the second. The same body from another session inside 30 seconds is a `duplicate`; a process the session started and a trusted controller are exempt from that check, and rate-limited like everyone else. A dropped message is never held, never delivered, and leaves no record, so a sender that waits out its burst and retries still lands.
 2. **Settled ids.** A `msgId` the gate already decided repeats its earlier verdict.
 3. **Policy.** `agents.crossSessionInbound` set to `accept`, `hold` or `refuse` wins. Unset: a process the session started or a trusted controller is accepted; otherwise a message is accepted only when `fromMode` names the same review class the receiver is in, and held in every other case, including when `fromMode` is absent.
-4. **Hold.** Up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`, or from the client of a session a program drives (below); a mode change re-evaluates the backlog.
+4. **Hold.** Up to 50 messages wait per session. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`, or from the client of a session a program drives (below); a mode change re-evaluates the backlog.
 5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A full queue is `dropped` with `queue-full` too.
 
 A sender does not have to discover the limits the hard way: a Qwen Code
@@ -310,8 +310,10 @@ that session's approval mode, `agents.crossSessionInbound` and
 
 - **Accepted.** The message is recorded in the session's transcript and
   handed to its model in a background turn the next time the session is
-  idle, the way a finished background task is. A session whose
-  notification queue is full answers `dropped` with `queue-full`.
+  idle, the way a finished background task is. Up to 20 accepted
+  messages wait per session, apart from the queue for background
+  results, so neither can push the other out. Past that, a message is
+  `dropped` with `queue-full`.
 - **Held.** The message is put to the session's client as an ACP
   `session/request_permission` request:
   - `_meta.qwenInteractionKind` is `peer_message`, on the request and on
@@ -326,6 +328,9 @@ that session's approval mode, `agents.crossSessionInbound` and
   - The options are `peer_deliver` and `peer_drop`. Any other answer,
     including a cancellation, leaves the message held, and the session
     asks again after a delay that doubles each time, up to a minute.
+  - When `peer_deliver` is chosen but the session cannot take the
+    message yet, the message stays held and delivery is retried on the
+    same schedule. The person is not asked again.
   - The request belongs to no prompt. A turn ending does not cancel it.
   - `_meta.expiresAt` is when the hold expires, in epoch milliseconds.
     It is absent when holds never expire.
@@ -337,6 +342,9 @@ answer changes nothing. The daemon ends each request at
 `_meta.expiresAt` by itself, so its pending list stays current. An
 editor that does not read the field may keep showing the dialog until
 someone answers it.
+
+When a session closes and its process stays up, the messages still held
+for it are settled `expired`.
 
 ## 7. Compatibility
 

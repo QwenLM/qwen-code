@@ -49,9 +49,12 @@ finished background task is written to the transcript, queued, and
 handed to the model in a background turn once the session is idle. That
 path already waits for a running prompt, asks the daemon for admission
 to start a turn, reports the turn in live state, and caps its queue. A
-peer message is one more kind on it, `peer`. A session whose queue is
-full turns the message away with `queue-full` rather than pushing out a
-result the model has not seen. A message accepted and then not queued,
+peer message is one more kind on it, `peer`, with a budget of its own:
+up to 20 per session, apart from the 20 background results. A message
+that was told `delivered` must not be evicted later by a burst of
+results, and a message must not evict a result the model has not seen.
+Room is reserved before the sender is told, counting the messages still
+being recorded, and a full budget answers `queue-full`. A message accepted and then not queued,
 because its session closed or the transcript write failed, has its
 `delivered` receipt taken back with `expired`, which is a legal step
 from `delivered`.
@@ -83,7 +86,10 @@ that doubles each time, up to a minute. A request can be cancelled for
 reasons unrelated to the message: cancelling a prompt cancels every
 pending request of the session. Without asking again, the message would
 sit held with nobody able to decide it. The delay keeps a client that
-cancels everything from being asked in a loop.
+cancels everything from being asked in a loop. When the answer is
+deliver but the session cannot take the message yet, the gate parks it
+again unchanged. The host then retries the delivery on the same
+schedule without asking the person again.
 
 **The review belongs to no turn.** A message can be held while an
 unrelated prompt or background turn is running. The daemon ties a
@@ -103,6 +109,19 @@ message once the addressed session changes review class. Both ways a
 driven session changes mode, the ACP `session/set_mode` call and the
 daemon's approval-mode control, re-evaluate held messages. Each message
 is re-judged for its own session.
+
+**A closing session settles its holds.** A session can close while
+its process keeps running. From the moment it is disposed it counts as
+gone: nothing new is delivered to it or asked of its client, even while
+its removal awaits cleanup. Its reviews are withdrawn by the session
+object, since /clear may have changed its id, and the messages still
+held for it are settled `expired`. A message held for a session that is
+no longer here is never judged by another session's policy: a re-judge
+answers it `misaddressed`.
+
+**Holds are capped per session.** The ceiling of 50 held messages
+applies to each hosted session, so one workspace's backlog cannot turn
+away every message for another.
 
 **Exit settles by id.** At exit, messages accepted but never handled get
 their receipts corrected. A single session's queue drains oldest first,
@@ -127,16 +146,20 @@ waiting.
 ## Verification
 
 - The gate: two hosted sessions with different policies on one gate, a
-  message for each judged by its own settings, and holds expiring on
-  their own sessions' schedules.
+  message for each judged by its own settings, holds expiring on their
+  own sessions' schedules, the hold cap per session, holds settled for a
+  session that goes, and a held message for a vanished session answered
+  `misaddressed`.
 - The session: an accepted message is recorded with kind `peer` and runs
-  in a background turn; room and waiting ids are reported; a review maps
+  in a background turn; messages and background results cannot evict
+  each other; room and waiting ids are reported; a review maps
   all three answers and stops on abort.
 - The host: readers answer per session, and an unknown id is refused;
   submissions route to the addressed session; reviews start once per
   hold, map to decisions, and stop when the hold or the session goes;
-  a review with no answer is asked again; both mode-change paths
-  re-judge.
+  a review with no answer is asked again; an approved message the session
+  could not take is retried; a closing session's reviews stop and its
+  holds are settled; both mode-change paths re-judge.
 - The bridge: `_meta.expiresAt` shortens the request timeout, the peer
   details are projected into the pending interaction, and a review asked
   during a running prompt is not tied to it.

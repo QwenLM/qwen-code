@@ -2397,20 +2397,12 @@ describe('a gate for a process hosting several sessions', () => {
     const host = hostOfTwo();
     for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
       expect(
-        host.gate.admit(
-          frame({
-            fromMode: 'bypass',
-            toSessionId: 'strict',
-            content: `s${i}`,
-          }),
-        ),
+        host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'strict' })),
       ).toBe('held');
     }
     // Full for `strict`, respelled or not...
     expect(
-      host.gate.admit(
-        frame({ fromMode: 'bypass', toSessionId: 'STRICT', content: 'over' }),
-      ),
+      host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'STRICT' })),
     ).toBe('dropped');
     // ...and still open for its sibling.
     expect(
