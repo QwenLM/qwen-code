@@ -559,7 +559,8 @@ describe('UpdateGoalTool', () => {
       'a tool result, not your own text',
       'never for difficulty, uncertainty, information you could still obtain, or wanting to ask',
       'why no in-scope work could satisfy the objective',
-      'Those three stop the Goal at once',
+      'The verifier may accept those three on the first turn they are proposed',
+      'a rejected proposal leaves the Goal running',
     ]) {
       expect(tool.description).toContain(fragment);
       expect(schema.properties['blockerKind']!.description).not.toContain(
