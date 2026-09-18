@@ -43,6 +43,14 @@ describe('settings presentation aliases', () => {
     ).toBe(true);
     expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:workflow-name-only');
   });
+  it('keeps the stable code-mode alias for the tool mode row', () => {
+    expect(
+      isSettingExcluded('tools.mode', {
+        excludeItems: ['setting:code-mode-only'],
+      }),
+    ).toBe(true);
+    expect(WEB_SHELL_SETTING_ITEM_IDS).toContain('setting:code-mode-only');
+  });
   it('matches published builtin ids by direct membership', () => {
     expect(
       isItemExcluded('builtin:model-management', {
