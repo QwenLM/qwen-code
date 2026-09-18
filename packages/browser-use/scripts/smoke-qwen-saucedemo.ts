@@ -200,15 +200,19 @@ await withManagedChrome('sauce', async (chrome) => {
     const calls = collectSuccessfulNodeReplCalls(events);
     // Inventory and cart both render prices under `.inventory_item_price`;
     // the model may or may not scope the selector to the row, so match the
-    // price class and tell the pages apart by the count each read returns.
-    const inventoryPrices = pricesFromCall(calls, '.inventory_item_price', 6);
-    // The prompt has the cart read after tab.url() confirms cart.html, so the
-    // cart is the last price read; the inventory is the first.
+    // price class and tell the pages apart by the tab.url() confirmation of
+    // cart.html the prompt requires before the cart read.
+    const inventoryPrices = pricesFromCall(
+      calls,
+      '.inventory_item_price',
+      6,
+      'inventory',
+    );
     const cartPrices = pricesFromCall(
       calls,
       '.inventory_item_price',
       3,
-      'last',
+      'cart',
     );
     const lowestThreePrices = inventoryPrices
       ? [...inventoryPrices].sort((left, right) => left - right).slice(0, 3)
@@ -218,18 +222,14 @@ await withManagedChrome('sauce', async (chrome) => {
       JSON.stringify([...cartPrices].sort((left, right) => left - right)) ===
         JSON.stringify(lowestThreePrices);
     const completion = await verifySauceCompletion(chrome.socketPath);
-    const joinedCode = calls.map((call) => call.code).join('\n');
     const joinedOutput = calls.map((call) => call.output).join('\n');
     const checks = {
       existingNodeReplUsed: calls.length > 0,
-      // The model may spell the entry as one literal or assemble it from the
-      // skill root across cells; what every spelling shares is the built-in
-      // skill root the CLI substituted into SKILL.md, the entry file name and
-      // the setup call, which together show the staged runtime was loaded.
-      browserSdkImported:
-        joinedCode.includes('setupBrowserRuntime()') &&
-        joinedCode.includes(builtinSkillRoot) &&
-        joinedCode.includes('index.js'),
+      browserSdkImported: stagedRuntimeImported(
+        calls,
+        browserRuntimeRoot,
+        builtinSkillRoot,
+      ),
       builtinModuleRootRegistered: successfulModuleRootRegistered(
         events,
         browserModuleRoot,
@@ -454,13 +454,70 @@ function successfulModuleRootRegistered(
   });
 }
 
+// A run proves it loaded the staged built-in runtime only through an import
+// expression that names that runtime: a literal path under the staged
+// runtime directory, or a path the same or an earlier cell assembled from the
+// skill root the CLI substituted into SKILL.md. The cell must also reach the
+// setup export (a destructuring alias still names it). A literal entry loaded
+// from anywhere else — the fallback a model reaches for when the staged
+// import throws — disqualifies the run, because it is not the shipped
+// runtime that was exercised.
+function stagedRuntimeImported(
+  calls: NodeReplCall[],
+  browserRuntimeRoot: string,
+  builtinSkillRoot: string,
+): boolean {
+  const entryFile = /\/(?:index|native-host)\.js/;
+  let rootBound = false;
+  let staged = false;
+  for (const call of calls) {
+    for (const root of [builtinSkillRoot, browserRuntimeRoot]) {
+      if (
+        call.code.includes(`'${root}'`) ||
+        call.code.includes(`"${root}"`) ||
+        call.code.includes(`\`${root}\``)
+      )
+        rootBound = true;
+    }
+    let importsStaged = false;
+    for (const match of call.code.matchAll(/import\(([^()]*)\)/g)) {
+      const expression = match[1] ?? '';
+      const literal = /^\s*(['"`])([^'"`$]+)\1\s*$/.exec(expression)?.[2];
+      if (literal !== undefined) {
+        if (literal.startsWith(`${browserRuntimeRoot}/`)) importsStaged = true;
+        else if (entryFile.test(literal)) return false;
+        continue;
+      }
+      if (/index\.js/.test(expression) && rootBound) importsStaged = true;
+    }
+    if (importsStaged && call.code.includes('setupBrowserRuntime'))
+      staged = true;
+  }
+  return staged;
+}
+
+// The prompt makes the model confirm cart.html with a separate tab.url() call
+// before reading cart prices, so that confirmation is the boundary between
+// the inventory and the cart: price reads before it belong to the inventory,
+// reads after it to the cart. A read's own values come first in its output
+// (a model may echo its selection afterwards in the same cell), so the
+// leading set is the read. Without a cart confirmation there is no cart read.
 function pricesFromCall(
   calls: NodeReplCall[],
   selector: string,
   expectedCount: number,
-  pick: 'first' | 'last' = 'first',
+  scope: 'inventory' | 'cart',
 ): number[] | null {
-  const candidates = calls
+  const cartConfirmed = calls.findIndex(
+    (call) => call.code.includes('.url(') && call.output.includes('cart.html'),
+  );
+  if (scope === 'cart' && cartConfirmed === -1) return null;
+  const read = calls
+    .filter((_, index) =>
+      scope === 'cart'
+        ? index > cartConfirmed
+        : cartConfirmed === -1 || index < cartConfirmed,
+    )
     .filter(
       (call) =>
         call.code.includes(selector) && call.code.includes('allTextContents'),
@@ -470,18 +527,11 @@ function pricesFromCall(
         Number(match[1]),
       ),
     )
-    .filter(
+    .find(
       (prices) =>
         prices.length >= expectedCount && prices.every(Number.isFinite),
     );
-  const ordered = pick === 'last' ? [...candidates].reverse() : candidates;
-  // A read that printed exactly the expected number of prices is the page
-  // itself; otherwise the read's own values come first and a model may echo
-  // its selection or a subtotal after them in the same cell, so take the
-  // leading set.
-  const chosen =
-    ordered.find((prices) => prices.length === expectedCount) ?? ordered[0];
-  return chosen ? chosen.slice(0, expectedCount) : null;
+  return read ? read.slice(0, expectedCount) : null;
 }
 
 async function verifySauceCompletion(socketPath: string): Promise<{

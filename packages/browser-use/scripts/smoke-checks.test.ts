@@ -66,18 +66,33 @@ describe('smoke observation claims', () => {
   );
   const checks = smoke.match(/const checks = \{[\s\S]*?\n {4}\};/)?.[0];
   assert.ok(checks, 'Smoke checks must be exercised');
+  const helperStart = smoke.indexOf('function stagedRuntimeImported(');
+  const helperEnd = smoke.indexOf('\n}\n', helperStart) + 3;
+  assert.ok(helperStart >= 0, 'stagedRuntimeImported must be exercised');
+  const stagedRuntimeImported = runInNewContext(
+    transformSync(smoke.slice(helperStart, helperEnd), {
+      loader: 'ts',
+      target: 'node22',
+    }).code + '\nstagedRuntimeImported;',
+    {},
+  ) as (
+    calls: Array<{ code: string; output: string }>,
+    browserRuntimeRoot: string,
+    builtinSkillRoot: string,
+  ) => boolean;
 
   it.each([
     '// .type( .click( .finalize(',
     'nodeRepl.write(".type( .click( .finalize(");',
   ])('does not report SDK setup from unrelated action text: %s', (code) => {
     const result = runInNewContext(checks + '\nchecks;', {
-      calls: [{ code }],
+      calls: [{ code, output: '' }],
       joinedCode: code,
       joinedOutput: 'Total: $36.69',
       browserRuntimeEntry: '/skill/runtime/index.js',
       browserRuntimeRoot: '/skill/runtime',
       builtinSkillRoot: '/skill',
+      stagedRuntimeImported,
       events: [],
       browserModuleRoot: '/runtime/node_modules',
       successfulModuleRootRegistered: () => true,
@@ -120,14 +135,30 @@ describe('smoke observation claims', () => {
       "import('/skill/runtime/index.js');",
       false,
     ],
+    [
+      'a staged import that threw and fell back to a foreign entry',
+      "let sdk; try { sdk = await import('/skill/runtime/index.js'); } catch { sdk = await import('/repo/packages/browser-use/dist/index.js'); } await sdk.setupBrowserRuntime();",
+      false,
+    ],
+    [
+      'the setup export reached through an alias',
+      "const { setupBrowserRuntime: setup } = await import('/skill/runtime/index.js');\nawait setup();",
+      true,
+    ],
+    [
+      'the skill root echoed in prose next to a foreign import',
+      "// staged at /skill/runtime/index.js\nawait (await import('/elsewhere/index.js')).setupBrowserRuntime();",
+      false,
+    ],
   ])('reports SDK setup for %s', (_label, code, expected) => {
     const result = runInNewContext(checks + '\nchecks;', {
-      calls: [{ code }],
+      calls: [{ code, output: '' }],
       joinedCode: code,
       joinedOutput: 'Total: $36.69',
       browserRuntimeEntry: '/skill/runtime/index.js',
       browserRuntimeRoot: '/skill/runtime',
       builtinSkillRoot: '/skill',
+      stagedRuntimeImported,
       events: [],
       browserModuleRoot: '/runtime/node_modules',
       successfulModuleRootRegistered: () => true,
@@ -158,68 +189,98 @@ describe('smoke price reads', () => {
     calls: Array<{ code: string; output: string }>,
     selector: string,
     expectedCount: number,
-    pick?: 'first' | 'last',
+    scope: 'inventory' | 'cart',
   ) => number[] | null;
   const inventory = {
     code: "tab.playwright.locator('.inventory_item_price').allTextContents()",
     output: "[ '$29.99', '$9.99', '$15.99', '$49.99', '$7.99', '$15.99' ]",
+  };
+  const cartConfirmed = {
+    code: 'tab.url()',
+    output: 'https://www.saucedemo.com/cart.html',
   };
   const cart = {
     code: "tab.playwright.locator('.cart_item .inventory_item_price').allTextContents()",
     output: "[ '$7.99', '$9.99', '$15.99' ]",
   };
 
-  it('accepts the price class with or without a row scope and tells pages apart by count', () => {
+  it('attributes reads to the inventory or the cart by the cart.html confirmation', () => {
+    const calls = [inventory, cartConfirmed, cart];
     expect(
-      pricesFromCall([inventory, cart], '.inventory_item_price', 6),
+      pricesFromCall(calls, '.inventory_item_price', 6, 'inventory'),
     ).toEqual([29.99, 9.99, 15.99, 49.99, 7.99, 15.99]);
+    expect(pricesFromCall(calls, '.inventory_item_price', 3, 'cart')).toEqual([
+      7.99, 9.99, 15.99,
+    ]);
+  });
+
+  it('reports no cart read without a cart.html confirmation, even for a three-price read', () => {
+    // A run that only sorted the inventory "Price (low to high)" and read it
+    // again printed three matching prices without ever visiting the cart.
+    const sortedInventory = {
+      code: "tab.playwright.locator('.inventory_item_price').allTextContents()",
+      output: "[ '$7.99', '$9.99', '$15.99', '$15.99', '$29.99', '$49.99' ]",
+    };
     expect(
-      pricesFromCall([inventory, cart], '.inventory_item_price', 3),
-    ).toEqual([7.99, 9.99, 15.99]);
+      pricesFromCall(
+        [inventory, sortedInventory],
+        '.inventory_item_price',
+        3,
+        'cart',
+      ),
+    ).toBeNull();
+    expect(
+      pricesFromCall([inventory, cart], '.inventory_item_price', 3, 'cart'),
+    ).toBeNull();
   });
 
   it('takes the leading prices when the same cell echoes a selection afterwards', () => {
     const inventoryWithEcho = {
-      code: "const prices = await tab.playwright.locator('.inventory_item_price').allTextContents(); nodeRepl.write(JSON.stringify(prices)); nodeRepl.write(JSON.stringify(cheapest));",
+      code: "const prices = await tab.playwright.locator('.inventory_item_price').allTextContents(); nodeRepl.write(JSON.stringify(prices)); nodeRepl.write(JSON.stringify(prices.slice(0, 3)));",
       output:
         '["$29.99","$9.99","$15.99","$49.99","$7.99","$15.99"]["$7.99","$9.99","$15.99"]',
     };
     expect(
-      pricesFromCall([inventoryWithEcho], '.inventory_item_price', 6),
+      pricesFromCall(
+        [inventoryWithEcho],
+        '.inventory_item_price',
+        6,
+        'inventory',
+      ),
     ).toEqual([29.99, 9.99, 15.99, 49.99, 7.99, 15.99]);
+    // An inventory echo is never a cart read.
     expect(
-      pricesFromCall([inventoryWithEcho], '.inventory_item_price', 3),
-    ).toEqual([29.99, 9.99, 15.99]);
-    // The cart is read after the inventory, so the last exact-count read
-    // wins over an earlier, longer inventory read.
-    const cart = {
-      code: "const cartPrices = await tab.playwright.locator('.inventory_item_price').allTextContents(); nodeRepl.write(JSON.stringify(cartPrices));",
-      output: '["$7.99","$9.99","$15.99"]',
+      pricesFromCall([inventoryWithEcho], '.inventory_item_price', 3, 'cart'),
+    ).toBeNull();
+    const cartWithEcho = {
+      code: "const cartPrices = await tab.playwright.locator('.inventory_item_price').allTextContents(); nodeRepl.write(JSON.stringify(cartPrices)); nodeRepl.write('subtotal $33.97');",
+      output: '["$7.99","$9.99","$15.99"] subtotal $33.97',
     };
     expect(
       pricesFromCall(
-        [inventoryWithEcho, cart],
+        [inventoryWithEcho, cartConfirmed, cartWithEcho],
         '.inventory_item_price',
         3,
-        'last',
+        'cart',
       ),
     ).toEqual([7.99, 9.99, 15.99]);
-    expect(
-      pricesFromCall([inventoryWithEcho], '.inventory_item_price', 3, 'last'),
-    ).toEqual([29.99, 9.99, 15.99]);
   });
 
   it('ignores reads that did not use allTextContents on the price class', () => {
-    const names = {
-      code: "tab.playwright.locator('.inventory_item_name').allTextContents()",
-      output: "[ '$1.00', '$2.00', '$3.00' ]",
-    };
-    const text = {
-      code: "tab.playwright.locator('.inventory_item_price').innerText()",
-      output: '$7.99 $9.99 $15.99',
+    const innerText = {
+      code: "tab.playwright.locator('.inventory_item_price').first().innerText()",
+      output: '$29.99 $9.99 $15.99 $49.99 $7.99 $15.99',
     };
     expect(
-      pricesFromCall([names, text], '.inventory_item_price', 3),
+      pricesFromCall([innerText], '.inventory_item_price', 6, 'inventory'),
+    ).toBeNull();
+    expect(
+      pricesFromCall(
+        [cartConfirmed, innerText],
+        '.inventory_item_price',
+        3,
+        'cart',
+      ),
     ).toBeNull();
   });
 });

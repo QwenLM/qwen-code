@@ -86,9 +86,14 @@ test('profile identity persists before hello and survives reconnects and worker 
     localState: Record<string, unknown>,
     failSave = false,
   ) => {
+    // Every hello the port receives is recorded together with the identity
+    // persisted at that moment; the ordering invariant is asserted on this
+    // record outside the bridge, which wraps postMessage in a bare catch
+    // that would swallow an assertion thrown from inside the mock.
     const hellos: Array<{
       extensionInstanceId: string;
       protocolVersion: number;
+      persistedInstanceId: unknown;
     }> = [];
     const listeners: Record<string, (...args: unknown[]) => void> = {};
     const event = (name: string) => ({
@@ -103,12 +108,10 @@ test('profile identity persists before hello and survives reconnects and worker 
         extensionInstanceId: string;
         protocolVersion: number;
       }) => {
-        assert.equal(
-          hello.extensionInstanceId,
-          localState.browserUseInstanceId,
-          'persist before connecting',
-        );
-        hellos.push(hello);
+        hellos.push({
+          ...hello,
+          persistedInstanceId: localState.browserUseInstanceId,
+        });
       },
     };
     const context = vm.createContext({
@@ -153,12 +156,22 @@ test('profile identity persists before hello and survives reconnects and worker 
   first.listeners.alarm({ name: 'browser-use-reconnect' });
   first.listeners.alarm({ name: 'browser-use-reconnect' });
   await vi.waitFor(() => assert.equal(first.hellos.length, 1));
+  const persistedBeforeConnecting = () => {
+    for (const hello of first.hellos)
+      assert.equal(
+        hello.persistedInstanceId,
+        hello.extensionInstanceId,
+        'persist before connecting',
+      );
+  };
+  persistedBeforeConnecting();
   const identity = first.hellos[0].extensionInstanceId;
   assert.match(identity, /^[0-9a-f-]{36}$/);
   assert.equal(first.hellos[0].protocolVersion, CHROME_BRIDGE_PROTOCOL_VERSION);
   first.listeners.disconnect();
   first.listeners.alarm({ name: 'browser-use-reconnect' });
   await vi.waitFor(() => assert.equal(first.hellos.length, 2));
+  persistedBeforeConnecting();
   assert.equal(first.hellos[1].extensionInstanceId, identity);
   const restarted = await startWorker(state);
   assert.equal(restarted.hellos[0].extensionInstanceId, identity);

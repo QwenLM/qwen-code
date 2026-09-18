@@ -101,6 +101,12 @@ Render screenshots with their metadata:
 await nodeRepl.emitImage(await tab.screenshot());
 ```
 
+The metadata reaches the model only through `@qwen-code/node-repl-mcp` 0.1.6
+or later; an older server accepts the call and silently drops it. If
+`node_repl` was registered before this skill existed, check its command with
+`qwen mcp list`, and when it pins an older version, re-register it with the
+`qwen mcp add` command from Setup above and ask the user to restart Qwen Code.
+
 Use `tab.dev.logs()` for bounded console diagnostics. Arm
 `tab.playwright.waitForEvent('download' | 'filechooser')` before the action that
 triggers it. Handle JavaScript dialogs through `tab.getJsDialog()`. Use a
