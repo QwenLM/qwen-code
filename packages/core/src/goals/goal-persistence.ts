@@ -31,13 +31,6 @@ export type GoalRecoveryRecord = Pick<ChatRecord, 'uuid' | 'type'> & {
 export interface GoalRecoverySelection {
   recovery: GoalRecovery;
   sourceUuid?: string;
-  /**
-   * Newer `goal_state` records that did not parse and were walked past to
-   * reach `sourceUuid`. Recovery takes the newest record that parses, so a
-   * record a later build wrote in a shape this one rejects quietly rewinds
-   * the Goal to an older transition; this names what was skipped.
-   */
-  skippedUuids: readonly string[];
 }
 
 const LEGACY_ACTIVE_KINDS = new Set(['set', 'checking']);
@@ -70,18 +63,16 @@ export function selectGoalRecoveryFromRecords(
         : undefined;
     if (payload) {
       if (skippedUuids.length > 0) {
-        // Not an error the caller can act on -- the Goal still restores --
-        // but the one trace that a resume landed on an older transition
-        // than the transcript's newest, and which records it stepped over.
+        // Recovery takes the newest record that parses, so a record a later
+        // build wrote in a shape this one rejects rewinds the Goal to an
+        // older transition. Not an error the caller can act on -- the Goal
+        // still restores -- but the one trace that says it happened and
+        // which newer records were stepped over.
         debugLogger.warn(
           `Goal recovery skipped ${skippedUuids.length} newer goal_state record(s) that did not parse (${skippedUuids.join(', ')}) and restored from ${record.uuid}.`,
         );
       }
-      return {
-        recovery: { kind: 'v2', payload },
-        sourceUuid: record.uuid,
-        skippedUuids,
-      };
+      return { recovery: { kind: 'v2', payload }, sourceUuid: record.uuid };
     }
     skippedUuids.push(record.uuid);
     if (!unsupported) {
@@ -94,17 +85,13 @@ export function selectGoalRecoveryFromRecords(
   }
 
   return unsupported
-    ? {
-        recovery: unsupported,
-        sourceUuid: unsupportedSourceUuid,
-        skippedUuids: skippedUuids.slice(1),
-      }
-    : { ...recoverLegacyGoal(records), skippedUuids: [] };
+    ? { recovery: unsupported, sourceUuid: unsupportedSourceUuid }
+    : recoverLegacyGoal(records);
 }
 
 function recoverLegacyGoal(
   records: readonly GoalRecoveryRecord[],
-): Omit<GoalRecoverySelection, 'skippedUuids'> {
+): GoalRecoverySelection {
   for (
     let recordIndex = records.length - 1;
     recordIndex >= 0;

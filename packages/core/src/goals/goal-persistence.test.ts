@@ -127,7 +127,7 @@ describe('recoverGoalFromRecords', () => {
     },
   );
 
-  it('names the newer records it walked past, and says so in the debug log', () => {
+  it('says in the debug log which newer records it walked past', () => {
     const malformed = {
       v: 3,
       snapshot: ACTIVE_PAYLOAD.snapshot,
@@ -148,7 +148,6 @@ describe('recoverGoalFromRecords', () => {
     expect(selection).toEqual({
       recovery: { kind: 'v2', payload: ACTIVE_PAYLOAD },
       sourceUuid: 'state-1',
-      skippedUuids: ['state-3', 'state-2'],
     });
     expect(warnings).toEqual([
       expect.stringContaining(
@@ -165,7 +164,27 @@ describe('recoverGoalFromRecords', () => {
         systemPayload: ACTIVE_PAYLOAD,
       }),
     ]);
-    expect(selection.skippedUuids).toEqual([]);
+    expect(selection).toEqual({
+      recovery: { kind: 'v2', payload: ACTIVE_PAYLOAD },
+      sourceUuid: 'state-1',
+    });
+    expect(warnings).toEqual([]);
+  });
+
+  it('stays quiet when no record parses', () => {
+    const malformed = {
+      v: 3,
+      snapshot: ACTIVE_PAYLOAD.snapshot,
+    } as unknown as GoalStateRecordPayloadV2;
+    warnings.length = 0;
+    const selection = selectGoalRecoveryFromRecords([
+      record('state-1', { subtype: 'goal_state', systemPayload: malformed }),
+      record('state-2', { subtype: 'goal_state', systemPayload: malformed }),
+    ]);
+    // Nothing was stepped over to reach an older transition: the newest
+    // record is the one reported, and the restore itself fails.
+    expect(selection.recovery.kind).toBe('unsupported');
+    expect(selection.sourceUuid).toBe('state-2');
     expect(warnings).toEqual([]);
   });
 
