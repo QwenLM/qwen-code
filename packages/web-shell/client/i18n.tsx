@@ -2724,6 +2724,7 @@ const EN: Messages = {
     'Use this provider for conversation. The current model is retained when it is included in the configuration.',
   'auth.purpose.image': 'Image generation',
   'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.realtime': 'Live Voice',
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
@@ -6474,6 +6475,7 @@ const ZH: Messages = {
     '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
   'auth.purpose.image': '生图',
   'auth.purpose.voice': '语音转写',
+  'auth.purpose.realtime': '实时语音',
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
