@@ -771,7 +771,7 @@
           }
         },
         "goalCheckpointTimeoutSeconds": {
-          "description": "Deprecated. Goals no longer run evidence-checkpoint model calls, because the verifier reads the transcript directly, so this value has no effect. It is still accepted and validated as an integer between 1 and 900 so that existing settings files keep loading.",
+          "description": "Deprecated. Goals no longer run evidence-checkpoint model calls, because the verifier reads the transcript directly, so this value is ignored. The key is still accepted so that existing settings files keep loading without an unknown-key warning.",
           "type": "integer",
           "minimum": 1,
           "maximum": 900

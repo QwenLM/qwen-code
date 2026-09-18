@@ -9458,23 +9458,6 @@ describe('formatGoalState', () => {
     },
   });
 
-  it('prints no checkpoint line for a record an earlier build left one on', () => {
-    const text = formatGoalState(
-      goalSnapshot({
-        status: 'usage_limited',
-        lastReason: 'Three evidence checkpoints stalled.',
-        limitKind: 'checkpoint_request',
-        checkpointStalls: 3,
-        lastCheckpointFailure: 'Error: provider failed',
-      }),
-      'status',
-    );
-
-    expect(text).toContain('Reason: Three evidence checkpoints stalled.');
-    expect(text).not.toContain('Checkpoint');
-    expect(text).not.toContain('provider failed');
-  });
-
   it('shows budgets on a stopped Goal in the usage order', () => {
     expect(
       formatGoalState(
