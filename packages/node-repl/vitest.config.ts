@@ -15,13 +15,5 @@ export default defineConfig({
     hookTimeout: 60_000,
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
-    // Cell-transform tests compile generated source with `vm.SourceTextModule` — the
-    // same parser the kernel child uses (see `kernel-manager.ts`) — so the worker
-    // needs the flag that exposes it.
-    poolOptions: {
-      forks: {
-        execArgv: ['--experimental-vm-modules'],
-      },
-    },
   },
 });
