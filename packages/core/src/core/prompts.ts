@@ -342,7 +342,19 @@ function gateToolGuidance(
   return kept.join('\n');
 }
 
-const TOOL_CALL_IN_EXAMPLE = /\[tool_call:\s*([A-Za-z0-9_]+)/g;
+// Every notation the example blocks use, because `getToolCallExamples` picks a
+// different one per model: the bracket form (general and code mode), the
+// qwen-coder XML form, the qwen-vl JSON form, and the Gemma 4 native form. The
+// JSON alternative requires the `"arguments"` key that always follows it, so a
+// `"name"` field in unrelated JSON inside an example is not read as a call.
+const TOOL_CALL_IN_EXAMPLE =
+  /\[tool_call:\s*([A-Za-z0-9_]+)|<function=([A-Za-z0-9_]+)>|"name":\s*"([A-Za-z0-9_]+)",\s*"arguments"|<\|tool_call>call:([A-Za-z0-9_]+)/g;
+
+function exampleToolNames(block: string): string[] {
+  return [...block.matchAll(TOOL_CALL_IN_EXAMPLE)].map(
+    (match) => match[1] ?? match[2] ?? match[3] ?? match[4]!,
+  );
+}
 // Matched as a pair rather than split on blank lines: a single example can
 // contain blank lines of its own, and splitting on them orphans the tool calls
 // in its later paragraphs from the `<example>` tag that gates them.
@@ -353,9 +365,8 @@ const EXAMPLE_BLOCK = /<example>[\s\S]*?<\/example>\n*/g;
  * declare, so the prompt never shows the model a call it cannot make (#12032).
  *
  * When no example survives the heading goes too, rather than leaving a section
- * with nothing under it. Example formats that do not use the `[tool_call: …]`
- * notation (the model-specific XML and JSON blocks) carry no detectable tool
- * names and are left alone.
+ * with nothing under it. All four notations are recognised, so gating does not
+ * silently stop working on the model-specific example sets.
  */
 function filterToolCallExamples(
   examples: string,
@@ -366,8 +377,8 @@ function filterToolCallExamples(
 
   let keptExamples = 0;
   const filtered = examples.replace(EXAMPLE_BLOCK, (block) => {
-    const callsUndeclared = [...block.matchAll(TOOL_CALL_IN_EXAMPLE)].some(
-      (match) => !declared.has(match[1]!),
+    const callsUndeclared = exampleToolNames(block).some(
+      (name) => !declared.has(name),
     );
     if (callsUndeclared) return '';
     keptExamples++;

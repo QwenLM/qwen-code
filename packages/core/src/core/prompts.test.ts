@@ -1335,6 +1335,9 @@ describe('resident tool gating (#12032)', () => {
     ToolNames.TOOL_SEARCH,
   ]);
 
+  const countExamples = (prompt: string) =>
+    prompt.split('<example>').length - 1;
+
   /** The two sections this change gates: tool policy, and the examples. */
   function gatedParts(prompt: string): [string, string] {
     const guidance =
@@ -1344,16 +1347,71 @@ describe('resident tool gating (#12032)', () => {
     return [guidance, examples];
   }
 
-  it('saves about 4k characters of tool text for a file-work allowlist', () => {
+  it('saves about 1.1k characters of policy text for a file-work allowlist', () => {
     const full = promptFor();
     const trimmed = promptFor(FILE_WORK_TOOLS);
 
-    // 4,012 characters (~1k tokens) when this landed. The band is loose enough
-    // for wording edits and tight enough that adding ungated tool text — or
-    // gating something new — shows up here instead of silently.
+    // 1,104 characters (~276 tokens) when this landed, all of it policy
+    // bullets: the examples only call file tools and the shell, so this
+    // allowlist keeps every one of them. The band is loose enough for wording
+    // edits and tight enough that a lost saving, or newly added ungated tool
+    // text, shows up here instead of silently.
     const saved = full.length - trimmed.length;
-    expect(saved).toBeGreaterThan(3_500);
-    expect(saved).toBeLessThan(4_500);
+    expect(saved).toBeGreaterThan(900);
+    expect(saved).toBeLessThan(1_400);
+    expect(countExamples(trimmed)).toBe(countExamples(full));
+  });
+
+  it('drops example blocks too once the allowlist is narrower', () => {
+    const narrow = new Set<string>([
+      ToolNames.READ_FILE,
+      ToolNames.SHELL,
+      ToolNames.SKILL,
+      ToolNames.ASK_USER_QUESTION,
+      ToolNames.TOOL_SEARCH,
+    ]);
+    const full = promptFor();
+    const trimmed = promptFor(narrow);
+
+    // 4,327 characters (~1,082 tokens) when this landed: the policy bullets
+    // plus the three examples that call edit / write_file / glob.
+    const saved = full.length - trimmed.length;
+    expect(saved).toBeGreaterThan(3_800);
+    expect(saved).toBeLessThan(5_000);
+    expect(countExamples(trimmed)).toBe(countExamples(full) - 3);
+  });
+
+  it('gates the model-specific example notations, not just the bracket form', () => {
+    // getToolCallExamples picks a different notation per model, so a filter
+    // that only understood `[tool_call: …]` would quietly stop gating the
+    // examples for every Qwen model that has its own set.
+    const narrow = new Set<string>([
+      ToolNames.READ_FILE,
+      ToolNames.SHELL,
+      ToolNames.SKILL,
+      ToolNames.ASK_USER_QUESTION,
+      ToolNames.TOOL_SEARCH,
+    ]);
+    const modelPrompt = (model: string, declaredTools?: ReadonlySet<string>) =>
+      getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        false,
+        declaredTools ? { declaredTools } : undefined,
+      );
+
+    for (const model of ['qwen3-coder', 'qwen3-vl', 'gemma4']) {
+      const full = modelPrompt(model);
+      const trimmed = modelPrompt(model, narrow);
+      expect(countExamples(trimmed)).toBe(countExamples(full) - 3);
+      // Checked on the examples section alone: `glob` also appears in prose
+      // this change deliberately leaves untouched.
+      expect(gatedParts(trimmed)[1]).not.toContain(ToolNames.GLOB);
+    }
   });
 
   it('changes nothing outside the two gated sections', () => {
