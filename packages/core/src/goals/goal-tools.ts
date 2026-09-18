@@ -172,6 +172,15 @@ export class GetGoalTool extends BaseDeclarativeTool<
     );
   }
 
+  // The strip happens in `build`, on the object that then flows through the
+  // schema check and into the invocation: the validator repairs values in
+  // place (a number where a string is expected, say), and a repair made on
+  // a copy would be thrown away. `validateToolParams` strips too, for a
+  // caller that only validates; on a stripped object it is a no-op.
+  override build(params: GetGoalToolParams) {
+    return super.build(withoutDeprecatedParams(params, ['view']));
+  }
+
   override validateToolParams(params: GetGoalToolParams): string | null {
     return super.validateToolParams(withoutDeprecatedParams(params, ['view']));
   }
@@ -331,7 +340,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      "Propose that the current Goal is complete or blocked. An independent verifier decides; this tool never changes the Goal's status. The verifier reads only the most recent records of this Goal's transcript (your visible output, tool results, the user's messages), so run the checks that prove every objective condition immediately before calling. If completion depends on content delivered in this turn, emit only what the objective requires first, with no progress or completion commentary. Never tell the user the Goal is complete or blocked: when the result reports readyForVerification, end the turn with no further text; otherwise keep working. The Goal status card reports the verdict.",
+      "Propose that the current Goal is complete or blocked. An independent verifier decides; this tool never changes the Goal's status. The verifier reads only the most recent records of this Goal's transcript (your visible output, tool results, the user's messages), so run the checks that prove every objective condition immediately before calling. If completion depends on content delivered in this turn, emit only what the objective requires first, with no progress or completion commentary. For blocked, set blockerKind: authority (a user or maintainer decision or permission is required), external (an evidenced external resource or capability is unavailable), or infeasible (a tool result, not your own text, shows the objective cannot be satisfied as written: it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; never for difficulty, uncertainty, information you could still obtain, or wanting to ask; the reason must state what was checked and why no in-scope work could satisfy the objective). Those three stop the Goal at once. Omit blockerKind, or set repeated, for the same blocker with the exact same reason text across three consecutive Goal turns. Never tell the user the Goal is complete or blocked: when the result reports readyForVerification, end the turn with no further text; otherwise keep working. The Goal status card reports the verdict.",
       Kind.Think,
       {
         type: 'object',
@@ -346,13 +355,18 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             type: 'string',
             enum: ['authority', 'external', 'repeated', 'infeasible'],
             description:
-              'Set for a blocked proposal. authority: a user or maintainer decision or permission is required. external: an evidenced external resource or capability is unavailable. repeated: the same evidenced blocker, with the exact same reason text, across three consecutive Goal turns. infeasible: a tool result (not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; never for difficulty, uncertainty, information you could still obtain, or wanting to ask, and the reason must state what was checked and why no in-scope work could satisfy the objective. Omitted: the repeated-blocker audit applies.',
+              'Which blocker a blocked proposal reports; the tool description says when each applies.',
           },
         },
         required: ['status', 'reason'],
         additionalProperties: false,
       },
     );
+  }
+
+  // See GetGoalTool.build for why the strip happens here as well.
+  override build(params: UpdateGoalToolParams) {
+    return super.build(withoutDeprecatedParams(params, ['evidenceRefs']));
   }
 
   override validateToolParams(params: UpdateGoalToolParams): string | null {
@@ -836,7 +850,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     super(
       ProposeGoalTool.Name,
       ToolDisplayNames.PROPOSE_GOAL,
-      'Propose a session Goal. The user approves or declines it in a dialog that no permission rule or approval mode skips, and only approval sets it. Propose only when the user asked for an outcome with a verifiable end state that spans several turns, or /goal-draft produced an objective; never to widen their request. If a Goal is active this tool refuses: give the user a `/goal edit …` or `/goal set …` line instead. A stopped Goal is replaced on approval. If the user declines you are not told why: do not ask, and do not propose the same or a reworded objective again. After approval, acknowledge in one sentence and stop with no further tool calls; the Goal starts on its own when the turn ends. Not available in plan mode.',
+      `Propose a session Goal. The user approves or declines it in a dialog that no permission rule or approval mode skips, and only approval sets it. Propose only when the user asked for an outcome with a verifiable end state that spans several turns, or /goal-draft produced an objective; never to widen their request. If a Goal is active this tool refuses: give the user a \`/goal edit …\` or \`/goal set …\` line instead. A stopped Goal is replaced on approval. If the user declines you are not told why: do not ask, and do not propose the same or a reworded objective again. Write the objective on one line, at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters, so the verifier can judge it from the transcript alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked. After approval, acknowledge in one sentence and stop with no further tool calls; the Goal starts on its own when the turn ends. Not available in plan mode.`,
       Kind.Other,
       {
         type: 'object',
@@ -845,7 +859,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
             type: 'string',
             minLength: 1,
             maxLength: PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
-            description: `The objective, on one line, written so the verifier can judge it from the transcript alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: as model guidance, stop as blocked after 20 turns. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
+            description: `The objective, on one line, at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
           },
         },
         required: ['objective'],

@@ -32,6 +32,10 @@ import {
   UpdateGoalTool,
   type GoalToolConfig,
 } from './goal-tools.js';
+import {
+  buildExecDescription,
+  planCodeModeBindings,
+} from '../tools/code-mode.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
@@ -540,22 +544,74 @@ describe('UpdateGoalTool', () => {
     expect(schema.properties['reason']!.maxLength).toBe(
       GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
     );
-    // The blocker rules live on the parameter they govern, once.
-    const blockerKind = schema.properties['blockerKind']!;
-    expect(blockerKind.enum).toContain('infeasible');
-    expect(blockerKind.description).toContain('three consecutive Goal turns');
-    expect(blockerKind.description).toContain('exact same reason text');
-    expect(blockerKind.description).toContain('cannot be satisfied as written');
-    expect(blockerKind.description).toContain(
-      'a tool result (not your own text)',
+    // The blocker rules live in the description, once: code mode carries a
+    // tool's description but not its parameter descriptions, so a rule that
+    // lived only on the parameter would be lost there. The parameter itself
+    // just points at the description.
+    expect(schema.properties['blockerKind']!.enum).toContain('infeasible');
+    expect(schema.properties['blockerKind']!.description).toContain(
+      'the tool description says when each applies',
     );
-    expect(blockerKind.description).toContain(
+    for (const fragment of [
+      'three consecutive Goal turns',
+      'exact same reason text',
+      'cannot be satisfied as written',
+      'a tool result, not your own text',
       'never for difficulty, uncertainty, information you could still obtain, or wanting to ask',
-    );
-    expect(blockerKind.description).toContain(
       'why no in-scope work could satisfy the objective',
+      'Those three stop the Goal at once',
+    ]) {
+      expect(tool.description).toContain(fragment);
+      expect(schema.properties['blockerKind']!.description).not.toContain(
+        fragment,
+      );
+    }
+  });
+
+  it('carries the blocker rules into the code-mode declaration', () => {
+    const plan = planCodeModeBindings(
+      [new UpdateGoalTool(makeConfig({}))],
+      () => false,
     );
-    expect(tool.description).not.toContain('infeasible');
+    const declaration = buildExecDescription(plan);
+    expect(declaration).toContain('three consecutive Goal turns');
+    expect(declaration).toContain('never for difficulty');
+  });
+
+  it('repairs a mistyped value on the object the invocation executes with, deprecated key or not', async () => {
+    // The schema validator coerces in place (a self-hosted model can send a
+    // number for a string); the strip of a deprecated key must not leave that
+    // repair on a copy that is then discarded.
+    const recordTerminalProposal = vi.fn().mockReturnValue({
+      recorded: true,
+      readyForVerification: true,
+    });
+    const tool = new UpdateGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'Deliver the result',
+          evidenceCursor: { recordId: 'goal-created' },
+        }),
+        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+        recordTerminalProposal,
+      }),
+    );
+    const invocation = goalTurnContext.run(permit, () =>
+      tool.build({
+        status: 'complete',
+        reason: 42,
+        evidenceRefs: ['stale-reference-from-an-older-contract'],
+      } as never),
+    );
+
+    await invocation.execute(new AbortController().signal);
+
+    expect(recordTerminalProposal).toHaveBeenCalledWith(permit, {
+      status: 'complete',
+      reason: '42',
+    });
   });
 
   it('serves a proposal that still sends evidenceRefs, and refuses any other unknown key', () => {
@@ -1218,6 +1274,25 @@ describe('ProposeGoalTool', () => {
     // The tool is declared in an interactive plan-mode session and refuses at
     // confirmation time there; the clause is the model's only static hint.
     expect(tool.description).toContain('Not available in plan mode.');
+    // The objective format is in the description for the same reason the
+    // blocker rules are: code mode carries no parameter descriptions.
+    for (const fragment of [
+      'numbered binary "Done when" checks that name a command',
+      'what must not change',
+      'a budget',
+      'what to do when blocked',
+      `at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters`,
+      'on one line',
+    ]) {
+      expect(tool.description).toContain(fragment);
+    }
+    const declaration = buildExecDescription(
+      planCodeModeBindings([tool], () => false),
+    );
+    expect(declaration).toContain('Done when');
+    expect(declaration).toContain(
+      String(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS),
+    );
   });
 
   it('validates the objective', () => {
@@ -1248,7 +1323,8 @@ describe('ProposeGoalTool', () => {
     // get_goal and update_goal are registered in every session, Goal or not,
     // so their schemas ride along with every model request. The figure is
     // what the three tools cost today plus room for a sentence; growing past
-    // it should be a decision, not drift.
+    // it should be a decision, not drift. (5 860 before the descriptions
+    // were trimmed.)
     const tools = [
       new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
       new UpdateGoalTool(makeConfig({})),
@@ -1261,7 +1337,7 @@ describe('ProposeGoalTool', () => {
       )
       .join('');
 
-    expect(advertised.length).toBeLessThan(3_600);
+    expect(advertised.length).toBeLessThan(4_100);
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
