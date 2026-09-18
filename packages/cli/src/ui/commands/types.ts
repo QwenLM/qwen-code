@@ -18,6 +18,8 @@ import type {
   HistoryItem,
   HistoryItemBtw,
   ConfirmationRequest,
+  ContextCompressionMeta,
+  ContextCompressionNotice,
 } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
@@ -179,7 +181,20 @@ export interface GoalControlActionReturn {
 export interface StreamMessagesActionReturn {
   type: 'stream_messages';
   messages: AsyncGenerator<
-    { messageType: 'info' | 'warning' | 'error'; content: string },
+    {
+      messageType: 'info' | 'warning' | 'error';
+      content: string;
+      /**
+       * Machine-readable companion to `content` for consumers that render the
+       * message themselves. Only the compression commands set it.
+       */
+      contextCompression?: ContextCompressionMeta;
+      /**
+       * Same, for the invocation note. A separate key on purpose: the two
+       * frames merge into one block, where a shared key would be overwritten.
+       */
+      contextCompressionNotice?: ContextCompressionNotice;
+    },
     void,
     unknown
   >;
@@ -465,6 +480,13 @@ export interface SlashCommand {
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];
+
+  /**
+   * The documented `/name` of a saved-workflow command. `CommandService` may
+   * rename an extension workflow on a collision; a `slashCommands.disabled`
+   * entry written with this name still matches the renamed command.
+   */
+  workflowName?: string;
 
   /** Parsed skill metadata for skill-backed commands. Used by ACP clients. */
   skillDetail?: {

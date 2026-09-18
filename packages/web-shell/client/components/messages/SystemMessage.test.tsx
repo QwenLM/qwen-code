@@ -1,3 +1,4 @@
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
@@ -396,6 +397,133 @@ describe('SystemMessage — vision bridge notice', () => {
   });
 });
 
+describe('SystemMessage — context compression', () => {
+  const result = {
+    originalTokenCount: 263195,
+    newTokenCount: 99799,
+    originalTokenCountIsEstimated: false,
+    newTokenCountIsEstimated: true,
+  };
+  const done = { phase: 'done', ...result };
+
+  it('renders the in-progress row in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compressing context..."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'progress' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('正在压缩');
+    expect(container.textContent).not.toContain('Compressing context...');
+  });
+
+  it('renders a no-op result in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="No compression needed."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'noop' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('无需压缩。');
+  });
+
+  it('renders the truncation notice in the UI language', () => {
+    const container = render(
+      <SystemMessage
+        content="Compression instructions were truncated to 2000 characters."
+        variant="info"
+        source="context_compression"
+        data={{ phase: 'notice', instructionsLimit: 2000 }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('压缩指令已截断为 2,000 个字符');
+  });
+
+  it('renders the counts in the UI language instead of the daemon sentence', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('上下文已压缩 263,195 → ~99,799');
+    expect(container.textContent).not.toContain('Context compressed');
+  });
+
+  it('renders the English line for an English UI', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={done}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+  });
+
+  it('carries a server-authored warning on a second line', () => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={{ ...done, warning: 'Recent history was left intact.' }}
+      />,
+      'en',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed 263,195 → ~99,799',
+    );
+    expect(container.textContent).toContain('Recent history was left intact.');
+    // A hard break, not a soft one: the row renders through Markdown, which
+    // would fold a bare newline into the line above.
+    expect(container.querySelector('br')).not.toBeNull();
+  });
+
+  it.each([
+    [
+      'a malformed count',
+      { phase: 'done', ...result, originalTokenCount: 'many' },
+    ],
+    ['no phase at all', result],
+    ['an unreadable payload', 'not-a-payload'],
+  ])('falls back to the daemon sentence for %s', (_label, data) => {
+    const container = render(
+      <SystemMessage
+        content="Context compressed (263195 -> ~99799)."
+        variant="info"
+        source="context_compression"
+        data={data}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      'Context compressed (263195 -> ~99799).',
+    );
+  });
+});
+
 describe('SystemMessage — background notification label', () => {
   it('labels background task notifications and preserves display text', () => {
     const container = render(
@@ -785,4 +913,89 @@ describe('SystemMessage — inline images', () => {
       attachmentId: 'notes.txt',
     });
   });
+});
+
+describe('background continuation', () => {
+  it('shows task provenance with an accessible source action', () => {
+    const locate = vi.fn(() => true);
+    const details = vi.fn();
+    const turn = {
+      turnId: 'turn-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+      label: 'Explore',
+      toolUseId: 'tool-1',
+    };
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="Explore"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{ ...turn, backgroundTask: { status: 'completed' } }}
+          onLocateBackgroundSource={locate}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain('Background agent·Explore');
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe('Background task completed');
+    expect(container.querySelector('[title="Explore"]')?.className).toContain(
+      'truncate',
+    );
+    expect(container.querySelector('button')?.textContent).toBe('Source');
+    expect(container.querySelector('button svg')).not.toBeNull();
+    expect(container.querySelector('button')?.className).toContain(
+      'text-muted-foreground',
+    );
+    expect(container.querySelector('button')?.className).toContain(
+      'font-normal',
+    );
+    act(() => container.querySelector('button')!.click());
+    expect(locate).toHaveBeenCalledWith('', 'tool-1');
+    act(() => container.querySelectorAll('button')[1]!.click());
+    expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
+  });
+  it.each([
+    ['failed', 'Background task failed'],
+    ['cancelled', 'Background task cancelled'],
+    [undefined, 'Background result'],
+  ])('does not describe %s results as successful', (status, label) => {
+    const container = render(
+      <SystemMessage
+        content="Explore"
+        variant="info"
+        source="background_notification_turn_started"
+        data={{ backgroundTask: { status } }}
+      />,
+    );
+    expect(
+      container.querySelector('[role="img"]')?.getAttribute('aria-label'),
+    ).toBe(label);
+    expect(container.querySelector('[data-tone="success"]')).toBeNull();
+  });
+  it.each(['completed', 'failed', 'cancelled'])(
+    'shows pending processing without overriding the %s outcome',
+    (status) => {
+      const container = render(
+        <SystemMessage
+          content="Explore completed"
+          variant="info"
+          source="background_task_completed"
+          data={{
+            kind: 'agent',
+            status,
+            description: 'Explore',
+            awaitingProcessing: true,
+          }}
+        />,
+      );
+      expect(container.textContent).toContain('Awaiting processing');
+      expect(
+        container.querySelector('[role="img"]')?.getAttribute('title'),
+      ).toBe(`Background task ${status}`);
+    },
+  );
 });

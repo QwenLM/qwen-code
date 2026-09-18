@@ -1,6 +1,11 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.23.3",
+  "version": "0.24.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/web-shell"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -82,6 +87,7 @@
     "@playwright/test": "1.61.1",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
+    "@types/hast": "^3.0.5",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from 'react';
+import { act, createRef, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonWorkspaceGitStatus,
@@ -23,6 +23,7 @@ import type {
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
+import { PASTE_TITLE_MAX_CHARS } from '../utils/largePaste';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -141,6 +142,7 @@ const composerCoreState = vi.hoisted(() => ({
   getText: vi.fn(() => ''),
   setText: vi.fn(),
   insertText: vi.fn(),
+  expandPastedText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
@@ -262,6 +264,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         removeImage: vi.fn(),
         pastedFiles: mockComposerCoreState.pastedFiles,
         removeFile: vi.fn(),
+        expandPastedText: composerCoreState.expandPastedText,
         composerTags: mockComposerCoreState.composerTags,
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
@@ -342,6 +345,7 @@ afterEach(() => {
   composerCoreState.getText.mockReset().mockReturnValue('');
   composerCoreState.setText.mockReset();
   composerCoreState.insertText.mockReset();
+  composerCoreState.expandPastedText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
@@ -370,13 +374,17 @@ afterEach(() => {
   latestComposerCoreOptions.current = null;
 });
 
-interface ChatEditorRenderProps {
+interface ChatEditorRenderProps
+  extends Pick<
+    ComponentProps<typeof ChatEditor>,
+    'contextUsageAlwaysVisible' | 'contextUsageControls' | 'onOpenContextUsage'
+  > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
   pastedFiles?: Array<{
     name: string;
     media_type: string;
-    text: string;
+    text?: string;
     size?: number;
   }>;
   gitBranch?: string;
@@ -964,6 +972,70 @@ describe('ChatEditor context usage ring', () => {
     expect(ring(noWindow)).toBeNull();
   });
 
+  it('discards a pending hover when the owning session changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const props = {
+        sessionId: 'session-a',
+        tokenCount: 100,
+        contextWindow: 1000,
+        onShowContextUsage: vi.fn(),
+      };
+      const container = renderChatEditor(props);
+      act(() =>
+        ring(container)!.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true }),
+        ),
+      );
+      rerenderChatEditor(container, { ...props, sessionId: 'session-b' });
+      expect(ring(container)).not.toBeNull();
+      await act(async () => vi.advanceTimersByTimeAsync(350));
+      expect(
+        document.querySelector('[data-web-shell-context-popover]'),
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps live hover actions available for an always-visible ring with unknown counts', async () => {
+    const compress = vi.fn().mockResolvedValue(undefined);
+    const onOpenContextUsage = vi.fn();
+    const onShowContextUsage = vi.fn();
+    const getContextUsage = vi.fn();
+    const container = renderChatEditor({
+      contextUsageAlwaysVisible: true,
+      onOpenContextUsage,
+      onShowContextUsage,
+      contextUsageControls: {
+        sessionId: 'session-1',
+        captureOwner: () => ({ isCurrent: () => true }),
+        canCompress: true,
+        compressing: false,
+        compress,
+        getContextUsage,
+      },
+    });
+    await act(async () => ring(container)!.focus());
+    const card = document.querySelector('[data-web-shell-context-popover]')!;
+    expect(card.querySelector('dl')).toBeNull();
+    expect(ring(container)!.hasAttribute('aria-describedby')).toBe(false);
+    expect(container.querySelector('[id$="-description"]')).toBeNull();
+    const buttons = Array.from(card.querySelectorAll('button'));
+    const compression = buttons.find(
+      (button) => button.textContent === 'Compress context',
+    )!;
+    expect(compression.disabled).toBe(false);
+    await act(async () => compression.click());
+    expect(compress).toHaveBeenCalledOnce();
+    await act(async () =>
+      buttons.find((button) => button.textContent === 'View details')!.click(),
+    );
+    expect(onOpenContextUsage).toHaveBeenCalledOnce();
+    expect(onShowContextUsage).not.toHaveBeenCalled();
+    expect(getContextUsage).not.toHaveBeenCalled();
+  });
+
   it('opens the context breakdown when clicked', () => {
     const onShowContextUsage = vi.fn();
     const container = renderChatEditor({
@@ -981,7 +1053,7 @@ describe('ChatEditor context usage ring', () => {
     expect(onShowContextUsage).toHaveBeenCalledTimes(1);
   });
 
-  it('shows the used/total detail in a tooltip on focus', async () => {
+  it('shows the used/total detail in the hover card on focus', async () => {
     const container = renderChatEditor({
       tokenCount: 53_600,
       contextWindow: 1_000_000,
@@ -992,7 +1064,7 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
 
-    const tooltip = document.querySelector('[data-slot="tooltip-content"]')!;
+    const tooltip = document.querySelector('[data-web-shell-context-popover]')!;
     expect(tooltip.textContent).toContain('Context Usage');
     expect(tooltip.textContent).toContain('5.4%');
     expect(tooltip.textContent).toContain('53,600 tokens');
@@ -1005,20 +1077,15 @@ describe('ChatEditor context usage ring', () => {
       tooltip.querySelector<HTMLElement>('[data-level]')?.style.width,
     ).toBe('5.36%');
     expect(
+      document
+        .getElementById(ring(container)!.getAttribute('aria-controls')!)
+        ?.getAttribute('aria-label'),
+    ).toBe('Context Usage');
+    expect(
       document.getElementById(
         ring(container)!.getAttribute('aria-describedby')!,
       )?.textContent,
     ).toBe('53,600 of 1,000,000 tokens used');
-    const arrow = document.querySelector<SVGElement>(
-      '[data-slot="tooltip-arrow"]',
-    );
-    expect(arrow?.querySelectorAll('path')).toHaveLength(2);
-    expect(arrow?.style.transform).toBe(
-      'translateY(var(--floating-arrow-offset))',
-    );
-    expect(
-      arrow?.closest('[data-slot="tooltip-content"]')?.getAttribute('class'),
-    ).toContain('[--floating-arrow-offset:-1px]');
   });
 
   it('shows zero remaining capacity when usage exceeds the context window', async () => {
@@ -1031,7 +1098,7 @@ describe('ChatEditor context usage ring', () => {
       ring(container)!.focus();
     });
     expect(
-      document.querySelector('[data-slot="tooltip-content"]')?.textContent,
+      document.querySelector('[data-web-shell-context-popover]')?.textContent,
     ).toContain('Remaining0 tokens');
   });
 
@@ -1058,7 +1125,7 @@ describe('ChatEditor context usage ring', () => {
       ).toBe(level);
       expect(
         document
-          .querySelector('[data-slot="tooltip-content"] [data-level]')
+          .querySelector('[data-web-shell-context-popover] [data-level]')
           ?.getAttribute('data-level'),
       ).toBe(level);
     },
@@ -1108,7 +1175,6 @@ describe('ChatEditor attachment reporting', () => {
         {
           name: 'report.html',
           media_type: 'text/html',
-          text: '<h1>Report</h1>',
         },
       ],
     });
@@ -1127,6 +1193,216 @@ describe('ChatEditor attachment reporting', () => {
     expect(
       attachments?.querySelector('button[aria-label="Remove report.html"]'),
     ).not.toBeNull();
+  });
+
+  it('shows a folded paste with its size and expands it on request', () => {
+    const text = `${'line\n'.repeat(199)}line`;
+    const onAttachmentPreview = vi.fn();
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text,
+          size: 1000,
+        },
+      ],
+      onAttachmentPreview,
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('1000 B');
+    expect(attachments?.textContent).not.toContain('lines');
+
+    // The action leads the second line and the size follows it.
+    const meta = container.querySelector<HTMLElement>(
+      '[class*="fileChipMeta"]',
+    );
+    expect(meta?.firstElementChild?.className).toContain('fileChipExpand');
+    expect(meta?.lastElementChild?.textContent).toBe('1000 B');
+
+    const buttons = Array.from(attachments?.querySelectorAll('button') ?? []);
+    expect(buttons).toHaveLength(3);
+    act(() => {
+      buttons
+        .find((button) => button.className.includes('fileChipTitle'))!
+        .click();
+    });
+    expect(onAttachmentPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'pasted-text.txt', text }),
+    );
+
+    const expand = buttons.find((button) =>
+      button.textContent?.includes('Show inline'),
+    )!;
+    expect(expand).toBeDefined();
+    act(() => {
+      expand.click();
+    });
+    expect(composerCoreState.expandPastedText).toHaveBeenCalledWith(0);
+  });
+
+  it('titles a folded paste with its first line instead of the file name', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'ERROR connection refused\nstack line\n'.repeat(100),
+          size: 4000,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    const title = container.querySelector<HTMLElement>(
+      '[class*="fileChipTitle"]',
+    );
+    expect(title?.textContent?.replace(/…$/, '')).toBe(
+      'ERROR connection refused stack line'.slice(0, PASTE_TITLE_MAX_CHARS),
+    );
+    expect(title?.getAttribute('title')).toBe(title?.textContent);
+    expect(attachments?.textContent).not.toContain('pasted-text.txt');
+  });
+
+  it('fills the title past a one-word first line', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'import\n  { spawn }\n  from child_process;\n'.repeat(50),
+          size: 2000,
+        },
+      ],
+    });
+    const title =
+      container.querySelector<HTMLElement>('[class*="fileChipTitle"]')
+        ?.textContent ?? '';
+    // The one-word first line is not the whole title: it runs into the next.
+    expect(title).toContain('import {');
+    expect(title.length).toBeLessThanOrEqual(PASTE_TITLE_MAX_CHARS + 1);
+  });
+
+  it('clips the title to a single line of bounded length', () => {
+    const firstLine = `head ${'x'.repeat(200)}`;
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: `${firstLine}\n${'tail\n'.repeat(200)}`,
+          size: 4000,
+        },
+      ],
+    });
+    const title = container.querySelector<HTMLElement>(
+      '[class*="fileChipTitle"]',
+    );
+    expect(title?.textContent?.endsWith('…')).toBe(true);
+    expect(title?.textContent).not.toContain('tail');
+    expect(title?.textContent?.length ?? 0).toBeLessThanOrEqual(
+      PASTE_TITLE_MAX_CHARS + 1,
+    );
+  });
+
+  it('falls back to the file name when there is no content to show', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: '\n\n   \n'.repeat(100),
+          size: 1200,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('pasted-text.txt');
+  });
+
+  it('leaves a pasted file without inline text without an expand action', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'photo.png',
+          media_type: 'image/png',
+          size: 2048,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).not.toContain('Show inline');
+    expect(attachments?.textContent).not.toContain('lines');
+  });
+
+  it('shows only the size, with no line count', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'x'.repeat(8000),
+          size: 8000,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('7.8 KB');
+    expect(attachments?.textContent).not.toContain('lines');
+  });
+
+  it('omits the size for a text card that carries none', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: '中文'.repeat(100),
+        },
+      ],
+    });
+    const meta = container.querySelector<HTMLElement>(
+      '[class*="fileChipMeta"]',
+    );
+    expect(meta?.textContent).not.toContain(' B');
+    // The action survives on its own when there is no size to show.
+    expect(meta?.lastElementChild?.textContent).toBe('Show inline');
+  });
+
+  it('expands the card whose action was clicked', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'first\n'.repeat(200),
+        },
+        {
+          name: 'pasted-text (1).txt',
+          media_type: 'text/plain',
+          text: 'second\n'.repeat(200),
+        },
+      ],
+    });
+    const expandButtons = Array.from(
+      container.querySelectorAll('button'),
+    ).filter((button) => button.textContent?.includes('Show inline'));
+    expect(expandButtons).toHaveLength(2);
+
+    act(() => {
+      expandButtons[1]!.click();
+    });
+
+    expect(composerCoreState.expandPastedText).toHaveBeenCalledWith(1);
   });
 
   it('reports whether the composer has tags or pasted images', () => {
@@ -1185,13 +1461,12 @@ describe('ChatEditor attachment reporting', () => {
     expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });
 
-  it('opens a text attachment preview when its chip is clicked', () => {
+  it('opens the preview when a chip without inline text is clicked', () => {
     const onAttachmentPreview = vi.fn();
     const container = renderChatEditor({
       pastedFiles: [
         {
           name: 'notes.txt',
-          text: 'hello attachment',
           media_type: 'text/plain',
           size: 16,
         },
@@ -1210,7 +1485,6 @@ describe('ChatEditor attachment reporting', () => {
     expect(onAttachmentPreview).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'notes.txt',
-        text: 'hello attachment',
       }),
     );
     expect(container.textContent).not.toContain('16 B');

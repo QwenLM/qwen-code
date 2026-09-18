@@ -383,9 +383,26 @@ describe('package scripts', () => {
       expect(result.stderr).toContain('- keytar@7.9.0');
     });
 
+    it('accepts a union of exact versions', () => {
+      // pnpm writes this shape itself when it merges version-scoped rules:
+      // the name once, then bare exact versions joined by `||`.
+      const result = runCheckLockfile((fixtureRoot) =>
+        mutatePnpmWorkspace(fixtureRoot, (workspace) => {
+          delete workspace.allowBuilds.keytar;
+          workspace.allowBuilds['keytar@7.0.0 || 7.9.0'] = true;
+        }),
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain(
+        'pnpm build approvals cover every install script.',
+      );
+    });
+
     it('ignores a range-scoped allowBuilds key, which decides nothing', () => {
-      // pnpm's isDepPathAllowBuildKey rejects a range, so `esbuild@^0.25.0`
-      // is filed under a package literally named that and approves no build.
+      // A range is not a version scope: pnpm's parseVersionPolicyRule throws
+      // INVALID_VERSION_UNION ('Use exact versions only') on `esbuild@^0.25.0`,
+      // so this key decides nothing and the gate stays red for that tree.
       const result = runCheckLockfile((fixtureRoot) =>
         mutatePnpmWorkspace(fixtureRoot, (workspace) => {
           delete workspace.allowBuilds.esbuild;
@@ -1083,6 +1100,7 @@ describe('package scripts', () => {
       'packages/*/package.json',
       '!packages/desktop-shell/package.json',
       '!packages/live-host/package.json',
+      '!packages/mobile-shell/package.json',
       'packages/channels/*/package.json',
       'integrations/*/package.json',
       'patches/**',
@@ -1754,6 +1772,7 @@ describe('package scripts', () => {
       'packages/mobile-mcp',
       'packages/node-repl',
       'packages/sdk-typescript',
+      'packages/web-shell',
     ]) {
       const packageJson = JSON.parse(
         readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),

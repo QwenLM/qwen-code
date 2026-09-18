@@ -195,7 +195,7 @@ for (const theme of ['light', 'dark']) {
     ).toBeInViewport();
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(percentage).toBeVisible();
-    const tooltip = page.locator('[data-slot="tooltip-content"]');
+    const tooltip = page.locator('[data-web-shell-context-popover]');
     await page.getByRole('button', { name: 'Ultra wide', exact: true }).focus();
     await page.keyboard.press('Tab');
     await expect(usage).toBeFocused();

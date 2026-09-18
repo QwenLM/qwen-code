@@ -185,6 +185,7 @@ describe('no-AK integration CI wiring', () => {
         './qwen-live-m2-steering.test.ts',
         './cli/_prompt-latency-policy.test.ts',
         './cli/daemon-invocation-context.test.ts',
+        './cli/headless-workflow-skill.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
@@ -980,6 +981,6 @@ describe('Windows temp short-alias guard', () => {
     // configure-windows-runner and the hosted redirect both set TEMP and TMP,
     // so an unset value means one of them stopped running — a clear message
     // beats realpathSync(undefined)'s TypeError.
-    expect(() => runGuard({})).toThrow(/TEMP is not set/);
+    expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
 });

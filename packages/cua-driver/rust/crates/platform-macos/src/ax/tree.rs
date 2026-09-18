@@ -372,41 +372,73 @@ pub(crate) fn walk_tree_with_context(
         // and walks nothing; it must never fall back to "everything that isn't
         // a window", which is how issue #2237 returned menu bars as panels.
         let mut walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
+            let describe = |child, complete: &mut bool| {
+                set_messaging_timeout(child);
+                let role_read = copy_string_attr_with_status(child, "AXRole");
+                if role_read.complete && role_read.value.is_none() {
+                    super::bindings::note_incomplete(
+                        "AXRole",
+                        "top-level element with no role value",
+                    );
+                }
+                *complete &= role_read.complete && role_read.value.is_some();
+                let role = role_read.value.unwrap_or_default();
+                let subrole_read = copy_string_attr_with_status(child, "AXSubrole");
+                *complete &= subrole_read.complete;
+                let identifier_read = copy_string_attr_with_status(child, "AXIdentifier");
+                *complete &= identifier_read.complete;
+                // Match AX window element → CGWindowID via private SPI.
+                // Only windows carry one, so skip the round-trip elsewhere.
+                let ax_window_id = if matches!(role.as_str(), "AXWindow" | "AXSheet") {
+                    ax_get_window_id(child)
+                } else {
+                    None
+                };
+                TopLevelCandidate {
+                    role,
+                    subrole: subrole_read.value,
+                    identifier: identifier_read.value,
+                    ax_window_id,
+                }
+            };
             let mut candidates: Vec<TopLevelCandidate> = top_level
                 .iter()
-                .map(|&child| {
-                    set_messaging_timeout(child);
-                    let role_read = copy_string_attr_with_status(child, "AXRole");
-                    if role_read.complete && role_read.value.is_none() {
-                        super::bindings::note_incomplete(
-                            "AXRole",
-                            "top-level element with no role value",
-                        );
-                    }
-                    complete &= role_read.complete && role_read.value.is_some();
-                    let role = role_read.value.unwrap_or_default();
-                    let subrole_read = copy_string_attr_with_status(child, "AXSubrole");
-                    complete &= subrole_read.complete;
-                    let identifier_read = copy_string_attr_with_status(child, "AXIdentifier");
-                    complete &= identifier_read.complete;
-                    // Match AX window element → CGWindowID via private SPI.
-                    // Only windows carry one, so skip the round-trip elsewhere.
-                    let ax_window_id = if matches!(role.as_str(), "AXWindow" | "AXSheet") {
-                        ax_get_window_id(child)
-                    } else {
-                        None
-                    };
-                    TopLevelCandidate {
-                        role,
-                        subrole: subrole_read.value,
-                        identifier: identifier_read.value,
-                        ax_window_id,
-                    }
-                })
+                .map(|&child| describe(child, &mut complete))
                 .collect();
             let mut decision = decide_window_scope(&candidates, wid, || {
                 crate::windows::resolve_window_owner(pid, wid)
             });
+            if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                // AppKit can omit every window from both arrays while these
+                // references still resolve to the requested window.
+                for attribute in ["AXFocusedWindow", "AXMainWindow"] {
+                    let selection = copy_element_attr_with_status(app_elem, attribute);
+                    complete &= selection.complete;
+                    let Some(window) = selection.value else {
+                        continue;
+                    };
+                    let mut owner = 0;
+                    if AXUIElementGetPid(window, &mut owner) == kAXErrorSuccess
+                        && owner == pid
+                        && !top_level
+                            .iter()
+                            .any(|&seen| CFEqual(seen as CFTypeRef, window as CFTypeRef) != 0)
+                    {
+                        let candidate = describe(window, &mut complete);
+                        if matches!(candidate.role.as_str(), "AXWindow" | "AXSheet")
+                            && candidate.ax_window_id == Some(wid)
+                        {
+                            top_level.push(window);
+                            candidates.push(candidate);
+                            continue;
+                        }
+                    }
+                    CFRelease(window as CFTypeRef);
+                }
+                decision = decide_window_scope(&candidates, wid, || {
+                    crate::windows::resolve_window_owner(pid, wid)
+                });
+            }
             if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
                 let (sheets, discovery_complete) = super::sheets::copy_attached_sheets(&top_level);
                 complete &= discovery_complete;

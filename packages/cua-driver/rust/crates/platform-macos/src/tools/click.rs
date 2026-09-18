@@ -71,11 +71,13 @@ struct SelectionPixelTarget {
     window_y: f64,
 }
 
-fn app_click_record(accessibility: bool) -> ActionExecutionRecord {
+fn app_click_record(accessibility: bool, foreground: bool) -> ActionExecutionRecord {
     ActionExecutionRecord::builder(
         ActionEffect::Unverifiable,
         if accessibility {
             ActionTransport::MacosAxAction
+        } else if foreground {
+            ActionTransport::MacosCgEventHid
         } else {
             ActionTransport::MacosCgEventPid
         },
@@ -88,6 +90,93 @@ fn app_click_record(accessibility: bool) -> ActionExecutionRecord {
     })
     .build()
     .expect("app click record is valid")
+}
+
+fn app_element_click_point(rect: [f64; 4], window: [f64; 4]) -> Option<(f64, f64)> {
+    if !rect.iter().chain(window.iter()).all(|v| v.is_finite())
+        || rect[2] <= 0.0
+        || rect[3] <= 0.0
+        || window[2] <= 0.0
+        || window[3] <= 0.0
+    {
+        return None;
+    }
+    // AX text areas include offscreen document content. Their full center can
+    // lie outside the window even while part of the control is visible.
+    let left = rect[0].max(window[0]);
+    let top = rect[1].max(window[1]);
+    let right = (rect[0] + rect[2]).min(window[0] + window[2]);
+    let bottom = (rect[1] + rect[3]).min(window[1] + window[3]);
+    (right > left && bottom > top)
+        .then_some((left + (right - left) / 2.0, top + (bottom - top) / 2.0))
+}
+
+fn prepare_app_pointer(pid: i32, window_id: u32, x: f64, y: f64) -> anyhow::Result<()> {
+    use crate::ax::bindings::*;
+    use core_foundation::base::CFType;
+    use std::time::{Duration, Instant};
+
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        anyhow::ensure!(!app.is_null(), "could not verify the app click target");
+        let _app = CFType::wrap_under_create_rule(app as CFTypeRef);
+        let _ = AXUIElementSetMessagingTimeout(app, 0.1);
+        let window = copy_element_attr(app, "AXFocusedWindow")
+            .ok_or_else(|| anyhow::anyhow!("could not read the app click target window"))?;
+        let _window = CFType::wrap_under_create_rule(window as CFTypeRef);
+        let mut owner = 0;
+        anyhow::ensure!(
+            AXUIElementGetPid(window, &mut owner) == kAXErrorSuccess
+                && owner == pid
+                && ax_get_window_id(window) == Some(window_id),
+            "app click target window changed before delivery"
+        );
+        let _ = AXUIElementSetMessagingTimeout(window, 0.1);
+        let _ = perform_action(window, "AXRaise");
+        let system = AXUIElementCreateSystemWide();
+        anyhow::ensure!(!system.is_null(), "could not verify the app click point");
+        let _system = CFType::wrap_under_create_rule(system as CFTypeRef);
+        let _ = AXUIElementSetMessagingTimeout(system, 0.1);
+        let deadline = Instant::now() + Duration::from_millis(900);
+        loop {
+            let mut hit = std::ptr::null_mut();
+            let status = AXUIElementCopyElementAtPosition(system, x as f32, y as f32, &mut hit);
+            let mut belongs = false;
+            if !hit.is_null() {
+                let mut current = CFType::wrap_under_create_rule(hit as CFTypeRef);
+                if status == kAXErrorSuccess {
+                    // Hosted file-panel controls have a different native window
+                    // ID. Only their actual AX ancestry proves the app target.
+                    for _ in 0..40 {
+                        let element = current.as_concrete_TypeRef() as AXUIElementRef;
+                        if CFEqual(element as CFTypeRef, window as CFTypeRef) != 0 {
+                            belongs = true;
+                            break;
+                        }
+                        let _ = AXUIElementSetMessagingTimeout(element, 0.1);
+                        if copy_string_attr(element, "AXRole").as_deref() == Some("AXApplication") {
+                            break;
+                        }
+                        let Some(parent) = copy_element_attr(element, "AXParent") else {
+                            break;
+                        };
+                        current = CFType::wrap_under_create_rule(parent as CFTypeRef);
+                    }
+                }
+            }
+            if belongs
+                && crate::input::skylight::front_process_matches(pid, window_id) == Some(true)
+                && focused_window_id_of_pid(pid) == Some(window_id)
+            {
+                return Ok(());
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "app click point did not belong to the exact target window; no mouse input was sent"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 fn selection_readback_confirms(
@@ -1336,9 +1425,9 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
         }
     };
     let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
-    let point = if let Some(pointer) = element_ptr {
+    let element_rect = if let Some(pointer) = element_ptr {
         match tokio::task::spawn_blocking(move || unsafe {
-            crate::ax::bindings::element_screen_center(pointer as AXUIElementRef)
+            element_screen_rect(pointer as AXUIElementRef)
         })
         .await
         {
@@ -1353,7 +1442,18 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
             Ok(frame) => frame,
             Err(error) => return error,
         };
-        let (sx, sy, wx, wy) = if let Some((x, y)) = point {
+        let (sx, sy, wx, wy) = if let Some(rect) = element_rect {
+            let Some((x, y)) = app_element_click_point(
+                rect,
+                [
+                    frame.bounds.x,
+                    frame.bounds.y,
+                    frame.bounds.width,
+                    frame.bounds.height,
+                ],
+            ) else {
+                return ToolResult::error("click element has no visible frame in its exact window");
+            };
             (x, y, x - frame.bounds.x, y - frame.bounds.y)
         } else if index.is_none() {
             let (Some(x), Some(y)) = (args.opt_f64("x"), args.opt_f64("y")) else {
@@ -1379,6 +1479,7 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     } else {
         None
     };
+    let point = element_rect.map(|[x, y, width, height]| (x + width / 2.0, y + height / 2.0));
     if let Some((x, y)) = pointer_target.map(|target| target.0).or(point) {
         crate::cursor::overlay::animate_cursor_to(cursor_key.clone(), x, y).await;
         crate::cursor::overlay::send_command(
@@ -1418,6 +1519,16 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
                     } else {
                         let (point, local) = pointer_target.unwrap();
                         let modifiers: Vec<&str> = modifiers.iter().map(String::as_str).collect();
+                        if foreground {
+                            prepare_app_pointer(pid, window_id, point.0, point.1)?;
+                            return crate::input::mouse::click_at_xy_desktop_with_modifiers_preserving_cursor(
+                                point.0,
+                                point.1,
+                                count,
+                                &button,
+                                &modifiers,
+                            );
+                        }
                         crate::input::app_pointer::click_button(
                             pid,
                             window_id,
@@ -1429,7 +1540,9 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
                         )
                     }
                 };
-                if foreground {
+                if foreground && action.is_none() {
+                    crate::input::skylight::with_foreground_hid_activation(pid, window_id, dispatch)
+                } else if foreground {
                     crate::input::skylight::with_foreground_assist(pid, window_id, dispatch)?;
                     Ok(())
                 } else {
@@ -1448,15 +1561,15 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
             .with_structured(serde_json::json!({
                 "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
             }))
-            .with_action_record(app_click_record(action.is_some())),
-        Ok(Err(_)) if changes.new_windows.iter().any(|window| window.pid == pid) => ToolResult::text(format!(
+            .with_action_record(app_click_record(action.is_some(), foreground)),
+        Ok(Err(_)) if action.is_some() && changes.new_windows.iter().any(|window| window.pid == pid) => ToolResult::text(format!(
             "Click changed the app.{}",
             changes.result_suffix()
         ))
         .with_structured(serde_json::json!({
             "path": if action.is_some() { "ax" } else { "cgevent" }, "verified": false, "effect": "unverifiable"
         }))
-        .with_action_record(app_click_record(action.is_some())),
+        .with_action_record(app_click_record(action.is_some(), foreground)),
         Ok(Err(error)) => ToolResult::error(format!("click failed: {error}")),
         Err(error) => ToolResult::error(format!("click task failed: {error}")),
     }
@@ -1823,6 +1936,38 @@ fn map_action(action: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_element_click_uses_the_part_inside_its_window() {
+        let window = [195.0, 92.0, 656.0, 422.0];
+        assert_eq!(
+            app_element_click_point([195.0, 124.0, 656.0, 1344.0], window),
+            Some((523.0, 319.0)),
+        );
+        assert_eq!(
+            app_element_click_point([200.0, 130.0, 100.0, 40.0], window),
+            Some((250.0, 150.0)),
+        );
+        assert_eq!(
+            app_element_click_point([100.0, -500.0, 400.0, 700.0], window),
+            Some((347.5, 146.0)),
+        );
+    }
+
+    #[test]
+    fn app_element_click_rejects_non_overlapping_and_invalid_frames() {
+        let window = [195.0, 92.0, 656.0, 422.0];
+        for rect in [
+            [195.0, 514.0, 656.0, 100.0],
+            [851.0, 92.0, 100.0, 422.0],
+            [200.0, 130.0, 0.0, 40.0],
+            [200.0, 130.0, 100.0, -40.0],
+            [f64::NAN, 130.0, 100.0, 40.0],
+            [200.0, 130.0, f64::INFINITY, 40.0],
+        ] {
+            assert_eq!(app_element_click_point(rect, window), None);
+        }
+    }
 
     #[test]
     fn implicit_click_selects_an_advertised_action_before_dispatch() {

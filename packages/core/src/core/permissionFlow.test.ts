@@ -46,6 +46,21 @@ const mockInvocation = (
   }) as unknown as AnyToolInvocation;
 
 describe('evaluatePermissionFlow', () => {
+  it('passes caller cancellation to intrinsic permission evaluation', async () => {
+    const invocation = mockInvocation();
+    const controller = new AbortController();
+    await evaluatePermissionFlow(
+      mockConfig(),
+      invocation,
+      'Read',
+      {},
+      controller.signal,
+    );
+    expect(invocation.getDefaultPermission).toHaveBeenCalledWith(
+      controller.signal,
+    );
+  });
+
   it('should return deny result with correct message when defaultPermission is deny', async () => {
     const invocation = mockInvocation({
       getDefaultPermission: vi.fn().mockResolvedValue('deny'),
@@ -211,6 +226,47 @@ describe('evaluatePermissionFlow', () => {
 
     expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(
       expect.objectContaining({ toolAliases: [legacyName] }),
+    );
+  });
+
+  // A rule pinned to a derived value (the Workflow tool's script digest) must
+  // be checked against the value the invocation computed, never a same-named
+  // parameter the model supplied.
+  it('matches rules against the parameters the invocation derives', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const order: string[] = [];
+    const modelParams = { name: 'audit', sha256: 'model-chosen' };
+    const invocation = mockInvocation({
+      params: modelParams,
+      getDefaultPermission: vi.fn(async () => {
+        order.push('default');
+        return 'ask' as const;
+      }),
+      getPermissionMatchParams: vi.fn(() => {
+        order.push('match');
+        return { name: 'audit', sha256: 'derived' };
+      }),
+    });
+
+    await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+      }),
+      invocation,
+      ToolNames.WORKFLOW,
+      modelParams,
+    );
+
+    // Derived after the L3 check, which is where the value is computed.
+    expect(order).toEqual(['default', 'match']);
+    expect(mockPm.evaluate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toolParams: { name: 'audit', sha256: 'derived' },
+      }),
     );
   });
 

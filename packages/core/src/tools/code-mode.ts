@@ -224,13 +224,13 @@ Use async/await and call registered tools through tools.<name>(args). Calls use 
 
 When a tool takes JavaScript source in a string, that source is parsed separately from this exec program. For static nested source, prefer a String.raw tagged template without nested backticks or interpolations, and use forward slashes in Windows file paths. Inspect returned field names before composing dependent calls; a tool's output field names may differ from another tool's input field names.
 
-Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls.
+Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls. When Omni is enabled, uploaded media and its resource metadata are also automatically retained; a result without content needs no image() call.
 
 Available globals:
 - tools: the code-mode-callable tool functions declared below.
 - ALL_TOOLS: frozen metadata for every function in tools.
 - text(value): append bounded text output. Non-string values are JSON-stringified when possible.
-- image(imageUrlOrItem: string | ImageContent): append an image from a base64 data URL or Qwen MCP ImageContent. To return a nested MCP image, pass an item such as image(result.content[0]).
+- image(imageUrlOrItem: string | ImageContent): append an image from a base64 data URL or Qwen MCP ImageContent. To return a nested MCP image, emit available items with result.content?.forEach(image).
 - audio(dataUrl: string): append audio from a base64 data URL with an audio MIME type.
 - generatedImage(result: CodeModeToolResult): append the image and saved-path hint returned by Qwen's built-in image_gen tool, for example generatedImage(await tools.image_gen({ prompt: '...' })).
 - setTimeout(callback: () => void, delayMs?: number): schedule a callback to run later and return a timeout id. Pending timeouts do not keep exec alive by themselves; await an explicit promise if you need to wait for one.
