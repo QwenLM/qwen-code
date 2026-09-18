@@ -56,6 +56,10 @@ import {
   validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import {
+  agentExecutionBackend,
+  agentExecutionFactory,
+} from './agent-execution.js';
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
@@ -107,7 +111,6 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
-  validateGoalCheckpointTimeoutSeconds,
   validateGoalMaxActiveMinutes,
   validateGoalMaxTurns,
   validateGoalTokenBudget,
@@ -1161,18 +1164,6 @@ function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
   }
 }
 
-function resolveGoalCheckpointTimeoutSeconds(
-  settings: Settings,
-): number | undefined {
-  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
-  if (fromSettings === undefined) return undefined;
-  try {
-    return validateGoalCheckpointTimeoutSeconds(fromSettings);
-  } catch (err) {
-    throw new Error(`settings.json: ${(err as Error).message}`);
-  }
-}
-
 /**
  * Resolves the tool-call budget for a run. Returns the validated count
  * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
@@ -1582,6 +1573,7 @@ export async function loadCliConfig(
    * If provided, these override settings.hooks for hook loading.
    */
   hooksConfig?: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
@@ -2452,7 +2444,6 @@ export async function loadCliConfig(
     goalTokenBudget: resolveGoalTokenBudget(settings),
     goalMaxTurns: resolveGoalMaxTurns(settings),
     goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
-    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2558,6 +2549,7 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
+    workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),
@@ -2674,6 +2666,8 @@ export async function loadCliConfig(
         }
       : undefined,
     settingsWatcher,
+    agentExecutionBackend: agentExecutionBackend(),
+    executionEnvironmentFactory: agentExecutionFactory(),
   };
 
   const config = new Config(configParams);

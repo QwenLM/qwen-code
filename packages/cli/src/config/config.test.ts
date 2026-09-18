@@ -8,7 +8,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
@@ -1197,6 +1196,27 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([undefined, '1'])(
+    'propagates the operator requirement independently of daemon factory availability: %s',
+    async (serve) => {
+      vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
+      vi.stubEnv('QWEN_CODE_SERVE', serve);
+      vi.stubEnv('SANDBOX', undefined);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentExecutionBackend: 'container',
+          executionEnvironmentFactory:
+            serve || process.platform === 'win32'
+              ? undefined
+              : expect.any(Function),
+        }),
+      );
+    },
+  );
+
   it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1615,41 +1635,23 @@ describe('loadCliConfig', () => {
   });
 
   describe('model.goalCheckpointTimeoutSeconds', () => {
-    it('carries the setting into the checkpoint verifier timeout', async () => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
+    it.each([45, 0, -1, 1.5, 901, '30' as unknown as number])(
+      'loads with the deprecated setting at %s and ignores it',
+      async (value) => {
+        // Goals no longer run evidence checkpoints, so nothing reads the
+        // value. A settings file that still carries it, valid or not, must
+        // not stop the CLI from starting.
+        process.argv = ['node', 'script.js'];
+        const argv = await parseArguments();
 
-      const config = await loadCliConfig(
-        { model: { goalCheckpointTimeoutSeconds: 45 } },
-        argv,
-      );
-
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
-    });
-
-    it.each([
-      0,
-      -1,
-      1.5,
-      GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-      '30' as unknown as number,
-    ])('rejects invalid settings value %s at startup', async (value) => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
-
-      await expect(
-        loadCliConfig({ model: { goalCheckpointTimeoutSeconds: value } }, argv),
-      ).rejects.toThrow(/settings\.json: model\.goalCheckpointTimeoutSeconds/);
-    });
-
-    it('uses the built-in default when the setting is unset', async () => {
-      process.argv = ['node', 'script.js'];
-      const argv = await parseArguments();
-
-      const config = await loadCliConfig({}, argv);
-
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(180_000);
-    });
+        await expect(
+          loadCliConfig(
+            { model: { goalCheckpointTimeoutSeconds: value } },
+            argv,
+          ),
+        ).resolves.toBeDefined();
+      },
+    );
   });
 
   it('should use configured context file name when settings.context.fileName is set', async () => {

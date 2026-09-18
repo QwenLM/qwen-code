@@ -292,6 +292,7 @@ import {
   useMessagesFromBlocks,
 } from './hooks/useMessages';
 import { useSessionSources } from './hooks/useSessionSources';
+import { useContextCompressionReconcile } from './hooks/useContextCompressionReconcile';
 import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
@@ -401,6 +402,7 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
@@ -1370,6 +1372,11 @@ export interface WebShellProps {
   onComposerTagClick?: ComposerTagClickHandler;
   /** Custom renderer displayed after the final assistant message of each turn. */
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  /**
+   * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
+   * object to leave the answer footer unchanged.
+   */
+  assistantFeedback?: WebShellAssistantFeedbackOptions;
   getAssistantSourcesIcon?: WebShellSourceIconResolver;
   sourceReferences?: readonly WebShellSourceReference[];
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
@@ -1463,6 +1470,7 @@ interface AppProps extends WebShellProps {
 type SessionActionsWithCreate = {
   createSession: (options?: {
     workspaceCwd?: string;
+    getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     approvalMode?: string;
     sourceType?: string;
@@ -3065,6 +3073,7 @@ export function App({
   renderComposerTagTooltip,
   onComposerTagClick,
   renderAssistantTurnFooter,
+  assistantFeedback,
   getAssistantSourcesIcon,
   sourceReferences,
   renderComposerToolbarStart,
@@ -3338,6 +3347,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      assistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -3370,6 +3380,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      assistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -3649,6 +3660,8 @@ export function App({
   >(initialSelectedWorkspaceCwd);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
+  const lockedWorkspaceCwdRef = useRef(lockedWorkspaceCwd);
+  lockedWorkspaceCwdRef.current = lockedWorkspaceCwd;
   const resolveWorkspaceMaintenanceTargetCwd = useCallback(() => {
     const preferredCwd = lockedWorkspaceCwd ?? selectedWorkspaceCwdRef.current;
     if (preferredCwd) {
@@ -9745,6 +9758,25 @@ export function App({
   useEffect(() => {
     if (mainView !== 'goals') strandedGoalSessionRef.current = undefined;
   }, [mainView]);
+  const getComposerWorkspaceCwd = useCallback(() => {
+    const productContext =
+      pendingSessionContextRef.current ?? connectionRef.current.sessionContext;
+    if (productContext && productContext.kind !== 'workspace') {
+      return undefined;
+    }
+    if (connectionRef.current.sessionId) {
+      return productContext?.kind === 'workspace'
+        ? productContext.cwd
+        : connectionRef.current.workspaceCwd;
+    }
+    return (
+      workspacesRef.current.find(
+        (entry) => entry.cwd === lockedWorkspaceCwdRef.current,
+      )?.cwd ??
+      selectedWorkspaceCwdRef.current ??
+      workspacesRef.current.find((entry) => entry.primary)?.cwd
+    );
+  }, []);
   const ensureSessionForPrompt = useCallback(() => {
     const currentSessionId = connectionRef.current.sessionId;
     if (createSessionPromiseRef.current) {
@@ -9876,6 +9908,7 @@ export function App({
             }
           },
           getCurrentSessionId: () => connectionRef.current.sessionId,
+          getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
         }).then((result) => {
           if (pendingManualTitleRef.current === pendingManualTitle) {
             pendingManualTitleRef.current = undefined;
@@ -9921,6 +9954,7 @@ export function App({
     void promise.then(clearPreparation, clearPreparation);
     return promise;
   }, [
+    getComposerWorkspaceCwd,
     lockedWorkspaceCwd,
     sessionActions,
     sessionCatalogController,
@@ -9933,24 +9967,6 @@ export function App({
   prepareSubmitRef.current = prepareSubmit;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
-  const getComposerWorkspaceCwd = useCallback(() => {
-    const productContext =
-      pendingSessionContextRef.current ?? connectionRef.current.sessionContext;
-    if (productContext && productContext.kind !== 'workspace') {
-      return undefined;
-    }
-    if (connectionRef.current.sessionId) {
-      return productContext?.kind === 'workspace'
-        ? productContext.cwd
-        : connectionRef.current.workspaceCwd;
-    }
-    return (
-      workspacesRef.current.find((entry) => entry.cwd === lockedWorkspaceCwd)
-        ?.cwd ??
-      selectedWorkspaceCwdRef.current ??
-      workspacesRef.current.find((entry) => entry.primary)?.cwd
-    );
-  }, [lockedWorkspaceCwd]);
   const retryOwnerIsCurrent = useCallback(
     (owner: CancelledRetryOwner) =>
       retryOwnerMatchesCurrent(
@@ -10357,7 +10373,10 @@ export function App({
         pendingManualTitleRef.current = undefined;
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
-        ).createSession({ workspaceCwd: cwd });
+        ).createSession({
+          workspaceCwd: cwd,
+          getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
+        });
         sessionCatalogController.sessionCreated(cwd, result.sessionId);
         return result.sessionId;
       } catch {
@@ -10365,6 +10384,7 @@ export function App({
       }
     },
     [
+      getComposerWorkspaceCwd,
       connection.sessionId,
       activeWorkspaceCwd,
       sessionCatalogController,
@@ -10486,6 +10506,14 @@ export function App({
       workspaceCwd: gitDiffWorkspaceCwd,
       gitCwd: sessionWorktree?.path,
       view: 'commit',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenLog = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'log',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
@@ -17864,6 +17892,19 @@ export function App({
         .catch(() => undefined);
     }
   }, [primaryContextControls, paneContextControls, compressionResults]);
+  // A compression typed into the composer never reaches the controls above, so
+  // the transcript outcome reconciles the ring for both entry points.
+  useContextCompressionReconcile({
+    blocks,
+    sessionId: connection.sessionId,
+    live:
+      connection.status === 'connected' &&
+      !connection.catchingUp &&
+      !connection.loadingTranscript,
+    currentModel: connection.currentModel ?? undefined,
+    contextWindow: connection.contextWindow ?? undefined,
+    getContextUsage: sessionActions.getContextUsage,
+  });
   const reconciledContextControls = useRef(
     new WeakMap<ContextUsageControls, ContextUsageControls>(),
   );
@@ -20286,6 +20327,11 @@ export function App({
                               ? handleOpenCommit
                               : undefined
                           }
+                          onOpenLog={
+                            gitDiffWorkspaceCwd
+                              ? handleOpenLog
+                              : undefined
+                          }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
@@ -20593,6 +20639,11 @@ export function App({
                 onOpenGitCommit={
                   workspaceContextActive && gitDiffWorkspaceCwd
                     ? handleOpenCommit
+                    : undefined
+                }
+                onOpenGitLog={
+                  workspaceContextActive && gitDiffWorkspaceCwd
+                    ? handleOpenLog
                     : undefined
                 }
                 onOpenAgent={openEnvironmentAgent}

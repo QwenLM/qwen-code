@@ -1173,10 +1173,17 @@
   justify-content: flex-end;
 }
 
-.sessionMetaSlot:not(
-  :has(.sessionLoading, .sessionAttention, .sessionGitIcon, .sessionSourceIcon)
-) {
-  padding-right: 10px;
+@supports (selector(:has(*))) {
+  .sessionMetaSlot:not(
+    :has(
+      .sessionLoading,
+      .sessionAttention,
+      .sessionGitIcon,
+      .sessionSourceIcon
+    )
+  ) {
+    padding-right: 10px;
+  }
 }
 
 .sessionAttention {
@@ -1236,29 +1243,40 @@
   pointer-events: none;
 }
 
-.sessionActions:focus-within,
-.sessionActions:has([data-state='open']) {
-  opacity: 1;
-  pointer-events: auto;
+@supports (selector(:has(*))) {
+  .sessionActions:focus-within,
+  .sessionActions:has([data-state='open']) {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (hover: hover) {
+    .sessionMetaSlot:has(.sessionActions:focus-within),
+    .sessionMetaSlot:has([data-state='open']) {
+      min-width: var(--session-actions-width, 78px);
+    }
+
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
+    .sessionMetaSlot:has([data-state='open']) .sessionLoading,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
+    .sessionMetaSlot:has([data-state='open']) .sessionAttention,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
+    .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
+      opacity: 0;
+    }
+
+    .sessionRow:hover:not(.runningSession)
+      .sessionMetaSlot:has(.sessionActions)
+      .sessionSourceIcon,
+    .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+      opacity: 0;
+    }
+  }
 }
 
 @media (hover: hover) {
-  .sessionMetaSlot:has(.sessionActions:focus-within),
-  .sessionMetaSlot:has([data-state='open']) {
-    min-width: var(--session-actions-width, 78px);
-  }
-
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionGitIcon,
-  .sessionMetaSlot:has([data-state='open']) .sessionGitIcon,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionLoading,
-  .sessionMetaSlot:has([data-state='open']) .sessionLoading,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
-  .sessionMetaSlot:has([data-state='open']) .sessionAttention,
-  .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
-  .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
-    opacity: 0;
-  }
-
   .sessionRow:hover .sessionMetaSlot {
     min-width: var(--session-actions-width, 78px);
   }
@@ -1267,11 +1285,7 @@
   .sessionRow:hover:not(.runningSession) .sessionAttention,
   .sessionMetaSlot:hover .sessionGitIcon,
   .sessionMetaSlot:hover .sessionLoading,
-  .sessionMetaSlot:hover .sessionAttention,
-  .sessionRow:hover:not(.runningSession)
-    .sessionMetaSlot:has(.sessionActions)
-    .sessionSourceIcon,
-  .sessionMetaSlot:has(.sessionActions):hover .sessionSourceIcon {
+  .sessionMetaSlot:hover .sessionAttention {
     opacity: 0;
   }
 
@@ -1416,6 +1430,7 @@
   z-index: 1100;
   width: 240px;
   max-height: min(320px, calc(100vh - 16px));
+  max-height: min(320px, calc(100dvh - 16px));
   padding: 6px;
   border: 1px solid var(--sidebar-border);
   border-radius: 8px;

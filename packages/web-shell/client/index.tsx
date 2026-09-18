@@ -271,6 +271,11 @@ export type {
   WebShellSessionArtifactsChangeReason,
   WebShellModelInfo,
   WebShellSkillInfo,
+  WebShellAssistantFeedbackInfo,
+  WebShellAssistantFeedbackOptions,
+  WebShellAssistantFeedbackRating,
+  WebShellAssistantFeedbackUserMessage,
+  AssistantFeedbackHandler,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
