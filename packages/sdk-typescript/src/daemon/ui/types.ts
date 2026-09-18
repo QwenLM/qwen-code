@@ -8,6 +8,7 @@ import type {
   DaemonAuthDeviceFlowSdkErrorKind,
   DaemonAuthProviderId,
   DaemonEvent,
+  DaemonBackgroundTurn,
   DaemonErrorKind,
   DaemonSessionArtifactChange,
   DaemonSkillToggleMutation,
@@ -21,6 +22,7 @@ export type DaemonUiEventType =
   | 'user.text.delta'
   | 'user.image.delta'
   | 'user.file.delta'
+  | 'user.resource_link.delta'
   | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
@@ -38,6 +40,7 @@ export type DaemonUiEventType =
   // Session-meta events
   | 'session.metadata.changed'
   | 'session.artifact.changed'
+  | 'session.source.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -94,6 +97,7 @@ export interface DaemonUiEventBase {
   segmentId?: string;
   /** Admitted prompt identifier for events belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   originatorClientId?: string;
@@ -146,6 +150,29 @@ export interface DaemonUiUserFileEvent extends DaemonUiEventBase {
   name: string;
   mimeType: string;
   attachmentId: string;
+  meta?: DaemonTextDeltaMeta;
+}
+
+export type DaemonResourceLink = {
+  type: 'resource_link';
+  uri: string;
+  name: string;
+  mimeType?: string | null;
+  size?: number | null;
+  description?: string | null;
+  title?: string | null;
+  annotations?: {
+    audience?: Array<'user' | 'assistant'> | null;
+    lastModified?: string | null;
+    priority?: number | null;
+    _meta?: Record<string, unknown> | null;
+  } | null;
+  _meta?: Record<string, unknown> | null;
+};
+
+export interface DaemonUiUserResourceLinkEvent extends DaemonUiEventBase {
+  type: 'user.resource_link.delta';
+  resourceLink: DaemonResourceLink;
   meta?: DaemonTextDeltaMeta;
 }
 
@@ -206,6 +233,7 @@ export type DaemonUiToolProvenance = 'builtin' | 'mcp' | 'subagent' | 'unknown';
 
 export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   type: 'tool.update';
+  subagentSessionReady?: boolean;
   toolCallId: string;
   title?: string;
   status?: string;
@@ -423,6 +451,12 @@ export interface DaemonUiSessionMetadataChangedEvent extends DaemonUiEventBase {
   displayName?: string;
 }
 
+export interface DaemonUiSessionSourceChangedEvent extends DaemonUiEventBase {
+  type: 'session.source.changed';
+  sessionId: string;
+  revision: number;
+}
+
 export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
   type: 'session.artifact.changed';
   sessionId: string;
@@ -475,6 +509,8 @@ export interface DaemonUiStateResyncRequiredEvent extends DaemonUiEventBase {
  */
 export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
   type: 'prompt.cancelled';
+  /** Execution time before explicit cancellation, excluding cleanup. */
+  elapsedMs?: number;
   /**
    * Why the turn was cancelled. Absent for a user-initiated cancel;
    * `'forward_failed'` when the daemon synthesized the cancel because the
@@ -710,6 +746,7 @@ export type DaemonUiEvent =
   | DaemonUiTextEvent
   | DaemonUiUserImageEvent
   | DaemonUiUserFileEvent
+  | DaemonUiUserResourceLinkEvent
   | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiAssistantUsageEvent
@@ -724,6 +761,7 @@ export type DaemonUiEvent =
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionArtifactChangedEvent
+  | DaemonUiSessionSourceChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
   | DaemonUiStateResyncRequiredEvent
@@ -901,6 +939,11 @@ export type DaemonToolPreview =
 export type DaemonToolResultPreview =
   | DaemonTodoListPreview
   | {
+      kind: 'question_answers';
+      text: string;
+      answers: Array<{ question: string; answer: string }>;
+    }
+  | {
       kind: 'text';
       text: string;
     }
@@ -948,6 +991,7 @@ export interface DaemonTranscriptBlockBase {
   segmentId?: string;
   /** Admitted prompt identifier for content belonging to one turn. */
   promptId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
   /** Durable checkpoint UUID for branching from this Assistant response. */
   branchRecordId?: string;
   /**
@@ -989,6 +1033,8 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
     text?: string;
     attachmentId?: string;
   }>;
+  /** Original ACP resource links, with their URI and attachment metadata. */
+  resourceLinks?: DaemonResourceLink[];
   streaming?: boolean;
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
@@ -1005,6 +1051,7 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
 }
 
 export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
+  subagentSessionReady?: boolean;
   kind: 'tool';
   toolCallId: string;
   title: string;
@@ -1091,6 +1138,7 @@ export interface DaemonPromptCancelledTranscriptBlock
   extends DaemonTranscriptBlockBase {
   kind: 'prompt_cancelled';
   reason?: string;
+  elapsedMs?: number;
 }
 
 export type DaemonTranscriptBlock =

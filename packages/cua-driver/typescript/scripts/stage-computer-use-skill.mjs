@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { copyFileSync, existsSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
-const source = path.resolve(
+const sourceRoot = path.resolve(
   packageRoot,
   "..",
   "..",
@@ -18,11 +18,17 @@ const source = path.resolve(
   "skills",
   "bundled",
   "computer-use",
-  "SKILL.md",
 )
-const destination = path.join(packageRoot, "computer-use", "SKILL.md")
+const resources = ["SKILL.md", "references/macos.md", "references/windows-linux.md"]
 
-if (!existsSync(source)) {
-  throw new Error(`canonical Computer Use skill not found: ${source}`)
+for (const resource of resources) {
+  const source = path.join(sourceRoot, resource)
+  if (!existsSync(source)) {
+    throw new Error(`canonical Computer Use skill resource not found: ${source}`)
+  }
 }
-copyFileSync(source, destination)
+for (const resource of resources) {
+  const destination = path.join(packageRoot, "computer-use", resource)
+  mkdirSync(path.dirname(destination), { recursive: true })
+  copyFileSync(path.join(sourceRoot, resource), destination)
+}

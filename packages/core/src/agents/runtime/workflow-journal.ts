@@ -6,12 +6,26 @@
 
 /**
  * @fileoverview Same-session workflow resume via a JSONL journal. Every
- * `agent()` dispatch in a run appends a `started` then a `result` line to
- * `<projectDir>/workflows/<runId>/journal.jsonl`. Re-running the workflow
- * with `Workflow({resumeFromRunId})` loads the journal and serves cached
- * results for the longest UNCHANGED PREFIX of `agent()` calls — the first
- * call whose (rolling prefix + prompt + opts) hash diverges, or that has no
- * journaled result, runs live, and every call after it runs live too.
+ * `agent()` dispatch in a run appends a `started` line to
+ * `<projectDir>/workflows/<runId>/journal.jsonl`, then a `result` line when
+ * it returns a value or a `failed` line when it settles without one.
+ * Re-running the workflow with `Workflow({resumeFromRunId})` loads the
+ * journal and serves cached results for the longest UNCHANGED PREFIX of
+ * `agent()` calls — the first call whose (rolling prefix + prompt + opts)
+ * hash diverges, or that has no journaled result, runs live, and every call
+ * after it runs live too.
+ *
+ * A run's first line is `launched`, written once at its start and never on a
+ * resume, so the journal of a run that launched is never empty. A resume whose
+ * journal is not on disk is refused: there is nothing to replay, and running
+ * every agent again under the old run id would only read as a continuation.
+ *
+ * Only `result` feeds the cache; `started` and `failed` are diagnostic. What
+ * they buy on resume is the ability to say WHY a call is running live again:
+ * `failed` means the previous run's dispatch settled without a value, while
+ * a bare `started` means the run was interrupted with that agent in flight.
+ * A run the user cancelled writes no `failed` records at all, so every key it
+ * left open reads as interrupted rather than as broken.
  *
  * Key derivation (matches upstream `v2`): each dispatch's key is
  * `v2:sha256(prefixHash ‖ prompt ‖ canonicalOpts)`, where `prefixHash` is
@@ -21,9 +35,9 @@
  * key, and so on — so the cache naturally invalidates from the edit point.
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
- * (`schema`, `model`, `isolation`, `agentType`, `workingDir`) with object keys
- * sorted, so cosmetic opt differences (a re-ordered schema, a `label` change)
- * don't bust the cache.
+ * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
+ * `disallowedTools`, `tools`) with object keys sorted, so cosmetic opt
+ * differences (a re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -32,9 +46,16 @@
  */
 
 import { createHash } from 'node:crypto';
+import { constants, promises as fs } from 'node:fs';
+import path from 'node:path';
 import { read, writeLine } from '../../utils/jsonl-utils.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { isSymlinkedRoot } from './workflow-saved.js';
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import {
+  readWorkflowSourceRef,
+  type WorkflowSourceRef,
+} from '../workflow-correlation.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_JOURNAL');
 
@@ -54,22 +75,97 @@ export interface JournalResultEntry {
   result: unknown;
 }
 
-export type JournalEntry = JournalStartedEntry | JournalResultEntry;
+/**
+ * The dispatch for this key settled without a result: it failed on its own
+ * (turn/time cap, model error, setup error, or exhausted stall retries).
+ *
+ * Written only when the outcome belongs to the dispatch. A run the user
+ * cancelled writes nothing, because that is a different thing on resume: an
+ * interrupted agent is worth respawning quietly, one that actually failed is
+ * worth saying so — and before this record the two were indistinguishable,
+ * both leaving a `started` with no `result` behind.
+ */
+export interface JournalFailedEntry {
+  type: 'failed';
+  key: string;
+  agentId: string;
+}
+
+/**
+ * The first record of every run, written once when the run starts and never on
+ * a resume. It carries nothing: its job is to make the journal of a run that
+ * launched non-empty before any agent settles, so "this run was interrupted
+ * before its first result" and "this run's journal is gone" are different
+ * files on disk.
+ */
+export interface JournalLaunchedEntry {
+  type: 'launched';
+  version: 1;
+}
+
+export type JournalEntry =
+  | JournalLaunchedEntry
+  | JournalStartedEntry
+  | JournalResultEntry
+  | JournalFailedEntry
+  | { type: 'source'; version: 1; sourceRef: WorkflowSourceRef };
+
+/**
+ * What reading a run's journal found. `missing` and `unreadable` are kept
+ * apart from an empty replay because a resume means something different for
+ * each: an empty journal belongs to a run that had nothing to cache yet, while
+ * a journal that is not there leaves nothing to resume at all.
+ */
+export type JournalLoadResult =
+  | { kind: 'loaded'; replay: JournalReplay }
+  | { kind: 'missing' }
+  | { kind: 'unreadable'; reason: string };
 
 /** Parsed journal: completed results + started-but-maybe-incomplete markers. */
 export interface JournalReplay {
+  sourceRef?: WorkflowSourceRef;
+  sourceError?: string;
   /** key → the completed result entry (last write wins). */
   results: Map<string, JournalResultEntry>;
   /** key → all `started` entries seen (length > 1 ⇒ prior respawns). */
   started: Map<string, JournalStartedEntry[]>;
+  /** Keys whose dispatch settled without a result. See JournalFailedEntry. */
+  failed: Set<string>;
 }
 
 /**
+ * The `agent()` options that change what a dispatch does, as one list: the
+ * resume key projects exactly these, and the orchestrator's fast path, which
+ * hands the session config to the agent untouched, is taken only when every
+ * one of them is absent. `label` / `phase` / `stallMs` are deliberately not
+ * here: they are cosmetic or operational.
+ */
+export const DISPATCH_AFFECTING_AGENT_OPTS = [
+  'schema',
+  'model',
+  'effort',
+  'isolation',
+  'agentType',
+  'workingDir',
+  'disallowedTools',
+  'tools',
+] as const;
+
+/**
  * Project the dispatch-affecting opts into a stable canonical string. Only
- * `schema` / `model` / `isolation` / `agentType` / `workingDir` change what
- * the dispatch does; `label` / `phase` / `stallMs` are cosmetic or
- * operational and must NOT bust the cache. Object keys are sorted recursively
- * so a re-serialized schema with reordered keys hashes the same.
+ * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
+ * `disallowedTools` / `tools` change what the dispatch does; `label` / `phase` /
+ * `stallMs` are cosmetic or operational and must NOT bust the cache. Object
+ * keys are sorted recursively so a re-serialized schema with reordered keys
+ * hashes the same.
+ *
+ * `effort`, `disallowedTools` and `tools` change how hard the agent thinks and
+ * what it may do, so a resume that changed any of them has to run live. The
+ * sandbox normalizes them before they get here — an effort alias to its tier, a
+ * tool list to a sorted, de-duplicated array with built-in display names mapped
+ * to tool names — so `'med'` and `'medium'`, `Edit` and `edit`, or the same
+ * tools in another order, are one key. Any other name is kept as written, so
+ * two spellings that reach the same MCP tool are two keys.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were
@@ -78,13 +174,7 @@ export interface JournalReplay {
  */
 export function canonicalizeAgentOpts(opts: WorkflowAgentOpts): string {
   const projected: Record<string, unknown> = {};
-  for (const k of [
-    'schema',
-    'model',
-    'isolation',
-    'agentType',
-    'workingDir',
-  ] as const) {
+  for (const k of DISPATCH_AFFECTING_AGENT_OPTS) {
     const v = opts[k];
     if (v === undefined || typeof v === 'function') continue;
     projected[k] = v;
@@ -155,43 +245,178 @@ export function deriveArgsSeed(args: unknown): string {
 /**
  * Build the replay maps from a flat list of journal entries. `result`
  * entries win last-write; `started` entries accumulate (so a key started
- * N times surfaces N prior attempts for the respawn telemetry).
+ * N times surfaces N prior attempts for the respawn telemetry); `failed`
+ * keys are collected as a set.
+ *
+ * An entry type this build does not know is skipped rather than rejected, so
+ * a journal written by a newer build still replays here for the records this
+ * one understands.
  */
 export function buildReplay(entries: JournalEntry[]): JournalReplay {
+  let sourceRef: WorkflowSourceRef | undefined;
+  let sourceError: string | undefined;
   const results = new Map<string, JournalResultEntry>();
   const started = new Map<string, JournalStartedEntry[]>();
+  const failed = new Set<string>();
   for (const e of entries) {
     if (e.type === 'result') {
       results.set(e.key, e);
     } else if (e.type === 'started') {
+      // A later attempt supersedes the prior terminal failure. If it is
+      // interrupted, the next resume must describe it as interrupted rather
+      // than carrying the stale failure classification forward forever.
+      failed.delete(e.key);
       const list = started.get(e.key);
       if (list) list.push(e);
       else started.set(e.key, [e]);
+    } else if (e.type === 'failed') {
+      failed.add(e.key);
+    } else if (e.type === 'source') {
+      try {
+        const ref = readWorkflowSourceRef(e.sourceRef);
+        if (
+          e.version !== 1 ||
+          !ref ||
+          (sourceRef &&
+            (sourceRef.id !== ref.id || sourceRef.revision !== ref.revision))
+        ) {
+          throw new Error('Conflicting or unsupported workflow source record.');
+        }
+        sourceRef = ref;
+      } catch {
+        sourceError = 'Workflow journal contains invalid source metadata.';
+      }
     }
   }
-  return { results, started };
+  return {
+    results,
+    started,
+    failed,
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(sourceError ? { sourceError } : {}),
+  };
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Append-only JSONL journal for one workflow run. Reads tolerate a missing
- * file (fresh run); appends are fire-and-forget at the call site (the
+ * Append-only JSONL journal for one workflow run. A read says whether the file
+ * was there (see {@link JournalLoadResult}); appends are fire-and-forget at the call site (the
  * orchestrator does not await them on the hot path — a journal write
  * failure must not fail the dispatch).
  */
 export class WorkflowJournal {
   private pending = Promise.resolve();
+  readonly path: string;
 
-  constructor(readonly path: string) {}
+  constructor(
+    journalPath: string,
+    private readonly root = path.dirname(path.dirname(journalPath)),
+  ) {
+    this.path = journalPath;
+  }
 
-  /** Load + parse all entries into replay maps. Empty maps if no file. */
-  async load(): Promise<JournalReplay> {
+  private async hasSymlinkedPath(): Promise<boolean> {
+    if (
+      (await isSymlinkedRoot(this.root)) ||
+      (await isSymlinkedRoot(path.dirname(this.path)))
+    ) {
+      return true;
+    }
+    return fs
+      .lstat(this.path)
+      .then((stat) => stat.isSymbolicLink())
+      .catch(() => false);
+  }
+
+  /** Ensure the advertised journal path exists without affecting the run. */
+  async ensureExists(): Promise<boolean> {
     try {
-      const entries = await read<JournalEntry>(this.path);
-      return buildReplay(entries);
+      if (await this.hasSymlinkedPath()) return false;
+      await fs.mkdir(path.dirname(this.path), { recursive: true });
+      if (await this.hasSymlinkedPath()) return false;
+      const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+      const file = await fs.open(
+        this.path,
+        constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollow,
+        0o600,
+      );
+      try {
+        await file.chmod(0o600);
+      } finally {
+        await file.close();
+      }
+      return true;
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.ensureExists failed for ${this.path}: ${error}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Remove a never-registered run's journal file, best-effort.
+   *
+   * Waits for every append already queued first. An append still in flight
+   * would otherwise land after the delete and recreate the file, leaving a run
+   * id that never registered with a non-empty journal a later resume would
+   * accept.
+   */
+  async remove(): Promise<void> {
+    await this.drain();
+    try {
+      if (await this.hasSymlinkedPath()) return;
+      await fs.rm(this.path, { force: true });
+      await fs.rmdir(path.dirname(this.path)).catch((error) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw error;
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `WorkflowJournal.remove failed for ${this.path}: ${error}`,
+      );
+    }
+  }
+
+  /**
+   * Load and parse every entry into replay maps. A file that is not there and
+   * a file that cannot be read are reported as such rather than as an empty
+   * replay; a file that exists and holds no entries is `loaded`.
+   */
+  async load(): Promise<JournalLoadResult> {
+    try {
+      await fs.stat(this.path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { kind: 'missing' };
+      }
+      debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
+      return { kind: 'unreadable', reason: describeError(e) };
+    }
+    try {
+      const entries = await read<JournalEntry>(this.path, {
+        throwOnNonEnoentError: true,
+      });
+      return { kind: 'loaded', replay: buildReplay(entries) };
     } catch (e) {
       debugLogger.warn(`WorkflowJournal.load failed for ${this.path}: ${e}`);
-      return { results: new Map(), started: new Map() };
+      return { kind: 'unreadable', reason: describeError(e) };
     }
+  }
+
+  /**
+   * Record that the run launched. Best-effort: the record only sharpens what a
+   * later resume can say, so failing to write it must not fail the launch.
+   */
+  async markLaunched(): Promise<void> {
+    await this.append({ type: 'launched', version: 1 }).catch((error) =>
+      debugLogger.warn(
+        `WorkflowJournal.markLaunched failed for ${this.path}: ${error}`,
+      ),
+    );
   }
 
   /** Append one entry. Rejects only on I/O error (callers `.catch`). */

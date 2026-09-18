@@ -1,5 +1,6 @@
 export default {
   commands: 'Commands',
+  'cross-session-protocol': 'Cross-Session Protocol',
   'code-review': 'Code Review',
   'followup-suggestions': 'Followup Suggestions',
   'tool-use-summaries': 'Tool-Use Summaries',
@@ -7,6 +8,7 @@ export default {
   'terminal-images': 'Terminal Images',
   'sub-agents': 'SubAgents',
   'multi-agent-coordination': 'Multi-Agent Coordination',
+  'agent-board': 'Agent Board',
   arena: 'Agent Arena',
   skills: 'Skills',
   memory: 'Memory',
@@ -29,4 +31,5 @@ export default {
   'scheduled-tasks': 'Scheduled Tasks',
   goals: 'Goals',
   tips: 'Contextual Tips',
+  'omni-media-policies': 'Omni Media Policies',
 };

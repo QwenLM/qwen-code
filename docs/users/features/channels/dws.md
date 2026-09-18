@@ -67,13 +67,17 @@ without interactive confirmations:
 YOLO mode auto-approves every tool call. Use it only for a trusted bot account
 and workspace.
 
-`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. Approve a user or group with the code returned by the channel:
+`senderPolicy` and `groupPolicy` default to `pairing` for a newly managed DWS channel. `dmPolicy` defaults to `open`, including existing configurations that omit it. Approve a user or group with the code returned by the channel:
 
 ```bash
 qwen channel pairing approve dws-work CODE
 ```
 
 `senderPolicy` controls direct-message senders, document-notification authors, native-todo creators, and senders in `open` or `allowlist` groups. `groupPolicy` controls group conversations. An approved pairing group follows the shared channel behavior and authorizes its members; open and allowlist groups must also pass `senderPolicy`.
+
+Group and direct-message access can be configured independently. For a group-only channel, set `dmPolicy: "disabled"` and choose an enabled `groupPolicy`. For a direct-message-only channel, set `groupPolicy: "disabled"` and `dmPolicy: "open"`. Direct-message access also controls document notifications. Native todo polling remains controlled separately by `watchTodos`.
+
+Disabled chat sources are not subscribed to or polled, and their messages cannot start new tasks through late callbacks or persisted replay. Pending work and history cursors are retained: after re-enabling a source, the existing recovery mechanism may process older messages, including messages from the disabled interval. Sender authorization, group pairing, and mention requirements still apply.
 
 `groups` controls mention behavior. A concrete group ID overrides `"*"`. With `requireMention: true`, only an @ message wakes the channel. With `requireMention: false`, ordinary messages are also received after the group and sender policies pass.
 
@@ -84,6 +88,12 @@ Ordinary direct messages are recovered the same way: a five-second history check
 When a message quotes another DingTalk message, the quoted text is included as reply context for the agent on both the real-time and history fallback paths.
 
 `startReaction` is the emoji character or DingTalk reaction name added while an accepted task is running; an omitted or empty value uses the default `🤔`. `endReaction` replaces it after the task completes, fails, or is cancelled; an omitted or empty value disables the end reaction.
+
+### IM Reply Delivery
+
+A completed group @ or direct-message reply is checkpointed before its first send and retried in the background without rerunning the task. The backoff starts at five seconds, doubles, and caps at five minutes. A reply is abandoned after 16 failed delivery attempts. Local deferrals caused by a disconnected channel or an unreadable pairing approval use a separate limit of 32 consecutive checks, so they do not consume the transport-attempt budget. A reply is dropped immediately when its sender, group, or direct-message authorization is definitively revoked. The queue holds up to 100 replies and evicts the oldest entry regardless of its attempt count when full; switching the configured DWS profile clears the queue. These drops are reported on channel stderr, not sent as chat notifications.
+
+Queued IM replies longer than 12,000 code points are truncated, with `[Response truncated for DWS delivery.]` appended to the message the recipient sees. Document-comment and native-todo comment replies do not use this queued retry or truncation path: each turn makes one comment-send call, unknown outcomes are swallowed, and definitive failures propagate to the existing inbound-turn retry policy. The end reaction marks task completion, not reply delivery, so a retried IM reply can arrive after that reaction appears.
 
 ## Document Mentions
 
@@ -121,6 +131,6 @@ qwen serve --workspace /path/to/your/project --channel dws-work
 
 Do not run both forms at once because they share the channel-service lease.
 
-For local verification, send a direct message from another account, approve pairing if required, and verify the configured start reaction appears while the task runs. If an end reaction is configured, verify that it replaces the start reaction afterward. Then add a document comment with @mention notification enabled. The channel should react to the notification message, read the document, and post the final answer under the original comment. A comment with notification disabled should produce no task.
+For local verification, send a direct message from another account, approve pairing if required, and verify the configured start reaction appears while the task runs. If an end reaction is configured, verify that it replaces the start reaction after the task finishes; reply delivery can complete later as described above. Then add a document comment with @mention notification enabled. The channel should react to the notification message, read the document, and post the final answer under the original comment. A comment with notification disabled should produce no task.
 
 The channel ignores events from sender IDs that DWS identifies as the authenticated account, preventing reply and pairing loops without inferring identity from message text. Starting the IM sources requires that authoritative self-identity: if the authenticated account exposes no openDingTalkId and no earlier session under the same profile recorded one, the channel refuses to connect. A reconnect that temporarily loses the ID keeps filtering on the previously recorded self sender IDs.

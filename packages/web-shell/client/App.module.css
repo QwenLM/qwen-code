@@ -118,7 +118,7 @@
 .contextBodyWithEnvironmentPanel [data-web-shell-message-list] {
   box-sizing: border-box;
   width: calc(100% + 332px);
-  padding-right: 356px;
+  padding-right: 352px;
 }
 
 .chatPane {
@@ -1188,13 +1188,15 @@
   height: 14px;
 }
 
-@container (max-width: 699px) {
-  .queuedPromptStateLabel {
-    display: none;
-  }
+@supports (container-type: inline-size) {
+  @container (max-width: 699px) {
+    .queuedPromptStateLabel {
+      display: none;
+    }
 
-  .queuedPromptState:not(.queuedPromptStateLoading) {
-    display: none;
+    .queuedPromptState:not(.queuedPromptStateLoading) {
+      display: none;
+    }
   }
 }
 

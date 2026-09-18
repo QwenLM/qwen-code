@@ -130,11 +130,10 @@ export default {
   'type to filter…': 'digite para filtrar…',
   'No skills are currently available.':
     'Nenhuma habilidade está disponível no momento.',
-  'All available skills are locked at a higher scope (see below).':
-    'Todas as habilidades disponíveis estão bloqueadas em um escopo superior (veja abaixo).',
   'No skills match the search.': 'Nenhuma habilidade corresponde à pesquisa.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Bloqueado por configurações de escopo superior (não é possível alternar aqui):',
+  'Locked by settings entries you cannot toggle here:':
+    'Bloqueado por entradas de configuração (não é possível alternar aqui):',
+  '{{count}} locked not shown': '{{count}} habilidades bloqueadas não exibidas',
   'higher scope': 'escopo superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloqueado: {{scope}}]',
@@ -579,6 +578,10 @@ export default {
     'Esta extensão instalará as seguintes habilidades:',
   'This extension will install the following subagents:':
     'Esta extensão instalará os seguintes subagentes:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Esta extensão instalará os seguintes fluxos de trabalho (scripts JavaScript que podem iniciar subagentes):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Estes scripts de fluxo de trabalho mudaram desde a versão instalada: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Instalação cancelada para "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -731,6 +734,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurados',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Este menu é somente leitura. Para adicionar ou modificar hooks, edite settings.json diretamente ou pergunte ao Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Reabra este menu para recarregar as definições dos hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Os controles dos hooks e as configurações de segurança HTTP exigem uma reinicialização.',
+  'Failed to reload hook definitions: {{error}}':
+    'Falha ao recarregar as definições dos hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Enter para selecionar · Esc para cancelar',
   // Hooks - Detail Step
@@ -804,8 +813,8 @@ export default {
     'A entrada para o comando é JSON com tool_name, tool_input, tool_use_id, error, error_type, is_interrupt e is_timeout.',
   'Input to command is JSON with notification message and type.':
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto da TUI interativa compatível).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'A entrada para o comando é JSON com "prompt" (o prompt atual vinculado ao modelo) e o campo opcional "submitted_prompt" (a projeção de texto capturada em um ponto de envio compatível).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
@@ -1131,6 +1140,12 @@ export default {
   'Clear Authentication': 'Limpar autenticação',
   disabled: 'desativado',
   enabled: 'ativado',
+  'disabled (bare mode)': 'desativado (modo mínimo)',
+  'disabled (safe mode)': 'desativado (modo seguro)',
+  'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
+  'disabled (folder not trusted)': 'desativado (pasta não confiável)',
+  'disabled (turned off for this session)':
+    'desativado (desligado nesta sessão)',
   'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',
@@ -1566,6 +1581,11 @@ export default {
   'No tasks currently running': 'Nenhuma tarefa em execução',
   'No entry to show.': 'Nenhuma entrada para mostrar.',
   'needs approval': 'precisa de aprovação',
+  'Large workflow': 'Workflow grande',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow grande: {{agents}} agentes agendados (limite de aviso {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow grande: ~{{tokens}} tokens de saída previstos (limite de aviso {{cap}}).',
   'rejected — edit config to re-approve':
     'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
@@ -2078,6 +2098,7 @@ export default {
   'Context files:': 'Arquivos de contexto:',
   'Skills:': 'Habilidades:',
   'Agents:': 'Agentes:',
+  'Workflows:': 'Fluxos de trabalho:',
   'MCP servers:': 'MCP servers:',
   'Press c to copy the authorization URL to your clipboard.':
     'Pressione c para copiar a URL de autorização para a área de transferência.',
@@ -2240,6 +2261,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

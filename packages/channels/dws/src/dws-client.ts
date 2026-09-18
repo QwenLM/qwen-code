@@ -778,7 +778,6 @@ export class DwsClient implements DwsClientLike {
         const message = parseDwsImEvent(line);
         const result = onMessage(message);
         if (!result || !('admitted' in result)) return result;
-        if (source.kind !== 'direct') return result.completed;
         const reportError = (error: unknown): void => {
           try {
             onError(error instanceof Error ? error : new Error(String(error)));
