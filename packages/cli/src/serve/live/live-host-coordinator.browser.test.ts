@@ -220,6 +220,8 @@ describe('LiveHostCoordinator browser Host', () => {
     expect(noRuntime.getStatus()).toMatchObject({
       available: false,
       blocker: 'appshot',
+      // Not the native "self-check failed" wording: a page has no self-check.
+      message: 'The dedicated Live Appshot channel is unavailable.',
     });
   });
 

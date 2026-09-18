@@ -1190,7 +1190,13 @@ export class LiveHostCoordinator {
     ) {
       return provider.message;
     }
-    if (blocker === 'appshot' && hello?.selfChecks.appshot && appshot.message) {
+    if (
+      blocker === 'appshot' &&
+      (hello?.selfChecks.appshot || this.host?.kind === 'browser') &&
+      appshot.message
+    ) {
+      // A browser Host has no self-check to fail: for it this blocker only
+      // ever means the daemon-side Live runtime is not ready yet.
       return appshot.message;
     }
     const messages: Record<NonNullable<LiveStatus['blocker']>, string> = {
