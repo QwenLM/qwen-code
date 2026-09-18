@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { EventEmitter } from 'node:events';
+import { WebSocket } from 'ws';
 import { describe, expect, it, vi } from 'vitest';
 import type { Settings } from '../../config/settings.js';
 import { LiveHostCoordinator } from './live-host-coordinator.js';
 import { LiveHostInstaller } from './live-host-installer.js';
 import { LiveSetupController } from './live-setup-controller.js';
-import { LIVE_HOST_PROTOCOL_VERSION } from './types.js';
+import {
+  LIVE_HOST_PROTOCOL_VERSION,
+  LIVE_WEB_HOST_BUNDLE_ID,
+} from './types.js';
 
 function createHarness(options: { initiallyEnabled?: boolean } = {}) {
   const initiallyEnabled = options.initiallyEnabled ?? false;
@@ -70,6 +75,7 @@ function createHarness(options: { initiallyEnabled?: boolean } = {}) {
     setEnabled,
     installLatest,
     settings: () => settings,
+    coordinator,
   };
 }
 
@@ -183,5 +189,49 @@ describe('LiveSetupController', () => {
       enabled: false,
       keyConfigured: true,
     });
+  });
+
+  it('saves a shortcut change while a browser Host holds the lease', async () => {
+    const harness = createHarness();
+    harness.coordinator.setAppshotReadiness({ state: 'ready' });
+    const socket = Object.assign(new EventEmitter(), {
+      readyState: WebSocket.OPEN as number,
+      bufferedAmount: 0,
+      sent: [] as string[],
+      send(data: string | Uint8Array) {
+        if (typeof data === 'string') this.sent.push(data);
+      },
+      close() {},
+    });
+    harness.coordinator.attachBrowserHost(socket as unknown as WebSocket);
+    socket.emit(
+      'message',
+      Buffer.from(
+        JSON.stringify({
+          type: 'host.hello',
+          protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+          hostVersion: '0.24.0',
+          bundleId: LIVE_WEB_HOST_BUNDLE_ID,
+          instanceNonce: 'browser_tab_nonce_0001',
+          permissions: { microphone: 'granted' },
+          selfChecks: { audioInput: true, audioOutput: true },
+        }),
+      ),
+      false,
+    );
+    expect(harness.coordinator.getStatus().host).toMatchObject({
+      kind: 'browser',
+    });
+
+    // Used to surface as a 500: the native shortcut round trip rejected
+    // with an error the setup route does not map.
+    const status = await harness.controller.update({ shortcut: 'Alt+Space' });
+
+    expect(status.shortcut).toBe('Alt+Space');
+    expect(harness.settings().experimental?.liveVoice).toMatchObject({
+      shortcut: 'Alt+Space',
+    });
+    expect(socket.sent.join('')).not.toContain('host.set_shortcut');
+    harness.coordinator.dispose();
   });
 });

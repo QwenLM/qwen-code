@@ -5207,9 +5207,9 @@ export class LlmClient {
 
   /**
    * Surgically disarm FileReadCache entries for files evicted by
-   * microcompaction. Falls back to a blanket clear() only when a blanked read
-   * cannot be linked to any path; path-level resolution failures are targeted
-   * to that path so one ghost file does not wipe unrelated cache entries.
+   * microcompaction. Falls back to a blanket clear() when a blanked read has
+   * no path or worker invalidation fails. Local path-resolution failures target
+   * only that path so one ghost file does not wipe unrelated cache entries.
    *
    * Shared by pre-send microcompaction and /compress-fast.
    */
@@ -5227,6 +5227,19 @@ export class LlmClient {
       return;
     }
     if (meta.evictedReadPaths.length === 0) {
+      return;
+    }
+    const executionEnvironment = this.config.getExecutionEnvironment();
+    if (executionEnvironment) {
+      try {
+        await executionEnvironment.invalidateReadCache(meta.evictedReadPaths);
+      } catch (error) {
+        fileReadCache.clear();
+        debugLogger.warn(
+          'Execution cache invalidation after compression failed',
+          error,
+        );
+      }
       return;
     }
     const statResults = await Promise.all(
