@@ -697,28 +697,21 @@ describe('ToolConfirmationMessage', () => {
         expect(untrusted).not.toContain('Yes, and auto-accept edits');
       });
 
-      it('holds a rejecting onConfirm instead of leaking an unhandled rejection', async () => {
-        const rejections: unknown[] = [];
-        const onRejection = (reason: unknown) => rejections.push(reason);
-        process.on('unhandledRejection', onRejection);
-        try {
-          const onConfirm = vi
-            .fn()
-            .mockRejectedValue(
-              new Error(
-                'Cannot enable privileged approval modes in an untrusted folder.',
-              ),
-            );
-          const { stdin } = renderWith(true, infoDetails(onConfirm));
-          stdin.write('\r');
-          await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
-          await new Promise((r) => setTimeout(r, 50));
-          // An escaped rejection would trip the process-level handler and show
-          // a "file a bug report" banner over a correctly-refused action.
-          expect(rejections).toEqual([]);
-        } finally {
-          process.removeListener('unhandledRejection', onRejection);
-        }
+      it('subscribes to the promise onConfirm returns instead of letting it float', async () => {
+        // A floating rejection reaches the process-level handler (llm.tsx) and
+        // shows a "file a bug report" banner over a correctly-refused action,
+        // so the call site must consume what onConfirm returns. Asserted via a
+        // thenable: `Promise.resolve(x).catch(...)` subscribes through `then`,
+        // a bare `onConfirm(outcome)` statement never does.
+        const then = vi.fn();
+        const thenable = { then } as unknown as Promise<void>;
+        const onConfirm = vi.fn(() => thenable);
+        const { stdin } = renderWith(true, infoDetails(onConfirm));
+
+        stdin.write('\r');
+
+        await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+        expect(then).toHaveBeenCalled();
       });
     });
   });
