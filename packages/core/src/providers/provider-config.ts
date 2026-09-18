@@ -382,7 +382,7 @@ export function buildInstallPlan(
     existingModels?.some(
       (entry) =>
         providerOwns?.(entry) &&
-        (entry.imageOnly || entry.voiceOnly) &&
+        (entry.imageOnly || entry.voiceOnly || entry.realtimeOnly) &&
         models.some((model) => model.id === entry.id) &&
         typeof entry.baseUrl === 'string' &&
         entry.baseUrl !== inputs.baseUrl &&

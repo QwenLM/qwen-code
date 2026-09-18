@@ -185,7 +185,9 @@ export async function applyProviderInstallPlan(
   );
   const preserveSelection =
     serviceOnly.length > 0 &&
-    serviceOnly.every((model) => model.imageOnly || model.voiceOnly);
+    serviceOnly.every(
+      (model) => model.imageOnly || model.voiceOnly || model.realtimeOnly,
+    );
   const previousEnvValues = new Map<string, string | undefined>();
   // Snapshot the runtime providers map *before* any setValue/reload so we can
   // restore in-memory state if a callback later in the flow rejects (e.g.
