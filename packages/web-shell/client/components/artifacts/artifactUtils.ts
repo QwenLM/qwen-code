@@ -3,7 +3,7 @@ import type {
   DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
-import { escapeAttribute } from '../preview/web-preview';
+import { escapeAttribute } from '../preview/web-preview.js';
 
 export function artifactKindLabel(
   kind: string,
@@ -403,7 +403,32 @@ function wrapArtifactPreview(preview: string, title: string): string {
 </head><body><iframe title="${escapeAttribute(title)}" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${escapeAttribute(preview)}"></iframe></body></html>`;
 }
 
+// The panel's source/rendered toggle unmounts the preview component on every
+// switch, so a remount would otherwise re-run the whole pipeline — both
+// renderer asset fetches, the base64 encodes, the DOM parse. The toggle
+// always returns to the same (content, title), so one slot covers it; a
+// different document simply replaces the slot.
+let lastBuiltPreviewDocument:
+  | { content: string; title: string; document: string }
+  | undefined;
+
 export async function loadArtifactPreviewDocument(
+  html: string,
+  title: string,
+  signal: AbortSignal,
+): Promise<string> {
+  if (
+    lastBuiltPreviewDocument?.content === html &&
+    lastBuiltPreviewDocument.title === title
+  ) {
+    return lastBuiltPreviewDocument.document;
+  }
+  const document = await buildArtifactPreviewDocument(html, title, signal);
+  lastBuiltPreviewDocument = { content: html, title, document };
+  return document;
+}
+
+async function buildArtifactPreviewDocument(
   html: string,
   title: string,
   signal: AbortSignal,

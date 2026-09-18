@@ -141,7 +141,9 @@ describe('collectReportedArtifacts', () => {
         workspacePath: 'a.md',
         url: 'https://example.com/a.md',
       },
-      // Exactly one locator, so only the reserved storage kind can reject it.
+      // Three defects at once (reserved storage, no workspacePath, a url):
+      // it trips multiple guards, so it cannot pin any one of them — the
+      // single-defect fixtures live in adapters/reported-artifacts.test.ts.
       {
         ...exportedArtifact,
         storage: 'published',
@@ -314,6 +316,30 @@ describe('useReportedArtifactRegistration', () => {
     sdk.owner++;
     await act(async () => complete(undefined));
     expect(requestToast).not.toHaveBeenCalled();
+  });
+
+  it('stays silent when a registration fails after the session was left', async () => {
+    sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];
+    let rejectRegistration!: (error: unknown) => void;
+    sdk.addArtifact.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectRegistration = reject;
+        }),
+    );
+    await render();
+    expect(sdk.addArtifact).toHaveBeenCalledTimes(1);
+
+    // The user leaves the session while the addArtifact POST is in flight;
+    // the catch handler's owner guard is the only thing suppressing a toast
+    // about a session the user is no longer looking at.
+    sdk.owner += 1;
+    await act(async () => {
+      rejectRegistration(new Error('daemon exploded'));
+    });
+
+    expect(requestToast).not.toHaveBeenCalled();
+    expect(sdk.refresh).not.toHaveBeenCalled();
   });
 
   it('registers every reported file exactly once', async () => {

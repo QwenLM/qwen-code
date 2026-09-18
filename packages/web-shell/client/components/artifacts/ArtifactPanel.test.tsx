@@ -723,6 +723,16 @@ async function flush() {
   });
 }
 
+// jsdom completes FileReader reads via setImmediate, a macrotask the
+// microtask-only flush() never drains.
+async function flushPreview() {
+  await act(async () => {
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+}
+
 describe('ArtifactPanel code review artifacts', () => {
   it('reads a saved artifact from the panel tab source session', async () => {
     const container = document.createElement('div');
@@ -3226,6 +3236,266 @@ describe('ArtifactPanel workspace artifact previews', () => {
 
     expect(container.textContent).toContain('正在加载预览...');
     expect(container.textContent).not.toContain('Loading preview...');
+  });
+
+  it('surfaces a failed export preview instead of loading forever', async () => {
+    vi.stubGlobal('__WEB_SHELL_VERSION__', '0.23.4');
+    const base = 'https://unpkg.com/@qwen-code/qwen-code@0.23.4/';
+    const integrity = `sha384-${'a'.repeat(64)}`;
+    const content = `<script id="transcript-document" type="application/json">{}</script><script id="transcript-renderer" integrity="${integrity}" src="${base}export-transcript-document.js"></script><link id="transcript-stylesheet" rel="stylesheet" integrity="${integrity}" href="${base}export-transcript-document.css">`;
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: content.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content,
+      encoding: 'utf-8',
+      truncated: false,
+    });
+    // An SRI mismatch rejects the renderer fetch; the panel must surface that
+    // failure rather than leaving the placeholder up forever.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockRejectedValue(new TypeError('Integrity mismatch')),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'export-preview',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'export.html',
+          workspacePath: 'export.html',
+          mimeType: 'text/html; charset=utf-8',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flushPreview();
+
+    expect(container.textContent).toContain(
+      'Could not load preview: Integrity mismatch',
+    );
+    expect(container.textContent).not.toContain('Loading preview...');
+  });
+
+  it('reuses the built export preview when toggling between source and rendered views', async () => {
+    vi.stubGlobal('__WEB_SHELL_VERSION__', '0.23.4');
+    const base = 'https://unpkg.com/@qwen-code/qwen-code@0.23.4/';
+    const integrity = `sha384-${'a'.repeat(64)}`;
+    const padding = 'x'.repeat(1024 * 1024 + 512);
+    const content = `<script id="transcript-document" type="application/json">{"padding":"${padding}"}</script><script id="transcript-renderer" integrity="${integrity}" src="${base}export-transcript-document.js"></script><link id="transcript-stylesheet" rel="stylesheet" integrity="${integrity}" href="${base}export-transcript-document.css">`;
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: Buffer.byteLength(content),
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content,
+      encoding: 'utf-8',
+      truncated: false,
+    });
+    const fetchMock = vi.fn(async () => new Response('verified bytes'));
+    vi.stubGlobal('fetch', fetchMock);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'export-preview-toggle',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'client',
+          status: 'available',
+          title: 'export-toggle.html',
+          workspacePath: 'export-toggle.html',
+          mimeType: 'text/html; charset=utf-8',
+          clientRetained: false,
+          createdAt: '2026-09-16T00:00:00.000Z',
+          updatedAt: '2026-09-16T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flushPreview();
+
+    const clickToggle = (label: string) => {
+      const button = Array.from(container.querySelectorAll('button')).find(
+        (candidate) => candidate.textContent === label,
+      );
+      expect(button?.textContent).toBe(label);
+      act(() => button!.click());
+    };
+    // Large documents open in source view; nothing is fetched until the user
+    // asks for the rendered preview.
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    clickToggle('Render full preview');
+    await flushPreview();
+    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    clickToggle('Show source');
+    await flushPreview();
+    expect(container.querySelector('.cm-editor')).not.toBeNull();
+
+    clickToggle('Render full preview');
+    await flushPreview();
+    expect(container.querySelector('iframe')).not.toBeNull();
+    // The remount must not re-fetch and re-encode the renderer assets.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('gates a large preview without copying the content into a Blob when no size is known', async () => {
+    const content = `<h1>Large document</h1>\n<!--${'中'.repeat(400_000)}-->`;
+    // The stat never resolves, so neither the reader's sizeBytes nor a
+    // catalog size is available: the 1 MiB gate must measure the seeded
+    // preview content without allocating a Blob copy of it.
+    mockWorkspaceActions.stat.mockReturnValue(new Promise(() => {}));
+    const blobSpy = vi.fn();
+    const OriginalBlob = globalThis.Blob;
+    vi.stubGlobal(
+      'Blob',
+      class extends OriginalBlob {
+        constructor(...args: ConstructorParameters<typeof Blob>) {
+          blobSpy(...args);
+          super(...args);
+        }
+      },
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[
+              {
+                id: 'large-export',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'client',
+                status: 'available',
+                title: 'large-export.html',
+                workspacePath: 'large-export.html',
+                mimeType: 'text/html; charset=utf-8',
+                retention: 'ephemeral',
+                clientRetained: false,
+                createdAt: '2026-09-16T00:00:00.000Z',
+                updatedAt: '2026-09-16T00:00:00.000Z',
+              },
+            ]}
+            tabs={[
+              {
+                id: 'artifact:large-export',
+                kind: 'artifact',
+                title: 'large-export.html',
+                artifactId: 'large-export',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+                previewContent: content,
+              },
+            ]}
+            activeTabId="artifact:large-export"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    // The gate decided from the seeded content alone: source view first.
+    expect(container.textContent).toContain(
+      'File is large. Source is shown by default.',
+    );
+    expect(
+      blobSpy.mock.calls.some(
+        ([parts]) => Array.isArray(parts) && parts.includes(content),
+      ),
+    ).toBe(false);
+  });
+
+  it('uses the catalog sizeBytes for the large-document gate before the file is read', async () => {
+    const content = '<h1>Small export</h1>';
+    // The stat never resolves, so only the catalog sizeBytes threaded from
+    // the artifact detail can drive the 1 MiB gate.
+    mockWorkspaceActions.stat.mockReturnValue(new Promise(() => {}));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[
+              {
+                id: 'catalog-sized-export',
+                kind: 'html',
+                storage: 'workspace',
+                source: 'client',
+                status: 'available',
+                title: 'catalog-sized.html',
+                workspacePath: 'catalog-sized.html',
+                mimeType: 'text/html; charset=utf-8',
+                sizeBytes: 2 * 1024 * 1024,
+                retention: 'ephemeral',
+                clientRetained: false,
+                createdAt: '2026-09-16T00:00:00.000Z',
+                updatedAt: '2026-09-16T00:00:00.000Z',
+              },
+            ]}
+            tabs={[
+              {
+                id: 'artifact:catalog-sized-export',
+                kind: 'artifact',
+                title: 'catalog-sized.html',
+                artifactId: 'catalog-sized-export',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+                previewContent: content,
+              },
+            ]}
+            activeTabId="artifact:catalog-sized-export"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await flush();
+
+    // Tiny content, large catalog size: the gate proves the threaded
+    // sizeBytes won over measuring the content.
+    expect(container.textContent).toContain(
+      'File is large. Source is shown by default.',
+    );
   });
 
   it('reads a secondary-workspace file through the capped preview window', async () => {

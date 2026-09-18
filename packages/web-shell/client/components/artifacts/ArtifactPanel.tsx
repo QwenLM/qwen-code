@@ -2849,6 +2849,7 @@ function ArtifactDetail({
         artifactVersion={getArtifactFreshnessKey(artifact)}
         workspaceActions={workspaceActions}
         previewContent={previewContent}
+        previewSizeBytes={artifact.sizeBytes}
         imageMimeType={imageMimeType}
         previewKind={
           isHtmlArtifact(artifact)
@@ -3869,7 +3870,8 @@ function LargeDocumentPreview({
   const { t } = useI18n();
   const [renderedContent, setRenderedContent] = useState<string | null>(null);
   const large = useMemo(
-    () => (sizeBytes ?? new Blob([content]).size) > 1024 * 1024,
+    () =>
+      (sizeBytes ?? new TextEncoder().encode(content).byteLength) > 1024 * 1024,
     [content, sizeBytes],
   );
   if (!large) return children();
