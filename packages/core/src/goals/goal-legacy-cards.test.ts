@@ -110,6 +110,18 @@ describe('findRunningLegacyGoalCard', () => {
     ).toEqual({ condition: 'ship it', iterations: 1 });
   });
 
+  it('does not borrow setAt from across a goal_state record', () => {
+    // The run the running card belongs to started after the journaled
+    // transition; a same-condition set card before it is an earlier run.
+    expect(
+      findRunningLegacyGoalCard([
+        cardRecord('r1', [card('set', 'ship it', { setAt: 100 })]),
+        stateRecord('s1'),
+        cardRecord('r2', [card('checking', 'ship it', { iterations: 1 })]),
+      ]),
+    ).toEqual({ condition: 'ship it', iterations: 1 });
+  });
+
   it('reads the newest card of a record that holds several', () => {
     expect(
       findRunningLegacyGoalCard([

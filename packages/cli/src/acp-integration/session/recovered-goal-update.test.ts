@@ -298,6 +298,26 @@ describe('renderPreparedGoalUpdate', () => {
     expect(result.updates).toEqual([]);
   });
 
+  it('does not supersede a legacy card behind a partial replay, but still publishes recovered state', async () => {
+    const idle = {
+      getSnapshot: vi.fn(() => ({ v: 2, activity: 'idle', goal: null })),
+      getRecoveryCause: vi.fn(() => undefined),
+    } as unknown as GoalRuntime;
+    const withoutCard = await renderPreparedGoalUpdate(async () => idle, {
+      replayedRecords: [legacySetCard('older objective', 2)],
+      partialReplay: true,
+    });
+    expect(withoutCard.updates).toEqual([]);
+
+    // Recovered state is the runtime's, not the page's: it publishes
+    // whatever the page did.
+    const recovered = await renderPreparedGoalUpdate(async () => runtime(), {
+      replayedRecords: [legacySetCard('older objective', 2)],
+      partialReplay: true,
+    });
+    expect(recovered.updates).toHaveLength(1);
+  });
+
   it('falls back to a page-out bootstrap when replay has no Goal card', async () => {
     const result = await renderPreparedGoalUpdate(
       async () => {

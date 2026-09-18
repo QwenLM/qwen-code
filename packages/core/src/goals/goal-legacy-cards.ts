@@ -32,8 +32,9 @@ export interface LegacyRunningGoalCard {
  *
  * `setAt` is carried from the `set` card that opened the run, since only
  * `set` cards were written with one. The walk back stops at a card of
- * another kind or another condition: two runs can sit back to back with no
- * terminal card between them, and the condition is what identifies the run.
+ * another kind or another condition, and at a `goal_state` record: two runs
+ * can sit back to back with no terminal card between them, and the
+ * condition is what identifies the run.
  *
  * Read for presentation only: the session list's label and the trailing
  * card an ACP replay emits so the running card is not the last word.
@@ -45,8 +46,11 @@ export function findRunningLegacyGoalCard(
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
     if (!record) continue;
-    if (running === undefined && record.subtype === 'goal_state') {
-      return undefined;
+    if (record.subtype === 'goal_state') {
+      // Newer than any card: a journaling build owns the Goal. Older than
+      // the running card: the run the card belongs to started after it,
+      // so nothing before it can be that run's `set` card.
+      return running;
     }
     const cards = legacyGoalCards(record);
     for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {

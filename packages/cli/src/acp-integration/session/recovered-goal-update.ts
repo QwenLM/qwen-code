@@ -6,7 +6,6 @@
 
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import {
-  findRunningLegacyGoalCard,
   GoalPersistenceUnavailableError,
   type ChatRecord,
   type GoalRecord,
@@ -14,6 +13,7 @@ import {
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core';
+import { findRunningLegacyGoalCard } from '@qwen-code/qwen-code-core/goals/goal-legacy-cards.js';
 import type { HistoryItemGoalStatus } from '../../ui/types.js';
 import {
   collectGoalStatusItemsFromRecords,
@@ -38,6 +38,12 @@ export async function renderPreparedGoalUpdate(
     hideRuntimeGoal?: boolean;
     bootstrap?: HistoryReplayGoalBootstrap;
     previousGoal?: GoalRecord | null;
+    /**
+     * The replayed page did not end where the transcript does. The
+     * recovered state still publishes; a card that supersedes the page's
+     * last card does not, since that card may not be on the page at all.
+     */
+    partialReplay?: boolean;
   } = {},
 ): Promise<RecoveredGoalUpdate> {
   let runtime;
@@ -54,7 +60,9 @@ export async function renderPreparedGoalUpdate(
   const cause = runtime.getRecoveryCause?.();
   const snapshot = runtime.getSnapshot();
   if (!cause) {
-    const status = legacyGoalSupersession(snapshot, options.replayedRecords);
+    const status = options.partialReplay
+      ? undefined
+      : legacyGoalSupersession(snapshot, options.replayedRecords);
     return { updates: status ? [buildGoalStatusUpdate(status)] : [] };
   }
   const publicationKey = goalPublicationKey(snapshot, cause);

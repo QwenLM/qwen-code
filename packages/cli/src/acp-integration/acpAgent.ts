@@ -1093,6 +1093,36 @@ function validateLoadReplayEnvelope(
   }
 }
 
+/**
+ * Append the Goal updates a load publishes after its replayed page, unless
+ * that would take the page over the limits it was cut to. A page already
+ * at a limit ships without them rather than failing the load over what
+ * is presentation, or state the client re-reads: a client that misses a
+ * published Goal state reads it back with `session.goal()`.
+ */
+function appendGoalUpdatesWithinLimits(
+  sessionId: string,
+  envelope: BridgeLoadReplayEnvelope,
+  goalUpdates: readonly SessionUpdate[],
+  enforceLimits: boolean,
+): void {
+  if (goalUpdates.length === 0) return;
+  const withGoal = {
+    ...envelope,
+    updates: [...envelope.updates, ...goalUpdates],
+  };
+  try {
+    validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
+  } catch (error) {
+    if (!(error instanceof HistoryReplayLimitError)) throw error;
+    debugLogger.debug(
+      `Dropped ${goalUpdates.length} Goal update(s) from a full replay page: ${error.message}`,
+    );
+    return;
+  }
+  envelope.updates = withGoal.updates;
+}
+
 function replayGoalBootstrap(
   projection:
     | SessionRestoreProjection
@@ -5667,11 +5697,13 @@ class QwenAgent implements Agent {
             // the page ended on. Nothing, for any transcript this build
             // wrote. A partial replay gets nothing either: the page did not
             // end where the transcript does. The card is presentation, so
-            // failing to render it is logged, never a failed load.
-            let goalUpdates: SessionUpdate[] = [];
-            if (replay.replayError === undefined) {
+            // failing to render it is logged, never a failed load. Rendered
+            // once the page is delivered, so it reads the Goal as it stands
+            // then, not as it stood before the replay's awaits.
+            const renderGoalUpdates = (): SessionUpdate[] => {
+              if (replay.replayError !== undefined) return [];
               try {
-                goalUpdates = liveSession.renderLegacyGoalSupersession(
+                return liveSession.renderLegacyGoalSupersession(
                   replayPage.records,
                 );
               } catch (error) {
@@ -5680,8 +5712,9 @@ class QwenAgent implements Agent {
                     error instanceof Error ? error.message : String(error)
                   }`,
                 );
+                return [];
               }
-            }
+            };
             if (!bulkReplay) {
               try {
                 for (const update of replay.updates) {
@@ -5699,7 +5732,7 @@ class QwenAgent implements Agent {
               if (replay.replayError !== undefined) {
                 throw RequestError.internalError(undefined, replay.replayError);
               }
-              for (const update of goalUpdates) {
+              for (const update of renderGoalUpdates()) {
                 try {
                   await liveSession.sendUpdate(update);
                 } catch (error) {
@@ -5729,24 +5762,12 @@ class QwenAgent implements Agent {
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
             validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
-            if (goalUpdates.length > 0) {
-              // The page was cut to the limits before the card existed; a
-              // page already at a limit ships without the card rather than
-              // failing the load over it.
-              const withGoal = {
-                ...envelope,
-                updates: [...envelope.updates, ...goalUpdates],
-              };
-              try {
-                validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
-                envelope.updates = withGoal.updates;
-              } catch (error) {
-                if (!(error instanceof HistoryReplayLimitError)) throw error;
-                debugLogger.debug(
-                  `Dropped the legacy Goal supersession from a full replay page: ${error.message}`,
-                );
-              }
-            }
+            appendGoalUpdatesWithinLimits(
+              sessionId,
+              envelope,
+              renderGoalUpdates(),
+              enforceLimits,
+            );
             return withRestoreHint(liveSession, {
               ...response,
               _meta: {
@@ -5928,6 +5949,7 @@ class QwenAgent implements Agent {
                     ? { hideRuntimeGoal: true }
                     : {}),
                   ...(goalBootstrap ? { bootstrap: goalBootstrap } : {}),
+                  ...(replayEnvelope?.partial ? { partialReplay: true } : {}),
                 },
               ).catch((error) => {
                 if (suppressRecoveredGoalPresentation) throw error;
@@ -5948,16 +5970,15 @@ class QwenAgent implements Agent {
                 streamGoalUpdates = rendered.updates;
                 return;
               }
-              const goalUpdates = rendered.updates;
-              if (goalUpdates.length > 0) {
+              if (rendered.updates.length > 0) {
                 replayEnvelope ??= {
                   v: LOAD_REPLAY_VERSION,
                   updates: [],
                 };
-                replayEnvelope.updates.push(...goalUpdates);
-                validateLoadReplayEnvelope(
+                appendGoalUpdatesWithinLimits(
                   sessionId,
                   replayEnvelope,
+                  rendered.updates,
                   restoreOptions.replay.kind === 'recent',
                 );
               }
