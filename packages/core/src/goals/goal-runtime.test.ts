@@ -2869,28 +2869,22 @@ describe('goal runtime', () => {
     expect(newHost.preemptGoalTurn).not.toHaveBeenCalled();
   });
 
-  it('migrates a legacy active goal once into a paused state', async () => {
+  it('restores a transcript that predates journaled Goal state with no Goal, and writes nothing', async () => {
+    // Builds before #7895 journaled goal_status cards, not state. Those are
+    // history: nothing is migrated, nothing is written, nothing starts.
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
 
     await runtime.restore([legacyGoalRecord()]);
-    await runtime.restore([legacyGoalRecord()]);
 
-    expect(journal.appended).toHaveLength(1);
-    expect(journal.appended[0]).toMatchObject({
-      cause: 'migrated',
-      snapshot: {
-        activity: 'idle',
-        goal: {
-          objective: 'ship it',
-          revision: 1,
-          status: 'paused',
-          evidenceCursor: { recordId: expect.any(String) },
-        },
-      },
+    expect(runtime.getSnapshot()).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
     });
-    expect(host.started).toEqual([]);
+    expect(runtime.getRecoveryCause?.()).toBeUndefined();
+    expect(journal.appended).toEqual([]);
     runtime.bindHost(host);
     await Promise.resolve();
     expect(host.started).toEqual([]);
@@ -3492,31 +3486,148 @@ describe('goal runtime', () => {
     expect(host.started).toEqual([]);
   });
 
-  it('blocks writes after failed legacy migration until restore succeeds', async () => {
-    const journal = fakeGoalJournal({
-      appendErrors: [new Error('migration write failed'), undefined],
-    });
+  it('blocks writes after a failed restore until one succeeds', async () => {
+    const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
+    const unreadable: RuntimeRecord = {
+      ...goalStateRecord({ v: 2, activity: 'idle', goal: null }),
+      systemPayload: { v: 99 },
+    };
 
-    await expect(runtime.restore([legacyGoalRecord()])).rejects.toEqual(
+    await expect(runtime.restore([unreadable])).rejects.toEqual(
       expect.objectContaining({
         name: 'GoalPersistenceUnavailableError',
-        message: 'migration write failed',
-        cause: expect.objectContaining({ message: 'migration write failed' }),
+        message: expect.stringContaining('unsupported version'),
       }),
     );
     await expect(
       runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
-    ).rejects.toThrow('migration write failed');
+    ).rejects.toThrow('unsupported version');
     expect(host.started).toEqual([]);
 
-    await runtime.restore([legacyGoalRecord()]);
+    await runtime.restore([
+      goalStateRecord(
+        {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'g-1',
+            revision: 1,
+            objective: 'ship it',
+            status: 'paused',
+            evidenceCursor: { recordId: 'restore-record' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+        'pause',
+      ),
+    ]);
     expect(runtime.getSnapshot().goal).toMatchObject({
       objective: 'ship it',
       status: 'paused',
     });
+  });
+
+  it('treats a record whose blockedAudit does not parse as unreadable, and blocks writes', async () => {
+    // Everything `prepareRestore` reads comes out of
+    // `parseGoalStateRecordPayloadV2`, which rejects the whole record when
+    // any part of it is malformed; there is no partially parsed record
+    // for the restore to trip over, so a malformed audit is the
+    // unsupported case, not an exception.
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    const record = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-audit',
+          revision: 3,
+          objective: 'ship it',
+          status: 'paused',
+          evidenceCursor: { recordId: 'restore-record' },
+          turnCount: 3,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+      'blocked',
+    );
+    const malformedAudit: RuntimeRecord = {
+      ...record,
+      systemPayload: {
+        ...(record.systemPayload as Record<string, unknown>),
+        blockedAudit: { fingerprint: 42, count: 3, turnIds: ['t1'] },
+      },
+    };
+
+    await expect(runtime.restore([malformedAudit])).rejects.toThrow(
+      GoalPersistenceUnavailableError,
+    );
+    await expect(
+      runtime.dispatch({ action: 'create', objective: 'must not overwrite' }),
+    ).rejects.toThrow(GoalPersistenceUnavailableError);
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(journal.appended).toEqual([]);
+  });
+
+  it('refuses a restore preparation that was still queued when the runtime was disposed', async () => {
+    // A restore itself writes nothing, but it queues behind whatever the
+    // runtime is already doing. Disposal while it waits must reach it
+    // before it commits anything.
+    let releaseAppend!: () => void;
+    const appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const runtime = createGoalRuntime({
+      journal: fakeGoalJournal({ beforeAppend: () => appendGate }),
+    });
+    const creating = runtime.dispatch({
+      action: 'create',
+      objective: 'hold the queue',
+    });
+    const preparing = runtime.prepareRestore([
+      goalStateRecord(
+        {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'g-queued',
+            revision: 1,
+            objective: 'queued restore',
+            status: 'paused',
+            evidenceCursor: { recordId: 'restore-record' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+        'pause',
+      ),
+    ]);
+
+    await Promise.resolve();
+    runtime.dispose();
+    releaseAppend();
+
+    await creating.catch(() => undefined);
+    await expect(preparing).rejects.toThrow('Goal runtime has been disposed');
+    await expect(runtime.activateRestoredWork()).rejects.toThrow(
+      'Goal runtime has been disposed',
+    );
+    expect(runtime.getSnapshot().goal?.objective).not.toBe('queued restore');
   });
 
   it('prepares an active restore without broadcasting or starting work', async () => {
@@ -3622,33 +3733,27 @@ describe('goal runtime', () => {
     ).resolves.toEqual([undefined, undefined]);
   });
 
-  it('prevents unfinished restore preparation from committing after disposal', async () => {
-    let releaseAppend!: () => void;
-    const appendGate = new Promise<void>((resolve) => {
-      releaseAppend = resolve;
-    });
-    const runtime = createGoalRuntime({
-      journal: fakeGoalJournal({ beforeAppend: () => appendGate }),
-    });
-    const preparing = runtime.prepareRestore([legacyGoalRecord()]);
-
-    await Promise.resolve();
-    runtime.dispose();
-    releaseAppend();
-
-    await expect(preparing).rejects.toThrow('Goal runtime has been disposed');
-    await expect(runtime.activateRestoredWork()).rejects.toThrow(
-      'Goal runtime has been disposed',
-    );
-  });
-
-  it('commits paused legacy recovery before a reentrant resume', async () => {
-    const journal = fakeGoalJournal({
-      appendErrors: [new Error('migration write failed'), undefined],
-    });
+  it('commits a restored paused Goal before a reentrant resume', async () => {
+    const journal = fakeGoalJournal();
     const runtime = createGoalRuntime({ journal });
-    await expect(runtime.restore([legacyGoalRecord()])).rejects.toThrow(
-      'migration write failed',
+    const pausedRecord = goalStateRecord(
+      {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-1',
+          revision: 1,
+          objective: 'ship it',
+          status: 'paused',
+          evidenceCursor: { recordId: 'restore-record' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+      'pause',
     );
     const host = fakeGoalTurnHost();
     let bindError: unknown;
@@ -3669,7 +3774,7 @@ describe('goal runtime', () => {
       });
     });
 
-    await runtime.restore([legacyGoalRecord()]);
+    await runtime.restore([pausedRecord]);
     await reentrantDispatch;
 
     expect(bindError).toBeUndefined();

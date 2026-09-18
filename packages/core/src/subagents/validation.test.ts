@@ -15,6 +15,32 @@ describe('SubagentValidator', () => {
     validator = new SubagentValidator();
   });
 
+  it.each(
+    [null, false, 'local', 'docker', '', [], {}].map((executionBackend) => ({
+      executionBackend,
+    })),
+  )(
+    'rejects invalid executionBackend=$executionBackend on direct create/update configurations',
+    ({ executionBackend }) => {
+      const config = {
+        name: 'test-agent',
+        description: 'A test agent',
+        systemPrompt: 'Complete the requested task.',
+        level: 'project',
+        executionBackend,
+      } as unknown as SubagentConfig;
+      expect(validator.validateConfig(config)).toMatchObject({
+        isValid: false,
+        errors: expect.arrayContaining([
+          'executionBackend must be "container" when provided',
+        ]),
+      });
+      expect(() => validator.validateOrThrow(config)).toThrow(
+        'executionBackend',
+      );
+    },
+  );
+
   describe('validateName', () => {
     it('should accept valid names', () => {
       const validNames = [
