@@ -358,6 +358,56 @@ describe('ChromeExtensionTransport', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'delivers a response ahead of the events that share its socket chunk',
+    async () => {
+      // Playwright installs a page's renderer and lifecycle listeners inside
+      // `Page.getFrameTree().then(...)`. A response only settles a promise, so
+      // its consumer runs on the microtask queue; events emitted synchronously
+      // from the same chunk overtook it, found no listener, and a claimed tab
+      // never regained its main world. Delivery must follow arrival order.
+      const { transport, socket, requests } = await connectedTransport();
+      const order: string[] = [];
+      transport.onEvent((event) => order.push(`event:${event.method}`));
+      const result = transport
+        .request('cdp.send', { tabId: 7, method: 'Page.getFrameTree' }, 1_000)
+        .then((value) => {
+          order.push('response:Page.getFrameTree');
+          return value;
+        });
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      socket.write(
+        Buffer.concat([
+          encodeFrame({
+            type: 'response',
+            id: requests[0]!.id,
+            ok: true,
+            result: { frameTree: {} },
+          }),
+          encodeFrame({
+            type: 'event',
+            tabId: 7,
+            method: 'Runtime.executionContextCreated',
+            params: {},
+          }),
+          encodeFrame({
+            type: 'event',
+            tabId: 7,
+            method: 'Page.lifecycleEvent',
+            params: { name: 'load' },
+          }),
+        ]),
+      );
+      await expect(result).resolves.toEqual({ frameTree: {} });
+      await vi.waitFor(() => expect(order).toHaveLength(3));
+      expect(order).toEqual([
+        'response:Page.getFrameTree',
+        'event:Runtime.executionContextCreated',
+        'event:Page.lifecycleEvent',
+      ]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'does not reopen a stopped socket for a late request',
     async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));

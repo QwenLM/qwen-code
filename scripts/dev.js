@@ -62,18 +62,26 @@ if (existsSync(userDocsTarget) && !existsSync(qcHelperDocsLink)) {
 // Stage the Browser Use skill runtime next to its SKILL.md for dev mode. The
 // bundle step does the same into dist/bundled; only dev mode reads the skill
 // from the source tree, so this copy exists nowhere else (it is git-ignored,
-// and no build step writes it). It needs the built browser-use package.
-try {
-  copyBrowserUseAssets(
-    root,
-    join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'browser-use'),
-  );
-} catch (error) {
-  console.warn(
-    `Browser Use skill runtime not staged for dev mode: ${
-      error instanceof Error ? error.message : String(error)
-    }`,
-  );
+// and no build step writes it). It needs the built browser-use package. The
+// informational passthrough flags never reach a skill, so they skip the copy
+// and stay a fast path.
+const passthroughArgs = process.argv.slice(2);
+const informationalOnly = passthroughArgs.some((argument) =>
+  ['--version', '-v', '--help', '-h'].includes(argument),
+);
+if (!informationalOnly) {
+  try {
+    copyBrowserUseAssets(
+      root,
+      join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'browser-use'),
+    );
+  } catch (error) {
+    console.warn(
+      `Browser Use skill runtime not staged for dev mode: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 // Entry point for the CLI

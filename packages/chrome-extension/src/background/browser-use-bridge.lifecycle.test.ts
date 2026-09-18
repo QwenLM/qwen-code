@@ -291,6 +291,34 @@ test.each([' ', 'Enter'])(
   },
 );
 
+test('a popup known only by its pending URL stays controllable', async () => {
+  // `chrome.tabs.onCreated` delivers a cross-origin popup with an empty `url`
+  // and the destination in `pendingUrl`. The claim already keys on
+  // `pendingUrl`; the runtime's immediate `tabs.get` must not then reject the
+  // same tab as unsupported because it only looked at `url`.
+  const f = await fixture();
+  await f.dispatch('cdp.send', {
+    tabId: 1,
+    method: 'Input.dispatchKeyEvent',
+    params: { type: 'keyDown', key: 'Enter', text: 'Enter' },
+  });
+  const popup = {
+    id: 3,
+    openerTabId: 1,
+    url: '',
+    pendingUrl: 'https://popup.test/cart',
+    windowId: 1,
+  };
+  f.tabs.set(3, popup);
+  f.emit('created', popup);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.agentOwnedTabs.has(3)).toBe(true);
+  await expect(f.dispatch('tabs.get', { tabId: 3 })).resolves.toMatchObject({
+    providerTabId: 3,
+  });
+  await expect(f.dispatch('tabs.attach', { tabId: 3 })).resolves.toBeDefined();
+});
+
 test.each(['persist', 'attach'])(
   'create failure during %s removes only the new tab',
   async (stage) => {

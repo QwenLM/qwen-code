@@ -602,7 +602,9 @@ async function requireControllableTab(tabId) {
   } catch {
     throw bridgeError('STALE_TAB', 'The Chrome tab no longer exists');
   }
-  if (!supportedUrl(tab.url)) {
+  // A tab the relay just claimed from `onCreated` may only carry its
+  // pending URL until the navigation commits; judge it the way the claim did.
+  if (!supportedUrl(tab.pendingUrl || tab.url)) {
     throw bridgeError(
       'UNSUPPORTED_TAB',
       'Qwen Browser can only control http(s) and about:blank tabs',

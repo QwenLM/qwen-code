@@ -274,59 +274,95 @@ export class ChromeExtensionTransport implements ChromeBridge {
         socket.destroy(new Error('Chrome bridge hello timed out'));
     }, this.connectTimeoutMs);
     handshakeTimer.unref();
+    // Messages are delivered in arrival order, one queue per socket. A
+    // response settles a promise, so the consumer's continuation runs on the
+    // microtask queue after this handler returns; an event emitted
+    // synchronously from the same chunk would overtake it. Playwright installs
+    // its page listeners inside `Page.getFrameTree().then(...)`, so an
+    // overtaking `Runtime.executionContextCreated` had no listener yet and the
+    // claimed tab lost its main world for good. After settling a response the
+    // drain yields a macrotask, which lets every pending continuation run
+    // before the next message; chunks arriving meanwhile join the same queue.
+    const inbound: unknown[] = [];
+    let draining = false;
+    const deliver = (message: unknown): 'continue' | 'yield' | 'stop' => {
+      if (!validated) {
+        if (!isObject(message) || message.type !== 'hello') return 'continue';
+        if (
+          message.extensionId === CHROME_EXTENSION_ID &&
+          typeof message.protocolVersion === 'number' &&
+          Number.isInteger(message.protocolVersion) &&
+          message.protocolVersion > 0 &&
+          message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION &&
+          !this.isConnected() &&
+          (this.selectedExtensionInstanceId === undefined ||
+            message.extensionInstanceId === this.selectedExtensionInstanceId)
+        ) {
+          // Not BROWSER_DISCONNECTED: discovery maps that code to an
+          // empty browser list, which would hide the update guidance.
+          this.incompatibleExtensionError = new BrowserRuntimeError(
+            'EXTENSION_VERSION_MISMATCH',
+            message.protocolVersion < CHROME_BRIDGE_PROTOCOL_VERSION
+              ? 'The Qwen Code Chrome extension is out of date. Update or reload it at chrome://extensions to match this Qwen Code version, then retry Browser Use.'
+              : 'This Qwen Code version is older than the Chrome extension. Update Qwen Code to match the installed extension, then retry Browser Use.',
+          );
+        }
+        if (
+          message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
+          message.extensionId !== CHROME_EXTENSION_ID ||
+          typeof message.extensionInstanceId !== 'string' ||
+          message.extensionInstanceId.trim() === '' ||
+          message.extensionInstanceId.length > 128
+        ) {
+          socket.destroy(
+            new Error(
+              'Chrome extension identity or protocol version did not match',
+            ),
+          );
+          return 'stop';
+        }
+        validated = true;
+        clearTimeout(handshakeTimer);
+        this.promote(socket, message as unknown as BridgeHello);
+        return 'continue';
+      }
+      if (this.socket !== socket) return 'stop';
+      const settlesResponse =
+        isObject(message) &&
+        message.type === 'response' &&
+        typeof message.id === 'string' &&
+        this.pending.has(message.id);
+      this.handleMessage(message);
+      return settlesResponse ? 'yield' : 'continue';
+    };
+    const drain = (): void => {
+      while (inbound.length > 0) {
+        const outcome = deliver(inbound.shift());
+        if (outcome === 'stop') {
+          inbound.length = 0;
+          break;
+        }
+        if (outcome === 'yield' && inbound.length > 0) {
+          setImmediate(drain);
+          return;
+        }
+      }
+      draining = false;
+    };
     socket.on('data', (chunk) => {
       try {
-        for (const message of decoder.push(chunk)) {
-          if (!validated) {
-            if (!isObject(message) || message.type !== 'hello') continue;
-            if (
-              message.extensionId === CHROME_EXTENSION_ID &&
-              typeof message.protocolVersion === 'number' &&
-              Number.isInteger(message.protocolVersion) &&
-              message.protocolVersion > 0 &&
-              message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION &&
-              !this.isConnected() &&
-              (this.selectedExtensionInstanceId === undefined ||
-                message.extensionInstanceId ===
-                  this.selectedExtensionInstanceId)
-            ) {
-              // Not BROWSER_DISCONNECTED: discovery maps that code to an
-              // empty browser list, which would hide the update guidance.
-              this.incompatibleExtensionError = new BrowserRuntimeError(
-                'EXTENSION_VERSION_MISMATCH',
-                message.protocolVersion < CHROME_BRIDGE_PROTOCOL_VERSION
-                  ? 'The Qwen Code Chrome extension is out of date. Update or reload it at chrome://extensions to match this Qwen Code version, then retry Browser Use.'
-                  : 'This Qwen Code version is older than the Chrome extension. Update Qwen Code to match the installed extension, then retry Browser Use.',
-              );
-            }
-            if (
-              message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
-              message.extensionId !== CHROME_EXTENSION_ID ||
-              typeof message.extensionInstanceId !== 'string' ||
-              message.extensionInstanceId.trim() === '' ||
-              message.extensionInstanceId.length > 128
-            ) {
-              socket.destroy(
-                new Error(
-                  'Chrome extension identity or protocol version did not match',
-                ),
-              );
-              return;
-            }
-            validated = true;
-            clearTimeout(handshakeTimer);
-            this.promote(socket, message as unknown as BridgeHello);
-            continue;
-          }
-          if (this.socket !== socket) return;
-          this.handleMessage(message);
-        }
+        inbound.push(...decoder.push(chunk));
       } catch {
         socket.destroy(new Error('Invalid Chrome bridge frame'));
+        return;
       }
+      if (draining) return;
+      draining = true;
+      drain();
     });
     socket.on('error', () => undefined);
     socket.on('close', () => {
+      inbound.length = 0;
       clearTimeout(handshakeTimer);
       this.acceptedSockets.delete(socket);
       if (this.socket === socket) this.disconnect(disconnectedError());
