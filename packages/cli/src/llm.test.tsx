@@ -11,6 +11,7 @@ import {
   vi,
   beforeEach,
   afterEach,
+  afterAll,
   type MockInstance,
 } from 'vitest';
 import {
@@ -26,6 +27,7 @@ import {
   createNonInteractivePromptId,
   main,
   registerLspHotReload,
+  setupUncaughtExceptionHandler,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
 } from './llm.js';
@@ -34,9 +36,20 @@ import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
-import type { Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
+import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
+
+const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+    >()),
+    prepareFileWatchersForProcessExit: mockPrepareFileWatchersForProcessExit,
+  }),
+);
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -79,6 +92,23 @@ const sessionRegistryConfigStub = {
   },
   unregisterSessionRegistry: async () => {},
 };
+
+// main() writes best-effort state under ~/.qwen; some runners — including
+// the review-address verification gate's clean child — inherit a HOME the
+// test process cannot write to. Ordinary CI already overrides HOME, so
+// point it at a scratch directory for this whole file.
+const savedHome = process.env['HOME'];
+const llmTestHome = mkdtempSync(join(tmpdir(), 'qwen-llm-test-home-'));
+process.env['HOME'] = llmTestHome;
+
+afterAll(() => {
+  if (savedHome === undefined) {
+    delete process.env['HOME'];
+  } else {
+    process.env['HOME'] = savedHome;
+  }
+  rmSync(llmTestHome, { recursive: true, force: true });
+});
 
 describe('gemini import boundary', () => {
   it('does not statically import ACP or noninteractive auth branches', () => {
@@ -461,6 +491,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -568,6 +599,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -656,6 +688,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -735,6 +768,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -787,6 +821,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never;
@@ -871,6 +906,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -947,6 +983,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1012,6 +1049,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1144,6 +1182,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never);
@@ -1196,6 +1235,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1242,6 +1282,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1309,6 +1350,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     };
@@ -1652,6 +1694,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1736,6 +1779,220 @@ describe('llm.tsx main function', () => {
     );
   });
 
+  it('continues the prompt id chain when the -p run resumes a session', () => {
+    // Every headless `-p` process would otherwise mint `########0` again, and
+    // loadSession keeps only the last file-history snapshot per promptId, so
+    // the earlier run's /rewind target for turn 0 would be dropped.
+    const records = [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/tmp',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'first turn' }] },
+      },
+      {
+        uuid: 'u2',
+        parentUuid: 'u1',
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: { uiEvent: { prompt_id: 'test-session-id########3' } },
+      },
+    ] as unknown as ChatRecord[];
+
+    expect(createNonInteractivePromptId('test-session-id', records)).toBe(
+      'test-session-id########4',
+    );
+  });
+
+  it('continues past a claimed turn 0 that the user-turn fallback cannot see', () => {
+    // computeInitialTurnFromHistory returns 0 here — highest claimed turn is
+    // 0, and the only user record has blank text so its fallback count stays
+    // 0 (`-p '   '` reaches the model, `llm.tsx` only rejects a falsy input).
+    // Seeding from that 0 would re-mint `########0`, the very collision this
+    // function exists to prevent.
+    const records = [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/tmp',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: '   ' }] },
+      },
+      {
+        uuid: 'u2',
+        parentUuid: 'u1',
+        sessionId: 'test-session-id',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: { uiEvent: { prompt_id: 'test-session-id########0' } },
+      },
+    ] as unknown as ChatRecord[];
+
+    expect(createNonInteractivePromptId('test-session-id', records)).toBe(
+      'test-session-id########1',
+    );
+  });
+
+  it('passes the resumed transcript through to the -p prompt id', async () => {
+    // Pins the call site, not just the function: without the
+    // `getResumedSessionData()` argument in main(), the shipped `-p` path
+    // reverts to `########0` on every resume while the unit tests above stay
+    // green.
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const validatorModule = await import('./validateNonInterActiveAuth.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const initializerModule = await import('./core/initializer.js');
+    const startupWarningsModule = await import('./utils/startupWarnings.js');
+    const userStartupWarningsModule = await import(
+      './utils/userStartupWarnings.js'
+    );
+
+    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      memoryFileCount: 0,
+    });
+    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
+    vi.spyOn(
+      userStartupWarningsModule,
+      'getUserStartupWarnings',
+    ).mockResolvedValue([]);
+    const runNonInteractiveSpy = vi
+      .spyOn(nonInteractiveModule, 'runNonInteractive')
+      .mockResolvedValue(0);
+
+    const configStub = {
+      isInteractive: () => false,
+      getQuestion: () => 'hello',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getFailedMcpServerNames: () => [],
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getContentGeneratorConfig: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getProxy: () => undefined,
+      getResumedSessionData: () => ({
+        conversation: {
+          sessionId: 'test-session-id',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: new Date().toISOString(),
+              type: 'system',
+              subtype: 'ui_telemetry',
+              cwd: '/tmp',
+              version: 'test',
+              systemPayload: {
+                uiEvent: { prompt_id: 'test-session-id########3' },
+              },
+            },
+          ],
+        },
+      }),
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getSystemHooks: () => undefined,
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockResolvedValue(
+      configStub,
+    );
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+
+    expect(runNonInteractiveSpy).toHaveBeenCalledTimes(1);
+    expect(runNonInteractiveSpy.mock.calls[0]?.[3]).toBe(
+      'test-session-id########4',
+    );
+  });
+
   const runSandboxRelaunch = async (
     argv: string[],
     sessionId = '123e4567-e89b-12d3-a456-426614174000',
@@ -1774,6 +2031,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2023,6 +2281,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2258,6 +2517,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2469,6 +2729,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2598,6 +2859,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2726,6 +2988,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2850,6 +3113,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2953,6 +3217,14 @@ describe('llm.tsx main function kitty protocol', () => {
     }
 
     expect(cleanupModule.runExitCleanup).toHaveBeenCalledTimes(2);
+    expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledTimes(2);
+    for (const index of [0, 1]) {
+      expect(
+        mockPrepareFileWatchersForProcessExit.mock.invocationCallOrder[index],
+      ).toBeLessThan(
+        vi.mocked(cleanupModule.runExitCleanup).mock.invocationCallOrder[index],
+      );
+    }
   });
 
   // Shared config/settings mocks for the interactive signal-handler tests.
@@ -3001,6 +3273,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3315,6 +3588,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3377,6 +3651,99 @@ describe('validateDnsResolutionOrder', () => {
   });
 });
 
+describe('setupUncaughtExceptionHandler', () => {
+  let tmpDir: string;
+  let installedHandler: ((error: unknown) => void) | undefined;
+  let exitSpy: MockInstance;
+  let debugLogPathSpy: MockInstance;
+
+  const makeConfig = (abortAll: () => void, running: unknown[] = []) =>
+    ({
+      ...sessionRegistryConfigStub,
+      getSessionId: () => 'uncaught-test-session',
+      getMonitorRegistry: () => ({ abortAll, getRunning: () => running }),
+    }) as unknown as Config;
+
+  const installHandler = (config: Config): ((error: unknown) => void) => {
+    const before = new Set(process.listeners('uncaughtException'));
+    setupUncaughtExceptionHandler(config);
+    const installed = process
+      .listeners('uncaughtException')
+      .filter((listener) => !before.has(listener))
+      .pop();
+    if (!installed) {
+      throw new Error('uncaughtException handler was not installed');
+    }
+    installedHandler = installed as (error: unknown) => void;
+    return installedHandler;
+  };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'qwen-uncaught-'));
+    debugLogPathSpy = vi
+      .spyOn(Storage, 'getDebugLogPath')
+      .mockReturnValue(join(tmpDir, 'debug.txt'));
+    exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as typeof process.exit);
+  });
+
+  afterEach(() => {
+    if (installedHandler) {
+      process.removeListener('uncaughtException', installedHandler);
+      installedHandler = undefined;
+    }
+    exitSpy.mockRestore();
+    debugLogPathSpy.mockRestore();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reaps running monitors before exiting on an uncaught exception', () => {
+    const abortAll = vi.fn();
+    const handler = installHandler(makeConfig(abortAll, [{}, {}]));
+
+    handler(new Error('boom'));
+
+    expect(abortAll).toHaveBeenCalledWith({ notify: false });
+    // The reap must land before exit: a reordering that exits first would
+    // silently skip it, and a mocked no-op exit cannot catch that by itself.
+    expect(abortAll.mock.invocationCallOrder[0]).toBeLessThan(
+      (exitSpy.mock.invocationCallOrder[0] as number) ?? 0,
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const log = readFileSync(join(tmpDir, 'debug.txt'), 'utf8');
+    expect(log).toContain('[UNCAUGHT_EXCEPTION] boom');
+    // A successful reap also leaves a synchronous record — without it a crash
+    // log cannot tell "reap skipped a monitor" from "signalled but ignored".
+    expect(log).toContain('[MONITOR_REAP] reaped=2');
+  });
+
+  it('leaves monitors alone for expected PTY teardown races', () => {
+    const abortAll = vi.fn();
+    const handler = installHandler(makeConfig(abortAll));
+
+    handler(new Error('read EIO'));
+
+    expect(abortAll).not.toHaveBeenCalled();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it('still exits when the monitor registry throws during reap', () => {
+    const abortAll = vi.fn(() => {
+      throw new Error('registry broken');
+    });
+    const handler = installHandler(makeConfig(abortAll));
+
+    expect(() => handler(new Error('boom'))).not.toThrow();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    // A failed reap means monitors still leak; that fact must be recorded,
+    // not swallowed (the crash line above cannot contain it).
+    const log = readFileSync(join(tmpDir, 'debug.txt'), 'utf8');
+    expect(log).toContain('[MONITOR_REAP_FAILED]');
+    expect(log).toContain('registry broken');
+  });
+});
+
 describe('startInteractiveUI', () => {
   // Mock dependencies
   const mockConfig = {
@@ -3392,7 +3759,12 @@ describe('startInteractiveUI', () => {
       ui: {
         hideWindowTitle: false,
       },
+      // Messaging is on by default, and on it binds an inbox and arms its
+      // own exit cleanup. These tests are about startup order and render
+      // options; the messaging path is covered in startInteractiveUI.test.
+      agents: { crossSessionMessaging: false },
     },
+    getSystemHooks: () => undefined,
     getUserHooks: () => undefined,
     getProjectHooks: () => undefined,
   } as LoadedSettings;
@@ -3724,6 +4096,8 @@ describe('startInteractiveUI', () => {
         ui: {
           hideWindowTitle: false,
         },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        agents: { crossSessionMessaging: false },
       },
     } as LoadedSettings;
 
@@ -4072,7 +4446,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
 
       await startInteractiveUI(
@@ -4103,7 +4481,11 @@ describe('startInteractiveUI', () => {
         getMemoryPressureMonitor: () => ({ performCheck }),
       } as unknown as Config;
       const settings = {
-        merged: { ui: { hideWindowTitle: true } },
+        // Off for the reason `mockSettings` gives: this is not about messaging.
+        merged: {
+          ui: { hideWindowTitle: true },
+          agents: { crossSessionMessaging: false },
+        },
       } as unknown as LoadedSettings;
       // An earlier describe's vi.restoreAllMocks() wipes the shared ink
       // render mock's return value in the full run, so re-arm it here.

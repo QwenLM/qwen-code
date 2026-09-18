@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  restoreSessionSources,
+  type SessionSourcesRestoreState,
+} from './session-sources.js';
+
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -50,14 +55,6 @@ import {
   type GoalRecoveryRecord,
   type GoalRecoverySelection,
 } from '../goals/goal-persistence.js';
-import {
-  EvidenceSourceUnavailableError,
-  GoalEvidenceCheckpointAccumulator,
-  GoalEvidenceRecordIndexAccumulator,
-  InvalidGoalEvidenceReferenceError,
-  type GoalEvidenceCheckpointWindow,
-  type GoalEvidenceRecordIndexHint,
-} from '../goals/goal-evidence.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
@@ -258,8 +255,9 @@ export interface SessionRestoreReplayPage {
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
 
-export interface SessionRuntimeResumeState {
+export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
+  completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
   attributionSnapshot?: AttributionSnapshot;
@@ -279,7 +277,6 @@ export interface SessionRuntimeResumeState {
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
   goalRecords: GoalRecoveryRecord[];
   goalRecoverySourceUuid?: string;
-  goalCheckpointWindow?: GoalEvidenceCheckpointWindow;
   initialTurn: number;
   backgroundNotificationTaskIds: string[];
 }
@@ -293,7 +290,8 @@ export interface SessionRestoreProjection {
   replay?: SessionRestoreReplayPage;
 }
 
-export interface SessionLiveRestoreProjection {
+export interface SessionLiveRestoreProjection
+  extends SessionSourcesRestoreState {
   sessionId: string;
   startTime: string;
   lastUpdated: string;
@@ -350,7 +348,6 @@ interface UuidIndexEntry {
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
   goalRecoveryCandidate: boolean;
-  goalEvidenceHint: GoalEvidenceRecordIndexHint;
   turnHint: SessionTurnRecordHint;
   navigationKind?: SessionTranscriptNavigationTurnKind;
   navigationOrdinal?: number;
@@ -375,6 +372,7 @@ interface TranscriptIndex {
   leafUuid: string;
   firstRecordUuid: string;
   physicalRecords: PhysicalRecordHint[];
+  sourceReadComplete: boolean;
   runtimeUuids: string[];
   replayUuids: string[];
   navigationTurns: TranscriptNavigationTurnHint[];
@@ -1626,7 +1624,6 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     total +=
       INDEX_ENTRY_BASE_BYTES +
       INDEX_HINT_BASE_BYTES * 2 +
-      (entry.goalEvidenceHint.parsedGoalContext ? INDEX_HINT_BASE_BYTES : 0) +
       INDEX_MAP_ENTRY_BYTES +
       INDEX_CONTAINER_BASE_BYTES +
       entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
@@ -1638,10 +1635,6 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.goalId) +
-      estimateStringBytes(entry.goalEvidenceHint.parsedGoalContext?.turnId) +
-      estimateStringBytes(entry.goalEvidenceHint.claimedGoalId) +
-      estimateStringBytes(entry.goalEvidenceHint.provenance) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
   for (const turn of index.navigationTurns) {
@@ -1962,12 +1955,9 @@ async function buildIndex(params: {
   // Retain only the fields required by the shared branch resolver while the
   // frozen snapshot is parsed, so page reads never reopen the full active chain.
   const branchPointRecords = new Map<string, BranchPointRecord>();
-  const goalEvidenceAccumulators = new Map<
-    string,
-    GoalEvidenceRecordIndexAccumulator
-  >();
   let sequence = 0;
   const physicalRecords: PhysicalRecordHint[] = [];
+  let sourceReadComplete = true;
   let leafUuid: string | undefined;
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
@@ -1981,9 +1971,15 @@ async function buildIndex(params: {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
         let fragmentIndex = 0;
-        for (const value of jsonl.parseLineTolerant<unknown>(text, filePath)) {
+        const parsed = jsonl.parseLineTolerantWithIntegrity<unknown>(
+          text,
+          filePath,
+        );
+        sourceReadComplete &&= parsed.complete;
+        for (const value of parsed.records) {
           const record = validateTranscriptRecord(value).record;
           if (!record) {
+            sourceReadComplete = false;
             continue;
           }
           if (firstRecordUuid === undefined) {
@@ -2045,9 +2041,6 @@ async function buildIndex(params: {
               record as unknown as ChatRecord,
               sessionId,
             ).countsAsUserPrompt;
-            goalEvidenceAccumulators
-              .get(record.uuid)
-              ?.addFragment(record as unknown as ChatRecord);
           } else {
             const chatRecord = record as unknown as ChatRecord;
             const navigationKind = navigationKindForRecord(chatRecord);
@@ -2055,15 +2048,6 @@ async function buildIndex(params: {
               chatRecord.subtype === 'cron' ||
               projectUserTranscriptForDisplay(chatRecord).displayText !==
                 undefined;
-            const goalEvidenceAccumulator =
-              new GoalEvidenceRecordIndexAccumulator(chatRecord);
-            const goalEvidenceHint = goalEvidenceAccumulator.finish();
-            if (goalEvidenceHint.provenance) {
-              goalEvidenceAccumulators.set(
-                record.uuid,
-                goalEvidenceAccumulator,
-              );
-            }
             byUuid.set(record.uuid, {
               parentUuid: record.parentUuid,
               sessionIdMatchesFile: record.sessionId === sessionId,
@@ -2080,7 +2064,6 @@ async function buildIndex(params: {
               attributionSnapshotCandidate:
                 isAttributionSnapshotCandidate(chatRecord),
               goalRecoveryCandidate: isGoalRecoveryCandidate(chatRecord),
-              goalEvidenceHint,
               turnHint: getSessionTurnRecordHint(chatRecord, sessionId),
               ...(navigationKind ? { navigationKind } : {}),
               navigationTextSuppressed,
@@ -2101,10 +2084,6 @@ async function buildIndex(params: {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
     throw error;
-  }
-
-  for (const [uuid, accumulator] of goalEvidenceAccumulators) {
-    byUuid.get(uuid)!.goalEvidenceHint = accumulator.finish();
   }
 
   for (const [uuid, entry] of byUuid) {
@@ -2219,6 +2198,7 @@ async function buildIndex(params: {
     leafUuid,
     firstRecordUuid,
     physicalRecords,
+    sourceReadComplete,
     runtimeUuids,
     replayUuids,
     navigationTurns,
@@ -2713,7 +2693,9 @@ export class SessionTranscriptReader {
       const entry = index.byUuid.get(uuid);
       if (
         position === compressionPosition ||
-        (entry?.type !== 'system' &&
+        ((entry?.type !== 'system' ||
+          entry?.subtype === 'goal_turn_end' ||
+          entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
       ) {
         modelSet.add(uuid);
@@ -2784,6 +2766,12 @@ export class SessionTranscriptReader {
           )
         : [],
     );
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const metadataSet = new Set(
@@ -2816,12 +2804,7 @@ export class SessionTranscriptReader {
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
-    let firstRecord: ChatRecord | undefined;
     let firstRecordSeen = false;
-    let goalCheckpointAccumulator:
-      | GoalEvidenceCheckpointAccumulator
-      | undefined;
-    let goalEvidenceSet = new Set<string>();
     const deferredPreReadRecords = new Map<string, ChatRecord>();
     const dispatchRecord = (record: ChatRecord): void => {
       if (modelSet.has(record.uuid)) apiHistory.add(record);
@@ -2871,10 +2854,8 @@ export class SessionTranscriptReader {
           );
         }
       }
+      if (record.uuid === sourcesUuid) sourceRecords.push(record);
       if (artifactSet.has(record.uuid)) artifacts.add(record);
-      if (goalEvidenceSet.has(record.uuid)) {
-        goalCheckpointAccumulator?.capture(record);
-      }
       if (replaySet.has(record.uuid)) {
         replayRecordsByUuid.set(record.uuid, record);
       }
@@ -2887,10 +2868,7 @@ export class SessionTranscriptReader {
     );
     const selectedReadsStartedAt = performance.now();
     const selectedReadSet = new Set(preReadUuids);
-    let goalRecovery: {
-      selectedGoalRecovery: GoalRecoverySelection;
-      goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-    };
+    let goalRecovery: { selectedGoalRecovery: GoalRecoverySelection };
     try {
       goalRecovery = await withAggregatedRecordReadContext(
         index,
@@ -2909,7 +2887,6 @@ export class SessionTranscriptReader {
                   );
                 }
                 firstRecordSeen = true;
-                if (!goalSet.has(record.uuid)) firstRecord = record;
               }
               if (goalSet.has(record.uuid)) {
                 const normalized = normalizeGoalRecoveryRecord(record);
@@ -2933,7 +2910,8 @@ export class SessionTranscriptReader {
                 metadataSet.has(record.uuid) ||
                 uiTelemetrySet.has(record.uuid) ||
                 fileHistorySet.has(record.uuid) ||
-                artifactSet.has(record.uuid);
+                artifactSet.has(record.uuid) ||
+                record.uuid === sourcesUuid;
               if (needsDeferredDispatch) {
                 if (
                   record.uuid === index.firstRecordUuid &&
@@ -2953,36 +2931,6 @@ export class SessionTranscriptReader {
 
           const selectedGoalRecovery =
             selectGoalRecoveryFromRecords(goalRecords);
-          const pendingGoal =
-            selectedGoalRecovery.recovery.kind === 'v2'
-              ? selectedGoalRecovery.recovery.payload
-              : undefined;
-          const pendingCheckpoint = pendingGoal?.checkpointPending;
-          if (pendingCheckpoint && pendingGoal.snapshot.goal) {
-            try {
-              goalCheckpointAccumulator = new GoalEvidenceCheckpointAccumulator(
-                index.runtimeUuids.map(
-                  (uuid) => index.byUuid.get(uuid)!.goalEvidenceHint,
-                ),
-                pendingGoal.snapshot.goal,
-                pendingCheckpoint.permit,
-              );
-            } catch (error) {
-              if (!(error instanceof EvidenceSourceUnavailableError)) {
-                throw error;
-              }
-              debugLogger.warn(
-                `restore projection: deferring unavailable Goal checkpoint evidence: ${error.message}`,
-              );
-            }
-          }
-          goalEvidenceSet = new Set(
-            goalCheckpointAccumulator?.getCandidateUuids() ?? [],
-          );
-          if (firstRecord && goalEvidenceSet.has(firstRecord.uuid)) {
-            goalCheckpointAccumulator?.capture(firstRecord);
-          }
-          firstRecord = undefined;
           const selectedRuntimeUuids = index.runtimeUuids.filter(
             (uuid) =>
               modelSet.has(uuid) ||
@@ -2991,13 +2939,16 @@ export class SessionTranscriptReader {
               metadataSet.has(uuid) ||
               uiTelemetrySet.has(uuid) ||
               fileHistorySet.has(uuid) ||
-              replaySet.has(uuid) ||
-              goalEvidenceSet.has(uuid),
+              replaySet.has(uuid),
           );
           const preReadSet = new Set(preReadUuids);
           readContext.preloadedRecords = deferredPreReadRecords;
           const remainingUuids = Array.from(
-            new Set([...selectedRuntimeUuids, ...artifactUuids]),
+            new Set([
+              ...selectedRuntimeUuids,
+              ...artifactUuids,
+              ...(sourcesUuid ? [sourcesUuid] : []),
+            ]),
           ).filter(
             (uuid) => !preReadSet.has(uuid) || deferredPreReadRecords.has(uuid),
           );
@@ -3009,18 +2960,7 @@ export class SessionTranscriptReader {
             readContext,
           );
 
-          let goalCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
-          try {
-            goalCheckpointWindow = goalCheckpointAccumulator?.finish();
-          } catch (error) {
-            if (!(error instanceof InvalidGoalEvidenceReferenceError)) {
-              throw error;
-            }
-            debugLogger.warn(
-              `restore projection: deferring invalid Goal checkpoint evidence: ${error.message}`,
-            );
-          }
-          return { selectedGoalRecovery, goalCheckpointWindow };
+          return { selectedGoalRecovery };
         },
       );
     } finally {
@@ -3093,8 +3033,10 @@ export class SessionTranscriptReader {
     const restoredTokenCounts = resumeTokenCounts.finish();
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
+    const completedToolCallIds = apiHistory.getCompletedToolCallIds();
     const runtime: SessionRuntimeResumeState = {
       apiHistory: apiHistory.finish(),
+      ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }
         : {}),
@@ -3115,6 +3057,9 @@ export class SessionTranscriptReader {
       ...(restoredFileHistory
         ? { fileHistorySnapshots: restoredFileHistory }
         : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       goalRecords,
       ...(goalRecovery.selectedGoalRecovery.sourceUuid
@@ -3122,9 +3067,6 @@ export class SessionTranscriptReader {
             goalRecoverySourceUuid:
               goalRecovery.selectedGoalRecovery.sourceUuid,
           }
-        : {}),
-      ...(goalRecovery.goalCheckpointWindow
-        ? { goalCheckpointWindow: goalRecovery.goalCheckpointWindow }
         : {}),
       initialTurn: turnStateValue.initialTurn,
       backgroundNotificationTaskIds:
@@ -3219,6 +3161,12 @@ export class SessionTranscriptReader {
         ? undefined
         : replaySelection.index.replayUuids[goalStatePosition];
     const goalStateSet = new Set(goalStateUuid ? [goalStateUuid] : []);
+    const sourcesUuid = index.physicalRecords.findLast(
+      (record) =>
+        record.type === 'system' &&
+        record.subtype === 'session_sources_snapshot',
+    )?.uuid;
+    const sourceRecords: ChatRecord[] = [];
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const selectedRuntimeUuids = index.runtimeUuids.filter(
@@ -3240,6 +3188,7 @@ export class SessionTranscriptReader {
     const selectedReadSet = new Set([
       ...selectedRuntimeUuids,
       ...artifactUuids,
+      ...(sourcesUuid ? [sourcesUuid] : []),
     ]);
     const selectedReadsStartedAt = performance.now();
     try {
@@ -3265,6 +3214,7 @@ export class SessionTranscriptReader {
             const normalized = normalizeGoalRecoveryRecord(record);
             if (normalized) goalRecords.push(normalized);
           }
+          if (record.uuid === sourcesUuid) sourceRecords.push(record);
           if (artifactSet.has(record.uuid)) artifacts.add(record);
         },
       );
@@ -3308,6 +3258,9 @@ export class SessionTranscriptReader {
       startTime: index.restoreStartTime,
       lastUpdated: index.lastUpdated,
       ...(replay ? { replay } : {}),
+      ...(index.sourceReadComplete
+        ? restoreSessionSources(sourceRecords, sessionId)
+        : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
       ...(goalRecords.length > 0 ? { goalRecords } : {}),
       ...(replayGoalRecoverySourceUuid

@@ -23,6 +23,7 @@ import {
   type DaemonWorkspaceExtensionsStatus,
   type DaemonWorkspaceFile,
   type DaemonGitHubPullRequestList,
+  type DaemonGitRemoteInfo,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
@@ -114,6 +115,11 @@ export interface WebShellDaemonScenario {
   gitHubPrs?: DaemonGitHubPullRequestList;
   /** Response for `GET /workspaces/:cwd/git/branches`. */
   gitBranches?: unknown;
+  /**
+   * Remotes served by `GET /workspaces/:cwd/git/remotes`. The add/remove
+   * routes mutate this array in place so later reads see earlier writes.
+   */
+  gitRemotes?: DaemonGitRemoteInfo[];
   /** Response for `GET /workspaces/:cwd/git/diff`. */
   gitDiff?: unknown;
   /** Response for `GET /workspaces/:cwd/git/log`. */
@@ -443,6 +449,7 @@ export function createWebShellDaemonScenario(
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
+    gitRemotes: overrides.gitRemotes,
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
@@ -704,7 +711,9 @@ function filterScenarioSessions(
     ? workspaceSessions.filter(
         (session) =>
           session.sourceType === sourceType ||
-          (sourceType === 'default' && session.sourceType === undefined),
+          (sourceType === 'default' &&
+            (session.sourceType === undefined ||
+              session.sourceType === 'qwen-live')),
       )
     : workspaceSessions;
   return group === 'pinned'
@@ -759,6 +768,7 @@ function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/brand' ||
     path === '/workspace/settings' ||
     path === '/workspace/providers' ||
     path === '/workspace/skills' ||
@@ -787,9 +797,11 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
-    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
+    /^\/workspaces\/.+\/git\/(branches|checkout|branch|push|pull|commit|diff|log|remotes|remote(?:\/remove)?)\/?$/.test(
       path,
     ) ||
+    // Remotes are scoped-only in the real daemon; the legacy git table
+    // intentionally omits them.
     /^\/workspace\/git\/(branches|checkout|branch|push|pull|commit|diff|log)\/?$/.test(
       path,
     ) ||
@@ -819,7 +831,10 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
-  if (method === 'GET' && (path === '/health' || path === '/capabilities')) {
+  if (
+    method === 'GET' &&
+    (path === '/health' || path === '/capabilities' || path === '/brand')
+  ) {
     return true;
   }
   if (
@@ -920,7 +935,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (
     method === 'GET' &&
-    /^\/workspaces\/.+\/git\/(branches|diff|log)\/?$/.test(path)
+    /^\/workspaces\/.+\/git\/(branches|diff|log|remotes)\/?$/.test(path)
   )
     return true;
   if (
@@ -930,7 +945,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (
     method === 'POST' &&
-    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit)\/?$/.test(path)
+    /^\/workspaces\/.+\/git\/(checkout|branch|push|pull|commit|remote|remote\/remove)\/?$/.test(
+      path,
+    )
   )
     return true;
   if (
@@ -1044,6 +1061,40 @@ function isDaemonRoute(method: string, path: string): boolean {
   );
 }
 
+// The remotes list lives on the scenario so the add/remove routes can
+// mutate what later GETs (and later mutations) observe — the same contract
+// the real daemon's fresh-list responses give the client.
+function materializeRemotes(
+  scenario: WebShellDaemonScenario,
+): DaemonGitRemoteInfo[] {
+  scenario.gitRemotes ??= [
+    {
+      name: 'origin',
+      fetchUrl: 'https://example.com/o/r.git',
+      pushUrl: 'https://example.com/o/r.git',
+      extraFetchUrls: 0,
+      extraPushUrls: 0,
+      promisor: false,
+      customRefspec: false,
+      otherSettings: 0,
+    },
+  ];
+  return scenario.gitRemotes;
+}
+
+function plainRemote(name: string, url: string): DaemonGitRemoteInfo {
+  return {
+    name,
+    fetchUrl: url,
+    pushUrl: url,
+    extraFetchUrls: 0,
+    extraPushUrls: 0,
+    promisor: false,
+    customRefspec: false,
+    otherSettings: 0,
+  };
+}
+
 async function handleDaemonRoute(
   route: Route,
   method: string,
@@ -1058,6 +1109,13 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/capabilities') {
     await json(route, scenario.capabilities);
+    return;
+  }
+  if (method === 'GET' && path === '/brand') {
+    // Always an empty brand, so the mock serves the built-in name and logo and
+    // the visual baselines stay valid. A spec that needs a white-label shell
+    // should give this a scenario field rather than loosening it here.
+    await json(route, {});
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
@@ -1617,6 +1675,63 @@ async function handleDaemonRoute(
         hasMore: false,
       },
     );
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/remotes\/?$/.test(path)) {
+    await json(route, {
+      v: 1,
+      workspaceCwd: scenario.workspaceCwd,
+      available: true,
+      remotes: materializeRemotes(scenario),
+    });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^\/workspaces\/.+\/git\/remote(?:\/remove)?\/?$/.test(path)
+  ) {
+    const remotes = materializeRemotes(scenario);
+    const name =
+      body && typeof body === 'object' && 'name' in body
+        ? String(body.name)
+        : '';
+    if (path.includes('/remote/remove')) {
+      const index = remotes.findIndex((r) => r.name === name);
+      if (index === -1) {
+        await json(
+          route,
+          {
+            error: 'no_such_remote',
+            message: `error: No such remote: '${name}'`,
+          },
+          404,
+        );
+        return;
+      }
+      remotes.splice(index, 1);
+    } else {
+      const url =
+        body && typeof body === 'object' && 'url' in body
+          ? String(body.url)
+          : '';
+      if (remotes.some((r) => r.name === name)) {
+        await json(
+          route,
+          {
+            error: 'remote_already_exists',
+            message: `error: remote ${name} already exists.`,
+          },
+          409,
+        );
+        return;
+      }
+      remotes.push(plainRemote(name, url));
+    }
+    await json(route, {
+      v: 1,
+      workspaceCwd: scenario.workspaceCwd,
+      remotes,
+    });
     return;
   }
   if (

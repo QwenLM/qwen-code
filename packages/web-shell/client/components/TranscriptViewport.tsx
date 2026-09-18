@@ -9,7 +9,9 @@ import {
   useCallback,
   useImperativeHandle,
   useLayoutEffect,
+  useMemo,
   useRef,
+  useState,
 } from 'react';
 import {
   MessageList,
@@ -20,13 +22,54 @@ import { Button } from './ui/button';
 import { GlobalTurnNavigation } from './GlobalTurnNavigation';
 import styles from './TranscriptViewport.module.css';
 import { useTranscriptViewport } from '../hooks/useTranscriptViewport';
+import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
+import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
 
 interface ReadingAnchor {
   source: string;
   rowKey?: string;
   offset: number;
   callId?: string;
+}
+
+export interface TurnFollowRange {
+  start: number;
+  end: number;
+  current: number;
+}
+
+// Rows whose blocks carry no turn mapping (assistant output, tool cards)
+// inherit the turn of the previous mapped row; rows above the first mapped row
+// belong to the turn before it. This mirrors how the in-list timeline
+// propagates a turn id across its rows.
+export function followRangeFromRows(
+  rows: readonly { top: number; bottom: number; ordinal?: number }[],
+  viewportTop: number,
+  viewportBottom: number,
+): TurnFollowRange | undefined {
+  const firstMapped = rows.find((row) => row.ordinal !== undefined)?.ordinal;
+  if (firstMapped === undefined) return undefined;
+  // The reading position is anchored a third of the way down the viewport so
+  // the highlight reaches the first and last turns at the scroll extremes
+  // instead of stalling on whichever turn sits in the middle.
+  const line = viewportTop + (viewportBottom - viewportTop) / 3;
+  let lastMapped: number | undefined;
+  let start: number | undefined;
+  let end: number | undefined;
+  let firstVisible: number | undefined;
+  let current: number | undefined;
+  for (const row of rows) {
+    if (row.ordinal !== undefined) lastMapped = row.ordinal;
+    const effective = row.ordinal ?? lastMapped ?? Math.max(0, firstMapped - 1);
+    if (row.bottom < viewportTop || row.top > viewportBottom) continue;
+    start = start === undefined ? effective : Math.min(start, effective);
+    end = end === undefined ? effective : Math.max(end, effective);
+    firstVisible ??= effective;
+    if (row.top <= line) current = effective;
+  }
+  if (start === undefined || end === undefined) return undefined;
+  return { start, end, current: current ?? firstVisible! };
 }
 
 export const TranscriptViewport = forwardRef<
@@ -49,8 +92,10 @@ export const TranscriptViewport = forwardRef<
     !props.hideSessionTimeline &&
     (viewport.navigation.mode === 'ready' ||
       viewport.navigation.mode === 'loading') &&
-    viewport.navigation.effectiveTurnCount > 0;
+    viewport.navigation.effectiveTurnCount >=
+      SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
   const root = useRef<HTMLDivElement>(null);
+  const navigationVisible = useChatNavigationVisible(root, globalNavigation);
   const list = useRef<MessageListHandle>(null);
   const anchor = useRef<ReadingAnchor | undefined>(undefined);
   const entryDirection = useRef<'older' | 'newer'>('older');
@@ -59,6 +104,15 @@ export const TranscriptViewport = forwardRef<
   const appliedTarget = useRef<number | undefined>(undefined);
   const scrollIntent = useRef(0);
   const restoring = useRef(false);
+  const loadFrame = useRef<number | undefined>(undefined);
+  useLayoutEffect(
+    () => () => {
+      if (loadFrame.current !== undefined)
+        cancelAnimationFrame(loadFrame.current);
+      loadFrame.current = undefined;
+    },
+    [viewKey],
+  );
   useLayoutEffect(() => {
     if (historical || loading) onCanScrollToBottomChange?.(true);
   }, [historical, loading, onCanScrollToBottomChange]);
@@ -114,6 +168,90 @@ export const TranscriptViewport = forwardRef<
       offset: row.getBoundingClientRect().top - top,
     };
   }, [historical, pin, rows, scroller, toolSources]);
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
+  const refreshAnchor = () => {
+    // Virtual rows may not exist when the scroll event starts the request.
+    anchor.current = captureRef.current() ?? anchor.current;
+  };
+
+  const blockOrdinal = useMemo(() => {
+    if (!globalNavigation) return undefined;
+    const navigation = viewport.navigation;
+    const map = new Map<string, number>();
+    for (const page of navigation.indexPages.values())
+      for (const entry of page.turns) {
+        const blockId = navigation.locations.get(entry.turnId)?.blockId;
+        if (blockId !== undefined) map.set(blockId, entry.ordinal);
+      }
+    navigation.provisionalTurns.forEach((turn, index) => {
+      if (turn.blockId) map.set(turn.blockId, navigation.totalTurns + index);
+    });
+    return map;
+  }, [globalNavigation, viewport.navigation]);
+  const [follow, setFollow] = useState<TurnFollowRange | undefined>(undefined);
+  const followFrame = useRef<number | undefined>(undefined);
+  const updateFollow = useCallback(() => {
+    const scroll = scroller();
+    if (!scroll || !blockOrdinal || !navigationVisible) {
+      setFollow(undefined);
+      return;
+    }
+    const rect = scroll.getBoundingClientRect();
+    const next = followRangeFromRows(
+      rows().map((row) => {
+        let ordinal: number | undefined;
+        for (const id of row.dataset.sourceBlockIds?.split(',') ?? []) {
+          const mapped = blockOrdinal.get(id);
+          if (
+            mapped !== undefined &&
+            (ordinal === undefined || mapped < ordinal)
+          )
+            ordinal = mapped;
+        }
+        const bounds = row.getBoundingClientRect();
+        return { top: bounds.top, bottom: bounds.bottom, ordinal };
+      }),
+      rect.top,
+      rect.bottom,
+    );
+    setFollow((previous) =>
+      previous &&
+      next &&
+      previous.start === next.start &&
+      previous.end === next.end &&
+      previous.current === next.current
+        ? previous
+        : next,
+    );
+  }, [scroller, rows, blockOrdinal, navigationVisible]);
+  const scheduleFollow = useCallback(() => {
+    if (followFrame.current !== undefined) return;
+    followFrame.current = requestAnimationFrame(() => {
+      followFrame.current = undefined;
+      if (!restoring.current) updateFollow();
+    });
+  }, [updateFollow]);
+  useLayoutEffect(() => {
+    scheduleFollow();
+  }, [scheduleFollow, messages, blockOrdinal]);
+  useLayoutEffect(() => {
+    const scroll = scroller();
+    if (!scroll || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => scheduleFollow());
+    observer.observe(scroll);
+    return () => observer.disconnect();
+  }, [scheduleFollow, scroller, viewKey]);
+  const updateFollowRef = useRef(updateFollow);
+  updateFollowRef.current = updateFollow;
+  useLayoutEffect(
+    () => () => {
+      if (followFrame.current !== undefined)
+        cancelAnimationFrame(followFrame.current);
+      followFrame.current = undefined;
+    },
+    [viewKey],
+  );
   useImperativeHandle(
     ref,
     () => ({
@@ -196,6 +334,7 @@ export const TranscriptViewport = forwardRef<
       else {
         anchor.current = undefined;
         restoring.current = false;
+        updateFollowRef.current();
       }
     };
     restore();
@@ -206,12 +345,39 @@ export const TranscriptViewport = forwardRef<
   }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
   const load = (direction: 'older' | 'newer') => {
-    anchor.current = capture();
-    entryDirection.current = direction;
-    void viewport.load(direction);
+    if (loadFrame.current !== undefined) return;
+    const intent = scrollIntent.current;
+    let remaining = 8;
+    const loadWhenVisible = () => {
+      loadFrame.current = undefined;
+      if (intent !== scrollIntent.current) return;
+      const scroll = scroller();
+      if (
+        !scroll ||
+        (direction === 'older'
+          ? scroll.scrollTop >= 200
+          : scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop >= 200)
+      )
+        return;
+      const saved = capture();
+      // A scroll event can arrive before the virtualized rows mount. Loading
+      // without an anchor would leave no reading position to restore.
+      if (!saved) {
+        if (--remaining > 0)
+          loadFrame.current = requestAnimationFrame(loadWhenVisible);
+        return;
+      }
+      anchor.current = saved;
+      entryDirection.current = direction;
+      void viewport.load(direction, refreshAnchor);
+    };
+    loadWhenVisible();
   };
   const handleScrollIntent = () => {
     scrollIntent.current += 1;
+    if (loadFrame.current !== undefined)
+      cancelAnimationFrame(loadFrame.current);
+    loadFrame.current = undefined;
     viewport.cancelSelection();
     if (!loading) anchor.current = undefined;
     restoring.current = false;
@@ -258,19 +424,22 @@ export const TranscriptViewport = forwardRef<
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {globalNavigation && (
-        <div className={styles.navigation}>
+        <div className={styles.navigation} hidden={!navigationVisible}>
           <GlobalTurnNavigation
             state={viewport.navigation}
             store={viewport.store}
+            follow={navigationVisible ? follow : undefined}
             onSelect={(ordinal) => {
+              handleScrollIntent();
               anchor.current = undefined;
+              setFollow(undefined);
               void viewport.selectOrdinal(ordinal);
             }}
           />
         </div>
       )}
       <div
-        className={`${globalNavigation ? styles.columnWithRail : ''} flex min-h-0 min-w-0 flex-1 flex-col`}
+        className="flex min-h-0 min-w-0 flex-1 flex-col"
         onWheelCapture={(event) => {
           handleScrollIntent();
           loadAtEdge(event.deltaY < 0 ? 'older' : 'newer');
@@ -295,6 +464,7 @@ export const TranscriptViewport = forwardRef<
           const current = capture();
           if (loading) anchor.current = current;
           loadAtEdge();
+          scheduleFollow();
         }}
       >
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -311,7 +481,7 @@ export const TranscriptViewport = forwardRef<
                     size="sm"
                     onClick={() => {
                       anchor.current = capture();
-                      viewport.retry();
+                      viewport.retry(refreshAnchor);
                     }}
                   >
                     {t('history.retry')}
@@ -347,6 +517,7 @@ export const TranscriptViewport = forwardRef<
                   onReloadTranscript: undefined,
                   transcriptReloadPaused: true,
                   onEditUserMessage: undefined,
+                  onSubmitUserMessageEdit: undefined,
                   onShowContextDetail: undefined,
                   onBranchSession: undefined,
                   onRetryClick: undefined,
@@ -357,6 +528,9 @@ export const TranscriptViewport = forwardRef<
                   welcomeHeader: undefined,
                   activeTurnStartedAt: undefined,
                   turnFileChanges: undefined,
+                  sourceEntries: undefined,
+                  sourceSessionId: undefined,
+                  onSourceOpen: undefined,
                   turnArtifacts: undefined,
                   turnScheduledTasks: undefined,
                   generateContent: undefined,

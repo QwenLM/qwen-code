@@ -6,36 +6,27 @@
 
 import { randomUUID } from 'node:crypto';
 import {
-  buildGoalEvidenceCheckpointWindow,
-  buildGoalEvidenceCatalog,
-  EvidenceSourceUnavailableError,
-  InvalidGoalEvidenceReferenceError,
-  validateGoalEvidenceReferences,
-  type GoalEvidenceCatalog,
-  type GoalEvidenceCheckpointWindow,
+  buildGoalVerifierEvidenceWindow,
+  VERIFIER_EVIDENCE_WINDOW_MIN_BYTES,
   type GoalEvidenceRecord,
+  type GoalVerifierEvidenceWindow,
 } from './goal-evidence.js';
 import {
-  isGoalCheckpointStalled,
-  materializeGoalEvidenceCheckpoint,
-  type GoalCheckpointVerifier,
-} from './goal-checkpoint.js';
-import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
-import {
-  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-  GOAL_CHECKPOINT_STALL_LIMIT,
-  GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
-  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
+  goalPauseReasonForVerifierFailure,
   GOAL_STATE_VERSION,
+  goalActiveTimeBudgetReason,
   goalTokenBudgetReason,
+  goalTurnBudgetReason,
+  isGoalActiveTimeBudgetSpent,
   isGoalTokenBudgetSpent,
+  isGoalTurnBudgetSpent,
   isRepeatedBlockerProposal,
+  type GoalBroadcastMeta,
   type GoalControlRequest,
-  type GoalEvidenceCheckpoint,
   type GoalLimitKind,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -50,21 +41,26 @@ import {
   elapsedActiveTime,
   GoalInvalidTransitionError,
   reduceGoalControl,
+  reduceGoalSpend,
   reduceGoalTurnFinished,
 } from './goal-reducer.js';
-import type {
-  GoalVerificationResult,
-  GoalVerifier,
-  GoalVerifierInput,
+import {
+  GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+  GOAL_VERIFIER_REQUEST_BYTE_LIMIT,
+  measureGoalVerifierEnvelopeBytes,
+  type GoalVerificationResult,
+  type GoalVerifier,
+  type GoalVerifierInput,
 } from './goal-verifier.js';
 import {
   createMigratedGoalState,
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
-
-const debugLogger = createDebugLogger('GOAL_RUNTIME');
+import type {
+  GoalContinuationTurn,
+  GoalContinuationUsage,
+} from './goal-continuation-prompt.js';
 
 export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
 export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
@@ -81,7 +77,6 @@ export interface CreateGoalRuntimeOptions {
   journal: GoalJournal;
   evidenceSource?: GoalEvidenceSource;
   verifier?: GoalVerifier;
-  checkpointVerifier?: GoalCheckpointVerifier;
   ledger?: GoalTurnLedger;
   /**
    * The autonomous spend window one user action (create, edit of a spent
@@ -92,6 +87,17 @@ export interface CreateGoalRuntimeOptions {
    * budgets existed.
    */
   tokenBudgetGrant?: number;
+  /**
+   * The autonomous turn window one user action arms, in finished Goal turns.
+   * Defaults to unbounded: a turn budget is a cadence the user asks for, not
+   * a guard every Goal needs.
+   */
+  turnBudgetGrant?: number;
+  /**
+   * The autonomous active-time window one user action arms, in milliseconds.
+   * Defaults to unbounded, for the same reason as `turnBudgetGrant`.
+   */
+  activeTimeBudgetGrantMs?: number;
 }
 
 /**
@@ -130,23 +136,9 @@ export class GoalPersistenceUnavailableError extends Error {
 }
 
 export interface GoalTurnHost {
-  startGoalTurn(input: {
-    permit: GoalTurnPermit;
-    continuationContext: string;
-    /**
-     * Set on the first continuation carrying an objective the model has not
-     * been handed before, when it had been handed an earlier one. Hosts pass
-     * it straight to `renderGoalContinuationPrompt`.
-     */
-    objectiveUpdated?: boolean;
-    /**
-     * Set on the one continuation a spent budget still grants: the model is
-     * to hand off, not to keep working. Hosts pass it straight to
-     * `renderGoalContinuationPrompt`.
-     */
-    windDown?: boolean;
-    verifierFeedback?: string;
-  }): Promise<void>;
+  startGoalTurn(
+    input: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  ): Promise<void>;
   preemptGoalTurn(reason: string): void;
 }
 
@@ -160,7 +152,6 @@ export interface GoalWorkerView {
   revision: number;
   objective: string;
   evidenceCursor: TranscriptCursor;
-  evidenceCatalog?: GoalEvidenceCatalog;
   verifierFeedback?: string;
 }
 
@@ -179,14 +170,19 @@ export interface GoalRuntime {
    * cause the broadcast carried.
    */
   getRecoveryCause?(): GoalStateCause | undefined;
+  /**
+   * `meta.replayed` is set on the one broadcast `restore()` makes to
+   * republish recovered state; every other broadcast passes no `meta`.
+   */
   subscribe(
-    listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
+    listener: (
+      snapshot: GoalSnapshotV2,
+      cause?: GoalStateCause,
+      meta?: GoalBroadcastMeta,
+    ) => void,
   ): () => void;
   restore(records: readonly GoalRecoveryRecord[]): Promise<void>;
-  prepareRestore(
-    records: readonly GoalRecoveryRecord[],
-    checkpointWindow?: GoalEvidenceCheckpointWindow,
-  ): Promise<void>;
+  prepareRestore(records: readonly GoalRecoveryRecord[]): Promise<void>;
   getPreparedRestore(): Promise<void>;
   activateRestoredWork(): Promise<void>;
   dispatch(
@@ -241,9 +237,6 @@ export function createGoalRuntime(
       'Goal evidence source and verifier must be configured together',
     );
   }
-  if (options.checkpointVerifier && !options.evidenceSource) {
-    throw new Error('Goal checkpoint verifier requires a Goal evidence source');
-  }
 
   let snapshot: GoalSnapshotV2 = {
     v: GOAL_STATE_VERSION,
@@ -251,7 +244,11 @@ export function createGoalRuntime(
     activity: 'idle',
   };
   const listeners = new Set<
-    (value: GoalSnapshotV2, cause?: GoalStateCause) => void
+    (
+      value: GoalSnapshotV2,
+      cause?: GoalStateCause,
+      meta?: GoalBroadcastMeta,
+    ) => void
   >();
   let dispatchTail = Promise.resolve();
   let host: GoalTurnHost | undefined;
@@ -303,14 +300,6 @@ export function createGoalRuntime(
         controller: AbortController;
       }
     | undefined;
-  let checkpointAttempt:
-    | {
-        permit: GoalTurnPermit;
-        goal: NonNullable<GoalSnapshotV2['goal']>;
-        recordUuid: string;
-        controller: AbortController;
-      }
-    | undefined;
   let blockedAudit: GoalStateRecordPayloadV2['blockedAudit'];
   let nextVerifierFeedback: string | undefined;
   let currentTurnFeedback: string | undefined;
@@ -323,11 +312,10 @@ export function createGoalRuntime(
    * record; one finished under someone else's text leaves the hand-off owed.
    */
   let windDownTurnId: string | undefined;
-  let restorePreparation: Promise<CheckpointAttempt | undefined> | undefined;
+  let restorePreparation: Promise<void> | undefined;
   let restoreActivation: Promise<void> | undefined;
   let preparedRestoreCause: GoalStateCause | undefined;
   let preparedRestoreHasSnapshot = false;
-  let preparedCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
   let disposed = false;
   let recoveryError: Error | undefined;
   /**
@@ -339,22 +327,6 @@ export function createGoalRuntime(
    */
   let recoveryCause: GoalStateCause | undefined;
   type VerificationAttempt = NonNullable<typeof verificationAttempt>;
-  type CheckpointAttempt = NonNullable<typeof checkpointAttempt>;
-
-  const createCheckpointAttempt = (
-    permit: GoalTurnPermit,
-    goal: NonNullable<GoalSnapshotV2['goal']>,
-    recordUuid: string = randomUUID(),
-  ): CheckpointAttempt | undefined =>
-    options.evidenceSource && options.checkpointVerifier
-      ? {
-          permit: structuredClone(permit),
-          goal: structuredClone(goal),
-          recordUuid,
-          controller: new AbortController(),
-        }
-      : undefined;
-
   /**
    * The finishing turn's spend, or zero when nothing can answer.
    *
@@ -397,6 +369,45 @@ export function createGoalRuntime(
 
   const tokenBudgetGrant =
     options.tokenBudgetGrant ?? GOAL_DEFAULT_TOKEN_BUDGET;
+  const turnBudgetGrant = options.turnBudgetGrant ?? Number.POSITIVE_INFINITY;
+  const activeTimeBudgetGrantMs =
+    options.activeTimeBudgetGrantMs ?? Number.POSITIVE_INFINITY;
+
+  /**
+   * The budget this Goal has spent, if any, and the stop it earns.
+   *
+   * One reader for every ceiling, so the continuation gate, the settle and
+   * the no-progress bound cannot disagree about whether a Goal is out of
+   * allowance. Ordered token, turns, time: when a turn crosses more than one
+   * ceiling at once the Goal stops with a single reason, and the token budget
+   * is the one that is armed by default and so the one a user is likeliest to
+   * be asking about.
+   */
+  const spentBudget = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    now: number,
+  ): { kind: GoalLimitKind; reason: string } | undefined => {
+    if (isGoalTokenBudgetSpent(goal)) {
+      return {
+        kind: 'token_budget',
+        reason: goalTokenBudgetReason(goal.tokenBudget),
+      };
+    }
+    if (isGoalTurnBudgetSpent(goal)) {
+      return {
+        kind: 'turn_budget',
+        reason: goalTurnBudgetReason(goal.turnBudget),
+      };
+    }
+    const elapsed = elapsedActiveTime(goal, now);
+    if (isGoalActiveTimeBudgetSpent(goal, elapsed)) {
+      return {
+        kind: 'time_budget',
+        reason: goalActiveTimeBudgetReason(goal.activeTimeBudgetMs),
+      };
+    }
+    return undefined;
+  };
 
   /**
    * The snapshot a runtime-driven stop settles on, built once so the
@@ -474,37 +485,33 @@ export function createGoalRuntime(
    *
    * Runs from `queueContinuation`, the single point every autonomous
    * continuation passes through, so one gate bounds every continuation loop
-   * at once -- turn cadence, verifier-rejection retries, checkpoint cycles,
+   * at once -- turn cadence, verifier-rejection retries,
    * and families not yet discovered. User-driven turns never pass through
    * here and are never blocked by the budget.
    */
   const stopForSpentBudget = () => {
     void enqueue(async () => {
       const goal = snapshot.goal;
+      const spent = goal ? spentBudget(goal, Date.now()) : undefined;
       if (
         !goal ||
         goal.status !== 'active' ||
-        !isGoalTokenBudgetSpent(goal) ||
+        !spent ||
         currentPermit ||
         pendingProposal ||
-        verificationAttempt ||
-        checkpointAttempt
+        verificationAttempt
       ) {
         return;
       }
-      const reason = goalTokenBudgetReason(goal.tokenBudget);
+      const { kind, reason } = spent;
       let limitedSnapshot: GoalSnapshotV2;
       try {
-        limitedSnapshot = await journalUsageLimitedSettle(
-          goal,
-          reason,
-          'token_budget',
-        );
+        limitedSnapshot = await journalUsageLimitedSettle(goal, reason, kind);
       } catch {
         // A lost settle write must not strand an "active" Goal the gate will
         // never continue: the window is spent either way, so show the stop
         // and let the user's next action surface the persistence loss.
-        limitedSnapshot = usageLimitedSnapshot(goal, reason, 'token_budget');
+        limitedSnapshot = usageLimitedSnapshot(goal, reason, kind);
       }
       if (
         snapshot.goal?.goalId !== goal.goalId ||
@@ -518,14 +525,6 @@ export function createGoalRuntime(
     }).catch(() => undefined);
   };
 
-  const withCheckpointStalls = (
-    goal: NonNullable<GoalSnapshotV2['goal']>,
-    checkpointStalls: number,
-  ): NonNullable<GoalSnapshotV2['goal']> => {
-    const { checkpointStalls: _previous, ...rest } = goal;
-    return checkpointStalls > 0 ? { ...rest, checkpointStalls } : rest;
-  };
-
   const assertAvailable = () => {
     if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
   };
@@ -537,10 +536,10 @@ export function createGoalRuntime(
 
   const getSnapshot = (): GoalSnapshotV2 => structuredClone(snapshot);
 
-  const broadcast = (cause?: GoalStateCause) => {
+  const broadcast = (cause?: GoalStateCause, meta?: GoalBroadcastMeta) => {
     for (const listener of listeners) {
       try {
-        listener(getSnapshot(), cause);
+        listener(getSnapshot(), cause, meta);
       } catch {
         // Subscribers cannot roll back a committed runtime transition.
       }
@@ -575,7 +574,6 @@ export function createGoalRuntime(
       currentPermit ||
       pendingProposal ||
       verificationAttempt ||
-      checkpointAttempt ||
       snapshot.activity !== 'idle' ||
       snapshot.goal?.status !== 'active'
     ) {
@@ -584,6 +582,26 @@ export function createGoalRuntime(
     continuationQueued = false;
     const scheduledHost = host;
     const continuationContext = snapshot.goal.objective;
+    // Read here, before the broadcast below hands listeners a snapshot they
+    // may act on: these figures describe the turn being scheduled.
+    const usage: GoalContinuationUsage = {
+      tokensUsed: snapshot.goal.tokensUsed,
+      ...(snapshot.goal.tokenBudget === undefined
+        ? {}
+        : { tokenBudget: snapshot.goal.tokenBudget }),
+      turnCount: snapshot.goal.turnCount,
+      ...(snapshot.goal.turnBudget === undefined
+        ? {}
+        : { turnBudget: snapshot.goal.turnBudget }),
+      // Elapsed rather than committed: an active Goal's clock is running, and
+      // the figure only ships alongside the ceiling it is measured against.
+      ...(snapshot.goal.activeTimeBudgetMs === undefined
+        ? {}
+        : {
+            activeTimeMs: elapsedActiveTime(snapshot.goal, Date.now()),
+            activeTimeBudgetMs: snapshot.goal.activeTimeBudgetMs,
+          }),
+    };
     const verifierFeedback = nextVerifierFeedback;
     nextVerifierFeedback = undefined;
     currentTurnFeedback = verifierFeedback;
@@ -653,6 +671,7 @@ export function createGoalRuntime(
         continuationContext,
         ...(objectiveUpdated ? { objectiveUpdated } : {}),
         ...(windDown ? { windDown } : {}),
+        usage,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {
@@ -668,12 +687,11 @@ export function createGoalRuntime(
       snapshot.goal?.status !== 'active' ||
       currentPermit ||
       pendingProposal ||
-      verificationAttempt ||
-      checkpointAttempt
+      verificationAttempt
     ) {
       return;
     }
-    if (isGoalTokenBudgetSpent(snapshot.goal)) {
+    if (spentBudget(snapshot.goal, Date.now())) {
       // A spent window buys one hand-off before it stops. The record marks
       // the hand-off that was delivered and finished; until then -- never
       // granted, dropped before the model saw it, or finished under someone
@@ -721,38 +739,19 @@ export function createGoalRuntime(
     snapshot.goal.status === 'active' &&
     snapshot.activity === 'verifying';
 
-  const isCurrentCheckpointAttempt = (attempt: CheckpointAttempt) =>
-    checkpointAttempt === attempt &&
-    snapshot.goal?.goalId === attempt.permit.goalId &&
-    snapshot.goal.revision === attempt.permit.revision &&
-    snapshot.goal.status === 'active' &&
-    snapshot.activity === 'verifying';
-
   const invalidateAttempts = (reason: string) => {
     const attempt = verificationAttempt;
-    const checkpoint = checkpointAttempt;
     verificationAttempt = undefined;
-    checkpointAttempt = undefined;
     pendingProposal = undefined;
     if (attempt && !attempt.controller.signal.aborted) {
       attempt.controller.abort(new Error(reason));
-    }
-    if (checkpoint && !checkpoint.controller.signal.aborted) {
-      checkpoint.controller.abort(new Error(reason));
     }
   };
 
   const verifierInput = (
     attempt: VerificationAttempt,
-    evidence: ReturnType<typeof validateGoalEvidenceReferences>,
+    window: GoalVerifierEvidenceWindow,
   ): GoalVerifierInput => {
-    const currentDeliveredOutput = evidence.citedRecords
-      .filter(
-        (record) =>
-          record.proofKind === 'delivered_output' &&
-          record.turnId === attempt.permit.turnId,
-      )
-      .map((record) => record.content);
     const base = {
       goal: {
         goalId: attempt.goal.goalId,
@@ -760,8 +759,9 @@ export function createGoalRuntime(
         objective: attempt.goal.objective,
       },
       currentTurnId: attempt.permit.turnId,
-      evidence: evidence.citedRecords,
-      ...(currentDeliveredOutput.length > 0 ? { currentDeliveredOutput } : {}),
+      evidence: window.evidence,
+      evidenceTurnIds: window.turnIds,
+      ...(window.omitted > 0 ? { omitted: window.omitted } : {}),
     };
     if (attempt.proposal.status === 'complete') {
       return {
@@ -773,7 +773,7 @@ export function createGoalRuntime(
       ...base,
       proposal: { ...attempt.proposal, status: 'blocked' },
       blockedPolicy:
-        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when cited external_fact evidence shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
+        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when external_fact evidence in the window shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
     };
   };
 
@@ -813,15 +813,23 @@ export function createGoalRuntime(
           kind: 'usage_limited';
           reason: string;
           limitKind?: GoalLimitKind;
-        },
-  ): Promise<CheckpointAttempt | undefined> =>
+        }
+      | { kind: 'paused'; reason: string },
+  ): Promise<void> =>
     enqueue(async () => {
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
 
       const now = Date.now();
+      const meteredGoal = reduceGoalSpend(
+        snapshot.goal,
+        outcome.kind === 'decision'
+          ? (outcome.result.usage?.totalTokenCount ?? 0)
+          : 0,
+        now,
+      );
       if (outcome.kind === 'decision' && outcome.result.decision === 'accept') {
         const acceptedGoal = {
-          ...snapshot.goal,
+          ...meteredGoal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
           lastReason:
@@ -871,7 +879,7 @@ export function createGoalRuntime(
         }
         snapshot = structuredClone(terminalSnapshot);
         broadcast(attempt.proposal.status);
-        return undefined;
+        return;
       }
 
       if (outcome.kind === 'usage_limited') {
@@ -885,16 +893,39 @@ export function createGoalRuntime(
         pendingProposal = undefined;
         nextVerifierFeedback = undefined;
         commitUsageLimitedSettle(limitedSnapshot);
-        return undefined;
+        return;
       }
 
-      const rejectedCheckpoint = isRepeatedBlockerProposal(attempt.proposal)
-        ? undefined
-        : createCheckpointAttempt(attempt.permit, snapshot.goal);
+      if (outcome.kind === 'paused') {
+        // The verifier gave no verdict, so nothing was decided about the
+        // proposal and no limit was reached. The Goal pauses with the
+        // failure as its reason; a resume continues the work, and the model
+        // proposes again once it has something to show.
+        const pausedSnapshot = settledSnapshot(
+          snapshot.goal,
+          'paused',
+          outcome.reason,
+        );
+        await options.journal.recordGoalState(randomUUID(), {
+          v: GOAL_STATE_VERSION,
+          cause: 'pause',
+          snapshot: pausedSnapshot,
+        });
+        if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
+        verificationAttempt = undefined;
+        pendingProposal = undefined;
+        nextVerifierFeedback = undefined;
+        continuationQueued = false;
+        currentTurnFeedback = undefined;
+        snapshot = structuredClone(pausedSnapshot);
+        broadcast('pause');
+        return;
+      }
+
       const rejectedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...snapshot.goal,
+          ...meteredGoal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
           lastReason: outcome.result.reason,
@@ -905,14 +936,6 @@ export function createGoalRuntime(
         v: GOAL_STATE_VERSION,
         cause: 'verifier_reject',
         snapshot: rejectedSnapshot,
-        ...(rejectedCheckpoint
-          ? {
-              checkpointPending: {
-                permit: structuredClone(rejectedCheckpoint.permit),
-                recordUuid: rejectedCheckpoint.recordUuid,
-              },
-            }
-          : {}),
         ...(blockedAudit
           ? { blockedAudit: structuredClone(blockedAudit) }
           : {}),
@@ -920,47 +943,10 @@ export function createGoalRuntime(
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
       verificationAttempt = undefined;
       pendingProposal = undefined;
-      checkpointAttempt = rejectedCheckpoint;
-      snapshot = {
-        ...structuredClone(rejectedSnapshot),
-        activity: rejectedCheckpoint ? 'verifying' : 'idle',
-      };
+      snapshot = structuredClone(rejectedSnapshot);
       nextVerifierFeedback = outcome.result.reason;
-      if (rejectedCheckpoint) {
-        continuationQueued = false;
-        broadcast('verifier_reject');
-        return rejectedCheckpoint;
-      }
       const continuationBroadcast = admitAfterRejection();
       if (!continuationBroadcast) broadcast('verifier_reject');
-      return undefined;
-    });
-
-  // Post-commit checkpoint recording is best-effort bookkeeping. When its
-  // persistence fails, settle the attempt it left behind so the runtime
-  // converges with the committed snapshot instead of stranding the goal on
-  // an activity that no later operation can clear.
-  const settleDanglingAttempt = (permit: GoalTurnPermit): Promise<void> =>
-    enqueue(async () => {
-      if (disposed) return;
-      const dangling = verificationAttempt ?? checkpointAttempt;
-      if (!dangling) return;
-      if (
-        snapshot.goal?.goalId !== permit.goalId ||
-        snapshot.goal?.revision !== permit.revision
-      ) {
-        return;
-      }
-      verificationAttempt = undefined;
-      checkpointAttempt = undefined;
-      pendingProposal = undefined;
-      snapshot = { ...snapshot, activity: 'idle' };
-      broadcast();
-      if (promoteQueuedUserTurn()) {
-        broadcast();
-      } else {
-        queueContinuation();
-      }
     });
 
   const runVerification = async (
@@ -976,348 +962,60 @@ export function createGoalRuntime(
           kind: 'usage_limited';
           reason: string;
           limitKind?: GoalLimitKind;
-        };
+        }
+      | { kind: 'paused'; reason: string };
+    let verifierCalled = false;
     try {
       await evidenceSource.flush();
       if (attempt.controller.signal.aborted) return;
       const records = await evidenceSource.readActiveTranscriptChain();
       if (attempt.controller.signal.aborted) return;
-      const evidence = validateGoalEvidenceReferences({
-        records,
-        goal: attempt.goal,
-        permit: attempt.permit,
-        proposal: attempt.proposal,
-      });
+      // The window gets whatever the request has left once the objective,
+      // the reason and the policy are in it, measured on the real payload
+      // with the largest omitted count standing in for the real one. The
+      // window counts its own turn-id list against the budget.
+      const budgetBytes =
+        GOAL_VERIFIER_REQUEST_BYTE_LIMIT -
+        measureGoalVerifierEnvelopeBytes(
+          verifierInput(attempt, {
+            evidence: [],
+            turnIds: [],
+            omitted: Number.MAX_SAFE_INTEGER,
+          }),
+        );
+      if (budgetBytes < VERIFIER_EVIDENCE_WINDOW_MIN_BYTES) {
+        // Not a verifier failure a resume could get past: the objective or
+        // the reason leaves no room for even one full record, so every
+        // proposal would be rejected for what the window left out.
+        await recordVerificationOutcome(attempt, {
+          kind: 'paused',
+          reason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+        });
+        return;
+      }
+      const window = buildGoalVerifierEvidenceWindow(
+        { records, goal: attempt.goal, permit: attempt.permit },
+        { budgetBytes },
+      );
+      verifierCalled = true;
       const result = await verifier(
-        verifierInput(attempt, evidence),
+        verifierInput(attempt, window),
         attempt.controller.signal,
       );
       if (attempt.controller.signal.aborted) return;
       outcome = { kind: 'decision', result };
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
-      if (error instanceof InvalidGoalEvidenceReferenceError) {
-        outcome =
-          error.code === 'catalog_truncated'
-            ? {
-                kind: 'usage_limited',
-                reason: error.message,
-                limitKind: 'evidence_catalog',
-              }
-            : {
-                kind: 'decision',
-                result: { decision: 'reject', reason: error.message },
-              };
-      } else {
-        const reason =
-          error instanceof EvidenceSourceUnavailableError
-            ? error.message
-            : error instanceof Error
-              ? error.message
-              : String(error);
-        outcome = { kind: 'usage_limited', reason };
-      }
+      const message = error instanceof Error ? error.message : String(error);
+      // A verifier that timed out, failed, or answered with something that
+      // is not a verdict has decided nothing: pause, so a resume retries.
+      // A transcript the window cannot be anchored in is a different
+      // failure, and keeps the stop it has always had.
+      outcome = verifierCalled
+        ? { kind: 'paused', reason: goalPauseReasonForVerifierFailure(message) }
+        : { kind: 'usage_limited', reason: message };
     }
-    const checkpoint = await recordVerificationOutcome(attempt, outcome);
-    if (!checkpoint) return;
-    try {
-      await runCheckpoint(checkpoint);
-    } catch {
-      // Same contract as finishTurn: the verifier outcome committed, so a
-      // failed checkpoint recording settles instead of escaping.
-      await settleDanglingAttempt(checkpoint.permit);
-    }
-  };
-
-  const finishCheckpointCheck = async (
-    attempt: CheckpointAttempt,
-    outcome: 'room' | 'stalled' | 'inconclusive' = 'inconclusive',
-  ): Promise<void> => {
-    await enqueue(async () => {
-      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      // Only a check that found room ends a stall streak. A check that
-      // produced nothing while the window overflowed -- an unusable
-      // result, a provider failure, or a verifier timeout -- counts like
-      // a stalled checkpoint. Any other check (never ran, or failed while
-      // the window had room) proved nothing about the window, so it
-      // preserves the streak; resetting there would launder the count.
-      const checkpointStalls =
-        outcome === 'room'
-          ? 0
-          : outcome === 'stalled'
-            ? (snapshot.goal.checkpointStalls ?? 0) + 1
-            : (snapshot.goal.checkpointStalls ?? 0);
-      if (
-        await settleIfCheckpointStalled(
-          attempt,
-          snapshot.goal,
-          checkpointStalls,
-        )
-      ) {
-        return;
-      }
-      const persistedCause =
-        nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
-      const now = Date.now();
-      const checkedSnapshot: GoalSnapshotV2 = {
-        v: GOAL_STATE_VERSION,
-        goal: {
-          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
-          activeTimeMs: elapsedActiveTime(snapshot.goal, now),
-          updatedAt: now,
-        },
-        activity: 'idle',
-      };
-      await options.journal.recordGoalState(attempt.recordUuid, {
-        v: GOAL_STATE_VERSION,
-        cause: persistedCause,
-        snapshot: checkedSnapshot,
-        ...(blockedAudit
-          ? { blockedAudit: structuredClone(blockedAudit) }
-          : {}),
-      });
-      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      checkpointAttempt = undefined;
-      snapshot = structuredClone(checkedSnapshot);
-      if (promoteQueuedUserTurn()) {
-        broadcast('checkpoint');
-      } else {
-        queueContinuation('checkpoint');
-      }
-    });
-  };
-
-  /** The `usage_limited` settle for a checkpoint attempt; runs on the queue. */
-  const settleCheckpointFailure = async (
-    attempt: CheckpointAttempt,
-    goal: NonNullable<GoalSnapshotV2['goal']>,
-    reason: string,
-    limitKind?: GoalLimitKind,
-  ): Promise<void> => {
-    const limitedSnapshot = await journalUsageLimitedSettle(
-      goal,
-      reason,
-      limitKind,
-    );
-    if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-    checkpointAttempt = undefined;
-    // Keep nextVerifierFeedback: a rejection committed before this
-    // checkpoint failure must still reach the resumed continuation.
-    commitUsageLimitedSettle(limitedSnapshot);
-  };
-
-  /**
-   * Stops the Goal once its stall streak reaches the limit, persisting the
-   * streak with the stop so the record explains itself. Returns whether the
-   * attempt was settled.
-   */
-  const settleIfCheckpointStalled = async (
-    attempt: CheckpointAttempt,
-    goal: NonNullable<GoalSnapshotV2['goal']>,
-    checkpointStalls: number,
-  ): Promise<boolean> => {
-    if (checkpointStalls < GOAL_CHECKPOINT_STALL_LIMIT) return false;
-    await settleCheckpointFailure(
-      attempt,
-      withCheckpointStalls(goal, checkpointStalls),
-      GOAL_CHECKPOINT_STALLED_REASON,
-      'evidence_catalog',
-    );
-    return true;
-  };
-
-  const recordCheckpointFailure = async (
-    attempt: CheckpointAttempt,
-    reason: string,
-    limitKind?: GoalLimitKind,
-  ): Promise<void> => {
-    await enqueue(async () => {
-      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      await settleCheckpointFailure(attempt, snapshot.goal, reason, limitKind);
-    });
-  };
-
-  const recordCheckpoint = async (
-    attempt: CheckpointAttempt,
-    checkpoint: NonNullable<GoalSnapshotV2['goal']>['evidenceCheckpoint'],
-    stalled: boolean,
-  ): Promise<void> => {
-    if (!checkpoint) return;
-    await enqueue(async () => {
-      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      const checkpointStalls = stalled
-        ? (snapshot.goal.checkpointStalls ?? 0) + 1
-        : 0;
-      // A stopped Goal discards the checkpoint it would have written: a
-      // resumed window restarts from a fresh cursor anyway.
-      if (
-        await settleIfCheckpointStalled(
-          attempt,
-          snapshot.goal,
-          checkpointStalls,
-        )
-      ) {
-        return;
-      }
-      const now = Date.now();
-      const persistedCause =
-        nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
-      const checkpointSnapshot: GoalSnapshotV2 = {
-        v: GOAL_STATE_VERSION,
-        goal: {
-          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
-          evidenceCursor: { recordId: attempt.recordUuid },
-          evidenceCheckpoint: checkpoint,
-          activeTimeMs: elapsedActiveTime(snapshot.goal, now),
-          updatedAt: now,
-        },
-        activity: 'idle',
-      };
-      await options.journal.recordGoalState(attempt.recordUuid, {
-        v: GOAL_STATE_VERSION,
-        cause: persistedCause,
-        snapshot: checkpointSnapshot,
-        ...(blockedAudit
-          ? { blockedAudit: structuredClone(blockedAudit) }
-          : {}),
-      });
-      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      checkpointAttempt = undefined;
-      snapshot = structuredClone(checkpointSnapshot);
-      if (promoteQueuedUserTurn()) {
-        broadcast('checkpoint');
-      } else {
-        queueContinuation('checkpoint');
-      }
-    });
-  };
-
-  const runCheckpoint = async (
-    attempt: CheckpointAttempt,
-    preparedWindow?: GoalEvidenceCheckpointWindow,
-    replay = false,
-  ): Promise<void> => {
-    const evidenceSource = options.evidenceSource;
-    const checkpointVerifier = options.checkpointVerifier;
-    if ((!preparedWindow && !evidenceSource) || !checkpointVerifier) {
-      await recordCheckpointFailure(
-        attempt,
-        'Goal checkpoint recovery dependencies are unavailable',
-      );
-      return;
-    }
-
-    try {
-      let window = preparedWindow;
-      if (!window) {
-        await evidenceSource!.flush();
-        if (attempt.controller.signal.aborted) return;
-        const records = await evidenceSource!.readActiveTranscriptChain();
-        if (attempt.controller.signal.aborted) return;
-        window = buildGoalEvidenceCheckpointWindow({
-          records,
-          goal: attempt.goal,
-          permit: attempt.permit,
-        });
-      }
-      // A truncated window still compresses: `shouldCheckpoint` stays true
-      // whenever anything was captured, and folding that into claims is what
-      // frees the budget. Only a window that captured nothing at all has
-      // nothing to salvage, and that is the state this stops the Goal in.
-      if (window.truncated && !window.shouldCheckpoint) {
-        await recordCheckpointFailure(
-          attempt,
-          GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
-          'evidence_catalog',
-        );
-        return;
-      }
-      if (!window.shouldCheckpoint) {
-        await finishCheckpointCheck(attempt, 'room');
-        return;
-      }
-      let checkpoint: GoalEvidenceCheckpoint;
-      try {
-        const result = await checkpointVerifier(
-          {
-            goal: {
-              goalId: attempt.goal.goalId,
-              revision: attempt.goal.revision,
-              objective: attempt.goal.objective,
-            },
-            previousClaims: window.previousClaims,
-            evidence: window.evidence,
-          },
-          attempt.controller.signal,
-        );
-        if (attempt.controller.signal.aborted) return;
-        checkpoint = materializeGoalEvidenceCheckpoint({
-          checkpointId: attempt.recordUuid,
-          createdAt: Date.now(),
-          previousClaims: window.previousClaims,
-          evidence: window.evidence,
-          result,
-        });
-      } catch (error) {
-        if (attempt.controller.signal.aborted) return;
-        if (error instanceof GoalCheckpointVerifierInputTooLargeError) {
-          await recordCheckpointFailure(
-            attempt,
-            GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-            'checkpoint_request',
-          );
-          return;
-        }
-        debugLogger.debug(
-          'Checkpoint check failed; counted as a stall only if the window overflowed and the check was not a restore replay.',
-          `windowTruncated=${window.truncated}`,
-          error,
-          `replay=${replay}`,
-        );
-        // A restore replay is exempt: it runs no turn of its own, so a
-        // transient failure at startup must not spend a streak the restored
-        // session never re-earned. The replay mints a continuation whose own
-        // checks count on this arm as live turns.
-        if (window.truncated && !replay) {
-          // A check that produced nothing while the window overflows is a
-          // compaction that gave no relief, whatever stopped it: a result
-          // that could not be folded into claims, a provider failure, or a
-          // verifier that never answered before its timeout. Like a full
-          // claim list, it counts toward the stall limit. Counting only the
-          // unusable-result shape let a verifier that timed out on every
-          // overflowing window run a Goal in circles: each turn paid the
-          // call, kept the same cursor, and was told to retry, with nothing
-          // but the token budget left to stop it.
-          await finishCheckpointCheck(attempt, 'stalled');
-          return;
-        }
-        // A failure while the window still has room must not abort a
-        // healthy Goal: settle the attempt as bookkeeping so the evidence
-        // stays citable and a later turn retries the checkpoint.
-        await finishCheckpointCheck(attempt);
-        return;
-      }
-      await recordCheckpoint(
-        attempt,
-        checkpoint,
-        isGoalCheckpointStalled(window, checkpoint),
-      );
-    } catch (error) {
-      if (attempt.controller.signal.aborted) return;
-      if (
-        error instanceof EvidenceSourceUnavailableError &&
-        error.code === 'current_turn_not_tail'
-      ) {
-        // A turn that recorded no goal-owned transcript records (e.g. a
-        // hook-blocked permit finished before anything was recorded) is a
-        // legitimate empty turn, not an integrity failure; close the
-        // attempt with bookkeeping only so the goal stays active.
-        await finishCheckpointCheck(attempt);
-        return;
-      }
-      const reason = error instanceof Error ? error.message : String(error);
-      await recordCheckpointFailure(attempt, reason);
-    }
+    await recordVerificationOutcome(attempt, outcome);
   };
 
   return {
@@ -1327,97 +1025,81 @@ export function createGoalRuntime(
       return recoveryCause;
     },
     subscribe(
-      listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
+      listener: (
+        value: GoalSnapshotV2,
+        cause?: GoalStateCause,
+        meta?: GoalBroadcastMeta,
+      ) => void,
     ): () => void {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    prepareRestore(
-      records: readonly GoalRecoveryRecord[],
-      checkpointWindow?: GoalEvidenceCheckpointWindow,
-    ): Promise<void> {
-      if (restorePreparation) return restorePreparation.then(() => undefined);
+    prepareRestore(records: readonly GoalRecoveryRecord[]): Promise<void> {
+      if (restorePreparation) return restorePreparation;
       restoreActivationPending = true;
-      preparedCheckpointWindow = checkpointWindow;
-      const preparation = enqueue(
-        async (): Promise<CheckpointAttempt | undefined> => {
-          assertAvailable();
-          if (restored) return;
-          const recovery = recoverGoalFromRecords(records);
-          if (recovery.kind === 'unsupported') {
-            recoveryError = new GoalPersistenceUnavailableError(
-              recovery.reason,
-            );
-            throw recoveryError;
-          }
-          try {
-            let recoveredSnapshot: GoalSnapshotV2 | undefined;
-            let recoveredCause: GoalStateCause | undefined;
-            if (recovery.kind === 'v2') {
-              recoveredSnapshot = {
-                ...structuredClone(recovery.payload.snapshot),
-                activity: 'idle',
-              };
-              blockedAudit = recovery.payload.blockedAudit
-                ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
-                : undefined;
-              recoveredCause = recovery.payload.cause;
-              const pending = recovery.payload.checkpointPending;
-              if (pending && recoveredSnapshot.goal) {
-                checkpointAttempt = createCheckpointAttempt(
-                  pending.permit,
-                  recoveredSnapshot.goal,
-                  pending.recordUuid,
-                );
-                if (!checkpointAttempt) {
-                  throw new GoalPersistenceUnavailableError(
-                    'Goal checkpoint recovery dependencies are unavailable',
-                  );
-                }
-                recoveredSnapshot.activity = 'verifying';
-              }
-              if (recoveredCause === 'verifier_reject') {
-                nextVerifierFeedback = recoveredSnapshot.goal?.lastReason;
-              }
-            } else if (recovery.kind === 'legacy') {
-              const recordUuid = randomUUID();
-              const payload = createMigratedGoalState({
-                objective: recovery.objective,
-                goalId: randomUUID(),
-                recordUuid,
-                now: Date.now(),
-              });
-              try {
-                await options.journal.recordGoalState(recordUuid, payload);
-              } catch (error) {
-                throw new GoalPersistenceUnavailableError(
-                  error instanceof Error ? error.message : String(error),
-                  { cause: error },
-                );
-              }
-              assertAvailable();
-              recoveredSnapshot = structuredClone(payload.snapshot);
-              recoveredCause = payload.cause;
+      const preparation = enqueue(async (): Promise<void> => {
+        assertAvailable();
+        if (restored) return;
+        const recovery = recoverGoalFromRecords(records);
+        if (recovery.kind === 'unsupported') {
+          recoveryError = new GoalPersistenceUnavailableError(recovery.reason);
+          throw recoveryError;
+        }
+        try {
+          let recoveredSnapshot: GoalSnapshotV2 | undefined;
+          let recoveredCause: GoalStateCause | undefined;
+          if (recovery.kind === 'v2') {
+            recoveredSnapshot = {
+              ...structuredClone(recovery.payload.snapshot),
+              activity: 'idle',
+            };
+            if (recoveredSnapshot.goal?.status === 'active') {
+              recoveredSnapshot.goal.updatedAt = Date.now();
+            }
+            blockedAudit = recovery.payload.blockedAudit
+              ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
+              : undefined;
+            recoveredCause = recovery.payload.cause;
+            if (recoveredCause === 'verifier_reject') {
+              nextVerifierFeedback = recoveredSnapshot.goal?.lastReason;
+            }
+          } else if (recovery.kind === 'legacy') {
+            const recordUuid = randomUUID();
+            const payload = createMigratedGoalState({
+              objective: recovery.objective,
+              goalId: randomUUID(),
+              recordUuid,
+              now: Date.now(),
+            });
+            try {
+              await options.journal.recordGoalState(recordUuid, payload);
+            } catch (error) {
+              throw new GoalPersistenceUnavailableError(
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              );
             }
             assertAvailable();
-            if (recoveredSnapshot) snapshot = recoveredSnapshot;
-            recoveryError = undefined;
-            restored = true;
-            if (recoveredSnapshot) {
-              recoveryCause = recoveredCause;
-            }
-            preparedRestoreHasSnapshot = recoveredSnapshot !== undefined;
-            preparedRestoreCause = recoveredCause;
-            return checkpointAttempt;
-          } catch (error) {
-            if (!disposed) {
-              recoveryError =
-                error instanceof Error ? error : new Error(String(error));
-            }
-            throw error;
+            recoveredSnapshot = structuredClone(payload.snapshot);
+            recoveredCause = payload.cause;
           }
-        },
-      );
+          assertAvailable();
+          if (recoveredSnapshot) snapshot = recoveredSnapshot;
+          recoveryError = undefined;
+          restored = true;
+          if (recoveredSnapshot) {
+            recoveryCause = recoveredCause;
+          }
+          preparedRestoreHasSnapshot = recoveredSnapshot !== undefined;
+          preparedRestoreCause = recoveredCause;
+        } catch (error) {
+          if (!disposed) {
+            recoveryError =
+              error instanceof Error ? error : new Error(String(error));
+          }
+          throw error;
+        }
+      });
       restorePreparation = preparation;
       return preparation.then(
         () => undefined,
@@ -1426,7 +1108,6 @@ export function createGoalRuntime(
             restorePreparation = undefined;
             restoreActivation = undefined;
             restoreActivationPending = false;
-            preparedCheckpointWindow = undefined;
           }
           throw error;
         },
@@ -1440,7 +1121,7 @@ export function createGoalRuntime(
           ),
         );
       }
-      return restorePreparation.then(() => undefined);
+      return restorePreparation;
     },
     activateRestoredWork(): Promise<void> {
       try {
@@ -1456,25 +1137,18 @@ export function createGoalRuntime(
         );
       }
       if (restoreActivation) return restoreActivation;
-      restoreActivation = restorePreparation.then(async (attempt) => {
+      restoreActivation = restorePreparation.then(async () => {
         assertAvailable();
         restoreActivationPending = false;
-        if (preparedRestoreHasSnapshot) broadcast(preparedRestoreCause);
-        if (!attempt) {
-          await enqueue(async () => {
-            assertAvailable();
-            queueContinuation();
-          });
-          return;
+        // The cause is the recovered record's: the transition it names was
+        // published by the session that made it, so mark this one a replay.
+        if (preparedRestoreHasSnapshot) {
+          broadcast(preparedRestoreCause, { replayed: true });
         }
-        try {
-          await runCheckpoint(attempt, preparedCheckpointWindow, true);
-        } catch {
-          // Recovery committed before the replay began, so a failed replay
-          // degrades instead of bricking the runtime: drop the pending
-          // checkpoint and let the restored goal continue.
-          await settleDanglingAttempt(attempt.permit);
-        }
+        await enqueue(async () => {
+          assertAvailable();
+          queueContinuation();
+        });
       });
       return restoreActivation;
     },
@@ -1496,8 +1170,7 @@ export function createGoalRuntime(
       if (
         snapshot.activity === 'verifying' ||
         pendingProposal ||
-        verificationAttempt ||
-        checkpointAttempt
+        verificationAttempt
       ) {
         queuedTurnKey ??= turnKey;
         continuationQueued = false;
@@ -1601,10 +1274,7 @@ export function createGoalRuntime(
     },
     finishTurn(permit: GoalTurnPermit): Promise<void> {
       const finish = enqueue(
-        async (): Promise<{
-          verification?: VerificationAttempt;
-          checkpoint?: CheckpointAttempt;
-        }> => {
+        async (): Promise<{ verification?: VerificationAttempt }> => {
           assertOperational();
           if (!isCurrentPermit(permit) || !snapshot.goal) {
             throw new Error(STALE_GOAL_TURN_MESSAGE);
@@ -1648,21 +1318,14 @@ export function createGoalRuntime(
           // that would have relieved it.
           //
           // The bound yields to the limits that describe the Goal better. A
-          // spent token budget is an allowance that was used up, and the
+          // spent budget is an allowance that was used up, and the
           // continuation gate owes that Goal its wind-down hand-off before
-          // the `token_budget` stop; pausing here would skip both. A Goal
-          // carrying a checkpoint stall streak is drowning in evidence, not
-          // idling -- its prose overflowed the window and `update_goal`
-          // answers `checkpointRequired` without recording a proposal -- so
-          // its checkpoint runs and the stall breaker stops it with the
-          // reason that fits, instead of a pause whose remedy (resume) would
-          // re-enter the same overflowing window.
+          // the matching stop; pausing here would skip both.
           const noProgressLimitReached =
             noProgressTurns !== undefined &&
             noProgressTurns >= GOAL_NO_PROGRESS_TURN_LIMIT &&
             nextGoal.status === 'active' &&
-            !isGoalTokenBudgetSpent(nextGoal) &&
-            !(nextGoal.checkpointStalls ?? 0);
+            !spentBudget(nextGoal, Date.now());
           if (heldWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
@@ -1675,21 +1338,10 @@ export function createGoalRuntime(
             proposal && persistedSnapshot.goal?.status === 'active'
               ? proposal
               : undefined;
-          const nextCheckpoint = !activeProposal
-            ? createCheckpointAttempt(permit, nextGoal)
-            : undefined;
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,
             cause: 'turn_finished',
             snapshot: persistedSnapshot,
-            ...(nextCheckpoint
-              ? {
-                  checkpointPending: {
-                    permit: structuredClone(nextCheckpoint.permit),
-                    recordUuid: nextCheckpoint.recordUuid,
-                  },
-                }
-              : {}),
             ...(persistedBlockedAudit
               ? { blockedAudit: structuredClone(persistedBlockedAudit) }
               : {}),
@@ -1750,10 +1402,7 @@ export function createGoalRuntime(
                   controller: new AbortController(),
                 }
               : undefined;
-          checkpointAttempt = noProgressSnapshot ? undefined : nextCheckpoint;
-          const verifying = Boolean(
-            pendingProposal || verificationAttempt || checkpointAttempt,
-          );
+          const verifying = Boolean(pendingProposal || verificationAttempt);
           snapshot = {
             ...structuredClone(noProgressSnapshot ?? persistedSnapshot),
             activity: verifying ? 'verifying' : 'idle',
@@ -1785,26 +1434,14 @@ export function createGoalRuntime(
           if (!noProgressSnapshot && !verifying && !currentPermit) {
             queueContinuation();
           }
-          return {
-            ...(verificationAttempt
-              ? { verification: verificationAttempt }
-              : {}),
-            ...(checkpointAttempt ? { checkpoint: checkpointAttempt } : {}),
-          };
+          return verificationAttempt
+            ? { verification: verificationAttempt }
+            : {};
         },
       );
       return finish.then(async (attempts) => {
         if (attempts.verification) {
           await runVerification(attempts.verification);
-          return;
-        }
-        if (!attempts.checkpoint) return;
-        try {
-          await runCheckpoint(attempts.checkpoint);
-        } catch {
-          // The turn already committed; a failed checkpoint recording must
-          // not surface as a failed turn or leave the goal verifying.
-          await settleDanglingAttempt(attempts.checkpoint.permit);
         }
       });
     },
@@ -1813,34 +1450,13 @@ export function createGoalRuntime(
       if (!isCurrentPermit(permit) || !snapshot.goal) {
         throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
-      const goal = structuredClone(snapshot.goal);
+      const goal = snapshot.goal;
       const verifierFeedback = currentTurnFeedback;
-      const evidenceSource = options.evidenceSource;
-      if (!evidenceSource) {
-        return {
-          goalId: goal.goalId,
-          revision: goal.revision,
-          objective: goal.objective,
-          evidenceCursor: structuredClone(goal.evidenceCursor),
-          ...(verifierFeedback ? { verifierFeedback } : {}),
-        };
-      }
-      await evidenceSource.flush();
-      const records = await evidenceSource.readActiveTranscriptChain();
-      const evidenceCatalog = buildGoalEvidenceCatalog({
-        records,
-        goal,
-        permit,
-      });
-      if (!isCurrentPermit(permit) || !snapshot.goal) {
-        throw new Error(STALE_GOAL_TURN_MESSAGE);
-      }
       return {
         goalId: goal.goalId,
         revision: goal.revision,
         objective: goal.objective,
         evidenceCursor: structuredClone(goal.evidenceCursor),
-        evidenceCatalog,
         ...(verifierFeedback ? { verifierFeedback } : {}),
       };
     },
@@ -1920,6 +1536,8 @@ export function createGoalRuntime(
               ? { recordId: recordUuid }
               : options.journal.getTranscriptCursor(),
           tokenBudgetGrant,
+          turnBudgetGrant,
+          activeTimeBudgetGrantMs,
         });
         const nextSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,

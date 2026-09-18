@@ -21,7 +21,7 @@
   border-radius: 12px;
   margin: 0;
   cursor: text;
-  --chat-editor-min-height: 140px;
+  --chat-editor-min-height: 116px;
   --chat-editor-max-height: min(350px, 40vh);
   --chat-editor-input-min-height: 44px;
   --chat-editor-input-max-height: 300px;
@@ -45,7 +45,7 @@
   z-index: 2;
   display: flex;
   box-sizing: border-box;
-  min-height: var(--chat-editor-min-height, 140px);
+  min-height: var(--chat-editor-min-height, 116px);
   max-height: var(--chat-editor-max-height, min(350px, 40vh));
   flex-direction: column;
   overflow: visible;
@@ -58,6 +58,17 @@
 
 .editorShell[data-web-shell-compact-composer] .content {
   padding: 10px;
+}
+
+.container:focus-within .content,
+.container[data-at-panel-open] .content {
+  border-color: var(--chat-editor-accent-color);
+}
+
+@supports (selector(:has(*))) {
+  .container:has([aria-expanded='true']) .content {
+    border-color: var(--chat-editor-accent-color);
+  }
 }
 
 .container[data-image-drag-active] .content {
@@ -888,6 +899,15 @@
   white-space: normal;
 }
 
+@supports (height: 100dvh) {
+  .tagTooltip {
+    max-height: min(
+      calc(100dvh - 16px),
+      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
+    );
+  }
+}
+
 .tagLabel,
 .tagValue {
   color: var(--chat-editor-text-primary);
@@ -1566,9 +1586,17 @@
   min-width: 0;
 }
 
-.toolBtn:hover {
+.toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+.planControl {
+  flex: 0 0 auto;
+}
+
+.planControl[data-disabled] {
+  cursor: default;
 }
 
 .workspaceSelectTrigger {
@@ -1694,6 +1722,102 @@
 .contextUsageBtn {
   flex-shrink: 0;
   padding: 0 4px;
+}
+
+.contextUsagePercentage {
+  display: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextUsagePercentage[data-level='normal'] {
+  color: var(--chat-editor-text-secondary);
+}
+
+.contextUsagePercentage[data-level='warning'] {
+  color: var(--warning-color);
+}
+
+.contextUsagePercentage[data-level='error'] {
+  color: var(--error-color);
+}
+
+.contextTooltip {
+  --muted-foreground: var(--chat-editor-text-secondary);
+  --destructive: var(--error-color);
+
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: 280px;
+  max-width: calc(100vw - 24px);
+  padding: 12px;
+  white-space: normal;
+}
+
+.contextTooltipHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
+.contextTooltipHeader strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextTooltipMeter {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.contextTooltipMeter > span {
+  display: block;
+  height: 100%;
+  background: var(--agent-blue-500);
+}
+
+.contextTooltipMeter > span[data-level='warning'] {
+  background: var(--warning-color);
+}
+
+.contextTooltipMeter > span[data-level='error'] {
+  background: var(--error-color);
+}
+
+.contextTooltipStats {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.contextTooltipStats dt,
+.contextTooltipHint {
+  color: var(--chat-editor-text-secondary);
+}
+
+.contextTooltipStats dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.contextTooltipHint {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+@supports (container-type: inline-size) {
+  @container (min-width: 521px) {
+    .contextUsagePercentage {
+      display: inline;
+    }
+  }
 }
 
 .contextRingTrack {
@@ -2148,6 +2272,111 @@
   gap: 6px;
   padding: 4px 0 0;
   flex-wrap: wrap;
+}
+
+/* Two classes so this wins over `.fileChip`'s fixed width, which is declared
+   later in this file: a text card sizes to its own content. */
+.fileChip.fileChipText {
+  width: auto;
+  min-width: min(264px, 100%);
+  max-width: min(100%, 360px);
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fileChipIcon {
+  display: flex;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fileChipBody {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+}
+
+.fileChipTitle {
+  overflow: hidden;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipTitle:disabled {
+  cursor: default;
+}
+
+.fileChipTitle:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+.fileChipTitle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  /* The row is nowrap, so at the narrowest panes let the size drop to its own
+     line rather than escaping the card. */
+  flex-wrap: wrap;
+}
+
+.fileChipExpand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fileChipExpand:not(:disabled):hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
+.fileChipExpand:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipExpand:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .fileChip {

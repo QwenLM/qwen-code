@@ -260,12 +260,9 @@ could send two searches for one turn. Use the v2 Extension profile for
 on-demand `context_search`, or the v3 Hook-only profile for Auto Recall, never
 both in one Qwen process.
 
-The Hook requires a non-empty `submitted_prompt` captured before prompt
-expansion. This includes supported interactive TUI submissions and headless
-CLI user turns (`qwen -p` and stream-json input, including SDK clients using
-that path). The field establishes prompt provenance, not a TUI-only origin.
-The Hook never falls back to the expanded `prompt`; events without
-`submitted_prompt` do not trigger retrieval.
+The Hook requires a non-empty `submitted_prompt` captured before prompt expansion. This includes supported interactive TUI submissions, first-turn headless CLI `UserQuery` sends (`qwen -p` and stream-json input, including SDK clients using that path), and explicitly declared fresh non-channel turns on the ACP session path used by ACP clients, `serve`, and daemon hosts. ACP/daemon clients must provide `_meta: { "qwen.submittedPrompt": "original submitted text" }` per eligible request; Web Shell does so at its submission boundary. Realtime voice handoffs omit declarations because their text comes from model-generated tool arguments. Existing ACP clients without a declaration continue to omit the field. Internal background dispatches and all channel messages, including human messages, are excluded. See [UserPromptSubmit](../../docs/users/features/hooks.md#userpromptsubmit).
+
+The field establishes prompt provenance, not a TUI-only origin or proof of human authorship. The Hook never falls back to `prompt`; events without `submitted_prompt` do not trigger retrieval.
 
 Register this profile only in launchers where automatic retrieval is intended
 for all eligible inputs. To disable every Hook for an automation run, use
@@ -535,11 +532,12 @@ is not a scope source. Foreign or missing targets do not disclose their text.
 The selected absence contract is either HTTP 404 (`http-404`) or HTTP 200 with
 JSON null (`null-200`); other shapes are not interpreted as absence.
 
-DELETE must return HTTP 200 with the exact message `Memory deleted successfully`
-or `Memory deleted successfully!`. Optional status must be `SUCCEEDED`, event
-must be `DELETE`, and cascade_count must be numeric zero. Non-null error/errors,
-conflicting fields, 202, 204 and other unrecognized replies remain unknown.
-Responses are bounded to 1 MiB and strictly decoded as UTF-8/JSON.
+DELETE follows the official client's response handling: require a successful
+HTTP status and parse the bounded UTF-8 JSON response without matching message
+text or imposing extra response-field rules. A successful status alone does not
+confirm deletion: an exact GET must then verify absence. Empty responses
+(including HTTP 204), invalid JSON and non-success HTTP responses remain unknown.
+Responses are bounded to 1 MiB. There are no automatic retries.
 
 ### Approval, verification and limits
 
@@ -553,7 +551,7 @@ permission policy; read-only annotations are not automatic authorization.
 Web Shell displays the exact ID and full expected text through ordinary MCP
 parameter approval. After approval, forget reads the target again and compares
 ID, all configured scope fields and full text before submitting one DELETE.
-If it receives a recognized success acknowledgement, it performs one exact GET
+If it receives a successful HTTP response with valid JSON, it performs one exact GET
 to verify absence. One total 100–30000 ms deadline covers those three steps;
 human approval waiting is outside that deadline. No state, confirmation token
 or mandatory earlier get is required: a direct call with the correct full ID
@@ -561,7 +559,7 @@ and original text receives the same checks.
 
 | Result        | Meaning                                                                                                                                                            |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `deleted`     | Recognized deletion acknowledgement followed by a read confirming absence.                                                                                         |
+| `deleted`     | Successful HTTP response with valid JSON followed by a read confirming absence.                                                                                    |
 | `not_deleted` | This call submitted zero DELETE requests. A fixed reason distinguishes invalid input, unavailable/changed target, verification failure or pre-delete cancellation. |
 | `unknown`     | DELETE started but its result or subsequent absence check is uncertain. Do not retry automatically; explicitly read to inspect current state.                      |
 

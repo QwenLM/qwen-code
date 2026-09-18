@@ -166,6 +166,7 @@ export interface DaemonHistoryNavigationStore
     rangeId: string,
     direction: 'older' | 'newer',
     request: HistoryViewportRequest,
+    beforeAdmit?: () => void,
   ): Promise<void>;
 }
 
@@ -924,6 +925,7 @@ export function createDaemonTurnNavigationStore(
     rangeId: string,
     direction: 'older' | 'newer',
     viewportRequest?: HistoryViewportRequest,
+    beforeAdmit?: () => void,
   ): Promise<void> {
     const activeClient = client;
     if (!activeClient || (viewportRequest && !viewportRequest.isCurrent()))
@@ -1042,6 +1044,8 @@ export function createDaemonTurnNavigationStore(
         ? table.pages.get(firstPageId)?.snapshot
         : undefined;
       if (!rangeSnapshot) return;
+      beforeAdmit?.();
+      if (!isCurrentBoundary()) return;
       pageTable.admitBoundary(
         rangeId,
         direction,
@@ -1156,13 +1160,14 @@ export function createDaemonTurnNavigationStore(
     rangeId: string,
     direction: 'older' | 'newer',
     request: HistoryViewportRequest,
+    beforeAdmit?: () => void,
   ): Promise<void> {
     const range = pageTable
       .getSnapshot()
       .ranges.find((range) => range.id === rangeId);
     if (!range || !request.isCurrent()) return;
     if (direction !== 'newer' || range.newer.kind !== 'live') {
-      return loadBoundary(rangeId, direction, request);
+      return loadBoundary(rangeId, direction, request, beforeAdmit);
     }
     const boundary = options.captureLiveBoundary?.();
     const activeClient = client;
@@ -1188,7 +1193,12 @@ export function createDaemonTurnNavigationStore(
       head.snapshot,
     );
     publish();
-    return loadBoundary(rangeId, direction, { isCurrent: current });
+    return loadBoundary(
+      rangeId,
+      direction,
+      { isCurrent: current },
+      beforeAdmit,
+    );
   }
 
   function hasLiveOverlap(rangeId: string): boolean {

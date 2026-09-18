@@ -115,13 +115,11 @@ export function createDeleteRequestEngine(
           return notDeleted('target_changed');
         submitted = true;
         const response = await fetcher(url, { ...init, method: 'DELETE' });
-        if (response.status !== 200) {
+        if (!response.ok) {
           await response.body?.cancel().catch(() => undefined);
           return { status: 'unknown', memoryId };
         }
-        const value: unknown = JSON.parse(await readBoundedBody(response));
-        if (!isDeleteAcknowledgement(value))
-          return { status: 'unknown', memoryId };
+        JSON.parse(await readBoundedBody(response));
         const after = await readTarget(memoryId, url, init);
         init.signal.throwIfAborted();
         return {
@@ -135,18 +133,6 @@ export function createDeleteRequestEngine(
       }
     },
   };
-}
-
-function isDeleteAcknowledgement(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    !hasError(value) &&
-    (value['message'] === 'Memory deleted successfully' ||
-      value['message'] === 'Memory deleted successfully!') &&
-    (value['status'] === undefined || value['status'] === 'SUCCEEDED') &&
-    (value['event'] === undefined || value['event'] === 'DELETE') &&
-    (value['cascade_count'] === undefined || value['cascade_count'] === 0)
-  );
 }
 
 function hasError(value: Record<string, unknown>): boolean {

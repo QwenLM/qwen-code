@@ -194,6 +194,12 @@ describe('Mem0 deletion MCP contract', () => {
         arguments: args,
       });
       expect(result.structuredContent).toMatchObject(outcome);
+      if (outcome.status === 'deleted') {
+        expect(result.structuredContent).toMatchObject({
+          message:
+            'The delete request returned a successful HTTP response and a subsequent exact read confirmed absence. Search indexes and existing conversations may still contain the text.',
+        });
+      }
       expect(result.isError).toBe(outcome.status !== 'deleted');
       expect(JSON.stringify(result)).not.toContain('中文');
       const text = (result.content as Array<{ text: string }>)[0]!.text;

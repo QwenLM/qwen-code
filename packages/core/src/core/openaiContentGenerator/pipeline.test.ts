@@ -26,8 +26,13 @@ import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
-import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
+import {
+  AuthType,
+  type ContentGeneratorConfig,
+  type PromptCacheSharingParameters,
+} from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import { determineProvider } from './index.js';
 import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
@@ -45,6 +50,12 @@ import {
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
+import { findProviderById } from '../../providers/all-providers.js';
+import {
+  buildInstallPlan,
+  resolveBaseUrl,
+} from '../../providers/provider-config.js';
+import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 
 // Mock dependencies
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
@@ -809,6 +820,17 @@ describe('ContentGenerationPipeline', () => {
         expectedThinking: undefined,
         expectedToolChoice: 'required',
       },
+      ...['gpt-5-pro', 'gpt-6-astra'].map((model) => ({
+        name: `preserve required tool selection for name-derived mandatory ${model}`,
+        baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+        model,
+        extraBody: undefined,
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: undefined,
+        expectedToolChoice: 'required',
+      })),
       {
         name: 'preserve required tool selection when thinking is not enabled',
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -956,7 +978,12 @@ describe('ContentGenerationPipeline', () => {
           testCase.model,
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: {
-          thinkingConfig: { includeThoughts: testCase.includeThoughts },
+          thinkingConfig: {
+            includeThoughts:
+              'includeThoughts' in testCase
+                ? testCase.includeThoughts
+                : undefined,
+          },
           tools: [
             {
               functionDeclarations: [
@@ -1137,9 +1164,7 @@ describe('ContentGenerationPipeline', () => {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://llm.example.com/v1',
         model: 'gpt-5.4',
-        // The shared mock sets samplingParams, and the pipeline ships those
-        // keys verbatim instead of injecting `reasoning` at all. Clear it so
-        // this exercises the injected-tier path the clamp is meant to cap.
+        // Exercise the configured-tier path without sampling overrides.
         samplingParams: undefined,
         reasoning: { effort: 'max' },
       } as ContentGeneratorConfig;
@@ -1181,7 +1206,300 @@ describe('ContentGenerationPipeline', () => {
 
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
-      expect(apiCall.reasoning).toEqual({ effort: 'xhigh' });
+      expect(apiCall.reasoning_effort).toBe('xhigh');
+      expect(apiCall.reasoning).toBeUndefined();
+    });
+
+    it.each([
+      ...[
+        {
+          name: 'capability with sampling null',
+          samplingParams: { reasoning_effort: null },
+          expected: { reasoning_effort: 'high' },
+        },
+        {
+          name: 'capability with sampling empty string',
+          samplingParams: { reasoning_effort: '' },
+          expected: { reasoning_effort: 'high' },
+        },
+        {
+          name: 'capability with extra-body null',
+          samplingParams: {},
+          extraBody: { reasoning_effort: null },
+          expected: { reasoning_effort: 'high' },
+        },
+        {
+          name: 'capability with raw nested extra body',
+          samplingParams: {},
+          extraBody: { reasoning: { effort: 'low' } },
+          expected: { reasoning: { effort: 'low' } },
+        },
+      ].map((testCase) => ({
+        ...testCase,
+        model: 'gpt-5.5',
+        reasoning: { effort: 'high' },
+        capability: {
+          thinking: true,
+          efforts: ['low', 'high'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+      })),
+      {
+        name: 'configured GPT tiers ahead of the built-in fallback',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'max' },
+        samplingParams: {},
+        expected: { reasoning_effort: 'max' },
+        capability: {
+          thinking: true,
+          efforts: ['medium', 'max'],
+          defaultEffort: 'max',
+          disableField: 'reasoning_effort',
+        },
+      },
+      {
+        name: 'configured effort with a token budget',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { max_completion_tokens: 1024 },
+        expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
+      },
+      {
+        name: 'over-ceiling effort with a token budget',
+        model: 'gpt-5.1',
+        reasoning: { effort: 'max' },
+        samplingParams: { max_completion_tokens: 1024 },
+        expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
+      },
+      {
+        name: 'configured effort with a null flat placeholder',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: null },
+        expected: { reasoning_effort: 'high' },
+      },
+      {
+        name: 'an empty-string flat placeholder',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: '' },
+        expected: { reasoning_effort: 'high' },
+      },
+      {
+        name: 'an extra-body empty string clearing a flat override',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'none' },
+        extraBody: { reasoning_effort: '' },
+        expected: { reasoning_effort: 'high' },
+      },
+      {
+        name: 'an explicit nested null in sampling parameters',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning: null },
+        expected: { reasoning: null },
+      },
+      {
+        name: 'an explicit nested null in extra body',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { max_completion_tokens: 1024 },
+        extraBody: { reasoning: null },
+        expected: { reasoning: null, max_completion_tokens: 1024 },
+      },
+      {
+        name: 'configured effort after an extra-body null replaces a flat override',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'none' },
+        extraBody: { reasoning_effort: null },
+        expected: { reasoning_effort: 'high' },
+      },
+      {
+        name: 'a configured reasoning budget with an extra-body flat override',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high', budget_tokens: 8192 },
+        samplingParams: { max_completion_tokens: 1024 },
+        extraBody: { reasoning_effort: 'low' },
+        expected: {
+          reasoning_effort: 'low',
+          reasoning: { budget_tokens: 8192 },
+          max_completion_tokens: 1024,
+        },
+      },
+      {
+        name: 'a non-mandatory GPT model on OpenRouter',
+        model: 'openai/gpt-5.4',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        reasoning: false,
+        samplingParams: {},
+        expected: { reasoning: { enabled: false } },
+      },
+      {
+        name: 'configured model fallback with a token budget',
+        model: '',
+        configuredModel: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { max_completion_tokens: 1024 },
+        expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
+      },
+      {
+        name: 'GPT-6 effort with a token budget',
+        model: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        samplingParams: { max_completion_tokens: 1024 },
+        expected: { reasoning_effort: 'high', max_completion_tokens: 1024 },
+      },
+      {
+        name: 'GPT-6 mandatory thinking with a raw disable value',
+        model: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'none' },
+        expected: {},
+      },
+      {
+        name: 'GPT-6 mandatory thinking on OpenRouter',
+        model: 'openai/gpt-6-astra',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        reasoning: false,
+        samplingParams: {},
+        expected: {},
+      },
+      {
+        name: 'the wire model thinking rules over the configured GPT-6 model',
+        model: 'gpt-5.5',
+        configuredModel: 'gpt-6-astra',
+        reasoning: { effort: 'high' },
+        samplingParams: {},
+        includeThoughts: false,
+        expected: { reasoning_effort: 'none' },
+      },
+      {
+        name: 'an explicit flat override',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning_effort: 'low' },
+        expected: { reasoning_effort: 'low' },
+      },
+      {
+        name: 'an explicit nested override',
+        model: 'gpt-5.4',
+        reasoning: { effort: 'high' },
+        samplingParams: { reasoning: { effort: 'low' } },
+        expected: { reasoning: { effort: 'low' } },
+      },
+      {
+        name: 'no configured effort',
+        model: 'gpt-5.4',
+        reasoning: undefined,
+        samplingParams: {},
+        expected: {},
+      },
+      {
+        name: 'disabled thinking',
+        model: 'gpt-5.4',
+        reasoning: false,
+        samplingParams: { reasoning_effort: 'high' },
+        expected: { reasoning_effort: 'none' },
+      },
+      {
+        name: 'per-request disabled thinking',
+        model: 'gpt-5.5',
+        reasoning: { effort: 'high' },
+        samplingParams: {},
+        includeThoughts: false,
+        expected: { reasoning_effort: 'none' },
+      },
+      {
+        name: 'mandatory GPT thinking',
+        model: 'gpt-5.3-codex',
+        reasoning: false,
+        samplingParams: {},
+        expected: {},
+      },
+      {
+        name: 'a non-GPT sampling request',
+        model: 'custom-model',
+        reasoning: { effort: 'high' },
+        samplingParams: {},
+        expected: {},
+      },
+    ])('sends $name through the real provider', async (testCase) => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'baseUrl' in testCase
+            ? testCase.baseUrl
+            : mockContentGeneratorConfig.baseUrl,
+        model:
+          ('configuredModel' in testCase
+            ? testCase.configuredModel
+            : undefined) ?? testCase.model,
+        reasoning: testCase.reasoning,
+        samplingParams: testCase.samplingParams,
+        extra_body: 'extraBody' in testCase ? testCase.extraBody : undefined,
+      } as ContentGeneratorConfig;
+      if ('capability' in testCase) {
+        mockCliConfig = {
+          ...mockCliConfig,
+          getResolvedModelConfig: vi.fn(() => ({
+            capabilities: { reasoning: testCase.capability },
+          })),
+        } as unknown as Config;
+      }
+      const provider = new DefaultOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        mockCliConfig,
+      );
+      vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
+      pipeline = new ContentGenerationPipeline({
+        ...mockConfig,
+        provider,
+        cliConfig: mockCliConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      });
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }],
+      });
+
+      await pipeline.execute(
+        {
+          model: testCase.model,
+          contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+          config: {
+            thinkingConfig: {
+              includeThoughts:
+                'includeThoughts' in testCase
+                  ? testCase.includeThoughts
+                  : undefined,
+            },
+          },
+        },
+        'prompt-id',
+      );
+
+      const body = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(body).toMatchObject(testCase.expected);
+      expect(body.reasoning).toEqual(
+        'reasoning' in testCase.expected
+          ? testCase.expected.reasoning
+          : undefined,
+      );
+      expect(body.reasoning_effort).toEqual(
+        'reasoning_effort' in testCase.expected
+          ? testCase.expected.reasoning_effort
+          : undefined,
+      );
     });
 
     it('never ships the escape-hatch disable shape to a thinkingMandatory model end to end', async () => {
@@ -1607,40 +1925,47 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.reasoning).toBeUndefined();
     });
 
-    it('should preserve reasoning_effort none when thinking is disabled', async () => {
-      mockContentGeneratorConfig = {
-        ...mockContentGeneratorConfig,
-        samplingParams: { reasoning_effort: 'none' },
-      } as ContentGeneratorConfig;
-      mockConfig = {
-        ...mockConfig,
-        contentGeneratorConfig: mockContentGeneratorConfig,
-      };
-      pipeline = new ContentGenerationPipeline(mockConfig);
+    it.each([
+      ['gpt-5.4', 'none'],
+      ['gpt-5', undefined],
+      ['gpt-6-astra', undefined],
+    ] as const)(
+      'respects %s support for disabling thinking',
+      async (model, expected) => {
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          samplingParams: { reasoning_effort: 'none' },
+        } as ContentGeneratorConfig;
+        mockConfig = {
+          ...mockConfig,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        };
+        pipeline = new ContentGenerationPipeline(mockConfig);
 
-      const request: GenerateContentParameters = {
-        model: 'gpt-5',
-        contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
-        config: { thinkingConfig: { includeThoughts: false } },
-      };
+        const request: GenerateContentParameters = {
+          model,
+          contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
+          config: { thinkingConfig: { includeThoughts: false } },
+        };
 
-      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
-        { role: 'user', content: 'Classify action' },
-      ]);
-      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
-        new GenerateContentResponse(),
-      );
-      (mockClient.chat.completions.create as Mock).mockResolvedValue({
-        id: 'response-id',
-        choices: [{ message: { content: 'safe' }, finish_reason: 'stop' }],
-      } as OpenAI.Chat.ChatCompletion);
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'Classify action' },
+        ]);
+        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          id: 'response-id',
+          choices: [{ message: { content: 'safe' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
 
-      await pipeline.execute(request, 'side-query:permission-classifier');
+        await pipeline.execute(request, 'side-query:permission-classifier');
 
-      const apiCall = (mockClient.chat.completions.create as Mock).mock
-        .calls[0][0];
-      expect(apiCall.reasoning_effort).toBe('none');
-    });
+        const apiCall = (mockClient.chat.completions.create as Mock).mock
+          .calls[0][0];
+        expect(apiCall.reasoning_effort).toBe(expected);
+      },
+    );
 
     it('should preserve enable_thinking when thinking is not explicitly disabled', async () => {
       // Arrange — normal request (not forked query), enable_thinking should be preserved
@@ -1740,6 +2065,173 @@ describe('ContentGenerationPipeline', () => {
       },
     );
 
+    it.each([
+      ['moonshot', 'kimi-k3', 'max', undefined, true],
+      ['moonshot', 'kimi-k2.7-code', undefined, undefined, true],
+      ['moonshot', 'kimi-k2.7-code-highspeed', undefined, undefined, true],
+      ['moonshot', 'kimi-k2.6', undefined, 'thinking', false],
+      ['deepseek', 'deepseek-v4-pro', 'low', 'thinking', false],
+      ['deepseek', 'deepseek-v4-flash', 'low', 'thinking', false],
+      ['alibabaStandard', 'qwen3.8-max', 'low', 'reasoning_effort', false],
+      [
+        'alibabaStandard',
+        'qwen3.8-max-0902',
+        'medium',
+        'reasoning_effort',
+        false,
+      ],
+      ['alibabaStandard', 'qwen3.8-flash', 'xhigh', 'reasoning_effort', false],
+      ['alibabaStandard', 'qwen3.7-plus', undefined, 'enable_thinking', false],
+      ['alibabaStandard', 'deepseek-v4-pro', 'high', 'enable_thinking', false],
+      ['alibabaStandard', 'deepseek-v4-pro', 'max', 'enable_thinking', false],
+      [
+        'alibabaStandard',
+        'deepseek-v4-flash',
+        'high',
+        'enable_thinking',
+        false,
+      ],
+      [
+        'alibabaStandard',
+        'deepseek-v4-pro-0813',
+        'low',
+        'enable_thinking',
+        false,
+      ],
+      [
+        'alibabaStandard',
+        'deepseek-v4-flash-0731',
+        'low',
+        'enable_thinking',
+        false,
+      ],
+      ['alibabaStandard', 'kimi-k3', 'low', undefined, true],
+      ['alibabaStandard', 'kimi-k2.7-code', undefined, undefined, true],
+      ['alibabaStandard', 'kimi-k2.6', undefined, 'enable_thinking', false],
+      ['token-plan', 'qwen3.8-max', 'low', undefined, true],
+      ['token-plan', 'qwen3.8-max-preview', 'medium', undefined, true],
+      ['token-plan', 'qwen3.8-flash', 'low', 'reasoning_effort', false],
+      ['token-plan', 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
+      ['coding-plan', 'qwen3.5-plus', undefined, 'enable_thinking', false],
+      ['coding-plan', 'kimi-k2.5', undefined, 'enable_thinking', false],
+    ] as const)(
+      'sends installed %s / %s reasoning through the real provider hook',
+      async (providerId, model, effort, disableField, mandatory) => {
+        const preset = findProviderById(providerId)!;
+        const baseUrl = resolveBaseUrl(preset);
+        const installed = buildInstallPlan(preset, {
+          baseUrl,
+          apiKey: 'test-key',
+          modelIds: [model],
+        }).modelProviders![0].models[0];
+        expect(installed.capabilities?.reasoning).toBeDefined();
+
+        for (const [mode, partial] of (
+          ['enabled', 'disabled', 'side-query'] as const
+        ).flatMap((mode) => [
+          [mode, false] as const,
+          ...(effort ? [[mode, true] as const] : []),
+        ])) {
+          mockContentGeneratorConfig = {
+            ...mockContentGeneratorConfig,
+            ...installed.generationConfig,
+            authType: AuthType.USE_OPENAI,
+            model,
+            baseUrl,
+            enableCacheControl: false,
+            reasoning:
+              mode === 'disabled' ? false : effort ? { effort } : undefined,
+          };
+          mockCliConfig = {
+            ...mockCliConfig,
+            getResolvedModelConfig: vi.fn().mockReturnValue(
+              partial
+                ? {
+                    ...installed,
+                    capabilities: { reasoning: { defaultEffort: effort } },
+                  }
+                : installed,
+            ),
+            getContentGeneratorConfig: () => mockContentGeneratorConfig,
+            getCliVersion: () => 'test',
+          } as unknown as Config;
+          const Provider =
+            providerId === 'moonshot'
+              ? DefaultOpenAICompatibleProvider
+              : providerId === 'deepseek'
+                ? DeepSeekOpenAICompatibleProvider
+                : DashScopeOpenAICompatibleProvider;
+          const provider = new Provider(
+            mockContentGeneratorConfig,
+            mockCliConfig,
+          );
+          vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
+          pipeline = new ContentGenerationPipeline({
+            ...mockConfig,
+            provider,
+            cliConfig: mockCliConfig,
+            contentGeneratorConfig: mockContentGeneratorConfig,
+          });
+          (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+            { role: 'user', content: 'Hello' },
+          ]);
+          (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+            new GenerateContentResponse(),
+          );
+          (mockClient.chat.completions.create as Mock).mockResolvedValue({
+            id: 'r',
+            choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+          });
+          await pipeline.execute(
+            {
+              model,
+              contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+              ...(mode === 'side-query'
+                ? { config: { thinkingConfig: { includeThoughts: false } } }
+                : {}),
+            },
+            'preset-test',
+          );
+          const wire = (
+            mockClient.chat.completions.create as Mock
+          ).mock.calls.at(-1)![0];
+          expect(wire.reasoning).toBeUndefined();
+          if (partial && mandatory && mode === 'side-query')
+            expect(wire.reasoning_effort).toBeUndefined();
+          if (mode === 'enabled') {
+            expect(wire.reasoning_effort).toBe(effort);
+            if (
+              providerId === 'alibabaStandard' &&
+              model === 'deepseek-v4-pro'
+            ) {
+              expect(wire.enable_thinking).toBeUndefined();
+              expect(wire.thinking).toBeUndefined();
+            }
+          } else if (!mandatory) {
+            expect(wire.reasoning_effort).toBe(
+              disableField === 'reasoning_effort' ? 'none' : undefined,
+            );
+            expect(wire.enable_thinking).toBe(
+              disableField === 'enable_thinking' ? false : undefined,
+            );
+            expect(wire.thinking).toEqual(
+              disableField === 'thinking' ? { type: 'disabled' } : undefined,
+            );
+          } else {
+            expect(wire.reasoning_effort).not.toBe('none');
+            expect(wire.enable_thinking).not.toBe(false);
+            expect(wire.thinking?.type).not.toBe('disabled');
+          }
+          if (
+            providerId === 'moonshot' ||
+            disableField === 'reasoning_effort'
+          ) {
+            expect(wire.enable_thinking).toBeUndefined();
+          }
+        }
+      },
+    );
+
     // Shared wiring for the capability cases below: an identity provider hook
     // so the assertions read the pipeline's own output, and a resolved model
     // config carrying whatever capability the case declares.
@@ -1784,6 +2276,264 @@ describe('ContentGenerationPipeline', () => {
     }
 
     it.each([
+      [
+        'openai-effort',
+        { reasoning_effort: 'medium' },
+        { reasoning_effort: 'none' },
+      ],
+      [
+        'openai-reasoning',
+        { reasoning: { effort: 'medium' } },
+        { reasoning: { enabled: false } },
+      ],
+      [
+        'deepseek-openai',
+        { thinking: { type: 'enabled' }, reasoning_effort: 'medium' },
+        { thinking: { type: 'disabled' } },
+      ],
+      [
+        'dashscope-effort',
+        { reasoning_effort: 'medium' },
+        { reasoning_effort: 'none' },
+      ],
+      [
+        'dashscope-thinking',
+        { enable_thinking: true },
+        { enable_thinking: false },
+      ],
+      [
+        'qwen-chat-template',
+        { chat_template_kwargs: { enable_thinking: true } },
+        { chat_template_kwargs: { enable_thinking: false } },
+      ],
+    ])(
+      'uses declared %s defaults and disable wire for an unknown alias',
+      async (profile, enabled, disabled) => {
+        (mockProvider.buildRequest as Mock).mockImplementation((request) =>
+          new DefaultOpenAICompatibleProvider(
+            mockContentGeneratorConfig,
+            mockCliConfig,
+          ).buildRequest(request, 'test'),
+        );
+        const capability = {
+          profile,
+          ...(profile === 'dashscope-thinking' ||
+          profile === 'qwen-chat-template'
+            ? {}
+            : { efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' }),
+        };
+        for (const [reasoning, expected] of [
+          [undefined, enabled],
+          [false, disabled],
+        ] as const) {
+          const wire = await executeWithCapability(
+            capability,
+            { reasoning },
+            'company-alias',
+          );
+          const actual = Object.fromEntries(
+            Object.entries(wire).filter(([key]) =>
+              [
+                'reasoning',
+                'reasoning_effort',
+                'thinking',
+                'enable_thinking',
+                'chat_template_kwargs',
+              ].includes(key),
+            ),
+          );
+          expect(actual).toEqual(expected);
+        }
+      },
+    );
+
+    it('preserves template siblings and clears incompatible budget on declared off requests', async () => {
+      (mockProvider.buildRequest as Mock).mockImplementation((request) =>
+        new DefaultOpenAICompatibleProvider(
+          mockContentGeneratorConfig,
+          mockCliConfig,
+        ).buildRequest(request, 'test'),
+      );
+      const template = await executeWithCapability(
+        { profile: 'qwen-chat-template' },
+        {
+          reasoning: false,
+          extra_body: {
+            enable_thinking: true,
+            chat_template_kwargs: { foo: 1 },
+          },
+        },
+        'company-alias',
+      );
+      expect(template['chat_template_kwargs']).toEqual({
+        foo: 1,
+        enable_thinking: false,
+      });
+      expect(template['enable_thinking']).toBeUndefined();
+      const effort = await executeWithCapability(
+        { defaultEffort: 'medium' },
+        {
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          reasoning: false,
+          extra_body: { thinking_budget: 4096, enable_thinking: true },
+        },
+        'qwen3.8-max',
+      );
+      expect(effort['reasoning_effort']).toBe('none');
+      expect(effort['thinking_budget']).toBeUndefined();
+      expect(effort['enable_thinking']).toBeUndefined();
+    });
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'keeps native DeepSeek %s reasoning projection with a profile',
+      async (source) => {
+        (mockProvider.buildRequest as Mock).mockImplementation((request) =>
+          new DeepSeekOpenAICompatibleProvider(
+            mockContentGeneratorConfig,
+            mockCliConfig,
+          ).buildRequest(request, 'test'),
+        );
+        const wire = await executeWithCapability(
+          {
+            profile: 'deepseek-openai',
+            efforts: ['high', 'max'],
+            defaultEffort: 'high',
+          },
+          {
+            baseUrl: 'https://api.deepseek.com/v1',
+            [source]: { reasoning: { effort: 'max' } },
+          },
+        );
+        expect(wire['reasoning_effort']).toBe('max');
+        expect(wire['reasoning']).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'openai-effort', 'reasoning_content', ''],
+      [
+        'https://api.cerebras.ai/v1',
+        'deepseek-openai',
+        'reasoning_content',
+        undefined,
+      ],
+      [
+        'https://api.mistral.ai/v1',
+        'deepseek-openai',
+        'reasoning_content',
+        undefined,
+      ],
+      [
+        'https://api.fireworks.ai/inference/v1',
+        'qwen-chat-template',
+        'reasoning',
+        undefined,
+      ],
+      [
+        'https://api.xiaomimimo.com/v1',
+        'openai-effort',
+        'reasoning_content',
+        '',
+      ],
+    ] as const)(
+      'preserves native history constraints on %s with %s',
+      (baseUrl, profile, field, expected) => {
+        const config = {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          model: 'alias',
+          baseUrl,
+        };
+        const cli = {
+          ...mockCliConfig,
+          getResolvedModelConfig: vi.fn().mockReturnValue({
+            capabilities: {
+              reasoning: {
+                profile,
+                ...(profile === 'qwen-chat-template'
+                  ? {}
+                  : {
+                      efforts: ['low', 'medium', 'high'],
+                      defaultEffort: 'medium',
+                    }),
+              },
+            },
+          }),
+        };
+        const provider = determineProvider(config, cli as unknown as Config);
+        const result = provider.buildRequest(
+          {
+            model: 'alias',
+            messages: [
+              {
+                role: 'assistant',
+                content: 'answer',
+                ...(expected === undefined
+                  ? { reasoning_content: 'trace' }
+                  : {}),
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionCreateParams,
+          'test',
+        );
+        if (expected === undefined)
+          expect(result.messages[0]).not.toHaveProperty(field);
+        else expect(result.messages[0]).toHaveProperty(field, expected);
+      },
+    );
+
+    it('keeps explicit sampling reasoning above a configured default', async () => {
+      const capability = {
+        profile: 'openai-effort',
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+      };
+      const wire = await executeWithCapability(
+        capability,
+        { samplingParams: { reasoning: { effort: 'minimal' } } },
+        'company-alias',
+      );
+      expect(wire['reasoning']).toEqual({ effort: 'minimal' });
+      const budget = await executeWithCapability(
+        capability,
+        {
+          samplingParams: undefined,
+          reasoning: { effort: 'high', budget_tokens: 8192 },
+        },
+        'company-alias',
+      );
+      expect(budget).toMatchObject({
+        reasoning_effort: 'high',
+        reasoning: { budget_tokens: 8192 },
+      });
+    });
+
+    it.each([
+      ['qwen3.8-max', 'https://dashscope.aliyuncs.com/compatible-mode/v1'],
+      ['openai/gpt-5.4', 'https://openrouter.ai/api/v1'],
+    ])(
+      'resolves %s default before shaping its request',
+      async (model, baseUrl) => {
+        const wire = await executeWithCapability(
+          { defaultEffort: 'medium' },
+          {
+            baseUrl,
+            extra_body: model.startsWith('openai/')
+              ? undefined
+              : { reasoning_effort: null },
+          },
+          model,
+        );
+        if (model.startsWith('openai/'))
+          expect(wire['reasoning']).toEqual({ effort: 'medium' });
+        else {
+          expect(wire['reasoning_effort']).toBe('medium');
+          expect(wire['reasoning']).toBeUndefined();
+        }
+      },
+    );
+
+    it.each([
       ['enable_thinking', false, undefined, undefined],
       ['reasoning_effort', undefined, 'none', undefined],
     ] as const)(
@@ -1801,6 +2551,22 @@ describe('ContentGenerationPipeline', () => {
         expect(apiCall['enable_thinking']).toBe(enableThinking);
         expect(apiCall['reasoning_effort']).toBe(reasoningEffort);
         expect(apiCall['thinking']).toBe(thinking);
+      },
+    );
+
+    it.each([
+      ['enable_thinking', { enable_thinking: false }],
+      ['thinking', { thinking: { type: 'disabled' } }],
+    ] as const)(
+      'preserves the configured GPT %s disable ownership',
+      async (disableField, expected) => {
+        const apiCall = await executeWithCapability(
+          { thinking: true, efforts: ['medium'], disableField },
+          { reasoning: false },
+          'gpt-5.5',
+        );
+        expect(apiCall).toMatchObject(expected);
+        expect(apiCall['reasoning_effort']).toBeUndefined();
       },
     );
 
@@ -1909,6 +2675,7 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.thinking).toEqual({ type: 'disabled' });
+      expect(apiCall.reasoning_effort).toBeUndefined();
     });
 
     it('emits thinking:disabled on DeepSeek hostname when reasoning is configured to false', async () => {
@@ -1947,6 +2714,7 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.thinking).toEqual({ type: 'disabled' });
+      expect(apiCall.reasoning_effort).toBeUndefined();
     });
 
     it('does NOT emit thinking:disabled on a non-DeepSeek hostname', async () => {
@@ -3326,7 +4094,7 @@ describe('ContentGenerationPipeline', () => {
       ]);
     });
 
-    it('does not log protocol-tag sanitization before a held finish is yielded', async () => {
+    it('logs protocol-tag sanitization when a held finish is flushed on the error path', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
@@ -3336,16 +4104,19 @@ describe('ContentGenerationPipeline', () => {
         async *[Symbol.asyncIterator]() {
           yield {
             id: 'finish-chunk',
-            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+            choices: [{ delta: {}, finish_reason: 'stop' }],
           } as OpenAI.Chat.ChatCompletionChunk;
           throw streamError;
         },
       };
+      // The error-path flush never releases a functionCall-bearing finish
+      // (see the withhold test below), so this fixture's finish carries a
+      // text part: the log pin needs a finish the flush actually delivers.
       const finishResponse = new GenerateContentResponse();
       finishResponse.responseId = 'finish-response';
       finishResponse.candidates = [
         {
-          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          content: { parts: [{ text: 'sanitized answer' }] },
           finishReason: FinishReason.STOP,
           index: 0,
         },
@@ -3356,7 +4127,7 @@ describe('ContentGenerationPipeline', () => {
         (_chunk, context) => {
           context.protocolTagSanitized = {
             tagName: 'think',
-            toolCallCount: 1,
+            toolCallCount: 0,
           };
           return finishResponse;
         },
@@ -3370,12 +4141,18 @@ describe('ContentGenerationPipeline', () => {
         'test-prompt-id',
       );
 
+      const results: GenerateContentResponse[] = [];
       await expect(async () => {
-        for await (const _ of resultGenerator) {
+        for await (const result of resultGenerator) {
           // Consume until the stream error after the held finish.
+          results.push(result);
         }
       }).rejects.toThrow(streamError);
-      expect(logProtocolTagSanitized).not.toHaveBeenCalled();
+      // The error-path flush delivers the held finish ahead of the
+      // rejection, so its sanitization is telemetry for a response the
+      // caller really received — suppressing it would lose the event.
+      expect(results).toEqual([finishResponse]);
+      expect(logProtocolTagSanitized).toHaveBeenCalledTimes(1);
     });
 
     it('logs only the accepted finish after duplicate and empty trailing chunks', async () => {
@@ -4963,6 +5740,774 @@ describe('ContentGenerationPipeline', () => {
       }
       expect(totalFunctionCalls).toBe(1);
     });
+
+    it('flushes a parked finish response when the stream fails before the trailing tail', async () => {
+      // A gateway error frame can land where the trailing usage chunk would
+      // have been: the finish chunk is already parked for the usage merge,
+      // and the iterator throws before anything releases it. The caller must
+      // still receive the finish response ahead of the rejection, or
+      // downstream completeness gates cannot tell the answer finished.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockChunk1 = {
+        id: 'chunk-1',
+        choices: [
+          { delta: { content: 'a complete answer' }, finish_reason: null },
+        ],
+      } as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk2 = {
+        id: 'chunk-2',
+        choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      const upstreamError = Object.assign(new Error("'id'"), {
+        code: 'KeyError',
+        requestID: 'req-1',
+      });
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk1;
+          yield mockChunk2;
+          throw upstreamError;
+        },
+      };
+
+      const mockContentResponse = new GenerateContentResponse();
+      mockContentResponse.candidates = [
+        { content: { parts: [{ text: 'a complete answer' }], role: 'model' } },
+      ];
+      const mockFinishResponse = new GenerateContentResponse();
+      mockFinishResponse.candidates = [
+        {
+          content: { parts: [], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(mockContentResponse)
+        .mockReturnValueOnce(mockFinishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const iterator = resultGenerator[Symbol.asyncIterator]();
+
+      const contentResult = await iterator.next();
+      if (contentResult.done) throw new Error('Expected a content response.');
+      expect(contentResult.value).toBe(mockContentResponse);
+
+      // The parked finish is flushed ahead of the propagated error.
+      const finishResult = await iterator.next();
+      if (finishResult.done) throw new Error('Expected a finish response.');
+      expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
+        FinishReason.STOP,
+      );
+
+      await expect(iterator.next()).rejects.toThrow("'id'");
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('flushes a parked finish response ahead of a stream-guard timeout', async () => {
+      // A provider that emits content plus `finish_reason: 'stop'` and then
+      // goes silent — a hung or drip-fed gateway after the answer — trips
+      // the inactivity watchdog while the finish chunk is still parked for
+      // the usage merge. Downstream completeness gates key on the finish
+      // reason, so the parked response must reach the caller ahead of the
+      // guard's rethrow; a flush placed below the guard branch never runs
+      // for this error class.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockChunk1 = {
+        id: 'chunk-1',
+        choices: [
+          { delta: { content: 'a complete answer' }, finish_reason: null },
+        ],
+      } as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk2 = {
+        id: 'chunk-2',
+        choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletionChunk;
+
+      const guardError = new StreamInactivityTimeoutError(240_000, 2, 240_500);
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield mockChunk1;
+          yield mockChunk2;
+          throw guardError;
+        },
+      };
+
+      const mockContentResponse = new GenerateContentResponse();
+      mockContentResponse.candidates = [
+        { content: { parts: [{ text: 'a complete answer' }], role: 'model' } },
+      ];
+      const mockFinishResponse = new GenerateContentResponse();
+      mockFinishResponse.candidates = [
+        {
+          content: { parts: [], role: 'model' },
+          finishReason: FinishReason.STOP,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(mockContentResponse)
+        .mockReturnValueOnce(mockFinishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        userPromptId,
+      );
+      const iterator = resultGenerator[Symbol.asyncIterator]();
+
+      const contentResult = await iterator.next();
+      if (contentResult.done) throw new Error('Expected a content response.');
+      expect(contentResult.value).toBe(mockContentResponse);
+
+      // The parked finish is flushed ahead of the guard's rethrow.
+      const finishResult = await iterator.next();
+      if (finishResult.done) throw new Error('Expected a finish response.');
+      expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
+        FinishReason.STOP,
+      );
+
+      // The caller still rejects with the dedicated timeout error instance —
+      // its type and idle/chunk metadata intact — because the guard branch
+      // bypasses handleError.
+      await expect(iterator.next()).rejects.toBe(guardError);
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('withholds a parked functionCall finish when the stream fails before the trailing tail', async () => {
+      // The converter emits functionCall parts only on the finish chunk, and
+      // streaming always parks that chunk for the trailing usage metadata.
+      // Releasing it ahead of the error would flip LlmChat's delivered flags
+      // (streamYieldedContentChunk, streamYieldedFunctionCall) and shut the
+      // transport replay gate that recovers exactly this cut, while the
+      // post-completion acceptance arm the flush feeds excludes tool calls
+      // anyway — so a tool-call finish stays parked on the error path.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
+        finishResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // The tool-call finish stays parked: the caller sees no chunk, only
+      // the rejection.
+      expect(results).toEqual([]);
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases a parked functionCall finish once content was delivered when the stream fails', async () => {
+      // Sibling of the withhold case above: the withhold protects LlmChat's
+      // transport replay gate, which is open only while nothing user-visible
+      // was delivered. Once prose has reached the caller that gate is already
+      // shut, so withholding buys no recovery — it only strands the model's
+      // decided tool call. The parked finish must be released so the
+      // delivered functionCall flips LlmChat's delivered flags and the
+      // error-path persistence plus the scheduler's repair flow take over.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'prose-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me read that file. ' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const proseResponse = new GenerateContentResponse();
+      proseResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me read that file. ' }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(proseResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // Both the prose and the released finish reach the caller ahead of the
+      // rejection.
+      expect(results).toEqual([proseResponse, finishResponse]);
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('withholds a parked functionCall finish when only thought content was delivered', async () => {
+      // The delivered-content flag mirrors LlmChat's notion, which excludes
+      // thought parts: a thought-only prefix persists nothing on the error
+      // path and leaves the transport replay gate open, so the parked
+      // tool-call finish stays withheld exactly as when nothing was
+      // delivered at all.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'thought-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me plan this out.' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const thoughtResponse = new GenerateContentResponse();
+      thoughtResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me plan this out.', thought: true }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(thoughtResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // The thought reached the caller but does not count as delivered
+      // content, so the tool-call finish stays parked.
+      expect(results).toEqual([thoughtResponse]);
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases a parked functionCall finish on a continuation attempt even when only thought content was delivered', async () => {
+      // Sibling of the thought-only withhold case above with the request
+      // marked as a transport-continuation attempt. The replay gate the
+      // withhold protects is turn-scoped (LlmChat's
+      // transportContinuationText), and with a continuation in flight it is
+      // already shut by the accumulated prefix — which a fresh stream's own
+      // yields cannot show. The delivered-content flag is seeded from the
+      // continuation marker, so the decided tool call is released instead of
+      // staying parked into another prose continuation.
+      const request: PromptCacheSharingParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        continuationInFlight: true,
+      };
+      const streamError = new Error('stream failed after finish');
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'thought-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me plan this out.' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          throw streamError;
+        },
+      };
+      const thoughtResponse = new GenerateContentResponse();
+      thoughtResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me plan this out.', thought: true }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(thoughtResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const results: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const result of resultGenerator) {
+          results.push(result);
+        }
+      }).rejects.toThrow(streamError);
+      // The thought reaches the caller, and so does the parked tool-call
+      // finish: the continuation marker means the replay gate the withhold
+      // would have protected is already shut.
+      expect(results).toEqual([thoughtResponse, finishResponse]);
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-deliver a Stage 2d finish when the consumer throws into the generator', async () => {
+      // The Stage 2d flush yields the parked finish and suspends there. A
+      // consumer that throws into the generator at that point lands in the
+      // error-path flush, which re-tests `finishYielded`: had Stage 2d not set
+      // it, the same response object would be delivered a second time, and
+      // every part it carries would be folded into the persisted turn twice.
+      // Latent rather than live: nothing in production initiates a throw into
+      // this chain — the two `.throw()` sites in it only forward one
+      // (`llm-content-generator.ts`, `loggingContentGenerator.ts`), and a
+      // `for await` consumer abandons through `.return()`, which does not run
+      // the catch. This pins the invariant so the first caller that does throw
+      // cannot double-deliver.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ text: 'a complete answer' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValueOnce(
+        finishResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      expect(first.value).toBe(finishResponse);
+
+      // The error-path flush must not hand the same response back a second
+      // time: the throw propagates to the consumer instead of resolving with
+      // another value.
+      await expect(
+        resultGenerator.throw!(new Error('consumer threw into the generator')),
+      ).rejects.toThrow('consumer threw into the generator');
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-deliver an in-loop merged finish when the consumer throws into the generator', async () => {
+      // Sibling of the Stage 2d case above, for the other yield of a parked
+      // finish: a chunk arriving after the finish one is merged into it and
+      // yielded in-loop. A throw landing on that suspension point reaches the
+      // error-path flush with the same parked response still set, so the flag
+      // has to be raised before suspending here too.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'usage-chunk',
+            choices: [{ delta: {} }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ text: 'a complete answer' }], role: 'model' },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+      const usageResponse = new GenerateContentResponse();
+      usageResponse.usageMetadata = {
+        promptTokenCount: 3,
+        candidatesTokenCount: 5,
+        totalTokenCount: 8,
+      };
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(finishResponse)
+        .mockReturnValueOnce(usageResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      // The merged response keeps the parked finish's candidates and carries
+      // the late usage.
+      expect(first.value?.candidates).toBe(finishResponse.candidates);
+      expect(first.value?.usageMetadata?.totalTokenCount).toBe(8);
+
+      await expect(
+        resultGenerator.throw!(new Error('consumer threw into the generator')),
+      ).rejects.toThrow('consumer threw into the generator');
+      expect(mockErrorHandler.handle).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases a parked tool call when the held-parts flush delivered the content', async () => {
+      // The unclosed-thinking-tag flush yields the parts the converter was
+      // holding. When those carry non-thought content, LlmChat counts the
+      // chunk as delivered and shuts its transport replay gate, so
+      // `contentYielded` has to agree at this yield site too — otherwise the
+      // error-path flush withholds a parked tool call that no recovery arm can
+      // pick up any more, stranding the model's decided call into a prose
+      // continuation. Held parts that are thought-only must keep the flag
+      // false — that is the withhold sibling below.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'held-parts-chunk',
+            choices: [{ delta: { content: ' ' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+        (_chunk, context) => {
+          // A whitespace-only candidate with no closing tag takes the flush
+          // branch, and the parts it holds are plain content, not reasoning.
+          context.pendingThinkingTagCandidate = { text: ' ' };
+          context.pendingUntrustedResponseParts = [
+            { text: 'Let me read that file. ' },
+          ];
+          return finishResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      expect(first.value?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Let me read that file. ' },
+      ]);
+
+      const second = await resultGenerator.throw!(
+        new Error('consumer threw into the generator'),
+      );
+      expect(second.value).toBe(finishResponse);
+    });
+
+    it('keeps a parked tool call withheld when the held-parts flush delivered only thought', async () => {
+      // The other end of the same knob. Held parts can be thought-marked
+      // reasoning, which LlmChat does not count as delivered, so its transport
+      // replay gate is still open and withholding the parked tool call still
+      // buys the recovery it exists for. Updating the flag unconditionally at
+      // that yield site would strand the call in the other direction.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'held-thought-chunk',
+            choices: [{ delta: { content: ' ' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingThinkingTagCandidate = { text: ' ' };
+          context.pendingUntrustedResponseParts = [
+            { thought: true, text: 'reasoning' },
+          ];
+          return finishResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      const first = await resultGenerator.next();
+      expect(first.value?.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'reasoning' },
+      ]);
+
+      // Nothing user-visible was delivered, so the parked finish stays parked
+      // and the throw propagates instead of resolving with it.
+      await expect(
+        resultGenerator.throw!(new Error('consumer threw into the generator')),
+      ).rejects.toThrow('consumer threw into the generator');
+    });
+
+    it('does not flush a parked tool-call finish into a cancelled turn', async () => {
+      // R17-2. The flush synthesises a delivery on the error path, so it needs
+      // the abort guard every other synthesis branch in this catch carries
+      // (the PROTOCOL_TAG_LEAK throw below spells it
+      // `request.config?.abortSignal?.aborted !== true`). Without it a user
+      // cancellation hands over a parked functionCall the caller was never
+      // shown: LlmChat folds it into the turn's parts before the AbortError
+      // lands, and cancellation persistence then writes a model[functionCall]
+      // turn into history and the JSONL record for a call the turn driver
+      // never dispatched — the transcript asserts a tool call in a turn the
+      // user cancelled. Guarded on the signal rather than the error's
+      // identity, because `isAbortError` is not imported here and two branches
+      // of one catch must not disagree about what "aborted" means.
+      const abortController = new AbortController();
+      const abortError = new Error('Aborted');
+      abortError.name = 'AbortError';
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'prose-chunk',
+            choices: [
+              {
+                delta: { content: 'Let me read that file. ' },
+                finish_reason: null,
+              },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'finish-chunk',
+            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          // The usage tail never arrives: the user pressed Esc first.
+          abortController.abort();
+          throw abortError;
+        },
+      };
+      const proseResponse = new GenerateContentResponse();
+      proseResponse.candidates = [
+        {
+          content: {
+            parts: [{ text: 'Let me read that file. ' }],
+            role: 'model',
+          },
+          index: 0,
+        },
+      ];
+      const finishResponse = new GenerateContentResponse();
+      finishResponse.candidates = [
+        {
+          content: { parts: [{ functionCall: { name: 'read_file' } }] },
+          finishReason: FinishReason.STOP,
+          index: 0,
+        },
+      ];
+
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToLlm as Mock)
+        .mockReturnValueOnce(proseResponse)
+        .mockReturnValueOnce(finishResponse);
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results: GenerateContentResponse[] = [];
+      let caught: unknown;
+      try {
+        for await (const result of resultGenerator) results.push(result);
+      } catch (error) {
+        caught = error;
+      }
+
+      // The prose the caller was shown survives; the parked call does not.
+      expect(results).toEqual([proseResponse]);
+      expect(
+        results.some((response) =>
+          response.candidates?.some((candidate) =>
+            candidate.content?.parts?.some((part) => part.functionCall),
+          ),
+        ),
+      ).toBe(false);
+      expect(caught).toBe(abortError);
+    });
   });
 
   describe('buildResponseFormat endpoint gate', () => {
@@ -4983,7 +6528,7 @@ describe('ContentGenerationPipeline', () => {
       expect(body.response_format).toEqual({ type: 'json_object' });
     });
 
-    it('falls back to json_object when required is partial (goalJudge shape)', () => {
+    it('falls back to json_object when required is partial', () => {
       const body = pipeline['buildResponseFormat']({
         model: 'test-model',
         contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
@@ -5148,6 +6693,7 @@ describe('ContentGenerationPipeline', () => {
           response_format: { type: 'json_object' },
         }),
         userPromptId,
+        0,
       );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -5204,6 +6750,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         userPromptId,
+        0,
       );
     });
 
@@ -5253,6 +6800,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         'test-prompt-id',
+        0,
       );
     });
 
@@ -5301,6 +6849,7 @@ describe('ContentGenerationPipeline', () => {
           },
         }),
         'test-prompt-id',
+        0,
       );
     });
 

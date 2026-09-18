@@ -5,18 +5,15 @@
  */
 
 import {
-  GOAL_CHECKPOINT_CLAIM_LIMIT,
-  GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
-  GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
-  GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
   GOAL_STATE_VERSION,
   goalLimitKindForReason,
-  isGoalEvidenceProofKind,
+  isGoalActiveTimeBudgetSpent,
+  isGoalBudgetLimitKind,
   isGoalLimitKind,
   isGoalTokenBudgetSpent,
+  isGoalTurnBudgetSpent,
   validateGoalPauseReason,
   type GoalControlRequest,
-  type GoalEvidenceCheckpoint,
   type GoalRecord,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -26,6 +23,34 @@ import {
 } from './goal-protocol.js';
 
 const MAX_BLOCKED_AUDIT_COUNT = 3;
+
+/**
+ * Keys that builds which compressed evidence into checkpoints wrote, and that
+ * nothing writes or reads any more. The parsers are closed-key allowlists, so
+ * a key left off the list would reject the whole record and a session resumed
+ * after an upgrade would lose its Goal. They are accepted whatever they hold
+ * and are not carried into the parsed value.
+ */
+const LEGACY_GOAL_RECORD_KEYS = [
+  'evidenceCheckpoint',
+  'checkpointStalls',
+  'lastCheckpointFailure',
+] as const;
+const LEGACY_PAYLOAD_KEYS = ['checkpointPending'] as const;
+
+export function reduceGoalSpend(
+  goal: GoalRecord,
+  tokens: number,
+  now: number,
+): GoalRecord {
+  if (!Number.isFinite(tokens) || tokens <= 0) return goal;
+  return {
+    ...goal,
+    tokensUsed: goal.tokensUsed + tokens,
+    activeTimeMs: elapsedActiveTime(goal, now),
+    updatedAt: now,
+  };
+}
 
 export interface GoalControlTransition {
   request: GoalControlRequest;
@@ -40,7 +65,24 @@ export interface GoalControlTransition {
    * unbounded.
    */
   tokenBudgetGrant?: number;
+  /**
+   * The autonomous turn window the caller is arming, in finished Goal turns.
+   * Armed and re-armed exactly like `tokenBudgetGrant`. Absent, or non-finite,
+   * means the transition arms no turn ceiling.
+   */
+  turnBudgetGrant?: number;
+  /**
+   * The autonomous active-time window the caller is arming, in milliseconds
+   * of `activeTimeMs`. Armed and re-armed exactly like `tokenBudgetGrant`.
+   */
+  activeTimeBudgetGrantMs?: number;
 }
+
+/** The three ceilings one control action can arm. */
+type GoalBudgetGrants = Pick<
+  GoalControlTransition,
+  'tokenBudgetGrant' | 'turnBudgetGrant' | 'activeTimeBudgetGrantMs'
+>;
 
 export interface GoalTurnFinishedTransition {
   now: number;
@@ -96,7 +138,7 @@ export function reduceGoalControl(
       normalizeObjective(request.objective, snapshotOf(null)),
       transition.now,
       transition.cursor,
-      transition.tokenBudgetGrant,
+      transition,
     );
   }
 
@@ -114,7 +156,7 @@ export function reduceGoalControl(
       normalizeObjective(request.objective, snapshotOf(current)),
       transition.now,
       transition.cursor,
-      transition.tokenBudgetGrant,
+      transition,
     );
   }
 
@@ -129,10 +171,8 @@ export function reduceGoalControl(
       revision: current.revision + 1,
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
-      evidenceCheckpoint: undefined,
-      checkpointStalls: undefined,
       noProgressTurns: undefined,
-      ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
+      ...rearmedBudgets(current, transition.now, transition),
       lastReason: undefined,
       limitKind: undefined,
     });
@@ -171,16 +211,16 @@ export function reduceGoalControl(
   if (
     request.action === 'resume' &&
     current.status === 'usage_limited' &&
-    current.limitKind === 'token_budget'
+    isGoalBudgetLimitKind(current.limitKind)
   ) {
     // A budget stop is a spent authorization, not a fault: resuming IS the
     // user paying for another window, so re-arm the ceiling ahead of the
-    // meter rather than resetting the meter -- `tokensUsed` stays honest
-    // accounting across the Goal's whole life.
+    // meter rather than resetting the meter -- `tokensUsed`, `turnCount` and
+    // `activeTimeMs` stay honest accounting across the Goal's whole life.
     return transitionGoal(current, transition.now, {
       status: 'active',
       noProgressTurns: undefined,
-      ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
+      ...rearmedBudgets(current, transition.now, transition),
       lastReason: undefined,
       limitKind: undefined,
     });
@@ -188,28 +228,18 @@ export function reduceGoalControl(
   if (request.action !== 'resume') {
     return assertNever(request, snapshotOf(current));
   }
-  // A Goal stopped by an evidence bound resumes from a fresh evidence window
-  // rather than refusing to resume at all. The bound was reached because the
-  // catalog could no longer hold everything since the cursor; carrying that
-  // same cursor and checkpoint back into an active Goal would reach it again
-  // on the next turn. Repointing the cursor to the resume boundary and
-  // dropping the checkpoint is the same reset `/goal edit` already performs,
-  // without discarding the objective or minting a new revision.
-  //
-  // The cost is explicit and belongs to the user who asked to resume:
-  // evidence recorded before this point is no longer citable, so a terminal
-  // proposal must prove itself from what the resumed run produces.
+  // A Goal an earlier build stopped at an evidence bound (an exhausted
+  // catalog, an oversized checkpoint request) resumes from a fresh evidence
+  // window: its cursor is repointed to the resume boundary, the same reset
+  // `/goal edit` performs, without discarding the objective or minting a new
+  // revision. No current build stops a Goal this way; the branch is what lets
+  // such a record resume cleanly.
   if (current.status === 'usage_limited' && isEvidenceLimited(current)) {
     return transitionGoal(current, transition.now, {
       status: 'active',
       evidenceCursor: copyCursor(transition.cursor),
-      evidenceCheckpoint: undefined,
-      // The streak counts checkpoints against one window; this resume starts
-      // a different one, so carrying it over would spend the new window's
-      // allowance on the old window's failures.
-      checkpointStalls: undefined,
       noProgressTurns: undefined,
-      ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
+      ...rearmedBudgets(current, transition.now, transition),
       lastReason: undefined,
       limitKind: undefined,
     });
@@ -227,7 +257,7 @@ export function reduceGoalControl(
   return transitionGoal(current, transition.now, {
     status: 'active',
     noProgressTurns: undefined,
-    ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
+    ...rearmedBudgets(current, transition.now, transition),
     ...(current.status === 'paused' ? { lastReason: undefined } : {}),
   });
 }
@@ -348,38 +378,21 @@ export function parseGoalStateRecordPayloadV2(
       'v',
       'cause',
       'snapshot',
-      'checkpointPending',
       'blockedAudit',
+      ...LEGACY_PAYLOAD_KEYS,
     ]) ||
     value['v'] !== GOAL_STATE_VERSION ||
     !isGoalStateCause(value['cause']) ||
-    !isCheckpointPending(value['checkpointPending']) ||
     !isBlockedAudit(value['blockedAudit'])
   ) {
     return undefined;
   }
   const parsedSnapshot = parseGoalSnapshotV2(value['snapshot']);
   if (parsedSnapshot?.activity !== 'idle') return undefined;
-  const checkpointPending = value['checkpointPending'];
-  if (
-    checkpointPending &&
-    (parsedSnapshot.goal?.status !== 'active' ||
-      checkpointPending.permit.goalId !== parsedSnapshot.goal.goalId ||
-      checkpointPending.permit.revision !== parsedSnapshot.goal.revision ||
-      checkpointPending.recordUuid ===
-        parsedSnapshot.goal.evidenceCursor.recordId ||
-      (value['cause'] !== 'turn_finished' &&
-        value['cause'] !== 'verifier_reject'))
-  ) {
-    return undefined;
-  }
   return {
     v: GOAL_STATE_VERSION,
     cause: value['cause'],
     snapshot: parsedSnapshot,
-    ...(checkpointPending
-      ? { checkpointPending: structuredClone(checkpointPending) }
-      : {}),
     ...(value['blockedAudit']
       ? { blockedAudit: structuredClone(value['blockedAudit']) }
       : {}),
@@ -444,7 +457,7 @@ function createGoal(
   objective: string,
   now: number,
   cursor: TranscriptCursor,
-  tokenBudget: number | undefined,
+  grants: GoalBudgetGrants,
 ): GoalRecord {
   return {
     goalId,
@@ -455,14 +468,26 @@ function createGoal(
     turnCount: 0,
     activeTimeMs: 0,
     tokensUsed: 0,
-    // A non-finite grant (a host opting out) arms nothing: `Infinity` would
-    // not survive the JSON journal, so "unbounded" is spelled as no field.
-    ...(tokenBudget !== undefined && Number.isFinite(tokenBudget)
-      ? { tokenBudget }
-      : {}),
+    ...armedBudget('tokenBudget', grants.tokenBudgetGrant),
+    ...armedBudget('turnBudget', grants.turnBudgetGrant),
+    ...armedBudget('activeTimeBudgetMs', grants.activeTimeBudgetGrantMs),
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/**
+ * The ceiling a create or replace stamps for one budget. A non-finite grant
+ * (a host or a setting opting out) arms nothing: `Infinity` would not survive
+ * the JSON journal, so "unbounded" is spelled as no field.
+ */
+function armedBudget(
+  field: 'tokenBudget' | 'turnBudget' | 'activeTimeBudgetMs',
+  grant: number | undefined,
+): Partial<GoalRecord> {
+  return grant !== undefined && Number.isFinite(grant)
+    ? { [field]: grant }
+    : {};
 }
 
 function assertExpectedVersion(
@@ -531,6 +556,57 @@ function rearmedTokenBudget(
     : { tokenBudget: undefined, windDownTurnId: undefined };
 }
 
+/** `rearmedTokenBudget` for the turn ceiling, measured in finished turns. */
+function rearmedTurnBudget(
+  current: GoalRecord,
+  grant: number | undefined,
+): Partial<GoalRecord> {
+  if (grant === undefined || !isGoalTurnBudgetSpent(current)) {
+    return {};
+  }
+  return Number.isFinite(grant)
+    ? { turnBudget: current.turnCount + grant, windDownTurnId: undefined }
+    : { turnBudget: undefined, windDownTurnId: undefined };
+}
+
+/**
+ * `rearmedTokenBudget` for the active-time ceiling.
+ *
+ * Measured against the same elapsed figure `transitionGoal` is about to
+ * commit as `activeTimeMs`, so the new window starts where the old one
+ * stopped rather than at a clock the record never held.
+ */
+function rearmedActiveTimeBudget(
+  current: GoalRecord,
+  now: number,
+  grant: number | undefined,
+): Partial<GoalRecord> {
+  const elapsed = elapsedActiveTime(current, now);
+  if (grant === undefined || !isGoalActiveTimeBudgetSpent(current, elapsed)) {
+    return {};
+  }
+  return Number.isFinite(grant)
+    ? { activeTimeBudgetMs: elapsed + grant, windDownTurnId: undefined }
+    : { activeTimeBudgetMs: undefined, windDownTurnId: undefined };
+}
+
+/**
+ * Every ceiling the transition re-arms. Each budget is independent: a spent
+ * one moves forward, an unspent one is left exactly as it was, so a resume
+ * granted for one bound cannot silently widen another.
+ */
+function rearmedBudgets(
+  current: GoalRecord,
+  now: number,
+  grants: GoalBudgetGrants,
+): Partial<GoalRecord> {
+  return {
+    ...rearmedTokenBudget(current, grants.tokenBudgetGrant),
+    ...rearmedTurnBudget(current, grants.turnBudgetGrant),
+    ...rearmedActiveTimeBudget(current, now, grants.activeTimeBudgetGrantMs),
+  };
+}
+
 function transitionGoal(
   goal: GoalRecord,
   now: number,
@@ -544,6 +620,15 @@ function transitionGoal(
   };
   if ('tokenBudget' in changes && changes.tokenBudget === undefined) {
     delete transitioned.tokenBudget;
+  }
+  if ('turnBudget' in changes && changes.turnBudget === undefined) {
+    delete transitioned.turnBudget;
+  }
+  if (
+    'activeTimeBudgetMs' in changes &&
+    changes.activeTimeBudgetMs === undefined
+  ) {
+    delete transitioned.activeTimeBudgetMs;
   }
   if ('windDownTurnId' in changes && changes.windDownTurnId === undefined) {
     delete transitioned.windDownTurnId;
@@ -595,11 +680,12 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'activeTimeMs',
       'tokensUsed',
       'tokenBudget',
+      'turnBudget',
+      'activeTimeBudgetMs',
       'windDownTurnId',
       'createdAt',
       'updatedAt',
-      'evidenceCheckpoint',
-      'checkpointStalls',
+      ...LEGACY_GOAL_RECORD_KEYS,
       'noProgressTurns',
       'lastReason',
       'limitKind',
@@ -618,14 +704,15 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       !isNonNegativeNumber(value['tokensUsed'])) ||
     (value['tokenBudget'] !== undefined &&
       !isNonNegativeNumber(value['tokenBudget'])) ||
+    (value['turnBudget'] !== undefined &&
+      !isNonNegativeInteger(value['turnBudget'])) ||
+    (value['activeTimeBudgetMs'] !== undefined &&
+      !isNonNegativeNumber(value['activeTimeBudgetMs'])) ||
     (value['windDownTurnId'] !== undefined &&
       (typeof value['windDownTurnId'] !== 'string' ||
         !value['windDownTurnId'])) ||
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
-    !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
-    (value['checkpointStalls'] !== undefined &&
-      !isNonNegativeInteger(value['checkpointStalls'])) ||
     (value['noProgressTurns'] !== undefined &&
       !isNonNegativeInteger(value['noProgressTurns'])) ||
     (value['lastReason'] !== undefined &&
@@ -633,13 +720,6 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     (value['limitKind'] !== undefined &&
       (!isGoalLimitKind(value['limitKind']) ||
         value['status'] !== 'usage_limited'))
-  ) {
-    return undefined;
-  }
-  if (
-    value['evidenceCheckpoint'] &&
-    value['evidenceCursor'].recordId !==
-      value['evidenceCheckpoint'].checkpointId
   ) {
     return undefined;
   }
@@ -657,20 +737,17 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     ...(value['tokenBudget'] === undefined
       ? {}
       : { tokenBudget: value['tokenBudget'] }),
+    ...(value['turnBudget'] === undefined
+      ? {}
+      : { turnBudget: value['turnBudget'] }),
+    ...(value['activeTimeBudgetMs'] === undefined
+      ? {}
+      : { activeTimeBudgetMs: value['activeTimeBudgetMs'] }),
     ...(value['windDownTurnId'] === undefined
       ? {}
       : { windDownTurnId: value['windDownTurnId'] }),
     createdAt: value['createdAt'],
     updatedAt: value['updatedAt'],
-    ...(value['evidenceCheckpoint'] === undefined
-      ? {}
-      : {
-          evidenceCheckpoint: structuredClone(value['evidenceCheckpoint']),
-        }),
-    // Zero is spelled as no field; a persisted 0 restores the same way.
-    ...(value['checkpointStalls']
-      ? { checkpointStalls: value['checkpointStalls'] }
-      : {}),
     ...(value['noProgressTurns']
       ? { noProgressTurns: value['noProgressTurns'] }
       : {}),
@@ -736,78 +813,6 @@ function isGoalStateCause(value: unknown): value is GoalStateCause {
     value === 'usage_limited' ||
     value === 'clear' ||
     value === 'migrated'
-  );
-}
-
-function isGoalEvidenceCheckpoint(
-  value: unknown,
-): value is GoalEvidenceCheckpoint | undefined {
-  if (value === undefined) return true;
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, ['checkpointId', 'createdAt', 'claims']) ||
-    typeof value['checkpointId'] !== 'string' ||
-    value['checkpointId'].length === 0 ||
-    !isFiniteNumber(value['createdAt']) ||
-    !Array.isArray(value['claims']) ||
-    value['claims'].length === 0 ||
-    value['claims'].length > GOAL_CHECKPOINT_CLAIM_LIMIT
-  ) {
-    return false;
-  }
-  let checkpointBytes = 0;
-  for (const [index, claim] of value['claims'].entries()) {
-    if (
-      !isRecord(claim) ||
-      !hasOnlyKeys(claim, ['id', 'proofKind', 'claim', 'sourceRefs']) ||
-      claim['id'] !== `${value['checkpointId']}:${index + 1}` ||
-      !isGoalEvidenceProofKind(claim['proofKind']) ||
-      typeof claim['claim'] !== 'string' ||
-      claim['claim'].trim().length === 0 ||
-      [...claim['claim']].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS ||
-      !Array.isArray(claim['sourceRefs']) ||
-      claim['sourceRefs'].length === 0 ||
-      claim['sourceRefs'].length > GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT ||
-      new Set(claim['sourceRefs']).size !== claim['sourceRefs'].length ||
-      claim['sourceRefs'].some(
-        (reference) => typeof reference !== 'string' || reference.length === 0,
-      )
-    ) {
-      return false;
-    }
-    checkpointBytes += new TextEncoder().encode(claim['claim']).byteLength;
-    if (checkpointBytes > GOAL_CHECKPOINT_CLAIM_MAX_BYTES) return false;
-  }
-  return true;
-}
-
-function isCheckpointPending(
-  value: unknown,
-): value is GoalStateRecordPayloadV2['checkpointPending'] {
-  return (
-    value === undefined ||
-    (isRecord(value) &&
-      hasOnlyKeys(value, ['permit', 'recordUuid']) &&
-      isGoalTurnPermit(value['permit']) &&
-      typeof value['recordUuid'] === 'string' &&
-      value['recordUuid'].length > 0)
-  );
-}
-
-function isGoalTurnPermit(value: unknown): value is {
-  goalId: string;
-  revision: number;
-  turnId: string;
-} {
-  return (
-    isRecord(value) &&
-    hasOnlyKeys(value, ['goalId', 'revision', 'turnId']) &&
-    typeof value['goalId'] === 'string' &&
-    value['goalId'].length > 0 &&
-    isNonNegativeInteger(value['revision']) &&
-    value['revision'] > 0 &&
-    typeof value['turnId'] === 'string' &&
-    value['turnId'].length > 0
   );
 }
 

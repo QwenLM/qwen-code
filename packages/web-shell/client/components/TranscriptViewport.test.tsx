@@ -70,7 +70,7 @@ afterEach(() => {
 const live: Message[] = [
   { id: 'live', role: 'user', content: 'live', timestamp: 1 },
 ];
-async function setup(supported = true, cursorOnly = false) {
+async function setup(supported = true, cursorOnly = false, turnCount = 4) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('requestAnimationFrame', () => 1);
   vi.stubGlobal('cancelAnimationFrame', () => undefined);
@@ -97,9 +97,14 @@ async function setup(supported = true, cursorOnly = false) {
       v: 1,
       sessionId: 'session',
       snapshot: 'snapshot',
-      totalTurns: 1,
+      totalTurns: turnCount,
       start: 0,
-      turns: [{ ordinal: 0, turnId: 'old', kind: 'prompt', label: 'old' }],
+      turns: Array.from({ length: turnCount }, (_, ordinal) => ({
+        ordinal,
+        turnId: ordinal === 0 ? 'old' : `turn-${ordinal}`,
+        kind: 'prompt' as const,
+        label: 'old',
+      })),
     }),
     getTranscriptPage,
     materializeTranscriptEvents: () => ({
@@ -136,6 +141,21 @@ async function setup(supported = true, cursorOnly = false) {
     onReloadTranscript: vi.fn(),
     onLoadOlderHistory: legacyLoad,
     hasOlderHistory: true,
+    sourceEntries: [
+      {
+        type: 'source',
+        source: {
+          id: 'source',
+          title: 'Source',
+          kind: 'link',
+          locator: { type: 'url', url: 'https://example.com/source' },
+          createdAt: '2025-01-01',
+          updatedAt: '2025-01-01',
+        },
+      },
+    ],
+    sourceSessionId: 'session',
+    onSourceOpen: vi.fn(),
   };
   act(() => root!.render(<TranscriptViewport {...props} ref={ref} />));
   const click = async (key: string) => {
@@ -159,6 +179,15 @@ async function setup(supported = true, cursorOnly = false) {
 }
 
 describe('TranscriptViewport', () => {
+  it.each([0, 3, 4])(
+    'requires at least four indexed turns (count=%i)',
+    async (count) => {
+      await setup(true, false, count);
+      expect(
+        container!.querySelector('[data-global-turn-navigation]') !== null,
+      ).toBe(count >= 4);
+    },
+  );
   it('pins the visible child of an expanded cross-page tool group', async () => {
     const { store, client, click, getTranscriptPage } = await setup();
     let toolId = 'newer-tool';
@@ -212,9 +241,6 @@ describe('TranscriptViewport', () => {
       hasOlder: true,
       hasMore: false,
     });
-    await click('history.loadEarlier');
-    expect(store.getViewportSnapshot().ranges[0]?.pageIds).toHaveLength(2);
-    const pin = vi.spyOn(store, 'setViewportAnchor');
     const list = container!.querySelector<HTMLElement>(
       '[data-web-shell-message-list]',
     )!;
@@ -246,6 +272,9 @@ describe('TranscriptViewport', () => {
         };
       },
     );
+    await click('history.loadEarlier');
+    expect(store.getViewportSnapshot().ranges[0]?.pageIds).toHaveLength(2);
+    const pin = vi.spyOn(store, 'setViewportAnchor');
     act(() => {
       list.dispatchEvent(new WheelEvent('wheel', { bubbles: true }));
       list.dispatchEvent(new Event('scroll', { bubbles: true }));
@@ -255,6 +284,9 @@ describe('TranscriptViewport', () => {
   it('switches only visible rows, disables historical mutations and returns live through the forwarded handle', async () => {
     const { props, ref, click } = await setup();
     expect(observed.props?.messages).toBe(live);
+    expect(observed.props?.sourceEntries).toBe(props.sourceEntries);
+    expect(observed.props?.sourceSessionId).toBe('session');
+    expect(observed.props?.onSourceOpen).toBe(props.onSourceOpen);
     await click('history.openEarlier');
     expect(
       container
@@ -271,6 +303,9 @@ describe('TranscriptViewport', () => {
     expect(observed.props?.onBranchSession).toBeUndefined();
     expect(observed.props?.onRetryClick).toBeUndefined();
     expect(observed.props?.onReloadTranscript).toBeUndefined();
+    expect(observed.props?.sourceEntries).toBeUndefined();
+    expect(observed.props?.sourceSessionId).toBeUndefined();
+    expect(observed.props?.onSourceOpen).toBeUndefined();
     const historical = observed.props?.messages;
     const nextLive: Message[] = [
       ...live,
@@ -285,6 +320,9 @@ describe('TranscriptViewport', () => {
     act(() => ref.current?.scrollToBottom());
     expect(observed.props?.messages).toBe(nextLive);
     expect(observed.props?.onEditUserMessage).toBe(props.onEditUserMessage);
+    expect(observed.props?.sourceEntries).toBe(props.sourceEntries);
+    expect(observed.props?.sourceSessionId).toBe('session');
+    expect(observed.props?.onSourceOpen).toBe(props.onSourceOpen);
   });
 
   it('preserves the original loader with turn navigation enabled', async () => {

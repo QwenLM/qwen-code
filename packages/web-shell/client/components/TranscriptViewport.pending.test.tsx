@@ -53,9 +53,14 @@ const head: DaemonSessionTurnIndexPage = {
   v: 1,
   sessionId: 'session',
   snapshot: 'snapshot',
-  totalTurns: 1,
+  totalTurns: 4,
   start: 0,
-  turns: [{ ordinal: 0, turnId: 'old', kind: 'prompt', label: 'old' }],
+  turns: Array.from({ length: 4 }, (_, ordinal) => ({
+    ordinal,
+    turnId: ordinal === 0 ? 'old' : `turn-${ordinal}`,
+    kind: 'prompt' as const,
+    label: 'old',
+  })),
 };
 const page: DaemonSessionTranscriptPage = {
   v: 1,

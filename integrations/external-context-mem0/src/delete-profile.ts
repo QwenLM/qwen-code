@@ -85,7 +85,7 @@ const getMessages = {
 };
 const forgetMessages = {
   deleted:
-    'The provider confirmed deletion and a subsequent exact read confirmed absence. Search indexes and existing conversations may still contain the text.',
+    'The delete request returned a successful HTTP response and a subsequent exact read confirmed absence. Search indexes and existing conversations may still contain the text.',
   not_deleted: 'This call did not submit a DELETE request.',
   unknown:
     'The record may have been deleted. Do not retry automatically; explicitly read the target to check its current state.',

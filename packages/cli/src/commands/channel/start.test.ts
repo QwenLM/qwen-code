@@ -917,6 +917,33 @@ describe('startCommand.handler', () => {
     expect(mockChannelLoopStoreCreateForTarget).toHaveBeenCalledWith(input, 3);
   });
 
+  it('passes the default Chinese language to the channel', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        channels: { telegram: { type: 'telegram' } },
+        general: { language: 'Chinese' },
+      },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.objectContaining({ locale: 'zh' }),
+    );
+  });
+
   it('uses available env-var resolution for single-channel config', async () => {
     const channels = { telegram: { type: 'telegram', token: '$BOT_TOKEN' } };
     mockLoadSettings.mockReturnValue({ merged: { channels } });
@@ -1099,6 +1126,35 @@ describe('startCommand.handler', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('started concurrently'),
     );
+  });
+
+  it('reports an unverifiable pidfile instead of a concurrent start', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    const err = Object.assign(
+      new Error(
+        'Channel service pidfile /home/u/.qwen/channels/service.pid holds a record this machine cannot verify.',
+      ),
+      { code: 'channel_service_conflict' },
+    );
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockChannelConnect.mockResolvedValue(undefined);
+    mockWriteServiceInfo.mockImplementationOnce(() => {
+      throw err;
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockChannelDisconnect).toHaveBeenCalled();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(`Error: ${err.message}`);
   });
 
   it('continues pidfile race cleanup when teardown steps throw', async () => {
@@ -2035,7 +2091,9 @@ describe('startCommand.handler', () => {
       first: { type: 'telegram' },
       second: { type: 'telegram' },
     };
-    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    mockLoadSettings.mockReturnValue({
+      merged: { channels, general: { language: 'Chinese' } },
+    });
     mockParseChannelConfig.mockImplementation(async (name: string) => ({
       ...mockParsedChannelConfig,
       cwd: `/tmp/${name}`,
@@ -2082,14 +2140,14 @@ describe('startCommand.handler', () => {
       'first',
       expect.objectContaining({ cwd: '/tmp/first' }),
       bridge,
-      expect.objectContaining({ router }),
+      expect.objectContaining({ locale: 'zh', router }),
     );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(
       2,
       'second',
       expect.objectContaining({ cwd: '/tmp/second' }),
       bridge,
-      expect.objectContaining({ router }),
+      expect.objectContaining({ locale: 'zh', router }),
     );
   });
 

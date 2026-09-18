@@ -8,7 +8,8 @@ import {
   MIN_CHILD_HEAP_MB,
   type DaemonMemoryBudget,
 } from './daemon-memory-budget.js';
-import { MAX_DAEMON_WORKSPACES } from './channel-control-timeouts.js';
+
+const MAX_MODELED_ACP_CHILDREN = 25;
 
 /**
  * Whether the daemon models a per-child heap partition.
@@ -19,6 +20,8 @@ import { MAX_DAEMON_WORKSPACES } from './channel-control-timeouts.js';
  * refused. Nothing is applied: no child receives a derived
  * `--max-old-space-size`, and no spawn is refused.
  *
+ * `admit` — enforce only the modeled process count, retaining legacy heap flags.
+ *
  * There is deliberately no `enforce` yet. Applying the partition needs a way
  * to tell an operator beforehand whether their workload fits it, and that
  * observation does not exist: `refusals` below counts admission pressure, not
@@ -28,7 +31,7 @@ import { MAX_DAEMON_WORKSPACES } from './channel-control-timeouts.js';
  * that justifies it — peak old-space per child, compared against
  * `perChildCeilingMb`.
  */
-export type ChildHeapMode = 'off' | 'observe';
+export type ChildHeapMode = 'off' | 'observe' | 'admit';
 
 export interface ChildHeapPolicySnapshot {
   mode: ChildHeapMode;
@@ -73,7 +76,7 @@ export interface ChildHeapPolicySnapshot {
    *   `committedProcessCount`, which counts a terminating child until it
    *   actually exits — deliberately, since its memory is still resident. So a
    *   replacement spawned before the old child exits transiently makes the
-   *   count one higher than steady state. Where `MAX_DAEMON_WORKSPACES` is the
+   *   count one higher than steady state. Where `MAX_MODELED_ACP_CHILDREN` is the
    *   binding term (`childPoolMb >= 12800`, i.e. a ~32 GB host and up), a
    *   daemon at 25 live children books a refusal on every channel replacement,
    *   with no memory pressure involved. Do not net this out by giving the
@@ -116,7 +119,7 @@ export function createChildHeapPolicy(options: {
   // reads as its *default* heap, roughly 4 GB, against a pool of nothing.
   const admissible = Math.min(
     Math.floor(budget.childPoolMb / MIN_CHILD_HEAP_MB),
-    MAX_DAEMON_WORKSPACES,
+    MAX_MODELED_ACP_CHILDREN,
   );
   // `floor(pool / admissible) >= MIN_CHILD_HEAP_MB` by construction, but the
   // legacy cap is `floor(available / 2)` and is under the floor whenever
@@ -145,6 +148,12 @@ export function createChildHeapPolicy(options: {
   // be the same contradiction from the other side.
   const maxConcurrentChildren = modelable ? admissible : 0;
   const perChildCeilingMb = modelable ? rawCeilingMb : null;
+
+  if (mode === 'admit' && maxConcurrentChildren === 0) {
+    throw new TypeError(
+      'ACP admission requires a memory budget that models at least one child.',
+    );
+  }
 
   return {
     decide(concurrentChildren) {

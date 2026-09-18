@@ -16,7 +16,8 @@
 
 import { readFileSync } from 'node:fs';
 import {
-  extractFileDiff,
+  extractStructuredResult,
+  formatToolArgs,
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
@@ -125,17 +126,17 @@ export function transcribeSession(
       const r = o.toolCallResult ?? {};
       const id = r.callId ?? pendingIdlessIds.shift() ?? `tool-${++toolSeq}`;
       if (r.resultDisplay) {
-        // FileDiff results ride as structured payloads (colored diff lines in
-        // the tool card); everything else flattens to display text. Bare
-        // `String(obj)` would render "[object Object]".
-        const diff = extractFileDiff(r.resultDisplay);
-        if (diff) {
-          events.push({ type: 'tool-result', id, display: '', diff });
+        // A structured payload rides as tool-result so the tool card keeps its
+        // own renderer; flattened text stays the incremental event, as in the
+        // live path. Bare `String(obj)` would render "[object Object]".
+        const structured = extractStructuredResult(r.resultDisplay);
+        if (structured) {
+          events.push({ type: 'tool-result', id, display: '', ...structured });
         } else {
           events.push({
             type: 'tool-output',
             id,
-            delta: renderResultDisplay(r.resultDisplay),
+            output: renderResultDisplay(r.resultDisplay),
           });
         }
       }
@@ -173,6 +174,10 @@ export function transcribeSession(
               tool: name,
               title: opts.toolTitle?.(name) ?? name,
             });
+            const args = formatToolArgs(
+              p.functionCall.args as Record<string, unknown> | undefined,
+            );
+            if (args) events.push({ type: 'tool-args', id, args });
           } else if (p.text) {
             events.push({ type: 'text', delta: p.text });
           }

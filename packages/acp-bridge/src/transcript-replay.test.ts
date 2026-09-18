@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { summarizeReplay } from './replay-summary.js';
 import {
   createTranscriptReplayMachine,
   createTranscriptToolCallResultUpdate,
@@ -80,6 +81,120 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('projects the daemon identity on every user block before a turn result', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        daemonPromptId: 'daemon-prompt-1',
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'model input' },
+            { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+          ],
+        },
+        systemPayload: {
+          displayText: 'visible input',
+          hookContext: '',
+          attachmentReferences: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    );
+    expect(projected).toHaveLength(3);
+    for (const update of projected) {
+      expect(update.sessionUpdate).toBe('user_message_chunk');
+      expect(update._meta).not.toHaveProperty('daemonPromptId');
+      expect(update._meta).toMatchObject({
+        promptId: 'daemon-prompt-1',
+        qwenTranscript: { sourceRecordIds: ['user-1'] },
+      });
+    }
+  });
+
+  it('does not infer a prompt identity for legacy user records', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('legacy', 'user', {
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      }),
+    );
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?._meta?.['promptId']).toBeUndefined();
+  });
+
+  it('preserves background execution identity without leaking into the next record', () => {
+    const machine = createTranscriptReplayMachine();
+    const backgroundTurn = {
+      turnId: 'notification-1',
+      taskId: 'Explore-1',
+      kind: 'agent',
+      sourceTurnId: 'user-1',
+      startedAt: 1000,
+    };
+    const backgroundRecord = {
+      ...record('assistant-bg', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [{ text: 'result' }, { text: 'thought', thought: true }],
+        },
+      }),
+      backgroundTurn,
+    };
+    const projected = updates(machine, backgroundRecord);
+    expect(projected.length).toBeGreaterThan(0);
+    for (const update of projected) {
+      expect(update._meta?.['backgroundTurn']).toEqual(backgroundTurn);
+    }
+    const next = updates(
+      machine,
+      record('assistant-next', 'assistant', {
+        message: { role: 'model', parts: [{ text: 'new response' }] },
+      }),
+    );
+    expect(
+      next.every((update) => update._meta?.['backgroundTurn'] === undefined),
+    ).toBe(true);
+  });
+
+  it('replays task completion as session status rather than an automatic execution', () => {
+    const backgroundTask = {
+      taskId: 'Explore-1',
+      kind: 'agent',
+      status: 'completed',
+    };
+    const item = {
+      ...record('completed-1', 'system', {
+        subtype: 'background_task_completed',
+        systemPayload: { displayText: 'Explore completed', backgroundTask },
+      }),
+      backgroundTurn: {
+        turnId: 'unrelated',
+        taskId: 'other',
+        kind: 'agent',
+        startedAt: 1000,
+      },
+    };
+    const projected = updates(createTranscriptReplayMachine(), item);
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Explore completed' },
+      _meta: {
+        source: 'background_task_completed',
+        qwenDiscreteMessage: true,
+        backgroundTask,
+      },
+    });
+    expect(projected[0]._meta?.['backgroundTurn']).toBeUndefined();
+  });
+
   it('stamps stable segment identity across replayed text parts', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
@@ -319,7 +434,9 @@ describe('createTranscriptReplayMachine', () => {
       updates(machine, goalStateRecord('goal-turn', 'turn_finished', turned)),
     ).toHaveLength(1);
 
-    const checkpointed: GoalRecord = {
+    // As a build that still compressed evidence into checkpoints journaled
+    // it: the parser accepts the old key and leaves it behind.
+    const checkpointed: GoalRecord & { evidenceCheckpoint: unknown } = {
       ...turned,
       evidenceCursor: { recordId: 'checkpoint-1' },
       evidenceCheckpoint: {
@@ -345,7 +462,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    const rejected: GoalRecord = {
+    const rejected = {
       ...checkpointed,
       lastReason: 'More work remains',
     };
@@ -356,7 +473,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toHaveLength(1);
 
-    const recommitted: GoalRecord = {
+    const recommitted = {
       ...rejected,
       activeTimeMs: 2900,
       tokensUsed: 0,
@@ -373,7 +490,8 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+    const { evidenceCheckpoint: _legacy, ...parsed } = recommitted;
+    expect(machine.snapshot().goalState?.goal).toEqual(parsed);
   });
 
   it('persists goalCause so bookkeeping suppression survives a page boundary', () => {
@@ -510,6 +628,94 @@ describe('createTranscriptReplayMachine', () => {
 
     expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
   });
+
+  it.each([
+    undefined,
+    null,
+    'invalid',
+    {},
+    { callId: '', subagentSessionReady: true },
+    { callId: 1, subagentSessionReady: true },
+    { callId: 'agent-1', subagentSessionReady: 'false' },
+  ])('reports and skips malformed readiness payload %j', (systemPayload) => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({ onDiagnostic });
+    expect(
+      updates(
+        machine,
+        record('ready-malformed', 'system', {
+          subtype: 'agent_session_ready',
+          systemPayload,
+        }),
+      ),
+    ).toEqual([]);
+    expect(onDiagnostic).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        code: 'malformed_agent_session_ready',
+        recordId: 'ready-malformed',
+        path: 'systemPayload',
+      }),
+    );
+  });
+
+  it.each([false, true])(
+    'replays valid readiness %s without a diagnostic',
+    (subagentSessionReady) => {
+      const onDiagnostic = vi.fn();
+      const machine = createTranscriptReplayMachine({ onDiagnostic });
+      updates(
+        machine,
+        record('start', 'assistant', {
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'agent-1', name: 'agent', args: {} } },
+            ],
+          },
+        }),
+      );
+      expect(
+        updates(
+          machine,
+          record('ready', 'system', {
+            subtype: 'agent_session_ready',
+            systemPayload: { callId: 'agent-1', subagentSessionReady },
+          }),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'agent-1',
+          _meta: expect.objectContaining({ subagentSessionReady }),
+        }),
+      ]);
+      expect(onDiagnostic).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'reports and skips readiness %s without a matching tool start',
+    (subagentSessionReady) => {
+      const onDiagnostic = vi.fn();
+      const machine = createTranscriptReplayMachine({ onDiagnostic });
+      expect(
+        updates(
+          machine,
+          record('orphan-ready', 'system', {
+            subtype: 'agent_session_ready',
+            systemPayload: { callId: 'missing-start', subagentSessionReady },
+          }),
+        ),
+      ).toEqual([]);
+      expect(onDiagnostic).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          code: 'orphan_agent_session_ready',
+          recordId: 'orphan-ready',
+          path: 'systemPayload.callId',
+        }),
+      );
+    },
+  );
 
   it('reports and skips a malformed goal_state record', () => {
     const onDiagnostic = vi.fn();
@@ -719,6 +925,99 @@ describe('createTranscriptReplayMachine', () => {
   describe('UserPromptSubmit hook context provenance', () => {
     const tagged =
       '<qwen:user-prompt-submit-context>\ninjected hook context\n</qwen:user-prompt-submit-context>';
+
+    it.each(['read both', ''])(
+      'replays original resource links with unchanged URIs and metadata (%j)',
+      (text) => {
+        const resourceLinks = [
+          {
+            type: 'resource_link',
+            uri: 'transit://resource-a',
+            name: 'notes.md',
+            mimeType: 'text/markdown',
+            size: 0,
+            title: 'First notes',
+            description: 'Original reference',
+            annotations: { audience: ['user'], priority: 0.5 },
+            _meta: { preview: { version: 1 } },
+          },
+          {
+            type: 'resource_link',
+            uri: 'https://example.com/notes.md',
+            name: 'notes.md',
+            mimeType: null,
+          },
+        ];
+        const projected = updates(
+          createTranscriptReplayMachine(),
+          record('user-resource', 'user', {
+            daemonPromptId: 'resource-prompt',
+            message: {
+              role: 'user',
+              parts: [{ text: 'expanded model input' }],
+            },
+            systemPayload: {
+              displayText: text,
+              hookContext: '',
+              resourceLinks,
+            },
+          }),
+        );
+
+        expect(
+          projected.map((update) =>
+            'content' in update ? update.content : update,
+          ),
+        ).toEqual([
+          ...(text ? [{ type: 'text', text }] : []),
+          ...resourceLinks,
+        ]);
+        for (const update of projected) {
+          expect(update._meta).toMatchObject({
+            promptId: 'resource-prompt',
+            qwenTranscript: { sourceRecordIds: ['user-resource'] },
+          });
+        }
+        const lastUpdate = projected.at(-1)!;
+        expect(
+          'content' in lastUpdate ? lastUpdate.content : lastUpdate,
+        ).not.toBe(resourceLinks[1]);
+      },
+    );
+
+    it('ignores invalid resource references and does not infer them from fileData', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-resource', 'user', {
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'read' },
+              { fileData: { fileUri: 'https://example.com/video.mp4' } },
+            ],
+          },
+          systemPayload: {
+            displayText: 'read',
+            hookContext: '',
+            resourceLinks: [
+              null,
+              { type: 'resource_link', uri: 'transit://x' },
+              {
+                type: 'resource_link',
+                uri: '',
+                name: 'empty',
+              },
+            ],
+          },
+        }),
+      );
+
+      expect(
+        projected.map((update) =>
+          'content' in update ? update.content : update,
+        ),
+      ).toEqual([{ type: 'text', text: 'read' }]);
+    });
 
     it('replays daemon attachment references without embedding base64', () => {
       const projected = updates(
@@ -1342,6 +1641,61 @@ describe('createTranscriptReplayMachine', () => {
 
     expect([...machine.finalize()]).toEqual([]);
     expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
+  });
+
+  it('attributes persisted Agent usage to its parent and omits it in summary', () => {
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          toolName: 'agent',
+          status: 'success',
+          resultDisplay: {
+            type: 'task_execution',
+            result: 'done',
+            executionSummary: {
+              inputTokens: 100,
+              outputTokens: 20,
+              totalTokens: 120,
+            },
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(2);
+    expect(result[1]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      _meta: {
+        parentToolCallId: 'agent-1',
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+    });
+    const events = result.map((data, id) => ({
+      id: id + 1,
+      v: 1 as const,
+      type: 'session_update',
+      data,
+    }));
+    expect(summarizeReplay(events)).toHaveLength(1);
+    expect(summarizeReplay(events)[0]?.data).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      rawOutput: { result: 'done', executionSummary: {} },
+    });
+    expect(machine.snapshot().cumulativeUsage.promptTokens).toBe(100);
   });
 
   it('correlates an id-less result only to one same-name pending call', () => {

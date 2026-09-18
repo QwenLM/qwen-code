@@ -102,19 +102,9 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
-it('keeps web_shell_e2e_smoke above its build-plus-browser budget on ECS', () => {
-  // Both numbers are measured, not predicted. This was the last lane on the
-  // pool still priced flat, and one commit lost it twice at 20: on hk3-9
-  // `npm ci` alone ran 19m46s of the budget and never finished, and on hk4-23
-  // install took 10m33s against 4m53s on hk5-2, leaving the browser smoke
-  // 8m15s before the job died against 2m29s warm. The smoke phase is a vite
-  // dev server plus a headless browser and touches no npm cache, so both
-  // phases running 2-3x is the pool rather than the dependencies. The healthy
-  // path is 8-10 minutes: a flat 20 only ever tolerated a 2x slowdown.
-  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(40);
-});
-
-it('keeps web_shell_e2e_smoke on its pre-contention ceiling when hosted', () => {
+it('keeps browser gates hosted independently of the shared Linux runner', () => {
+  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
+  expect(timeoutMinutesOn('web_shell_e2e_smoke', ECS_RUNNER)).toBe(20);
   expect(timeoutMinutesOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toBe(20);
   expect(timeoutMinutesOn('web_shell_e2e_smoke', '')).toBe(20);
 });
@@ -671,7 +661,7 @@ describe('GitHub helper tests', () => {
   it('keeps the dependency-free fast lane off npm-package suites', () => {
     // The github_ci_only helper step runs before ANY dependency install (the
     // setup-node and `npm ci` steps are gated on the full profile), so every
-    // suite it lists must import node: builtins only. These 9 suites import
+    // suite it lists must import node: builtins only. These 10 suites import
     // the `yaml` npm package; letting the fast lane run the full list made an
     // ECS-updater-only fork PR fail closed with ERR_MODULE_NOT_FOUND on a
     // fresh hosted runner (#10548 review R6-1). The full-profile helper step
@@ -695,6 +685,7 @@ describe('GitHub helper tests', () => {
       '.github/scripts/ci-runner-routing.test.mjs',
       '.github/scripts/assign-pr-owner.test.mjs',
       '.github/scripts/ci-disk-pressure.test.mjs',
+      '.github/scripts/e2e-build.test.mjs',
     ];
     for (const suite of yamlSuites) {
       expect(depFreeSuites, suite).not.toContain(suite);

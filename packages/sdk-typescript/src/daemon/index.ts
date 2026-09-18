@@ -50,6 +50,10 @@ export type { RestSseTransport } from './RestSseTransport.js';
 // The `NegotiateTransportOptions` *type* stays available from this barrel
 // for backward compatibility (type-only, no bundle cost).
 export type { NegotiateTransportOptions } from './negotiateTransport.js';
+export {
+  WEB_SHELL_PWA_ASSETS,
+  WEB_SHELL_SERVICE_WORKER_ROUTE,
+} from './pwa-assets.js';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
@@ -181,6 +185,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
@@ -223,6 +228,7 @@ export type {
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiSessionMetadataChangedEvent,
+  DaemonUiSessionSourceChangedEvent,
   DaemonUiShellOutputEvent,
   DaemonUiStateResyncRequiredEvent,
   DaemonUiReplayCompleteEvent,
@@ -230,6 +236,7 @@ export type {
   DaemonUiFollowupSuggestionEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUiUserResourceLinkEvent,
   DaemonUiToolProvenance,
   DaemonUiToolUpdateEvent,
   DaemonUiWorkspaceAgentChangedEvent,
@@ -245,6 +252,7 @@ export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
+  GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_PAUSE_REASON_COMMAND,
   isDaemonContentHash,
   requireWorkspaceCwd,
@@ -252,6 +260,8 @@ export {
 export type {
   DaemonAgentChangedData,
   DaemonAgentChangedEvent,
+  DaemonSourceChangedData,
+  DaemonSourceChangedEvent,
   DaemonArtifactChangedData,
   DaemonArtifactChangedEvent,
   DaemonApprovalModeChangedData,
@@ -486,6 +496,8 @@ export type {
   DaemonWorkspacePermissionsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonModelConfiguration,
+  DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
   DaemonModelProviderRuntimeSyncResult,
@@ -536,6 +548,9 @@ export type {
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
+  DaemonGitRemoteInfo,
+  DaemonGitRemotesResult,
+  DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestReviewDecision,
   DaemonGitHubPullRequestChecks,
   DaemonGitHubPullRequest,
@@ -545,6 +560,7 @@ export type {
   DaemonWorkspaceRemovalResult,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
+  DaemonBrand,
   DaemonCapabilities,
   DaemonContextCategoryBreakdown,
   DaemonContextFileScope,
@@ -600,15 +616,19 @@ export type {
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonSessionContextStatus,
+  DaemonContinueSessionResult,
   DaemonLspServerStatus,
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonWorkflowApprovalStatusEntry,
+  DaemonWorkflowSizeWarning,
   DaemonWorkflowDispatchStatus,
   DaemonWorkflowDispatchStatusEntry,
+  DaemonWorkflowCallTrace,
   DaemonWorkflowEvent,
   DaemonWorkflowPhaseVisit,
   DaemonSessionProcessTaskLifecycleStatus,
@@ -825,8 +845,18 @@ export type {
   DaemonSessionArtifactRestoreState,
   DaemonSessionArtifactRetention,
   DaemonSessionArtifactsEnvelope,
+  SessionSource,
+  SessionSourceLocator,
+  SessionSourceInput,
+  SessionSourcesResult,
+  SessionSourcesSnapshot,
+  SessionSourceUpsertResult,
+  SessionSourceRemoveResult,
   DaemonSessionArtifactSource,
   DaemonSessionArtifactStatus,
   DaemonSessionArtifactStorage,
   SessionMetadataResult,
 } from './types.js';
+
+export { parseDaemonBackgroundTurn } from './types.js';
+export type { DaemonBackgroundTurn } from './types.js';

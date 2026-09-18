@@ -31,6 +31,7 @@ import {
   type TrustPrecedenceRule,
 } from '../config/trust-precedence.js';
 import { publishPendingCompileCache } from '../config/compile-cache.js';
+import { captureEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 
@@ -47,6 +48,7 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
+  serve?: { channels?: unknown };
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -261,6 +263,7 @@ export function loadServeFastPathEnvironment(
   settings: ServeFastPathSettings,
   startDir: string = process.cwd(),
 ): void {
+  captureEnvironmentBeforeLoad();
   const userLevelPaths = getUserLevelEnvPathsFastPath();
   const envFilePaths = findEnvFilesFastPath(settings, startDir, userLevelPaths);
   const rejectedLoaderKeys: string[] = [];
@@ -411,7 +414,10 @@ function isWorkspaceTrustedFastPath(
   return isPathTrustedFastPath(realWorkspaceDir);
 }
 
-function readSettingsSummary(filePath: string): ServeFastPathSettings {
+function readSettingsSummary(
+  filePath: string,
+  includeServe = false,
+): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
 
   let parsed: unknown;
@@ -429,7 +435,7 @@ function readSettingsSummary(filePath: string): ServeFastPathSettings {
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  return pickFastPathSettings(parsed);
+  return pickFastPathSettings(parsed, includeServe);
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -446,6 +452,7 @@ function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
 
 function pickFastPathSettings(
   value: Record<string, unknown>,
+  includeServe = false,
 ): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   const useLegacyKeys = shouldUseLegacyFastPathKeys(value);
@@ -638,6 +645,14 @@ function pickFastPathSettings(
     out.policy = pickedPolicy;
   }
 
+  const serve = value['serve'];
+  if (includeServe && isPlainObject(serve)) {
+    const channels = serve['channels'];
+    if (channels !== undefined) {
+      out.serve = { channels };
+    }
+  }
+
   return out;
 }
 
@@ -719,9 +734,16 @@ export function loadServeFastPathSettings(
     path.join(getGlobalQwenDirLite(), 'settings.json'),
   );
   const initialTrustCheckSettings = mergeFastPathSettings(system, user);
-  const isTrusted =
-    isWorkspaceTrustedFastPath(initialTrustCheckSettings, realWorkspaceDir) ??
-    true;
+  const trustDecision = isWorkspaceTrustedFastPath(
+    initialTrustCheckSettings,
+    realWorkspaceDir,
+  );
+  const isTrusted = trustDecision ?? true;
+  const startupChannelsTrusted =
+    isWorkspaceTrustedFastPath(
+      mergeFastPathSettings(systemDefaults, user, system),
+      realWorkspaceDir,
+    ) === true;
   let realHomeDir = resolvedHomeDir;
   try {
     realHomeDir = fs.realpathSync(resolvedHomeDir);
@@ -736,11 +758,16 @@ export function loadServeFastPathSettings(
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
   const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(workspaceSettingsPath)
+    ? readSettingsSummary(workspaceSettingsPath, startupChannelsTrusted)
     : {};
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
+  if (startupChannelsTrusted && workspaceFromDisk.serve) {
+    merged.serve = {
+      channels: workspaceFromDisk.serve.channels,
+    };
+  }
   return resolveEnvVarsInObject(
     merged as Settings,
     getHomeEnvFallbackVarsFastPath(),

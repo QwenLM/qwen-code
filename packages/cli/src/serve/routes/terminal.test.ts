@@ -18,7 +18,7 @@ const context = {
 const resolveWorkspace = (selector: string) =>
   selector === '/workspace' ? context : undefined;
 const request = {
-  url: '/terminal?terminalId=terminal%3Amanual-1&cwd=%2Fworkspace',
+  url: '/terminal?terminalId=terminal%3Amanual-1&cwd=%2Fworkspace&replay=1',
 } as IncomingMessage;
 
 class FakeWebSocket extends EventEmitter {
@@ -45,6 +45,7 @@ function registryWithSnapshot(
         exited: boolean;
         exitCode?: number;
         workspaceCwd: string;
+        handlesPrimaryDa?: boolean;
       }
     | undefined,
 ) {
@@ -61,6 +62,18 @@ function registryWithSnapshot(
 }
 
 describe('terminal WebSocket route', () => {
+  it('rejects legacy replay clients before creating a PTY', async () => {
+    const registry = registryWithSnapshot(undefined);
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      { url: request.url!.replace('&replay=1', '') } as IncomingMessage,
+    );
+    expect(ws.close).toHaveBeenCalledWith(4002, 'Terminal protocol mismatch');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(registry.addOutputListener).not.toHaveBeenCalled();
+  });
+
   it('rejects invalid workspaces and terminal ids before creating a PTY', async () => {
     const registry = registryWithSnapshot(undefined);
     const unknown = new FakeWebSocket();
@@ -119,6 +132,9 @@ describe('terminal WebSocket route', () => {
       env: { PATH: '/runtime/bin' },
     });
     expect(sentOutput(ws)).toContain('prompt $ ');
+    expect(ws.sent[0]).toBe(
+      '\x00{"type":"snapshot","replay":false,"handlesPrimaryDa":false}',
+    );
     expect(registry.write).toHaveBeenCalledWith(
       'terminal:manual-1',
       'echo ready\r',
@@ -320,6 +336,7 @@ describe('terminal WebSocket route', () => {
       output: '',
       exited: false,
       workspaceCwd: '/workspace',
+      handlesPrimaryDa: true,
     });
     vi.mocked(registry.addOutputListener).mockImplementation(
       (_terminalId, listener) => {
@@ -343,6 +360,10 @@ describe('terminal WebSocket route', () => {
 
     expect(sentOutput(first)).toContain('live');
     expect(sentOutput(second)).toContain('live');
+    expect(first.sent.slice(0, 2)).toEqual([
+      '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":true}',
+      Buffer.from(''),
+    ]);
     expect(registry.create).not.toHaveBeenCalled();
   });
 
@@ -429,7 +450,7 @@ describe('terminal WebSocket route', () => {
     await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
       ws as unknown as WebSocket,
       {
-        url: `/terminal?terminalId=${terminalId}&cwd=%2Fworkspace`,
+        url: `/terminal?terminalId=${terminalId}&cwd=%2Fworkspace&replay=1`,
       } as IncomingMessage,
     );
 

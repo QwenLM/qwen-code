@@ -25,7 +25,17 @@ import {
 } from 'node:fs';
 import prompts from 'prompts';
 import { detectAgents, type DetectedAgent } from './agent-detector.js';
+import { DEFAULT_PROACTIVE_CONFIG, type ProactiveConfig } from './config.js';
 import { LiveHostInstaller } from './host/live-host-installer.js';
+import { initialMemoryConfig } from './memory/config.js';
+import {
+  displayLiveMessage,
+  isLiveLanguage,
+  liveText,
+  type LiveLanguage,
+  type LiveMessageKey,
+  type LiveMessageParams,
+} from './i18n/messages.js';
 
 const CONFIG_DIR = join(homedir(), '.qwen-live');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
@@ -41,6 +51,7 @@ interface RawBackend {
 }
 
 interface RawConfig {
+  language?: LiveLanguage;
   realtimeApiKey?: string;
   realtimeEndpoint?: string;
   realtimeModel?: string;
@@ -48,38 +59,83 @@ interface RawConfig {
   defaultCwd?: string;
   backends?: RawBackend[];
   port?: number;
+  visualInput?: {
+    source: 'screen' | 'camera';
+    mode: 'on-demand' | 'live-feed';
+    fps: number;
+    cameraResolution: { width: number; height: number };
+    cameraSnapshotResolution: 'native' | { width: number; height: number };
+    liveResolution: { width: number; height: number };
+    snapshotResolution: 'native' | { width: number; height: number };
+  };
+  proactive?: ProactiveConfig;
+  memory?: ReturnType<typeof initialMemoryConfig>;
 }
 
 export async function runInit(): Promise<void> {
-  console.log('\n  qwen-live setup\n  ================\n');
+  let previousLanguage: LiveLanguage | undefined;
+  if (existsSync(CONFIG_PATH)) {
+    try {
+      const existing: unknown = JSON.parse(
+        readFileSync(CONFIG_PATH, 'utf8').replace(/^\uFEFF/u, ''),
+      );
+      if (
+        existing &&
+        typeof existing === 'object' &&
+        'language' in existing &&
+        isLiveLanguage(existing.language)
+      )
+        previousLanguage = existing.language;
+    } catch {
+      /* The overwrite prompt still protects the existing file. */
+    }
+  }
+  const languageAnswer = await prompts({
+    type: 'toggle',
+    name: 'value',
+    message: liveText('en', 'language.choose'),
+    inactive: liveText('zh-CN', 'language.chinese'),
+    active: liveText('en', 'language.english'),
+    initial: previousLanguage === 'en',
+  });
+  if (typeof languageAnswer.value !== 'boolean') return;
+  const language: LiveLanguage = languageAnswer.value ? 'en' : 'zh-CN';
+  const t = (key: LiveMessageKey, params?: LiveMessageParams) =>
+    liveText(language, key, params);
+  const confirmLabels = {
+    yes: t('init.yes'),
+    no: t('init.no'),
+    yesOption: t('init.yesOption'),
+    noOption: t('init.noOption'),
+  };
+  const selectLabels = {
+    hint: t('init.selectHint'),
+    warn: t('init.selectDisabled'),
+  };
+  console.log(`\n  ${t('init.title')}\n  ================\n`);
 
   // 1. Check existing config
   if (existsSync(CONFIG_PATH)) {
-    const existing = readFileSync(CONFIG_PATH, 'utf8');
     const overwrite = await prompts({
       type: 'confirm',
+      ...confirmLabels,
       name: 'value',
-      message: 'A config.json already exists. Overwrite?',
+      message: t('init.overwrite'),
       initial: false,
     });
     if (!overwrite.value) {
-      console.log('\n  Keeping existing config. Run `qwen-live` to start.\n');
+      console.log(`\n  ${t('init.keep')}\n`);
       return;
     }
-    void existing; // suppress unused
   }
 
   // 2. Scan for agents
-  console.log('  Scanning for installed coding agents...\n');
+  console.log(`  ${t('init.scanning')}\n`);
   const agents = detectAgents();
   if (agents.length === 0) {
-    console.log('  No supported coding agents found on your PATH.');
-    console.log(
-      '  Install at least one of: qodercli, qwen, gemini, claude, codex\n',
-    );
-    console.log(
-      '  You can create ~/.qwen-live/config.json manually instead.\n',
-    );
+    console.log(`  ${t('init.noAgents')}`);
+    console.log(`  ${t('init.installAgent')}\n`);
+    console.log(`  ${t('init.manualConfig')}\n`);
     return;
   }
   for (const agent of agents) {
@@ -90,8 +146,9 @@ export async function runInit(): Promise<void> {
   // 3. Select default backend
   const defaultChoice = await prompts({
     type: 'select',
+    ...selectLabels,
     name: 'value',
-    message: 'Which agent should be the default backend?',
+    message: t('init.defaultAgent'),
     choices: agents.map((agent) => ({
       title: `${agent.label} (${agent.version})`,
       value: agent.name,
@@ -99,7 +156,7 @@ export async function runInit(): Promise<void> {
     initial: 0,
   });
   if (defaultChoice.value === undefined) {
-    console.log('\n  Cancelled.\n');
+    console.log(`\n  ${t('init.cancelled')}\n`);
     return;
   }
 
@@ -111,30 +168,38 @@ export async function runInit(): Promise<void> {
   while (addMore && available.length > 0) {
     const more = await prompts({
       type: 'confirm',
+      ...confirmLabels,
       name: 'value',
-      message: `Add another backend? (${available.length} remaining)`,
+      message: t('init.addAgent', { count: available.length }),
       initial: false,
     });
+    if (typeof more.value !== 'boolean') {
+      console.log(`\n  ${t('init.cancelled')}\n`);
+      return;
+    }
     if (!more.value) {
       addMore = false;
       break;
     }
     const pick = await prompts({
       type: 'select',
+      ...selectLabels,
       name: 'value',
-      message: 'Which agent?',
+      message: t('init.whichAgent'),
       choices: available.map((agent) => ({
         title: `${agent.label} (${agent.version})`,
         value: agent.name,
       })),
       initial: 0,
     });
-    if (pick.value !== undefined) {
-      const agent = available.find((a) => a.name === pick.value)!;
-      backends.push(toRawBackend(agent, false));
-      const idx = available.indexOf(agent);
-      if (idx !== -1) available.splice(idx, 1);
+    if (pick.value === undefined) {
+      console.log(`\n  ${t('init.cancelled')}\n`);
+      return;
     }
+    const agent = available.find((a) => a.name === pick.value)!;
+    backends.push(toRawBackend(agent, false));
+    const idx = available.indexOf(agent);
+    if (idx !== -1) available.splice(idx, 1);
   }
 
   // Build the default backend
@@ -142,90 +207,178 @@ export async function runInit(): Promise<void> {
   backends.unshift(toRawBackend(defaultAgent, true));
 
   // 5. API key
-  const envKey =
-    process.env['DASHSCOPE_API_KEY'] ??
-    process.env['QWEN_LIVE_REALTIME_API_KEY'];
+  const envKeyName = process.env['DASHSCOPE_API_KEY']
+    ? 'DASHSCOPE_API_KEY'
+    : process.env['QWEN_LIVE_REALTIME_API_KEY']
+      ? 'QWEN_LIVE_REALTIME_API_KEY'
+      : undefined;
+  const envKey = envKeyName ? process.env[envKeyName] : undefined;
   let apiKey: string | undefined;
   if (envKey) {
     const useEnv = await prompts({
       type: 'confirm',
+      ...confirmLabels,
       name: 'value',
-      message: `Use DASHSCOPE_API_KEY from environment (${envKey.slice(0, 8)}...)?`,
+      message: t('init.useEnv', { name: envKeyName! }),
       initial: true,
     });
+    if (typeof useEnv.value !== 'boolean') {
+      console.log(`\n  ${t('init.cancelled')}\n`);
+      return;
+    }
     if (useEnv.value) {
       apiKey = envKey;
+    } else {
+      console.log(`  ${t('init.unsetEnv', { name: envKeyName! })}`);
     }
   }
   if (!apiKey) {
     const keyPrompt = await prompts({
       type: 'password',
       name: 'value',
-      message: 'DashScope realtime API key (sk-...):',
+      message: t('init.apiKey'),
       validate: (val: string) =>
-        val.trim().length > 0 || 'Please enter your API key',
+        val.trim().length > 0 || t('init.apiKeyRequired'),
     });
     apiKey = keyPrompt.value?.trim();
   }
   if (!apiKey) {
-    console.log('\n  Cancelled — API key is required.\n');
+    console.log(`\n  ${t('init.cancelledKey')}\n`);
     return;
   }
 
-  // 6. Working directory
+  // 6. Realtime API name
+  const modelPrompt = await prompts({
+    type: 'text',
+    name: 'value',
+    message: t('init.apiName'),
+    initial: 'qwen3.5-omni-plus-realtime',
+    validate: (value: string) =>
+      value.trim().length > 0 || t('init.apiNameRequired'),
+  });
+  const realtimeModel =
+    typeof modelPrompt.value === 'string'
+      ? modelPrompt.value.trim()
+      : undefined;
+  if (!realtimeModel) {
+    console.log(`\n  ${t('init.cancelled')}\n`);
+    return;
+  }
+
+  const memoryPrompt = await prompts({
+    type: 'confirm',
+    ...confirmLabels,
+    name: 'value',
+    message: t('init.memoryEnabled'),
+    initial: true,
+  });
+  if (typeof memoryPrompt.value !== 'boolean') {
+    console.log(`\n  ${t('init.cancelled')}\n`);
+    return;
+  }
+  let memoryModel = 'qwen3.7-plus';
+  if (memoryPrompt.value) {
+    const memoryModelPrompt = await prompts({
+      type: 'text',
+      name: 'value',
+      message: t('init.memoryModel'),
+      initial: memoryModel,
+      validate: (value: string) =>
+        (value.trim().length > 0 &&
+          value.trim().length <= 256 &&
+          !/\p{C}/u.test(value)) ||
+        t('init.modelRequired'),
+    });
+    if (
+      typeof memoryModelPrompt.value !== 'string' ||
+      !memoryModelPrompt.value.trim()
+    ) {
+      console.log(`\n  ${t('init.cancelled')}\n`);
+      return;
+    }
+    memoryModel = memoryModelPrompt.value.trim();
+  }
+
+  // 7. Working directory
   const cwdPrompt = await prompts({
     type: 'text',
     name: 'value',
-    message: 'Default working directory for coding sessions:',
+    message: t('init.cwd'),
     initial: process.cwd(),
   });
+  if (cwdPrompt.value === undefined) {
+    console.log(`\n  ${t('init.cancelled')}\n`);
+    return;
+  }
   const defaultCwd = cwdPrompt.value || process.cwd();
 
-  // 7. Host app (macOS only)
-  let hostStatus = 'skipped';
+  // 8. Host app (macOS only)
+  let hostStatus = t('init.hostSkipped');
   if (process.platform === 'darwin') {
-    console.log('\n  Checking Live Host app...');
+    console.log(`\n  ${t('init.hostChecking')}`);
     const installer = new LiveHostInstaller();
     const status = await installer.refresh();
     if (status.state === 'installed') {
-      console.log(`  ✓ Live Host ${status.version} is installed.`);
-      hostStatus = 'installed';
+      console.log(
+        `  ✓ ${t('init.hostInstalled', { version: status.version! })}`,
+      );
+      hostStatus = t('init.hostReady');
     } else if (status.state === 'missing') {
       const install = await prompts({
         type: 'confirm',
+        ...confirmLabels,
         name: 'value',
-        message: 'Live Host is not installed. Install now?',
+        message: t('init.hostInstall'),
         initial: true,
       });
+      if (typeof install.value !== 'boolean') {
+        console.log(`\n  ${t('init.cancelled')}\n`);
+        return;
+      }
       if (install.value) {
-        console.log('  Installing Live Host (this may take a minute)...');
+        console.log(`  ${t('init.hostInstalling')}`);
         const result = await installer.ensureInstalled();
         if (result.state === 'installed') {
-          console.log(`  ✓ Live Host ${result.version} installed.`);
-          hostStatus = 'installed';
+          console.log(
+            `  ✓ ${t('init.hostInstalled', { version: result.version! })}`,
+          );
+          hostStatus = t('init.hostReady');
         } else {
           console.log(
-            `  ✗ Installation failed: ${result.message ?? 'unknown error'}`,
+            `  ✗ ${t('init.hostInstallFailed', { detail: result.message ? displayLiveMessage(language, result.message) : t('init.unknownError') })}`,
           );
-          hostStatus = 'failed';
+          hostStatus = t('init.hostFailed');
         }
       } else {
-        hostStatus = 'skipped';
+        hostStatus = t('init.hostSkipped');
       }
     } else {
-      console.log(`  ! Host check failed: ${status.message ?? 'unknown'}`);
-      hostStatus = 'error';
+      console.log(
+        `  ! ${t('init.hostCheckFailed', { detail: status.message ? displayLiveMessage(language, status.message) : t('init.unknownError') })}`,
+      );
+      hostStatus = t('init.hostError');
     }
   } else {
-    console.log(
-      '\n  Live Host app is macOS-only. Voice features require a Mac.',
-    );
-    hostStatus = 'unsupported';
+    console.log(`\n  ${t('init.hostMacOnly')}`);
+    hostStatus = t('init.hostUnsupported');
   }
 
-  // 8. Write config
+  // 9. Write config
   const config: RawConfig = {
+    language,
     realtimeApiKey: apiKey,
+    realtimeModel,
+    visualInput: {
+      source: 'screen',
+      mode: 'on-demand',
+      fps: 1,
+      cameraResolution: { width: 1280, height: 720 },
+      cameraSnapshotResolution: 'native',
+      liveResolution: { width: 1280, height: 720 },
+      snapshotResolution: 'native',
+    },
+    proactive: DEFAULT_PROACTIVE_CONFIG,
+    memory: initialMemoryConfig(memoryPrompt.value, memoryModel),
     defaultCwd,
     backends,
   };
@@ -237,11 +390,15 @@ export async function runInit(): Promise<void> {
   });
   renameSync(tmpPath, CONFIG_PATH);
 
-  // 9. Done
-  console.log(`\n  ✓ Config written to ${CONFIG_PATH}`);
-  console.log(`  ✓ Default backend: ${defaultAgent.label}`);
-  console.log(`  ✓ Host: ${hostStatus}`);
-  console.log('\n  Run `qwen-live` to start the daemon.\n');
+  // 10. Done
+  console.log(`\n  ✓ ${t('init.saved', { path: CONFIG_PATH })}`);
+  console.log(`  ✓ ${t('init.backendSummary', { name: defaultAgent.label })}`);
+  console.log(`  ✓ ${t('init.apiSummary', { name: realtimeModel })}`);
+  console.log(
+    `  ✓ ${t('init.memorySummary', { name: memoryPrompt.value ? memoryModel : t('init.disabled') })}`,
+  );
+  console.log(`  ✓ ${t('init.hostSummary', { status: hostStatus })}`);
+  console.log(`\n  ${t('init.run')}\n`);
 }
 
 function toRawBackend(agent: DetectedAgent, isDefault: boolean): RawBackend {

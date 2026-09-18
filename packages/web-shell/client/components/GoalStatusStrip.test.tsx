@@ -244,4 +244,15 @@ describe('GoalStatusStrip', () => {
         ?.textContent,
     ).toBe('2.5M / 30.0M tokens');
   });
+
+  it('shows no checkpoint streak, even for a snapshot an older daemon filled in', () => {
+    render('active', {
+      checkpointStalls: 2,
+      lastCheckpointFailure: 'Error: provider failed',
+    });
+
+    expect(
+      container.querySelector('[data-testid="goal-checkpoint-stalls"]'),
+    ).toBeNull();
+  });
 });
