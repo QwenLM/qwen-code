@@ -35,6 +35,8 @@ export interface LiveSetupStatus {
   voice: string;
   /** `realtimeOnly` routes from user-scope `modelProviders`, for a picker. */
   models: Array<{ id: string; provider: string; name?: string }>;
+  /** Whether the native macOS Host can attach on this daemon. */
+  nativeHost: boolean;
   shortcut: string;
   install: LiveHostInstallStatus;
   live: LiveStatus;
@@ -80,6 +82,8 @@ export interface LiveSetupControllerDeps {
   validateCredential?: (credential: LiveProviderCredential) => Promise<void>;
   /** Where a realtime route's `envKey` is read from. */
   env?: Readonly<Record<string, string | undefined>>;
+  /** Defaults to true: the native Host was the only endpoint before. */
+  nativeHost?: boolean;
 }
 
 async function validateCredential(
@@ -148,6 +152,7 @@ export class LiveSetupController {
         provider: route.provider,
         ...(route.name ? { name: route.name } : {}),
       })),
+      nativeHost: this.deps.nativeHost !== false,
       shortcut: live.shortcut,
       install: this.deps.installer.getStatus(),
       live: this.deps.coordinator.getStatus(),
@@ -415,7 +420,9 @@ export class LiveSetupController {
         throw error;
       }
     }
-    if (nextEnabled) void this.deps.installer.ensureInstalled();
+    if (nextEnabled && this.deps.nativeHost !== false) {
+      void this.deps.installer.ensureInstalled();
+    }
     return await this.getStatus();
   }
 }

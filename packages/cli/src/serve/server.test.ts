@@ -43474,7 +43474,8 @@ describe('Live Appshot server integration', () => {
         expect(capabilities.body.features.includes('realtime_voice')).toBe(
           native,
         );
-        // Shipped Web Shells turn these keys into the native install card.
+        // Listed on every platform; `/live/setup.nativeHost` tells the Web
+        // Shell whether the install / launch / shortcut parts apply.
         const settings = await request(app)
           .get('/workspace/settings')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -43482,7 +43483,11 @@ describe('Live Appshot server integration', () => {
           settings.body.settings.some((setting: { key: string }) =>
             setting.key.startsWith('experimental.liveVoice.'),
           ),
-        ).toBe(native);
+        ).toBe(true);
+        const setup = await request(app)
+          .get('/live/setup')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(setup.body.nativeHost).toBe(native);
       } finally {
         (app?.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
         restoreEnv('QWEN_HOME', previousQwenHome);

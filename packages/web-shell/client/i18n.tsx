@@ -525,6 +525,8 @@ const EN: Messages = {
   'settings.liveSetup.experimental': 'Experimental',
   'settings.liveSetup.description':
     'Talk to Qwen from anywhere on this Mac with Realtime voice, Appshot, and task handoff.',
+  'settings.liveSetup.browserDescription':
+    'Talk to Qwen with Realtime voice and task handoff, using this browser as the microphone and speaker.',
   'settings.liveSetup.enable': 'Enable Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
@@ -4469,6 +4471,8 @@ const ZH: Messages = {
   'settings.liveSetup.experimental': '实验性',
   'settings.liveSetup.description':
     '在这台 Mac 的任意界面通过 Realtime 语音、Appshot 和任务交接与 Qwen 对话。',
+  'settings.liveSetup.browserDescription':
+    '通过 Realtime 语音和任务交接与 Qwen 对话，由此浏览器充当麦克风和扬声器。',
   'settings.liveSetup.enable': '启用 Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
