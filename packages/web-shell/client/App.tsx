@@ -292,6 +292,7 @@ import {
   useMessagesFromBlocks,
 } from './hooks/useMessages';
 import { useSessionSources } from './hooks/useSessionSources';
+import { useContextCompressionReconcile } from './hooks/useContextCompressionReconcile';
 import type { SessionSource } from '@qwen-code/sdk/daemon';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
@@ -17864,6 +17865,19 @@ export function App({
         .catch(() => undefined);
     }
   }, [primaryContextControls, paneContextControls, compressionResults]);
+  // A compression typed into the composer never reaches the controls above, so
+  // the transcript outcome reconciles the ring for both entry points.
+  useContextCompressionReconcile({
+    blocks,
+    sessionId: connection.sessionId,
+    live:
+      connection.status === 'connected' &&
+      !connection.catchingUp &&
+      !connection.loadingTranscript,
+    currentModel: connection.currentModel ?? undefined,
+    contextWindow: connection.contextWindow ?? undefined,
+    getContextUsage: sessionActions.getContextUsage,
+  });
   const reconciledContextControls = useRef(
     new WeakMap<ContextUsageControls, ContextUsageControls>(),
   );
