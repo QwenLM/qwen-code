@@ -2578,6 +2578,24 @@ describe('Server Config (config.ts)', () => {
       expect(wrapper.getApprovalMode()).toBe(ApprovalMode.AUTO_EDIT);
     });
 
+    it('keeps batch mode out of derived configs so only the main loop defers', () => {
+      // --batch marks the main loop's own turns. Inherited through the
+      // prototype it also sent the memory-extraction subagent to the Batch
+      // API: two 24h jobs, two queue waits, for one user turn.
+      const parent = new Config({ ...baseParams, batchMode: true });
+      expect(parent.getBatchMode()).toBe(true);
+
+      expect(deriveConfig(parent).getBatchMode()).toBe(false);
+      expect(
+        deriveWorktreeConfig(parent, '/tmp/batch-worktree').getBatchMode(),
+      ).toBe(false);
+      // An explicit override still wins, and the parent is untouched.
+      expect(
+        deriveConfig(parent, { getBatchMode: () => true }).getBatchMode(),
+      ).toBe(true);
+      expect(parent.getBatchMode()).toBe(true);
+    });
+
     it('applies public getter overrides without mutating the parent', () => {
       const parent = new Config(baseParams);
       const child = deriveConfig(parent, {

@@ -146,6 +146,16 @@ contains "R5 model output" "BATCH_OK" "${SCR}/out/o.txt"
 check "R5 one batch per hop (2 hops)" 2 "$(count batch_created "${SCR}/tools.log" || true)"
 check "R5 all files cleaned up" 4 "$(count file_deleted "${SCR}/tools.log" || true)"
 
+echo "--- R8 only the main loop's turn goes to batch"
+# The memory-extraction subagent runs on a derived config; if it inherited
+# --batch, one `-p` run would submit (and wait on) a second 24h job.
+export OPENAI_BASE_URL=http://127.0.0.1:8899/v1
+rc=$(run -p "say hi" --batch)
+check "R8 exit 0" 0 "${rc}"
+check "R8 one batch job for one user turn" 1 \
+  "$(($(count batch_created "${SCR}/happy.log" || true) - 1))"
+check "R8 the subagent turn stayed realtime" 1 "$(count realtime_chat "${SCR}/happy.log" || true)"
+
 echo "--- R6 failed batch surfaces the provider reason"
 export OPENAI_BASE_URL=http://127.0.0.1:8901/v1
 rc=$(run -p "say hi" --batch)

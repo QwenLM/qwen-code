@@ -2211,6 +2211,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getMessageBus'
     | 'getAutoMemoryPrompt'
     | 'getUserMemory'
+    | 'getBatchMode'
   >
 >;
 
@@ -2452,6 +2453,18 @@ export function deriveConfig(
   overrides: DerivedConfigOverrides = {},
 ): Config {
   const derived = Object.create(base) as Config;
+  // A derived config is a subagent or otherwise scoped context, never the main
+  // loop, and `--batch` marks the main loop's own turns only. Without this the
+  // flag reaches every derived turn through the prototype: one
+  // `qwen -p "say hi" --batch` submitted a second 24h job for the
+  // memory-extraction subagent, paying a second queue wait for work the user
+  // never asked to defer. An explicit override below still wins.
+  Object.defineProperty(derived, 'getBatchMode', {
+    value: () => false,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
   for (const key in overrides) {
     if (!Object.hasOwn(overrides, key)) continue;
     const override = overrides[key as keyof DerivedConfigOverrides];
