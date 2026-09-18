@@ -1796,7 +1796,7 @@ jobs:
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
-              --append-system-prompt "Store all temporary verification clones, scratch worktrees, and test files under TMPDIR=${TMPDIR:-/tmp}. Use mktemp -d inside that directory; do not create hardcoded /tmp/verify-* or /tmp/qwen-verify-* paths. Pass this directory requirement to every subagent. Keep final review artifacts in the normal review artifact paths so they are uploaded before cleanup." \
+              --append-system-prompt "Store all temporary verification clones and test files under TMPDIR=${TMPDIR:-/tmp}. Use mktemp -d inside that directory; do not create hardcoded /tmp/verify-* or /tmp/qwen-verify-* paths. Pass this directory requirement to every subagent. Keep final review artifacts in the normal review artifact paths so they are uploaded before cleanup." \
               --prompt "$attempt_prompt" \
               --output-format stream-json \
               | tee "$LOG_PATH"

@@ -48,7 +48,7 @@ docker image prune --force --filter 'until=24h' || echo 'warning: dangling image
 # which can stay busy indefinitely on a host running overlapping jobs.
 cleanup_status=0
 timeout 20m docker builder prune --all --force \
-  --filter 'until=24h' --reserved-space 30GB || {
+  --filter 'until=24h' --keep-storage 30GB || {
   echo 'error: Docker build cache cleanup failed' >&2
   cleanup_status=1
 }

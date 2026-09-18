@@ -70,11 +70,11 @@ for (const options of [{}, { busy: true }, { daemonLock: false }]) {
     assert.equal(result.status, 0, result.stderr);
     assert.match(
       result.calls,
-      /^builder prune --all --force --filter until=24h --reserved-space 30GB$/m,
+      /^builder prune --all --force --filter until=24h --keep-storage 30GB$/m,
     );
     assert.match(
       result.calls,
-      /^timeout 20m docker builder prune --all --force --filter until=24h --reserved-space 30GB$/m,
+      /^timeout 20m docker builder prune --all --force --filter until=24h --keep-storage 30GB$/m,
     );
     assert.equal(
       result.calls.includes('image prune --all'),

@@ -111,10 +111,10 @@ the job log.
 This is a temporary-directory convention, not filesystem isolation: commands
 that explicitly write elsewhere bypass it. Existing arbitrary copies in `/tmp`
 remain covered only by the seven-day policy. This service does not remove them
-by name because they may belong to an active job. A later review job retries
-removing stale `qwen-review-scratch.*` directories from `RUNNER_TEMP`; residue
-on a host that runs no later review still requires manual cleanup. Build-cache
-reclamation does not initialize unused data disks.
+by name because they may belong to an active job. A later review job on the
+same runner registration retries removing stale `qwen-review-scratch.*`
+directories from `RUNNER_TEMP`; residue on an idle registration still requires
+manual cleanup. Build-cache reclamation does not initialize unused data disks.
 
 ## Regression check
 
