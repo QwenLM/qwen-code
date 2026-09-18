@@ -43,6 +43,15 @@ reap_stale 'name=qwen-code-' "$now"
 # lock and runs even on hosts that never create it.
 docker image prune --force --filter 'until=24h' || echo 'warning: dangling image prune failed' >&2
 
+# Image pruning does not reclaim BuildKit's intermediate npm/build layers.
+# Docker protects in-use cache; do not wait for the shared CI daemon lock,
+# which can stay busy indefinitely on a host running overlapping jobs.
+timeout 20m docker builder prune --all --force \
+  --filter 'until=24h' --keep-storage 30GB || {
+  echo 'error: Docker build cache cleanup failed' >&2
+  exit 1
+}
+
 # Take the shared daemon lock exclusively, non-blocking, only around the
 # labelled prune — the same shape as the job's own prune step. Holding it
 # across the reap loop above would starve CI jobs waiting on `flock --shared
