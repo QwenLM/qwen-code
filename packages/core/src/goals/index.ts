@@ -21,12 +21,12 @@ export type {
   GoalTurnFinishedTransition,
 } from './goal-reducer.js';
 export * from './goal-persistence.js';
+export * from './goal-legacy-cards.js';
 export {
   isGoalCheckpointBookkeepingRecord,
   projectGoalStateToLegacy,
 } from './goal-legacy-projection.js';
 export type {
-  ActiveGoal,
   LegacyActiveGoal,
   LegacyGoalProjection,
   LegacyGoalStatus,

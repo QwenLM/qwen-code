@@ -13,6 +13,7 @@ import {
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core';
+import { findRunningLegacyGoalCard } from '@qwen-code/qwen-code-core/goals/goal-legacy-cards.js';
 import type { HistoryItemGoalStatus } from '../../ui/types.js';
 import {
   collectGoalStatusItemsFromRecords,
@@ -37,6 +38,12 @@ export async function renderPreparedGoalUpdate(
     hideRuntimeGoal?: boolean;
     bootstrap?: HistoryReplayGoalBootstrap;
     previousGoal?: GoalRecord | null;
+    /**
+     * The replayed page did not end where the transcript does. The
+     * recovered state still publishes; a card that supersedes the page's
+     * last card does not, since that card may not be on the page at all.
+     */
+    partialReplay?: boolean;
   } = {},
 ): Promise<RecoveredGoalUpdate> {
   let runtime;
@@ -51,8 +58,13 @@ export async function renderPreparedGoalUpdate(
     return { updates: status ? [buildGoalStatusUpdate(status)] : [] };
   }
   const cause = runtime.getRecoveryCause?.();
-  if (!cause) return { updates: [] };
   const snapshot = runtime.getSnapshot();
+  if (!cause) {
+    const status = options.partialReplay
+      ? undefined
+      : legacyGoalSupersession(snapshot, options.replayedRecords);
+    return { updates: status ? [buildGoalStatusUpdate(status)] : [] };
+  }
   const publicationKey = goalPublicationKey(snapshot, cause);
   if (options.hideRuntimeGoal) {
     return {
@@ -79,7 +91,44 @@ export async function renderPreparedGoalUpdate(
   };
 }
 
-function unrestorableGoalStatus(
+/** Why a Goal was not restored, as the trailing card tells the user. */
+export const UNREADABLE_GOAL_REASON =
+  'Goal not restored: its saved state could not be read, so this session is not driving it.';
+export const LEGACY_GOAL_REASON =
+  'Goal not restored: it was recorded by an earlier version of Qwen Code, so this session is not driving it. Set it again with /goal set.';
+
+/**
+ * The trailing `cleared` card for a Goal a build before #7895 recorded as a
+ * running card, which this build does not restore.
+ *
+ * Nothing is wrong with the transcript and nothing was recovered, so this is
+ * the one place that says the card is not a running Goal. Emitted only when
+ * the runtime drives no Goal and the replay's newest Goal record is that
+ * card: a Goal set after the resume, or any `goal_state` record after the
+ * card, means a journaling build has had the last word and the card is
+ * history the replay already showed as such.
+ */
+export function legacyGoalSupersession(
+  snapshot: GoalSnapshotV2,
+  replayedRecords: readonly ChatRecord[] | undefined,
+): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
+  if (snapshot.goal !== null || !replayedRecords?.length) return undefined;
+  const card = findRunningLegacyGoalCard(replayedRecords);
+  if (!card) return undefined;
+  return {
+    kind: 'cleared',
+    condition: card.condition,
+    iterations: card.iterations,
+    ...(card.setAt !== undefined ? { setAt: card.setAt } : {}),
+    lastReason: LEGACY_GOAL_REASON,
+  };
+}
+
+/**
+ * The trailing `cleared` card for a Goal whose saved state could not be
+ * read, so that the running card the replay ended on is not the last word.
+ */
+export function unrestorableGoalStatus(
   replayedRecords?: readonly ChatRecord[],
   bootstrap?: HistoryReplayGoalBootstrap,
 ): Omit<HistoryItemGoalStatus, 'id' | 'type'> | undefined {
@@ -93,8 +142,7 @@ function unrestorableGoalStatus(
     condition: active.condition,
     iterations: active.iterations,
     ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-    lastReason:
-      'Goal not restored: its saved state could not be read, so this session is not driving it.',
+    lastReason: UNREADABLE_GOAL_REASON,
   };
 }
 
