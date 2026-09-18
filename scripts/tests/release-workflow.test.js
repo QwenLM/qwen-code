@@ -598,6 +598,7 @@ describe('release workflow', () => {
       mkdirSync(bin);
       for (const path of [
         'dist',
+        'packages/web-shell',
         'packages/channels/base',
         ...channels.map((channel) => `packages/channels/${channel}`),
       ]) {
@@ -642,13 +643,14 @@ describe('release workflow', () => {
           .map((line) => line.split('\t'));
         expect(publishCalls.map(([cwd]) => cwd)).toEqual([
           join(canonicalDirectory, 'dist'),
+          join(canonicalDirectory, 'packages/web-shell'),
           join(canonicalDirectory, 'packages/channels/base'),
         ]);
         // The dist-tag is the reason NPM_TAG is set in this child env at all.
         // Without it `npm publish` defaults to `latest`, so the 21:00 UTC
         // nightly would take over the tag every end-user install and the ECS
         // fleet updater resolve through. `--access public` is here for the
-        // same reason: one array feeds all twelve published packages.
+        // same reason: one array feeds all thirteen published packages.
         for (const [cwd, args] of publishCalls) {
           expect(args, cwd).toContain('--access public');
           expect(args, cwd).toContain('--tag=latest');

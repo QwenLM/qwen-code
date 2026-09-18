@@ -188,6 +188,7 @@ case "${step}" in
       publish_package 'packages/audio-capture'
     fi
     publish_package 'dist'
+    publish_package 'packages/web-shell'
     publish_package 'packages/channels/base'
 
     publish_marker="$(mktemp)"
