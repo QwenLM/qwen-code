@@ -16960,6 +16960,25 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
+    // The entry check runs before the claim's await; the run can register
+    // in that window, and a second runner under its id would share its
+    // journal.
+    it('does not start a retry for a run that registered while the claim ran', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      mockClaimInterruptedWorkflowRun.mockImplementationOnce(async () => {
+        daemon.runs.push({ runId, status: 'running' });
+        return undefined;
+      });
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: false,
+        status: 'running',
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
     it('does not retry a run this session is already starting', async () => {
       const daemon = await startDaemon();
       mockReadWorkflowSnapshot.mockResolvedValue(historical());
