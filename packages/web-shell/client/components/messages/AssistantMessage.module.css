@@ -166,6 +166,7 @@
 .translationPopover {
   width: min(480px, calc(100vw - 32px));
   max-height: min(520px, calc(100vh - 48px));
+  max-height: min(520px, calc(100dvh - 48px));
 }
 
 .translationTitle {

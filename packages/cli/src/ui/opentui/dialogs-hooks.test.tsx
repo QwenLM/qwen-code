@@ -273,6 +273,44 @@ describe('hooks dialog helpers', () => {
     expect(stopFields.get('Skill:')).toBe('/skills/review');
     expect(stopFields.get('Command:')).toBe('./lint.sh');
   });
+
+  it('says why a disabled hook will not run', () => {
+    const fields = new Map(
+      hookDetailFields(row({ enabled: false, disabledReason: 'untrusted' })),
+    );
+
+    expect(fields.get('Status:')).toBe('disabled (folder not trusted)');
+  });
+
+  it('shows no reason for an enabled hook', () => {
+    const fields = new Map(hookDetailFields(row({ enabled: true })));
+
+    expect(fields.get('Status:')).toBe('enabled');
+  });
+
+  it('gives each disabled reason its own status text', () => {
+    const reasons = [
+      'bareMode',
+      'safeMode',
+      'allHooksDisabled',
+      'untrusted',
+      'registryDisabled',
+    ] as const;
+    const texts = reasons.map((disabledReason) =>
+      new Map(hookDetailFields(row({ enabled: false, disabledReason }))).get(
+        'Status:',
+      ),
+    );
+
+    expect(texts).toEqual([
+      'disabled (bare mode)',
+      'disabled (safe mode)',
+      'disabled (disableAllHooks)',
+      'disabled (folder not trusted)',
+      'disabled (turned off for this session)',
+    ]);
+    expect(new Set(texts).size).toBe(reasons.length);
+  });
 });
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
@@ -324,6 +362,11 @@ function configWith(options: {
     isSafeMode: () => false,
     getBareMode: () => false,
     getSessionId: () => 'session-1',
+    isTrustedFolder: () => true,
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+    getExtensions: () => [],
   } as unknown as Config;
 }
 
