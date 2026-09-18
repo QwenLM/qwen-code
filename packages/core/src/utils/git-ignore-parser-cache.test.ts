@@ -72,6 +72,20 @@ describe('GitIgnoreParser cache retention', () => {
     expect(parser.isIgnored('dynamic/result.tmp')).toBe(false);
   });
 
+  it('keeps the .git/info/exclude snapshot across matcher rollover', async () => {
+    await write('.git/info/exclude', '*.bak\n');
+    parser = new GitIgnoreParser(root);
+    expect(parser.isIgnored('result.bak')).toBe(true);
+
+    await write('.git/info/exclude', '*.other\n');
+    for (let i = 0; i < LOOKUP_WINDOW; i++) {
+      expect(parser.isIgnored(`rollover-${i}/probe.txt`)).toBe(false);
+    }
+
+    expect(parser.isIgnored('result.bak')).toBe(true);
+    expect(parser.isIgnored('result.other')).toBe(false);
+  });
+
   it('counts ancestor matcher checks on deep cache misses', () => {
     const depth = 25;
     const tail = Array.from({ length: depth }, (_, i) => `level-${i}`).join(

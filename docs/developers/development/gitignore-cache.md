@@ -13,19 +13,27 @@ matcher on a cache miss, so deep paths consume multiple units instead of
 bypassing the bound. One query can cross the threshold; the rollover happens
 before the following query. This also releases the matchers' internal per-path
 result caches. Per-directory rule lookups, including empty `.gitignore` probes,
-are retained for the session, and `.git/info/exclude` is read at most once per
-process. The interval is an internal memory/performance tradeoff, not a user
-setting or a reload mechanism. Restart the session after changing ignore files.
+are retained for the lifetime of each parser, and `.git/info/exclude` is read at
+most once per parser instance. A process can hold more than one parser, so a
+parser created after an ignore-file edit can observe the new rules while an
+existing parser keeps its snapshot. The interval is an internal
+memory/performance tradeoff, not a user setting or a reload mechanism. Restart
+the session to make ignore-file changes apply everywhere.
 
 This limits retention caused by repeatedly compiling the same rules, not all
 memory used by a search. A sparse glob can still visit a large directory tree,
-and per-directory rule lookup memos still scale with directories visited while
-loaded rules scale with the number of contributing ignore files. For generated
-outputs that should not be searched, add their directory to
+and per-directory rule lookup memos still scale with directories visited.
+Retained compiled matchers scale with contributing ignore-file chains: each
+chain-prefix matcher replays the rules from the ignore files above it, so a long
+nested chain costs more than one compiled rule set per contributing file. This is
+mostly relevant to unusually deep ignore hierarchies; shallow shared chains are
+the common case this cache optimizes. For generated outputs that should not be
+searched, add their directory to
 [`.qwenignore`](../../users/configuration/qwen-ignore.md) so traversal skips the
 subtree. The existing Glob result limit is unchanged.
 
-Regression coverage checks retained matcher identity and cache rollover rather
-than asserting platform-dependent heap sizes. A real CLI integration test uses
-a local fake model endpoint to request a sparse glob over more than one cache
-window, checking nested rules, re-inclusion, ignored ancestors, and `.qwenignore`.
+The deterministic core cache-retention suite pins matcher sharing, rollover,
+and stable rule snapshots. A real bundled-CLI integration test separately pins
+nested ignore and `.qwenignore` semantics through a sparse traversal that spans
+more than one production matcher-evaluation window; it is not the discriminator
+for the memory-retention fix itself.

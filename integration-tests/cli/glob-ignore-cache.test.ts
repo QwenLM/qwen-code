@@ -29,8 +29,9 @@ describe('Glob ignore-cache rollover', () => {
     rig.createFile('needle.txt', 'root match');
 
     // A sparse pattern must traverse the whole tree rather than hit Glob's
-    // result-count cap. Each fixture entry adds two traversed directories, so
-    // this exceeds one production matcher-cache window without a stale literal.
+    // result-count cap. The core cache-retention suite pins the rollover bound;
+    // this fixture pins ignore semantics through a real bundled-CLI traversal
+    // that also spans more than one production matcher-evaluation window.
     const scratchDirectories = Math.floor(MATCHER_CACHE_RESET_INTERVAL / 2) + 1;
     for (let i = 0; i < scratchDirectories; i++) {
       rig.mkdir(`scratch/${i}/nested`);
