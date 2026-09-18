@@ -515,3 +515,49 @@ describe('scripts suite timeout', () => {
     ).toContain('QWEN_SCRIPTS_TEST_TIMEOUT_MS');
   });
 });
+
+describe('scripts config bash-step capability exclude', () => {
+  // scripts/tests/main-ci-failure-log-download.test.js executes the
+  // workflow's download step through the host's bash and dies at its
+  // `mapfile` on a bash 3.2 host (the nightly macOS lane) before any
+  // assertion runs, so scripts/tests/vitest.config.ts excludes the file when
+  // the host fails the same capability probe the suite gates on. Pin the
+  // wiring rather than the probe's spelling: deleting the capability arm
+  // must fail the first case (the exclusion is what closes the ungated-case
+  // class — an uncollected file runs nothing, however its source text is
+  // spelled), and flattening it to an unconditional entry must fail the
+  // second (that would silently drop the suite's Linux coverage).
+  const SUITE = 'scripts/tests/main-ci-failure-log-download.test.js';
+
+  async function importScriptsConfigWithProbe(probePasses: boolean) {
+    // The config evaluates the probe at module scope, so steer it through
+    // spawnSync and re-import; the static imports above already resolved
+    // the ambient probe.
+    vi.doMock('node:child_process', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('node:child_process')>()),
+      spawnSync: () => ({ status: probePasses ? 0 : 1 }),
+    }));
+    vi.resetModules();
+    try {
+      return (await import('./vitest.config.js')).default;
+    } finally {
+      vi.doUnmock('node:child_process');
+    }
+  }
+
+  it('excludes the bash-executed log-download suite when the probe fails', async () => {
+    const config = await importScriptsConfigWithProbe(false);
+    expect(config.test?.exclude).toContain(SUITE);
+  });
+
+  it('collects the suite when the probe passes, platform arm aside', async () => {
+    const config = await importScriptsConfigWithProbe(true);
+    // The win32 arm excludes the suite regardless of the probe, so only a
+    // non-Windows host observes the capability arm's empty branch.
+    if (process.platform === 'win32') {
+      expect(config.test?.exclude).toContain(SUITE);
+    } else {
+      expect(config.test?.exclude ?? []).not.toContain(SUITE);
+    }
+  });
+});

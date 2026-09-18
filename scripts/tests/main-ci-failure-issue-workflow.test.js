@@ -235,9 +235,15 @@ describe('main CI failure issue workflow', () => {
     // scripts/tests/main-ci-failure-log-download.test.js spawns the real
     // download step, which dies at its `mapfile` on a bash 3.2 host (the
     // nightly macOS lane) before any assertion runs; a dropped or neutered
-    // gate turns that lane red on a script it cannot execute. The pin lives
-    // here rather than in the gated file because that file is excluded from
-    // the Windows lanes, while this YAML-parse suite runs on every host.
+    // gate turns that lane red on a script it cannot execute. The
+    // enforcement lives in scripts/tests/vitest.config.ts, whose capability
+    // arm excludes the file when the same probe fails — an uncollected file
+    // runs no ungated case, hook, modifier spelling, or appended construct,
+    // which a pin over the suite's source text can only ever approximate (a
+    // describe appended in Prettier's multi-argument form and pre-gate
+    // it.skipIf/test.concurrent cases escaped the previous text pin). What
+    // remains here pins the wiring rather than the surface. This YAML-parse
+    // suite runs on every host, unlike the gated file.
     const suite = readFileSync(
       'scripts/tests/main-ci-failure-log-download.test.js',
       'utf8',
@@ -248,29 +254,41 @@ describe('main CI failure issue workflow', () => {
     expect(suite).toMatch(
       /const canRunStep =\s+spawnSync\('bash', \['-c', 'mapfile -t x <<< y'\][\s\S]*?\.status === 0 &&\s+spawnSync\('jq', \['--version'\][\s\S]*?\.status === 0;/,
     );
-    // Anchor the gate to the suite title, so the spelling only ever survives
-    // as the live wrapper: a plain describe plus a quoted comment fails too.
+    // Anchor the in-file gate to the suite title, so the spelling only ever
+    // survives as the live wrapper: a plain describe plus a quoted comment
+    // fails too. The gate stays so the skip remains visible wherever the
+    // file is collected — an excluded file prints no skip line.
     expect(suite).toMatch(
       /describe\.skipIf\(!canRunStep\)\(\s*'main CI failure issue log-download execution'/,
     );
-    // And every bash-spawning case stays behind the gate, quantified over the
-    // whole file: the boundary keeps tokens that merely contain `it(`
-    // (exit(, split() green, while the `test(` and `it.each(` spellings of a
-    // case count too.
-    const gate = suite.indexOf('describe.skipIf(!canRunStep)(');
-    expect(gate, 'the gate wrapper').toBeGreaterThan(-1);
-    for (const m of suite.matchAll(/(^|[^\w.])(it|test)(\.each)?\s*\(/g)) {
-      expect(m.index, 'a case outside the capability gate').toBeGreaterThan(
-        gate,
-      );
-    }
-    // An index comparison cannot catch a case appended AFTER the gated
-    // describe — its index is greater than the gate's too — so pin the tail:
-    // the gated describe closes as `\n);` and must stay the last top-level
-    // construct in the file (a benign trailing statement reddens this too).
-    expect(
-      suite.trimEnd().endsWith('\n);'),
-      'the gated describe is the last top-level construct in the file',
-    ).toBe(true);
+    // The config carries the same probe; pin its expression too so the two
+    // cannot drift — a config probe weakened past the suite's own (say,
+    // dropping the jq arm) would collect the file on hosts whose gate then
+    // skips every case, silently discarding the coverage.
+    const config = readFileSync('scripts/tests/vitest.config.ts', 'utf8');
+    expect(config).toMatch(
+      /const canRunBashSteps =\s+spawnSync\('bash', \['-c', 'mapfile -t x <<< y'\][\s\S]*?\.status === 0 &&\s+spawnSync\('jq', \['--version'\][\s\S]*?\.status === 0;/,
+    );
+  });
+
+  it('keeps the log-download suite on the win32 arm of the scripts exclude', () => {
+    // The win32 entry is the only thing keeping the bash-executed suite off
+    // the test_windows lane: Git Bash satisfies the capability probe there,
+    // yet the suite's harness joins PATH with ':' and spawns an
+    // extension-less gh stub, so a collected run warns and drops every log
+    // and goes red on its assertions. vitest stays silent when an exclude
+    // pattern matches nothing, so deleting the entry — or moving it to the
+    // other arm — drops the guard with every suite still green. Anchor the
+    // pin to the win32 arm of the ternary: a plain toContain over the whole
+    // config text stays green on the move, which is exactly the property
+    // under test.
+    const config = readFileSync('scripts/tests/vitest.config.ts', 'utf8');
+    const arm = config.match(
+      /process\.platform === 'win32'\s*\?\s*\[([\s\S]*?)\]\s*:\s*\[/,
+    );
+    expect(arm, 'the win32 arm of the exclude ternary').toBeTruthy();
+    expect(arm[1]).toContain(
+      "'scripts/tests/main-ci-failure-log-download.test.js'",
+    );
   });
 });
