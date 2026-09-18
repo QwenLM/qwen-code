@@ -104,7 +104,7 @@ describe('buildInstallPlan', () => {
       { id: 'omni-realtime', baseUrl, envKey, realtimeOnly: true },
       { id: 'chat', baseUrl, envKey },
     ];
-    const plan = buildInstallPlan(
+    const plan = buildInstallPlanSrc(
       customProvider,
       {
         protocol: AuthType.USE_OPENAI,
