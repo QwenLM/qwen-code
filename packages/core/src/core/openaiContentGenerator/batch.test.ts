@@ -223,6 +223,58 @@ describe('runBatchCompletion', () => {
     expect(client.batches.cancel).not.toHaveBeenCalled();
   });
 
+  it('absorbs a transient poll failure and keeps waiting on the same batch', async () => {
+    client.batches.create.mockResolvedValue({
+      id: 'b5',
+      status: 'in_progress',
+    });
+    client.batches.retrieve
+      .mockRejectedValueOnce(
+        Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+      )
+      .mockResolvedValueOnce({
+        id: 'b5',
+        status: 'completed',
+        output_file_id: 'file-out',
+      });
+    client.files.content.mockResolvedValue(outputLine(completion));
+
+    const result = await runBatchCompletion(
+      client as unknown as OpenAI,
+      request,
+      undefined,
+      0,
+    );
+
+    expect(result).toEqual(completion);
+    // One batch, not two: a retry of this function would create a second job.
+    expect(client.batches.create).toHaveBeenCalledTimes(1);
+    expect(uploadFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('abandons the job after repeated poll failures, leaving it recoverable', async () => {
+    client.batches.create.mockResolvedValue({
+      id: 'b6',
+      status: 'in_progress',
+    });
+    client.batches.retrieve.mockRejectedValue(
+      Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+    );
+
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow('qwen batch fetch b6');
+
+    expect(client.batches.retrieve).toHaveBeenCalledTimes(6);
+    // The job is still running: do not cancel it and do not delete its input,
+    // and surface an error the caller's retry will not turn into a second job.
+    expect(client.batches.cancel).not.toHaveBeenCalled();
+    expect(client.files.delete).not.toHaveBeenCalled();
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.not.toMatchObject({ code: 'ECONNRESET' });
+  });
+
   it('cancels the batch and throws an AbortError when aborted while waiting', async () => {
     client.batches.create.mockResolvedValue({
       id: 'b4',

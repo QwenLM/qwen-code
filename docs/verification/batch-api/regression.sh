@@ -37,7 +37,7 @@ start_server() {
 
 stop_servers() {
   local port pid
-  for port in 8899 8900 8901 8902; do
+  for port in 8899 8900 8901 8902 8903; do
     pid=$(ss -ltnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2 || true)
     if [[ -n "${pid}" ]]; then
       kill "${pid}" 2>/dev/null || true
@@ -90,6 +90,7 @@ start_server happy 8899
 start_server tools 8900
 start_server failed 8901
 start_server stuck 8902
+start_server unpollable 8903
 
 cd "${ROOT}" || exit 1
 # R1 asserts "exactly one batch", which only means anything with the relaunch
@@ -188,6 +189,19 @@ for p in "${NPM_PID}" $(descendants "${NPM_PID}" || true); do
 done
 sleep 10
 contains "R7 SIGINT cancels server-side" '"event":"batch_cancelled"' "${SCR}/stuck.log"
+
+echo "--- R9 a batch whose status cannot be polled is left recoverable"
+# The outer retryWithBackoff retries transport errors, and a retry of
+# runBatchCompletion uploads and creates a SECOND job while the first keeps
+# running and billing. The give-up error must not be retryable, and the
+# abandoned job's input file must survive for `qwen batch fetch`.
+export OPENAI_BASE_URL=http://127.0.0.1:8903/v1
+rc=$(run -p "say hi" --batch)
+check "R9 exit 1" 1 "${rc}"
+check "R9 exactly one job created, not a second one" 1 \
+  "$(count batch_created "${SCR}/unpollable.log" || true)"
+check "R9 the input file is kept" 0 "$(count file_deleted "${SCR}/unpollable.log" || true)"
+contains "R9 tells the user how to recover" "qwen batch fetch" "${SCR}/out/e.txt"
 
 echo
 echo "=== ${PASS} passed, ${FAIL} failed ==="

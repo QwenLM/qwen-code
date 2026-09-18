@@ -9,6 +9,7 @@
  *   failed - every batch settles as `failed`
  *   slow   - batch stays in_progress for SLOW_SECONDS, then completes
  *   stuck  - batch never completes (for abort/cancel tests)
+ *   unpollable - batch is created, then every status poll fails with 500
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -227,6 +228,12 @@ const server = http.createServer((req, res) => {
     if (m && req.method === 'GET') {
       const job = batches.get(m[1]);
       if (!job) return send(res, 404, { error: { message: 'no such batch' } });
+      if (SCENARIO === 'unpollable') {
+        log({ event: 'poll_rejected', id: job.id });
+        return send(res, 500, {
+          error: { message: 'fake: upstream unavailable' },
+        });
+      }
       return send(res, 200, pollJob(job));
     }
 

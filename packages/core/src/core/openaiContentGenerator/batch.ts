@@ -9,6 +9,11 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('OPENAI_BATCH');
 const SETTLED = new Set(['completed', 'failed', 'expired', 'cancelled']);
+// Consecutive failed polls tolerated before the wait is abandoned. A batch
+// runs for hours on the provider's side, so a blip while asking after it must
+// not end the turn — but a persistently unreachable endpoint must not spin
+// forever either.
+const MAX_POLL_FAILURES = 5;
 
 interface BatchOutputLine {
   custom_id: string;
@@ -131,6 +136,10 @@ export async function runBatchCompletion(
   });
   const file = await uploadInputFile(client, line + '\n', signal);
   const fileIds = [file.id];
+  // Set when the job is left running on purpose: the wait was abandoned but
+  // the batch is neither settled nor cancelled, so its files must survive for
+  // `qwen batch fetch <id>` to recover it.
+  let abandoned = false;
   // Declared outside the `try` because `create` is inside it: the `finally`
   // must also cover a failed `create`, or the already-uploaded (and billed)
   // input file is orphaned, and the `catch` needs to tell "create threw"
@@ -153,9 +162,34 @@ export async function runBatchCompletion(
     process.stderr.write(
       `[batch] submitted ${batch.id}; results due by ${dueBy}\n`,
     );
+    let pollFailures = 0;
     while (!SETTLED.has(batch.status)) {
       await sleep(pollMs, signal);
-      batch = await client.batches.retrieve(batch.id, { signal });
+      try {
+        batch = await client.batches.retrieve(batch.id, { signal });
+        pollFailures = 0;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        // A transient error here must not escape as-is. The caller's
+        // `retryWithBackoff` retries transport errors and 429/5xx, and a retry
+        // of this function uploads and creates a SECOND batch — the first one
+        // keeps running and billing, unreachable. So poll failures are
+        // absorbed here, and the give-up error is a plain one the outer retry
+        // will not act on.
+        const detail = error instanceof Error ? error.message : String(error);
+        if (++pollFailures > MAX_POLL_FAILURES) {
+          abandoned = true;
+          throw new Error(
+            `Batch ${batch.id} is still running, but polling it failed ` +
+              `${pollFailures} times in a row (${detail}). Recover the result ` +
+              `with \`qwen batch fetch ${batch.id}\`.`,
+          );
+        }
+        debugLogger.debug(
+          `batch ${batch.id} poll failed (${pollFailures}/${MAX_POLL_FAILURES}): ${detail}`,
+        );
+        continue;
+      }
       debugLogger.debug(`batch ${batch.id} ${batch.status}`);
     }
     if (batch.output_file_id) fileIds.push(batch.output_file_id);
@@ -186,7 +220,11 @@ export async function runBatchCompletion(
     }
     throw error;
   } finally {
-    await Promise.allSettled(fileIds.map((id) => client.files.delete(id)));
+    // An abandoned job still needs its input file (the provider is reading it)
+    // and will write its output into the account the user recovers from.
+    if (!abandoned) {
+      await Promise.allSettled(fileIds.map((id) => client.files.delete(id)));
+    }
   }
 }
 
