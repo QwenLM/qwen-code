@@ -491,6 +491,7 @@ export * from './services/web-terminal-registry.js';
 export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
+export * from './agents/workflow-checkpoint.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -833,6 +834,24 @@ export {
   formatStopHookBlockingCapWarning,
 } from './hooks/stopHookCap.js';
 export type { StopFailureErrorType } from './hooks/types.js';
+export {
+  HOOK_EVENT_DISPLAY,
+  hookEventDisplay,
+} from './hooks/hook-event-display.js';
+export type { HookEventDisplayMeta } from './hooks/hook-event-display.js';
+export {
+  DEFAULT_COMMAND_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_HTTP_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_PROMPT_HOOK_TIMEOUT_SECONDS,
+  DEFAULT_FUNCTION_HOOK_TIMEOUT_MS,
+  describeHookTimeout,
+  isLegacyMillisecondHookTimeout,
+  resolveCommandHookTimeoutMs,
+} from './hooks/hook-timeout.js';
+export type {
+  HookTimeoutDescription,
+  HookTimeoutSource,
+} from './hooks/hook-timeout.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 export {
   USER_PROMPT_SUBMIT_CONTEXT_OPEN_TAG,
