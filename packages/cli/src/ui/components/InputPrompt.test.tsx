@@ -130,6 +130,7 @@ const mockSlashCommands: SlashCommand[] = [
     name: 'memory',
     kind: CommandKind.BUILT_IN,
     description: 'Manage memory',
+    // InputPrompt's live-slash submit gate requires action !== undefined.
     action: vi.fn(),
     subCommands: [
       {

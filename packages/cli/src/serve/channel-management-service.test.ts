@@ -275,6 +275,31 @@ describe('createChannelManagementService', () => {
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
+  it('rejects an upsert that omits cwd on a stored cross-workspace config', async () => {
+    const { service, store, manager } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          bot: {
+            type: 'dingtalk',
+            cwd: '../secondary',
+            senderPolicy: 'pairing',
+          },
+        },
+      }),
+    });
+
+    await expect(
+      service.upsert('bot', {
+        expectedRevision: 'rev-1',
+        config: { type: 'dingtalk', senderPolicy: 'open' },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_workspace_mismatch' });
+
+    expect(store.upsert).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
   it('fails closed for lifecycle and pairing on a legacy cross-workspace config', async () => {
     const { service, store, manager } = setup({
       committedNames: ['bot'],

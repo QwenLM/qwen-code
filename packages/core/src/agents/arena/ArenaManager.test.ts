@@ -74,6 +74,8 @@ const createMockConfig = (
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
   getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
+  getCodeModeOnly: () => false,
+  isTodoWriteEnabled: () => false,
   // Read by resolveMainSessionOutputStyle: the peer inherits the style the
   // main session actually carries, so the main session's prompt-override and
   // interaction-mode state is part of that decision.
@@ -424,6 +426,7 @@ describe('ArenaManager', () => {
       mockConfig = {
         ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
         getOutputStyle: () => getBuiltInOutputStyle('Concise'),
+        isTodoWriteEnabled: () => true,
       };
       const manager = new ArenaManager(mockConfig as never);
 
@@ -442,6 +445,7 @@ describe('ArenaManager', () => {
           'This is a non-interactive, single-turn run',
         );
         expect(systemPrompt).toContain('# Output Style: Concise');
+        expect(systemPrompt).toContain('# Task Management');
       }
     });
 

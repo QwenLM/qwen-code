@@ -47,7 +47,7 @@ function mountManyMermaids(count: number): HTMLElement {
     root.render(
       createElement(
         TranscriptRenderModeProvider,
-        { value: 'document' },
+        { value: 'readonly' },
         ...Array.from({ length: count }, (_, index) =>
           createElement(Markdown, {
             key: index,
@@ -82,7 +82,24 @@ afterEach(() => {
 });
 
 describe('Markdown Mermaid render modes', () => {
-  it('applies resource limits only in document mode', async () => {
+  it('renders a mermaid fence as its own source in document mode', async () => {
+    const view = mountMermaid('document');
+    await startMermaidRender();
+
+    // Document mode is an exported file: it degrades the fence to a plain <pre>
+    // so the export bundle can drop mermaid entirely (#11091).
+    expect(mermaidMock.initialize).not.toHaveBeenCalled();
+    expect(mermaidMock.render).not.toHaveBeenCalled();
+    expect(view.container.querySelector('pre code')?.textContent).toContain(
+      'graph TD',
+    );
+    expect(view.container.querySelector('svg')).toBeNull();
+    // Deliberately no interactive arm here: leaving a render in flight would
+    // hold the module-level `mermaidRenderQueue` pending past this test and
+    // stall every later one. The cases below cover interactive rendering.
+  });
+
+  it('applies resource limits outside interactive mode', async () => {
     let resolveFirstRender: ((value: { svg: string }) => void) | undefined;
     mermaidMock.render.mockImplementationOnce(
       () =>
@@ -101,7 +118,7 @@ describe('Markdown Mermaid render modes', () => {
       'maxEdges',
     );
 
-    view.render('document');
+    view.render('readonly');
     await startMermaidRender();
     expect(mermaidMock.initialize).toHaveBeenCalledTimes(1);
 
@@ -116,7 +133,7 @@ describe('Markdown Mermaid render modes', () => {
       maxEdges: 500,
     });
 
-    view.render('readonly');
+    view.render('interactive');
     await startMermaidRender();
     expect(mermaidMock.initialize).toHaveBeenCalledTimes(3);
     expect(mermaidMock.initialize.mock.calls[2]?.[0]).not.toHaveProperty(
@@ -127,7 +144,7 @@ describe('Markdown Mermaid render modes', () => {
     );
   });
 
-  it('times out only in document mode', async () => {
+  it('times out outside interactive mode', async () => {
     let resolveInteractiveRender:
       | ((value: { svg: string }) => void)
       | undefined;
@@ -139,7 +156,7 @@ describe('Markdown Mermaid render modes', () => {
             resolveInteractiveRender = resolve;
           }),
       );
-    const view = mountMermaid('document');
+    const view = mountMermaid('readonly');
     await startMermaidRender();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
@@ -162,7 +179,7 @@ describe('Markdown Mermaid render modes', () => {
     });
   });
 
-  it('does not charge queue wait time against document renders', async () => {
+  it('does not charge queue wait time against readonly renders', async () => {
     mermaidMock.render.mockImplementation(
       () =>
         new Promise((resolve) => {

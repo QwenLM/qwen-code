@@ -12,7 +12,6 @@ import {
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import {
   apiActivityTracker,
-  getActiveGoal,
   projectGoalStateToLegacy,
   type GoalRecord,
   type GoalSnapshotV2,
@@ -96,7 +95,6 @@ export class MessageEmitter extends BaseEmitter {
     reasons: string[],
     stopHookCount: number,
   ): Promise<void> {
-    const activeGoal = getActiveGoal(this.sessionId);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
@@ -105,16 +103,6 @@ export class MessageEmitter extends BaseEmitter {
           iterationCount,
           reasons,
           stopHookCount,
-          ...(activeGoal
-            ? {
-                goal: {
-                  condition: activeGoal.condition,
-                  iterations: activeGoal.iterations,
-                  setAt: activeGoal.setAt,
-                  lastReason: activeGoal.lastReason,
-                },
-              }
-            : {}),
         },
       },
     });

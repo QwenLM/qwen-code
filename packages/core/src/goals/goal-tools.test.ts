@@ -27,9 +27,15 @@ import {
   type PendingGoalProposal,
   type ProposeGoalToolConfig,
   applyPendingGoalProposal,
+  formatProposeGoalRecoveryFailed,
+  formatProposeGoalRecoveryNotStarted,
   UpdateGoalTool,
   type GoalToolConfig,
 } from './goal-tools.js';
+import {
+  buildExecDescription,
+  planCodeModeBindings,
+} from '../tools/code-mode.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
@@ -160,6 +166,8 @@ describe('GetGoalTool', () => {
           activeTimeMs: 1_763_705,
           tokensUsed: 4_500,
           tokenBudget: 30_000_000,
+          turnBudget: 40,
+          activeTimeBudgetMs: 1_800_000,
           createdAt: 1,
           updatedAt: 2,
           lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
@@ -192,6 +200,10 @@ describe('GetGoalTool', () => {
         activeTimeMs: 1_763_705,
         tokensUsed: 4_500,
         tokenBudget: 30_000_000,
+        // A stopped Goal's cadence ceilings are reported beside the token
+        // one, so an inspection can see which allowance ran out.
+        turnBudget: 40,
+        activeTimeBudgetMs: 1_800_000,
         lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
       },
     });
@@ -238,6 +250,46 @@ describe('GetGoalTool', () => {
     expect(result.returnDisplay).toBe(
       'No Goal turn is permitted · last Goal paused after 1 turn',
     );
+  });
+
+  it('leaves checkpoint health out of the summary, whatever an earlier build recorded', async () => {
+    // Goals no longer run evidence checkpoints. A record an earlier build
+    // stopped on one still carries the streak and the failure; the model is
+    // told why the Goal stopped, not about a mechanism that is gone.
+    const config = makeConfig({
+      getGoalForWorker: vi.fn(),
+      getSnapshot: () => ({
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          status: 'usage_limited' as const,
+          limitKind: 'checkpoint_request' as const,
+          evidenceCursor: { recordId: 'record-1' },
+          turnCount: 5,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+          checkpointStalls: 3,
+          lastCheckpointFailure: 'Error: provider failed',
+          lastReason: 'Three evidence checkpoints stalled.',
+        },
+      }),
+    });
+
+    const { lastGoal } = JSON.parse(
+      String((await execute(new GetGoalTool(config))).llmContent),
+    );
+
+    expect(lastGoal).toMatchObject({
+      status: 'usage_limited',
+      lastReason: 'Three evidence checkpoints stalled.',
+    });
+    expect(lastGoal).not.toHaveProperty('checkpointStalls');
+    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
   });
 
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
@@ -317,7 +369,7 @@ describe('GetGoalTool', () => {
     );
   });
 
-  it('returns only the bounded worker view for the captured permit', async () => {
+  it('returns only the worker view for the captured permit', async () => {
     const snapshot = {
       v: 2 as const,
       activity: 'running' as const,
@@ -339,18 +391,6 @@ describe('GetGoalTool', () => {
       revision: 3,
       objective: 'Ship Goal v3',
       evidenceCursor: { recordId: 'cursor-1' },
-      evidenceCatalog: {
-        entries: [
-          {
-            uuid: 'evidence-1',
-            provenance: 'tool_result',
-            turnId: 'turn-4',
-            preview: '12 tests passed',
-            proofKind: 'external_fact',
-          },
-        ],
-        lineageTurnIds: ['turn-4'],
-      },
       verifierFeedback: 'retry: missing edge case',
       fullTranscript: ['must not leak'],
     });
@@ -367,199 +407,63 @@ describe('GetGoalTool', () => {
     expect(getSnapshotForPermit).toHaveBeenCalledWith(permit);
     expect(JSON.parse(String(result.llmContent))).toEqual({
       active: true,
-      view: 'summary',
       snapshot,
-      evidenceCatalog: {
-        entries: [
-          {
-            uuid: 'evidence-1',
-            provenance: 'tool_result',
-            turnId: 'turn-4',
-            preview: '12 tests passed',
-            proofKind: 'external_fact',
-          },
-        ],
-        lineageTurnIds: ['turn-4'],
-      },
       verifierFeedback: 'retry: missing edge case',
     });
     expect(String(result.llmContent)).not.toContain('must not leak');
     expect(result.returnDisplay).toBe('Active goal · revision 3');
   });
 
-  it('exposes the view parameter and nothing else', () => {
-    const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
-    expect(tool.schema.parametersJsonSchema).toEqual({
-      type: 'object',
-      properties: {
-        view: {
-          type: 'string',
-          enum: ['summary', 'full'],
-          description: expect.stringContaining('summary (default)'),
-        },
+  it('returns the snapshot as it is and ignores the deprecated view parameter', async () => {
+    const snapshot = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 3,
+        objective: 'Ship Goal v3',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'checkpoint-9' },
+        turnCount: 40,
+        activeTimeMs: 120,
+        tokensUsed: 0,
+        createdAt: 10,
+        updatedAt: 20,
       },
-      additionalProperties: false,
-    });
-  });
-
-  // A long-running Goal after a few checkpoints: 32 claims of the maximum
-  // length, a catalog at its entry cap, and a lineage at its cap.
-  const LONG_CLAIM = 'C'.repeat(2_000);
-  const LONG_PREVIEW_ASCII = 'p'.repeat(240);
-  const LONG_PREVIEW_CJK = '证'.repeat(80); // 240 bytes
-  const checkpointedGoal = () => ({
-    goalId: 'goal-1',
-    revision: 3,
-    objective: 'Ship Goal v3',
-    status: 'active' as const,
-    evidenceCursor: { recordId: 'checkpoint-9' },
-    turnCount: 40,
-    activeTimeMs: 120,
-    tokensUsed: 0,
-    createdAt: 10,
-    updatedAt: 20,
-    evidenceCheckpoint: {
-      checkpointId: 'checkpoint-9',
-      createdAt: 15,
-      claims: Array.from({ length: 32 }, (_, index) => ({
-        id: `checkpoint-9:${index + 1}`,
-        proofKind: 'external_fact' as const,
-        claim: `SECRET_CLAIM_TEXT ${LONG_CLAIM}`,
-        sourceRefs: Array.from(
-          { length: 4 },
-          (_, ref) => `src-${index}-${ref}`,
-        ),
-      })),
-    },
-  });
-  const checkpointedCatalog = () => ({
-    entries: [
-      ...Array.from({ length: 32 }, (_, index) => ({
-        uuid: `checkpoint-9:${index + 1}`,
-        provenance: 'goal_checkpoint' as const,
-        turnId: 'checkpoint:checkpoint-9',
-        preview: `claim ${index + 1} ${LONG_PREVIEW_ASCII}`.slice(0, 240),
-        proofKind: 'external_fact' as const,
-      })),
-      ...Array.from({ length: 60 }, (_, index) => ({
-        uuid: `earlier-${index}`,
-        provenance: 'tool_result' as const,
-        turnId: `earlier-turn-${index % 12}`,
-        preview: index % 2 === 0 ? LONG_PREVIEW_ASCII : LONG_PREVIEW_CJK,
-        proofKind: 'external_fact' as const,
-      })),
-      {
-        uuid: 'earlier-short',
-        provenance: 'tool_result' as const,
-        turnId: 'earlier-turn-0',
-        preview: '12 tests passed',
-        proofKind: 'external_fact' as const,
-      },
-      ...Array.from({ length: 8 }, (_, index) => ({
-        uuid: `current-${index}`,
-        provenance: 'assistant_output' as const,
-        turnId: permit.turnId,
-        preview: LONG_PREVIEW_ASCII,
-        proofKind: 'delivered_output' as const,
-      })),
-    ],
-    lineageTurnIds: [
-      ...Array.from({ length: 15 }, (_, index) => `earlier-turn-${index}`),
-      permit.turnId,
-    ],
-    truncated: false,
-  });
-  const checkpointedTool = () =>
-    new GetGoalTool(
+    };
+    const tool = new GetGoalTool(
       makeConfig({
         getGoalForWorker: vi.fn().mockResolvedValue({
           goalId: 'goal-1',
           revision: 3,
           objective: 'Ship Goal v3',
           evidenceCursor: { recordId: 'checkpoint-9' },
-          evidenceCatalog: checkpointedCatalog(),
         }),
-        getSnapshotForPermit: vi.fn(() => ({
-          v: 2 as const,
-          activity: 'running' as const,
-          goal: checkpointedGoal(),
-        })),
+        getSnapshotForPermit: vi.fn(() => structuredClone(snapshot)),
       }),
     );
-  const read = async (params: GetGoalToolParams) => {
-    const invocation = goalTurnContext.run(permit, () =>
-      checkpointedTool().build(params),
-    );
-    const result = await invocation.execute(new AbortController().signal);
-    return String(result.llmContent);
-  };
+    const read = async (params: GetGoalToolParams) => {
+      const invocation = goalTurnContext.run(permit, () => tool.build(params));
+      const result = await invocation.execute(new AbortController().signal);
+      return JSON.parse(String(result.llmContent)) as Record<string, unknown>;
+    };
 
-  it('collapses checkpoint claims and shortens earlier previews in the summary view', async () => {
-    const content = await read({});
-    const payload = JSON.parse(content);
+    const payload = await read({});
+    expect(payload).toEqual({ active: true, snapshot });
+    expect(await read({ view: 'full' })).toEqual(payload);
+  });
 
-    // The claims' text is the duplicate: each claim is already a catalog entry.
-    expect(content).not.toContain('SECRET_CLAIM_TEXT');
-    expect(payload.snapshot.goal.evidenceCheckpoint).toEqual({
-      checkpointId: 'checkpoint-9',
-      createdAt: 15,
-      claimCount: 32,
+  it('advertises no parameters, and still serves a call that sends the old one', () => {
+    const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
+    expect(tool.schema.parametersJsonSchema).toEqual({
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
     });
-    expect(payload.view).toBe('summary');
-
-    const entries: Array<{
-      uuid: string;
-      turnId: string;
-      provenance: string;
-      preview: string;
-    }> = payload.evidenceCatalog.entries;
-    // Every uuid survives: the summary changes what is shown, not what is
-    // citable.
-    expect(entries.map((entry) => entry.uuid)).toEqual(
-      checkpointedCatalog().entries.map((entry) => entry.uuid),
-    );
-    for (const entry of entries) {
-      const bytes = Buffer.byteLength(entry.preview, 'utf8');
-      if (
-        entry.provenance === 'goal_checkpoint' ||
-        entry.turnId === permit.turnId
-      ) {
-        expect(bytes).toBe(240);
-      } else {
-        expect(bytes).toBeLessThanOrEqual(80);
-      }
-    }
-    // Multi-byte previews are cut on a code point, not mid-character.
-    expect(entries.find((entry) => entry.uuid === 'earlier-1')?.preview).toBe(
-      '证'.repeat(26),
-    );
-    // An earlier-turn preview already within the cap passes through
-    // byte-identical and is not counted as shortened.
-    expect(
-      entries.find((entry) => entry.uuid === 'earlier-short')?.preview,
-    ).toBe('12 tests passed');
-    expect(payload.evidenceCatalog.shortenedPreviews).toBe(60);
-    expect(payload.evidenceCatalog.lineageTurnIds).toHaveLength(16);
-  });
-
-  it('returns the whole checkpoint and catalog in the full view', async () => {
-    const payload = JSON.parse(await read({ view: 'full' }));
-
-    expect(payload.view).toBe('full');
-    expect(payload.snapshot.goal).toEqual(checkpointedGoal());
-    expect(payload.evidenceCatalog).toEqual(checkpointedCatalog());
-    expect(payload.evidenceCatalog).not.toHaveProperty('shortenedPreviews');
-  });
-
-  it('keeps a steady-state summary read under a fixed byte ceiling', async () => {
-    const summaryBytes = Buffer.byteLength(await read({}), 'utf8');
-    const fullBytes = Buffer.byteLength(await read({ view: 'full' }), 'utf8');
-
-    // The full read of this fixture is what a long Goal paid on every
-    // get_goal before: the 2,000-character claims alone are ~64 KB.
-    expect(fullBytes).toBeGreaterThan(100_000);
-    expect(summaryBytes).toBeLessThanOrEqual(36_000);
-    expect(fullBytes / summaryBytes).toBeGreaterThanOrEqual(3);
+    // `view` left the schema to stop paying for it on every request; a model
+    // that still sends it is served, where any other unknown key is refused.
+    expect(tool.validateToolParams({ view: 'full' })).toBeNull();
+    expect(tool.validateToolParams({ verbose: true } as never)).not.toBeNull();
   });
 });
 
@@ -581,225 +485,84 @@ describe('UpdateGoalTool', () => {
     },
   });
 
-  it('exposes the exact evidence and non-terminal response contract', () => {
+  it('exposes the transcript-tail evidence contract', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
     const schema = tool.schema.parametersJsonSchema as {
-      properties: {
-        reason: { maxLength?: number };
-        evidenceRefs: {
-          description?: string;
-          items?: { description?: string };
-          maxItems?: number;
-        };
-        blockerKind: { description?: string };
-      };
+      required: string[];
+      properties: Record<
+        string,
+        { description?: string; enum?: string[]; maxLength?: number }
+      >;
     };
 
-    expect(tool.description).toContain('call get_goal in the current turn');
-    expect(tool.description).toContain('evidenceCatalog.entries[].uuid');
     expect(tool.description).toContain(
-      'never goalId, turnId, or lineageTurnIds',
+      "only the most recent records of this Goal's transcript",
     );
     expect(tool.description).toContain(
-      'Do not tell the user the Goal is complete',
+      'run the checks that prove every objective condition immediately before calling',
     );
     expect(tool.description).toContain(
-      'call get_goal, wait for its result, and call update_goal in a later model step',
-    );
-    expect(tool.description).not.toContain('in that same response');
-    expect(tool.description).toContain(
-      'Do not add progress or completion commentary',
+      'Never tell the user the Goal is complete or blocked',
     );
     expect(tool.description).toContain(
-      'end the turn without additional user-facing text',
+      'with no progress or completion commentary',
     );
-    expect(tool.description).not.toContain(
-      'say the proposal is awaiting independent verification',
-    );
-    expect(schema.properties.evidenceRefs.description).toContain(
-      'evidenceCatalog.entries[].uuid',
-    );
-    expect(schema.properties.evidenceRefs.items?.description).toContain(
-      'not a turnId',
-    );
-    expect(schema.properties.evidenceRefs.maxItems).toBe(100);
-    expect(schema.properties.reason.maxLength).toBe(
+    expect(tool.description).toContain('end the turn with no further text');
+    expect(tool.description).not.toContain('evidenceCatalog');
+    expect(tool.description).not.toContain('cite');
+
+    expect(schema.required).toEqual(['status', 'reason']);
+    expect(Object.keys(schema.properties)).toEqual([
+      'status',
+      'reason',
+      'blockerKind',
+    ]);
+    expect(schema.properties['reason']!.maxLength).toBe(
       GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
     );
-    expect(schema.properties.blockerKind.description).toContain(
+    // The blocker rules live in the description, once: code mode carries a
+    // tool's description but not its parameter descriptions, so a rule that
+    // lived only on the parameter would be lost there. The parameter itself
+    // just points at the description.
+    expect(schema.properties['blockerKind']!.enum).toContain('infeasible');
+    expect(schema.properties['blockerKind']!.description).toContain(
+      'the tool description says when each applies',
+    );
+    for (const fragment of [
       'three consecutive Goal turns',
-    );
-    expect(schema.properties.blockerKind.description).toContain(
       'exact same reason text',
-    );
-    expect(
-      (schema.properties.blockerKind as { enum?: string[] }).enum,
-    ).toContain('infeasible');
-    expect(schema.properties.blockerKind.description).toContain(
       'cannot be satisfied as written',
-    );
-    expect(tool.description).toContain('a tool result, not your own text');
-    expect(tool.description).toContain(
-      'not for difficulty, uncertainty, information you could still obtain',
-    );
+      'a tool result, not your own text',
+      'never for difficulty, uncertainty, information you could still obtain, or wanting to ask',
+      'why no in-scope work could satisfy the objective',
+      'The verifier may accept those three on the first turn they are proposed',
+      'a rejected proposal leaves the Goal running',
+    ]) {
+      expect(tool.description).toContain(fragment);
+      expect(schema.properties['blockerKind']!.description).not.toContain(
+        fragment,
+      );
+    }
   });
 
-  it('rejects lineage turn ids before recording a proposal', async () => {
-    const recordTerminalProposal = vi.fn();
-    const getGoalForWorker = vi.fn().mockResolvedValue({
-      goalId: permit.goalId,
-      revision: permit.revision,
-      objective: 'Reply test until the user types qqq',
-      evidenceCursor: { recordId: 'goal-created' },
-      evidenceCatalog: {
-        entries: [
-          {
-            uuid: 'user-input-qqq',
-            provenance: 'real_user',
-            turnId: permit.turnId,
-            preview: 'qqq',
-            proofKind: 'user_input',
-          },
-        ],
-        lineageTurnIds: [permit.turnId],
-      },
-    });
-    const getSnapshotForPermit = vi.fn(() => ({
-      v: 2 as const,
-      activity: 'running' as const,
-      goal: {
-        goalId: permit.goalId,
-        revision: permit.revision,
-        objective: 'Reply test until the user types qqq',
-        status: 'active' as const,
-        evidenceCursor: { recordId: 'goal-created' },
-        turnCount: 3,
-        activeTimeMs: 100,
-        tokensUsed: 0,
-        createdAt: 1,
-        updatedAt: 2,
-      },
-    }));
-    const tool = new UpdateGoalTool(
-      makeConfig({
-        getGoalForWorker,
-        getSnapshotForPermit,
-        recordTerminalProposal,
-      }),
+  it('carries the blocker rules into the code-mode declaration', () => {
+    const plan = planCodeModeBindings(
+      [new UpdateGoalTool(makeConfig({}))],
+      () => false,
     );
-    const invocation = goalTurnContext.run(permit, () =>
-      tool.build({
-        status: 'complete',
-        reason: 'The user typed qqq',
-        evidenceRefs: [permit.turnId],
-      }),
-    );
-
-    const result = await invocation.execute(new AbortController().signal);
-
-    expect(JSON.parse(String(result.llmContent))).toEqual({
-      proposalRecorded: false,
-      readyForVerification: false,
-      goalLifecycleChanged: false,
-      invalidEvidenceRefs: [permit.turnId],
-      error:
-        'evidenceRefs must use values from the latest get_goal evidenceCatalog.entries[].uuid; call get_goal and retry. Do not use goalId, turnId, or lineageTurnIds.',
-    });
-    expect(result.returnDisplay).toBe(
-      'Goal proposal was not recorded because its evidence is not current. Read the current Goal and retry.',
-    );
-    expect(result.returnDisplay).not.toContain('turnId');
-    expect(result.returnDisplay).not.toContain('uuid');
-    expect(recordTerminalProposal).not.toHaveBeenCalled();
+    const declaration = buildExecDescription(plan);
+    expect(declaration).toContain('three consecutive Goal turns');
+    expect(declaration).toContain('never for difficulty');
   });
 
-  it("cites this turn's delivered output for a completion that omitted it", async () => {
-    const recordTerminalProposal = vi.fn(() => ({
+  it('repairs a mistyped value on the object the invocation executes with, deprecated key or not', async () => {
+    // The schema validator coerces in place (a self-hosted model can send a
+    // number for a string); the strip of a deprecated key must not leave that
+    // repair on a copy that is then discarded.
+    const recordTerminalProposal = vi.fn().mockReturnValue({
       recorded: true,
       readyForVerification: true,
-    }));
-    const getGoalForWorker = vi.fn().mockResolvedValue({
-      goalId: permit.goalId,
-      revision: permit.revision,
-      objective: 'Output ZQPX one character per turn',
-      evidenceCursor: { recordId: 'goal-created' },
-      evidenceCatalog: {
-        entries: [
-          {
-            uuid: 'tool-result-1',
-            provenance: 'tool_result',
-            turnId: 'turn-1',
-            preview: 'tests passed',
-            proofKind: 'external_fact',
-          },
-          {
-            uuid: 'letter-x',
-            provenance: 'assistant_output',
-            turnId: permit.turnId,
-            preview: 'X',
-            proofKind: 'delivered_output',
-          },
-        ],
-        lineageTurnIds: ['turn-1', permit.turnId],
-      },
     });
-    const getSnapshotForPermit = vi.fn(() => ({
-      v: 2 as const,
-      activity: 'running' as const,
-      goal: {
-        goalId: permit.goalId,
-        revision: permit.revision,
-        objective: 'Output ZQPX one character per turn',
-        status: 'active' as const,
-        evidenceCursor: { recordId: 'goal-created' },
-        turnCount: 3,
-        activeTimeMs: 100,
-        tokensUsed: 0,
-        createdAt: 1,
-        updatedAt: 2,
-      },
-    }));
-    const tool = new UpdateGoalTool(
-      makeConfig({
-        getGoalForWorker,
-        getSnapshotForPermit,
-        recordTerminalProposal,
-      }),
-    );
-    const invocation = goalTurnContext.run(permit, () =>
-      tool.build({
-        status: 'complete',
-        reason: 'All characters were delivered',
-        evidenceRefs: ['tool-result-1'],
-      }),
-    );
-
-    const result = await invocation.execute(new AbortController().signal);
-
-    // Refusing here could not converge: complying emits assistant text, which
-    // is delivered_output stamped with this same turn, so the required set
-    // grew by one per retry until a human stopped the Goal.
-    expect(recordTerminalProposal).toHaveBeenCalledWith(
-      permit,
-      expect.objectContaining({
-        status: 'complete',
-        evidenceRefs: ['tool-result-1', 'letter-x'],
-      }),
-    );
-    expect(JSON.parse(String(result.llmContent))).toMatchObject({
-      proposalRecorded: true,
-      readyForVerification: true,
-      autoCitedCurrentDeliveredOutput: ['letter-x'],
-    });
-  });
-
-  it('does not duplicate output the completion already cited', async () => {
-    // validateGoalEvidenceReferences rejects a duplicated ref outright, so the
-    // fold has to be a union rather than an append.
-    const recordTerminalProposal = vi.fn(() => ({
-      recorded: true,
-      readyForVerification: true,
-    }));
     const tool = new UpdateGoalTool(
       makeConfig({
         getGoalForWorker: vi.fn().mockResolvedValue({
@@ -807,39 +570,6 @@ describe('UpdateGoalTool', () => {
           revision: permit.revision,
           objective: 'Deliver the result',
           evidenceCursor: { recordId: 'goal-created' },
-          evidenceCatalog: {
-            entries: [
-              {
-                uuid: 'letter-x',
-                provenance: 'assistant_output',
-                turnId: permit.turnId,
-                preview: 'X',
-                proofKind: 'delivered_output',
-              },
-              {
-                uuid: 'letter-y',
-                provenance: 'assistant_output',
-                turnId: permit.turnId,
-                preview: 'Y',
-                proofKind: 'delivered_output',
-              },
-              {
-                uuid: 'current-external-fact',
-                provenance: 'tool_result',
-                turnId: permit.turnId,
-                preview: 'permission denied',
-                proofKind: 'external_fact',
-              },
-              {
-                uuid: 'prior-delivered-output',
-                provenance: 'assistant_output',
-                turnId: 'prior-turn',
-                preview: 'Earlier output',
-                proofKind: 'delivered_output',
-              },
-            ],
-            lineageTurnIds: ['prior-turn', permit.turnId],
-          },
         }),
         getSnapshotForPermit: vi.fn(() => activeSnapshot()),
         recordTerminalProposal,
@@ -847,141 +577,87 @@ describe('UpdateGoalTool', () => {
     );
     const invocation = goalTurnContext.run(permit, () =>
       tool.build({
+        status: 'complete',
+        reason: 42,
+        evidenceRefs: ['stale-reference-from-an-older-contract'],
+      } as never),
+    );
+
+    await invocation.execute(new AbortController().signal);
+
+    expect(recordTerminalProposal).toHaveBeenCalledWith(permit, {
+      status: 'complete',
+      reason: '42',
+    });
+  });
+
+  it('serves a proposal that still sends evidenceRefs, and refuses any other unknown key', () => {
+    const tool = new UpdateGoalTool(makeConfig({}));
+    expect(
+      tool.validateToolParams({
         status: 'complete',
         reason: 'Delivered',
-        evidenceRefs: ['letter-x'],
+        evidenceRefs: ['an-old-habit'],
       }),
-    );
-
-    const result = await invocation.execute(new AbortController().signal);
-
-    expect(recordTerminalProposal).toHaveBeenCalledWith(
-      permit,
-      expect.objectContaining({ evidenceRefs: ['letter-x', 'letter-y'] }),
-    );
-    expect(recordTerminalProposal).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(result.llmContent))).toMatchObject({
-      autoCitedCurrentDeliveredOutput: ['letter-y'],
-    });
+    ).toBeNull();
+    expect(
+      tool.validateToolParams({
+        status: 'complete',
+        reason: 'Delivered',
+        citations: [],
+      } as never),
+    ).not.toBeNull();
+    // A call with no arguments at all gets the schema's answer, not a throw.
+    expect(tool.validateToolParams(undefined as never)).toMatch(/must/i);
+    expect(
+      new GetGoalTool(
+        makeConfig({ getGoalForWorker: vi.fn() }),
+      ).validateToolParams(null as never),
+    ).toMatch(/must/i);
   });
 
-  it('leaves a blocked proposal to cite whatever it chose', async () => {
-    // The gate only ever guarded completion: a blocker is judged on the
-    // blocker, not on what the turn happened to deliver.
-    const recordTerminalProposal = vi.fn(() => ({
+  it('records the proposal without references and without reading a catalog', async () => {
+    const recordTerminalProposal = vi.fn().mockReturnValue({
       recorded: true,
-      readyForVerification: false,
-    }));
+      readyForVerification: true,
+    });
+    const getGoalForWorker = vi.fn().mockResolvedValue({
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: 'Deliver the result',
+      evidenceCursor: { recordId: 'goal-created' },
+    });
+    const getSnapshotForPermit = vi.fn(() => activeSnapshot());
     const tool = new UpdateGoalTool(
       makeConfig({
-        getGoalForWorker: vi.fn().mockResolvedValue({
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'Deliver the result',
-          evidenceCursor: { recordId: 'goal-created' },
-          evidenceCatalog: {
-            entries: [
-              {
-                uuid: 'tool-result-1',
-                provenance: 'tool_result',
-                turnId: permit.turnId,
-                preview: 'permission denied',
-                proofKind: 'external_fact',
-              },
-              {
-                uuid: 'letter-x',
-                provenance: 'assistant_output',
-                turnId: permit.turnId,
-                preview: 'X',
-                proofKind: 'delivered_output',
-              },
-            ],
-            lineageTurnIds: [permit.turnId],
-          },
-        }),
-        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+        getGoalForWorker,
+        getSnapshotForPermit,
         recordTerminalProposal,
       }),
     );
     const invocation = goalTurnContext.run(permit, () =>
       tool.build({
-        status: 'blocked',
-        reason: 'The credential store is unreadable',
-        evidenceRefs: ['tool-result-1'],
-        blockerKind: 'external',
-      }),
-    );
-
-    const result = await invocation.execute(new AbortController().signal);
-
-    expect(recordTerminalProposal).toHaveBeenCalledWith(
-      permit,
-      expect.objectContaining({ evidenceRefs: ['tool-result-1'] }),
-    );
-    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
-      'autoCitedCurrentDeliveredOutput',
-    );
-  });
-
-  it('queues truncated completion for boundary classification', async () => {
-    const recordTerminalProposal = vi.fn(() => ({
-      recorded: true,
-      readyForVerification: true,
-    }));
-    const runtime = {
-      getGoalForWorker: vi.fn().mockResolvedValue({
-        goalId: permit.goalId,
-        revision: permit.revision,
-        objective: 'Ship Goal v3',
-        evidenceCursor: { recordId: 'goal-created' },
-        evidenceCatalog: {
-          entries: [
-            {
-              uuid: 'output',
-              provenance: 'assistant_output',
-              turnId: permit.turnId,
-              preview: 'done',
-              proofKind: 'delivered_output',
-            },
-          ],
-          lineageTurnIds: [permit.turnId],
-          truncated: true,
-        },
-      }),
-      getSnapshotForPermit: vi.fn(() => ({
-        v: 2 as const,
-        activity: 'running' as const,
-        goal: {
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'Ship Goal v3',
-          status: 'active' as const,
-          evidenceCursor: { recordId: 'goal-created' },
-          turnCount: 1,
-          activeTimeMs: 0,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      })),
-      recordTerminalProposal,
-    };
-    const invocation = goalTurnContext.run(permit, () =>
-      new UpdateGoalTool(makeConfig(runtime)).build({
         status: 'complete',
-        reason: 'done',
-        evidenceRefs: ['output'],
+        reason: '  Focused tests passed  ',
+        evidenceRefs: ['stale-reference-from-an-older-contract'],
       }),
     );
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+    expect(recordTerminalProposal).toHaveBeenCalledWith(permit, {
+      status: 'complete',
+      reason: 'Focused tests passed',
+    });
+    expect(JSON.parse(String(result.llmContent))).toEqual({
       proposalRecorded: true,
       readyForVerification: true,
+      goalLifecycleChanged: false,
+      nextAction: expect.stringContaining(
+        'End this turn without user-facing text',
+      ),
     });
     expect(result.terminateTurn).toBe(true);
-    expect(recordTerminalProposal).toHaveBeenCalledOnce();
   });
 
   it('records one proposal while leaving the Goal active', async () => {
@@ -1035,7 +711,7 @@ describe('UpdateGoalTool', () => {
         readyForVerification: false,
         goalLifecycleChanged: false,
         nextAction:
-          'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, with current evidence cited on each turn.',
+          'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, each of which must show the blocker in its own tool results.',
       });
       expect(result.terminateTurn).toBeUndefined();
     }
@@ -1092,85 +768,54 @@ describe('UpdateGoalTool', () => {
     expect(runtime.getSnapshot().goal?.status).toBe('paused');
   });
 
-  it('requires a non-empty reason and stable evidence references', () => {
-    const { runtime } = {
-      runtime: {} as GoalRuntime,
-    };
-    const tool = new UpdateGoalTool(makeConfig(runtime));
+  it('requires a non-empty reason and ignores evidence references', () => {
+    const tool = new UpdateGoalTool(makeConfig({} as GoalRuntime));
+    const build = (params: Parameters<typeof tool.build>[0]) =>
+      goalTurnContext.run(permit, () => tool.build(params));
 
     expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'complete',
-          reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS),
-          evidenceRefs: ['evidence-1'],
-        }),
-      ),
+      build({
+        status: 'complete',
+        reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS),
+      }),
     ).not.toThrow();
     expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'complete',
-          reason: 'é'.repeat(GOAL_PROPOSAL_REASON_MAX_BYTES / 2),
-          evidenceRefs: ['evidence-1'],
-        }),
-      ),
+      build({
+        status: 'complete',
+        reason: 'é'.repeat(GOAL_PROPOSAL_REASON_MAX_BYTES / 2),
+      }),
     ).not.toThrow();
     expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'complete',
-          reason: '   ',
-          evidenceRefs: ['evidence-1'],
-        }),
-      ),
-    ).toThrow(/reason/i);
+      build({ status: 'blocked', reason: 'Waiting for authority' }),
+    ).not.toThrow();
     expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'blocked',
-          reason: 'Waiting for authority',
-          evidenceRefs: [],
-        }),
-      ),
-    ).toThrow(/evidence/i);
+      build({
+        status: 'blocked',
+        reason: 'Waiting for authority',
+        evidenceRefs: [],
+      }),
+    ).not.toThrow();
     expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'blocked',
-          reason: 'Waiting for authority',
-          evidenceRefs: ['   '],
-        }),
-      ),
-    ).toThrow(/evidence/i);
+      build({
+        status: 'complete',
+        reason: 'Focused tests passed',
+        evidenceRefs: ['same-reference', ' same-reference '],
+      }),
+    ).not.toThrow();
+    expect(() => build({ status: 'complete', reason: '   ' })).toThrow(
+      /reason/i,
+    );
     expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'complete',
-          reason: 'Focused tests passed',
-          evidenceRefs: ['same-reference', ' same-reference '],
-        }),
-      ),
-    ).toThrow('evidenceRefs must contain unique stable evidence references');
-    expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'complete',
-          reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS + 1),
-          evidenceRefs: ['evidence-1'],
-        }),
-      ),
+      build({
+        status: 'complete',
+        reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS + 1),
+      }),
     ).toThrow(/characters/i);
     expect(() =>
-      goalTurnContext.run(permit, () =>
-        tool.build({
-          status: 'complete',
-          reason: '界'.repeat(
-            Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1,
-          ),
-          evidenceRefs: ['evidence-1'],
-        }),
-      ),
+      build({
+        status: 'complete',
+        reason: '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1),
+      }),
     ).toThrow(/UTF-8 bytes/i);
   });
 
@@ -1603,6 +1248,28 @@ describe('ProposeGoalTool', () => {
     expect(tool.description).toContain(
       'do not propose the same or a reworded objective again',
     );
+    // The tool is declared in an interactive plan-mode session and refuses at
+    // confirmation time there; the clause is the model's only static hint.
+    expect(tool.description).toContain('Not available in plan mode.');
+    // The objective format is in the description for the same reason the
+    // blocker rules are: code mode carries no parameter descriptions.
+    for (const fragment of [
+      'numbered binary "Done when" checks that name a command',
+      'what must not change',
+      'a budget',
+      'what to do when blocked',
+      `at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters`,
+      'on one line',
+    ]) {
+      expect(tool.description).toContain(fragment);
+    }
+    const declaration = buildExecDescription(
+      planCodeModeBindings([tool], () => false),
+    );
+    expect(declaration).toContain('Done when');
+    expect(declaration).toContain(
+      String(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS),
+    );
   });
 
   it('validates the objective', () => {
@@ -1613,7 +1280,41 @@ describe('ProposeGoalTool', () => {
         objective: 'x'.repeat(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS + 1),
       }),
     ).not.toBeNull();
+    expect(
+      tool.validateToolParams({ objective: 'Outcome: ship it.\nBudget: 20.' }),
+    ).toBe('objective must be written on one line.');
     expect(tool.validateToolParams({ objective })).toBeNull();
+  });
+
+  it('prints each recovery command as a complete final line', () => {
+    for (const message of [
+      formatProposeGoalRecoveryNotStarted(objective),
+      formatProposeGoalRecoveryFailed(objective),
+    ]) {
+      expect(message.split('\n').at(-1)).toBe(`/goal set ${objective}`);
+      expect(message.match(/\/goal/g)).toHaveLength(1);
+    }
+  });
+
+  it('keeps what the Goal tools cost every request inside a budget', () => {
+    // get_goal and update_goal are registered in every session, Goal or not,
+    // so their schemas ride along with every model request. The figure is
+    // what the three tools cost today plus room for a sentence; growing past
+    // it should be a decision, not drift. (5 860 before the descriptions
+    // were trimmed.)
+    const tools = [
+      new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() })),
+      new UpdateGoalTool(makeConfig({})),
+      new ProposeGoalTool(proposeConfig(idleRuntime().runtime)),
+    ];
+    const advertised = tools
+      .map(
+        (tool) =>
+          tool.description + JSON.stringify(tool.schema.parametersJsonSchema),
+      )
+      .join('');
+
+    expect(advertised.length).toBeLessThan(3_800);
   });
 
   it('shows the objective in a plain-text info dialog and parks it on approval', async () => {
@@ -1628,6 +1329,7 @@ describe('ProposeGoalTool', () => {
     expect(details.type).toBe('info');
     if (details.type !== 'info') return;
     expect(details.renderPromptAsPlainText).toBe(true);
+    expect(details.hideAlwaysAllow).toBe(true);
     expect(details.prompt).toContain('Set this as the session Goal?');
     expect(details.prompt).toContain(objective);
 
@@ -1643,7 +1345,11 @@ describe('ProposeGoalTool', () => {
     // proposing turn of its Goal permit. The client applies it at the
     // turn boundary (see applyPendingGoalProposal below).
     expect(config.setPendingGoalProposal).toHaveBeenCalledTimes(1);
-    expect(config.pending()).toEqual({ objective, turnKey: 'user-turn-key' });
+    expect(config.pending()).toEqual({
+      objective,
+      turnKey: 'user-turn-key',
+      reviewedGoal: null,
+    });
     expect(runtime.getSnapshot().goal).toBeNull();
     expect(host.started).toHaveLength(0);
 
@@ -1830,6 +1536,78 @@ describe('ProposeGoalTool', () => {
     expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
 
+  describe.each(['before approval', 'before settlement'] as const)(
+    'rejects a changed reviewed target %s',
+    (phase) => {
+      it.each(['create', 'edit', 'replace', 'clear'] as const)(
+        'preserves the result of a concurrent %s',
+        async (action) => {
+          const { runtime, host } = idleRuntime();
+          const pauseCurrent = async () => {
+            const current = runtime.getSnapshot().goal!;
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: current.goalId,
+              expectedRevision: current.revision,
+            });
+          };
+          if (action !== 'create') {
+            await runtime.dispatch({ action: 'create', objective: 'Original' });
+            await pauseCurrent();
+          }
+          const config = proposeConfig(runtime);
+          const invocation = new ProposeGoalTool(config).build({ objective });
+          const details = await invocation.getConfirmationDetails(
+            new AbortController().signal,
+          );
+          if (phase === 'before settlement') {
+            await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+            expect((await execute(invocation)).error).toBeUndefined();
+          }
+
+          if (action === 'create') {
+            await runtime.dispatch({ action, objective: 'Concurrent' });
+            await pauseCurrent();
+          } else {
+            const current = runtime.getSnapshot().goal!;
+            const version = {
+              expectedGoalId: current.goalId,
+              expectedRevision: current.revision,
+            };
+            await runtime.dispatch(
+              action === 'clear'
+                ? { action, ...version }
+                : { action, objective: 'Concurrent', ...version },
+            );
+            if (action === 'replace') await pauseCurrent();
+          }
+          const changed = runtime.getSnapshot().goal;
+          const startedBefore = host.started.length;
+
+          if (phase === 'before approval') {
+            await details.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+            const result = await execute(invocation);
+            expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+            expect(result.llmContent).toContain('changed after the proposal');
+            expect(config.pending()).toBeUndefined();
+          } else {
+            const result = await applyPendingGoalProposal(
+              runtime,
+              config.pending()!,
+            );
+            expect(result).toMatchObject({
+              applied: false,
+              kind: 'changed',
+              reason: expect.stringContaining('changed after the proposal'),
+            });
+          }
+          expect(runtime.getSnapshot().goal).toEqual(changed);
+          expect(host.started).toHaveLength(startedBefore);
+        },
+      );
+    },
+  );
+
   it('replaces a stopped Goal when the parked approval is applied', async () => {
     const { runtime, host } = idleRuntime();
     await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });
@@ -1854,6 +1632,10 @@ describe('ProposeGoalTool', () => {
     const result = await execute(invocation);
     const payload = JSON.parse(result.llmContent as string);
     expect(payload.replacesGoalId).toBe(paused.goalId);
+    expect(config.pending()?.reviewedGoal).toEqual({
+      goalId: paused.goalId,
+      revision: paused.revision,
+    });
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
 
     const applied = await applyPendingGoalProposal(runtime, config.pending()!);
@@ -1881,6 +1663,7 @@ describe('ProposeGoalTool', () => {
     const applied = await applyPendingGoalProposal(runtime, config.pending()!);
     expect(applied.applied).toBe(false);
     if (applied.applied) return;
+    expect(applied.kind).toBe('changed');
     expect(applied.reason).toContain('became active');
     expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
@@ -1903,6 +1686,7 @@ describe('ProposeGoalTool', () => {
     const applied = applyPendingGoalProposal(runtime, {
       objective,
       turnKey: 'user-turn-key',
+      reviewedGoal: { goalId: original.goalId, revision: original.revision },
     });
 
     await expect(resumed).resolves.toMatchObject({
@@ -1914,7 +1698,10 @@ describe('ProposeGoalTool', () => {
         },
       },
     });
-    await expect(applied).resolves.toMatchObject({ applied: false });
+    await expect(applied).resolves.toMatchObject({
+      applied: false,
+      kind: 'changed',
+    });
     expect(runtime.getSnapshot().goal).toMatchObject({
       goalId: original.goalId,
       objective: 'Paused by user',
@@ -1943,8 +1730,11 @@ describe('ProposeGoalTool', () => {
     const applied = await applyPendingGoalProposal(stale, {
       objective,
       turnKey: 'user-turn-key',
+      reviewedGoal: { goalId: paused.goalId, revision: paused.revision - 1 },
     });
     expect(applied.applied).toBe(false);
+    if (applied.applied) return;
+    expect(applied.kind).toBe('changed');
     expect(runtime.getSnapshot().goal?.goalId).toBe(paused.goalId);
   });
 });

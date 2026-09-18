@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from 'vitest';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
-import { getPillLabel, hasPendingApproval } from './BackgroundTasksPill.js';
+import {
+  getPillLabel,
+  hasLargeWorkflow,
+  hasPendingApproval,
+} from './BackgroundTasksPill.js';
 import type {
   BackgroundApproval,
   WorkflowApproval,
@@ -289,5 +293,34 @@ describe('hasPendingApproval', () => {
         dreamEntry({ dreamId: 'd-a' }),
       ]),
     ).toBe(false);
+  });
+});
+
+describe('hasLargeWorkflow', () => {
+  const sizeWarning = {
+    axis: 'agents' as const,
+    scheduledAgents: 40,
+    totalTokens: 0,
+    projectedTokens: 2_800_000,
+    agentCap: 15,
+    tokenCap: 1_500_000,
+    capFromGuideline: true,
+    at: 0,
+  };
+
+  it('is true for an active workflow flagged as large', () => {
+    expect(hasLargeWorkflow([workflowEntry({ sizeWarning })])).toBe(true);
+    expect(
+      hasLargeWorkflow([workflowEntry({ status: 'paused', sizeWarning })]),
+    ).toBe(true);
+  });
+
+  // The marker asks the user to consider stopping a run; a settled run has
+  // nothing left to stop.
+  it('is false once the flagged run settled, and without a flag', () => {
+    expect(
+      hasLargeWorkflow([workflowEntry({ status: 'completed', sizeWarning })]),
+    ).toBe(false);
+    expect(hasLargeWorkflow([workflowEntry(), agentEntry()])).toBe(false);
   });
 });

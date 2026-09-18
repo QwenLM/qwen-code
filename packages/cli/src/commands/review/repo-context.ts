@@ -23,9 +23,11 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import { isSameFile } from './lib/same-file.js';
+import { untrustedGitfile } from './lib/worktree.js';
 import {
   isSafeRepositoryRelativePath,
   MAX_IDENTITY_BYTES,
@@ -34,6 +36,11 @@ import {
   validateRepositoryContext,
 } from './lib/repository-context.js';
 import { stringifyPlanReport } from './lib/report.js';
+import {
+  contextRoleRunsInThisReview,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
 
 interface RepoContextArgs {
   plan: string;
@@ -51,6 +58,7 @@ interface MutablePlan {
   mergeBaseSha?: unknown;
   baseFetchFailed?: unknown;
   repositoryContext?: unknown;
+  reviewProfile?: unknown;
   [key: string]: unknown;
 }
 
@@ -390,6 +398,23 @@ export function runRepoContext(
     }
     throw err;
   }
+  // Every read below — `rev-parse --git-common-dir`, `cat-file -e`, `ls-tree`,
+  // `show <base>:<path>` — resolves the repository through this worktree's own
+  // `.git`, which sits inside the directory the review sandbox hands the
+  // reviewed code read-write. The identity files this command extracts are the
+  // ones the trust boundary exists to take from the MERGE BASE rather than
+  // from the PR head; read through a rewritten pointer they come from a
+  // repository the PR author planted, and the whole boundary is decorative.
+  // Same gate, same reason, as the writes in `scratch-tree` and `fetch-pr`.
+  const untrusted = untrustedGitfile(worktree);
+  if (untrusted !== null) {
+    throw new Error(
+      `repo-context: refusing to read the repository context — ${untrusted}. ` +
+        `The merge-base identity files would come from whichever repository ` +
+        `that pointer names. Sweep the tree (\`qwen review cleanup\`) and ` +
+        `re-fetch before re-running.`,
+    );
+  }
 
   // The plan's identity, captured BEFORE the provider work. The providers
   // take real time, the plan path is shared per PR, and a concurrent capture
@@ -429,6 +454,22 @@ export function runRepoContext(
         );
   if (context === null) delete plan.repositoryContext;
   else plan.repositoryContext = context;
+  if (
+    plan.reviewProfile === DOCS_NAV_PROFILE &&
+    context &&
+    context.requiredAgents.some((role) =>
+      contextRoleRunsInThisReview(
+        role,
+        plan as RosterPlan,
+        reviewMode(plan as RosterPlan),
+      ),
+    )
+  ) {
+    delete plan.reviewProfile;
+    writeStderrLine(
+      'Repository-required reviewers keep this navigation change on the full review path.',
+    );
+  }
 
   mkdirSync(dirname(outPath), { recursive: true });
   atomicWriteFileSync(outPath, `${JSON.stringify(context, null, 2)}\n`);

@@ -1,13 +1,16 @@
 import {
   createContext,
+  createElement,
   memo,
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ReactNode,
+  type ComponentProps,
 } from 'react';
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
@@ -17,7 +20,7 @@ import {
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import type { Components, Options } from 'react-markdown';
+import type { Components, Options, ExtraProps } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -38,6 +41,8 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import { FootnoteSection, FootnoteSup } from './FootnoteCard';
+import { rehypeFootnoteCards } from './rehype-footnote-cards';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
   WebShellMarkdownChartProvider,
@@ -200,7 +205,12 @@ const MERMAID_RENDER_TIMEOUT_MS = 10_000;
 function MermaidBlock({ code }: { code: string }) {
   const { t } = useI18n();
   const appTheme = useTheme();
-  const documentMode = useTranscriptRenderMode() === 'document';
+  // Document mode no longer reaches this component: since #11091 CodeBlock
+  // renders a mermaid fence as a plain <pre> there, so the export bundle can
+  // drop mermaid entirely. The render limits below were never about the export
+  // format though — they are about rendering a transcript the viewer did not
+  // author and cannot interrupt, which is equally true of readonly replay.
+  const untrustedMode = useTranscriptRenderMode() !== 'interactive';
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
@@ -295,7 +305,7 @@ function MermaidBlock({ code }: { code: string }) {
         .then(async (mod) => {
           if (cancelled) return;
           const mermaid = mod.default;
-          const configKey = `${mermaidTheme}:${documentMode ? 'document' : 'runtime'}`;
+          const configKey = `${mermaidTheme}:${untrustedMode ? 'hardened' : 'runtime'}`;
           const render = mermaidRenderQueue.then(async () => {
             if (cancelled) throw new Error('Mermaid render skipped');
             if (lastMermaidConfigKey !== configKey) {
@@ -304,7 +314,7 @@ function MermaidBlock({ code }: { code: string }) {
                 theme: mermaidTheme,
                 securityLevel: 'strict',
                 suppressErrorRendering: true,
-                ...(documentMode
+                ...(untrustedMode
                   ? {
                       maxTextSize: MAX_MERMAID_TEXT_CHARS,
                       maxEdges: MAX_MERMAID_EDGES,
@@ -318,7 +328,7 @@ function MermaidBlock({ code }: { code: string }) {
               lastMermaidConfigKey = configKey;
             }
             const id = `mermaid-${++mermaidRenderId}`;
-            if (!documentMode) return mermaid.render(id, code.trim());
+            if (!untrustedMode) return mermaid.render(id, code.trim());
             let timeoutId: ReturnType<typeof setTimeout> | undefined;
             try {
               return await Promise.race([
@@ -355,7 +365,7 @@ function MermaidBlock({ code }: { code: string }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code, documentMode, mermaidTheme]);
+  }, [code, untrustedMode, mermaidTheme]);
 
   const handleCopy = () => {
     void writeClipboardText(code)
@@ -546,7 +556,11 @@ function CodeBlock({
       .catch(warnClipboardWriteFailure);
   };
 
-  if (lang === 'mermaid' && !isStreaming) {
+  // In document mode a mermaid fence falls through to the plain <pre> below,
+  // holding its own source: the same degradation this component already applies
+  // to syntax highlighting there, and what lets the export bundle drop mermaid
+  // and its graph dependencies (#11091).
+  if (lang === 'mermaid' && !isStreaming && !documentMode) {
     return <MermaidBlock code={code} />;
   }
 
@@ -756,12 +770,47 @@ export function markdownUrlTransform(
 function MarkdownLink({
   href,
   children,
-}: {
-  href?: string;
-  children?: ReactNode;
-}) {
+  node,
+  id,
+  'aria-label': ariaLabel,
+  'aria-describedby': ariaDescribedBy,
+}: ComponentProps<'a'> & ExtraProps) {
   const renderMode = useTranscriptRenderMode();
   const openExternalLink = useExternalLinkOpener();
+  const footnote =
+    node?.properties.dataFootnoteRef !== undefined ||
+    node?.properties.dataFootnoteBackref !== undefined;
+  if (footnote && href?.startsWith('#')) {
+    return (
+      <a
+        id={id}
+        href={href}
+        className={styles.link}
+        aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
+        data-footnote-ref={
+          node?.properties.dataFootnoteRef !== undefined ? '' : undefined
+        }
+        data-footnote-backref={
+          node?.properties.dataFootnoteBackref !== undefined ? '' : undefined
+        }
+        onClick={(event) => {
+          const root = event.currentTarget.getRootNode() as
+            | Document
+            | ShadowRoot;
+          const target = root.getElementById(href.slice(1));
+          if (!target) return;
+          event.preventDefault();
+          target.scrollIntoView({ block: 'nearest' });
+          if (!target.hasAttribute('tabindex') && target.tagName !== 'BUTTON')
+            target.tabIndex = -1;
+          target.focus({ preventScroll: true });
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
     if (renderMode !== 'interactive') {
       return <span className={styles.link}>{children}</span>;
@@ -887,6 +936,8 @@ function createComponents(
     pre: MarkdownPre,
     a: MarkdownLink,
     img: MarkdownImage,
+    sup: FootnoteSup,
+    section: FootnoteSection,
     table({ children }: { children?: ReactNode }) {
       if (tableMode === 'advanced') {
         const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
@@ -947,6 +998,7 @@ export const Markdown = memo(function Markdown({
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const footnotePrefix = `footnote-${useId()}-`;
   const sourceMarkdown = source ? markdown : undefined;
 
   const throttledContent = useThrottledValue(content ?? '', isStreaming);
@@ -974,14 +1026,53 @@ export const Markdown = memo(function Markdown({
   }, [effectiveTableMode, renderedContent]);
 
   const sourceComponents = sourceMarkdown?.components;
+  const inlineFootnoteIcon = sourceMarkdown?.getInlineFootnoteIcon;
+  const mountFootnotePreview = sourceMarkdown?.mountFootnotePreview;
   const renderedComponents = useMemo(() => {
-    if (!sourceComponents) return components;
-    return {
+    if (!sourceComponents && !inlineFootnoteIcon && !mountFootnotePreview)
+      return components;
+    const rendered = {
       ...components,
       ...sourceComponents,
       ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
-  }, [components, effectiveTableMode, sourceComponents]);
+    const SourceLink = sourceComponents?.a;
+    if (sourceComponents) {
+      rendered.a = (props) => {
+        const footnote =
+          props.node?.properties.dataFootnoteRef !== undefined ||
+          props.node?.properties.dataFootnoteBackref !== undefined;
+        if (footnote || !SourceLink) return <MarkdownLink {...props} />;
+        if (typeof SourceLink !== 'string')
+          return createElement(SourceLink, props);
+        const { node: _node, ...elementProps } = props;
+        return createElement(SourceLink, elementProps);
+      };
+    }
+    if (!sourceComponents?.sup) {
+      rendered.sup = (props) => (
+        <FootnoteSup
+          {...props}
+          linkComponent={SourceLink}
+          iconResolver={inlineFootnoteIcon}
+          mountPreview={mountFootnotePreview}
+        />
+      );
+      rendered.section = (props) => (
+        <FootnoteSection
+          {...props}
+          sectionComponent={sourceComponents?.section}
+        />
+      );
+    }
+    return rendered;
+  }, [
+    components,
+    effectiveTableMode,
+    sourceComponents,
+    inlineFootnoteIcon,
+    mountFootnotePreview,
+  ]);
   const chart =
     !documentMode &&
     source === 'assistant' &&
@@ -1026,10 +1117,26 @@ export const Markdown = memo(function Markdown({
   }, [sourceMarkdown?.remarkPlugins]);
 
   const rehypePlugins = useMemo(() => {
-    return sourceMarkdown?.rehypePlugins
-      ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-      : [rehypeKatex];
-  }, [sourceMarkdown?.rehypePlugins]);
+    return [
+      rehypeKatex,
+      ...(sourceMarkdown?.rehypePlugins ?? []),
+      [
+        rehypeFootnoteCards,
+        {
+          prefix: footnotePrefix,
+          group: !documentMode && !sourceComponents?.sup,
+          safeHref: isSafeHref,
+          safeImage: isSafeImageSrc,
+          transformUrl: markdownUrlTransform,
+        },
+      ],
+    ] satisfies NonNullable<Options['rehypePlugins']>;
+  }, [
+    sourceMarkdown?.rehypePlugins,
+    footnotePrefix,
+    documentMode,
+    sourceComponents?.sup,
+  ]);
   const urlTransform = useMemo(
     () => (url: string) => markdownUrlTransform(url, documentMode),
     [documentMode],

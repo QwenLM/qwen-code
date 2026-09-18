@@ -13,11 +13,21 @@
  * for caching): a snapshot is the whole-run summary.
  */
 
+import {
+  isWorkflowSourceRef,
+  MAX_WORKFLOW_CALL_TRACES,
+  type WorkflowSourceRef,
+  type WorkflowCallTrace,
+} from './workflow-correlation.js';
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { deleteInlineWorkflowScript } from './runtime/workflow-saved.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import {
+  isActiveWorkflowStatus,
+  isWorkflowRunPersistenceActive,
   isTerminalWorkflowStatus,
   type WorkflowDispatchTrace,
   type WorkflowEvent,
@@ -26,6 +36,10 @@ import {
   type WorkflowTask,
   type WorkflowTerminalStatus,
 } from './workflow-run-registry.js';
+import {
+  isWorkflowSizeWarning,
+  type WorkflowSizeWarning,
+} from './runtime/workflow-size.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
@@ -34,6 +48,9 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
+  sourceRef?: WorkflowSourceRef;
+  workflowCalls?: WorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   runId: string;
   /** Tool call that launched the run. Absent on legacy snapshots. */
   toolUseId?: string;
@@ -56,6 +73,10 @@ export interface WorkflowSnapshot {
   dispatches?: WorkflowDispatchTrace[];
   agentsDispatched: number;
   agentsCompleted: number;
+  /** Absent on snapshots written before resume respawns were counted. */
+  agentsRespawned?: number;
+  /** Absent when the run never crossed a size threshold, and on older snapshots. */
+  sizeWarning?: WorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   /** `perPhaseTokens` flattened to `[phaseOrNull, tokens]` pairs. */
@@ -76,6 +97,11 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   }
   return {
     runId: task.runId,
+    ...(task.sourceRef ? { sourceRef: { ...task.sourceRef } } : {}),
+    ...(task.workflowCalls
+      ? { workflowCalls: task.workflowCalls.map((call) => ({ ...call })) }
+      : {}),
+    ...(task.workflowCallsTruncated ? { workflowCallsTruncated: true } : {}),
     ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
     description: task.description,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
@@ -93,6 +119,8 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     })),
     agentsDispatched: task.agentsDispatched,
     agentsCompleted: task.agentsCompleted,
+    agentsRespawned: task.agentsRespawned ?? 0,
+    ...(task.sizeWarning ? { sizeWarning: { ...task.sizeWarning } } : {}),
     tokensSpent: task.tokensSpent,
     tokenBudgetTotal: task.tokenBudgetTotal,
     perPhaseTokens: Array.from(task.perPhaseTokens.entries()),
@@ -142,11 +170,35 @@ export async function writeWorkflowSnapshot(
       JSON.stringify(snapshot, null, 2),
       'utf8',
     );
-    await pruneSnapshots(dir);
+    await pruneSnapshots(config, dir);
     return true;
   } catch (e) {
     debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
     return false;
+  }
+}
+
+/**
+ * The persisted snapshot of one run, or `undefined` when there is none, it
+ * cannot be read, or it is not a snapshot. For a caller that has a run id and
+ * no registry entry to ask — a resume after a restart — and needs what the run
+ * recorded about itself.
+ */
+export async function readWorkflowSnapshot(
+  config: Config,
+  runId: string,
+): Promise<WorkflowSnapshot | undefined> {
+  const storage = config.storage;
+  if (!storage) return undefined;
+  try {
+    const raw = await fs.readFile(
+      storage.getWorkflowRunSnapshotPath(runId),
+      'utf8',
+    );
+    const parsed: unknown = JSON.parse(raw);
+    return isWorkflowSnapshot(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -185,9 +237,9 @@ export async function listWorkflowSnapshots(
 }
 
 /**
- * Delete one persisted run summary and its resume journal. The run id must be
- * a well-formed workflow run id because both targets live below the project
- * runs dir.
+ * Delete one persisted run summary, resume journal, and generated inline
+ * script. The run id must be well-formed because every target is derived from
+ * it below the project runs dir.
  * Returns true when the safe target is absent after this call.
  */
 export async function deleteWorkflowSnapshot(
@@ -197,7 +249,7 @@ export async function deleteWorkflowSnapshot(
   const storage = config.storage;
   if (!storage || !/^wf_[0-9a-f]+$/.test(runId)) return false;
   try {
-    await fs.rm(`${storage.getWorkflowRunsDir()}/${runId}`, {
+    await fs.rm(path.dirname(storage.getWorkflowRunJournalPath(runId)), {
       recursive: true,
       force: true,
     });
@@ -205,6 +257,7 @@ export async function deleteWorkflowSnapshot(
     debugLogger.warn(`delete workflow journal failed for ${runId}: ${error}`);
     return false;
   }
+  if (!(await deleteInlineWorkflowScript(config, runId))) return false;
   try {
     await fs.unlink(storage.getWorkflowRunSnapshotPath(runId));
   } catch (error) {
@@ -279,6 +332,8 @@ function isWorkflowDispatch(value: unknown): value is WorkflowDispatchTrace {
     typeof value['label'] === 'string' &&
     typeof value['prompt'] === 'string' &&
     isOptionalString(value['subagentId']) &&
+    isOptionalString(value['stepId']) &&
+    isOptionalString(value['workflowCallId']) &&
     (status === 'queued' ||
       status === 'running' ||
       status === 'completed' ||
@@ -363,14 +418,40 @@ function isWorkflowEvent(value: unknown): value is WorkflowEvent {
   }
 }
 
+function isWorkflowCall(value: unknown): value is WorkflowCallTrace {
+  if (!isRecord(value)) return false;
+  const status = value['status'];
+  return (
+    typeof value['id'] === 'string' &&
+    isOptionalString(value['stepId']) &&
+    isOptionalString(value['workflowName']) &&
+    (status === 'running' ||
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled') &&
+    isFiniteNumber(value['startedAt']) &&
+    (value['endedAt'] === undefined || isFiniteNumber(value['endedAt'])) &&
+    isOptionalString(value['error'])
+  );
+}
+
 function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   if (!isRecord(value)) return false;
   const status = value['status'];
+  const workflowCalls = value['workflowCalls'];
   const phaseVisits = value['phaseVisits'];
   const dispatches = value['dispatches'];
   const events = value['events'];
   const perPhaseTokens = value['perPhaseTokens'];
   return (
+    (value['sourceRef'] === undefined ||
+      isWorkflowSourceRef(value['sourceRef'])) &&
+    (workflowCalls === undefined ||
+      (Array.isArray(workflowCalls) &&
+        workflowCalls.length <= MAX_WORKFLOW_CALL_TRACES &&
+        workflowCalls.every(isWorkflowCall))) &&
+    (value['workflowCallsTruncated'] === undefined ||
+      typeof value['workflowCallsTruncated'] === 'boolean') &&
     typeof value['runId'] === 'string' &&
     value['runId'].length > 0 &&
     isOptionalString(value['toolUseId']) &&
@@ -394,6 +475,10 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
       (Array.isArray(events) && events.every(isWorkflowEvent))) &&
     isFiniteNumber(value['agentsDispatched']) &&
     isFiniteNumber(value['agentsCompleted']) &&
+    (value['agentsRespawned'] === undefined ||
+      isFiniteNumber(value['agentsRespawned'])) &&
+    (value['sizeWarning'] === undefined ||
+      isWorkflowSizeWarning(value['sizeWarning'])) &&
     isFiniteNumber(value['tokensSpent']) &&
     (value['tokenBudgetTotal'] === null ||
       isFiniteNumber(value['tokenBudgetTotal'])) &&
@@ -413,7 +498,7 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
 }
 
 /** Remove the oldest snapshots beyond the retention cap. */
-async function pruneSnapshots(dir: string): Promise<void> {
+async function pruneSnapshots(config: Config, dir: string): Promise<void> {
   let files: string[];
   try {
     files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json'));
@@ -434,6 +519,13 @@ async function pruneSnapshots(dir: string): Promise<void> {
   );
   stats.sort((a, b) => a.mtime - b.mtime);
   const toPrune = stats.slice(0, stats.length - MAX_RETAINED_SNAPSHOTS);
+  const registry = config.getWorkflowRunRegistry?.();
+  const protectedRunIds = new Set([
+    ...(registry?.list() ?? [])
+      .filter((entry) => isActiveWorkflowStatus(entry.status))
+      .map((entry) => entry.runId),
+    ...(registry?.listStartingRunIds() ?? []),
+  ]);
   await Promise.all(
     toPrune.map((s) => {
       // Each run also has a sibling `<runId>/journal.jsonl` directory (the
@@ -449,21 +541,29 @@ async function pruneSnapshots(dir: string): Promise<void> {
       // may drive `fs.rm`. The `.json` unlink stays unconditional — it removes
       // exactly that one file, never a directory.
       const isRunDir = /^wf_[0-9a-f]+$/.test(runId);
+      const deleteArtifacts =
+        isRunDir &&
+        !protectedRunIds.has(runId) &&
+        !isWorkflowRunPersistenceActive(config, runId);
       return Promise.all([
         fs
           .unlink(`${dir}/${s.f}`)
           .catch((e) =>
             debugLogger.warn(`prune unlink failed for ${s.f}: ${e}`),
           ),
-        ...(isRunDir
+        ...(deleteArtifacts
           ? [
               fs
-                .rm(`${dir}/${runId}`, { recursive: true, force: true })
+                .rm(
+                  path.dirname(config.storage.getWorkflowRunJournalPath(runId)),
+                  { recursive: true, force: true },
+                )
                 .catch((e) =>
                   debugLogger.warn(
                     `prune journal dir failed for ${runId}: ${e}`,
                   ),
                 ),
+              deleteInlineWorkflowScript(config, runId),
             ]
           : []),
       ]);

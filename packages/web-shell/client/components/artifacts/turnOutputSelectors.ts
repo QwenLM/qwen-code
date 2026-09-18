@@ -72,6 +72,30 @@ export function getArtifactsByTurn(
       }
     }
   }
+  for (const [turnId, list] of byTurn) {
+    const savedUrls = new Set(
+      list
+        .filter(
+          (artifact) =>
+            artifact.metadata?.['artifactType'] === 'web_preview_snapshot',
+        )
+        .map((artifact) => artifact.metadata?.['publishedUrl']),
+    );
+    byTurn.set(
+      turnId,
+      list.filter(
+        (artifact) =>
+          artifact.metadata?.['artifactType'] === 'web_preview_snapshot' ||
+          artifact.storage !== 'published' ||
+          !artifact.url ||
+          // Only a file:// publication is indistinguishable from its saved
+          // twin: the preview cannot frame it either way. A browser-openable
+          // live card opens the hosted page, so it is not a duplicate.
+          /^https?:/i.test(artifact.url) ||
+          !savedUrls.has(artifact.url),
+      ),
+    );
+  }
   return byTurn;
 }
 
@@ -282,7 +306,7 @@ function getFileChange(
   };
 }
 
-function getToolFilePath(tool: ACPToolCall): string | undefined {
+export function getToolFilePath(tool: ACPToolCall): string | undefined {
   const fromArgs = getStringContentField(
     tool.args,
     'file_path',

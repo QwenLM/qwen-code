@@ -53,6 +53,7 @@ import {
   getAgentCancellationReason,
   getAgentCurrentToolHint,
   getAgentDescription,
+  getSubagentDetailsUnavailableReason,
   getAgentDisplayStatus,
   getAgentType,
   getTaskExecutionRecord,
@@ -83,6 +84,8 @@ import {
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './tools/ToolChrome.module.css';
 import { getMcpAppDisplay, McpApp } from './McpApp';
+import type { TurnOutputOpenRequest } from '../artifacts/TurnOutputs';
+import { ToolFilePreviewButton } from './ToolFilePreviewButton';
 
 interface ToolGroupProps {
   tools: ACPToolCall[];
@@ -99,6 +102,7 @@ interface ToolGroupProps {
   }>;
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
   isLocateFlashing?: boolean;
   /** Powers the translate action on completed thinking rows (zh-CN). */
   generateContent?: SessionContentGenerator;
@@ -374,11 +378,13 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
 
 function ToolExpandedCard({
   title,
+  action,
   detail,
   status,
   children,
 }: {
   title: string;
+  action?: ReactNode;
   detail?: string;
   status?: ACPToolCall['status'];
   children?: ReactNode;
@@ -389,6 +395,7 @@ function ToolExpandedCard({
         <span className={styles.expandedCardTitleRow}>
           {status && <StatusIcon status={status} />}
           <span className={styles.expandedCardTitle}>{title}</span>
+          {action}
         </span>
         {detail && <span className={styles.expandedCardDetail}>{detail}</span>}
       </div>
@@ -432,6 +439,7 @@ interface ToolLineProps {
   tool: ACPToolCall;
   approval?: PermissionRequest | null;
   workspaceCwd?: string;
+  onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
   summaryOnly?: boolean;
   forceExpanded?: boolean;
   detailsVisible?: boolean;
@@ -494,7 +502,8 @@ function getAgentDisplayInfo(
     0;
 
   const stats = taskExec?.['executionSummary'] as
-    Record<string, unknown> | undefined;
+    | Record<string, unknown>
+    | undefined;
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDurationMs(stats['totalDurationMs'])
@@ -550,8 +559,7 @@ export function shouldAutoExpand(tool: ACPToolCall): boolean {
   if (tool.status === 'completed') return false;
   const name = tool.toolName.toLowerCase();
   if (isAskUserQuestionToolName(tool.toolName)) return true;
-  if (name === 'write_file' || name === 'writefile') return true;
-  if (name === 'edit' || name === 'editfile') return true;
+  if (isEditToolName(name)) return true;
   if (isShellToolName(name)) return true;
   return false;
 }
@@ -1047,6 +1055,7 @@ function areToolLinePropsEqual(
 ): boolean {
   if (prev.approval?.id !== next.approval?.id) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
+  if (prev.onTurnOutputOpen !== next.onTurnOutputOpen) return false;
   if (prev.summaryOnly !== next.summaryOnly) return false;
   if (prev.forceExpanded !== next.forceExpanded) return false;
   if (prev.detailsVisible !== next.detailsVisible) return false;
@@ -1058,12 +1067,14 @@ function areToolLinePropsEqual(
     a.callId === b.callId &&
     a.toolName === b.toolName &&
     a.status === b.status &&
+    a.subagentSessionReady === b.subagentSessionReady &&
     a.startTime === b.startTime &&
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
     a.args === b.args &&
     a.content === b.content &&
+    a.locations === b.locations &&
     a.title === b.title &&
     areSubToolsEqual(a.subTools, b.subTools)
   );
@@ -1083,6 +1094,7 @@ function areSubToolsEqual(
       a.callId !== b.callId ||
       a.toolName !== b.toolName ||
       a.status !== b.status ||
+      a.subagentSessionReady !== b.subagentSessionReady ||
       a.endTime !== b.endTime ||
       a.rawOutput !== b.rawOutput ||
       a.args !== b.args ||
@@ -1147,6 +1159,7 @@ export const ToolLine = memo(function ToolLine({
   tool,
   approval,
   workspaceCwd,
+  onTurnOutputOpen,
   summaryOnly = false,
   forceExpanded = false,
   detailsVisible = true,
@@ -1164,9 +1177,9 @@ export const ToolLine = memo(function ToolLine({
   const hasApproval = approval?.toolCallId === tool.callId;
   const isHostOwnedEditApproval = Boolean(
     hostOwnsEditDiffPreview &&
-    hasApproval &&
-    approval?.hasDiffPreview &&
-    isEditToolName(approval?.toolName ?? tool.toolName),
+      hasApproval &&
+      approval?.hasDiffPreview &&
+      isEditToolName(approval?.toolName ?? tool.toolName),
   );
   const locksPendingEditApproval = isHostOwnedEditApproval;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
@@ -1211,10 +1224,10 @@ export const ToolLine = memo(function ToolLine({
     toolContainsCallId(tool, approval.toolCallId);
   const waitingForApproval = Boolean(
     isHostOwnedEditApproval ||
-    (hostOwnsEditDiffPreview &&
-      hasSubToolApproval &&
-      approval?.hasDiffPreview &&
-      isEditToolName(approval.toolName ?? '')),
+      (hostOwnsEditDiffPreview &&
+        hasSubToolApproval &&
+        approval?.hasDiffPreview &&
+        isEditToolName(approval.toolName ?? '')),
   );
   const isRunningTool = isActiveToolStatus(tool.status);
   const showsLiveElapsed =
@@ -1274,6 +1287,7 @@ export const ToolLine = memo(function ToolLine({
     // show yet — keep the row compact and non-openable; the approval dialog
     // is the single source of interaction.
     const approvalPending = !!hasApproval;
+    const unavailableReason = getSubagentDetailsUnavailableReason(tool);
     const panel = (
       <SubAgentPanel
         tool={tool}
@@ -1304,7 +1318,7 @@ export const ToolLine = memo(function ToolLine({
         </>
       );
       return (
-        <div className={styles.line}>
+        <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
           {approvalPending ? (
             <div
               className={`${styles.lineMain} ${styles.lineButton}`}
@@ -1316,7 +1330,11 @@ export const ToolLine = memo(function ToolLine({
             <button
               type="button"
               className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
-              onClick={() => subagentDetails.onOpen(tool)}
+              aria-disabled={!!unavailableReason || undefined}
+              title={unavailableReason ? t(unavailableReason) : undefined}
+              onClick={() => {
+                if (!unavailableReason) subagentDetails.onOpen(tool);
+              }}
             >
               {rowContent}
               <span className={styles.lineChevronRight} aria-hidden="true" />
@@ -1326,13 +1344,19 @@ export const ToolLine = memo(function ToolLine({
       );
     }
     return (
-      <div className={styles.line}>
+      <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
         {!hideHeader && (
           <div
             className={`${styles.lineMain} ${
               approvalPending ? '' : styles.lineExpandable
             }`}
-            onClick={approvalPending ? undefined : () => setExpanded(!expanded)}
+            aria-disabled={!!unavailableReason || undefined}
+            title={unavailableReason ? t(unavailableReason) : undefined}
+            onClick={
+              approvalPending || unavailableReason
+                ? undefined
+                : () => setExpanded(!expanded)
+            }
           >
             <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
@@ -1405,6 +1429,18 @@ export const ToolLine = memo(function ToolLine({
     name === 'search' ||
     name === 'glob';
   const isRead = name === 'read' || name === 'read_file' || name === 'readfile';
+  const filePreviewAction =
+    detailsVisible &&
+    (isRead ||
+      isEditToolName(name) ||
+      name === 'display_image' ||
+      name === 'zoom_image') ? (
+      <ToolFilePreviewButton
+        tool={tool}
+        workspaceCwd={workspaceCwd}
+        onOpen={onTurnOutputOpen}
+      />
+    ) : undefined;
   // Every regular tool row expands on demand. Content controls only what the
   // expanded card shows, never whether the user can open or close it —
   // except while an opted-in host owns this pending Edit's diff preview.
@@ -1444,7 +1480,7 @@ export const ToolLine = memo(function ToolLine({
     expanded && !detailView && (!isTodo || (!hasTodoList && !result));
 
   return (
-    <div className={styles.line}>
+    <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
       {hideHeader && isRunningTool && elapsed && (
         <div className={styles.lineMain}>
           <ToolHeaderExtra
@@ -1559,6 +1595,7 @@ export const ToolLine = memo(function ToolLine({
           title={displayName}
           detail={expandedCardDetail}
           status={tool.status}
+          action={filePreviewAction}
         >
           {result && (
             <div
@@ -1608,7 +1645,11 @@ export const ToolLine = memo(function ToolLine({
                 result={result}
               />
             ) : isRead ? (
-              <ToolExpandedCard title={displayName} status={tool.status}>
+              <ToolExpandedCard
+                title={displayName}
+                status={tool.status}
+                action={filePreviewAction}
+              >
                 <ExpandedReadContent tool={tool} />
               </ToolExpandedCard>
             ) : (
@@ -1616,6 +1657,7 @@ export const ToolLine = memo(function ToolLine({
                 title={displayName}
                 detail={expandedCardDetail}
                 status={tool.status}
+                action={filePreviewAction}
               >
                 {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
                 {(name === 'write_file' || name === 'writefile') && (
@@ -1760,6 +1802,7 @@ export const ToolGroup = memo(function ToolGroup({
   thoughts,
   pendingApproval,
   workspaceCwd,
+  onTurnOutputOpen,
   isLocateFlashing = false,
   generateContent,
 }: ToolGroupProps) {
@@ -1822,11 +1865,15 @@ export const ToolGroup = memo(function ToolGroup({
   );
   const opensMonitorDetails = Boolean(
     !compactSummary &&
-    singleMonitor &&
-    monitorDetailsAvailable &&
-    !monitorDetailsUnavailable,
+      singleMonitor &&
+      monitorDetailsAvailable &&
+      !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
+  const unavailableReason =
+    !compactSummary && singleSubagent
+      ? getSubagentDetailsUnavailableReason(singleSubagent)
+      : undefined;
   const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
@@ -1874,10 +1921,11 @@ export const ToolGroup = memo(function ToolGroup({
         <button
           type="button"
           disabled={documentMode}
+          aria-disabled={!!unavailableReason || undefined}
           tabIndex={documentMode ? -1 : undefined}
           className={styles.chatSummary}
           onClick={() => {
-            if (documentMode) return;
+            if (documentMode || unavailableReason) return;
             if (opensSubagentDetails && singleSubagent && subagentDetails) {
               subagentDetails.onOpen(singleSubagent);
               return;
@@ -1892,11 +1940,13 @@ export const ToolGroup = memo(function ToolGroup({
             documentMode || opensToolDetails ? undefined : chatExpanded
           }
           title={
-            documentMode || opensToolDetails
-              ? undefined
-              : showGroupContent
-                ? t('tool.collapseHint')
-                : t('tool.expand')
+            unavailableReason
+              ? t(unavailableReason)
+              : documentMode || opensToolDetails
+                ? undefined
+                : showGroupContent
+                  ? t('tool.collapseHint')
+                  : t('tool.expand')
           }
         >
           <span
@@ -2020,6 +2070,7 @@ export const ToolGroup = memo(function ToolGroup({
                           tool={tool}
                           approval={pendingApproval}
                           workspaceCwd={workspaceCwd}
+                          onTurnOutputOpen={onTurnOutputOpen}
                           summaryOnly={!singleTool || compactToolLines}
                           forceExpanded={
                             documentMode || (!!singleTool && !compactToolLines)
@@ -2061,6 +2112,7 @@ export const ToolGroup = memo(function ToolGroup({
           tool={tool}
           approval={pendingApproval}
           workspaceCwd={workspaceCwd}
+          onTurnOutputOpen={onTurnOutputOpen}
           forceExpanded={documentMode}
         />
       ))}
