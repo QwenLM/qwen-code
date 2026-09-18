@@ -16748,8 +16748,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const execute = vi.fn(async () => {
         if (options.execute) return options.execute(runs);
         const [params] = buildSessionOwnedBackground.mock.calls.at(-1)!;
+        const resumed = params['resumeFromRunId'];
         const started = {
-          runId: params.resumeFromRunId ?? 'wf_5678efab',
+          runId: typeof resumed === 'string' ? resumed : 'wf_5678efab',
           status: 'running',
         };
         runs.push(started);
