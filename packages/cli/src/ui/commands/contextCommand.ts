@@ -114,11 +114,17 @@ const NO_SKILLS_NOTICE = 'No skills are currently available.';
 const SKILL_LISTING_ENTRY =
   /<skill>\n<name>\n([\s\S]*?)\n<\/name>[\s\S]*?<\/skill>/g;
 
+interface SkillListingEntryCost {
+  /** Name exactly as rendered in the listing (unescaped, original case). */
+  name: string;
+  tokens: number;
+}
+
 interface SkillListingCost {
   /** The whole listing reminder as sent, wrapper included. */
   tokens: number;
   /** Per-entry cost, keyed by lower-cased skill name. */
-  byName: Map<string, number>;
+  byName: Map<string, SkillListingEntryCost>;
 }
 
 function isSkillListingText(text: string): boolean {
@@ -130,14 +136,58 @@ function isSkillListingText(text: string): boolean {
 // Measured from the rendered text rather than re-derived from skill configs,
 // so budget trimming and XML escaping are reflected exactly (#12033).
 function measureSkillListing(text: string): SkillListingCost {
-  const byName = new Map<string, number>();
+  const byName = new Map<string, SkillListingEntryCost>();
   for (const match of text.matchAll(SKILL_LISTING_ENTRY)) {
-    byName.set(
-      unescapeXml(match[1]!).toLowerCase(),
-      estimateContextTextTokens(match[0]),
-    );
+    const name = unescapeXml(match[1]!);
+    byName.set(name.toLowerCase(), {
+      name,
+      tokens: estimateContextTextTokens(match[0]),
+    });
   }
   return { tokens: estimateContextTextTokens(text), byName };
+}
+
+function mergeSkillListing(
+  into: SkillListingCost,
+  from: SkillListingCost,
+): void {
+  into.tokens += from.tokens;
+  for (const [name, entry] of from.byName) {
+    into.byName.set(name, entry);
+  }
+}
+
+/**
+ * Skill-listing reminders that landed *after* the startup prelude. A skill
+ * enabled mid-session is announced by a tail `<system-reminder>` carrying an
+ * `<available_skills>` block (`buildChangedSkillsReminder`, and the scheduler's
+ * equivalent), which `getStartupContextLength` never inspects. Those tokens are
+ * listing cost, not conversation, so they are measured here and billed with the
+ * startup listing under `skills` — otherwise the entry is billed to `messages`
+ * while its detail row prints `0`.
+ *
+ * Text that merely mentions `<available_skills>` without a single `<skill>`
+ * entry (a pasted example, the fixed "no skills" notice) is left alone: only
+ * measured listings are excluded from `messages`.
+ */
+function measureTailSkillListings(conversation: Content[]): {
+  listing: SkillListingCost;
+  /** The exact part texts whose cost the listing already carries. */
+  billedTexts: Set<string>;
+} {
+  const listing: SkillListingCost = { tokens: 0, byName: new Map() };
+  const billedTexts = new Set<string>();
+  for (const content of conversation) {
+    for (const part of content.parts ?? []) {
+      const text = part.text;
+      if (typeof text !== 'string' || !isSkillListingText(text)) continue;
+      const measured = measureSkillListing(text);
+      if (measured.byName.size === 0) continue;
+      mergeSkillListing(listing, measured);
+      billedTexts.add(text);
+    }
+  }
+  return { listing, billedTexts };
 }
 
 interface StartupPreludeCost {
@@ -153,11 +203,7 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
     for (const part of content.parts ?? []) {
       if (typeof part.text !== 'string') continue;
       if (isSkillListingText(part.text)) {
-        const listing = measureSkillListing(part.text);
-        skillListing.tokens += listing.tokens;
-        for (const [name, tokens] of listing.byName) {
-          skillListing.byName.set(name, tokens);
-        }
+        mergeSkillListing(skillListing, measureSkillListing(part.text));
       } else {
         startupContextTokens += estimateContextTextTokens(part.text);
       }
@@ -203,27 +249,71 @@ function estimateFunctionResponseTokens(
 }
 
 /**
- * Content estimate of the conversation after the startup prelude. Skill tool
- * responses are skipped because the bodies they carry are billed under
- * `skills`. A top-level media part has no text to estimate; the provider still
- * counts it, so its cost surfaces as `unattributed`.
+ * Whether a `skill` response carries a body that `skills` already bills
+ * (`loadedBodiesTokens`). Membership is by body, not by tool name: the Skill
+ * tool also returns raw command output for a same-named non-skill command
+ * without tracking it — "the result is raw command text, not a skill body"
+ * (`tools/skill.ts`) — and tracking is cleared by `/restore`, by compression and
+ * by a startup resume that declines to match (`clearLoadedSkillTracking`). Those
+ * responses are ordinary conversation content, so a name-keyed skip dropped them
+ * out of `messages` and into `unattributed`, which owns nothing. Core accepts the
+ * same two shapes when it restores tracking (`restoreLoadedSkillsFromHistory`):
+ * the body verbatim, or the body with a suffix appended after a newline.
+ */
+function isBilledSkillBody(
+  part: Part,
+  billedSkillBodies: ReadonlySet<string>,
+): boolean {
+  if (billedSkillBodies.size === 0) return false;
+  const output = (
+    part.functionResponse?.response as { output?: unknown } | undefined
+  )?.output;
+  if (typeof output !== 'string') return false;
+  if (billedSkillBodies.has(output)) return true;
+  for (const body of billedSkillBodies) {
+    if (output.startsWith(`${body}\n`)) return true;
+  }
+  return false;
+}
+
+interface ConversationBilling {
+  imageTokenEstimate: number;
+  /** `buildSkillLlmContent` bodies already billed under `skills`. */
+  billedSkillBodies: ReadonlySet<string>;
+  /** Tail `<available_skills>` reminder texts already billed under `skills`. */
+  billedListingTexts: ReadonlySet<string>;
+}
+
+/**
+ * Content estimate of the conversation after the startup prelude. A part whose
+ * cost another category already owns is skipped here: tracked skill bodies and
+ * tail skill-listing reminders are both billed under `skills`. A top-level media
+ * part has no text to estimate; the provider still counts it, so its cost
+ * surfaces as `unattributed`.
  */
 function estimateConversationTokens(
   conversation: Content[],
-  imageTokenEstimate: number,
+  billing: ConversationBilling,
 ): number {
   let tokens = 0;
   for (const content of conversation) {
     for (const part of content.parts ?? []) {
       if (typeof part.text === 'string') {
+        if (billing.billedListingTexts.has(part.text)) continue;
         tokens += estimateContextTextTokens(part.text);
       } else if (part.functionCall) {
         tokens += estimateContextTextTokens(JSON.stringify(part.functionCall));
-      } else if (
-        part.functionResponse &&
-        part.functionResponse.name !== ToolNames.SKILL
-      ) {
-        tokens += estimateFunctionResponseTokens(part, imageTokenEstimate);
+      } else if (part.functionResponse) {
+        if (
+          part.functionResponse.name === ToolNames.SKILL &&
+          isBilledSkillBody(part, billing.billedSkillBodies)
+        ) {
+          continue;
+        }
+        tokens += estimateFunctionResponseTokens(
+          part,
+          billing.imageTokenEstimate,
+        );
       }
     }
   }
@@ -271,10 +361,13 @@ export async function collectContextData(
     activeChat?.getHistoryShallow?.() ?? activeChat?.getHistory?.() ?? [];
   const preludeLength = getStartupContextLength(history);
   const prelude = measureStartupPrelude(history.slice(0, preludeLength));
-  const conversationTokens = estimateConversationTokens(
-    history.slice(preludeLength),
-    resolveSlimmingConfig(config.getChatCompression?.()).imageTokenEstimate,
-  );
+  const conversationHistory = history.slice(preludeLength);
+  // Skill-listing reminders appended after the prelude are listing cost, not
+  // conversation, and are billed with the startup listing under `skills`.
+  const tailSkillListings = measureTailSkillListings(conversationHistory);
+  // Measured below, once the set of skill bodies `skills` actually bills is
+  // known: a `skill` response is skipped here only when that set owns its body.
+  let conversationTokens = 0;
 
   const systemPromptText = getMainSessionBaseSystemPrompt(config);
   const systemPromptTokens = estimateContextTextTokens(systemPromptText);
@@ -360,20 +453,26 @@ export async function collectContextData(
       skillListing = measureSkillListing(reminder.reminder);
     }
   }
+  mergeSkillListing(skillListing, tailSkillListings.listing);
+
   let loadedBodiesTokens = 0;
+  // The exact bodies `loadedBodiesTokens` bills below. `estimateConversationTokens`
+  // skips a `skill` response only when this set owns its body, so the skip and
+  // the billing can never disagree.
+  const billedSkillBodies = new Set<string>();
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
     const listingTokens =
-      skillListing.byName.get(skill.name.toLowerCase()) ?? 0;
+      skillListing.byName.get(skill.name.toLowerCase())?.tokens ?? 0;
     const isLoaded = loadedSkillNames.has(skill.name);
     let bodyTokens: number | undefined;
     if (isLoaded && skill.body) {
       const baseDir = skill.filePath
         ? skill.filePath.replace(/\/[^/]+$/, '')
         : '';
-      bodyTokens = estimateContextTextTokens(
-        buildSkillLlmContent(baseDir, skill.body),
-      );
+      const body = buildSkillLlmContent(baseDir, skill.body);
+      bodyTokens = estimateContextTextTokens(body);
       loadedBodiesTokens += bodyTokens;
+      billedSkillBodies.add(body);
     }
     return {
       name: skill.name,
@@ -381,6 +480,28 @@ export async function collectContextData(
       loaded: isLoaded,
       bodyTokens,
     };
+  });
+
+  // The listing also carries model-invocable commands — a user's own
+  // `.qwen/commands/*.toml`, extension saved workflows with `whenToUse` — which
+  // `listSkills()` never returns, while their tokens are inside the measured
+  // listing that `skillsTokens` bills. Give each one a row so the rows and the
+  // category cover the same set. Rows never feed `skillsTokens`: Built-in tools
+  // subtracts the Skill tool definition *because* `skills` carries it.
+  const rowedNames = new Set(skillConfigs.map((s) => s.name.toLowerCase()));
+  for (const [key, entry] of skillListing.byName) {
+    if (rowedNames.has(key)) continue;
+    rowedNames.add(key);
+    // Rendered into the listing, so model-invocable by definition.
+    enabledSkillNames.add(key);
+    skills.push({ name: entry.name, tokens: entry.tokens });
+  }
+
+  conversationTokens = estimateConversationTokens(conversationHistory, {
+    imageTokenEstimate: resolveSlimmingConfig(config.getChatCompression?.())
+      .imageTokenEstimate,
+    billedSkillBodies,
+    billedListingTexts: tailSkillListings.billedTexts,
   });
 
   const skillsTokens =
@@ -555,7 +676,8 @@ export async function collectContextData(
   //
   // SCOPE GAP (R5.1): `estimateConversationTokens` is still not the cheap
   // gate's estimator — this file measures with the CJK-aware
-  // `estimateContextTextTokens` and skips `skill` responses, while
+  // `estimateContextTextTokens` and skips the parts another category already
+  // owns (tracked skill bodies, skill listings), while
   // chatCompressionService uses `estimatePromptTokens(history, ...)` over the
   // real history. The tier can therefore land on the far side of a threshold
   // from the runtime's own answer, for a single render, until a send replaces

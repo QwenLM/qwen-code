@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  buildSkillLlmContent,
   estimateContextTextTokens,
   getBuiltInOutputStyle,
   getCoreSystemPrompt,
@@ -259,24 +260,76 @@ describe('collectContextData (contextCommand)', () => {
       { role: 'model', parts: [{ text: 'b'.repeat(800) }] },
     ];
 
+    const skillResponse = (output: string): Content =>
+      ({
+        role: 'user',
+        parts: [{ functionResponse: { name: 'skill', response: { output } } }],
+      }) as unknown as Content;
+
+    // A `skill` tool whose tracking is intact, i.e. the shape the live registry
+    // has once a body has been loaded. `getLoadedSkillNames()` is case-sensitive
+    // against the manager's name (contextCommand.ts), so the fixture uses the
+    // exact spelling `listSkills()` returns.
+    const skillToolSchema = {
+      name: 'skill',
+      description: 'Load a skill by name',
+      parameters: {
+        type: 'OBJECT',
+        properties: { skill: { type: 'STRING' } },
+      },
+    };
+    const skillToolDouble = {
+      name: 'skill',
+      schema: skillToolSchema,
+      getLoadedSkillNames: vi.fn().mockReturnValue(new Set(['report-builder'])),
+    };
+    const skillBody = 'Report builder instructions.\n'.repeat(140);
+    const trackedBody = buildSkillLlmContent(
+      '/skills/report-builder',
+      skillBody,
+    );
+    const trackedSkillList = [
+      {
+        name: 'report-builder',
+        description: 'Build reports',
+        level: 'project',
+        filePath: '/skills/report-builder/SKILL.md',
+        body: skillBody,
+      },
+    ];
+
     function makeChatConfig(options: {
       total: number;
       cached?: number;
       history: Content[];
       /** True when the count came from core's estimator, not the provider. */
       estimated?: boolean;
+      /** Registry contents; a `skill` double turns on loaded-body tracking. */
+      tools?: unknown[];
+      /** Overrides the default one-skill list. */
+      skillList?: unknown[];
     }): Config {
+      const skillList = options.skillList ?? [
+        {
+          name: 'report-builder',
+          description: 'Build reports',
+          level: 'project',
+          filePath: '/skills/report-builder/SKILL.md',
+        },
+      ];
       return {
         ...makeMockConfig(200_000),
+        ...(options.tools
+          ? {
+              getToolRegistry: vi.fn().mockReturnValue({
+                getAllTools: vi.fn().mockReturnValue(options.tools),
+                getFunctionDeclarations: vi.fn().mockReturnValue([]),
+                isDeferredAndHidden: vi.fn().mockReturnValue(false),
+              }),
+            }
+          : {}),
         getSkillManager: vi.fn().mockReturnValue({
-          listSkills: vi.fn().mockResolvedValue([
-            {
-              name: 'report-builder',
-              description: 'Build reports',
-              level: 'project',
-              filePath: '/skills/report-builder/SKILL.md',
-            },
-          ]),
+          listSkills: vi.fn().mockResolvedValue(skillList),
         }),
         getLlmClient: vi.fn().mockReturnValue({
           isInitialized: vi.fn().mockReturnValue(true),
@@ -348,16 +401,33 @@ describe('collectContextData (contextCommand)', () => {
       const data = await collectContextData(
         makeChatConfig({
           total: 5_000,
+          cached: 4_000,
           history: [
             prelude,
             { role: 'user', parts: [{ text: 'c'.repeat(40_000) }] },
           ],
         }),
-        false,
+        true,
       );
 
       expect(data.breakdown.unattributed).toBe(0);
       expect(sumRows(data.breakdown)).toBe(5_000);
+      // The cached count is an annotation, never a term of the row sum, and
+      // never subtracted when deriving `messages` (this is the only branch that
+      // still derives it by subtraction).
+      expect(data.breakdown.cachedTokens).toBe(4_000);
+      // Each row pinned against its own unscaled value: dropping `* scale` from
+      // a row this PR added leaves the two identities above intact, because
+      // `messages` absorbs the difference.
+      expect(data.breakdown.skills).toBeLessThan(
+        estimateContextTextTokens(listingReminder),
+      );
+      expect(data.breakdown.startupContext).toBeLessThan(
+        estimateContextTextTokens(environmentReminder),
+      );
+      expect(data.skills[0]!.tokens).toBeLessThan(
+        estimateContextTextTokens(skillEntry),
+      );
     });
 
     it('charges nested tool media at the flat image budget, not as base64 text', async () => {
@@ -456,30 +526,162 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('does not bill skill tool responses as messages', async () => {
+    it('bills a tracked skill body under skills and keeps it out of messages', async () => {
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
-          history: [
-            prelude,
-            conversation[0]!,
-            {
-              role: 'user',
-              parts: [
-                {
-                  functionResponse: {
-                    name: 'skill',
-                    response: { output: 'x'.repeat(4_000) },
-                  },
-                },
-              ],
-            },
-          ],
+          tools: [skillToolDouble],
+          skillList: trackedSkillList,
+          history: [prelude, conversation[0]!, skillResponse(trackedBody)],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.messages).toBe(100);
+      expect(data.skills[0]).toEqual({
+        name: 'report-builder',
+        tokens: estimateContextTextTokens(skillEntry),
+        loaded: true,
+        bodyTokens: estimateContextTextTokens(trackedBody),
+      });
+      // The three terms `skillsTokens` adds — tool definition, the listing as
+      // sent, and the loaded body, which no fixture made nonzero before.
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
+          estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(trackedBody),
+      );
+      expect(sumRows(data.breakdown)).toBe(100_000);
+    });
+
+    it('bills a skill response whose body was never tracked as messages', async () => {
+      // Two production shapes reach this line: the Skill tool returns a
+      // same-named command's expanded prompt without calling `onSkillLoaded`,
+      // and `/restore` / compression clear the tracking while the body stays in
+      // history. Neither is billed under `skills`, so neither may be skipped
+      // here — a name-keyed skip dropped those tokens into `unattributed`,
+      // which owns nothing.
+      const commandOutput = 'Expanded command prompt.\n'.repeat(160);
+      const expected =
+        100 +
+        estimateContextTextTokens(
+          JSON.stringify({
+            name: 'skill',
+            response: { output: commandOutput },
+          }),
+        );
+
+      const untracked = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [prelude, conversation[0]!, skillResponse(commandOutput)],
+        }),
+        false,
+      );
+      // A skill tool that tracks a *different* body must not change the answer.
+      const trackingOtherBody = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          tools: [skillToolDouble],
+          skillList: trackedSkillList,
+          history: [prelude, conversation[0]!, skillResponse(commandOutput)],
         }),
         false,
       );
 
-      expect(data.breakdown.messages).toBe(100);
+      expect(untracked.breakdown.messages).toBe(expected);
+      expect(trackingOtherBody.breakdown.messages).toBe(expected);
+      expect(sumRows(untracked.breakdown)).toBe(100_000);
+    });
+
+    it('gives a detail row to a listing entry listSkills does not return', async () => {
+      // `collectAvailableSkillEntries` merges model-invocable commands (a user's
+      // `.qwen/commands/*.toml`, extension saved workflows) into the listing, so
+      // their tokens are inside the measured block `skills` bills while
+      // `listSkills()` never returns them: billed with no row.
+      const commandEntry =
+        '<skill>\n<name>\ndeploy-check\n</name>\n<description>\nRun the deploy checks\n</description>\n</skill>';
+      const commandListing = wrapSystemReminder(
+        `The following skills are available for use with the Skill tool.\n\n<available_skills>\n${[
+          skillEntry,
+          commandEntry,
+        ].join('\n')}\n</available_skills>`,
+      );
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          history: [
+            {
+              role: 'user',
+              parts: [{ text: commandListing }, { text: environmentReminder }],
+            },
+            ...conversation,
+          ],
+        }),
+        true,
+      );
+
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(commandListing),
+      );
+      expect(data.skills).toContainEqual({
+        name: 'deploy-check',
+        tokens: estimateContextTextTokens(commandEntry),
+      });
+    });
+
+    it('bills a mid-session skill listing under skills, not under messages', async () => {
+      // A skill enabled after startup is announced by a tail `<system-reminder>`
+      // (`buildChangedSkillsReminder`) that `getStartupContextLength` never
+      // inspects. Without measuring it here the entry's row printed `0 tokens`
+      // while its text was billed to `messages`.
+      const lateEntry =
+        '<skill>\n<name>\nlate-skill\n</name>\n<description>\nArrived after startup\n</description>\n<location>\nproject\n</location>\n</skill>';
+      const delta = wrapSystemReminder(
+        `The following skills/commands became available after startup and can now be invoked via the Skill tool by name.\n\n<available_skills>\n${lateEntry}\n</available_skills>`,
+      );
+      const lateSkill = {
+        name: 'late-skill',
+        description: 'Arrived after startup',
+        level: 'project',
+        filePath: '/skills/late-skill/SKILL.md',
+      };
+
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 100_000,
+          skillList: [
+            {
+              name: 'report-builder',
+              description: 'Build reports',
+              level: 'project',
+              filePath: '/skills/report-builder/SKILL.md',
+            },
+            lateSkill,
+          ],
+          history: [
+            prelude,
+            { role: 'user', parts: [{ text: delta }] },
+            ...conversation,
+          ],
+        }),
+        true,
+      );
+
+      expect(data.skills.find((skill) => skill.name === 'late-skill')).toEqual({
+        name: 'late-skill',
+        tokens: estimateContextTextTokens(lateEntry),
+        loaded: false,
+        bodyTokens: undefined,
+      });
+      // Both listings, and only the two conversation turns.
+      expect(data.breakdown.skills).toBe(
+        estimateContextTextTokens(listingReminder) +
+          estimateContextTextTokens(delta),
+      );
+      expect(data.breakdown.messages).toBe(300);
+      expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
     it('prints the startup context, unattributed and cached rows in text output', async () => {
