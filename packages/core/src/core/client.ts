@@ -2335,7 +2335,10 @@ export class LlmClient {
       // (#12032). Mid-session reveals deliberately do not update this: they
       // change only the tools block, keeping the cached system prefix stable.
       profiler.timeSync('prompt_tool_snapshot', () => {
-        this.config.setPromptToolSnapshot(
+        // Optional call: partial Config stubs (tests, derived agent shims) do
+        // not carry the setter, and a missing snapshot simply leaves the prompt
+        // ungated rather than failing session startup.
+        this.config.setPromptToolSnapshot?.(
           new Set(
             toolRegistry
               .getFunctionDeclarations()

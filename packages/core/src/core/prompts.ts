@@ -343,13 +343,16 @@ function gateToolGuidance(
 }
 
 const TOOL_CALL_IN_EXAMPLE = /\[tool_call:\s*([A-Za-z0-9_]+)/g;
+// Matched as a pair rather than split on blank lines: a single example can
+// contain blank lines of its own, and splitting on them orphans the tool calls
+// in its later paragraphs from the `<example>` tag that gates them.
+const EXAMPLE_BLOCK = /<example>[\s\S]*?<\/example>\n*/g;
 
 /**
  * Drops `<example>` blocks that demonstrate a tool this session did not
  * declare, so the prompt never shows the model a call it cannot make (#12032).
  *
- * Blocks are separated by a blank line and the heading precedes the first one;
- * when no example survives the heading goes too, rather than leaving a section
+ * When no example survives the heading goes too, rather than leaving a section
  * with nothing under it. Example formats that do not use the `[tool_call: …]`
  * notation (the model-specific XML and JSON blocks) carry no detectable tool
  * names and are left alone.
@@ -361,19 +364,18 @@ function filterToolCallExamples(
   const declared = surface?.declaredTools;
   if (!declared) return examples;
 
-  const firstExample = examples.indexOf('<example>');
-  if (firstExample === -1) return examples;
-  const heading = examples.slice(0, firstExample);
-  const blocks = examples.slice(firstExample).split('\n\n');
-
-  const kept = blocks.filter((block) => {
-    if (!block.includes('<example>')) return true;
-    return [...block.matchAll(TOOL_CALL_IN_EXAMPLE)].every((match) =>
-      declared.has(match[1]!),
+  let keptExamples = 0;
+  const filtered = examples.replace(EXAMPLE_BLOCK, (block) => {
+    const callsUndeclared = [...block.matchAll(TOOL_CALL_IN_EXAMPLE)].some(
+      (match) => !declared.has(match[1]!),
     );
+    if (callsUndeclared) return '';
+    keptExamples++;
+    return block;
   });
-  if (!kept.some((block) => block.includes('<example>'))) return '';
-  return heading + kept.join('\n\n');
+  if (keptExamples === 0) return '';
+  // Dropping a block from the middle can leave the gap behind it.
+  return filtered.replace(/\n{3,}/g, '\n\n').trimEnd();
 }
 
 /**

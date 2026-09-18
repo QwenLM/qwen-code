@@ -1314,6 +1314,8 @@ describe('resident tool gating (#12032)', () => {
     expect(prompt).toContain('# Examples');
     expect(prompt).toContain(`[tool_call: ${ToolNames.SHELL}`);
     expect(prompt).not.toContain(`[tool_call: ${ToolNames.GLOB}`);
+    // `edit` is called from the refactor example's later paragraphs, past a
+    // blank line: the block has to be gated as one unit, not per paragraph.
     expect(prompt).not.toContain(`[tool_call: ${ToolNames.EDIT}`);
     // An example that calls no tool at all is not about the tool surface.
     expect(prompt).toContain('user: 1 + 2');
