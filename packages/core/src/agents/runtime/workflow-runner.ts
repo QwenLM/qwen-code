@@ -34,6 +34,11 @@ import {
   type WorkflowSnapshot,
 } from '../workflow-snapshot.js';
 import {
+  checkpointFromTask,
+  removeWorkflowCheckpoint,
+  writeWorkflowCheckpoint,
+} from '../workflow-checkpoint.js';
+import {
   readWorkflowSourceRef,
   type WorkflowSourceRef,
 } from '../workflow-correlation.js';
@@ -67,6 +72,7 @@ import {
 import {
   compileWorkflowScript,
   describeWorkflowCompileError,
+  type WorkflowMeta,
 } from './workflow-sandbox.js';
 import {
   resolveReviewWorkflowLimits,
@@ -314,6 +320,7 @@ export class WorkflowRunner {
     let callerWasAbortedBeforeStart: boolean;
     let orchestrator: WorkflowOrchestrator;
     let reviewLimits: ReviewWorkflowLimits | undefined;
+    let scriptMeta: WorkflowMeta | null = null;
     try {
       const loaded = options.loadScript
         ? await options.loadScript()
@@ -338,7 +345,7 @@ export class WorkflowRunner {
         registry?.get(runId)?.workflowName;
 
       try {
-        compileWorkflowScript(script);
+        scriptMeta = compileWorkflowScript(script).meta;
       } catch (error) {
         throw new WorkflowScriptNotLaunchedError(
           describeWorkflowCompileError(
@@ -535,6 +542,18 @@ export class WorkflowRunner {
       releasePersistenceActivity();
       throw error;
     }
+    // Lets a later process find this run if this one exits before it
+    // settles. Not awaited: nothing about starting depends on it, and the
+    // settlement below waits for it before removing it.
+    const checkpointWrite = entry
+      ? writeWorkflowCheckpoint(
+          config,
+          checkpointFromTask(entry, {
+            sessionId: config.getSessionId?.() ?? '',
+            meta: scriptMeta,
+          }),
+        )
+      : undefined;
     const emitUpdate = (): void => {
       if (!entry || !options.onUpdate || !isCurrentEntry()) return;
       try {
@@ -788,6 +807,13 @@ export class WorkflowRunner {
             } catch {
               // Telemetry must not affect workflow execution.
             }
+          }
+          // The run settled, so nothing is left for a later process to
+          // claim — even when the snapshot write failed, since a claim would
+          // then call a run interrupted that was not.
+          if (checkpointWrite) {
+            await checkpointWrite;
+            await removeWorkflowCheckpoint(config, runId);
           }
           releasePersistenceActivity();
           registry?.releaseHandle(runId, handle);
