@@ -171,8 +171,8 @@ const TRANSCRIPT_GOAL_STATUS_KINDS = new Set([
   // A paused goal is not running, and dropping the card here is not neutral:
   // the replay stream is what feeds the goal renderer, so the older `set` card
   // stays newest and every surface keeps claiming autonomous work is under way.
-  // Kept in step with `GOAL_STATUS_KINDS`, which the daemon-side reader
-  // (`parseGoalStatusItem`) validates the same on-disk cards against.
+  // Kept in step with `GOAL_CARD_KINDS` in core's `goal-legacy-cards.ts`,
+  // which the daemon-side readers validate the same on-disk cards against.
   'paused',
   'checking',
 ]);
