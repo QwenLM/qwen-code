@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,6 +19,7 @@ const entryPath = path.join(runtimeRoot, 'lib', 'cli-entry.js');
 const token = crypto.randomBytes(32).toString('hex');
 
 verifyRuntimeIntegrity();
+verifyPtySupport();
 
 const child = spawn(
   nodePath,
@@ -117,6 +118,54 @@ function finish(error) {
     console.error(error.message);
     process.exitCode = 1;
   }
+}
+
+function verifyPtySupport() {
+  const marker = crypto.randomBytes(8).toString('hex');
+  const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
+  const command = `echo ${marker}`;
+  const script = `
+const pty = await import('@lydell/node-pty');
+const child = pty.spawn(${JSON.stringify(shell)}, ['-c', ${JSON.stringify(command)}], {
+  name: 'xterm-color',
+  cols: 80,
+  rows: 24,
+  cwd: process.cwd(),
+  env: process.env,
+});
+let output = '';
+child.onData((data) => {
+  output += data;
+});
+const deadline = Date.now() + 15_000;
+while (!output.includes(${JSON.stringify(marker)}) && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+child.kill();
+if (!(child.pid > 0) || !output.includes(${JSON.stringify(marker)})) {
+  throw new Error(
+    'PTY round-trip failed: ' + JSON.stringify({ pid: child.pid, output }),
+  );
+}
+console.log('pid=' + child.pid);
+`;
+  // cwd lib/ is the resolution root of the bundled lib/cli-entry.js, so this
+  // asks the same question getPty() asks at runtime: a real spawn round-trip
+  // through the bundled Node, not a file-existence check. A prebuild that is
+  // staged but cannot load (unsigned native library, older glibc) fails here
+  // exactly like an absent one (#11872).
+  const result = spawnSync(nodePath, ['--input-type=module', '-e', script], {
+    cwd: path.join(runtimeRoot, 'lib'),
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      'Bundled runtime cannot run a PTY, so the Web Terminal would report ' +
+        `"PTY not available":\n${result.stdout}${result.stderr}`,
+    );
+  }
+  console.log(`Bundled runtime PTY round-trip ok (${result.stdout.trim()})`);
 }
 
 function verifyRuntimeIntegrity() {

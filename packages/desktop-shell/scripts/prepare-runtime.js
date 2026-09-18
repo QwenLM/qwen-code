@@ -44,6 +44,20 @@ const binDir = path.join(packageRoot, 'bin');
 const target = desktopTarget();
 const skipBuild = process.env.QWEN_DESKTOP_SKIP_BUILD === '1';
 
+// Desktop target -> the @lydell/node-pty prebuild package carrying that
+// platform's native addon. desktopTarget() already speaks the wrapper's own
+// `${process.platform}-${process.arch}` dialect, so do not borrow
+// scripts/create-standalone-package.js's TARGET_PREBUILD_DIR here: it keys
+// Windows as 'win-x64' and would resolve '@lydell/node-pty-undefined' for this
+// script's 'win32-x64'.
+const NODE_PTY_PREBUILD_PACKAGE = new Map([
+  ['darwin-arm64', '@lydell/node-pty-darwin-arm64'],
+  ['darwin-x64', '@lydell/node-pty-darwin-x64'],
+  ['linux-arm64', '@lydell/node-pty-linux-arm64'],
+  ['linux-x64', '@lydell/node-pty-linux-x64'],
+  ['win32-x64', '@lydell/node-pty-win32-x64'],
+]);
+
 const npm = process.env.npm_execpath;
 if (!npm) throw new Error('npm_execpath is unavailable. Run through npm.');
 
@@ -80,6 +94,7 @@ try {
   fs.writeFileSync(path.join(packageRoot, '.gitkeep'), '');
   fs.mkdirSync(binDir, { recursive: true });
   copyDirectory(distDir, libDir);
+  stageNodePty(target);
   await installNodeRuntime(nodeDir, target);
   writeLaunchers(target);
   copyRequiredFile(
@@ -194,6 +209,61 @@ function copyValidCachedArchive(
     fs.rmSync(cachedArchivePath, { force: true });
     fs.rmSync(archivePath, { force: true });
     return false;
+  }
+}
+
+// The bundled CLI resolves its PTY backend with `await
+// import('@lydell/node-pty')` (packages/core/src/utils/getPty.ts), so Node
+// walks up from lib/cli-entry.js and lib/node_modules is the first candidate.
+// Without it every Web Terminal spawn collapses to "PTY not available"
+// (#11872). scripts/create-standalone-package.js::copyNodePtyAddon stages the
+// same two packages for the standalone archives.
+function stageNodePty(desktopTarget) {
+  const prebuildPackage = NODE_PTY_PREBUILD_PACKAGE.get(desktopTarget);
+  const packageNames = ['@lydell/node-pty', prebuildPackage];
+  // sourceRoot, not repoRoot: the release job installs dependencies in a
+  // separate checkout (QWEN_CODE_ROOT) and only builds the shell here.
+  const modulesSrc = path.join(sourceRoot, 'node_modules');
+  const packageSources = packageNames.map((packageName) =>
+    path.join(modulesSrc, packageName),
+  );
+  const prebuildDir = path.join(
+    packageSources[1],
+    'prebuilds',
+    prebuildPackage.slice('@lydell/node-pty-'.length),
+  );
+  const ready =
+    packageSources.every((packageSource) =>
+      fs.existsSync(path.join(packageSource, 'package.json')),
+    ) &&
+    fs.existsSync(prebuildDir) &&
+    fs.readdirSync(prebuildDir).some((entry) => entry.endsWith('.node'));
+  if (!ready) {
+    // Degrade instead of failing the build: the app still runs and only the
+    // Web Terminal loses PTY support. linux-arm64 has no pinned prebuild yet,
+    // so a local build for it lands here.
+    console.warn(
+      `[desktop] node-pty packages for ${desktopTarget} are missing from ` +
+        `${modulesSrc}; bundling without PTY support ` +
+        '(web terminal will report "PTY not available").',
+    );
+    return;
+  }
+  const modulesDest = path.join(libDir, 'node_modules');
+  for (let index = 0; index < packageNames.length; index += 1) {
+    fs.cpSync(
+      packageSources[index],
+      path.join(modulesDest, packageNames[index]),
+      {
+        recursive: true,
+        dereference: true,
+        verbatimSymlinks: false,
+        // The win32-x64 prebuild ships .pdb debug symbols beside its addon
+        // that nothing reads at runtime; the standalone packager drops them
+        // too.
+        filter: (source) => !source.endsWith('.pdb'),
+      },
+    );
   }
 }
 

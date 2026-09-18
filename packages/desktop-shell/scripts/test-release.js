@@ -45,6 +45,7 @@ try {
   testElectronBridgeWorkflow();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
+  testRuntimeNodePtyTargetMapping();
   testUpdaterMirrorConfiguration();
   testResolveLogRoot();
   testSliceNewLog();
@@ -477,6 +478,42 @@ function testDesktopReleaseHardening() {
   );
 }
 
+function testRuntimeNodePtyTargetMapping() {
+  const prepareRuntime = fs.readFileSync(
+    path.join(packageDir, 'scripts', 'prepare-runtime.js'),
+    'utf8',
+  );
+  const literal =
+    /const NODE_PTY_PREBUILD_PACKAGE = new Map\(\[([\s\S]*?)\]\);/.exec(
+      prepareRuntime,
+    );
+  assert.ok(
+    literal,
+    'runtime preparation must map desktop targets to node-pty prebuild packages',
+  );
+  const mapping = vm.runInNewContext(`new Map([${literal[1]}])`);
+  const allowList = /!\[\s*([\s\S]*?)\]\.includes\(resolved\)/.exec(
+    prepareRuntime,
+  );
+  assert.ok(allowList, 'desktopTarget() must keep validating its targets');
+  const supported = vm.runInNewContext(`[${allowList[1]}]`);
+  assert.deepEqual(
+    [...mapping.keys()].sort(),
+    [...supported].sort(),
+    'every target desktopTarget() accepts needs a node-pty prebuild package',
+  );
+  for (const target of supported) {
+    // The wrapper requires `@lydell/node-pty-${process.platform}-${process.arch}`
+    // at runtime, and the standalone packager keys Windows as 'win-x64': reusing
+    // that map here would stage '@lydell/node-pty-undefined' for 'win32-x64'.
+    assert.equal(
+      mapping.get(target),
+      `@lydell/node-pty-${target}`,
+      `${target} must stage the prebuild package its own wrapper requires`,
+    );
+  }
+}
+
 function testRuntimePreparation(directory) {
   const testPackageDir = path.join(directory, 'packages', 'desktop-shell');
   const testScript = path.join(testPackageDir, 'scripts', 'prepare-runtime.js');
@@ -526,6 +563,35 @@ function testRuntimePreparation(directory) {
   ]) {
     fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
   }
+  // Dependencies live only under the QWEN_CODE_ROOT checkout, as they do in the
+  // release job: the shell's own checkout is never installed there. Staging has
+  // to follow QWEN_CODE_ROOT (#11872).
+  const lydellDir = path.join(sourceRoot, 'node_modules', '@lydell');
+  const prebuildDir = path.join(
+    lydellDir,
+    'node-pty-darwin-arm64',
+    'prebuilds',
+    'darwin-arm64',
+  );
+  fs.mkdirSync(path.join(lydellDir, 'node-pty'), { recursive: true });
+  fs.mkdirSync(prebuildDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(lydellDir, 'node-pty', 'package.json'),
+    JSON.stringify({ name: '@lydell/node-pty', version: '0.0.0-test' }),
+  );
+  fs.writeFileSync(
+    path.join(lydellDir, 'node-pty', 'index.js'),
+    'module.exports = {};\n',
+  );
+  fs.writeFileSync(
+    path.join(lydellDir, 'node-pty-darwin-arm64', 'package.json'),
+    JSON.stringify({
+      name: '@lydell/node-pty-darwin-arm64',
+      version: '0.0.0-test',
+    }),
+  );
+  fs.writeFileSync(path.join(prebuildDir, 'pty.node'), 'test addon');
+  fs.writeFileSync(path.join(prebuildDir, 'pty.pdb'), 'test symbols');
   fs.mkdirSync(path.join(extractedRoot, 'bin'), { recursive: true });
   fs.writeFileSync(path.join(extractedRoot, 'bin', 'node'), 'node');
   fs.writeFileSync(path.join(extractedRoot, 'LICENSE'), 'node license');
@@ -584,6 +650,47 @@ globalThis.fetch = async (url) => {
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
   );
 
+  // The Web Terminal resolves its PTY backend from lib/, so the runtime has to
+  // carry the wrapper and this target's prebuild under lib/node_modules
+  // (#11872).
+  const stagedLydellDir = path.join(
+    runtimeDir,
+    'qwen-code',
+    'lib',
+    'node_modules',
+    '@lydell',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(stagedLydellDir, 'node-pty', 'index.js'), 'utf8'),
+    'module.exports = {};\n',
+  );
+  const stagedAddon = path.join(
+    stagedLydellDir,
+    'node-pty-darwin-arm64',
+    'prebuilds',
+    'darwin-arm64',
+    'pty.node',
+  );
+  assert.ok(fs.existsSync(stagedAddon));
+  assert.equal(
+    fs.existsSync(path.join(path.dirname(stagedAddon), 'pty.pdb')),
+    false,
+    'debug symbols must not be bundled into the runtime',
+  );
+  const stagedChecksums = JSON.parse(
+    fs.readFileSync(
+      path.join(runtimeDir, 'qwen-code', 'checksums.json'),
+      'utf8',
+    ),
+  );
+  assert.equal(
+    stagedChecksums[
+      'lib/node_modules/@lydell/node-pty-darwin-arm64/prebuilds/darwin-arm64/pty.node'
+    ],
+    crypto.createHash('sha256').update('test addon').digest('hex'),
+    'the staged prebuild must be checksummed so signing refresh and smoke verification cover it',
+  );
+
   const second = spawnSync(process.execPath, [testScript], {
     encoding: 'utf8',
     env,
@@ -613,6 +720,27 @@ globalThis.fetch = async (url) => {
     3,
   );
   assert.equal(fs.existsSync(path.join(cacheDir, 'SHASUMS256.txt')), false);
+
+  // A target whose prebuild is not installed must still produce a runtime:
+  // linux-arm64 has no pinned package upstream, and failing the build there
+  // would trade a missing Web Terminal for no app at all (#11872).
+  fs.rmSync(path.join(sourceRoot, 'node_modules'), {
+    recursive: true,
+    force: true,
+  });
+  const degraded = spawnSync(process.execPath, [testScript], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(degraded.status, 0, degraded.stderr);
+  assert.match(
+    degraded.stderr,
+    /node-pty packages for darwin-arm64 are missing/,
+  );
+  assert.equal(
+    fs.existsSync(path.join(runtimeDir, 'qwen-code', 'lib', 'node_modules')),
+    false,
+  );
 
   const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
   fs.writeFileSync(marker, 'preserve me');
