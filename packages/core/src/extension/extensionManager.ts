@@ -1624,7 +1624,11 @@ export class ExtensionManager {
       return [];
     }
 
-    const settled = await Promise.allSettled(
+    // Promise.all, not allSettled: loadExtension converts its own per-extension
+    // errors to null, but an entry whose stat itself throws (e.g. a dangling
+    // symlink at the extensions root) must propagate and fail the whole load —
+    // read-only consumers rely on that fail-closed signal.
+    const extensions = await Promise.all(
       subdirs.map((subdir) =>
         this.loadExtension({
           extensionDir: path.join(extensionsDir, subdir),
@@ -1632,11 +1636,7 @@ export class ExtensionManager {
         }),
       ),
     );
-    return settled.flatMap((result) =>
-      result.status === 'fulfilled' && result.value != null
-        ? [result.value]
-        : [],
-    );
+    return extensions.filter((extension) => extension != null);
   }
 
   async loadExtension(
