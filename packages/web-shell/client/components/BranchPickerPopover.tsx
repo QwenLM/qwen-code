@@ -23,6 +23,7 @@ import {
   GitCommitIcon,
   FolderGit2Icon,
   GlobeIcon,
+  HistoryIcon,
   Loader2Icon,
   PlusIcon,
   SearchIcon,
@@ -188,6 +189,8 @@ interface BranchPickerPopoverProps {
   onOpenCommit?: () => void;
   /** Opens the worktree manager. */
   onOpenWorktrees?: () => void;
+  /** Opens the commit history graph. */
+  onOpenLog?: () => void;
   children: React.ReactNode;
 }
 
@@ -417,6 +420,7 @@ export function BranchPickerPopover({
   onOpenDiff,
   onOpenCommit,
   onOpenWorktrees,
+  onOpenLog,
   children,
 }: BranchPickerPopoverProps) {
   const { t } = useI18n();
@@ -1390,7 +1394,8 @@ export function BranchPickerPopover({
     t('branchPicker.action.checkoutRef').toLowerCase().includes(q) ||
     t('branchPicker.action.viewChanges').toLowerCase().includes(q) ||
     t('branchPicker.action.manageRemotes').toLowerCase().includes(q) ||
-    t('branchPicker.action.worktrees').toLowerCase().includes(q);
+    t('branchPicker.action.worktrees').toLowerCase().includes(q) ||
+    t('branchPicker.action.history').toLowerCase().includes(q);
 
   useEffect(() => {
     if (!actionsVisible) {
@@ -1571,6 +1576,25 @@ export function BranchPickerPopover({
                           />
                           <span className={styles.actionLabel}>
                             {t('branchPicker.action.viewChanges')}
+                          </span>
+                        </button>
+                      )}
+                      {onOpenLog && (
+                        <button
+                          type="button"
+                          className={styles.actionItem}
+                          onClick={() => {
+                            onOpenLog();
+                            onOpenChange(false);
+                          }}
+                          data-testid="branch-picker-history"
+                        >
+                          <HistoryIcon
+                            size={14}
+                            className={styles.actionIcon}
+                          />
+                          <span className={styles.actionLabel}>
+                            {t('branchPicker.action.history')}
                           </span>
                         </button>
                       )}

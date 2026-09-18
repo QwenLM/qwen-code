@@ -231,6 +231,8 @@ interface ChatEditorProps {
   onOpenCommit?: () => void;
   /** Opens the worktree manager. */
   onOpenWorktrees?: () => void;
+  /** Opens the commit history graph. */
+  onOpenLog?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1593,6 +1595,7 @@ export const ChatEditor = memo(
       onOpenGitDiff,
       onOpenCommit,
       onOpenWorktrees,
+      onOpenLog,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -3438,6 +3441,7 @@ export const ChatEditor = memo(
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
                         onOpenWorktrees={onOpenWorktrees}
+                        onOpenLog={onOpenLog}
                       >
                         <button
                           type="button"
