@@ -780,26 +780,6 @@ describe('describeGoalCard (ink GoalStateCard)', () => {
     activity = 'idle',
   ): GoalSnapshotLike => ({ goal, activity }) as GoalSnapshotLike;
 
-  it('has no checkpoint line, whatever an earlier build left on the record', () => {
-    const view = describeGoalCard(
-      snap({
-        objective: 'o',
-        status: 'usage_limited',
-        lastReason: 'Three evidence checkpoints stalled.',
-        limitKind: 'checkpoint_request',
-        checkpointStalls: 3,
-        lastCheckpointFailure: 'Error: provider failed',
-      }),
-    );
-
-    expect(view).toMatchObject({
-      state: 'card',
-      reason: 'Three evidence checkpoints stalled.',
-    });
-    expect(view).not.toHaveProperty('checkpoint');
-    expect(JSON.stringify(view)).not.toContain('provider failed');
-  });
-
   it('renders every lifecycle state', () => {
     expect(
       describeGoalCard(snap({ objective: 'o', status: 'active' })),

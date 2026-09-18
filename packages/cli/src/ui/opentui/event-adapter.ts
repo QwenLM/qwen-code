@@ -20,6 +20,7 @@
  * this slice may only touch opentui/**).
  */
 
+import type { GoalSnapshotLike } from '../utils/goal-card-view.js';
 import type {
   AnsiToken,
   ChatCompressionInfo,
@@ -800,21 +801,7 @@ export function createEventMapper(
   };
 }
 
-/** Loose GoalSnapshotV2 shape (goal-protocol.ts) for display purposes. */
-export type GoalSnapshotLike = {
-  goal?: {
-    objective?: string;
-    status?: string;
-    turnCount?: number;
-    turnBudget?: number;
-    activeTimeMs?: number;
-    activeTimeBudgetMs?: number;
-    tokensUsed?: number;
-    tokenBudget?: number;
-    lastReason?: string;
-  } | null;
-  activity?: string;
-};
+export type { GoalSnapshotLike };
 
 /** Drains a real agent stream into a neutral-event sink. */
 export async function pumpServerStream(
