@@ -25,6 +25,9 @@ The Linux installer checks a detected glibc version before downloading an
 official standalone archive and reports how to use npm with a compatible
 Node.js build when the host is too old. Offline `--archive` installs are not
 blocked by this preflight because custom archives may carry a different runtime.
+Mirrored downloads selected with `--base-url` remain subject to the official
+runtime preflight. For a custom runtime build, verify host compatibility and
+install it with `--archive`.
 
 ## Installation Scripts
 
@@ -279,9 +282,11 @@ Environment variables:
 - `QWEN_INSTALL_REPAIR_PATH`
 - `QWEN_INSTALL_PATH_SCOPE`
 
-Use `--base-url` for private mirrors. The URL must contain
-`qwen-code-<target>` archives and `SHA256SUMS` in the same directory. Custom
-base URLs must use `https://`.
+Use `--base-url` for private mirrors of the official standalone layout. The URL
+must contain `qwen-code-<target>` archives and `SHA256SUMS` in the same directory.
+These mirrored downloads remain subject to the official Linux runtime preflight.
+Custom base URLs must use `https://`. If the mirror serves a custom runtime build,
+verify its host compatibility separately and install it with `--archive`.
 
 For Aliyun OSS/CDN, release publishing uploads byte-identical artifacts to the
 versioned directory, for example `releases/qwen-code/vX.Y.Z/`. Stable releases

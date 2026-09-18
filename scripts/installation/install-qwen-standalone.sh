@@ -494,7 +494,7 @@ detect_glibc_version() {
 
     if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+([.][0-9]+)?$ ]] && command_exists ldd; then
         version=$(LC_ALL=C LANG=C ldd --version 2>&1 | awk '
-            NR == 1 {
+            NR == 1 && /GNU libc|GNU C Library|GLIBC/ {
                 for (i = NF; i > 0; i--) {
                     if ($i ~ /^[0-9]+\.[0-9]+([.][0-9]+)?$/) {
                         print $i
@@ -539,8 +539,9 @@ check_standalone_runtime_compatibility() {
 
     local glibc_version
     if ! glibc_version=$(detect_glibc_version); then
-        # Do not guess for unknown libc implementations. The archive/runtime
-        # compatibility check below still handles those hosts as before.
+        # Unknown libc (musl, busybox ldd): fail open. No libc or runtime check
+        # runs later either — the archive installs and an incompatible runtime
+        # fails when qwen first starts, as it did before this preflight.
         return 0
     fi
 
@@ -548,7 +549,10 @@ check_standalone_runtime_compatibility() {
         return 0
     fi
 
-    log_error "The standalone Linux archive bundles Node.js 22 and requires glibc 2.28 or newer; this system has glibc ${glibc_version}."
+    log_error "The official standalone Linux archive bundles Node.js 22 and requires glibc 2.28 or newer; this system has glibc ${glibc_version}."
+    if [[ -n "${BASE_URL}" ]]; then
+        log_warning "--base-url mirrors are checked against the official standalone runtime requirement. For a custom runtime, use --archive after verifying compatibility with this host."
+    fi
     log_error "Use --method npm with a Node.js 22+ build compatible with this system, or use a Linux distribution with glibc 2.28+."
     return 1
 }

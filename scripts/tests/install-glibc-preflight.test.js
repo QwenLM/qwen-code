@@ -9,7 +9,6 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -32,6 +31,9 @@ function runInstaller({
   glibcVersion,
   useLddFallback = false,
   useUnknownLibc = false,
+  unknownLibcOutput = 'musl libc (x86_64)\nVersion 1.2.5',
+  baseUrl = '',
+  useLocalArchive = false,
 }) {
   const root = mkdtempSync(path.join(tmpdir(), 'qwen-glibc-preflight-'));
   const binDir = path.join(root, 'bin');
@@ -57,8 +59,9 @@ esac
       path.join(binDir, 'ldd'),
       useUnknownLibc
         ? `#!/bin/sh
-echo "musl libc (x86_64)"
-echo "Version 1.2.5"
+cat <<'QWEN_TEST_LIBC'
+${unknownLibcOutput}
+QWEN_TEST_LIBC
 `
         : `#!/bin/sh
 echo "ldd (GNU libc) ${glibcVersion}"
@@ -85,28 +88,34 @@ exit 91
 `,
   );
 
-  const result = spawnSync(
-    'bash',
-    [
-      installerPath,
-      '--method',
-      'standalone',
-      '--mirror',
-      'github',
-      '--version',
-      '0.24.0',
-      '--no-modify-path',
-    ],
-    {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        HOME: homeDir,
-        PATH: `${binDir}:${process.env.PATH ?? ''}`,
-        QWEN_INSTALL_ROOT: path.join(root, 'install'),
-      },
+  const installerArgs = [
+    installerPath,
+    '--method',
+    'standalone',
+    '--mirror',
+    'github',
+    '--version',
+    '0.24.0',
+    '--no-modify-path',
+  ];
+  if (baseUrl) {
+    installerArgs.push('--base-url', baseUrl);
+  }
+  if (useLocalArchive) {
+    const archivePath = path.join(root, 'qwen-code-linux-x64.tar.gz');
+    writeFileSync(archivePath, 'placeholder archive');
+    installerArgs.push('--archive', archivePath);
+  }
+
+  const result = spawnSync('bash', installerArgs, {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: homeDir,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+      QWEN_INSTALL_ROOT: path.join(root, 'install'),
     },
-  );
+  });
 
   return {
     root,
@@ -138,6 +147,29 @@ describe('standalone installer glibc preflight', () => {
     }
   });
 
+  itOnUnix(
+    'identifies the official runtime requirement for base-url mirrors',
+    () => {
+      const result = runInstaller({
+        glibcVersion: '2.17',
+        baseUrl: 'https://mirror.invalid/qwen',
+      });
+      try {
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          'The official standalone Linux archive',
+        );
+        expect(result.stderr).not.toContain(
+          'The standalone Linux archive bundles',
+        );
+        expect(result.stdout).toContain('For a custom runtime, use --archive');
+        expect(existsSync(result.curlMarker)).toBe(false);
+      } finally {
+        cleanup(result);
+      }
+    },
+  );
+
   itOnUnix('falls back to ldd when getconf cannot report glibc', () => {
     const result = runInstaller({
       glibcVersion: '2.17',
@@ -167,6 +199,25 @@ describe('standalone installer glibc preflight', () => {
     }
   });
 
+  itOnUnix(
+    'leaves unknown libc with a version on the first line unchanged',
+    () => {
+      const result = runInstaller({
+        glibcVersion: '1.2',
+        useLddFallback: true,
+        useUnknownLibc: true,
+        unknownLibcOutput: 'unknown libc 1.2.5',
+      });
+      try {
+        expect(result.status).toBe(1);
+        expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
+        expect(existsSync(result.curlMarker)).toBe(true);
+      } finally {
+        cleanup(result);
+      }
+    },
+  );
+
   itOnUnix('allows glibc 2.28 to continue to the release download', () => {
     const result = runInstaller({ glibcVersion: '2.28' });
     try {
@@ -178,25 +229,18 @@ describe('standalone installer glibc preflight', () => {
     }
   });
 
-  it(
-    'keeps the preflight scoped to downloaded Linux standalone archives',
-    () => {
-      const script = readFileSync(installerPath, 'utf8');
-      const archiveBranch = script.indexOf(
-        'if [[ -n "${ARCHIVE_PATH}" ]]; then',
-      );
-      const downloadBranch = script.indexOf(
-        '    else\n        if ! target=$(detect_target); then',
-        archiveBranch,
-      );
-      const compatibilityCheck = script.indexOf(
-        'check_standalone_runtime_compatibility "${target}"',
-        downloadBranch,
-      );
-
-      expect(archiveBranch).toBeGreaterThanOrEqual(0);
-      expect(downloadBranch).toBeGreaterThan(archiveBranch);
-      expect(compatibilityCheck).toBeGreaterThan(downloadBranch);
-    },
-  );
+  itOnUnix('keeps offline custom archives outside the glibc preflight', () => {
+    const result = runInstaller({
+      glibcVersion: '2.17',
+      useLocalArchive: true,
+    });
+    try {
+      expect(result.status).toBe(1);
+      expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
+      expect(result.stderr).toContain('SHA256SUMS not found');
+      expect(existsSync(result.curlMarker)).toBe(false);
+    } finally {
+      cleanup(result);
+    }
+  });
 });
