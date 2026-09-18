@@ -5,6 +5,7 @@ import tailwindcss from '@tailwindcss/vite';
 import postcss from 'postcss';
 import selectorParser from 'postcss-selector-parser';
 import pkg from './package.json' with { type: 'json' };
+import { shouldExternalizeWebShellDependency } from './build-boundary';
 import { WEB_SHELL_BUILD_TARGET } from './vite.config';
 
 const COMPONENT_SCOPE =
@@ -170,10 +171,9 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
-    // Same floor as the app build: the lib bundle minifies the same xterm
-    // (it is not external), and Vite 5's default target lowers its logical
-    // assignments into code that throws on the first mode query. Also covers
-    // the transcript entry inlined into /export html documents.
+    // Keep the library and app on one syntax floor. Runtime packages are
+    // externalized below, while package-owned output and the transcript entry
+    // still need a stable target for npm consumers.
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
@@ -187,38 +187,7 @@ export default defineConfig(({ mode }) => ({
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: [
-        'react',
-        'react/jsx-runtime',
-        'react/jsx-dev-runtime',
-        'react-dom',
-        'react-dom/client',
-        'radix-ui',
-        'lucide-react',
-        'class-variance-authority',
-        'clsx',
-        'tailwind-merge',
-        'vaul',
-        '@qwen-code/sdk',
-        /^@qwen-code\/sdk\//,
-        '@datafe-open/markdown-chart',
-        '@datafe-open/markdown-chart-echarts',
-        '@datafe-open/markdown-chart-react',
-        'echarts',
-        /^echarts\//,
-        'react-markdown',
-        'remark-cjk-friendly',
-        /^remark-cjk-friendly\//,
-        'remark-gfm',
-        'remark-math',
-        'rehype-katex',
-        'shiki',
-        'mermaid',
-        'katex',
-        /^katex\/(?!dist\/katex\.min\.css$)/,
-        'codemirror',
-        /^@codemirror\//,
-      ],
+      external: shouldExternalizeWebShellDependency,
     },
   },
   define: {
