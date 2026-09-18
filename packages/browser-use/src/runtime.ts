@@ -4,13 +4,61 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { fileURLToPath } from 'node:url';
+
 import { ChromeExtensionTransport } from './bridge/index.js';
 import { DEFAULT_CHROME_DOCUMENTATION } from './core/chrome-runtime-documentation.js';
+import {
+  installChromeNativeHost,
+  isChromeExtensionInstalled,
+  nativeHostInstallHome,
+} from './native-host-installer.js';
 import { PlaywrightRuntime } from './playwright/playwright-runtime.js';
 
 export type BrowserBackend = Pick<PlaywrightRuntime, 'dispatch' | 'stop'>;
 
 export async function createBrowserBackend(): Promise<BrowserBackend> {
+  if (
+    !process.env['QWEN_BROWSER_USE_SOCKET_PATH'] &&
+    (process.platform === 'darwin' || process.platform === 'linux')
+  ) {
+    const options = {
+      homeDir: nativeHostInstallHome(),
+      nativeHostPath: fileURLToPath(
+        new URL('./native-host.js', import.meta.url),
+      ),
+    };
+    const deadline = Date.now() + 30_000;
+    while (!(await isChromeExtensionInstalled(options))) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          'Could not detect the Qwen Code Chrome extension after waiting 30 seconds. ' +
+            'If you just installed it, wait a few seconds and retry Browser Use. ' +
+            'If it is not installed, install it at chrome://extensions ' +
+            '(Developer mode > Load unpacked), then retry Browser Use.',
+        );
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(1_000, remainingMs)),
+      );
+    }
+    const installed = await installChromeNativeHost(options);
+    if (installed.skippedForeignPaths.length > 0) {
+      // A foreign manifest under a browser root the user does not run is
+      // harmless, so this is a warning rather than a failure; but when it is
+      // the browser in use, Chrome keeps launching the other program's host
+      // and the bridge only ever reports a generic connection timeout.
+      process.stderr.write(
+        'Browser Use: another program owns the Chrome Native Messaging ' +
+          'manifest at ' +
+          installed.skippedForeignPaths.join(', ') +
+          '. It was left unchanged; if that browser is the one you use, ' +
+          'Chrome will launch that host instead of Qwen Code. ' +
+          'Remove or move the file, then retry Browser Use.\n',
+      );
+    }
+  }
   return new PlaywrightRuntime({
     bridge: new ChromeExtensionTransport(),
     documentation: DEFAULT_CHROME_DOCUMENTATION,

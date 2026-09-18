@@ -9742,7 +9742,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('lists workspace hooks from the registry with their stored config and state', async () => {
+  it('lists workspace hooks from the registry with their stored config and state, without subagent entries', async () => {
     const getAllSessionHooks = vi.fn().mockReturnValue([
       {
         hookId: 'session-hook-1',
@@ -9759,6 +9759,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getBareMode: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('workspace-session'),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue({
         getAllHooks: () => [
           {
@@ -9778,6 +9779,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             eventName: 'Stop',
             source: 'session',
             agentScope: 'agent-1',
+            enabled: true,
+            config: {
+              type: 'http',
+              url: 'https://hooks.example.com/agent-stop',
+            },
+          },
+          {
+            eventName: 'Stop',
+            source: 'project',
             enabled: true,
             config: {
               type: 'http',
@@ -9834,7 +9844,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             headers: { 'X-Team': 'core' },
             once: true,
           },
-          source: 'session',
+          source: 'project',
           enabled: true,
         },
       ],
