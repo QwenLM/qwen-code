@@ -14,6 +14,23 @@
 
 ---
 
+## 0.5 哪些已经由 CI 覆盖，不用再手工做
+
+PR #12145 的 `prompts.test.ts` 里有五条测试，每次推送都会跑，所以下面这些**不需要你那边重复验证**：
+
+| 已自动覆盖                                           | 测试                                                                        |
+| ---------------------------------------------------- | --------------------------------------------------------------------------- |
+| 默认配置渲染不漂移                                   | 17 份现有完整提示词快照 + `renders identically when every tool is declared` |
+| 节省量在预期区间（3,500-4,500 字符）                 | `saves about 4k characters of tool text for a file-work allowlist`          |
+| 只有两个被门控段落发生变化                           | `changes nothing outside the two gated sections`                            |
+| 被门控段落里不出现未声明的工具（机械扫描全部工具名） | `never names an undeclared tool inside the gated sections`                  |
+| code mode 完全不受门控影响（反向检查）               | `leaves CodeModeOnly guidance untouched by the declared set`                |
+| 快照确实从 `Config` 传到提示词构建器                 | `takes the declared set from the Config snapshot`                           |
+
+**因此这份文档只剩两类事需要真实会话：** 一是**真实请求的 token 是否真的下降**（单元测试只能量字符数，量不到 provider 的计费口径，也证明不了 `tools.eager` 在你们部署上真的被接受）；二是**召回率与其他模块在真实会话中的表现**（§5、§6）。
+
+---
+
 ## 1. 预期收益（静态推算，待验证）
 
 被门控的只有两段：`## Using Your Tools` 的部分条目，以及 `# Examples` 中的示例块。用脚本按实现里的同一套规则模拟渲染，得到：
@@ -67,6 +84,8 @@ diff /tmp/prompt-default.md /tmp/prompt-eager.md
 ---
 
 ## 4. 正确性检查（比省 token 更重要）
+
+> 这三条的**单元测试版本已经在 CI 里**（见 §0.5）。这里保留的是**真实会话**版本：它额外证明 settings 真的被读取、快照真的被记录，而不只是函数层面成立。
 
 **第 1 条 · 默认配置逐字节不变（已核实的机制，待实测确认）**
 CI 里的 17 份完整提示词快照都是默认路径（无声明集合），它们没有变动即证明默认输出未漂移。实测确认：把改动前后的 `/tmp/prompt-default.md` 做 diff，应当完全相同。

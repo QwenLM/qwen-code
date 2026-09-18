@@ -116,11 +116,13 @@ getCoreSystemPrompt(
 
 ## 7. 验证计划
 
-1. **默认会话回归：** 没有快照、或快照包含全部已注册工具时，渲染出的提示词与现状逐字节一致。这是让改动对常见场景安全的守卫。
-2. **裁剪会话快照：** 为以下三种情况建 fixture：(a) 只有七个文件工作类工具；(b) `codeModeOnly`；(c) 缺少 `glob` 与 `grep_search` 的集合。断言对应的条目与示例消失，且其他内容不变。
-3. **不变量测试：** 扫描渲染后提示词中**被门控段落**（`## Using Your Tools` 与 `# Examples`）里出现的每个 `ToolNames` 取值，断言找到的每个名字都在声明集合中。之所以限定这两段，是因为 §6 中那两处未门控的散文引用。这个测试同时能抓住门控过度与门控不足。
-4. **`/context` 一致性：** 断言 `/context` 度量的提示词与聊天实际使用的来自同一份快照。
-5. **Token 度量：** 在设置了裁剪版 `tools.eager` 白名单的会话上，对比改动前后的系统提示词一行，以 provider 的 `input_token_count` 作为基准（分类标尺本身正在 #12119 中修复）。实测差值在 PR 中报告，不在本文预测。
+第 1-4 项已在本 PR 的 `prompts.test.ts` 中自动化，每次推送都会重新检查；第 5 项需要真实会话，交接文档为 [`docs/verification/resident-tool-prompt-assembly/README.md`](../verification/resident-tool-prompt-assembly/README.md)。
+
+1. **默认会话回归（已在 CI）。** 现有 17 份完整提示词快照覆盖"无快照"路径，`renders identically when every tool is declared` 覆盖"全部声明"路径。两者共同构成让改动对常见场景安全的守卫。
+2. **效果，以及效果之外不漂移（已在 CI）。** `saves about 4k characters of tool text for a file-work allowlist` 断言节省量落在 3,500-4,500 字符区间——落地时实测 4,012（约 1k token）——因此收益丢失与新增未门控工具文案都会变成失败。`changes nothing outside the two gated sections` 从两次渲染中剥掉 `## Using Your Tools` 与 `# Examples`，断言其余部分完全相同。
+3. **不变量（已在 CI）。** `never names an undeclared tool inside the gated sections` 以词边界匹配把每个 `ToolNames` 取值扫一遍被门控文本，可抓住门控不足；配合完整集合亦可抓住门控过度。之所以限定这两段，是因为 §6 中那两处未门控的散文引用。
+4. **反向检查与接线（已在 CI）。** `leaves CodeModeOnly guidance untouched by the declared set` 断言 code mode 在有无快照时渲染完全一致；`takes the declared set from the Config snapshot` 断言 `getMainSessionBaseSystemPrompt` 确实读取 `Config.getPromptToolSnapshot()`——这正是让 `/context` 与真实请求同源的性质。
+5. **Token 度量（已交接）。** 在设置了裁剪版 `tools.eager` 白名单的会话上，对比改动前后的系统提示词一行，以 provider 的 `input_token_count` 为基准（分类标尺本身正在 #12119 中修复）。交接文档还包含把本改动与 `tools.eager` 自身收益分离的三档跑法，以及在仓库缺少 eval 设施下只能做的弱化召回验证。
 
 ## 8. 验收标准
 

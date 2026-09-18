@@ -1320,6 +1320,121 @@ describe('resident tool gating (#12032)', () => {
     // An example that calls no tool at all is not about the tool surface.
     expect(prompt).toContain('user: 1 + 2');
   });
+
+  // A `tools.eager` allowlist sized for file work, plus the tools that stay
+  // declared whatever the allowlist says (they are exempt from eager demotion).
+  const FILE_WORK_TOOLS: ReadonlySet<string> = new Set<string>([
+    ToolNames.READ_FILE,
+    ToolNames.WRITE_FILE,
+    ToolNames.EDIT,
+    ToolNames.GLOB,
+    ToolNames.GREP,
+    ToolNames.SHELL,
+    ToolNames.SKILL,
+    ToolNames.ASK_USER_QUESTION,
+    ToolNames.TOOL_SEARCH,
+  ]);
+
+  /** The two sections this change gates: tool policy, and the examples. */
+  function gatedParts(prompt: string): [string, string] {
+    const guidance =
+      prompt.match(/## Using Your Tools\n[\s\S]*?(?=\n#{1,2} )/)?.[0] ?? '';
+    const examples =
+      prompt.match(/# Examples[\s\S]*?(?=\n# Final Reminder)/)?.[0] ?? '';
+    return [guidance, examples];
+  }
+
+  it('saves about 4k characters of tool text for a file-work allowlist', () => {
+    const full = promptFor();
+    const trimmed = promptFor(FILE_WORK_TOOLS);
+
+    // 4,012 characters (~1k tokens) when this landed. The band is loose enough
+    // for wording edits and tight enough that adding ungated tool text — or
+    // gating something new — shows up here instead of silently.
+    const saved = full.length - trimmed.length;
+    expect(saved).toBeGreaterThan(3_500);
+    expect(saved).toBeLessThan(4_500);
+  });
+
+  it('changes nothing outside the two gated sections', () => {
+    const strip = (prompt: string) => {
+      const [guidance, examples] = gatedParts(prompt);
+      expect(guidance).not.toBe('');
+      expect(examples).not.toBe('');
+      return prompt.replace(guidance, '').replace(examples, '');
+    };
+
+    expect(strip(promptFor(FILE_WORK_TOOLS))).toBe(strip(promptFor()));
+  });
+
+  it('never names an undeclared tool inside the gated sections', () => {
+    const declared = new Set<string>([
+      ToolNames.READ_FILE,
+      ToolNames.SHELL,
+      ToolNames.SKILL,
+      ToolNames.ASK_USER_QUESTION,
+      ToolNames.TOOL_SEARCH,
+    ]);
+    const [guidance, examples] = gatedParts(promptFor(declared));
+    expect(guidance).not.toBe('');
+    expect(examples).not.toBe('');
+    const gated = `${guidance}\n${examples}`;
+
+    // Mechanical sweep rather than hand-picked assertions: it catches
+    // under-gating (a line that survived and should not have) and, read the
+    // other way with a full set, over-gating.
+    const leaked = Object.values(ToolNames).filter(
+      (name) =>
+        !declared.has(name) &&
+        new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
+    );
+
+    expect(leaked).toEqual([]);
+  });
+
+  it('leaves CodeModeOnly guidance untouched by the declared set', () => {
+    const codeModePrompt = (declaredTools?: ReadonlySet<string>) =>
+      getCoreSystemPrompt(
+        undefined,
+        'gpt-4',
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        true,
+        declaredTools ? { declaredTools } : undefined,
+      );
+
+    // Reverse check: in code mode the tools are reached as `tools.<name>`
+    // inside `exec` and are not declarations, so a narrow declared set must not
+    // strip that guidance.
+    expect(codeModePrompt(new Set([ToolNames.EXEC]))).toBe(codeModePrompt());
+  });
+
+  it('takes the declared set from the Config snapshot', () => {
+    const base = {
+      getSystemPrompt: () => undefined,
+      getModel: () => 'gpt-4',
+      getOutputStyle: () => undefined,
+      getCodeModeOnly: () => false,
+      getExperimentalZedIntegration: () => false,
+      getInputFormat: () => InputFormat.TEXT,
+      isInteractive: () => true,
+      isTodoWriteEnabled: () => false,
+    };
+
+    // The snapshot is the single source `/context` and the request share, so
+    // the prompt must actually read it rather than recompute from a registry.
+    const gated = getMainSessionBaseSystemPrompt({
+      ...base,
+      getPromptToolSnapshot: () => FILE_WORK_TOOLS,
+    });
+    const ungated = getMainSessionBaseSystemPrompt(base);
+
+    expect(gated).not.toContain('- **Subagent Delegation:**');
+    expect(ungated).toContain('- **Subagent Delegation:**');
+    expect(gated.length).toBeLessThan(ungated.length);
+  });
 });
 
 describe('CodeModeOnly tool guidance', () => {

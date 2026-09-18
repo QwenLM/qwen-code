@@ -116,11 +116,13 @@ The prompt depends only on the session-start snapshot, so `setStaticSystemPrefix
 
 ## 7. Validation plan
 
-1. **Default-session regression:** with no snapshot, or a snapshot containing every registered tool, the rendered prompt is byte-identical to today. This is the guard that makes the change safe for the common case.
-2. **Trimmed-session snapshots:** fixtures for (a) the seven file-work tools only, (b) `codeModeOnly`, (c) a set with `glob` and `grep_search` absent. Assert the corresponding bullets and examples disappear and nothing else moves.
-3. **Invariant test:** scan the gated sections (`## Using Your Tools` and `# Examples`) of the rendered prompt for every `ToolNames` value and assert each name found is in the declared set. Scoped to those sections because of the two ungated prose mentions in §6. This is the test that catches both over-gating and under-gating.
-4. **`/context` agreement:** assert the prompt `/context` measures is built from the same snapshot the chat used.
-5. **Token measurement:** on a session with a trimmed `tools.eager` allowlist, compare the system-prompt row before and after, using the provider's `input_token_count` as the anchor (the category ruler itself is being fixed in #12119). Report the measured delta in the PR rather than predicting it here.
+Items 1-4 are automated in this PR's `prompts.test.ts`, so every push re-checks them; item 5 needs a real session and is handed off in [`docs/verification/resident-tool-prompt-assembly/README.md`](../verification/resident-tool-prompt-assembly/README.md).
+
+1. **Default-session regression (in CI).** The 17 existing full-prompt snapshots cover the no-snapshot path, and `renders identically when every tool is declared` covers the all-declared path. Together they are the guard that makes the change safe for the common case.
+2. **Effect, and no drift outside it (in CI).** `saves about 4k characters of tool text for a file-work allowlist` asserts the saving lands in a 3,500-4,500 character band — measured at 4,012 (~1k tokens) when this landed — so both a lost saving and newly added ungated tool text surface as a failure. `changes nothing outside the two gated sections` strips `## Using Your Tools` and `# Examples` from both renders and asserts the remainder is identical.
+3. **Invariant (in CI).** `never names an undeclared tool inside the gated sections` sweeps every `ToolNames` value against the gated text with a word-boundary match, catching under-gating and, with a full set, over-gating. Scoped to those sections because of the two ungated prose mentions in §6.
+4. **Reverse checks and plumbing (in CI).** `leaves CodeModeOnly guidance untouched by the declared set` asserts code mode renders identically with and without a snapshot, and `takes the declared set from the Config snapshot` asserts `getMainSessionBaseSystemPrompt` reads `Config.getPromptToolSnapshot()` — the property that keeps `/context` and the request on one source.
+5. **Token measurement (handed off).** On a session with a trimmed `tools.eager` allowlist, compare the system-prompt row before and after, anchored on the provider's `input_token_count` (the category ruler itself is being fixed in #12119). The brief also carries the three-way run that separates this change's saving from `tools.eager`'s own, and the weakened recall check that is all the repo's missing eval harness allows.
 
 ## 8. Acceptance criteria
 
