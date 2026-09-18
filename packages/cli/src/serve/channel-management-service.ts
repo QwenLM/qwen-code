@@ -423,6 +423,17 @@ export function createChannelManagementService(
     async upsert(name, request) {
       assertManageableInstanceName(name);
       assertWorkspaceConfig(request.config);
+      // The submitted config is asserted above; the stored entry is a separate
+      // input. `upsert` replaces the stored config wholesale, so a caller who
+      // omits `cwd` would otherwise adopt (and drop the `cwd` of) an entry this
+      // workspace does not own — e.g. a user-scope channel pointing at another
+      // project, now reachable because a home-directory workspace resolves its
+      // channel scope to the shared user file. Mirror `remove`, which asserts
+      // the stored entry rather than the submitted one.
+      const current = opts.store.snapshot();
+      if (Object.hasOwn(current.channels, name)) {
+        assertWorkspaceConfig(current.channels[name]!);
+      }
       const active = workspaceCommittedNames().includes(name);
       if (active) assertOwnedRuntime(name);
       const persisted = await opts.store.upsert(name, request);

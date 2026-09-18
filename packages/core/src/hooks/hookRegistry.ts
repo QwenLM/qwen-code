@@ -29,6 +29,7 @@ export interface ExtensionWithHooks {
 export interface HookRegistryConfig {
   getProjectRoot(): string;
   isTrustedFolder(): boolean;
+  getSystemHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getExtensions(): ExtensionWithHooks[];
@@ -252,6 +253,15 @@ export class HookRegistry {
    * Process hooks from the config that was already loaded by the CLI
    */
   private processHooksFromConfig(): void {
+    // System hooks, from the System and SystemDefaults settings files. Like
+    // user hooks they load regardless of folder trust. Registration order does
+    // not decide execution order: getHooksForEvent sorts by source priority
+    // (Project, User, System, Extensions).
+    const systemHooks = this.config.getSystemHooks();
+    if (systemHooks) {
+      this.processHooksConfiguration(systemHooks, HooksConfigSource.System);
+    }
+
     // Load user hooks (always available, regardless of folder trust)
     const userHooks = this.config.getUserHooks();
     if (userHooks) {
