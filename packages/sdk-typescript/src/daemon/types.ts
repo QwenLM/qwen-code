@@ -87,20 +87,12 @@ export interface GoalRecord {
   createdAt: number;
   updatedAt: number;
   /**
-   * Consecutive evidence checkpoints that failed to relieve an overflowing
-   * window; the Goal stops when this reaches three. Absent means zero, which
-   * is also what an older daemon's snapshot looks like.
+   * @deprecated Goals no longer run evidence checkpoints, so a current daemon
+   * never sends this. Kept so a snapshot from an older daemon still types.
    */
   checkpointStalls?: number;
   /**
-   * A one-line diagnostic for the most recent checkpoint check that gave no
-   * relief: `ErrorName: message` for a check that failed, or the runtime's own
-   * phrase for one that answered with a full claim list while the window
-   * overflowed, so it does not always mean the check threw. Cleared by a check
-   * that finds room or writes a checkpoint without stalling, by every control
-   * action that clears `checkpointStalls`, and by a checkpoint stop whose cause
-   * is not itself a check, so it can be absent while `checkpointStalls` is
-   * still non-zero. Also absent when the daemon predates the field.
+   * @deprecated See `checkpointStalls`: only an older daemon sends this.
    */
   lastCheckpointFailure?: string;
   lastReason?: string;
@@ -128,9 +120,9 @@ export interface GoalSnapshotV2 {
 export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
 
 /**
- * How many consecutive stalled evidence checkpoints stop a Goal, duplicated so
- * a client can show `checkpointStalls` against it. It must match
- * `GOAL_CHECKPOINT_STALL_LIMIT` in `packages/core/src/goals/goal-protocol.ts`.
+ * @deprecated Goals no longer run evidence checkpoints, so there is no stall
+ * streak to show against this, and core no longer defines the limit it used
+ * to mirror. Kept only because it is part of the published surface.
  */
 export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
 

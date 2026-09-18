@@ -35,8 +35,6 @@ export type {
 } from './goal-legacy-projection.js';
 export * from './goal-evidence.js';
 export * from './goal-tool-result-provenance.js';
-export * from './goal-checkpoint.js';
-export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
 export {

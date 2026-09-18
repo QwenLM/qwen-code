@@ -29,6 +29,7 @@ import {
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
+import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
 
@@ -670,6 +671,55 @@ describe('splitCompoundCommand', () => {
     },
   );
 
+  // #11851: bash only treats space, tab and newline as word separators. `\r`,
+  // `\v`, `\f` and `\u00a0` are ordinary word characters to bash, so in
+  // `echo x >\r& rm …` the redirection target is the `\r` and the `&` is the
+  // async operator — bash runs two commands. When the scan skipped those four
+  // as if they were whitespace, both halves stayed in one segment and the
+  // first command's allow rule covered the second.
+  // Titles carry the escaped spelling: the raw characters are invisible in a
+  // terminal and a `\v` or `\f` in a title collapses a line break in the XML of
+  // the JUnit report.
+  it.each([
+    ['\\r', 'echo x >\r& rm -rf /tmp/x', 'echo x >\r'],
+    ['\\v', 'echo x >\v& rm -rf /tmp/x', 'echo x >\v'],
+    ['\\f', 'echo x >\f& rm -rf /tmp/x', 'echo x >\f'],
+    ['\\u00a0', 'echo x >\u00a0& rm -rf /tmp/x', 'echo x >\u00a0'],
+    // Spaced variant: real separators around the non-IFS character.
+    ['\\r (spaced)', 'echo x > \r & rm -rf /tmp/x', 'echo x > \r'],
+  ])(
+    'splits a command with %s between the > and the &',
+    async (_label, command, first) => {
+      // The character is the redirect target, so it stays: trimming discards
+      // only the separators bash's lexer discards, not `String.prototype.trim`'s
+      // wider set.
+      expect(splitCompoundCommand(command)).toEqual([first, 'rm -rf /tmp/x']);
+    },
+  );
+
+  // A `\n` terminator drops the `\r` of a CRLF pair with it, so a
+  // Windows-pasted script still splits and still trims — unless that `\r` *is*
+  // the whole redirection target of the line, which bash names the file after.
+  it.each([
+    [
+      'a plain CRLF line ending',
+      'echo x\r\nrm -rf /tmp/x',
+      ['echo x', 'rm -rf /tmp/x'],
+    ],
+    [
+      'a CR that is the whole redirect target',
+      'echo x >\r\necho y',
+      ['echo x >\r', 'echo y'],
+    ],
+    [
+      'a CR target on a command that takes arguments',
+      'cat >\r\necho hi',
+      ['cat >\r', 'echo hi'],
+    ],
+  ])('splits on a newline with %s', async (_label, command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
   // Over-correction guard: the longer operators must keep winning over the
   // bare `&`, so these two pass both before and after the change.
   it.each([
@@ -825,6 +875,35 @@ describe('matchesPathPattern', () => {
     expect(matchesPathPattern('*.env', '/project/.env', projectRoot, cwd)).toBe(
       true,
     );
+  });
+
+  // A line terminator is an ordinary word character to bash, so a redirection
+  // target can end in one — and picomatch compiles `**` to a `.`-based body
+  // that the four JS line terminators do not match. Before they were
+  // substituted, every one of these was `false` and a `deny` silently became an
+  // `allow` (#11865).
+  it.each([
+    ['\\r', '/project/out\r'],
+    ['\\n', '/project/out\n'],
+    ['\\u2028', '/project/out\u2028'],
+    ['\\u2029', '/project/out\u2029'],
+    ['a whole-target \\r', '/project/\r'],
+  ])('matches a path ending in %s against **', async (_label, filePath) => {
+    expect(matchesPathPattern('//project/**', filePath, projectRoot, cwd)).toBe(
+      true,
+    );
+    expect(matchesPathPattern('./out*', filePath, projectRoot, cwd)).toBe(
+      filePath !== '/project/\r',
+    );
+  });
+
+  it('still keeps * from crossing / for a line-terminator path', async () => {
+    expect(
+      matchesPathPattern('//project/*', '/project/a/out\r', projectRoot, cwd),
+    ).toBe(false);
+    expect(
+      matchesPathPattern('//project/*', '/project/out\r', projectRoot, cwd),
+    ).toBe(true);
   });
 
   it('** matches recursively across directories', async () => {
@@ -2487,6 +2566,36 @@ describe('PermissionManager', () => {
       expect(buildPm('bash', ask).hasMatchingAskRule(ctx)).toBe(false);
       expect(buildPm('cmd', ask).hasMatchingAskRule(ctx)).toBe(true);
     });
+
+    // The splitter's array is an intermediate result; the verdict is the
+    // guarantee. Before the fix the backward scan read these characters as
+    // whitespace, the `&` was not an async operator, and the whole command was
+    // one segment — so the `echo` allow rule covered the `rm`.
+    it.each([
+      ['\\r', 'echo x >\r& rm -rf /tmp/x'],
+      ['\\v', 'echo x >\v& rm -rf /tmp/x'],
+      ['\\f', 'echo x >\f& rm -rf /tmp/x'],
+      // The NBSP verdict-level row: the path-deny test below is already a
+      // `deny` without the splitter fix (base never splits the NBSP payload at
+      // all, and the write op is attributed either way), so this is the row
+      // that discriminates for `\u00a0` — `allow` at the merge base, `deny`
+      // here.
+      ['\\u00a0', 'echo x >\u00a0& rm -rf /tmp/x'],
+    ])(
+      'compound with %s inside the redirect target: deny in second → deny',
+      async (_label, command) => {
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(echo *)'],
+            permissionsDeny: ['Bash(rm *)'],
+          }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      },
+    );
 
     it('three-part compound: all must pass', async () => {
       pm = new PermissionManager(
@@ -4287,6 +4396,74 @@ describe('PermissionManager — compound shell write attribution', () => {
       }),
     ).toBe('deny');
   });
+
+  // #11865: a redirect target made of characters that are not bash word
+  // separators — a single NBSP here — is a real filename to bash, so it must
+  // survive into the virtual op. `String.prototype.trim` used to delete it,
+  // and the write disappeared from a verdict that was a `deny`.
+  it('attributes a write whose whole target is an invisible character', () => {
+    expect(
+      extractShellOperationsAcrossCommand('echo x >\r& echo y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+    expect(
+      extractShellOperationsAcrossCommand('echo x >\u00a0& echo y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+  });
+
+  it('does not invent a read op when an invisible target is followed by a word', () => {
+    // `cat >\u00a0` takes no argument, so a deleted target left the bare `>`
+    // in the positional args and `looksLikePath('>')` turned the real write
+    // into a spurious `read_file '/project/>'`.
+    expect(
+      extractShellOperationsAcrossCommand('cat >\u00a0& echo hi', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+  });
+
+  // Same defect on the `\n` spelling: the CR of a CRLF pair is dropped with the
+  // line ending, but when the CR *is* the whole redirection target that deleted
+  // the write and left the bare operator in the positional args, where
+  // `looksLikePath('>')` invented a `read_file` of a file nobody reads — and
+  // `/project/>` is matchable, so a `Read(//project/**)` deny fired on it.
+  it('attributes a CR redirect target across a newline instead of inventing a read', () => {
+    expect(
+      extractShellOperationsAcrossCommand('echo x >\r\necho y', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+    expect(
+      extractShellOperationsAcrossCommand('cat >\r\necho hi', '/project'),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+  });
+
+  // The verdict, not the intermediate op. Each target is a character bash keeps
+  // as part of the word, so the write really happens inside the denied tree;
+  // the `\r` rows were an `allow` until the path matcher stopped handing line
+  // terminators to picomatch (#11865).
+  it.each([
+    ['\\r (whole target)', 'echo x >\r& echo y'],
+    ['\\r (visible prefix)', 'echo x >out\r& echo y'],
+    ['\\v', 'echo x >\v& echo y'],
+    ['\\f', 'echo x >\f& echo y'],
+    ['\\u00a0', 'echo x >\u00a0& echo y'],
+  ])(
+    'denies an invisible write inside a denied directory: %s',
+    async (_label, command) => {
+      const pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)'],
+          permissionsDeny: ['Edit(//project/**)', 'Write(//project/**)'],
+          cwd: '/project',
+          projectRoot: '/project',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command,
+          cwd: '/project',
+        }),
+      ).toBe('deny');
+    },
+  );
 
   it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
     const pm = new PermissionManager(
