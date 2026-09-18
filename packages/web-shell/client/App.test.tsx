@@ -1435,6 +1435,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       collapsed?: boolean;
       onOpenSettings?: () => void;
       onOpenPlugins?: () => void;
+      onOpenAgents?: () => void;
       onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
@@ -1608,6 +1609,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: props.onOpenPlugins,
           },
           'plugins',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-agents',
+            type: 'button',
+            onClick: props.onOpenAgents,
+          },
+          'agents',
         ),
         React.createElement(
           'button',
@@ -28492,6 +28502,23 @@ describe('App session callbacks', () => {
     ).toBe('true');
   });
 
+  it('opens Agent management from the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-agents"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container
+        .querySelector('[data-testid="inline-panel"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Agents');
+  });
+
   it('keeps sidebar project management available during standalone sessions', async () => {
     const { container, rerender } = renderApp();
     await flush();
@@ -28522,7 +28549,6 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     await flush();
-
     expect(
       container
         .querySelector('[data-testid="inline-panel"]')
