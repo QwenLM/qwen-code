@@ -33,10 +33,12 @@ describe('sandbox file protocol and versions', () => {
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
   it('preserves raw bytes beyond 1 MiB across a split header', async () => {
+    const target = path.join(root, 'versioned.txt');
+    writeFileSync(target, 'old');
     const request = {
       operation: 'write' as const,
       destination: path.join(root, '世界.txt'),
-      expected: null,
+      expected: getSandboxFileVersion(target),
       content: Buffer.alloc(2 * 1024 * 1024, 0xff),
     };
     request.content[0] = 0;
@@ -52,6 +54,26 @@ describe('sandbox file protocol and versions', () => {
     );
     expect(decoded).toEqual(request);
   });
+
+  it.each([-1, 1])(
+    'rejects a body whose length differs by %i',
+    async (delta) => {
+      const request = {
+        operation: 'write' as const,
+        destination: path.join(root, 'file'),
+        expected: null,
+        content: Buffer.from([0, 0xff, 10, 13]),
+      };
+      const encoded = encodeSandboxWriteRequest(request);
+      const wire =
+        delta < 0
+          ? encoded.subarray(0, encoded.length - 1)
+          : Buffer.concat([encoded, Buffer.from([0])]);
+      await expect(
+        readSandboxWriteRequest(Readable.from([wire])),
+      ).rejects.toThrow('Truncated file worker body');
+    },
+  );
 
   it('rejects an oversized header before consuming the body', async () => {
     let consumedBody = false;

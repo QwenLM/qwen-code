@@ -28,21 +28,30 @@ const request = {
   expected: null,
   content: Buffer.from([0, 0xff, 10]),
 };
-function result(overrides: Partial<BwrapExecutionResult> = {}) {
-  vi.mocked(executeBwrap).mockResolvedValue({
-    pid: 1,
-    settled: Promise.resolve({ state: 'confirmed', exitCode: 0 }),
-    result: Promise.resolve({
-      output: '{"ok":true}',
-      exitCode: 0,
-      signal: null,
-      error: null,
-      aborted: false,
+function result(
+  overrides: Partial<BwrapExecutionResult> = {},
+  reply = '{"ok":true}',
+  diagnostics = '',
+) {
+  vi.mocked(executeBwrap).mockImplementation(async (...args) => {
+    args[2]({ type: 'data', chunk: reply, stream: 'stdout' });
+    if (diagnostics)
+      args[2]({ type: 'data', chunk: diagnostics, stream: 'stderr' });
+    return {
       pid: 1,
-      executionMethod: 'child_process',
-      sandboxStatus: { state: 'confirmed', exitCode: 0 },
-      ...overrides,
-    } as BwrapExecutionResult),
+      settled: Promise.resolve({ state: 'confirmed', exitCode: 0 }),
+      result: Promise.resolve({
+        output: '{"ok":true}',
+        exitCode: 0,
+        signal: null,
+        error: null,
+        aborted: false,
+        pid: 1,
+        executionMethod: 'child_process',
+        sandboxStatus: { state: 'confirmed', exitCode: 0 },
+        ...overrides,
+      } as BwrapExecutionResult),
+    };
   });
 }
 describe('sandbox file worker client', () => {
@@ -55,9 +64,46 @@ describe('sandbox file worker client', () => {
     const launch = vi.mocked(executeBwrap).mock.calls[0][1];
     expect(launch.args).toEqual(['/installed/file-worker.js']);
     expect(launch.env).toEqual({ PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' });
+    expect(vi.mocked(executeBwrap).mock.calls[0][6]).toEqual({
+      streamStdout: true,
+    });
     expect(
       await readSandboxWriteRequest(Readable.from([launch.stdin])),
     ).toEqual(request);
+  });
+  it('accepts a confirmed successful write despite display-channel noise', async () => {
+    result({ output: 'node warning on stderr' });
+    await expect(
+      writeSandboxFile(policy, request, new AbortController().signal),
+    ).resolves.toBeUndefined();
+  });
+  it('reports a confirmed nonzero exit before parsing an invalid reply', async () => {
+    result(
+      {
+        exitCode: 1,
+        sandboxStatus: { state: 'confirmed', exitCode: 1 },
+        output: 'worker terminated before replying',
+      },
+      '',
+    );
+    await expect(
+      writeSandboxFile(policy, request, new AbortController().signal),
+    ).rejects.toThrow(
+      'Sandbox file worker exited 1: worker terminated before replying',
+    );
+  });
+  it('preserves transport errors together with bounded stderr diagnostics', async () => {
+    result(
+      {
+        sandboxStatus: { state: 'unconfirmed' },
+        error: new Error('spawn denied'),
+      },
+      '',
+      'bwrap: permission denied',
+    );
+    await expect(
+      writeSandboxFile(policy, request, new AbortController().signal),
+    ).rejects.toThrow('spawn denied\nbwrap: permission denied');
   });
   it('forwards the caller abort signal and stays on the pipe transport', async () => {
     const signal = new AbortController().signal;
@@ -74,11 +120,15 @@ describe('sandbox file worker client', () => {
   it.each(['ESTALE', 'EACCES', 'ENOSPC'])(
     'preserves worker error code %s',
     async (code) => {
-      result({
-        exitCode: 1,
-        sandboxStatus: { state: 'confirmed', exitCode: 1 },
-        output: JSON.stringify({ ok: false, code, error: 'worker failure' }),
-      });
+      result(
+        {
+          exitCode: 1,
+          sandboxStatus: { state: 'confirmed', exitCode: 1 },
+          output: JSON.stringify({ ok: false, code, error: 'worker failure' }),
+        },
+        JSON.stringify({ ok: false, code, error: 'worker failure' }),
+        'node warning',
+      );
       await expect(
         writeSandboxFile(policy, request, new AbortController().signal),
       ).rejects.toMatchObject({ code });
@@ -92,7 +142,6 @@ describe('sandbox file worker client', () => {
       sandboxStatus: { state: 'confirmed' as const, exitCode: 1 },
       exitCode: 1,
     },
-    { output: '{"ok":false}' },
   ])(
     'rejects ambiguous or unsuccessful completion without replay',
     async (overrides) => {

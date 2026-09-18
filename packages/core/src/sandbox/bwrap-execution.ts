@@ -25,7 +25,6 @@ import type {
   ShellPostPromoteSettleInfo,
 } from '../services/shellExecutionService.js';
 import { sandboxStatusError, type BwrapStatus } from './bwrap-status.js';
-import { realpathNearestExisting } from '../utils/paths.js';
 
 const debugLogger = createDebugLogger('BWRAP_EXECUTION');
 
@@ -36,7 +35,6 @@ export interface BwrapPolicy {
   filesystem: 'read-only' | 'workspace-write';
   network: 'open' | 'closed';
   bwrapPath?: string;
-  protectedRoots?: readonly string[];
 }
 
 export interface BwrapExecutionResult extends ShellExecutionResult {
@@ -122,11 +120,6 @@ export async function executeBwrap(
     path.dirname(relay),
     path.dirname(node),
     path.dirname(bwrap),
-    ...(policy.protectedRoots ?? []).map((root) => {
-      if (!path.isAbsolute(root))
-        throw new Error('Protected sandbox paths must be absolute.');
-      return realpathNearestExisting(root);
-    }),
     ...[
       '/proc',
       '/dev',
@@ -181,7 +174,22 @@ export async function executeBwrap(
     }
   };
   try {
-    scratch = directory(await mkdtemp(path.join(os.tmpdir(), 'qwen-sandbox-')));
+    const requestedScratchRoot = os.tmpdir();
+    const scratchRoot =
+      path.isAbsolute(requestedScratchRoot) && existsSync(requestedScratchRoot)
+        ? realpathSync(requestedScratchRoot)
+        : realpathSync('/tmp');
+    if (
+      contains(workspace, scratchRoot) ||
+      protectedRoots.some((protectedRoot) =>
+        contains(protectedRoot, scratchRoot),
+      )
+    )
+      throw new Error(
+        `Temporary root ${scratchRoot} overlaps the workspace or a protected root.`,
+      );
+    scratch = await mkdtemp(path.join(scratchRoot, 'qwen-sandbox-'));
+    scratch = directory(scratch);
     checkWritable(scratch);
     if (overlaps(workspace, scratch))
       throw new Error('Workspace and scratch must be disjoint.');

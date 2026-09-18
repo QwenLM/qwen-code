@@ -462,6 +462,8 @@ describe('ShellExecutionService', () => {
     );
 
     it('never replays a launch after PTY initialization fails after spawn', async () => {
+      const activeBefore = ShellExecutionService['activePtys'].size;
+      const disposeSpy = vi.spyOn(Terminal.prototype, 'dispose');
       mockPtyProcess.onData.mockImplementationOnce(() => {
         throw new Error('posix_spawnp failed after spawn');
       });
@@ -474,6 +476,12 @@ describe('ShellExecutionService', () => {
       );
       await expect(handle.result).rejects.toThrow('after spawn');
       expect(mockCpSpawn).not.toHaveBeenCalled();
+      expect(mockProcessKill).toHaveBeenCalledWith(
+        -mockPtyProcess.pid,
+        'SIGKILL',
+      );
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+      expect(ShellExecutionService['activePtys'].size).toBe(activeBefore);
     });
 
     it('ends stdin without reporting an early-close error when the exit status is known', async () => {
@@ -3288,6 +3296,24 @@ describe('ShellExecutionService child_process fallback', () => {
       ]);
     });
 
+    it('flushes a trailing partial character for streaming text', async () => {
+      await simulateExecutionWithConfig(
+        'partial-character',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from([0xe2]));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        shellExecutionConfig,
+        { streamStdout: true },
+      );
+      expect(onOutputEventMock).toHaveBeenLastCalledWith({
+        type: 'data',
+        chunk: '\ufffd',
+        stream: 'stdout',
+      });
+    });
+
     it('does not settle a streaming execution at exit while stdio is still draining', async () => {
       // The trailing-output fix: settling at 'exit' would race the
       // consumer's own settle (a background task closes its output file
@@ -4085,17 +4111,23 @@ describe('ShellExecutionService child_process fallback', () => {
     it('should not emit data events after binary is detected', async () => {
       mockIsBinary.mockImplementation((buffer) => buffer.includes(0x00));
 
-      await simulateExecution('cat mixed_file', (cp) => {
-        cp.stdout?.emit('data', Buffer.from('some text'));
-        cp.stdout?.emit('data', Buffer.from([0x00, 0x01, 0x02]));
-        cp.stdout?.emit('data', Buffer.from('more text'));
-        cp.emit('exit', 0, null);
-      });
+      await simulateExecution(
+        'cat mixed_file',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from([0xe2]));
+          cp.stdout?.emit('data', Buffer.from([0x00, 0x01, 0x02]));
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { streamStdout: true },
+      );
 
       const eventTypes = onOutputEventMock.mock.calls.map(
         (call: [ShellOutputEvent]) => call[0].type,
       );
-      expect(eventTypes).toEqual(['binary_detected']);
+      const binaryIndex = eventTypes.indexOf('binary_detected');
+      expect(binaryIndex).toBeGreaterThanOrEqual(0);
+      expect(eventTypes.slice(binaryIndex + 1)).not.toContain('data');
     });
   });
 
