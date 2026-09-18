@@ -6,8 +6,12 @@ does not retain another compiled copy of every ancestor rule. Nested rules,
 negation, directory-only patterns, and `.git/info/exclude` keep their existing
 precedence; ignore files below an ignored ancestor are not consulted.
 
-Transient directory memos and compiled matchers are discarded every 10,000
-ignore checks, including memo hits. This also releases the matchers' internal
+Transient directory memos and compiled matchers are discarded before the next
+ignore query after at least 10,000 matcher evaluations have accumulated. The
+counter includes both final path checks and ancestor-pruning checks performed
+while building a matcher on a cache miss, so deep paths consume multiple units
+instead of bypassing the bound. One query can cross the threshold; the rollover
+happens before the following query. This also releases the matchers' internal
 per-path result caches. Empty pattern lookups are discarded at that boundary;
 already-loaded non-empty rules are retained. The interval is an internal
 memory/performance tradeoff, not a user setting or a live reload mechanism.

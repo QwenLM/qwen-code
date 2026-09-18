@@ -23,7 +23,7 @@ export class GitIgnoreParser implements GitIgnoreFilter {
   // Directories with no additional rules share a compiled matcher.
   private ignorerCache: Map<string, ReturnType<typeof ignore>> = new Map();
   private chainIgnorers: Map<string, ReturnType<typeof ignore>> = new Map();
-  private ignorerLookups = 0;
+  private matcherChecksSinceReset = 0;
 
   constructor(projectRoot: string) {
     this.projectRoot = path.resolve(projectRoot);
@@ -154,8 +154,11 @@ export class GitIgnoreParser implements GitIgnoreFilter {
 
       // Reuse the matcher for the chain of contributing ignore files, not a
       // fresh copy of every ancestor rule for each directory in a large tree.
+      // Rollover is based on actual ignore-library evaluations, including the
+      // ancestor checks performed while constructing a cache-miss matcher.
+      this.resetMatcherCachesIfNeeded();
       const ig = this.getIgnorerForDir(path.dirname(resolved));
-      return ig.ignores(normalizedPath);
+      return this.matcherIgnores(ig, normalizedPath);
     } catch (_error) {
       return false;
     }
@@ -168,21 +171,6 @@ export class GitIgnoreParser implements GitIgnoreFilter {
    * directory is itself ignored, deeper `.gitignore` files are not consulted.
    */
   private getIgnorerForDir(leafDir: string): ReturnType<typeof ignore> {
-    // Count memo hits too: ignore() also caches every tested path internally.
-    // Drop all references to those matchers periodically, retaining only the
-    // already-loaded, non-empty rule snapshots rather than empty-directory
-    // entries that grow with the number of directories visited.
-    if (++this.ignorerLookups > MATCHER_CACHE_RESET_INTERVAL) {
-      this.ignorerLookups = 1;
-      this.ignorerCache.clear();
-      this.chainIgnorers.clear();
-      for (const [dir, patterns] of this.cache) {
-        if (patterns.length === 0) {
-          this.cache.delete(dir);
-        }
-      }
-    }
-
     const cached = this.ignorerCache.get(leafDir);
     if (cached) {
       return cached;
@@ -223,7 +211,7 @@ export class GitIgnoreParser implements GitIgnoreFilter {
       if (relativeDir) {
         // Append trailing '/' so directory-only patterns (e.g. `logs/`) match.
         const normalizedRelativeDir = relativeDir.replace(/\\/g, '/') + '/';
-        if (ig.ignores(normalizedRelativeDir)) {
+        if (this.matcherIgnores(ig, normalizedRelativeDir)) {
           // This directory is ignored by an ancestor's .gitignore.
           // According to git behavior, we don't need to process this
           // directory's .gitignore, as nothing inside it can be un-ignored.
@@ -250,6 +238,29 @@ export class GitIgnoreParser implements GitIgnoreFilter {
 
     this.ignorerCache.set(leafDir, ig);
     return ig;
+  }
+
+  private resetMatcherCachesIfNeeded(): void {
+    if (this.matcherChecksSinceReset < MATCHER_CACHE_RESET_INTERVAL) {
+      return;
+    }
+
+    this.matcherChecksSinceReset = 0;
+    this.ignorerCache.clear();
+    this.chainIgnorers.clear();
+    for (const [dir, patterns] of this.cache) {
+      if (patterns.length === 0) {
+        this.cache.delete(dir);
+      }
+    }
+  }
+
+  private matcherIgnores(
+    ig: ReturnType<typeof ignore>,
+    candidate: string,
+  ): boolean {
+    this.matcherChecksSinceReset += 1;
+    return ig.ignores(candidate);
   }
 
   private getChainIgnorer(

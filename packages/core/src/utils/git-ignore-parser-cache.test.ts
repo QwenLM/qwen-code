@@ -10,7 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { GitIgnoreParser } from './gitIgnoreParser.js';
 
-// Exercise a complete production cache window, including directory memo hits.
+// Exercise a complete production matcher-evaluation window.
 const LOOKUP_WINDOW = 10_000;
 
 describe('GitIgnoreParser cache retention', () => {
@@ -54,6 +54,30 @@ describe('GitIgnoreParser cache retention', () => {
     expect(parser['ignorerCache'].size).toBeLessThanOrEqual(LOOKUP_WINDOW);
     expect(parser['cache'].size).toBeLessThanOrEqual(LOOKUP_WINDOW + 1);
     expect(new Set(parser['ignorerCache'].values()).size).toBe(1);
+  });
+
+  it('counts ancestor matcher checks on deep cache misses', () => {
+    const depth = 25;
+    const tail = Array.from({ length: depth }, (_, i) => `level-${i}`).join(
+      '/',
+    );
+
+    expect(parser.isIgnored(`branch-0/${tail}/first.log`)).toBe(true);
+    const chainKey = `\0${root}`;
+    const firstMatcher = parser['chainIgnorers'].get(chainKey);
+    expect(firstMatcher).toBeDefined();
+
+    // A fresh deep branch is a cache miss. It evaluates every ancestor against
+    // the currently applicable matcher, plus the final path. Counting only
+    // top-level isIgnored() calls would leave the same matcher alive here.
+    const checksPerLookup = depth + 2;
+    const lookupsToCrossWindow = Math.ceil(LOOKUP_WINDOW / checksPerLookup) + 2;
+    for (let i = 1; i <= lookupsToCrossWindow; i++) {
+      expect(parser.isIgnored(`branch-${i}/${tail}/result.log`)).toBe(true);
+    }
+
+    expect(parser['chainIgnorers'].get(chainKey)).not.toBe(firstMatcher);
+    expect(parser['matcherChecksSinceReset']).toBeLessThan(LOOKUP_WINDOW);
   });
 
   it('releases matcher result caches even when every directory lookup is a memo hit', () => {
