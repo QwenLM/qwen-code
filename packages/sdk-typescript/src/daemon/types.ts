@@ -121,9 +121,8 @@ export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
 
 /**
  * @deprecated Goals no longer run evidence checkpoints, so there is no stall
- * streak to show against this. Kept because it is part of the published
- * surface; it still matches `GOAL_CHECKPOINT_STALL_LIMIT` in
- * `packages/core/src/goals/goal-protocol.ts` for as long as that exists.
+ * streak to show against this, and core no longer defines the limit it used
+ * to mirror. Kept only because it is part of the published surface.
  */
 export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
 
