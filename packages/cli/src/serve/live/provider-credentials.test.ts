@@ -264,6 +264,35 @@ describe('Live provider credentials', () => {
       );
     });
 
+    it('fails a provider-qualified selector that names no route instead of falling back', () => {
+      // Route deleted / flag dropped / typo: the stored legacy key and
+      // endpoint must not be picked up silently.
+      const input = routed(
+        { model: `openai:${route.id}`, apiKey: 'legacy-secret' },
+        { openai: [{ ...route, realtimeOnly: undefined }] },
+      );
+      expect(() => resolveLiveProviderCredential(input, { env: {} })).toThrow(
+        /names no realtimeOnly route under modelProviders\.openai/,
+      );
+    });
+
+    it('keeps treating an id that merely contains a colon as a bare id', () => {
+      const credential = resolveLiveProviderCredential(
+        routed({ model: 'vendor:custom-realtime', apiKey: 'legacy-secret' }),
+        { env: {} },
+      );
+      expect(credential.realtimeModel).toBe('vendor:custom-realtime');
+      expect(credential.apiKey).toBe('legacy-secret');
+    });
+
+    it('says the route was not found when the free-standing key is missing', () => {
+      expect(() =>
+        resolveLiveProviderCredential(routed({ model: 'mistyped-id' }), {
+          env: { DASHSCOPE_API_KEY: 'env-secret' },
+        }),
+      ).toThrow(/'mistyped-id' matches no realtimeOnly route/);
+    });
+
     it('resolves provider:modelId and refuses an ambiguous bare id', () => {
       const input = routed(
         {},

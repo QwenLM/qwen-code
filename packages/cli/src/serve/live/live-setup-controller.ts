@@ -250,21 +250,43 @@ export class LiveSetupController {
       );
     }
 
-    let usesRoute: boolean;
+    // A broken route configuration (ambiguous id, deleted route) fails only
+    // the updates that depend on the provider. Turning Live Voice off,
+    // clearing the key or changing the shortcut must keep working, otherwise
+    // the only way out is editing settings.json by hand.
+    const needsProvider =
+      (update.enabled === true && !current.enabled) ||
+      update.apiKey?.operation === 'replace' ||
+      providerChanged;
+    let usesRoute = false;
+    let routeError: unknown;
     try {
       usesRoute = findLiveRealtimeRoute(settings, nextModel) !== undefined;
     } catch (error) {
+      routeError = error;
+    }
+    if (routeError !== undefined && needsProvider) {
       throw new LiveSetupError(
-        error instanceof LiveProviderConfigError
-          ? error.message
+        routeError instanceof LiveProviderConfigError
+          ? routeError.message
           : 'The Live Voice model could not be resolved.',
         'invalid_live_model',
         400,
       );
     }
+    // A route reads its key through envKey and ignores liveVoice.apiKey, so a
+    // submitted key could never be validated: the check would run against the
+    // route's key, pass, and then store the unverified value in clear text.
+    if (usesRoute && update.apiKey?.operation === 'replace') {
+      throw new LiveSetupError(
+        `Live Voice model '${nextModel}' takes its key from its modelProviders route; experimental.liveVoice.apiKey is not used.`,
+        'live_api_key_unused',
+        400,
+      );
+    }
     // A realtimeOnly route brings its own key through envKey; only the
     // free-standing path needs liveVoice.apiKey.
-    if (nextEnabled && !usesRoute && !nextKey) {
+    if (nextEnabled && !usesRoute && !nextKey && routeError === undefined) {
       throw new LiveSetupError(
         'Configure the DashScope Realtime API key before enabling Live Voice.',
         'live_api_key_required',

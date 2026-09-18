@@ -158,6 +158,12 @@ export function listLiveRealtimeRoutes(
  * Match `experimental.liveVoice.model` (`modelId` or `provider:modelId`)
  * against the realtime routes. `undefined` means "no route": the caller falls
  * back to the free-standing `liveVoice.endpoint` / `liveVoice.apiKey` fields.
+ *
+ * Only a bare id may fall back. A selector qualified with a configured
+ * provider is an explicit request for a route, so a miss (route deleted, flag
+ * dropped, typo) is an error: falling back would silently pair a stored
+ * clear-text key with a possibly different region's endpoint and send the
+ * whole `provider:modelId` string upstream as the model id.
  */
 export function findLiveRealtimeRoute(
   settings: Settings,
@@ -175,6 +181,19 @@ export function findLiveRealtimeRoute(
       matches = routes.filter(
         (route) => route.provider === provider && route.id === id,
       );
+      const providers = settings.modelProviders as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        matches.length === 0 &&
+        providers &&
+        typeof providers === 'object' &&
+        Object.hasOwn(providers, provider)
+      ) {
+        throw new LiveProviderConfigError(
+          `experimental.liveVoice.model '${selector}' names no realtimeOnly route under modelProviders.${provider}.`,
+        );
+      }
     }
   }
   if (matches.length > 1) {
@@ -270,7 +289,7 @@ export function resolveLiveProviderCredential(
       (typeof configuredKey === 'string' ? configuredKey.trim() : '');
     if (!apiKey) {
       throw new LiveProviderConfigError(
-        'The DashScope Realtime API key is not configured.',
+        `The DashScope Realtime API key is not configured. '${live.model}' matches no realtimeOnly route in modelProviders, so experimental.liveVoice.apiKey is required.`,
       );
     }
     endpoint = validateRealtimeEndpoint(live.endpoint);

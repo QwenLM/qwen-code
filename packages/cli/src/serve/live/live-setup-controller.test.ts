@@ -285,6 +285,46 @@ describe('LiveSetupController', () => {
       });
     });
 
+    it('still turns off and rebinds the shortcut while the route is ambiguous', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        // Bare default id under two providers: unresolvable.
+        modelProviders: { openai: [route], 'dashscope-intl': [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+
+      await expect(
+        harness.controller.update({ voice: 'Ethan' }),
+      ).rejects.toMatchObject({ code: 'invalid_live_model', status: 400 });
+
+      await harness.controller.update({ shortcut: 'Command+L' });
+      expect(harness.settings().experimental?.liveVoice).toMatchObject({
+        shortcut: 'Command+L',
+      });
+      await harness.controller.update({ enabled: false });
+      expect(harness.setEnabled).toHaveBeenLastCalledWith(false);
+      expect(harness.settings().experimental?.liveVoice).toMatchObject({
+        enabled: false,
+      });
+      expect(harness.validateCredential).not.toHaveBeenCalled();
+    });
+
+    it('refuses to store a key the selected route would never use', async () => {
+      const harness = createHarness({
+        initiallyEnabled: true,
+        modelProviders: { openai: [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      await expect(
+        harness.controller.update({
+          apiKey: { operation: 'replace', value: 'unverifiable-secret' },
+        }),
+      ).rejects.toMatchObject({ code: 'live_api_key_unused', status: 400 });
+      // Validating against the route's key would pass and prove nothing.
+      expect(harness.validateCredential).not.toHaveBeenCalled();
+      expect(harness.persistSettings).not.toHaveBeenCalled();
+    });
+
     it('rejects a route that cannot produce a credential', async () => {
       const harness = createHarness({
         initiallyEnabled: true,
