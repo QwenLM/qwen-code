@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import ignore from 'ignore';
 import { isPathWithinRoot } from './workspaceContext.js';
 
-// Bound transient directory and per-path matcher caches during large scans.
+// Bound transient compiled matcher and per-path matcher caches during large scans.
 const MATCHER_CACHE_RESET_INTERVAL = 10_000;
 
 export interface GitIgnoreFilter {
@@ -248,11 +248,6 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     this.matcherChecksSinceReset = 0;
     this.ignorerCache.clear();
     this.chainIgnorers.clear();
-    for (const [dir, patterns] of this.cache) {
-      if (patterns.length === 0) {
-        this.cache.delete(dir);
-      }
-    }
   }
 
   private matcherIgnores(

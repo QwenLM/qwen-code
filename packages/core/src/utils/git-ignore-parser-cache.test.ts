@@ -46,14 +46,27 @@ describe('GitIgnoreParser cache retention', () => {
     expect(new Set(parser['ignorerCache'].values()).size).toBe(1);
   });
 
-  it('bounds directory memos and negative pattern lookups across a large scan', () => {
+  it('bounds matcher caches while retaining pattern lookup memos across a large scan', () => {
     for (let i = 0; i < LOOKUP_WINDOW + 5; i++) {
       expect(parser.isIgnored(`scratch-${i}/result.log`)).toBe(true);
     }
 
     expect(parser['ignorerCache'].size).toBeLessThanOrEqual(LOOKUP_WINDOW);
-    expect(parser['cache'].size).toBeLessThanOrEqual(LOOKUP_WINDOW + 1);
     expect(new Set(parser['ignorerCache'].values()).size).toBe(1);
+    expect(parser['cache'].has(path.join(root, 'scratch-0'))).toBe(true);
+    expect(parser['cache'].get(path.join(root, 'scratch-0'))).toEqual([]);
+  });
+
+  it('does not partially reload missing ignore files after matcher rollover', async () => {
+    await fs.mkdir(path.join(root, 'dynamic'));
+    expect(parser.isIgnored('dynamic/result.tmp')).toBe(false);
+    await write('dynamic/.gitignore', '*.tmp\n');
+
+    for (let i = 0; i < LOOKUP_WINDOW; i++) {
+      expect(parser.isIgnored(`scratch-${i}/probe.txt`)).toBe(false);
+    }
+
+    expect(parser.isIgnored('dynamic/result.tmp')).toBe(false);
   });
 
   it('counts ancestor matcher checks on deep cache misses', () => {
@@ -131,7 +144,7 @@ describe('GitIgnoreParser cache retention', () => {
       expect(parser.isIgnored(`scratch/probe-${i}.txt`)).toBe(false);
     }
 
-    // Keep the already-loaded rule snapshot; drop only derived/negative caches.
+    // Keep the loaded pattern snapshots while resetting derived matchers.
     expect(parser['cache'].get(root)).toBe(rootPatterns);
     for (const [file, expected] of [...cases].reverse()) {
       expect(parser.isIgnored(file)).toBe(expected);

@@ -6,21 +6,22 @@ does not retain another compiled copy of every ancestor rule. Nested rules,
 negation, directory-only patterns, and `.git/info/exclude` keep their existing
 precedence; ignore files below an ignored ancestor are not consulted.
 
-Transient directory memos and compiled matchers are discarded before the next
-ignore query after at least 10,000 matcher evaluations have accumulated. The
-counter includes both final path checks and ancestor-pruning checks performed
-while building a matcher on a cache miss, so deep paths consume multiple units
-instead of bypassing the bound. One query can cross the threshold; the rollover
-happens before the following query. This also releases the matchers' internal
-per-path result caches. Empty pattern lookups are discarded at that boundary;
-already-loaded non-empty rules are retained. The interval is an internal
-memory/performance tradeoff, not a user setting or a live reload mechanism.
-Restart the session after changing ignore files.
+Transient compiled matchers are discarded before the next ignore query after
+at least 10,000 matcher evaluations have accumulated. The counter includes both
+final path checks and ancestor-pruning checks performed while building a matcher
+on a cache miss, so deep paths consume multiple units instead of bypassing the
+bound. One query can cross the threshold; the rollover happens before the
+following query. This also releases the matchers' internal per-path result
+caches. Per-directory rule lookups, including empty `.gitignore` probes, are
+retained for the session, and `.git/info/exclude` is read at most once per
+process. The interval is an internal memory/performance tradeoff, not a user
+setting or a reload mechanism. Restart the session after changing ignore files.
 
 This limits retention caused by repeatedly compiling the same rules, not all
 memory used by a search. A sparse glob can still visit a large directory tree,
-and loaded rules still scale with the number of contributing ignore files.
-For generated outputs that should not be searched, add their directory to
+and per-directory rule lookup memos still scale with directories visited while
+loaded rules scale with the number of contributing ignore files. For generated
+outputs that should not be searched, add their directory to
 [`.qwenignore`](../../users/configuration/qwen-ignore.md) so traversal skips the
 subtree. The existing Glob result limit is unchanged.
 
