@@ -961,6 +961,63 @@ describe('WorkflowRunner', () => {
     await expect(fs.readFile(journalPath, 'utf8')).resolves.toBe(journalBefore);
   });
 
+  // After a restart there is no registry entry to restore the script from;
+  // the run's snapshot is what still holds it. Without reading it, a resume
+  // that failed to start left the original run's copy overwritten by the
+  // script of the attempt that never ran.
+  it('restores the original inline script from its snapshot when a resume fails to start after a restart', async () => {
+    const root = await makeStorageRoot();
+    const first = configWithRegistry();
+    stubStorage(first.config, root);
+    const initial = await WorkflowRunner.start({
+      config: first.config,
+      signal: new AbortController().signal,
+      script: 'return "original"',
+      args: undefined,
+      dispatch: async () => 'unused',
+    });
+    await initial.completion;
+    const scriptPath = initial.scriptPath!;
+
+    // A second process: fresh registry, same storage, the run in a snapshot.
+    const { config, registry } = configWithRegistry();
+    stubStorage(config, root);
+    readWorkflowSnapshotMock.mockResolvedValueOnce({
+      runId: initial.runId,
+      script: 'return "original"',
+    });
+    let releasePersist: (() => void) | undefined;
+    persistInlineWorkflowScriptMock.mockImplementationOnce(
+      async (_config: Config, runId: string, script: string) => {
+        await new Promise<void>((resolve) => {
+          releasePersist = resolve;
+        });
+        const file = path.join(root, 'generated', 'inline', `${runId}.js`);
+        await fs.writeFile(file, script, 'utf8');
+        return file;
+      },
+    );
+
+    const resume = WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return "never ran"',
+      args: undefined,
+      resumeFromRunId: initial.runId,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+    await vi.waitFor(() => expect(releasePersist).toBeDefined());
+    expect(registry.cancelStarting(initial.runId)).toBe(true);
+    releasePersist!();
+
+    await expect(resume).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+    expect(readWorkflowSnapshotMock).toHaveBeenCalledTimes(1);
+    await expect(fs.readFile(scriptPath, 'utf8')).resolves.toBe(
+      'return "original"',
+    );
+  });
+
   it.each([
     [true, true, false, true],
     [true, false, false, false],

@@ -31,6 +31,7 @@ import {
 import {
   readWorkflowSnapshot,
   writeWorkflowSnapshot,
+  type WorkflowSnapshot,
 } from '../workflow-snapshot.js';
 import {
   readWorkflowSourceRef,
@@ -292,6 +293,13 @@ export class WorkflowRunner {
     };
     const storage = config.storage;
     const previousEntry = registry?.get(runId);
+    // The run as it was before this start: the registry entry while the
+    // process still has one, else its snapshot (the registry does not outlive
+    // the process). Read once, for the sourceRef guard below and for putting
+    // back the inline script copy a resume that fails to start overwrote.
+    let previousRun:
+      | Pick<WorkflowSnapshot, 'sourceRef' | 'script'>
+      | undefined = previousEntry;
     let journalPath = storage
       ? storage.getWorkflowRunJournalPath(runId)
       : undefined;
@@ -384,14 +392,14 @@ export class WorkflowRunner {
             'Workflow sourceRef must match the original journal. Start a new run to use a different source.',
           );
         }
-        // The registry does not outlive the process, so after a restart the
-        // run's snapshot is what still says it carried a reference. Without
-        // it this guard could not fire, and the resumed run would settle
-        // without the reference and overwrite the snapshot that held it.
-        const recordedSourceRef = previousEntry
-          ? previousEntry.sourceRef
-          : (await readWorkflowSnapshot(config, runId))?.sourceRef;
-        if (recordedSourceRef && !original) {
+        // After a restart the run's snapshot is what still says it carried a
+        // reference. Without it this guard could not fire, and the resumed
+        // run would settle without the reference and overwrite the snapshot
+        // that held it.
+        if (!previousRun) {
+          previousRun = await readWorkflowSnapshot(config, runId);
+        }
+        if (previousRun?.sourceRef && !original) {
           throw new Error(
             'Workflow source metadata is missing from its journal.',
           );
@@ -435,7 +443,9 @@ export class WorkflowRunner {
       // Persisted only once the run is certain to start: a script that never
       // compiled, and a start the registry cancelled out from under us, leave
       // no file behind. A resume of an inline script overwrites the copy from
-      // the original run, which is the file the model was told to edit.
+      // the original run, which is the file the model was told to edit; a
+      // resume that then fails to start puts the original back (see the
+      // catch below).
       if (options.script !== undefined && scriptPath === undefined) {
         const persisted = await persistInlineWorkflowScript(
           config,
@@ -516,8 +526,8 @@ export class WorkflowRunner {
       if (persistedInlineScript && options.resumeFromRunId === undefined) {
         await deleteInlineWorkflowScript(config, runId);
       }
-      if (persistedInlineScript && options.resumeFromRunId && previousEntry) {
-        await persistInlineWorkflowScript(config, runId, previousEntry.script);
+      if (persistedInlineScript && options.resumeFromRunId && previousRun) {
+        await persistInlineWorkflowScript(config, runId, previousRun.script);
       }
       if (options.resumeFromRunId === undefined) {
         await journal?.remove();

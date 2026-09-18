@@ -757,7 +757,12 @@ export class WorkflowRunRegistry {
     }
     const existing = this.entries.get(runId);
     if (existing && isActiveWorkflowStatus(existing.status)) {
-      return existing.status === 'paused' || existing.status === 'pausing'
+      // Only a run that has finished pausing can be resumed (`resume()`
+      // wants `paused`), so a run still on its way there is told to wait.
+      if (existing.status === 'pausing') {
+        return `Workflow run ${runId} is pausing, not finished. ${twoCopies}: wait for it to pause and resume it from /workflows, or cancel it there and wait for it to exit.`;
+      }
+      return existing.status === 'paused'
         ? `Workflow run ${runId} is paused, not finished. ${twoCopies}: resume it from /workflows, or cancel it there and wait for it to exit.`
         : `Workflow run ${runId} is still running. ${twoCopies}: cancel it from /workflows first, or wait for it to settle.`;
     }

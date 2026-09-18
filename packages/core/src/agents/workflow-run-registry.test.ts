@@ -1139,7 +1139,9 @@ describe('WorkflowRunRegistry', () => {
     const paused = r.register(reg('wf_live_paused'));
     r.onDispatchStateChange(paused.runId, 'pausing');
     expect(r.get(paused.runId)?.status).toBe('pausing');
-    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(pausedRefusal);
+    expect(() => r.reserveStart(paused.runId, fresh)).toThrow(
+      'Workflow run wf_live_paused is pausing, not finished. Starting it again now would run two copies of its agents against the same journal: wait for it to pause and resume it from /workflows, or cancel it there and wait for it to exit.',
+    );
     r.onDispatchStateChange(paused.runId, 'paused');
     expect(r.get(paused.runId)?.status).toBe('paused');
     expect(() => r.reserveStart(paused.runId, fresh)).toThrow(pausedRefusal);
