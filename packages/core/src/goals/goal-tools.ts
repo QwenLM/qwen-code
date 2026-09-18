@@ -80,6 +80,8 @@ function withoutDeprecatedParams<T extends object>(
   params: T,
   names: readonly string[],
 ): T {
+  // Anything that is not an object is left for the schema check to describe.
+  if (typeof params !== 'object' || params === null) return params;
   if (!names.some((name) => name in params)) return params;
   return Object.fromEntries(
     Object.entries(params).filter(([key]) => !names.includes(key)),
@@ -344,7 +346,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             type: 'string',
             enum: ['authority', 'external', 'repeated', 'infeasible'],
             description:
-              'Set for a blocked proposal. authority: a user or maintainer decision or permission is required. external: an evidenced external resource or capability is unavailable. repeated: the same evidenced blocker, with the exact same reason text, across three consecutive Goal turns. infeasible: a tool result (not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; never for difficulty, uncertainty, or information you could still obtain, and the reason must state what was checked. Omitted: the repeated-blocker audit applies.',
+              'Set for a blocked proposal. authority: a user or maintainer decision or permission is required. external: an evidenced external resource or capability is unavailable. repeated: the same evidenced blocker, with the exact same reason text, across three consecutive Goal turns. infeasible: a tool result (not your own text) shows the objective cannot be satisfied as written -- it contradicts itself, names a target that verifiably does not exist, or needs an action no tool can perform; never for difficulty, uncertainty, information you could still obtain, or wanting to ask, and the reason must state what was checked and why no in-scope work could satisfy the objective. Omitted: the repeated-blocker audit applies.',
           },
         },
         required: ['status', 'reason'],
@@ -834,7 +836,7 @@ export class ProposeGoalTool extends BaseDeclarativeTool<
     super(
       ProposeGoalTool.Name,
       ToolDisplayNames.PROPOSE_GOAL,
-      'Propose a session Goal. The user approves or declines it in a dialog that no permission rule or approval mode skips, and only approval sets it. Propose only when the user asked for an outcome with a verifiable end state that spans several turns, or /goal-draft produced an objective; never to widen their request. If a Goal is active this tool refuses: give the user a `/goal edit …` or `/goal set …` line instead. A stopped Goal is replaced on approval. If the user declines you are not told why: do not ask, and do not propose the same or a reworded objective again. After approval, acknowledge in one sentence and stop with no further tool calls; the Goal starts on its own when the turn ends.',
+      'Propose a session Goal. The user approves or declines it in a dialog that no permission rule or approval mode skips, and only approval sets it. Propose only when the user asked for an outcome with a verifiable end state that spans several turns, or /goal-draft produced an objective; never to widen their request. If a Goal is active this tool refuses: give the user a `/goal edit …` or `/goal set …` line instead. A stopped Goal is replaced on approval. If the user declines you are not told why: do not ask, and do not propose the same or a reworded objective again. After approval, acknowledge in one sentence and stop with no further tool calls; the Goal starts on its own when the turn ends. Not available in plan mode.',
       Kind.Other,
       {
         type: 'object',

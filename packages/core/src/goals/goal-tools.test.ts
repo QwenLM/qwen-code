@@ -550,7 +550,10 @@ describe('UpdateGoalTool', () => {
       'a tool result (not your own text)',
     );
     expect(blockerKind.description).toContain(
-      'never for difficulty, uncertainty, or information you could still obtain',
+      'never for difficulty, uncertainty, information you could still obtain, or wanting to ask',
+    );
+    expect(blockerKind.description).toContain(
+      'why no in-scope work could satisfy the objective',
     );
     expect(tool.description).not.toContain('infeasible');
   });
@@ -571,6 +574,13 @@ describe('UpdateGoalTool', () => {
         citations: [],
       } as never),
     ).not.toBeNull();
+    // A call with no arguments at all gets the schema's answer, not a throw.
+    expect(tool.validateToolParams(undefined as never)).toMatch(/must/i);
+    expect(
+      new GetGoalTool(
+        makeConfig({ getGoalForWorker: vi.fn() }),
+      ).validateToolParams(null as never),
+    ).toMatch(/must/i);
   });
 
   it('records the proposal without references and without reading a catalog', async () => {
@@ -1205,6 +1215,9 @@ describe('ProposeGoalTool', () => {
     expect(tool.description).toContain(
       'do not propose the same or a reworded objective again',
     );
+    // The tool is declared in an interactive plan-mode session and refuses at
+    // confirmation time there; the clause is the model's only static hint.
+    expect(tool.description).toContain('Not available in plan mode.');
   });
 
   it('validates the objective', () => {
