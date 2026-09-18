@@ -24,9 +24,11 @@ const steps = workflow.jobs['review-pr'].steps;
 const prepare = steps.find((s) => s.id === 'review_scratch');
 const cleanup = steps.find((s) => s.name === 'Clean review scratch directory');
 const review = steps.find((s) => s.name === 'Run review');
+const worktreeCleanup = steps.find((s) => s.name === 'Clean review worktrees');
 
 test('review scratch cleanup runs after artifacts and only removes its own directory', () => {
   const root = mkdtempSync(join(tmpdir(), 'review-cleanup-test-'));
+  const outside = mkdtempSync(join(tmpdir(), 'review-cleanup-outside-'));
   const output = join(root, 'output');
   const env = { ...process.env, RUNNER_TEMP: root, GITHUB_OUTPUT: output };
   const run = (script, extra = {}) =>
@@ -49,7 +51,7 @@ test('review scratch cleanup runs after artifacts and only removes its own direc
     assert.equal(run(cleanup.run, { REVIEW_SCRATCH: scratch }).status, 0);
     for (const invalid of [
       root,
-      '/tmp',
+      outside,
       `${root}/qwen-review-scratch.x/../qwen-review-scratch.other`,
     ]) {
       assert.notEqual(run(cleanup.run, { REVIEW_SCRATCH: invalid }).status, 0);
@@ -58,14 +60,37 @@ test('review scratch cleanup runs after artifacts and only removes its own direc
     symlinkSync(sibling, scratch);
     assert.equal(run(cleanup.run, { REVIEW_SCRATCH: scratch }).status, 0);
     assert.equal(existsSync(join(sibling, 'keep')), true);
-    assert.match(cleanup.if, /always\(\)/);
-    assert.ok(
-      steps.indexOf(cleanup) >
-        steps.findIndex((s) => s.name === 'Upload review artifacts'),
+    const failedScratch = join(root, 'qwen-review-scratch.failed');
+    const bin = join(root, 'bin');
+    mkdirSync(failedScratch);
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'rm'), '#!/bin/bash\nexit 1\n', { mode: 0o755 });
+    const failedCleanup = run(cleanup.run, {
+      REVIEW_SCRATCH: failedScratch,
+      PATH: `${bin}:${process.env.PATH}`,
+    });
+    assert.equal(failedCleanup.status, 0);
+    assert.match(failedCleanup.stdout, /::error::Could not remove/);
+    assert.equal(
+      cleanup.if,
+      "always() && steps.review_scratch.outputs.dir != ''",
     );
+    const uploadIndex = steps.findIndex(
+      (s) => s.name === 'Upload review artifacts',
+    );
+    assert.notEqual(uploadIndex, -1);
+    assert.ok(steps.indexOf(cleanup) > uploadIndex);
     assert.equal(review.env.TMPDIR, '${{ steps.review_scratch.outputs.dir }}');
-    assert.match(review.run, /--append-system-prompt .*TMPDIR=\$TMPDIR/);
+    assert.match(
+      review.run,
+      /--append-system-prompt .*TMPDIR=\$\{TMPDIR:-\/tmp\}/,
+    );
+    assert.match(
+      worktreeCleanup.run,
+      /"\$\{RUNNER_TEMP:-\/tmp\}"\/qwen-review-scratch\.\*/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });

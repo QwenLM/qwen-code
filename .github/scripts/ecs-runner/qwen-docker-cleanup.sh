@@ -46,10 +46,11 @@ docker image prune --force --filter 'until=24h' || echo 'warning: dangling image
 # Image pruning does not reclaim BuildKit's intermediate npm/build layers.
 # Docker protects in-use cache; do not wait for the shared CI daemon lock,
 # which can stay busy indefinitely on a host running overlapping jobs.
+cleanup_status=0
 timeout 20m docker builder prune --all --force \
-  --filter 'until=24h' --keep-storage 30GB || {
+  --filter 'until=24h' --reserved-space 30GB || {
   echo 'error: Docker build cache cleanup failed' >&2
-  exit 1
+  cleanup_status=1
 }
 
 # Take the shared daemon lock exclusively, non-blocking, only around the
@@ -61,14 +62,16 @@ timeout 20m docker builder prune --all --force \
 # e2e/release leg has run, and creating it here as root would break later CI.
 if [[ ! -e "$daemon_lock" ]]; then
   echo "skipped: no sandbox daemon lock at $daemon_lock; labelled image prune skipped" >&2
-  exit 0
+  exit "$cleanup_status"
 fi
 exec 8>>"$daemon_lock" || {
   echo "error: cannot open sandbox daemon lock at $daemon_lock" >&2
   exit 1
 }
-flock --nonblock 8 || { echo 'skipped: sandbox daemon lock busy' >&2; exit 0; }
+flock --nonblock 8 || { echo 'skipped: sandbox daemon lock busy' >&2; exit "$cleanup_status"; }
 
 timeout 20m docker image prune --all --force \
   --filter 'label=org.qwen-code.ci.sandbox=true' \
   --filter 'until=24h' || echo 'warning: Qwen CI image prune failed' >&2
+
+exit "$cleanup_status"

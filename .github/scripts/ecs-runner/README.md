@@ -102,16 +102,18 @@ containerd leases, or containerd snapshots directly. Those resources require
 separate disk-pressure monitoring and a host drain before manual cleanup.
 
 The PR review workflow creates a private scratch directory under `RUNNER_TEMP`,
-exports it as `TMPDIR`, and instructs the agent and its subagents to keep
-verification copies there. An `always()` step removes that directory after
-artifact upload, including on failed or cancelled reviews when cleanup steps
-can run. Cleanup failures are reported in the job log.
+exports it as `TMPDIR`, and asks the top-level agent to keep verification
+copies there and pass the same requirement to its subagents. An `always()`
+step removes that directory after artifact upload, including on failed or
+cancelled reviews when cleanup steps can run. Cleanup failures are reported in
+the job log.
 
 This is a temporary-directory convention, not filesystem isolation: commands
 that explicitly write elsewhere bypass it. Existing arbitrary copies in `/tmp`
 remain covered only by the seven-day policy. This service does not remove them
-by name because they may belong to an active job. Host crashes or forced kills
-can also prevent job cleanup; the host policy remains a fallback. Build-cache
+by name because they may belong to an active job. A later review job retries
+removing stale `qwen-review-scratch.*` directories from `RUNNER_TEMP`; residue
+on a host that runs no later review still requires manual cleanup. Build-cache
 reclamation does not initialize unused data disks.
 
 ## Regression check

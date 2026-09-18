@@ -1793,7 +1793,7 @@ jobs:
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
-              --append-system-prompt "Store all temporary verification clones, scratch worktrees, and test files under TMPDIR=$TMPDIR. Use mktemp -d inside that directory; do not create hardcoded /tmp/verify-* or /tmp/qwen-verify-* paths. Pass this directory requirement to every subagent. Keep final review artifacts in the normal review artifact paths so they are uploaded before cleanup." \
+              --append-system-prompt "Store all temporary verification clones, scratch worktrees, and test files under TMPDIR=${TMPDIR:-/tmp}. Use mktemp -d inside that directory; do not create hardcoded /tmp/verify-* or /tmp/qwen-verify-* paths. Pass this directory requirement to every subagent. Keep final review artifacts in the normal review artifact paths so they are uploaded before cleanup." \
               --prompt "$attempt_prompt" \
               --output-format stream-json \
               | tee "$LOG_PATH"
@@ -2932,7 +2932,6 @@ jobs:
             echo 'Removed job-owned review scratch directory'
           else
             echo '::error::Could not remove job-owned review scratch directory'
-            exit 1
           fi
 
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
@@ -2959,16 +2958,17 @@ jobs:
         timeout-minutes: 5
         run: |-
           set -uo pipefail
-          # Sweep the per-run staging dirs 'Stage review artifacts' mints
+          # Sweep the per-run artifact staging and review scratch dirs minted
           # under RUNNER_TEMP, which survives across jobs on this pool: the
           # upload has already run, and a runner executes one job at a time,
-          # so nothing else owns a live staging dir. Runs BEFORE the .git
-          # check so a job that dies before checkout still sweeps. The
-          # legacy fixed path rides along; foreign-uid residue that refuses
-          # removal stays — it can never be published, because the upload
-          # reads only the per-run mktemp path this job output.
+          # so nothing else owns a live directory. Runs BEFORE the .git check
+          # so a job that dies before checkout still sweeps. The legacy fixed
+          # upload path rides along; foreign-uid residue that refuses removal
+          # stays — it can never be published, because the upload reads only
+          # the per-run mktemp path this job output.
           rm -rf "${RUNNER_TEMP:-/tmp}"/qwen-review-upload.* \
-            "${RUNNER_TEMP:-/tmp}"/qwen-review-upload 2>/dev/null || true
+            "${RUNNER_TEMP:-/tmp}"/qwen-review-upload \
+            "${RUNNER_TEMP:-/tmp}"/qwen-review-scratch.* 2>/dev/null || true
           if [ ! -e .git ]; then
             echo "no Git checkout; nothing to clean"
             exit 0
