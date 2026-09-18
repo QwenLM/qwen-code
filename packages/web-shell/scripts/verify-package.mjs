@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const typesRoot = resolve(packageRoot, 'dist/types');
+const repositoryAliasSpecifier =
+  /\b(?:from|import\s*\(|require\s*\()\s*['"]@\//;
 
 async function* declarationFiles(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -19,7 +21,7 @@ async function* declarationFiles(directory) {
 const failures = [];
 for await (const file of declarationFiles(typesRoot)) {
   const source = await readFile(file, 'utf8');
-  if (/['"]@\//.test(source)) {
+  if (repositoryAliasSpecifier.test(source)) {
     failures.push(
       `repository-only @/ import leaked into ${file.slice(packageRoot.length + 1)}`,
     );
