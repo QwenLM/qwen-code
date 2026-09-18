@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import * as vm from 'node:vm';
 import { prepareNodeReplCell } from './cell-transform.js';
 
 describe('prepareNodeReplCell', () => {
@@ -35,38 +36,74 @@ describe('prepareNodeReplCell', () => {
   });
 
   it('keeps a cell parseable when a top-level statement omits its semicolon', async () => {
-    // The commit is injected at a top-level statement's `endIndex`. Without a
-    // leading terminator the generated identifier is glued onto the user's last
-    // token, and the kernel rejects the entire cell with `SyntaxError: Unexpected
-    // identifier '__qwen_repl_...'`. The two shapes fail for different reasons, so
-    // they are covered separately.
+    // Invariant: the commit must be terminated, so the identifier it starts with can
+    // never be glued onto the user's last token. Several edits land on the same
+    // top-level statement boundary — declarator markers, the cancellation guard, the
+    // carried-reference tail, and the commit itself — and the commit must sort last
+    // among them. A leading `;` is what makes that true whatever the user wrote.
     //
-    // Path 1: an unterminated expression statement. `activeBindings` is seeded from
-    // `previousBindings`, so every cell after the first one has a non-empty commit.
-    const expression = await prepareNodeReplCell('next', {
-      previousBindings: [{ name: 'previous', kind: 'const' }],
-      cellId: 'cell-omit-semicolon',
-    });
-    // Path 2: an unterminated declaration in a fresh kernel. Here the hoisted `var`
-    // seed alone makes `activeBindings` non-empty, and the declarator marker lands
-    // at the same offset as the commit, so the two are concatenated:
-    // `var next = 1, <helper> = (..., undefined)__qwen_repl_..._snapshot[...]`.
-    const declaration = await prepareNodeReplCell('var next = 1', {
-      previousBindings: [],
-      cellId: 'cell-omit-semicolon-declaration',
-    });
+    // The oracle is the parser the kernel uses (`vm.SourceTextModule`), not a token
+    // class: a token class only covers the endings someone enumerated, while the shape
+    // that ends a cell is arbitrary (`... 1`, `... 'literal'`, `... }`). The fixtures
+    // below pick one representative per route to a shared offset.
+    const cases = {
+      // Path 1: an unterminated expression statement. `activeBindings` is seeded from
+      // `previousBindings`, so every cell after the first one has a non-empty commit.
+      expression: await prepareNodeReplCell('next', {
+        previousBindings: [{ name: 'previous', kind: 'const' }],
+        cellId: 'cell-omit-semicolon',
+      }),
+      // Path 2: an unterminated declaration in a fresh kernel. Here the hoisted `var`
+      // seed alone makes `activeBindings` non-empty, and the declarator marker lands at
+      // the same offset as the commit.
+      declaration: await prepareNodeReplCell('var next = 1', {
+        previousBindings: [],
+        cellId: 'cell-omit-semicolon-declaration',
+      }),
+      // Tails a token class tends to miss: the last character is a quote.
+      literal: await prepareNodeReplCell("'literal'", {
+        previousBindings: [{ name: 'previous', kind: 'const' }],
+        cellId: 'cell-omit-semicolon-literal',
+      }),
+      template: await prepareNodeReplCell('`done: ${previous}`', {
+        previousBindings: [{ name: 'previous', kind: 'const' }],
+        cellId: 'cell-omit-semicolon-template',
+      }),
+      // The carried-reference family: `})["name"]` is a shape no other fixture
+      // produces, and it shares the commit's offset.
+      carried: await prepareNodeReplCell('handler = () => 1', {
+        previousBindings: [{ name: 'handler', kind: 'let' }],
+        cellId: 'cell-omit-semicolon-carried',
+      }),
+    };
 
-    for (const { source } of [expression, declaration]) {
-      expect(source).not.toMatch(/[\w$)\]]__qwen_repl_/);
+    // The kernel compiles exactly this source, so compile it the same way.
+    for (const [name, { source }] of Object.entries(cases)) {
+      expect(
+        () => new vm.SourceTextModule(source, { identifier: `cell:${name}` }),
+        `${name} must compile`,
+      ).not.toThrow();
     }
-    // The commit still carries the payload it exists for.
-    expect(expression.source).toContain('["previous"] = {binding:');
-    expect(declaration.source).toContain('["next"] = {binding:');
+
+    // Compiling is necessary but not sufficient: a fix that simply *skips* the commit
+    // for unterminated statements compiles too, and would silently drop the
+    // statement-boundary snapshot the commit exists for. These pin the commit itself,
+    // on the physical line the one-line prelude cannot reach, keyed on the `;` that
+    // discriminates it from the declarator marker.
+    const bodyLine = (source: string): string => source.split('\n')[1] ?? '';
+    expect(bodyLine(cases.expression.source)).toContain('["previous"] = {binding:');
+    expect(bodyLine(cases.declaration.source)).toMatch(
+      /undefined\);__qwen_repl_\w+__snapshot\["next"\] = \{binding:/,
+    );
+    expect(bodyLine(cases.carried.source)).toContain('})["handler"];__qwen_repl_');
+
     // LINE_OFFSET invariant: the prelude occupies exactly one physical line, so the
-    // user's first line stays physical line 2 and reported stack traces keep lining
-    // up with the code the model wrote. Terminating the commit must not add a line.
-    expect(expression.source.split('\n')[1]).toContain('next');
-    expect(declaration.source.split('\n')[1]).toContain('var next = 1');
+    // user's first line stays physical line 2 and stack traces keep lining up with the
+    // code the model wrote. Terminating the commit must not add a line.
+    expect(bodyLine(cases.expression.source)).toContain('next');
+    expect(bodyLine(cases.declaration.source)).toContain('var next = 1');
+    // The carried-reference rewrite keeps the user's code on physical line 2 too.
+    expect(bodyLine(cases.carried.source)).toContain('({["handler"]:() => 1})["handler"];');
   });
 
   it('carries a previous binding with its declaration kind so conflicts are native', async () => {
