@@ -427,6 +427,12 @@ import {
   toPermissionOptions,
 } from './permissionUtils.js';
 import {
+  buildPeerReviewRequest,
+  type PeerReviewDecision,
+  peerReviewDecision,
+  type PeerReviewSubject,
+} from '../peer-inbound.js';
+import {
   MessageRewriteMiddleware,
   loadRewriteConfig,
 } from './rewrite/index.js';
@@ -1496,7 +1502,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
@@ -2157,6 +2163,8 @@ export class Session implements SessionContext {
   private currentNotificationWorkChainId?: string;
   private readonly channelTaskCaptures = new Set<ChannelTaskResponseCapture>();
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
+  /** Ids of peer messages accepted and not yet in the notification queue. */
+  private readonly acceptingPeerMessageIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
@@ -10591,6 +10599,85 @@ export class Session implements SessionContext {
         }
       }
     }
+  }
+
+  /**
+   * Queue a cross-session message this session's gate accepted.
+   *
+   * It travels as a background notification: recorded in the transcript
+   * first, then handled in a turn of its own once the session is idle —
+   * after whatever prompt is running, the same "next turn" a person at a
+   * terminal gets. The message id is the task id, so a repeat of it is
+   * recognised rather than handled twice.
+   */
+  async enqueuePeerMessage(message: {
+    msgId: string;
+    displayText: string;
+    modelText: string;
+    label?: string;
+  }): Promise<{ accepted: boolean }> {
+    this.acceptingPeerMessageIds.add(message.msgId);
+    try {
+      return await this.enqueueBackgroundNotification({
+        taskId: message.msgId,
+        // A task status to the notification pipeline; for a message it
+        // means the message arrived, which is all there is to say.
+        status: 'completed',
+        kind: 'peer',
+        displayText: message.displayText,
+        modelText: message.modelText,
+        ...(message.label !== undefined ? { label: message.label } : {}),
+      });
+    } finally {
+      this.acceptingPeerMessageIds.delete(message.msgId);
+    }
+  }
+
+  /**
+   * Whether another peer message fits without pushing anything out of the
+   * notification queue. Checked before a message is accepted, so a full
+   * queue turns the sender away with an honest receipt instead of evicting
+   * a result the session has not seen.
+   */
+  hasRoomForPeerMessage(): boolean {
+    return (
+      !this.disposed &&
+      !this.closing &&
+      this.notificationQueue.length + this.acceptingPeerMessageIds.size <
+        MAX_BACKGROUND_NOTIFICATION_QUEUE
+    );
+  }
+
+  /** Ids of peer messages accepted here that no turn has handled yet. */
+  queuedPeerMessageIds(): string[] {
+    return [
+      ...this.acceptingPeerMessageIds,
+      ...this.notificationQueue
+        .filter((item) => item.kind === 'peer')
+        .map((item) => item.taskId),
+    ];
+  }
+
+  /**
+   * Ask this session's client whether to deliver a held cross-session
+   * message.
+   *
+   * Sent straight to the client rather than through the queue tool
+   * approvals share: a hold can wait minutes for an answer, and a tool
+   * call in the meantime must not wait behind it. Rejects when `signal`
+   * aborts; resolves `cancelled` for any answer that is not one of the
+   * two offered options.
+   */
+  async requestPeerMessageReview(
+    subject: PeerReviewSubject,
+    signal: AbortSignal,
+  ): Promise<PeerReviewDecision> {
+    const response = await requestPermissionWithAbort(
+      this.client,
+      buildPeerReviewRequest(this.sessionId, subject),
+      signal,
+    );
+    return peerReviewDecision(response);
   }
 
   async #persistDaemonBackgroundNotification(

@@ -20,6 +20,7 @@ import {
   ApprovalMode,
   buildDeliveryStatusFrame,
   buildUserFrame,
+  canonicalizeMsgId,
   MAX_HELD_MESSAGES,
   MAX_SETTLED_IDS,
   parsePeerFrame,
@@ -223,9 +224,9 @@ async function start(
         }
       | undefined;
     reassertSessionRecord?: () => Promise<void>;
-    getPolicySetting?: () => InboundPolicy | undefined;
-    getHeldExpiryMs?: () => number | null;
-    getPolicyScope?: () => PolicyScope | undefined;
+    getPolicySetting?: (sessionId?: string) => InboundPolicy | undefined;
+    getHeldExpiryMs?: (sessionId?: string) => number | null;
+    getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
     controllerRegistryPath?: string;
     admission?: PeerAdmission;
     dropReceiptTrailMs?: number;
@@ -799,6 +800,8 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         admissionKey: `peer:${sender.socketPath}`,
         from: sender.socketPath,
         toSessionId: 'session-a',
+        // No name on the frame, so the sender is shown by its address.
+        senderLabel: sender.socketPath,
       },
     ]);
 
@@ -1374,6 +1377,95 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         .map((r) => (r as { status: string }).status);
     expect(statusesFor(consumed.msgId)).toEqual(['delivered']);
     expect(statusesFor(waiting.msgId)).toEqual(['delivered', 'expired']);
+  });
+
+  it('settles by id when the host says which messages still wait', async () => {
+    // A host with a queue per session drains them on their own schedules,
+    // so the newest message may be the one consumed first.
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start();
+    const waitingIds = new Set<string>();
+    m.setSubmitFn((_modelText, _displayText, delivery) => {
+      waitingIds.add(canonicalizeMsgId(delivery!.msgId));
+      return true;
+    });
+    m.setQueuedPeerIds(() => waitingIds);
+    // Set alongside, and ignored: the ids decide.
+    m.setQueuedPeerCount(() => 1);
+
+    const older = peerFrame({ content: 'older', from: sender.socketPath });
+    const newer = peerFrame({ content: 'newer', from: sender.socketPath });
+    await send(m.socketPath!, older);
+    await send(m.socketPath!, newer);
+    await settle();
+    waitingIds.delete(canonicalizeMsgId(newer.msgId));
+
+    await m.close();
+    messaging = null;
+
+    const statusesFor = (msgId: string) =>
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === msgId)
+        .map((r) => (r as { status: string }).status);
+    expect(statusesFor(older.msgId)).toEqual(['delivered', 'expired']);
+    expect(statusesFor(newer.msgId)).toEqual(['delivered']);
+  });
+
+  it('takes back the receipt of an accepted message the host could not queue', async () => {
+    const sender = await startSenderInbox();
+    const admission = unmeteredAdmission();
+    const forget = vi.spyOn(admission, 'forgetMessage');
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, { admission });
+    const deliveries: PeerQueuedDelivery[] = [];
+    m.setSubmitFn((_modelText, _displayText, delivery) => {
+      deliveries.push(delivery!);
+      return true;
+    });
+
+    const lost = peerFrame({ content: 'lost', from: sender.socketPath });
+    await send(m.socketPath!, lost);
+    await settle();
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]?.senderLabel).toBe(sender.socketPath);
+
+    m.expireUndelivered(deliveries[0]!);
+    await settle();
+    expect(forget).toHaveBeenCalledWith(
+      deliveries[0]!.admissionKey,
+      lost.msgId,
+    );
+
+    // It no longer counts as outstanding, so exit does not expire it twice.
+    await m.close();
+    messaging = null;
+    expect(
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === lost.msgId)
+        .map((r) => (r as { status: string }).status),
+    ).toEqual(['delivered', 'expired']);
+  });
+
+  it('asks each setting reader about the session a message is addressed to', async () => {
+    const sender = await startSenderInbox();
+    const asked: Array<string | undefined> = [];
+    const { submitted } = await start(ApprovalMode.DEFAULT, {
+      ownsSessionId: (id) => id === 'hosted-1',
+      getPolicySetting: (id) => {
+        asked.push(id);
+        return 'accept';
+      },
+    });
+    await send(
+      messaging!.socketPath!,
+      peerFrame({
+        content: 'pinned',
+        from: sender.socketPath,
+        toSessionId: 'hosted-1',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+    expect(asked).toContain('hosted-1');
   });
 
   it('settles a partially flushed buffer alongside queued frames at exit', async () => {

@@ -161,6 +161,10 @@ import {
   sessionIdContext,
   registerSession,
   getLastPeerInboxFailure,
+  canonicalizeMsgId,
+  parseHeldExpiry,
+  type HeldMessage,
+  type InboundPolicy,
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
@@ -345,6 +349,8 @@ import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
+import { peerReviewKey } from './peer-inbound.js';
 import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -544,6 +550,11 @@ async function startSessionOwnedWorkflow(
 }
 
 const debugLogger = createDebugLogger('ACP_AGENT');
+
+/** First delay before a held message whose review got no answer is asked again. */
+const PEER_REVIEW_RETRY_BASE_MS = 1000;
+/** Longest delay between asks about one held message. */
+const PEER_REVIEW_RETRY_MAX_MS = 60_000;
 const QWEN_ACP_LOCAL_READ_ROOTS_ENV = 'QWEN_ACP_LOCAL_READ_ROOTS';
 const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 // Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
@@ -3695,12 +3706,23 @@ class QwenAgent implements Agent {
    * and binding a socket per session would multiply file descriptors by
    * the session count for no added reach.
    *
-   * Outbound only for now. Inbound is refused rather than held, because a
-   * hold is a question put to a person and nobody is watching a hold list
-   * on a daemon-managed session's behalf; a sender is told so at once
-   * instead of waiting out an expiry.
+   * Inbound messages are judged by the same gate a terminal session uses,
+   * under the settings of the session each is addressed to. One that is
+   * accepted is queued as a background notification and handled in a turn
+   * of its own when that session is idle. One that is held is put to the
+   * session's client as a permission request (see `peer-inbound.ts`),
+   * which is how a client's user is asked anything.
    */
   private peerMessagingStart: Promise<PeerMessaging | null> | null = null;
+  /**
+   * Held messages whose review is out with a client, by `peerReviewKey`.
+   * Aborted when the message stops being held — decided elsewhere,
+   * expired, released by a mode change — or its session goes away.
+   */
+  private readonly peerReviews = new Map<
+    string,
+    { sessionId: string; controller: AbortController }
+  >();
   // Set by closePeerMessaging: a retry must not resurrect an inbox after
   // teardown ran.
   private peerMessagingClosed = false;
@@ -4396,6 +4418,7 @@ class QwenAgent implements Agent {
     // a record left behind advertises a session that is gone, and peers
     // would keep addressing it until this process exits.
     this.registeredSessions.delete(sessionId);
+    this.abortPeerReviewsFor(session);
     try {
       await session.getConfig().unregisterSessionRegistry();
     } catch (error) {
@@ -4797,32 +4820,46 @@ class QwenAgent implements Agent {
     this.peerMessagingStart = (async () => {
       try {
         const messaging = await PeerMessaging.start({
-          // Inbound is refused outright, so neither the approval mode nor
-          // the parity rule it feeds is ever consulted. Stated rather than
-          // left to a default: what a daemon-managed session may be told
-          // is settled here and nowhere else.
-          getApprovalMode: () => null,
-          getPolicySetting: () => 'refuse',
+          // Each reader takes the session the message is addressed to and
+          // answers from that session's own settings: one process can
+          // host sessions from several workspaces, and each keeps its own
+          // review policy, hold lifetime and approval mode. A frame for a
+          // session this process no longer holds is refused — the
+          // registry check upstream normally answers it misaddressed
+          // before it gets here.
+          getApprovalMode: (id) => {
+            const session = this.hostedSession(id);
+            if (!session) return null;
+            try {
+              return session.getConfig().getApprovalMode();
+            } catch {
+              // Unknown, which the gate treats as "hold", not "accept".
+              return null;
+            }
+          },
+          getPolicySetting: (id) => {
+            const session = this.hostedSession(id);
+            if (!session) return 'refuse';
+            return session.getSettings().merged.agents?.crossSessionInbound as
+              | InboundPolicy
+              | undefined;
+          },
+          getHeldExpiryMs: (id) =>
+            parseHeldExpiry(
+              this.hostedSession(id)?.getSettings().merged.agents
+                ?.crossSessionHeldExpiry,
+            ),
+          getPolicyScope: (id) => {
+            const session = this.hostedSession(id);
+            return session
+              ? inboundPolicyScope(session.getSettings())
+              : undefined;
+          },
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             this.publishInboxAddress(ipcPath, ipcToken),
-          ownsSessionId: (id) => {
-            // The map key froze when the session was published, while
-            // the record a sender reads follows the Config's live id —
-            // /clear swaps the id under a running session. Test both, so
-            // a frame pinned to either spelling is answered by the
-            // session that holds it.
-            const wanted = normalizeSessionIdForLookup(id);
-            return (
-              this.sessions.has(wanted) ||
-              [...this.sessions.values()].some(
-                (session) =>
-                  normalizeSessionIdForLookup(
-                    session.getConfig().getSessionId(),
-                  ) === wanted,
-              )
-            );
-          },
+          ownsSessionId: (id) => this.hostedSession(id) !== undefined,
         });
+        if (messaging) this.attachPeerInbound(messaging);
         // A bind that could not start is not "started": the next hosted
         // session retries rather than the process staying dark until exit.
         // Except for a platform with no inbox transport. That refusal is
@@ -4847,9 +4884,200 @@ class QwenAgent implements Agent {
     })();
   }
 
+  /**
+   * The hosted session a message addressed to `id` is for, if this
+   * process holds it.
+   *
+   * The map key froze when the session was published, while the record a
+   * sender reads follows the Config's live id — /clear swaps the id under
+   * a running session. Both are tested, so a frame pinned to either
+   * spelling reaches the session that holds it.
+   */
+  private hostedSession(id: string | undefined): Session | undefined {
+    if (id === undefined) return undefined;
+    const wanted = normalizeSessionIdForLookup(id);
+    const byKey = this.sessions.get(wanted);
+    if (byKey) return byKey;
+    for (const session of this.sessions.values()) {
+      if (
+        normalizeSessionIdForLookup(session.getConfig().getSessionId()) ===
+        wanted
+      ) {
+        return session;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Give the inbox somewhere to deliver and someone to ask.
+   *
+   * Accepted messages go to the addressed session's notification queue;
+   * held ones are put to that session's client, one review per hold.
+   */
+  private attachPeerInbound(messaging: PeerMessaging): void {
+    messaging.setSubmitFn((modelText, displayText, delivery) => {
+      const session = this.hostedSession(delivery?.toSessionId);
+      // No room means the sender hears `queue-full` now, rather than the
+      // message pushing out a result the session has not seen yet.
+      if (!delivery || !session || !session.hasRoomForPeerMessage()) {
+        return false;
+      }
+      void session
+        .enqueuePeerMessage({
+          msgId: delivery.msgId,
+          displayText,
+          modelText,
+          ...(delivery.senderLabel !== undefined
+            ? { label: delivery.senderLabel }
+            : {}),
+        })
+        .then(
+          ({ accepted }) => {
+            if (!accepted) messaging.expireUndelivered(delivery);
+          },
+          () => messaging.expireUndelivered(delivery),
+        );
+      return true;
+    });
+    messaging.setQueuedPeerIds(() => {
+      const ids = new Set<string>();
+      for (const session of this.sessions.values()) {
+        for (const id of session.queuedPeerMessageIds()) {
+          ids.add(canonicalizeMsgId(id));
+        }
+      }
+      return ids;
+    });
+    messaging.onHeldChange((held) =>
+      this.reviewHeldPeerMessages(messaging, held),
+    );
+  }
+
+  /**
+   * Start a review for every newly held message and withdraw the ones for
+   * messages no longer held.
+   */
+  private reviewHeldPeerMessages(
+    messaging: PeerMessaging,
+    held: readonly HeldMessage[],
+  ): void {
+    const current = new Set(held.map(peerReviewKey));
+    for (const [key, review] of this.peerReviews) {
+      if (!current.has(key)) {
+        review.controller.abort();
+        this.peerReviews.delete(key);
+      }
+    }
+    for (const entry of held) {
+      const key = peerReviewKey(entry);
+      if (this.peerReviews.has(key)) continue;
+      const session = this.hostedSession(entry.frame.toSessionId);
+      if (!session) continue;
+      const controller = new AbortController();
+      this.peerReviews.set(key, {
+        sessionId: session.getConfig().getSessionId(),
+        controller,
+      });
+      this.askPeerReview(messaging, session, entry, controller.signal, 0);
+    }
+  }
+
+  /**
+   * Put one held message to its session's client, and act on the answer.
+   *
+   * No answer — a cancellation, a timeout, a failed request — is asked
+   * again while the message is still held, after a delay that doubles
+   * each time up to a minute. A request can be cancelled by things that
+   * have nothing to do with the message: the client cancelling a prompt
+   * cancels every pending request of the session. Without asking again
+   * the message would sit held with nobody able to decide it until it
+   * expires. The delay keeps a client that cancels every request from
+   * being asked in a loop.
+   */
+  private askPeerReview(
+    messaging: PeerMessaging,
+    session: Session,
+    entry: HeldMessage,
+    signal: AbortSignal,
+    attempt: number,
+  ): void {
+    const msgId = entry.frame.msgId;
+    const askAgain = (why: string) => {
+      if (signal.aborted) return;
+      const delayMs = Math.min(
+        PEER_REVIEW_RETRY_MAX_MS,
+        PEER_REVIEW_RETRY_BASE_MS * 2 ** attempt,
+      );
+      debugLogger.debug(
+        `[ACP] peer review of ${msgId} ${why}; asking again in ${delayMs}ms`,
+      );
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        if (signal.aborted) return;
+        this.askPeerReview(messaging, session, entry, signal, attempt + 1);
+      }, delayMs);
+      timer.unref?.();
+      const onAbort = () => clearTimeout(timer);
+      signal.addEventListener('abort', onAbort, { once: true });
+    };
+    void session
+      .requestPeerMessageReview(
+        { entry, expiresAt: messaging.heldExpiresAt(entry) },
+        signal,
+      )
+      .then(
+        (decision) => {
+          if (signal.aborted) return;
+          if (decision === 'cancelled') {
+            askAgain('got no answer');
+            return;
+          }
+          const outcome = messaging.decide(
+            msgId,
+            decision === 'deliver' ? 'approve' : 'deny',
+          );
+          if (outcome !== 'done') {
+            debugLogger.debug(
+              `[ACP] peer review of ${msgId} answered ${decision}: ${outcome}`,
+            );
+          }
+        },
+        (error: unknown) => {
+          askAgain(
+            `failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      );
+  }
+
+  /** Withdraw the reviews out for one session, which is going away. */
+  private abortPeerReviewsFor(session: Session): void {
+    const sessionId = session.getConfig().getSessionId();
+    for (const [key, review] of this.peerReviews) {
+      if (review.sessionId === sessionId) {
+        review.controller.abort();
+        this.peerReviews.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Re-judge held messages after a hosted session's approval mode
+   * changed: parity may now release them. Process-wide, because each
+   * held message is judged for its own session.
+   */
+  private hostedSessionModeChanged(): void {
+    void this.peerMessagingStart
+      ?.then((messaging) => messaging?.reevaluate('approval-mode-changed'))
+      .catch(() => {});
+  }
+
   /** Close the inbox and stop advertising it. Safe to call more than once. */
   async closePeerMessaging(): Promise<void> {
     this.peerMessagingClosed = true;
+    for (const review of this.peerReviews.values()) review.controller.abort();
+    this.peerReviews.clear();
     const pending = this.peerMessagingStart;
     if (!pending) return;
     this.peerMessagingStart = null;
@@ -6365,9 +6593,11 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return this.runInSessionContext(session, () =>
+    const result = await this.runInSessionContext(session, () =>
       session.setMode({ ...params, sessionId }),
     );
+    this.hostedSessionModeChanged();
+    return result;
   }
 
   async unstable_setSessionModel(
@@ -12046,6 +12276,7 @@ class QwenAgent implements Agent {
         } else if (previous === 'plan') {
           session.clearActiveTodoPlanRevision();
         }
+        if (current !== previous) this.hostedSessionModeChanged();
         return {
           previous,
           current,

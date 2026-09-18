@@ -40,6 +40,7 @@ import {
   forgetSendPacerMessages,
   formatPeerDisplay,
   formatPeerEnvelope,
+  peerSenderLabel,
   getPeerControllerRegistryPath,
   InboundGate,
   MAX_HELD_MESSAGES,
@@ -75,6 +76,8 @@ export interface PeerQueuedDelivery {
   from?: string;
   replyToken?: string;
   toSessionId?: string;
+  /** Who sent it, as a person should see it (see `peerSenderLabel`). */
+  senderLabel?: string;
 }
 
 export {
@@ -154,15 +157,20 @@ export interface PeerReceipt {
 }
 
 export interface PeerMessagingOptions {
-  getApprovalMode: () => ApprovalMode | null;
-  getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * The four settings readers take the session a message is addressed to
+   * (its `toSessionId`). A process holding one session ignores it; one
+   * hosting several reads the settings of that session. See the gate.
+   */
+  getApprovalMode: (sessionId?: string) => ApprovalMode | null;
+  getPolicySetting: (sessionId?: string) => InboundPolicy | undefined;
   /**
    * How long a held message waits, in milliseconds, or null for "until
    * the session ends". Omitted in tests, which take the default.
    */
-  getHeldExpiryMs?: () => number | null;
+  getHeldExpiryMs?: (sessionId?: string) => number | null;
   /** Which scope set the policy, for wording a hold cause. See the gate. */
-  getPolicyScope?: () => PolicyScope | undefined;
+  getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -283,6 +291,7 @@ export class PeerMessaging {
    */
   private readonly outstanding: PeerUserFrame[] = [];
   private queuedPeerCount: (() => number) | null = null;
+  private queuedPeerIds: (() => ReadonlySet<string>) | null = null;
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
   >();
@@ -484,6 +493,52 @@ export class PeerMessaging {
     this.queuedPeerCount = fn;
   }
 
+  /**
+   * Register the ids of peer messages still waiting to be consumed, for a
+   * host whose queues do not drain in arrival order.
+   *
+   * The count above assumes one queue drained oldest-first, so the
+   * unconsumed messages are the newest ones. A process hosting several
+   * sessions has a queue per session, each draining on its own schedule,
+   * and only the ids say which messages are still waiting. Ids are
+   * compared canonicalized. When set, this is used instead of the count.
+   */
+  setQueuedPeerIds(fn: () => ReadonlySet<string>): void {
+    this.queuedPeerIds = fn;
+  }
+
+  /**
+   * Take back the `delivered` receipt of a message the host accepted and
+   * then could not queue — its session went away, or the transcript write
+   * the queue depends on failed. The sender is told `expired`, which is a
+   * legal step from `delivered`, and the message stops counting against
+   * its sender's duplicate window so an honest retry can land.
+   */
+  expireUndelivered(delivery: PeerQueuedDelivery): void {
+    const key = canonicalizeMsgId(delivery.msgId);
+    const index = this.outstanding.findIndex(
+      (frame) => canonicalizeMsgId(frame.msgId) === key,
+    );
+    if (index !== -1) this.outstanding.splice(index, 1);
+    debugLogger.debug(
+      `accepted peer message ${delivery.msgId} could not be queued; expiring it`,
+    );
+    if (delivery.from) {
+      void sendDeliveryStatus(
+        delivery.from,
+        {
+          status: 'expired',
+          origMsgId: delivery.msgId,
+          from: this.inbox?.socketPath,
+        },
+        delivery.replyToken,
+      );
+    }
+    if (delivery.admissionKey !== undefined) {
+      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
+    }
+  }
+
   getHeld(): readonly HeldMessage[] {
     return this.withControllerValidity(() => this.gate?.getHeld() ?? []);
   }
@@ -494,6 +549,15 @@ export class PeerMessaging {
    */
   getHeldExpiryMs(): number | null {
     return this.gate?.getHeldExpiryMs() ?? null;
+  }
+
+  /**
+   * When a held message will expire, as a wall-clock epoch in
+   * milliseconds, or null when it will not — judged for the session it is
+   * addressed to, the way the gate will judge it.
+   */
+  heldExpiresAt(entry: HeldMessage): number | null {
+    return this.gate?.heldExpiresAt(entry) ?? null;
   }
 
   /**
@@ -726,10 +790,7 @@ export class PeerMessaging {
    * exist to carry.
    */
   private async settleUnconsumed(): Promise<void> {
-    const queued = this.queuedPeerCount?.() ?? 0;
-    const dropped = this.outstanding.slice(
-      Math.max(0, this.outstanding.length - this.buffered.length - queued),
-    );
+    const dropped = this.unconsumedFrames();
     const receipts = dropped
       .filter((frame) => frame.from !== undefined)
       .map((frame) =>
@@ -744,6 +805,33 @@ export class PeerMessaging {
         ),
       );
     await Promise.allSettled(receipts);
+  }
+
+  private unconsumedFrames(): PeerUserFrame[] {
+    if (this.queuedPeerIds) {
+      let waiting: ReadonlySet<string>;
+      try {
+        waiting = this.queuedPeerIds();
+      } catch (error) {
+        debugLogger.debug(
+          `queued-peer-ids reader threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        waiting = new Set();
+      }
+      const buffered = new Set(
+        this.buffered.map((entry) => canonicalizeMsgId(entry.frame.msgId)),
+      );
+      return this.outstanding.filter((frame) => {
+        const key = canonicalizeMsgId(frame.msgId);
+        return buffered.has(key) || waiting.has(key);
+      });
+    }
+    const queued = this.queuedPeerCount?.() ?? 0;
+    return this.outstanding.slice(
+      Math.max(0, this.outstanding.length - this.buffered.length - queued),
+    );
   }
 
   /**
@@ -1017,6 +1105,13 @@ export class PeerMessaging {
           ...(frame.toSessionId !== undefined
             ? { toSessionId: frame.toSessionId }
             : {}),
+          senderLabel: peerSenderLabel({
+            from,
+            ...(frame.fromName !== undefined
+              ? { fromName: frame.fromName }
+              : {}),
+            ...(origin.controller ? { controller: origin.controller } : {}),
+          }),
         },
       ) ?? false
     );

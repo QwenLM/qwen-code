@@ -1050,11 +1050,15 @@ you have open. Several of them share one process and one inbox, so a
 sender has to name the session it means — every Qwen Code session does
 that automatically.
 
-Messages sent _to_ one are refused rather than held. Holding is a
-question put to a person, and nobody is watching a held-message list on a
-driven session's behalf; a sender is told at once instead of
-waiting out an expiry. Where a held message should surface for those
-sessions is not settled yet.
+It receives messages too, under the same rules as a terminal session.
+An accepted message reaches the model the next time the session is
+idle. A held one is shown to whoever drives the session as a permission
+request with two choices, **Deliver to this session** and **Drop**: in
+the Web Shell and other daemon clients it appears with the session's
+other pending requests and goes away when the message expires, and in an
+editor that drives `qwen --acp` directly it is a permission dialog.
+`agents.crossSessionInbound` and `agents.crossSessionHeldExpiry` are
+read from the settings of the workspace the session runs in.
 
 A session registers unless its own settings turn
 `agents.crossSessionMessaging` off. Turned off, it stays invisible,

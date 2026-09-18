@@ -13,6 +13,8 @@ import {
   formatPeerEnvelope,
   OWN_PROCESS_AUTHORITY_NOTICE,
   PEER_AUTHORITY_NOTICE,
+  peerSenderLabel,
+  sanitizePeerText,
 } from './peer-envelope.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
@@ -482,5 +484,44 @@ describe('controller envelope', () => {
         controller: VOICE,
       }),
     ).toBe('Message from a trusted controller (voice bridge): open the diff');
+  });
+});
+
+describe('sanitizePeerText', () => {
+  it('keeps line breaks and tabs and strips the controls around them', () => {
+    expect(sanitizePeerText('a\r\nb\rc\td\u0007e\u202Ef\u2028g', 100)).toBe(
+      'a\nb\nc\tdefg',
+    );
+  });
+
+  it('cuts at the limit with an ellipsis, counting code points', () => {
+    expect(sanitizePeerText('abcdef', 4)).toBe('abc\u2026');
+    expect(sanitizePeerText('abcd', 4)).toBe('abcd');
+    // Four astral characters are four, not eight, and are never split.
+    expect(sanitizePeerText('\u{1F600}'.repeat(5), 4)).toBe(
+      '\u{1F600}'.repeat(3) + '\u2026',
+    );
+  });
+});
+
+describe('peerSenderLabel', () => {
+  it('names a controller by its grant, whatever the frame claims', () => {
+    expect(
+      peerSenderLabel({
+        from: '/tmp/a.sock',
+        fromName: 'me',
+        controller: { id: 'c_0123abcd', label: 'voice bridge' },
+      }),
+    ).toBe('voice bridge');
+  });
+
+  it('prefers the sender name and falls back to its address', () => {
+    expect(
+      peerSenderLabel({ from: '/tmp/a.sock', fromName: 'build\nbot' }),
+    ).toBe('build bot');
+    expect(peerSenderLabel({ from: '/tmp/a.sock', fromName: ' \u0007 ' })).toBe(
+      '/tmp/a.sock',
+    );
+    expect(peerSenderLabel({ from: '/tmp/a.sock' })).toBe('/tmp/a.sock');
   });
 });

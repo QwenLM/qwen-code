@@ -2842,6 +2842,152 @@ describe('Session', () => {
     expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
   });
 
+  describe('cross-session messages', () => {
+    function heldEntry(): core.HeldMessage {
+      return {
+        frame: core.buildUserFrame({
+          content: 'please rebase',
+          from: '/tmp/peer.sock',
+          fromName: 'build bot',
+          fromMode: 'bypass',
+          toSessionId: 'test-session-id',
+        }),
+        cause: 'mode-mismatch',
+        heldAt: 1_000,
+      };
+    }
+
+    it('records an accepted message and hands it to the model in a background turn', async () => {
+      let turnKind: string | undefined;
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        turnKind = session.getBackgroundTurn()?.kind;
+        return createEmptyStream();
+      });
+
+      await expect(
+        session.enqueuePeerMessage({
+          msgId: 'msg-1',
+          displayText: 'Message from build bot: please rebase',
+          modelText: '<cross_session_message>please rebase',
+          label: 'build bot',
+        }),
+      ).resolves.toEqual({ accepted: true });
+
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledWith(
+        [{ text: '<cross_session_message>please rebase' }],
+        'Message from build bot: please rebase',
+        expect.objectContaining({ taskId: 'msg-1', kind: 'peer' }),
+      );
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+      );
+      expect(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[0]![1].message,
+      ).toContainEqual({ text: '<cross_session_message>please rebase' });
+      expect(turnKind).toBe('peer');
+      expect(session.queuedPeerMessageIds()).toEqual([]);
+    });
+
+    it('lists waiting messages and says when the queue has no room', async () => {
+      // A prompt in flight keeps everything queued.
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = new AbortController();
+
+      await session.enqueuePeerMessage({
+        msgId: 'msg-a',
+        displayText: 'a',
+        modelText: 'a',
+      });
+      await session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent',
+      });
+      await session.enqueuePeerMessage({
+        msgId: 'msg-b',
+        displayText: 'b',
+        modelText: 'b',
+      });
+      expect(session.queuedPeerMessageIds()).toEqual(['msg-a', 'msg-b']);
+      expect(session.hasRoomForPeerMessage()).toBe(true);
+
+      for (let i = 3; i < MAX_BACKGROUND_NOTIFICATION_QUEUE; i++) {
+        await session.enqueuePeerMessage({
+          msgId: `msg-${i}`,
+          displayText: 'x',
+          modelText: 'x',
+        });
+      }
+      expect(session.hasRoomForPeerMessage()).toBe(false);
+
+      session.dispose();
+      expect(session.hasRoomForPeerMessage()).toBe(false);
+    });
+
+    it('asks the client about a held message outside the tool approval queue', async () => {
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'selected', optionId: 'peer_deliver' },
+      });
+      const entry = heldEntry();
+
+      await expect(
+        session.requestPeerMessageReview(
+          { entry, expiresAt: 61_000 },
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('deliver');
+      const request = vi
+        .mocked(mockClient.requestPermission)
+        .mock.calls.at(-1)?.[0];
+      expect(request?.sessionId).toBe('test-session-id');
+      expect(request?.toolCall.toolCallId).toBe(
+        `peer-message:${entry.frame.msgId}`,
+      );
+      expect(request?._meta).toEqual({
+        qwenInteractionKind: 'peer_message',
+        expiresAt: 61_000,
+      });
+
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'selected', optionId: 'peer_drop' },
+      });
+      await expect(
+        session.requestPeerMessageReview(
+          { entry, expiresAt: null },
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('drop');
+
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+      await expect(
+        session.requestPeerMessageReview(
+          { entry, expiresAt: null },
+          new AbortController().signal,
+        ),
+      ).resolves.toBe('cancelled');
+    });
+
+    it('gives up on a review when the hold goes away', async () => {
+      vi.mocked(mockClient.requestPermission).mockImplementationOnce(
+        () => new Promise(() => {}),
+      );
+      const controller = new AbortController();
+      const review = session.requestPeerMessageReview(
+        { entry: heldEntry(), expiresAt: null },
+        controller.signal,
+      );
+      controller.abort();
+      await expect(review).rejects.toBeDefined();
+    });
+  });
+
   it('attributes a delayed title notification to the persisted record session', () => {
     const callback = mockChatRecordingService.setTitleRecordedCallback.mock
       .calls[0]?.[0] as

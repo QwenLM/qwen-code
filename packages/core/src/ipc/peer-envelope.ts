@@ -148,6 +148,42 @@ export function flattenPeerLabel(value: string): string {
 }
 
 /**
+ * A peer-supplied body made safe to show a person as text.
+ *
+ * Unlike a label it may span lines, so line breaks and tabs stay; every
+ * other control or format character goes, for the reasons
+ * {@link flattenPeerLabel} gives, and the result is capped in code points.
+ */
+export function sanitizePeerText(value: string, maxChars: number): string {
+  const cleaned = value
+    .replace(/\r\n?/g, '\n')
+    .replace(/(?![\n\t])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '');
+  const points = Array.from(cleaned);
+  return points.length > maxChars
+    ? `${points.slice(0, Math.max(0, maxChars - 1)).join('')}\u2026`
+    : cleaned;
+}
+
+/**
+ * The name to show a person for who sent a message.
+ *
+ * A controller is named by the label its user gave it, never by the
+ * `fromName` in the frame: the point is to say which grant let the
+ * message through, and a sender that could choose that string could
+ * impersonate another grant. Otherwise the sender's own name, and failing
+ * that its reply address.
+ */
+export function peerSenderLabel(fields: {
+  fromName?: string;
+  from: string;
+  controller?: PeerControllerIdentity;
+}): string {
+  if (fields.controller) return flattenPeerLabel(fields.controller.label);
+  const name = flattenPeerLabel(fields.fromName ?? '');
+  return name.length > 0 ? name : flattenPeerLabel(fields.from);
+}
+
+/**
  * Quote a value for an XML-ish attribute.
  *
  * `from` is a socket path or a peer-chosen display name, so it is
@@ -245,18 +281,9 @@ export function formatPeerDisplay(fields: {
   selfSent?: boolean;
   controller?: PeerControllerIdentity;
 }): string {
-  // Same flattening as the envelope: this line goes to the terminal, and
-  // a peer-chosen name is the one part of it the peer fully controls.
-  const name = flattenPeerLabel(fields.fromName ?? '');
-  // A controller is named by the label its user gave it, never by the
-  // `fromName` in the frame: the whole point of the line is to say which
-  // grant let this through, and a sender that could choose that string
-  // could impersonate another grant.
-  const who = fields.controller
-    ? flattenPeerLabel(fields.controller.label)
-    : name.length > 0
-      ? name
-      : flattenPeerLabel(fields.from);
+  // Flattened like the envelope: this line goes to the terminal, and a
+  // peer-chosen name is the one part of it the peer fully controls.
+  const who = peerSenderLabel(fields);
   const oneLine = flattenPeerLabel(fields.content).replace(/\s+/g, ' ').trim();
   const preview = oneLine.length > 120 ? `${oneLine.slice(0, 119)}…` : oneLine;
   const sender = fields.controller
