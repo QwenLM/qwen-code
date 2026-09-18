@@ -1100,6 +1100,7 @@ describe('package scripts', () => {
       'packages/*/package.json',
       '!packages/desktop-shell/package.json',
       '!packages/live-host/package.json',
+      '!packages/mobile-shell/package.json',
       'packages/channels/*/package.json',
       'integrations/*/package.json',
       'patches/**',

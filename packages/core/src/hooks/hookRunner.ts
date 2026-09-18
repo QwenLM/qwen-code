@@ -743,6 +743,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };
@@ -833,6 +834,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -863,6 +865,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -906,6 +909,7 @@ export class HookRunner {
       hookConfig,
       eventName,
       success: true,
+      outcome: 'success',
       duration: 0,
       isAsync: true,
       output: { continue: true },
