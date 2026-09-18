@@ -819,7 +819,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
       f !== 'voice_transcribe' &&
-      f !== 'realtime_voice',
+      f !== 'realtime_voice' &&
+      f !== 'realtime_voice_web',
   ),
   'workspace_settings',
   'workspace_permissions',
@@ -891,6 +892,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'browser_automation_mcp',
   'voice_transcribe',
   'realtime_voice',
+  'realtime_voice_web',
   'web_terminal',
 ] as const;
 
@@ -4024,6 +4026,20 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, { acpHttpEnabled: false }),
           ).not.toContain(feature);
+          continue;
+        }
+        if (feature === 'realtime_voice_web') {
+          expect(
+            predicate({ acpHttpEnabled: true, realtimeVoiceWebEnabled: true }),
+          ).toBe(true);
+          expect(
+            predicate({ acpHttpEnabled: false, realtimeVoiceWebEnabled: true }),
+          ).toBe(false);
+          // The native toggle alone must not advertise the browser endpoint.
+          expect(
+            predicate({ acpHttpEnabled: true, realtimeVoiceEnabled: true }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
           continue;
         }
         if (feature === 'web_terminal') {
@@ -43245,14 +43261,6 @@ describe('Live Appshot server integration', () => {
 
   it.each([
     {
-      name: 'non-macOS',
-      options: baseOpts,
-      deps: {
-        runtimePlatform: 'linux' as const,
-        webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
-      },
-    },
-    {
       name: 'API-only mode',
       options: { ...baseOpts, serveWebShell: false },
       deps: {
@@ -43275,6 +43283,7 @@ describe('Live Appshot server integration', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(capabilities.body.features).not.toContain('realtime_voice');
+      expect(capabilities.body.features).not.toContain('realtime_voice_web');
       const settings = await request(app)
         .get('/workspace/settings')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -43287,6 +43296,206 @@ describe('Live Appshot server integration', () => {
       (app.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
     }
   });
+
+  describe('browser Host ingress', () => {
+    const browserHello = {
+      type: 'host.hello',
+      kind: 'browser',
+      protocolVersion: 9,
+      hostVersion: '0.24.0',
+      bundleId: 'com.alibaba.qwen-code.web-shell',
+      instanceNonce: 'browser_tab_nonce_0001',
+      permissions: { microphone: 'granted' },
+      selfChecks: { audioInput: true, audioOutput: true },
+    };
+
+    async function withLiveDaemon(
+      options: { enabled: boolean; trusted?: boolean },
+      run: (
+        port: number,
+        app: ReturnType<typeof createServeApp>,
+      ) => Promise<void>,
+    ): Promise<void> {
+      const tmp = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-live-web-ingress-'),
+      );
+      const qwenHome = path.join(tmp, 'qwen-home');
+      await fsp.mkdir(qwenHome, { recursive: true });
+      await fsp.writeFile(
+        path.join(qwenHome, 'settings.json'),
+        JSON.stringify({
+          experimental: {
+            liveVoice: {
+              enabled: options.enabled,
+              apiKey: 'dedicated-realtime-key',
+            },
+          },
+        }),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = qwenHome;
+      resetHomeEnvBootstrapForTesting();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        daemonEnv: {},
+        runtimePlatform: 'linux',
+        webShellDir: path.join(tmp, 'web-shell'),
+        ...(options.trusted === undefined
+          ? {}
+          : { primaryWorkspaceTrusted: options.trusted }),
+      });
+      const server = app.listen(0, '127.0.0.1');
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const acpHandle = app.locals['acpHandle'] as AcpHttpHandle;
+      acpHandle.attachServer(server);
+      try {
+        await run((server.address() as AddressInfo).port, app);
+      } finally {
+        (app.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
+        acpHandle.dispose();
+        server.closeAllConnections?.();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tmp, { recursive: true, force: true });
+      }
+    }
+
+    function closeCodeOf(url: string): Promise<number> {
+      return new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(url, { handshakeTimeout: 2000 });
+        ws.on('close', (code) => resolve(code));
+        ws.on('error', reject);
+      });
+    }
+
+    it('welcomes the Web Shell on /live/web without the native nonce header', async () => {
+      await withLiveDaemon(
+        { enabled: true, trusted: true },
+        async (port, app) => {
+          const welcome = await new Promise<Record<string, unknown>>(
+            (resolve, reject) => {
+              const ws = new WebSocket(`ws://127.0.0.1:${port}/live/web`, {
+                handshakeTimeout: 2000,
+              });
+              ws.on('open', () => ws.send(JSON.stringify(browserHello)));
+              ws.on('message', (data) => {
+                resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+              });
+              ws.on('close', (code) =>
+                reject(new Error(`closed before welcome: ${code}`)),
+              );
+              ws.on('error', reject);
+            },
+          );
+          expect(welcome['type']).toBe('host.welcome');
+          const coordinator = app.locals[
+            'liveCoordinator'
+          ] as LiveHostCoordinator;
+          expect(coordinator.getStatus().host).toMatchObject({
+            kind: 'browser',
+          });
+        },
+      );
+    });
+
+    it('does not mount the native /live/host ingress off macOS', async () => {
+      await withLiveDaemon({ enabled: true, trusted: true }, async (port) => {
+        await expect(
+          closeCodeOf(`ws://127.0.0.1:${port}/live/host`),
+        ).rejects.toThrow();
+      });
+    });
+
+    it('closes /live/web with 4003 while Live Voice is disabled', async () => {
+      await withLiveDaemon({ enabled: false, trusted: true }, async (port) => {
+        await expect(
+          closeCodeOf(`ws://127.0.0.1:${port}/live/web`),
+        ).resolves.toBe(4003);
+      });
+    });
+
+    it('closes /live/web with 4003 in an untrusted workspace', async () => {
+      await withLiveDaemon(
+        { enabled: true, trusted: false },
+        async (port, app) => {
+          await expect(
+            closeCodeOf(`ws://127.0.0.1:${port}/live/web`),
+          ).resolves.toBe(4003);
+          const coordinator = app.locals[
+            'liveCoordinator'
+          ] as LiveHostCoordinator;
+          expect(coordinator.getStatus().host).toBeUndefined();
+        },
+      );
+    });
+  });
+
+  it.each([
+    { runtimePlatform: 'linux' as const, native: false },
+    { runtimePlatform: 'darwin' as const, native: true },
+  ])(
+    'advertises the browser Host on $runtimePlatform and the native Host only on macOS',
+    async ({ runtimePlatform, native }) => {
+      const tmp = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-live-browser-host-'),
+      );
+      const qwenHome = path.join(tmp, 'qwen-home');
+      await fsp.mkdir(qwenHome, { recursive: true });
+      await fsp.writeFile(
+        path.join(qwenHome, 'settings.json'),
+        JSON.stringify({
+          experimental: {
+            liveVoice: { enabled: true, apiKey: 'dedicated-realtime-key' },
+          },
+        }),
+      );
+      const previousQwenHome = process.env['QWEN_HOME'];
+      process.env['QWEN_HOME'] = qwenHome;
+      resetHomeEnvBootstrapForTesting();
+      let app: ReturnType<typeof createServeApp> | undefined;
+      try {
+        app = createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          persistSetting: vi.fn(async () => undefined),
+          daemonEnv: {},
+          runtimePlatform,
+          webShellDir: path.join(tmp, 'web-shell'),
+        });
+        const live = await request(app)
+          .get('/live/status')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(live.status).toBe(200);
+        expect(live.body).toMatchObject({ blocker: 'host_missing' });
+        const capabilities = await request(app)
+          .get('/capabilities')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(capabilities.body.features).toContain('realtime_voice_web');
+        expect(capabilities.body.features.includes('realtime_voice')).toBe(
+          native,
+        );
+        // Listed on every platform; `/live/setup.nativeHost` tells the Web
+        // Shell whether the install / launch / shortcut parts apply.
+        const settings = await request(app)
+          .get('/workspace/settings')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(
+          settings.body.settings.some((setting: { key: string }) =>
+            setting.key.startsWith('experimental.liveVoice.'),
+          ),
+        ).toBe(true);
+        const setup = await request(app)
+          .get('/live/setup')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(setup.body.nativeHost).toBe(native);
+      } finally {
+        (app?.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
+        restoreEnv('QWEN_HOME', previousQwenHome);
+        resetHomeEnvBootstrapForTesting();
+        await fsp.rm(tmp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not initialize Live dependencies when disabled at daemon startup', async () => {
     const tmp = await fsp.mkdtemp(

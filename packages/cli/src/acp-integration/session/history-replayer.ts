@@ -13,7 +13,7 @@ import type {
 import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
-  projectGoalStateToLegacy,
+  projectGoalCard,
 } from '@qwen-code/qwen-code-core';
 import {
   createTranscriptReplayMachine,
@@ -135,12 +135,11 @@ export class HistoryReplayer {
     if (!goalState?.goal || goalState.goal.status !== 'active' || !goalCause) {
       return undefined;
     }
-    const projection = projectGoalStateToLegacy({
+    const { kind, ...goalStatus } = projectGoalCard({
       v: 2,
       cause: goalCause,
       snapshot: goalState,
     });
-    const { type: _type, kind, ...goalStatus } = projection.goalStatus;
     if (kind !== 'set' && kind !== 'checking') {
       return undefined;
     }
