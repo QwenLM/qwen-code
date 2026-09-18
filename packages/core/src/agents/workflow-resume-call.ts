@@ -79,17 +79,17 @@ export function hasUninlinableResumeArgs(
 }
 
 /**
- * The resume call for this run, or `null` when there is none to offer: no
- * script on disk to resume from (an inline script that could not be
- * persisted), or, in a name-only session, no name that leads back to it.
- */
-/**
  * Said in place of a resume call for a run that wrote no journal: a resume
  * replays the journal, and with none on disk the call would be refused.
  */
 export const NO_JOURNAL_NO_RESUME_NOTE =
   'No journal was written for this run, so it cannot be resumed; run the workflow again without resumeFromRunId.';
 
+/**
+ * The resume call for this run, or `null` when there is none to offer: no
+ * script on disk to resume from (an inline script that could not be
+ * persisted), or, in a name-only session, no name that leads back to it.
+ */
 export function buildResumeCall(target: WorkflowResumeTarget): string | null {
   let source: string;
   if (target.nameOnly) {
