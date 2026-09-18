@@ -110,10 +110,14 @@ Two rules are deliberate:
 
 - Workspace settings are never consulted, only user- and system-level ones. A
   project's `.qwen/settings.json` cannot add or redirect a Live Voice route.
-- When `experimental.liveVoice.model` matches no `realtimeOnly` route, the
+- A **bare** `modelId` that matches no `realtimeOnly` route uses the
   free-standing `experimental.liveVoice.endpoint` and
-  `experimental.liveVoice.apiKey` fields are used as before, so existing setups
-  keep working unchanged.
+  `experimental.liveVoice.apiKey` fields as before, so existing setups keep
+  working unchanged. A `provider:modelId` selector whose provider exists but
+  has no such route is an error instead: a deleted or mistyped route never
+  falls back to a stored key silently.
+- While a route is selected, `experimental.liveVoice.apiKey` is unused, and the
+  setup API refuses to store a new one.
 
 ## Override reasoning capabilities
 
