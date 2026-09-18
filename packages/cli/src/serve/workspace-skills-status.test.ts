@@ -456,6 +456,42 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     return directory;
   }
 
+  it('discovers managed skills before a fresh home has a user extension directory', async () => {
+    const managedExtensionsDir = path.join(qwenHome, 'prepared');
+    const skillDir = path.join(
+      managedExtensionsDir,
+      'bundle',
+      'skills',
+      'example',
+    );
+    await fsp.mkdir(skillDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+      JSON.stringify({ name: 'bundle', version: '1.0.0' }),
+    );
+    await fsp.writeFile(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: example\ndescription: A managed example\n---\nBuiltin instructions',
+    );
+    await expect(
+      fsp.stat(path.join(qwenHome, 'extensions')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    const provider = createWorkspaceSkillsStatusProvider({
+      managedExtensionsDir,
+    });
+    const status = await provider(qwenHome);
+    expect(status.initialized).toBe(true);
+    expect(status.skills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'bundle:example',
+          level: 'extension',
+          status: 'ok',
+        }),
+      ]),
+    );
+  });
+
   it('lists active and inactive extension Skills without a runtime Config', async () => {
     const active = await writeExtension('active', ['active-skill']);
     await writeExtension('inactive', ['inactive-skill']);

@@ -67,6 +67,160 @@ describe('ExtensionStore', () => {
     );
   });
 
+  it.each([false, 'managed', 1, null, {}, []])(
+    'rejects invalid managed policy markers %#',
+    async (managed) => {
+      const store = makeStore();
+      const identity = { id: 'ab'.repeat(32), name: 'managed' };
+      const initial = await store.ensureInitialized([
+        { ...identity, source: 'managed' },
+      ]);
+      await fsp.writeFile(
+        path.join(storeDir, 'state.json'),
+        JSON.stringify({
+          ...initial,
+          extensions: {
+            [identity.id]: { ...initial.extensions[identity.id], managed },
+          },
+        }),
+      );
+      await expect(store.readSnapshot()).rejects.toBeInstanceOf(
+        ExtensionStoreCorruptError,
+      );
+    },
+  );
+
+  it('clears managed ownership when updating a user-owned artifact without another discovery', async () => {
+    const store = makeStore();
+    const identity = { id: 'ac'.repeat(32), name: 'transition' };
+    const destination = path.join(extensionsDir, identity.name);
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+    const installed = await store.commitArtifact({
+      operation: 'install',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      initialActivation: { scope: 'user' },
+    });
+    await store.setDefaultActivation(identity, 'disabled');
+    const discovered = await store.ensureInitialized([
+      { ...identity, source: 'managed' },
+    ]);
+    expect(discovered.extensions[identity.id]).toMatchObject({
+      managed: true,
+      artifactGeneration: installed.extensions[identity.id].artifactGeneration,
+    });
+    const update = await store.createStagingDirectory();
+    await fsp.writeFile(path.join(update, 'qwen-extension.json'), '{}');
+    const updated = await store.commitArtifact({
+      operation: 'update',
+      identity,
+      destinationDirectory: destination,
+      stagingDirectory: update,
+      expectedArtifactGeneration:
+        installed.extensions[identity.id].artifactGeneration,
+    });
+    expect(updated.extensions[identity.id]).not.toHaveProperty('managed');
+    expect(updated.extensions[identity.id].defaultActivation).toBe('disabled');
+    await fsp.rm(destination, { recursive: true });
+    const missing = await store.setDefaultActivations([identity], 'enabled');
+    expect(missing.extensions[identity.id].declarationOnly).toBe(true);
+  });
+
+  it.each(['same-id', 'different-id'] as const)(
+    'clears managed ownership when an installer adopts a %s policy',
+    async (mode) => {
+      const store = makeStore();
+      const identity = { id: 'ad'.repeat(32), name: 'adopted' };
+      const destination = path.join(extensionsDir, identity.name);
+      await store.setDefaultActivations([identity], 'disabled');
+      await fsp.mkdir(destination);
+      await store.ensureInitialized([identity]);
+      await fsp.rm(destination, { recursive: true });
+      const managed = await store.ensureInitialized([
+        { ...identity, source: 'managed' },
+      ]);
+      expect(managed.extensions[identity.id]).toMatchObject({
+        managed: true,
+        preserveActivationOnNextInstall: true,
+      });
+      const userIdentity = {
+        ...identity,
+        id: mode === 'same-id' ? identity.id : 'ae'.repeat(32),
+      };
+      const staging = await store.createStagingDirectory();
+      await fsp.writeFile(path.join(staging, 'qwen-extension.json'), '{}');
+      const installed = await store.commitArtifact({
+        operation: 'install',
+        identity: userIdentity,
+        destinationDirectory: destination,
+        stagingDirectory: staging,
+        initialActivation: { scope: 'user' },
+      });
+      expect(installed.extensions[userIdentity.id]).not.toHaveProperty(
+        'managed',
+      );
+      expect(installed.extensions[userIdentity.id]).toMatchObject({
+        defaultActivation: 'disabled',
+        artifactGeneration: installed.generation,
+      });
+      expect(installed.extensions[userIdentity.id]).not.toHaveProperty(
+        'preserveActivationOnNextInstall',
+      );
+      await fsp.rm(destination, { recursive: true });
+      const missing = await store.setDefaultActivations(
+        [userIdentity],
+        'enabled',
+      );
+      expect(missing.extensions[userIdentity.id].declarationOnly).toBe(true);
+    },
+  );
+
+  it('does not infer a user artifact directory from managed name changes', async () => {
+    const store = makeStore();
+    const managed = {
+      id: 'af'.repeat(32),
+      name: 'External',
+      source: 'managed' as const,
+    };
+    await store.ensureInitialized([managed]);
+    const renamed = await store.ensureInitialized([
+      { ...managed, name: 'external' },
+    ]);
+    expect(renamed.extensions[managed.id]).not.toHaveProperty(
+      'artifactDirectory',
+    );
+    const user = {
+      id: 'ba'.repeat(32),
+      name: 'EXTERNAL',
+      source: 'user' as const,
+    };
+    const destination = path.join(extensionsDir, user.name);
+    await fsp.mkdir(destination);
+    await fsp.writeFile(path.join(destination, 'qwen-extension.json'), '{}');
+    const discovered = await store.ensureInitialized([user]);
+    expect(discovered.extensions[user.id]).not.toHaveProperty(
+      'artifactDirectory',
+    );
+    expect(discovered.extensions[user.id]).not.toHaveProperty('managed');
+    const staging = await store.createStagingDirectory();
+    await fsp.writeFile(
+      path.join(staging, 'qwen-extension.json'),
+      '{"version":"2"}',
+    );
+    await store.commitArtifact({
+      operation: 'update',
+      identity: user,
+      destinationDirectory: destination,
+      stagingDirectory: staging,
+      expectedArtifactGeneration: 0,
+    });
+    expect(
+      await fsp.readFile(path.join(destination, 'qwen-extension.json'), 'utf8'),
+    ).toBe('{"version":"2"}');
+  });
+
   it('imports V1 rules without materializing workspace overrides', async () => {
     await fsp.writeFile(
       enablementPath,

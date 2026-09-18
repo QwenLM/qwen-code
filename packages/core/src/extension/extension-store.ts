@@ -22,6 +22,7 @@ export type WorkspaceActivation = ExtensionActivation | 'inherit';
 
 export interface ExtensionPolicy {
   name: string;
+  managed?: true;
   artifactDirectory?: string;
   artifactGeneration?: number;
   declarationOnly?: true;
@@ -48,6 +49,7 @@ export interface ExtensionStoreBatchMutationOutcome {
 export interface ExtensionIdentity {
   id: string;
   name: string;
+  source?: 'managed' | 'user';
 }
 
 export interface ExtensionActivationResult {
@@ -281,6 +283,7 @@ function parseState(
     return (
       typeof parsed.name === 'string' &&
       /^[a-zA-Z0-9-_.]+$/.test(parsed.name) &&
+      (parsed.managed === undefined || parsed.managed === true) &&
       (parsed.artifactDirectory === undefined ||
         (typeof parsed.artifactDirectory === 'string' &&
           /^[a-zA-Z0-9-_.]+$/.test(parsed.artifactDirectory) &&
@@ -453,7 +456,7 @@ export class ExtensionStore {
                 `Extension name "${identity.name}" conflicts with an installed extension.`,
               );
             }
-            if (!directPolicy.declarationOnly) {
+            if (!directPolicy.declarationOnly && !directPolicy.managed) {
               directPolicy.artifactDirectory ??= directPolicy.name;
             }
             if (
@@ -480,8 +483,10 @@ export class ExtensionStore {
           }
           if (directPolicy.declarationOnly) {
             delete directPolicy.declarationOnly;
-            directPolicy.artifactGeneration = existing.generation + 1;
-            directPolicy.preserveActivationOnNextInstall = true;
+            if (identity.source !== 'managed') {
+              directPolicy.artifactGeneration = existing.generation + 1;
+              directPolicy.preserveActivationOnNextInstall = true;
+            }
             changed = true;
           }
           continue;
@@ -493,13 +498,19 @@ export class ExtensionStore {
         );
         if (staleEntry) {
           const [staleId, policy] = staleEntry;
-          if (!policy.declarationOnly && policy.name !== identity.name) {
+          if (
+            !policy.declarationOnly &&
+            !policy.managed &&
+            policy.name !== identity.name
+          ) {
             policy.artifactDirectory ??= policy.name;
           }
           if (policy.declarationOnly) {
             delete policy.declarationOnly;
-            policy.artifactGeneration = existing.generation + 1;
-            policy.preserveActivationOnNextInstall = true;
+            if (identity.source !== 'managed') {
+              policy.artifactGeneration = existing.generation + 1;
+              policy.preserveActivationOnNextInstall = true;
+            }
           }
           delete existing.extensions[staleId];
           policy.name = identity.name;
@@ -593,6 +604,14 @@ export class ExtensionStore {
           changed = true;
         }
       }
+      for (const identity of extensions) {
+        const policy = existing.extensions[identity.id];
+        const managed = identity.source === 'managed';
+        if (managed === (policy.managed === true)) continue;
+        if (managed) policy.managed = true;
+        else delete policy.managed;
+        changed = true;
+      }
       let remainderSource = legacyProjectionIsNewer
         ? legacy
         : importUnmappedLegacy
@@ -620,6 +639,7 @@ export class ExtensionStore {
       const rules = findLegacyRules(legacy, identity.name);
       policies[identity.id] = {
         name: identity.name,
+        ...(identity.source === 'managed' ? { managed: true as const } : {}),
         defaultActivation: 'enabled',
         workspaceOverrides: {},
         ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
@@ -799,6 +819,9 @@ export class ExtensionStore {
         targetSnapshot.extensions[input.identity.id]!.artifactGeneration =
           targetSnapshot.generation + 1;
       }
+      if (input.operation !== 'uninstall') {
+        delete targetSnapshot.extensions[input.identity.id].managed;
+      }
       targetSnapshot.generation = snapshot.generation + 1;
       targetSnapshot.legacyProjectionHash = projectionHash(
         this.buildLegacyProjection(targetSnapshot),
@@ -951,18 +974,24 @@ export class ExtensionStore {
   async setDefaultActivation(
     identity: ExtensionIdentity,
     activation: ExtensionActivation,
+    options: { clearLegacyPathRules?: boolean } = {},
   ): Promise<ExtensionStoreSnapshot> {
     return await this.mutate(identity, (policy) => {
       policy.defaultActivation = activation;
+      if (options.clearLegacyPathRules) delete policy.legacyPathRules;
     });
   }
 
   async setDefaultActivations(
     identities: readonly ExtensionIdentity[],
     activation: ExtensionActivation,
+    options: { clearLegacyPathRulesForIds?: ReadonlySet<string> } = {},
   ): Promise<ExtensionStoreSnapshot> {
-    const outcome = await this.mutateMany(identities, (policy) => {
+    const outcome = await this.mutateMany(identities, (policy, identity) => {
       policy.defaultActivation = activation;
+      if (options.clearLegacyPathRulesForIds?.has(identity.id)) {
+        delete policy.legacyPathRules;
+      }
     });
     return outcome.snapshot;
   }
@@ -1113,7 +1142,7 @@ export class ExtensionStore {
 
   private async mutateMany(
     identities: readonly ExtensionIdentity[],
-    update: (policy: ExtensionPolicy) => void,
+    update: (policy: ExtensionPolicy, identity: ExtensionIdentity) => void,
     declareUnknown = true,
   ): Promise<ExtensionStoreBatchMutationOutcome> {
     identities.forEach(assertIdentity);
@@ -1148,7 +1177,10 @@ export class ExtensionStore {
           legacyForRemainder = snapshot.legacyProjectionRemainder ?? {};
         }
       }
-      const policies: ExtensionPolicy[] = [];
+      const policies: Array<{
+        policy: ExtensionPolicy;
+        identity: ExtensionIdentity;
+      }> = [];
       for (const identity of identities) {
         let policy = snapshot.extensions[identity.id];
         if (!policy) {
@@ -1173,6 +1205,7 @@ export class ExtensionStore {
           }
         }
         if (
+          !policy.managed &&
           !policy.declarationOnly &&
           policy.artifactGeneration !== undefined &&
           !(await this.extensionArtifactExists(policy))
@@ -1186,12 +1219,12 @@ export class ExtensionStore {
             `Extension id ${identity.id} belongs to "${policy.name}", not "${identity.name}".`,
           );
         }
-        policies.push(policy);
+        policies.push({ policy, identity });
       }
       if (policies.length === 0) {
         return { snapshot, updated: false };
       }
-      for (const policy of policies) update(policy);
+      for (const { policy, identity } of policies) update(policy, identity);
       this.updateLegacyProjectionRemainder(snapshot, legacyForRemainder);
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);

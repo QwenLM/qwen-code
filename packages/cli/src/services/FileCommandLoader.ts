@@ -11,6 +11,7 @@ import toml from '@iarna/toml';
 import { glob } from 'glob';
 import { z } from 'zod';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { hydrateExtensionText } from '@qwen-code/qwen-code-core/extension/variables.js';
 import {
   createDebugLogger,
   EXTENSIONS_CONFIG_FILENAME,
@@ -30,6 +31,7 @@ import type { SlashCommand } from '../ui/commands/types.js';
 interface CommandDirectory {
   path: string;
   extensionName?: string;
+  extensionRoot?: string;
 }
 
 const debugLogger = createDebugLogger('FILE_COMMAND_LOADER');
@@ -116,6 +118,7 @@ export class FileCommandLoader implements ICommandLoader {
             path.join(dirInfo.path, file),
             dirInfo.path,
             dirInfo.extensionName,
+            dirInfo.extensionRoot,
           ),
         );
 
@@ -125,6 +128,7 @@ export class FileCommandLoader implements ICommandLoader {
             path.join(dirInfo.path, file),
             dirInfo.path,
             dirInfo.extensionName,
+            dirInfo.extensionRoot,
           ),
         );
 
@@ -188,6 +192,7 @@ export class FileCommandLoader implements ICommandLoader {
           dirs.push({
             path: cmdPath,
             extensionName: ext.displayName ?? ext.name,
+            extensionRoot: ext.source === 'managed' ? ext.path : undefined,
           });
         }
       }
@@ -203,6 +208,7 @@ export class FileCommandLoader implements ICommandLoader {
   private getExtensionCommandsPaths(ext: {
     path: string;
     name: string;
+    source?: 'managed' | 'user';
   }): string[] {
     // Try to get extension config
     try {
@@ -217,9 +223,15 @@ export class FileCommandLoader implements ICommandLoader {
             : [config.commands];
 
           return commandsArray
-            .map((cmdPath: string) =>
-              path.isAbsolute(cmdPath) ? cmdPath : path.join(ext.path, cmdPath),
-            )
+            .map((cmdPath: string) => {
+              const resolved =
+                ext.source === 'managed'
+                  ? hydrateExtensionText(cmdPath, ext.path)
+                  : cmdPath;
+              return path.isAbsolute(resolved)
+                ? resolved
+                : path.join(ext.path, resolved);
+            })
             .filter((cmdPath: string) => {
               try {
                 return fsSync.existsSync(cmdPath);
@@ -260,6 +272,7 @@ export class FileCommandLoader implements ICommandLoader {
     filePath: string,
     baseDir: string,
     extensionName?: string,
+    extensionRoot?: string,
   ): Promise<SlashCommand | null> {
     let fileContent: string;
     try {
@@ -294,6 +307,9 @@ export class FileCommandLoader implements ICommandLoader {
     }
 
     const validDef = validationResult.data;
+    if (extensionRoot) {
+      validDef.prompt = hydrateExtensionText(validDef.prompt, extensionRoot);
+    }
 
     // Use factory to create command
     return createSlashCommandFromDefinition(
@@ -316,6 +332,7 @@ export class FileCommandLoader implements ICommandLoader {
     filePath: string,
     baseDir: string,
     extensionName?: string,
+    extensionRoot?: string,
   ): Promise<SlashCommand | null> {
     let fileContent: string;
     try {
@@ -350,6 +367,9 @@ export class FileCommandLoader implements ICommandLoader {
     }
 
     const validDef = validationResult.data;
+    if (extensionRoot) {
+      validDef.prompt = hydrateExtensionText(validDef.prompt, extensionRoot);
+    }
 
     // Convert to CommandDefinition format
     const definition: CommandDefinition = {

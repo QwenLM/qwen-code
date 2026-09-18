@@ -190,9 +190,17 @@ describe('AcpBridge', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
+      managedExtensions: '/deployment/prepared extensions',
     });
 
     await bridge.start();
+
+    expect(child.spawn.mock.calls[0]![1]).toEqual(
+      expect.arrayContaining([
+        '--managed-extensions',
+        '/deployment/prepared extensions',
+      ]),
+    );
 
     const spawnOptions = child.spawn.mock.calls[0]![2] as {
       env?: Record<string, string | undefined>;

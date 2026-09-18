@@ -8,6 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { listCommand, handleList } from './list.js';
 import { t } from '../../i18n/index.js';
 import yargs from 'yargs';
+import { resolveManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
+import { resolve } from 'node:path';
+import { getExtensionManager } from './utils.js';
+import { TOP_LEVEL_GLOBAL_OPTIONS } from '../../config/top-level-options.js';
 
 const mockGetLoadedExtensions = vi.hoisted(() => vi.fn());
 const mockToOutputString = vi.hoisted(() => vi.fn());
@@ -33,6 +37,22 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 describe('extensions list command', () => {
+  it.each(['--managed-extensions . list', 'list --managed-extensions .'])(
+    'passes the global directory through management parsing: %s',
+    async (args) => {
+      mockGetLoadedExtensions.mockReturnValue([]);
+      const parser = yargs([])
+        .option('managed-extensions', {
+          ...TOP_LEVEL_GLOBAL_OPTIONS['managed-extensions'],
+          coerce: resolveManagedExtensionsDir,
+        })
+        .command(listCommand)
+        .exitProcess(false);
+      await parser.parseAsync(args);
+      expect(getExtensionManager).toHaveBeenLastCalledWith(resolve('.'));
+    },
+  );
+
   it('should parse the list command', () => {
     const parser = yargs([]).command(listCommand).fail(false).locale('en');
     expect(() => parser.parse('list')).not.toThrow();

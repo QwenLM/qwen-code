@@ -3948,6 +3948,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('keeps the deployment extension root when a new session changes cwd', async () => {
+    await setupSessionMocks('managed-session');
+    const managedExtensions = '/deployment/prepared extensions';
+    const agentPromise = runAcpAgent(mockConfig, makeSessionSettings(), {
+      ...mockArgv,
+      managedExtensions,
+    });
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike) as AgentLike;
+    await agent.newSession({ cwd: '/another-workspace', mcpServers: [] });
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+      managedExtensions,
+    });
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[2]).toBe(
+      '/another-workspace',
+    );
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('passes each concurrent newSession its own workspace settings instance', async () => {
     const settingsA = makeSessionSettings();
     const settingsB = makeSessionSettings();
@@ -26988,6 +27012,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     }
     return { agent, agentPromise };
   }
+
+  it.each(['load', 'resume'] as const)(
+    '%s preserves the deployment extension root across workspace restore',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      mockArgv.managedExtensions = '/deployment/prepared extensions';
+      const { agent, agentPromise } = await spawnAgent();
+      try {
+        const params = {
+          cwd: '/restored-workspace',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: { managedExtensions: '/request-must-not-override' },
+        };
+        if (action === 'load') await agent.loadSession(params);
+        else await agent.unstable_resumeSession(params);
+        expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+          managedExtensions: '/deployment/prepared extensions',
+        });
+        expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[2]).toBe(
+          '/restored-workspace',
+        );
+      } finally {
+        mockArgv.managedExtensions = undefined;
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('loadSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });

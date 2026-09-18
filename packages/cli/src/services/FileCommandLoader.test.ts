@@ -104,6 +104,44 @@ describe('FileCommandLoader', () => {
     mock.restore();
   });
 
+  it('hydrates managed command paths and prompts without changing source files', async () => {
+    const root = path.join(process.cwd(), 'managed-command');
+    const markdown = 'Use ${CLAUDE_PLUGIN_ROOT}/script and ${extensionPath}';
+    const source = 'prompt = "Use ${CLAUDE_PLUGIN_ROOT}/script"';
+    mock({
+      [root]: {
+        'qwen-extension.json': JSON.stringify({
+          commands: '${extensionPath}/actions',
+        }),
+        actions: { 'markdown.md': markdown, 'toml.toml': source },
+      },
+    });
+    const config = {
+      getFolderTrustFeature: () => false,
+      getFolderTrust: () => true,
+      getProjectRoot: () => process.cwd(),
+      getExtensions: () => [
+        { name: 'managed', path: root, source: 'managed', isActive: true },
+      ],
+    } as unknown as Config;
+    const commands = await new FileCommandLoader(config).loadCommands(signal);
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      const result = await command.action?.(createMockCommandContext(), '');
+      expect(result?.type).toBe('submit_prompt');
+      expect(JSON.stringify(result)).toContain(root);
+      expect(JSON.stringify(result)).not.toContain('${CLAUDE_PLUGIN_ROOT}');
+      expect(JSON.stringify(result)).not.toContain('${extensionPath}');
+    }
+    const fs = await import('node:fs/promises');
+    expect(
+      await fs.readFile(path.join(root, 'actions/markdown.md'), 'utf8'),
+    ).toBe(markdown);
+    expect(
+      await fs.readFile(path.join(root, 'actions/toml.toml'), 'utf8'),
+    ).toBe(source);
+  });
+
   it('loads a single command from a file', async () => {
     const userCommandsDir = Storage.getUserCommandsDir();
     mock({

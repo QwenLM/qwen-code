@@ -49,6 +49,40 @@ describe('createExtensionsController', () => {
     vi.restoreAllMocks();
   });
 
+  it('uses the deployment root for managers in every selected workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qwen-managed-controller-'));
+    try {
+      const managedExtensionsDir = join(root, 'prepared');
+      await mkdir(join(managedExtensionsDir, 'bundle'), { recursive: true });
+      await writeFile(
+        join(managedExtensionsDir, 'bundle', 'qwen-extension.json'),
+        JSON.stringify({ name: 'managed-controller', version: '1.2.3' }),
+      );
+      vi.stubEnv('QWEN_HOME', join(root, 'home'));
+      const controller = createExtensionsController({
+        managedExtensionsDir,
+        boundWorkspace: join(root, 'first'),
+        bridge: {} as AcpSessionBridge,
+        workspace: {} as DaemonWorkspaceService,
+        isWorkspaceTrusted: () => true,
+      });
+      for (const workspace of [join(root, 'first'), join(root, 'second')]) {
+        const manager = controller.createExtensionManager(workspace, true);
+        await manager.refreshCache();
+        expect(manager.getLoadedExtensions()).toEqual([
+          expect.objectContaining({
+            name: 'managed-controller',
+            source: 'managed',
+            version: '1.2.3',
+          }),
+        ]);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('does not impose a public-only extension network policy', () => {
     const controller = createExtensionsController({
       boundWorkspace: '/work/bound',

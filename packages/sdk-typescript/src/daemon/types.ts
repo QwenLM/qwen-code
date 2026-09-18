@@ -5127,6 +5127,7 @@ export interface DaemonExtensionEntry {
   version: string;
   isActive: boolean;
   path: string;
+  extensionSource?: 'managed' | 'user';
   source?: string;
   installType?: DaemonExtensionInstallType;
   originSource?: DaemonExtensionOriginSource;
@@ -5180,6 +5181,7 @@ export type ExtensionWorkspaceBatchActivationState =
   | 'inherit';
 
 export interface ExtensionCatalogEntry {
+  extensionSource?: 'managed' | 'user';
   id: string;
   name: string;
   version: string;
@@ -5196,6 +5198,7 @@ export interface ExtensionCatalog {
 }
 
 export interface WorkspaceExtensionProjectionEntry {
+  extensionSource?: 'managed' | 'user';
   extensionId: string;
   name: string;
   version: string;

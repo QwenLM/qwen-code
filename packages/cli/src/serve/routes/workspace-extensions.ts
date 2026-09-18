@@ -499,6 +499,7 @@ const buildExtensionSkillStates = (
 };
 
 interface RegisterWorkspaceExtensionRoutesDeps {
+  managedExtensionsDir?: string;
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
@@ -551,6 +552,7 @@ export function registerWorkspaceExtensionRoutes(
           : undefined;
     return {
       boundWorkspace: ws,
+      managedExtensionsDir: deps.managedExtensionsDir,
       bridge: wsBridge,
       workspace: wsService,
       ...(isWorkspaceTrusted ? { isWorkspaceTrusted } : {}),
@@ -1865,6 +1867,7 @@ export function registerWorkspaceExtensionRoutes(
             id: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             ...(extension.installMetadata?.type
               ? { installType: extension.installMetadata.type }
               : {}),
@@ -2372,6 +2375,7 @@ export function registerWorkspaceExtensionRoutes(
             extensionId: extension.id,
             name: extension.name,
             version: extension.version,
+            extensionSource: extension.source ?? 'user',
             defaultActivation: activation.default,
             workspaceActivation:
               activation.workspace === 'inherit' ? null : activation.workspace,

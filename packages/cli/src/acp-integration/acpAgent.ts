@@ -6870,6 +6870,7 @@ class QwenAgent implements Agent {
     let extensions: ReturnType<ExtensionManager['getLoadedExtensions']> = [];
     try {
       const extensionManager = new ExtensionManager({
+        managedExtensionsDir: this.argv.managedExtensions,
         workspaceDir: cwd,
         isWorkspaceTrusted: settings.isTrusted,
         locale: getCurrentLanguage(),
@@ -9092,6 +9093,7 @@ class QwenAgent implements Agent {
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
+            extensionSource: ext.source ?? 'user',
             ...(ext.installMetadata?.source
               ? { source: redactUrlCredentials(ext.installMetadata.source) }
               : {}),
@@ -14081,6 +14083,7 @@ class QwenAgent implements Agent {
         const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const extensionManager = new ExtensionManager({
+          managedExtensionsDir: this.argv.managedExtensions,
           workspaceDir: settingsCwd,
           isWorkspaceTrusted:
             isWorkspaceTrusted(settings.merged).isTrusted ?? true,

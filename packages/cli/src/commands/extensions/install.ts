@@ -24,6 +24,7 @@ import {
 import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface InstallArgs {
+  managedExtensions?: string;
   source: string;
   ref?: string;
   autoUpdate?: boolean;
@@ -86,6 +87,7 @@ export async function handleInstall(args: InstallArgs) {
       : requestConsentOrFail.bind(null, requestConsentNonInteractive);
     const workspaceDir = process.cwd();
     extensionManager = new ExtensionManager({
+      managedExtensionsDir: args.managedExtensions,
       workspaceDir,
       locale: getCurrentLanguage(),
       isWorkspaceTrusted:
@@ -200,6 +202,7 @@ export const installCommand: CommandModule = {
       }),
   handler: async (argv) => {
     await handleInstall({
+      managedExtensions: argv['managed-extensions'] as string | undefined,
       source: argv['source'] as string,
       ref: argv['ref'] as string | undefined,
       autoUpdate: argv['auto-update'] as boolean | undefined,

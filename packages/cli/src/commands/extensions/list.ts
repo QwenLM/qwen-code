@@ -11,13 +11,13 @@ import { extensionToOutputString, getExtensionManager } from './utils.js';
 import { t, initializeI18n, resolveLanguageSetting } from '../../i18n/index.js';
 import { loadSettings } from '../../config/settings.js';
 
-export async function handleList() {
+export async function handleList(managedExtensions?: string) {
   try {
     const settings = loadSettings();
     await initializeI18n(
       resolveLanguageSetting(settings.merged.general?.language as string),
     );
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(managedExtensions);
     const extensions = extensionManager.getLoadedExtensions();
 
     if (!extensions || extensions.length === 0) {
@@ -41,7 +41,7 @@ export const listCommand: CommandModule = {
   command: 'list',
   describe: t('Lists installed extensions.'),
   builder: (yargs) => yargs,
-  handler: async () => {
-    await handleList();
+  handler: async (argv) => {
+    await handleList(argv['managed-extensions'] as string | undefined);
   },
 };

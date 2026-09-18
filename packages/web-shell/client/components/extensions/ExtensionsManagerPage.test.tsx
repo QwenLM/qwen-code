@@ -190,6 +190,34 @@ afterEach(async () => {
 });
 
 describe('ExtensionsManagerPage activation refresh', () => {
+  it('labels managed packages and keeps activation available without artifact actions or absolute paths', async () => {
+    const status = await state.actions.loadExtensionsStatus();
+    status.extensions[0] = {
+      ...status.extensions[0],
+      extensionSource: 'managed',
+      path: '/deployment/extensions/demo',
+    };
+    state.actions.loadExtensionsStatus.mockResolvedValue(status);
+    await renderPage();
+    await act(async () => {
+      container.querySelector<HTMLElement>('[aria-label="Demo"]')!.click();
+    });
+    expect(container.textContent).toContain('Managed');
+    expect(container.textContent).not.toContain('/deployment/extensions/demo');
+    expect(container.querySelector('[aria-haspopup="menu"]')).toBeNull();
+    const controls =
+      container.querySelectorAll<HTMLButtonElement>('[role="combobox"]');
+    expect(controls).toHaveLength(2);
+    expect(Array.from(controls).every((control) => !control.disabled)).toBe(
+      true,
+    );
+    await chooseActivation('user', 'Disabled');
+    expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      'disabled',
+    );
+  });
+
   it('submits a workspace refresh without polling or blocking the page', async () => {
     // A refresh that never settles keeps the page busy if it is awaited.
     state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(

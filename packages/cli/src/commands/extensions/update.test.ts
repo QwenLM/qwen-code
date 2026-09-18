@@ -9,7 +9,7 @@ import { updateCommand, handleUpdate } from './update.js';
 import yargs from 'yargs';
 import { ExtensionUpdateState } from '@qwen-code/qwen-code-core';
 
-const mockGetLoadedExtensions = vi.hoisted(() => vi.fn());
+const mockGetLoadedExtensions = vi.hoisted(() => vi.fn().mockReturnValue([]));
 const mockUpdateExtension = vi.hoisted(() => vi.fn());
 const mockCheckForAllExtensionUpdates = vi.hoisted(() => vi.fn());
 const mockUpdateAllUpdatableExtensions = vi.hoisted(() => vi.fn());
@@ -80,6 +80,31 @@ describe('extensions update command', () => {
 describe('handleUpdate', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetLoadedExtensions.mockReturnValue([]);
+  });
+
+  it('reports managed update refusal before checking missing metadata', async () => {
+    mockGetLoadedExtensions.mockReturnValueOnce([
+      { name: 'managed', source: 'managed' },
+    ]);
+    await handleUpdate({ name: 'managed' });
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('managed by its provider'),
+    );
+    expect(mockCheckForExtensionUpdate).not.toHaveBeenCalled();
+    expect(mockUpdateExtension).not.toHaveBeenCalled();
+  });
+
+  it('reports managed skips while still invoking user update-all', async () => {
+    mockGetLoadedExtensions.mockReturnValueOnce([
+      { name: 'managed', source: 'managed' },
+    ]);
+    mockUpdateAllUpdatableExtensions.mockResolvedValueOnce([]);
+    await handleUpdate({ all: true });
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Skipping managed extension'),
+    );
+    expect(mockUpdateAllUpdatableExtensions).toHaveBeenCalled();
   });
 
   describe('update by name', () => {

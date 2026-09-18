@@ -16,6 +16,7 @@ import { getExtensionManager } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface UpdateArgs {
+  managedExtensions?: string;
   name?: string;
   all?: boolean;
 }
@@ -42,7 +43,7 @@ const updateWarningOutput = (info: ExtensionUpdateInfo) =>
     .join('\n');
 
 export async function handleUpdate(args: UpdateArgs) {
-  const extensionManager = await getExtensionManager();
+  const extensionManager = await getExtensionManager(args.managedExtensions);
   const extensions = extensionManager.getLoadedExtensions();
 
   if (args.name) {
@@ -55,6 +56,11 @@ export async function handleUpdate(args: UpdateArgs) {
           t('Extension "{{name}}" not found.', { name: args.name }),
         );
         return;
+      }
+      if (extension.source === 'managed') {
+        throw new Error(
+          `Managed extension "${extension.name}" is managed by its provider and cannot be updated.`,
+        );
       }
       if (!extension.installMetadata) {
         writeStdoutLine(
@@ -107,6 +113,13 @@ export async function handleUpdate(args: UpdateArgs) {
     }
   }
   if (args.all) {
+    for (const extension of extensions) {
+      if (extension.source === 'managed') {
+        writeStdoutLine(
+          `Skipping managed extension "${extension.name}": managed by its provider.`,
+        );
+      }
+    }
     try {
       const extensionState = new Map();
       await extensionManager.checkForAllExtensionUpdates(
@@ -166,6 +179,7 @@ export const updateCommand: CommandModule = {
       }),
   handler: async (argv) => {
     await handleUpdate({
+      managedExtensions: argv['managed-extensions'] as string | undefined,
       name: argv['name'] as string | undefined,
       all: argv['all'] as boolean | undefined,
     });

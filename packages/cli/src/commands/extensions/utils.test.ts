@@ -100,6 +100,16 @@ describe('extensionToOutputString', () => {
     mockIsEnabled.mockReturnValue(true);
   });
 
+  it('identifies managed source without install metadata', () => {
+    const result = extensionToOutputString(
+      createMockExtension({ source: 'managed' }),
+      mockExtensionManager,
+      '/workspace',
+    );
+    expect(result).toContain('Source: managed');
+    expect(result).toContain('(1.0.0)');
+  });
+
   it('should include status icon when inline is false', () => {
     const extension = createMockExtension();
     const result = extensionToOutputString(
