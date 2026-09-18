@@ -5810,3 +5810,29 @@ it('does not let old execution output consume or relabel a newer result for the 
   ).toBe(false);
   expect(after[0]).toMatchObject({ data: { backgroundTask: firstTask } });
 });
+
+describe('transcript message prompt ids', () => {
+  it('carries the daemon-stamped prompt id onto the messages it built', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'hello', 1000, false, {
+        promptId: 'prompt-1',
+      }),
+      textBlock('assistant-2', 'assistant', 'hi', 1100),
+      textBlock('user-3', 'user', 'again', 2000, false, {
+        promptId: 'prompt-2',
+      }),
+      textBlock('assistant-4', 'assistant', 'sure', 2100, false, {
+        promptId: 'prompt-2',
+      }),
+    ]);
+    const promptIdOf = (id: string) =>
+      messages.find((message) => message.id === id)?.promptId;
+
+    // A replayed turn stamps the prompt's own block; a live turn may stamp the
+    // answer instead. Both carry the same value.
+    expect(promptIdOf('user-1')).toBe('prompt-1');
+    expect(promptIdOf('assistant-4')).toBe('prompt-2');
+    // A block without a stamp must not have one invented for it.
+    expect(promptIdOf('assistant-2')).toBeUndefined();
+  });
+});
