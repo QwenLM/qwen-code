@@ -30,6 +30,7 @@
 11634 finalize-release.yml
 19441 live-host-release.yml
 6488 live-host.yml
+1343 mobile-shell.yml
 9948 main-ci-failure-issue.yml
 2277 pnpm-store.yml
 3083 pnpm-worktree-smoke.yml

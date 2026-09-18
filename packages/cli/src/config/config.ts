@@ -53,6 +53,7 @@ import {
   loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
+  validateModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -106,7 +107,6 @@ import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
-  validateGoalCheckpointTimeoutSeconds,
   validateGoalMaxActiveMinutes,
   validateGoalMaxTurns,
   validateGoalTokenBudget,
@@ -1160,18 +1160,6 @@ function resolveGoalMaxActiveMinutes(settings: Settings): number | undefined {
   }
 }
 
-function resolveGoalCheckpointTimeoutSeconds(
-  settings: Settings,
-): number | undefined {
-  const fromSettings: unknown = settings.model?.goalCheckpointTimeoutSeconds;
-  if (fromSettings === undefined) return undefined;
-  try {
-    return validateGoalCheckpointTimeoutSeconds(fromSettings);
-  } catch (err) {
-    throw new Error(`settings.json: ${(err as Error).message}`);
-  }
-}
-
 /**
  * Resolves the tool-call budget for a run. Returns the validated count
  * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
@@ -1581,6 +1569,7 @@ export async function loadCliConfig(
    * If provided, these override settings.hooks for hook loading.
    */
   hooksConfig?: {
+    systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
   },
@@ -2061,7 +2050,27 @@ export async function loadCliConfig(
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
-  // Unified resolution of generation config with source attribution
+  // Validate provider protocols and per-model `wireApi` fields up front. The
+  // registry resolver throws a bare Error, and every startup shape passes
+  // through here, even without a selected model/auth type — classify it as a
+  // FatalConfigError so the user gets the message and the "please fix the
+  // configuration file(s)" hint instead of a stack trace before the TUI
+  // starts.
+  try {
+    validateModelProvidersConfig(
+      settings.modelProviders,
+      settings.providerProtocol,
+    );
+  } catch (err) {
+    throw new FatalConfigError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Unified resolution of generation config with source attribution. Note the
+  // up-front provider validation above is what classifies invalid configuration;
+  // this call's own settings reads must not re-wrap a resolver
+  // defect as a user config error, so it stays unwrapped.
   const resolvedCliConfig = resolveCliGenerationConfig({
     argv: {
       model: argv.model,
@@ -2431,7 +2440,6 @@ export async function loadCliConfig(
     goalTokenBudget: resolveGoalTokenBudget(settings),
     goalMaxTurns: resolveGoalMaxTurns(settings),
     goalMaxActiveMinutes: resolveGoalMaxActiveMinutes(settings),
-    goalCheckpointTimeoutSeconds: resolveGoalCheckpointTimeoutSeconds(settings),
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
@@ -2506,7 +2514,7 @@ export async function loadCliConfig(
     locale: resolveLocaleForExtensions(settings),
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType: selectedAuthType,
+    authType: resolvedCliConfig.authType,
     inputFormat,
     outputFormat,
     includePartialMessages,
@@ -2537,6 +2545,7 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
+    workflowNameOnly: settings.tools?.workflowNameOnly,
     modelProposedGoals: normalizeModelProposedGoals(
       settings.goals?.modelProposed,
     ),

@@ -18,6 +18,7 @@ packages:
   - 'integrations/external-context-mem0'
   - '!packages/desktop-shell'
   - '!packages/live-host'
+  - '!packages/mobile-shell'
 
 # npm links every workspace package into the root node_modules; pnpm links
 # one only where it is a declared dependency. The root package therefore

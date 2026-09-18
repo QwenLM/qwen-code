@@ -115,10 +115,12 @@ export async function collectContextData(
   const apiTotalTokens = activeChat
     ? activeChat.getLastPromptTokenCount()
     : uiTelemetryService.getLastPromptTokenCount();
-  // Cached-content tokens have no per-chat mirror today (only the global
-  // singleton is written, llm-chat.ts), so this read stays global. It only
-  // refines the messages-vs-cache split, not the headline total or tier.
-  const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
+  // Same per-session preference as the total (#5763 / #12047): the global
+  // singleton reports whichever session last completed a turn in a `serve`
+  // daemon. Fall back only when no chat exists yet.
+  const apiCachedTokens =
+    activeChat?.getLastCachedContentTokenCount?.() ??
+    uiTelemetryService.getLastCachedContentTokenCount();
 
   const systemPromptText = getMainSessionBaseSystemPrompt(config);
   const systemPromptTokens = estimateContextTextTokens(systemPromptText);

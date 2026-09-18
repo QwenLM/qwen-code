@@ -5,6 +5,7 @@
  */
 
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +14,11 @@ import { parse as parseYaml } from 'yaml';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
-const desktopPrefixes = ['packages/desktop-shell', 'packages/live-host'];
+const nativePrefixes = [
+  'packages/desktop-shell',
+  'packages/live-host',
+  'packages/mobile-shell',
+];
 const forbiddenRootPackages = [
   'electron',
   'electron-builder',
@@ -24,10 +29,10 @@ const forbiddenRootPackages = [
 
 let hasError = false;
 
-console.log('Checking desktop workspace isolation...');
+console.log('Checking native workspace isolation...');
 
-function isDesktopLocation(location) {
-  return desktopPrefixes.some(
+function isNativeLocation(location) {
+  return nativePrefixes.some(
     (prefix) => location === prefix || location.startsWith(`${prefix}/`),
   );
 }
@@ -58,26 +63,26 @@ try {
   process.exit(1);
 }
 
-const desktopWorkspaces = workspaces
+const nativeWorkspaces = workspaces
   .map((workspace) => workspace.location)
-  .filter(isDesktopLocation);
+  .filter(isNativeLocation);
 
-if (desktopWorkspaces.length > 0) {
+if (nativeWorkspaces.length > 0) {
   reportError(
-    'Desktop packages should not be part of the root npm workspace set.',
-    desktopWorkspaces,
+    'Native packages should not be part of the root npm workspace set.',
+    nativeWorkspaces,
   );
 }
 
 const lockfile = parseYaml(readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8'));
-const desktopLockfileEntries = Object.keys(lockfile.importers ?? {}).filter(
-  isDesktopLocation,
+const nativeLockfileEntries = Object.keys(lockfile.importers ?? {}).filter(
+  isNativeLocation,
 );
 
-if (desktopLockfileEntries.length > 0) {
+if (nativeLockfileEntries.length > 0) {
   reportError(
-    'Root pnpm-lock.yaml should not contain desktop importers.',
-    desktopLockfileEntries,
+    'Root pnpm-lock.yaml should not contain native package importers.',
+    nativeLockfileEntries,
   );
 }
 
@@ -92,8 +97,32 @@ if (installedForbiddenPackages.length > 0) {
   );
 }
 
+const wrapperJar = join(
+  root,
+  'packages',
+  'mobile-shell',
+  'gradle',
+  'wrapper',
+  'gradle-wrapper.jar',
+);
+const wrapperChecksum = `${wrapperJar}.sha256`;
+if (!existsSync(wrapperJar) || !existsSync(wrapperChecksum)) {
+  reportError('Android Gradle wrapper integrity files are missing.');
+} else {
+  const expected = readFileSync(wrapperChecksum, 'utf8').trim().toLowerCase();
+  const actual = createHash('sha256')
+    .update(readFileSync(wrapperJar))
+    .digest('hex');
+  if (!/^[a-f0-9]{64}$/u.test(expected) || actual !== expected) {
+    reportError('Android Gradle wrapper checksum does not match.', [
+      `expected ${expected}`,
+      `actual ${actual}`,
+    ]);
+  }
+}
+
 if (hasError) {
   process.exit(1);
 }
 
-console.log('Desktop workspace isolation check passed.');
+console.log('Native workspace isolation check passed.');

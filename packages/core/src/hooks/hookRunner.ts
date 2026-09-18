@@ -674,7 +674,9 @@ export class HookRunner {
     try {
       // Check if this is an async command hook
       if (this.isAsyncHook(hookConfig)) {
-        return this.executeAsyncHook(
+        // Awaited so a rejection lands in the catch below: executeHook never
+        // throws, and the caller's onHookEnd always runs.
+        return await this.executeAsyncHook(
           hookConfig as CommandHookConfig,
           eventName,
           input,
@@ -741,6 +743,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };
@@ -831,6 +834,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -861,6 +865,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -904,6 +909,7 @@ export class HookRunner {
       hookConfig,
       eventName,
       success: true,
+      outcome: 'success',
       duration: 0,
       isAsync: true,
       output: { continue: true },

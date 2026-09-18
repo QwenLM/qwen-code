@@ -15,8 +15,8 @@
  *  - the main menu renders the three top-level entries (ink AuthDialog
  *    parity) and Esc is blocked while unauthenticated;
  *  - main → sub-menu navigation and back follow the ink view stack;
- *  - the custom-provider wizard walks the full six-step flow
- *    (protocol → baseUrl → apiKey → models → advancedConfig → review) and
+ *  - the custom-provider wizard walks the full seven-step flow
+ *    (protocol → api → baseUrl → apiKey → models → advancedConfig → review) and
  *    the final Enter drives the same install-plan write path as ink's
  *    useAuth.handleProviderSubmit (buildInstallPlan → applyProviderInstall
  *    Plan → feedback + close);
@@ -99,6 +99,7 @@ vi.mock('./theme.js', () => ({
 }));
 vi.mock('../../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: () => ({}),
+  getRawModelProviders: () => ({}),
 }));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -224,13 +225,16 @@ function createMockConfig(authType?: AuthType): Config {
       syncAfterAuthRefresh: vi.fn(),
     })),
     reloadModelProvidersConfig: vi.fn(),
+    syncModelSelection: vi.fn(),
     refreshAuth: vi.fn(),
   } as unknown as Config;
 }
 
-function createMockSettings(): LoadedSettings {
+function createMockSettings(
+  merged: Record<string, unknown> = {},
+): LoadedSettings {
   return {
-    merged: { env: {}, modelProviders: {} },
+    merged: { env: {}, modelProviders: {}, ...merged },
     forScope: () => ({ settings: {}, path: '', originalSettings: {} }),
   } as unknown as LoadedSettings;
 }
@@ -238,11 +242,12 @@ function createMockSettings(): LoadedSettings {
 function renderDialog(overrides?: {
   authType?: AuthType;
   initialError?: string;
+  merged?: Record<string, unknown>;
 }) {
   const onClose = vi.fn();
   const notify = vi.fn();
   const config = createMockConfig(overrides?.authType);
-  const settings = createMockSettings();
+  const settings = createMockSettings(overrides?.merged);
   render(
     <OpenTuiAuthDialog
       config={config}
@@ -255,7 +260,7 @@ function renderDialog(overrides?: {
   return { onClose, notify, config };
 }
 
-/** Drive main → Custom Provider → through the full six-step wizard. */
+/** Drive main → Custom Provider → through the full seven-step wizard. */
 async function runCustomProviderFlow(): Promise<{
   onClose: ReturnType<typeof vi.fn>;
   notify: ReturnType<typeof vi.fn>;
@@ -264,7 +269,8 @@ async function runCustomProviderFlow(): Promise<{
   await press('down');
   await press('down');
   await press('return'); // main: CUSTOM_PROVIDER → provider-setup (protocol)
-  await press('return'); // protocol: OpenAI-compatible → baseUrl input
+  await press('return'); // protocol: OpenAI-compatible → API selection
+  await press('return'); // API: Chat Completions → baseUrl input
   await typeText('https://api.example.com/v1');
   await press('return'); // baseUrl → apiKey
   await typeText('sk-test');
@@ -389,7 +395,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   it('walks the custom-provider wizard and submits the install plan', async () => {
     const { onClose, notify } = await runCustomProviderFlow();
     // review: step title reflects the last step before saving
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     await press('return'); // save
 
     await vi.waitFor(() => {
@@ -405,15 +411,18 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('offers and saves OpenAI Responses through the custom-provider protocol filter', async () => {
+  it('offers and saves Responses within the OpenAI custom-provider choice', async () => {
     const { onClose } = renderDialog();
     await press('down');
     await press('down');
     await press('return');
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
-    expect(screen.getByText('OpenAI Responses')).toBeTruthy();
+    expect(screen.queryByText('OpenAI Responses')).toBeNull();
     expect(screen.getByText('Anthropic-compatible')).toBeTruthy();
     expect(screen.getByText('Gemini-compatible')).toBeTruthy();
+    await press('return');
+    expect(screen.getByText('Chat Completions')).toBeTruthy();
+    expect(screen.getByText('Responses')).toBeTruthy();
     await press('down');
     await press('return');
     await typeText('https://api.example.com/v1');
@@ -423,8 +432,54 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await typeText('responses-model');
     await press('return');
     await press('return');
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     await press('return');
+    await vi.waitFor(() => {
+      expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
+    });
+    expect(core.applyProviderInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+      expect.anything(),
+    );
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('reopens a saved Responses install with the API step on Responses', async () => {
+    // Custom Provider prefills the saved ids, so the API step must open on
+    // the saved wire or Save restamps them onto Chat Completions (ink parity).
+    const { onClose } = renderDialog({
+      merged: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'm1',
+              baseUrl: 'https://gw.example/v1',
+              envKey: 'QWEN_CUSTOM_API_KEY_X',
+              wireApi: 'responses',
+            },
+          ],
+        },
+      },
+    });
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → API
+    // RadioList marks the cursor row with '› '.
+    expect(
+      screen.getByText('Responses').previousElementSibling?.textContent,
+    ).toBe('› ');
+    expect(
+      screen.getByText('Chat Completions').previousElementSibling?.textContent,
+    ).toBe('  ');
+    await press('return'); // API: keep the saved Responses route → baseUrl
+    await typeText('https://gw.example/v1');
+    await press('return'); // baseUrl → apiKey
+    await typeText('sk-test');
+    await press('return'); // apiKey → models (prefilled with m1)
+    await press('return'); // models → advancedConfig
+    await press('return'); // advancedConfig → review
+    await press('return'); // save
     await vi.waitFor(() => {
       expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1);
     });
@@ -440,7 +495,8 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
     await typeText('https://api.example.com/v1');
     await press('return'); // baseUrl → apiKey
     await typeText('sk-test');
@@ -540,7 +596,8 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
     await typeText('https://api.example.com/v1');
     await press('return'); // baseUrl → apiKey
   }
@@ -551,7 +608,8 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
   }
 
   /** The step titles the wizard walks through from the API key to the review. */
@@ -603,9 +661,9 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     await typeBatchedThenEnter('https://x.test');
     // A stale empty URL fell back to the protocol default without an error, so
     // the wizard advanced and saved the endpoint nobody typed.
-    expect(screen.getByText(/Step 3\/6 · API Key/)).toBeTruthy();
+    expect(screen.getByText(/Step 4\/7 · API Key/)).toBeTruthy();
     await runToReviewStep();
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     expect(document.body.textContent).toContain('"baseUrl": "https://x.test"');
     expect(document.body.textContent).not.toContain('api.openai.com');
   });
@@ -628,8 +686,14 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
       await press('return'); // models → advancedConfig
       await press('return'); // advancedConfig → review
       await press('return'); // review → save
-      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
-      expect(build.mock.calls[0]?.[1]?.apiKey).toBe('sk-test');
+      // The review step builds the plan again for its preview, so the submit
+      // count is the install call; the key it carried must be the burst alone.
+      await vi.waitFor(() =>
+        expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1),
+      );
+      const keys = build.mock.calls.map((call) => call[1]?.apiKey);
+      expect(keys).toContain('sk-test');
+      expect(keys).not.toContain('sk-testZ');
     } finally {
       build.mockRestore();
     }
@@ -651,8 +715,14 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
       });
       await press('return'); // advancedConfig → review
       await press('return'); // review → save
-      await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['mod']);
+      await vi.waitFor(() =>
+        expect(core.applyProviderInstallPlan).toHaveBeenCalledTimes(1),
+      );
+      const ids = build.mock.calls.map((call) =>
+        JSON.stringify(call[1]?.modelIds),
+      );
+      expect(ids).toContain('["mod"]');
+      expect(ids).not.toContain('["modZ"]');
     } finally {
       build.mockRestore();
     }
@@ -795,7 +865,7 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
     expect(screen.getByText('auto')).toBeTruthy();
     await press('return'); // advancedConfig: skip → review
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
   });
 });
 
@@ -814,7 +884,8 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
-    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await press('return'); // protocol: OpenAI-compatible → API selection
+    await press('return'); // API: Chat Completions → baseUrl input
   }
 
   /** Walk to the advanced-config step with the context-window row focused. */
@@ -901,7 +972,7 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(focusedField()).toEqual({ text: 'https:// ', cell: ' ' });
     // the edited value, not the typed one, is what the step submits
     await press('return');
-    expect(screen.getByText(/Step 3\/6 · API Key/)).toBeTruthy();
+    expect(screen.getByText(/Step 4\/7 · API Key/)).toBeTruthy();
   });
 
   it('sends ctrl+E to the end of a pasted value and bare End to its own line', async () => {
@@ -959,7 +1030,7 @@ describe('caret editing in dialog text fields (#107)', () => {
     await typeText('7');
     expect(focusedField()).toEqual({ text: '129734', cell: '3' });
     await press('return');
-    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
+    expect(screen.getByText(/Step 7\/7 · Review/)).toBeTruthy();
     expect(document.body.textContent).toContain('"contextWindowSize": 129734');
   });
 
