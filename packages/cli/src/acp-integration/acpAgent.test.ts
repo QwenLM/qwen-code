@@ -28226,12 +28226,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('keeps the recovered Goal card off a full or partial bulk replay page on a cold load', async () => {
+  it('delivers the recovered Goal state as live updates when the cold bulk page is full', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    // A Goal recovered from a goal_state record: the client must get this
+    // whatever the page can carry, or it shows no Goal while the runtime
+    // drives one.
     const goalUpdate = {
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
-      _meta: { goalStatus: { kind: 'cleared', condition: 'ship the thing' } },
+      _meta: {
+        goalState: { v: 2, activity: 'idle' },
+        goalStatus: { kind: 'set', condition: 'ship the thing' },
+      },
     };
     bindRestoreMocks({
       sessionExists: true,
@@ -28265,6 +28271,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(mockRenderPreparedGoalUpdate).toHaveBeenLastCalledWith(
       expect.any(Function),
       expect.not.objectContaining({ partialReplay: true }),
+    );
+    expect(lastSessionMock?.sendUpdate).toHaveBeenCalledExactlyOnceWith(
+      goalUpdate,
     );
 
     mockConnectionState.resolve();

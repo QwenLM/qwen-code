@@ -1095,18 +1095,17 @@ function validateLoadReplayEnvelope(
 
 /**
  * Append the Goal updates a load publishes after its replayed page, unless
- * that would take the page over the limits it was cut to. A page already
- * at a limit ships without them rather than failing the load over what
- * is presentation, or state the client re-reads: a client that misses a
- * published Goal state reads it back with `session.goal()`.
+ * that would take the page over the limits it was cut to. Returns whether
+ * they were appended: a page already at a limit ships without them rather
+ * than failing the load, and the caller delivers them another way.
  */
 function appendGoalUpdatesWithinLimits(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
   goalUpdates: readonly SessionUpdate[],
   enforceLimits: boolean,
-): void {
-  if (goalUpdates.length === 0) return;
+): boolean {
+  if (goalUpdates.length === 0) return true;
   const withGoal = {
     ...envelope,
     updates: [...envelope.updates, ...goalUpdates],
@@ -1116,11 +1115,12 @@ function appendGoalUpdatesWithinLimits(
   } catch (error) {
     if (!(error instanceof HistoryReplayLimitError)) throw error;
     debugLogger.debug(
-      `Dropped ${goalUpdates.length} Goal update(s) from a full replay page: ${error.message}`,
+      `Kept ${goalUpdates.length} Goal update(s) off a full replay page: ${error.message}`,
     );
-    return;
+    return false;
   }
   envelope.updates = withGoal.updates;
+  return true;
 }
 
 function replayGoalBootstrap(
@@ -5762,6 +5762,7 @@ class QwenAgent implements Agent {
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
             validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
+            // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
               sessionId,
               envelope,
@@ -5975,12 +5976,18 @@ class QwenAgent implements Agent {
                   v: LOAD_REPLAY_VERSION,
                   updates: [],
                 };
-                appendGoalUpdatesWithinLimits(
+                const appended = appendGoalUpdatesWithinLimits(
                   sessionId,
                   replayEnvelope,
                   rendered.updates,
                   restoreOptions.replay.kind === 'recent',
                 );
+                // What a full page cannot carry is the recovered Goal
+                // state, which the client must still get: it is sent as
+                // live updates once the session is up, as a streamed load
+                // sends it. The publication key is primed either way, so
+                // the subscription does not publish the same state twice.
+                if (!appended) streamGoalUpdates = rendered.updates;
               }
             },
             beforeSessionPublish: () => {
@@ -6037,17 +6044,17 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
-                try {
-                  for (const update of streamGoalUpdates) {
-                    await createdSession.sendUpdate(update);
-                  }
-                } catch (error) {
-                  debugLogger.debug(
-                    `Failed to publish recovered Goal state: ${
-                      error instanceof Error ? error.message : String(error)
-                    }`,
-                  );
+              }
+              try {
+                for (const update of streamGoalUpdates) {
+                  await createdSession.sendUpdate(update);
                 }
+              } catch (error) {
+                debugLogger.debug(
+                  `Failed to publish recovered Goal state: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
               }
               await profiler.time('post_replay_services', async () => {
                 if (!provisionalStandalone && !suppressWorktreeContextRestore) {
