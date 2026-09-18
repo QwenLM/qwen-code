@@ -26,6 +26,17 @@ import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 const execFileAsync = promisify(execFile);
 
+function isGitProbeInfrastructureError(error: unknown): boolean {
+  const failure = error as { code?: unknown; killed?: unknown };
+  return (
+    failure.killed === true ||
+    (typeof failure.code === 'string' &&
+      ['ENOENT', 'EACCES', 'EAGAIN', 'ENOMEM', 'ETIMEDOUT'].includes(
+        failure.code,
+      ))
+  );
+}
+
 export interface WorkspaceRouteContext {
   readonly runtime: WorkspaceRuntime;
   readonly routePrefix: string;
@@ -412,8 +423,9 @@ export function resolveContainedCwdOrFail(
 }
 
 async function resolveGitCommonDir(cwd: string): Promise<string | null> {
+  let stdout: string;
   try {
-    const { stdout } = await execFileAsync(
+    ({ stdout } = await execFileAsync(
       'git',
       ['rev-parse', '--git-common-dir'],
       {
@@ -422,16 +434,20 @@ async function resolveGitCommonDir(cwd: string): Promise<string | null> {
         timeout: 30_000,
         env: gitEnv(),
       },
-    );
-    return await fsPromises.realpath(path.resolve(cwd, stdout.trim()));
-  } catch {
+    ));
+  } catch (error) {
+    if (isGitProbeInfrastructureError(error)) throw error;
     return null;
   }
+  return fsPromises
+    .realpath(path.resolve(cwd, stdout.trim()))
+    .catch(() => null);
 }
 
 async function resolveAbsoluteGitDir(cwd: string): Promise<string | null> {
+  let stdout: string;
   try {
-    const { stdout } = await execFileAsync(
+    ({ stdout } = await execFileAsync(
       'git',
       ['rev-parse', '--absolute-git-dir'],
       {
@@ -440,11 +456,12 @@ async function resolveAbsoluteGitDir(cwd: string): Promise<string | null> {
         timeout: 30_000,
         env: gitEnv(),
       },
-    );
-    return await fsPromises.realpath(stdout.trim());
-  } catch {
+    ));
+  } catch (error) {
+    if (isGitProbeInfrastructureError(error)) throw error;
     return null;
   }
+  return fsPromises.realpath(stdout.trim()).catch(() => null);
 }
 
 async function readBoundedRegularFile(
@@ -527,20 +544,16 @@ export async function resolveSessionManagedGitCwd(
     return null;
   }
 
-  let repoTop: string | undefined;
+  let stdout: string;
   try {
-    const { stdout } = await execFileAsync(
-      'git',
-      ['rev-parse', '--show-toplevel'],
-      {
-        cwd: workspace,
-        encoding: 'utf8',
-        timeout: 30_000,
-        env: gitEnv(),
-      },
-    );
-    repoTop = await fsPromises.realpath(stdout.trim());
+    ({ stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: workspace,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: gitEnv(),
+    }));
   } catch (error) {
+    if (isGitProbeInfrastructureError(error)) throw error;
     const stderr = (error as { stderr?: unknown }).stderr;
     if (
       typeof stderr === 'string' &&
@@ -552,6 +565,8 @@ export async function resolveSessionManagedGitCwd(
     }
     return null;
   }
+  const repoTop = await fsPromises.realpath(stdout.trim()).catch(() => null);
+  if (repoTop === null) return null;
   const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
   if (
     isWithinRoot(requested, workspace) &&
@@ -602,10 +617,21 @@ export async function resolveSessionManagedGitCwd(
       );
     const sidecarRaw = await readBoundedRegularFile(sidecarPath, 64 * 1024);
     if (sidecarRaw === null) return null;
-    const sidecar = JSON.parse(sidecarRaw) as Record<string, unknown>;
+    let sidecar: unknown;
+    try {
+      sidecar = JSON.parse(sidecarRaw);
+    } catch {
+      return null;
+    }
     if (
-      typeof sidecar['worktreePath'] !== 'string' ||
-      (await fsPromises.realpath(sidecar['worktreePath'])) !== worktreeRoot
+      !sidecar ||
+      typeof sidecar !== 'object' ||
+      Array.isArray(sidecar) ||
+      typeof (sidecar as Record<string, unknown>)['worktreePath'] !==
+        'string' ||
+      (await fsPromises.realpath(
+        (sidecar as { worktreePath: string }).worktreePath,
+      )) !== worktreeRoot
     ) {
       return null;
     }

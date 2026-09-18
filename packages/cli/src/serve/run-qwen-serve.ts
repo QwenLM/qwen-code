@@ -85,7 +85,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
-import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 // Named subpath: the core barrel pulls shell/glob/chokidar into the serve
 // pre-listen static closure.
 import {
@@ -3292,9 +3292,12 @@ function bridgeHasLiveSessionWithin(
   });
 }
 
-function createBranchRecoverySessionService(
+async function createBranchRecoverySessionService(
   runtime: WorkspaceRuntime,
-): SessionService {
+): Promise<SessionService> {
+  const { SessionService } = await import(
+    '@qwen-code/qwen-code-core/services/sessionService.js'
+  );
   return new SessionService(runtime.workspaceCwd, {
     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
   });
@@ -6059,7 +6062,7 @@ async function runQwenServeImpl(
     if (trustedWorkspace) {
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
-        sessionService: createBranchRecoverySessionService(
+        sessionService: await createBranchRecoverySessionService(
           workspaceRuntimes[0],
         ),
         assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
@@ -7443,7 +7446,7 @@ async function runQwenServeImpl(
       if (wsRuntime.primary && wsRuntime.trusted) {
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
-          sessionService: createBranchRecoverySessionService(wsRuntime),
+          sessionService: await createBranchRecoverySessionService(wsRuntime),
           assertGenerationOpen: () => generationGuard.assertOpen(),
           isWorktreeOccupied: (worktreePath) =>
             bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),

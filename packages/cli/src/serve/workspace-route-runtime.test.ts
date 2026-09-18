@@ -292,12 +292,11 @@ describe('resolveSessionManagedGitCwd', () => {
         sendBridgeError,
       ),
     ).toBeUndefined();
-    expect(sendBridgeError).toHaveBeenCalledWith(
-      response,
-      expect.any(SyntaxError),
-      { route: 'GET /workspaces/:workspace/git' },
+    expect(sendBridgeError).not.toHaveBeenCalled();
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: 'invalid_cwd' }),
     );
-    expect(response.status).not.toHaveBeenCalled();
     fs.writeFileSync(sidecarPath, validSidecar);
 
     const unbound = { query: { cwd: worktree } } as unknown as Request;
@@ -442,7 +441,7 @@ describe('resolveSessionManagedGitCwd', () => {
     expect(await resolveSessionManagedGitCwd(request, runtime)).toBeNull();
   });
 
-  it('fails closed when the workspace git probe fails', async () => {
+  it('reports a missing git executable as an infrastructure error', async () => {
     const subdirectory = path.join(repo, 'packages', 'app');
     fs.mkdirSync(subdirectory, { recursive: true });
     const runtime = {
@@ -451,9 +450,23 @@ describe('resolveSessionManagedGitCwd', () => {
     const originalPath = process.env['PATH'];
     process.env['PATH'] = '';
     try {
+      const response = makeResponse();
+      const sendBridgeError = vi.fn();
       expect(
-        await resolveSessionManagedGitCwd(fakeReq(subdirectory), runtime),
-      ).toBeNull();
+        await resolveSessionManagedGitCwdForRoute(
+          fakeReq(subdirectory),
+          response,
+          runtime,
+          'GET /workspaces/:workspace/git',
+          sendBridgeError,
+        ),
+      ).toBeUndefined();
+      expect(sendBridgeError).toHaveBeenCalledWith(
+        response,
+        expect.objectContaining({ code: 'ENOENT' }),
+        { route: 'GET /workspaces/:workspace/git' },
+      );
+      expect(response.status).not.toHaveBeenCalled();
     } finally {
       process.env['PATH'] = originalPath;
     }

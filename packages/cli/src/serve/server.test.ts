@@ -21483,6 +21483,7 @@ describe('createServeApp', () => {
         prompt: 'reowned worktree',
         mtime: new Date('2026-05-17T12:30:00.000Z'),
         sourceType: 'web_shell',
+        runtimeBaseDir: runtimeDir,
       });
       const bridge = fakeBridge({
         listImpl: () => [
@@ -21495,28 +21496,30 @@ describe('createServeApp', () => {
           },
         ],
       });
-      mockWt.readSidecar = async () => ({
+      mockWt.readSidecar = vi.fn(async () => ({
         slug: 'reowned',
         worktreePath: `${WS_BOUND}/.qwen/worktrees/reowned`,
         worktreeBranch: 'worktree-reowned',
         originalCwd: WS_BOUND,
         originalBranch: 'main',
         originalHeadCommit: 'abc123',
-      });
-      mockWt.readMarkerLenient = async () => 'another-session';
+      }));
+      mockWt.readMarkerLenient = vi.fn(async () => 'another-session');
 
       try {
         const result = await listWorkspaceSessionsForResponse(
           bridge,
           WS_BOUND,
           {},
-          { runtimeBaseDir: path.join(runtimeDir, 'reowned-list') },
+          { runtimeBaseDir: runtimeDir },
         );
 
         expect(result.sessions).toEqual([
           expect.objectContaining({ sessionId }),
         ]);
         expect(result.sessions[0]).not.toHaveProperty('worktree');
+        expect(mockWt.readSidecar).toHaveBeenCalledOnce();
+        expect(mockWt.readMarkerLenient).toHaveBeenCalledOnce();
       } finally {
         mockWt.readSidecar = undefined;
         mockWt.readMarker = undefined;
@@ -26369,6 +26372,21 @@ describe('createServeApp', () => {
             path.join(chatsDir, `.branch-worktree-${res.body.sessionId}.json`),
           ),
         ).toBe(false);
+
+        const duplicate = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+        expect(duplicate.status).toBe(500);
+        expect(duplicate.body.code).toBe('worktree_create_failed');
+        expect(
+          await fsp.readFile(path.join(worktreePath, '.qwen-session'), 'utf8'),
+        ).toBe(res.body.sessionId);
+        expect(
+          (await fsp.readdir(chatsDir)).filter((entry) =>
+            entry.startsWith('.branch-worktree-'),
+          ),
+        ).toEqual([]);
       } finally {
         mockWt.impl = undefined;
         mockBranchOps.getHeadCommit = undefined;

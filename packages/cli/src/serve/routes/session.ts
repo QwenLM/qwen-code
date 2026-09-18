@@ -5586,11 +5586,26 @@ export function registerSessionRoutes(
                   },
                 );
                 runtime.generationGuard?.assertOpen();
+                const worktreePath = worktreeService.getUserWorktreePath(slug);
+                const pathExists = await fs.promises
+                  .lstat(worktreePath)
+                  .then(() => true)
+                  .catch((error: NodeJS.ErrnoException) => {
+                    if (error.code === 'ENOENT') return false;
+                    throw error;
+                  });
+                if (pathExists) {
+                  res.status(500).json({
+                    error: 'Failed to create worktree',
+                    code: 'worktree_create_failed',
+                  });
+                  return;
+                }
                 journal = await createBranchWorktreeJournal({
                   journalPath,
                   targetSessionId,
                   slug,
-                  worktreePath: worktreeService.getUserWorktreePath(slug),
+                  worktreePath,
                   worktreeBranch: worktreeBranchForSlug(slug),
                   repoTop: base.repoTop,
                   baseCommit: base.headCommit,

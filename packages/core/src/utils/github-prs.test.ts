@@ -420,6 +420,33 @@ describe('createGitHubPullRequest', () => {
     expect(seenEnv?.['GH_TOKEN']).toBe('ws-token');
     expect(seenEnv).not.toHaveProperty('GH_REPO');
   });
+
+  it('uses XDG gh credentials without exposing XDG git config to subprocesses', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    let seenEnv: Record<string, string | undefined> | undefined;
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, opts: unknown, cb: unknown) => {
+        seenEnv = (opts as { env?: Record<string, string | undefined> }).env;
+        (cb as ExecCallback)(null, 'https://github.com/o/r/pull/7\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      {
+        XDG_CONFIG_HOME: '/tmp/gh-user-config',
+        GIT_SSL_CAINFO: '/tmp/ca.pem',
+        GIT_DIR: '/tmp/decoy/.git',
+      },
+    );
+
+    expect(seenEnv?.['GH_CONFIG_DIR']).toBe('/tmp/gh-user-config/gh');
+    expect(seenEnv?.['GIT_SSL_CAINFO']).toBe('/tmp/ca.pem');
+    expect(seenEnv).not.toHaveProperty('XDG_CONFIG_HOME');
+    expect(seenEnv).not.toHaveProperty('GIT_DIR');
+  });
 });
 
 describe('normalizeRemoteToWebUrl', () => {

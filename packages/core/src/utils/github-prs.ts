@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
 import { gitEnv } from './git-branches.js';
@@ -18,6 +19,20 @@ const GH_MAX_BUFFER = 16 * 1024 * 1024;
 // and re-truncates to GITHUB_PR_ERROR_MESSAGE_MAX, so a path that straddles the
 // display boundary is still whole here and gets redacted before it is cut.
 const GH_ERROR_RAW_MAX = 4096;
+
+function ghEnv(
+  base?: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const source = base ?? process.env;
+  const env = gitEnv(source);
+  if (env['GH_CONFIG_DIR'] === undefined && source['XDG_CONFIG_HOME']) {
+    env['GH_CONFIG_DIR'] = path.join(source['XDG_CONFIG_HOME'], 'gh');
+  }
+  for (const key of ['GIT_SSL_CAINFO', 'GIT_SSL_CAPATH']) {
+    if (source[key] !== undefined) env[key] = source[key];
+  }
+  return env;
+}
 
 /** Display cap applied by the route after path sanitization. */
 export const GITHUB_PR_ERROR_MESSAGE_MAX = 512;
@@ -223,7 +238,7 @@ function runGhPrList(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: ghEnv(env),
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -324,7 +339,7 @@ function runGhPrCreate(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: ghEnv(env),
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -544,7 +559,7 @@ export function fetchCurrentBranchPullRequest(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: ghEnv(env),
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -656,7 +671,7 @@ export function fetchAttributionRepoKeys(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: ghEnv(env),
       },
       (error, stdout) => {
         if (error) {

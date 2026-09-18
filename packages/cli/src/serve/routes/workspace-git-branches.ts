@@ -19,7 +19,6 @@ import {
 import { isValidRefName } from '@qwen-code/qwen-code-core/utils/gitDirect.js';
 import { findGitRoot } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
