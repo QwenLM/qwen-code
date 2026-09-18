@@ -2167,6 +2167,137 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  it('does not publish a slow detached create after session-less workspace navigation', async () => {
+    vi.useFakeTimers();
+    try {
+      const nextSession = createMockSession('session-b');
+      const deferred = createDeferred<DaemonSessionClient>();
+      let selectedWorkspaceCwd = '/workspace';
+      const connection: DaemonConnectionState = {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      };
+      const publishedSessionIds: Array<string | undefined> = [];
+      const { actions, sessionRef, getConnection } = createActionsHarness({
+        connection,
+        createDetachedSession: vi.fn(() => deferred.promise),
+        onConnectionChange: (next) => publishedSessionIds.push(next.sessionId),
+      });
+      const outcome = actions
+        .createSession({
+          workspaceCwd: '/workspace',
+          getCurrentWorkspaceCwd: () => selectedWorkspaceCwd,
+        })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10_000);
+      selectedWorkspaceCwd = '/other-workspace';
+      expect(getConnection()).toBe(connection);
+      await vi.advanceTimersByTimeAsync(25_000);
+      deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+      expect(await outcome).toMatchObject({ name: 'AbortError' });
+      expect(nextSession.detach).toHaveBeenCalledOnce();
+      expect(sessionRef.current).toBeUndefined();
+      expect(getConnection()).toBe(connection);
+      expect(publishedSessionIds).not.toContain('session-b');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      name: 'equivalent paths',
+      target: '/workspace',
+      current: '/workspace///',
+      attached: false,
+    },
+    {
+      name: 'another checkout',
+      target: '/other-checkout',
+      current: '/workspace',
+      attached: false,
+    },
+    {
+      name: 'the returned session already attached',
+      target: '/other-checkout',
+      current: '/other-checkout',
+      attached: true,
+    },
+  ])(
+    'accepts detached creation with $name',
+    async ({ target, current, attached }) => {
+      const nextSession = createMockSession('session-b');
+      nextSession.workspaceCwd = target;
+      const deferred = createDeferred<DaemonSessionClient>();
+      let selectedWorkspaceCwd = '/workspace';
+      const { actions, sessionRef, getConnection, replaceConnection } =
+        createActionsHarness({
+          connection: {
+            status: 'connected',
+            sessionContext: { kind: 'workspace', cwd: '/workspace' },
+          },
+          createDetachedSession: vi.fn(() => deferred.promise),
+        });
+      const pending = actions.createSession({
+        workspaceCwd: target,
+        getCurrentWorkspaceCwd: () => selectedWorkspaceCwd,
+      });
+      selectedWorkspaceCwd = current;
+      if (attached) {
+        replaceConnection({
+          status: 'connected',
+          sessionId: nextSession.sessionId,
+          sessionContext: { kind: 'workspace', cwd: target },
+        });
+      }
+      deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+      await expect(pending).resolves.toBe(nextSession);
+      expect(nextSession.detach).not.toHaveBeenCalled();
+      expect(sessionRef.current).toBe(nextSession);
+      expect(getConnection().sessionId).toBe('session-b');
+    },
+  );
+
+  it('stops first-prompt preparation before callbacks after workspace navigation', async () => {
+    const nextSession = createMockSession('session-b');
+    const deferred = createDeferred<DaemonSessionClient>();
+    let selectedWorkspaceCwd = '/workspace';
+    const { actions, getConnection, replaceConnection } = createActionsHarness({
+      createDetachedSession: vi.fn(() => deferred.promise),
+    });
+    const attachSession = vi.spyOn(actions, 'attachSession');
+    const clearSession = vi.spyOn(actions, 'clearSession');
+    const onSessionCreated = vi.fn();
+    const onSessionAllocated = vi.fn();
+    const pending = createAndAttachSessionForPrompt({
+      sessionActions: actions,
+      workspaceCwd: '/workspace',
+      getCurrentWorkspaceCwd: () => selectedWorkspaceCwd,
+      getCurrentSessionId: () => getConnection().sessionId,
+      onSessionCreated,
+      onSessionAllocated,
+    });
+    selectedWorkspaceCwd = '/other-workspace';
+    const navigatedConnection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-c',
+      sessionContext: { kind: 'workspace', cwd: selectedWorkspaceCwd },
+    };
+    replaceConnection(navigatedConnection);
+    deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(nextSession.detach).toHaveBeenCalledOnce();
+    expect(onSessionCreated).not.toHaveBeenCalled();
+    expect(onSessionAllocated).not.toHaveBeenCalled();
+    expect(attachSession).not.toHaveBeenCalled();
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(getConnection()).toBe(navigatedConnection);
+  });
+
   it('does not restore a detached session after the session was cleared', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
@@ -5931,6 +6062,7 @@ function createActionsHarness(
     addNotice?: ReturnType<typeof vi.fn>;
     clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
+    onConnectionChange?: (connection: DaemonConnectionState) => void;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
     daemonActivePromptRef?: {
@@ -6038,6 +6170,7 @@ function createActionsHarness(
     onPromptRemoved: opts.onPromptRemoved,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
+      opts.onConnectionChange?.(connection);
     },
     setPromptStatus,
     setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),

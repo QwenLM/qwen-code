@@ -2068,6 +2068,7 @@ export function createDaemonSessionActions({
 
     async createSession(options?: {
       workspaceCwd?: string;
+      getCurrentWorkspaceCwd?: () => string | undefined;
       sessionContext?: DaemonProductSessionContext;
       modelServiceId?: string;
       approvalMode?: DaemonApprovalMode;
@@ -2107,6 +2108,13 @@ export function createDaemonSessionActions({
         manualSessionClearRef.current = false;
         const currentConnection = getConnection();
         const connectionSessionIdAtStart = currentConnection.sessionId;
+        const getWorkspaceSelectionKey = () => {
+          const cwd = options?.getCurrentWorkspaceCwd?.();
+          return sessionContextKey(
+            cwd === undefined ? undefined : { kind: 'workspace', cwd },
+          );
+        };
+        const workspaceSelectionAtStart = getWorkspaceSelectionKey();
         targetSessionContext = resolveActionSessionContext(
           options?.sessionContext,
           options?.workspaceCwd,
@@ -2224,7 +2232,8 @@ export function createDaemonSessionActions({
                 CREATE_WATCHDOG_TIMEOUT_MS,
               );
         const userMovedAway =
-          getConnection().sessionId !== connectionSessionIdAtStart &&
+          (getConnection().sessionId !== connectionSessionIdAtStart ||
+            getWorkspaceSelectionKey() !== workspaceSelectionAtStart) &&
           getConnection().sessionId !== nextSession.sessionId;
         if (manualSessionClearRef.current || userMovedAway) {
           try {

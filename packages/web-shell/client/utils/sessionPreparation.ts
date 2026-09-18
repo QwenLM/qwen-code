@@ -11,6 +11,7 @@ const SESSION_CREATED_CALLBACK_TIMEOUT_MS = 30_000;
 type PromptSessionActions = {
   createSession: (options?: {
     workspaceCwd?: string;
+    getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;
@@ -55,6 +56,7 @@ export async function createAndAttachSessionForPrompt({
   onSessionCreated,
   onSessionAllocated,
   getCurrentSessionId,
+  getCurrentWorkspaceCwd,
   warn = console.warn,
 }: {
   sessionActions: PromptSessionActions;
@@ -74,6 +76,7 @@ export async function createAndAttachSessionForPrompt({
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
+  getCurrentWorkspaceCwd?: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<{
   worktree?: { slug: string; path: string; branch: string };
@@ -103,6 +106,7 @@ export async function createAndAttachSessionForPrompt({
         }
       : {
           workspaceCwd,
+          getCurrentWorkspaceCwd,
           sessionContext,
           sourceType: sessionSourceType,
           ...(approvalMode ? { approvalMode } : {}),
