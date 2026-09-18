@@ -32,6 +32,13 @@ import {
   MAX_WORKFLOW_STALL_MS_ENV,
 } from '../../../agents/runtime/workflow-stall.js';
 import { WorkflowAgentFailedError } from '../../../agents/runtime/workflow-agent-failure.js';
+import {
+  DEFAULT_WORKFLOW_SIZE_GUIDELINE,
+  DEFAULT_WORKFLOW_SIZE_WARNING_AGENTS,
+  DEFAULT_WORKFLOW_SIZE_WARNING_TOKENS,
+  WORKFLOW_SIZE_GUIDELINE_AGENTS,
+  WORKFLOW_SIZE_GUIDELINE_SETTING_LABEL,
+} from '../../../agents/runtime/workflow-size.js';
 import type { WorkflowAgentDispatch } from '../../../agents/runtime/workflow-orchestrator.js';
 import {
   buildWorkflowToolDescription,
@@ -163,6 +170,8 @@ describe('bundled workflow-authoring skill', () => {
     ['`node:vm` sandbox'],
     // meta: the full contract, including the field the approval dialog prints.
     ['optionally `whenToUse` and `phases: [{ title, detail? }]`'],
+    // whenToUse: what it does for a workflow an extension ships.
+    ['`whenToUse` also lists the workflow for the model to start'],
     // parallel(): the eager form is refused, after the dispatches were spent.
     ['`parallel([() => agent(...)])`'],
     ['a non-function element rejects the whole batch'],
@@ -170,6 +179,7 @@ describe('bundled workflow-authoring skill', () => {
     // Determinism: all of Date, and the workaround.
     ['so does all of `Date`'],
     ['`new Date()`'],
+    ['`Date()`, `new Date()`'],
     ['stamp the result after the workflow returns'],
     // pipeline(): null drops the item and skips its later stages.
     ['its remaining stages are skipped'],
@@ -192,13 +202,32 @@ describe('bundled workflow-authoring skill', () => {
     ['A different effort is a different resume cache key'],
     // disallowedTools only narrows, names what it accepts, and a schema agent
     // cannot deny its answer.
-    ['stallMs?, disallowedTools? })'],
+    ['stallMs?, disallowedTools?, tools? })'],
     ['never re-enable one'],
     ['`mcp__<server>__*`'],
     ["such as `'Bash'`, resolves the call to null"],
     ['include `structured_output` resolves to null'],
     ['not on their order or duplicates'],
     ['named by its tool name or its display name'],
+    // tools narrows to exact names, refuses patterns and exec, and fails the
+    // call rather than dispatching an agent that could only spend its turn.
+    ['never brings back a tool the floor below or a deny takes away'],
+    ['an MCP tool by the name the model sees'],
+    [
+      "Patterns (`'*'`, `mcp__<server>`, `mcp__<server>__*`), `exec` and an empty list reject the call",
+    ],
+    ['the agent keeps `exec`, which can call only the listed tools'],
+    ["An entry that names no tool, such as `'Bash'`"],
+    [
+      "shares no tool with the `agentType`'s own allowlist or whose every tool is denied",
+    ],
+    ['also given `structured_output`'],
+    ['is simply not given, as with an `agentType` allowlist'],
+    ['or one no subagent may use (such as `todo_write`)'],
+    [
+      'Built-in spellings, order and duplicates do not change the resume key; other spellings do',
+    ],
+    ['whatever their `agentType` or their `tools`'],
     // What the disallowed-tool floor means for a script. The tools themselves
     // are checked against the orchestrator's own list below.
     ['cannot fan out further'],
@@ -210,6 +239,8 @@ describe('bundled workflow-authoring skill', () => {
       'inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any other thunk rejection',
     ],
     ['so null-check a `workflow()` result too'],
+    // The name-only lock reaches nested calls too.
+    ['`workflow({ scriptPath })` throws the same way; nest by name'],
     // isolation: every refusal, and the workaround for the nested one.
     ['when the session is already inside a worktree'],
     ['pass it as `workingDir`'],
@@ -219,9 +250,22 @@ describe('bundled workflow-authoring skill', () => {
     // Labels: the failures list carries nothing else.
     ['Make it unique per dispatch'],
     // The journal: every line type, and what a bare `started` means.
+    ['a `launched` line when the run starts'],
     ['a `started` line when an agent is dispatched'],
+    // Resume: what is refused, and what to do instead.
+    ['journal is no longer on disk has nothing to resume'],
+    ['start it again without `resumeFromRunId`'],
+    ['would run two copies of its agents against one journal'],
     ['Only `result` lines feed the resume cache'],
     ['means the run was interrupted'],
+    // budget: where total comes from, what spent() counts, what the gate
+    // does not stop, and the two ways to size work to it.
+    ['a `+500k`-style directive'],
+    ['`spent()` then counts every output token this turn'],
+    ['agents already running are not stopped by it'],
+    ['guard on `budget.total`'],
+    ['budget.remaining() > 50_000'],
+    ['Math.floor(budget.total / 100_000)'],
     // Saving is a different skill.
     ['`workflow-creator` skill'],
   ])('states the script contract: %s', (anchor) => {
@@ -399,5 +443,39 @@ describe('the worked example', () => {
 
     expect(result.error?.message).toContain('args.target is required');
     expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+// The size guideline and the large-run thresholds are stated in prose here and
+// enforced in `workflow-size.ts`. Each sentence is built from the constant the
+// runtime uses, so moving a threshold without the reference turns this red.
+describe('bundled workflow-authoring skill — workflow size', () => {
+  it('states the guideline sizes the tool description offers', () => {
+    expect(DEFAULT_WORKFLOW_SIZE_GUIDELINE).toBe('medium');
+    expect(skillProse()).toContain(
+      `small (${WORKFLOW_SIZE_GUIDELINE_AGENTS.small} agents), medium (${WORKFLOW_SIZE_GUIDELINE_AGENTS.medium}, the default) or large (${WORKFLOW_SIZE_GUIDELINE_AGENTS.large})`,
+    );
+  });
+
+  it('states the large-run thresholds the runner checks', () => {
+    expect(skillProse()).toContain(
+      `(${DEFAULT_WORKFLOW_SIZE_WARNING_AGENTS} when unrestricted) or projects past ~${DEFAULT_WORKFLOW_SIZE_WARNING_TOKENS / 1_000_000}M output tokens`,
+    );
+    expect(skillProse()).toContain('it is not stopped');
+  });
+
+  it('names the setting by its label and says a mid-session change is announced', () => {
+    expect(skillProse()).toContain(
+      `the ${WORKFLOW_SIZE_GUIDELINE_SETTING_LABEL} setting`,
+    );
+    expect(skillProse()).toContain(
+      'arrives as a reminder that replaces the guideline in the description',
+    );
+  });
+
+  it('says a non-deterministic script is refused before it starts', () => {
+    expect(skillProse()).toContain(
+      'is refused before it starts, so none of its agents runs first',
+    );
   });
 });

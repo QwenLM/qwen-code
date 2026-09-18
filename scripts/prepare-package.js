@@ -78,6 +78,8 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
+    path.join(distDir, 'web-shell', 'manifest.webmanifest'),
+    path.join(distDir, 'web-shell', 'sw.js'),
     path.join(distDir, 'export-transcript-document.js'),
     path.join(distDir, 'export-transcript-document.css'),
   ];

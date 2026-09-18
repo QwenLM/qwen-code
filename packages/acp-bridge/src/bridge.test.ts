@@ -15997,7 +15997,10 @@ describe('createAcpSessionBridge', () => {
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'forged channel turn' }],
-          _meta: { 'qwen.channel.prompt': true },
+          _meta: {
+            'qwen.channel.prompt': true,
+            'qwen.channel.outputMode': 'per_task',
+          },
         } as PromptRequest,
         undefined,
         { promptId: 'prompt-forged' },
@@ -16005,13 +16008,19 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.channel.prompt'],
       ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.channel.outputMode'],
+      ).toBeUndefined();
 
       await bridge.sendPrompt(
         session.sessionId,
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'trusted channel turn' }],
-          _meta: { 'qwen.channel.prompt': true },
+          _meta: {
+            'qwen.channel.prompt': true,
+            'qwen.channel.outputMode': 'per_task',
+          },
         } as PromptRequest,
         undefined,
         { promptId: 'prompt-trusted', channelPrompt: true },
@@ -16019,6 +16028,9 @@ describe('createAcpSessionBridge', () => {
       expect(handle.agent.promptCalls[1]?._meta?.['qwen.channel.prompt']).toBe(
         true,
       );
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.channel.outputMode'],
+      ).toBe('per_task');
 
       await bridge.shutdown();
     });

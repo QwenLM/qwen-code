@@ -1865,3 +1865,38 @@ describe('UiTelemetryService', () => {
     });
   });
 });
+
+describe('UiTelemetryService.getTotalOutputTokens', () => {
+  const response = (model: string, outputTokens: number) =>
+    ({
+      'event.name': EVENT_API_RESPONSE,
+      model,
+      prompt_id: 'p1',
+      duration_ms: 10,
+      input_token_count: 5,
+      output_token_count: outputTokens,
+      total_token_count: 5 + outputTokens,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+    }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+  // The workflow turn budget reads this: every model the session used, the
+  // main loop's and the subagents' alike, and nothing from another session.
+  it("sums output tokens across the session's models only", () => {
+    const service = new UiTelemetryService();
+    service.addEvent(response('qwen-a', 120), 'session-a');
+    service.addEvent(response('qwen-b', 30), 'session-a');
+    service.addEvent(response('qwen-a', 999), 'session-b');
+
+    expect(service.getTotalOutputTokens('session-a')).toBe(150);
+    expect(service.getTotalOutputTokens('session-b')).toBe(999);
+    expect(service.getTotalOutputTokens('never-seen')).toBe(0);
+  });
+
+  it('starts again from zero after the session is reset', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(response('qwen-a', 120), 'session-a');
+    service.resetSession('session-a');
+    expect(service.getTotalOutputTokens('session-a')).toBe(0);
+  });
+});

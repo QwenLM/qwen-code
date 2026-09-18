@@ -12,6 +12,9 @@ import {
 import {
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_TASK_OUTPUT_META_KEY,
+  ChannelPromptCancelledError,
   type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
 
@@ -4141,6 +4144,264 @@ describe('DaemonChannelBridge', () => {
 
     events.close();
     bridge.stop();
+  });
+
+  it.each([undefined, 'per_task'] as const)(
+    'consumes a task result only for %s',
+    async (outputMode) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      session.prompt.mockImplementation(async () => {
+        events.push({
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'Main result' },
+            },
+          },
+        });
+        for (const claimed of [true, false]) {
+          events.push({
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: {
+                  type: 'text',
+                  text: claimed ? 'Task result' : 'Unrelated result',
+                },
+                _meta: {
+                  qwenDiscreteMessage: true,
+                  source: 'background_notification_response',
+                  [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
+                  backgroundTask: {
+                    taskId: 'task-1',
+                    kind: 'agent',
+                    status: 'completed',
+                    turnComplete: true,
+                  },
+                },
+              },
+            },
+          });
+        }
+        events.push(turnCompleteEvent());
+        return { stopReason: 'end_turn' };
+      });
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+      });
+      const backgroundResponse = vi.fn();
+      bridge.on('backgroundResponse', backgroundResponse);
+      await bridge.start();
+      await bridge.newSession('/repo');
+      await expect(
+        bridge.prompt('session-1', 'question', { outputMode }),
+      ).resolves.toBe(outputMode ? 'Task result' : 'Main result');
+      expect(
+        session.prompt.mock.calls[0]?.[0]?._meta?.[
+          CHANNEL_OUTPUT_MODE_META_KEY
+        ],
+      ).toBe(outputMode);
+      expect(backgroundResponse).toHaveBeenCalledOnce();
+      expect(backgroundResponse).toHaveBeenCalledWith(
+        'session-1',
+        'Unrelated result',
+        expect.any(Object),
+      );
+      events.close();
+      bridge.stop();
+    },
+  );
+
+  it.each(['same', 'unrelated', 'replaced'] as const)(
+    'keeps partiality attached to the selected background reply (%s)',
+    async (terminal) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      session.prompt.mockImplementation(async () => {
+        const emit = (
+          text: string,
+          turnId: string,
+          turnComplete: boolean,
+          partial = false,
+        ) =>
+          events.push({
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionId: 'session-1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text },
+                _meta: {
+                  qwenDiscreteMessage: true,
+                  source: 'background_notification_response',
+                  [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+                  backgroundTask: {
+                    taskId: 'task-1',
+                    kind: 'agent',
+                    status: 'completed',
+                    turnId,
+                    turnComplete,
+                    partial,
+                  },
+                },
+              },
+            },
+          });
+        emit('Retained result', 'turn-1', false);
+        emit('', terminal === 'unrelated' ? 'turn-2' : 'turn-1', true, true);
+        if (terminal === 'replaced') emit('Complete result', 'turn-3', true);
+        events.push(turnCompleteEvent());
+        return { stopReason: 'end_turn' };
+      });
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+      });
+      const onTaskResult = vi.fn();
+      await bridge.start();
+      await bridge.newSession('/repo');
+      try {
+        await expect(
+          bridge.prompt('session-1', 'question', {
+            outputMode: 'per_task',
+            onTaskResult,
+          }),
+        ).resolves.toBe(
+          terminal === 'replaced' ? 'Complete result' : 'Retained result',
+        );
+        expect(onTaskResult).toHaveBeenCalledExactlyOnceWith({
+          partial: terminal === 'same',
+        });
+      } finally {
+        events.close();
+        bridge.stop();
+      }
+    },
+  );
+
+  it('does not deliver captured task output after remote cancellation', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      events.push({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Stale task result' },
+            _meta: {
+              qwenDiscreteMessage: true,
+              source: 'background_notification_response',
+              [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+            },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      return { stopReason: 'cancelled' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(
+      bridge.prompt('session-1', 'question', { outputMode: 'per_task' }),
+    ).rejects.toBeInstanceOf(ChannelPromptCancelledError);
+    session.prompt.mockResolvedValue({ stopReason: 'end_turn' });
+    await expect(
+      bridge.prompt('session-1', 'fresh', { outputMode: 'per_task' }),
+    ).resolves.toBe('');
+    events.close();
+    bridge.stop();
+  });
+
+  it('keeps a newer task claim while a cancelled prompt finishes unwinding', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let finishFirst!: (result: { stopReason: string }) => void;
+    let finishSecond!: (result: { stopReason: string }) => void;
+    session.prompt
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishSecond = resolve;
+          }),
+      );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    const claims = (bridge as unknown as { taskOutputs: Map<string, unknown> })
+      .taskOutputs;
+    const first = bridge.prompt('session-1', 'first', {
+      outputMode: 'per_task',
+    });
+    const firstCancelled = expect(first).rejects.toBeInstanceOf(
+      ChannelPromptCancelledError,
+    );
+    let second: Promise<string> | undefined;
+    try {
+      await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(1));
+      await bridge.cancelSession('session-1');
+      second = bridge.prompt('session-1', 'second', { outputMode: 'per_task' });
+      await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(2));
+      finishFirst({ stopReason: 'cancelled' });
+      await firstCancelled;
+      // Arrive after the old finally: an unconditional delete loses this reply.
+      events.push({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Second task result' },
+            _meta: {
+              qwenDiscreteMessage: true,
+              source: 'background_notification_response',
+              [CHANNEL_TASK_OUTPUT_META_KEY]: true,
+              backgroundTask: {
+                taskId: 'second-task',
+                turnId: 'second-turn',
+                turnComplete: true,
+              },
+            },
+          },
+        },
+      });
+      events.push(turnCompleteEvent());
+      finishSecond({ stopReason: 'end_turn' });
+      await expect(second).resolves.toBe('Second task result');
+      expect(claims.has('session-1')).toBe(false);
+    } finally {
+      finishFirst?.({ stopReason: 'cancelled' });
+      finishSecond?.({ stopReason: 'end_turn' });
+      await firstCancelled;
+      await second?.catch(() => undefined);
+      events.close();
+      bridge.stop();
+    }
   });
 
   it('forwards a distinct user-facing prompt text in daemon metadata', async () => {

@@ -4,31 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  GoalEvidenceRecord,
-  ValidatedGoalEvidenceRecord,
-} from './goal-evidence.js';
-import {
-  recoverGoalFromRecords,
-  type GoalRecoveryRecord,
-} from './goal-persistence.js';
+import { describe, expect, it, vi } from 'vitest';
+import type { GoalEvidenceRecord } from './goal-evidence.js';
+import { type GoalRecoveryRecord } from './goal-persistence.js';
 import {
   GOAL_INFEASIBLE_NEXT_STEP,
-  GOAL_CHECKPOINT_CLAIM_LIMIT,
-  GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS,
-  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-  GOAL_CHECKPOINT_STALL_LIMIT,
-  GOAL_CHECKPOINT_STALLED_REASON,
-  GOAL_CHECKPOINT_UNREACHABLE_REASON,
-  GOAL_CHECKPOINT_UNUSABLE_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
+  goalPauseReasonForVerifierFailure,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
   goalActiveTimeBudgetReason,
-  goalCheckpointHealthVisible,
   goalTurnBudgetReason,
+  type GoalBroadcastMeta,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -44,55 +32,10 @@ import {
 } from './goal-runtime.js';
 import { GoalConflictError } from './goal-reducer.js';
 import {
-  GOAL_CHECKPOINT_BATCH_RECORD_LIMIT,
-  InvalidGoalCheckpointError,
-  type GoalCheckpointVerificationResult,
-  type GoalCheckpointVerifier,
-  type GoalCheckpointVerifierInput,
-} from './goal-checkpoint.js';
-import {
-  GoalCheckpointClaimBudgetError,
-  GoalCheckpointClaimCountError,
-  GoalCheckpointClaimLengthError,
-  GoalCheckpointVerifierInputTooLargeError,
-} from './goal-checkpoint-verifier.js';
-import type { GoalVerifier } from './goal-verifier.js';
-
-// Records the GOAL_RUNTIME debug-log calls so tests can assert that a failed
-// checkpoint check leaves a trace on every arm of its handler. The wrapper
-// delegates to the real logger, so logging behavior itself is unchanged.
-const runtimeDebugCalls = vi.hoisted(() => [] as unknown[][]);
-vi.mock('../utils/debugLogger.js', async (importOriginal) => {
-  const original =
-    await importOriginal<typeof import('../utils/debugLogger.js')>();
-  return {
-    ...original,
-    createDebugLogger: (tag?: string) => {
-      const logger = original.createDebugLogger(tag);
-      return {
-        ...logger,
-        debug: (...args: unknown[]) => {
-          if (tag === 'GOAL_RUNTIME') runtimeDebugCalls.push(args);
-          logger.debug(...args);
-        },
-      };
-    },
-  };
-});
-
-// The recorder is file-global, so every test starts from an empty log
-// instead of inheriting entries from earlier checkpoint failures.
-beforeEach(() => {
-  runtimeDebugCalls.length = 0;
-});
-
-// Selects only the checkpoint-failure lines: an unrelated GOAL_RUNTIME
-// diagnostic must not shift the counts the stall tests pin.
-function failedCheckpointChecks(): unknown[][] {
-  return runtimeDebugCalls.filter(([message]) =>
-    String(message).includes('Checkpoint check failed'),
-  );
-}
+  GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+  GoalVerifierInputTooLargeError,
+  type GoalVerifier,
+} from './goal-verifier.js';
 
 const FORMER_GOAL_CONTINUATION_LIMIT = 50;
 
@@ -366,6 +309,72 @@ describe('goal runtime', () => {
       tokensUsed: 3_000,
     });
   });
+
+  it.each(['accept', 'reject'] as const)(
+    'persists %s verifier usage once and applies the budget gate',
+    async (decision) => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      let records: readonly RuntimeRecord[] = [];
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision,
+        reason: 'Checked the cited result',
+        usage: { totalTokenCount: 250 },
+      }));
+      const runtime = createGoalRuntime({
+        journal,
+        evidenceSource: fakeEvidenceSource(() => records),
+        verifier,
+        ledger: { takeGoalTurnTokens: () => 800 },
+        tokenBudgetGrant: 1_000,
+      });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      records = verifierEvidenceRecords(
+        permit,
+        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      );
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['assistant-evidence'],
+      });
+
+      await runtime.finishTurn(permit);
+
+      expect(verifier).toHaveBeenCalledOnce();
+      expect(
+        journal.appended.find(({ cause }) => cause === 'turn_finished')!
+          .snapshot.goal?.tokensUsed,
+      ).toBe(800);
+      expect(
+        journal.appended.find(({ cause }) => cause === `verifier_${decision}`)!
+          .snapshot.goal,
+      ).toMatchObject({ tokensUsed: 1_050, turnCount: 1 });
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        tokensUsed: 1_050,
+        turnCount: 1,
+        status: decision === 'accept' ? 'complete' : 'active',
+      });
+      if (decision === 'reject') {
+        expect(host.inputs[1]).toMatchObject({ windDown: true });
+      } else {
+        expect(host.started).toHaveLength(1);
+        expect(journal.appended.at(-1)!.snapshot.goal?.tokensUsed).toBe(1_050);
+        const restored = createGoalRuntime({
+          journal: fakeGoalJournal(),
+          evidenceSource: fakeEvidenceSource(() => records),
+          verifier,
+        });
+        await restored.restore(journal.records);
+        expect(restored.getSnapshot().goal?.tokensUsed).toBe(1_050);
+        expect(verifier).toHaveBeenCalledOnce();
+        restored.dispose();
+      }
+      runtime.dispose();
+    },
+  );
 
   it('asks the ledger for the finishing turn, not the session', async () => {
     const journal = fakeGoalJournal();
@@ -885,7 +894,14 @@ describe('goal runtime', () => {
     expect(verifier).toHaveBeenCalledWith(
       expect.objectContaining({
         currentTurnId: permit.turnId,
-        currentDeliveredOutput: ['Delivered result'],
+        evidenceTurnIds: [permit.turnId],
+        evidence: [
+          expect.objectContaining({
+            uuid: 'assistant-evidence',
+            proofKind: 'delivered_output',
+            content: 'Delivered result',
+          }),
+        ],
       }),
       expect.any(AbortSignal),
     );
@@ -1031,15 +1047,188 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(1);
   });
 
-  it('rejects an invalid evidence reference without calling the verifier', async () => {
+  it("sends the verifier this turn's records newest first, without references", async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
     const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The suite passed in this turn',
+    }));
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    const base = verifierEvidenceRecords(permit, cursorId);
+    records = [
+      ...base,
+      {
+        ...base[1]!,
+        uuid: 'tool-evidence',
+        type: 'tool_result',
+        provenance: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'shell',
+                response: { output: '18 tests passed' },
+              },
+            },
+          ],
+        },
+      },
+    ];
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+      evidenceRefs: ['a-reference-the-runtime-ignores'],
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).toHaveBeenCalledOnce();
+    const input = vi.mocked(verifier).mock.calls[0]![0];
+    expect(input).toMatchObject({
+      currentTurnId: permit.turnId,
+      evidenceTurnIds: [permit.turnId],
+      proposal: { status: 'complete', reason: 'Delivered' },
+    });
+    expect(input).not.toHaveProperty('omitted');
+    expect(input.evidence.map((record) => record.uuid)).toEqual([
+      'tool-evidence',
+      'assistant-evidence',
+    ]);
+    expect(input.evidence[0]).toMatchObject({
+      provenance: 'tool_result',
+      proofKind: 'external_fact',
+      turnId: permit.turnId,
+    });
+    expect(input.evidence[0]!.content).toContain('18 tests passed');
+    expect(input.evidence[1]).toMatchObject({
+      provenance: 'assistant_output',
+      proofKind: 'delivered_output',
+      content: 'Delivered result',
+    });
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'complete' });
+  });
+
+  it('keeps the newest records of the turn and reports the ones the verifier limit left out', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The newest output proves it',
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+    const permit = host.started[0];
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    // 140 records of 2 100 content bytes against a request of 256 000 bytes
+    // measured on the serialized records: only the newest hundred or so are
+    // sent and the rest are counted, so a turn that ran a hundred tools no
+    // longer stops the Goal -- it is judged from its tail.
+    records = verifierEvidenceWindow(permit, cursorId, 140).map((record) =>
+      record.type === 'assistant'
+        ? {
+            ...record,
+            message: { role: 'model', parts: [{ text: 'x'.repeat(2_100) }] },
+          }
+        : record,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'complete',
+      reason: 'Delivered',
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).toHaveBeenCalledOnce();
+    const input = vi.mocked(verifier).mock.calls[0]![0];
+    expect(input.evidence.length).toBeGreaterThan(100);
+    expect(input.evidence.length).toBeLessThan(125);
+    expect(input.evidence[0]!.uuid).toBe('assistant-evidence-139');
+    expect(input.evidence.at(-1)!.uuid).toBe(
+      `assistant-evidence-${140 - input.evidence.length}`,
+    );
+    expect(input.omitted).toBe(140 - input.evidence.length);
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'complete' });
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'verifier_accept',
+      'complete',
+    ]);
+  });
+
+  it.each([
+    ['fills the request by itself', 260_000],
+    // Room for a stub but not for one full record: the verifier could only
+    // reject for what the window left out, turn after turn.
+    ['leaves less room than one full record needs', 245_000],
+  ])(
+    'pauses with a clear reason when the objective %s',
+    async (_name, length) => {
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      // /goal set accepts any length; a pasted 250 kB specification is the
+      // objective, and no evidence window can fit next to it.
+      await runtime.dispatch({
+        action: 'create',
+        objective: 'x'.repeat(length),
+      });
+      const permit = host.started[0];
+      records = verifierEvidenceRecords(
+        permit,
+        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      );
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+      });
+
+      await runtime.finishTurn(permit);
+
+      expect(verifier).not.toHaveBeenCalled();
+      expect(runtime.getSnapshot()).toMatchObject({
+        activity: 'idle',
+        goal: {
+          status: 'paused',
+          lastReason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+        },
+      });
+      expect(runtime.getSnapshot().goal).not.toHaveProperty('limitKind');
+      expect(journal.appended.at(-1)).toMatchObject({ cause: 'pause' });
+      expect(host.started).toHaveLength(1);
+    },
+  );
+
+  it('still asks the verifier when a long objective leaves room for a full record', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'ok',
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({
+      action: 'create',
+      objective: 'x'.repeat(230_000),
+    });
     const permit = host.started[0];
     records = verifierEvidenceRecords(
       permit,
@@ -1048,147 +1237,116 @@ describe('goal runtime', () => {
     runtime.recordTerminalProposal(permit, {
       status: 'complete',
       reason: 'Delivered',
-      evidenceRefs: ['missing-evidence'],
     });
-    const causes: Array<GoalStateCause | undefined> = [];
-    runtime.subscribe((_snapshot, cause) => causes.push(cause));
 
     await runtime.finishTurn(permit);
 
-    expect(verifier).not.toHaveBeenCalled();
+    expect(verifier).toHaveBeenCalledOnce();
+    expect(runtime.getSnapshot().goal).toMatchObject({ status: 'complete' });
+  });
+
+  it.each([
+    ['times out', new Error('Goal verifier timed out after 120000ms')],
+    ['cannot send the request', new GoalVerifierInputTooLargeError(300_000)],
+    [
+      'answers with something that is not a verdict',
+      new Error('Goal verifier returned invalid JSON'),
+    ],
+  ])(
+    'pauses the Goal, resumably, when the verifier %s',
+    async (_name, failure) => {
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn(async () => {
+        throw failure;
+      });
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0];
+      records = verifierEvidenceRecords(
+        permit,
+        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      );
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+      });
+
+      await runtime.finishTurn(permit);
+
+      // One attempt: a request the model could not answer is not resent at
+      // another size, and no verdict is no limit.
+      expect(verifier).toHaveBeenCalledOnce();
+      expect(journal.appended.map((payload) => payload.cause)).toEqual([
+        'create',
+        'turn_finished',
+        'pause',
+      ]);
+      const paused = runtime.getSnapshot();
+      expect(paused).toMatchObject({
+        activity: 'idle',
+        goal: {
+          status: 'paused',
+          lastReason: goalPauseReasonForVerifierFailure(failure.message),
+        },
+      });
+      expect(paused.goal).not.toHaveProperty('limitKind');
+      expect(host.started).toHaveLength(1);
+
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: paused.goal!.goalId,
+        expectedRevision: paused.goal!.revision,
+      });
+      expect(runtime.getSnapshot().goal).toMatchObject({ status: 'active' });
+      expect(host.started).toHaveLength(2);
+    },
+  );
+
+  it('leaves a blocked proposal to the verifier instead of refusing it on a coverage rule', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'reject' as const,
+      reason: 'Only the assistant says it cannot be done',
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'rebase onto v9' });
+    const permit = host.started[0];
+    // Only the model's own prose says it cannot be done.
+    records = verifierEvidenceRecords(
+      permit,
+      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+    );
+    runtime.recordTerminalProposal(permit, {
+      status: 'blocked',
+      blockerKind: 'infeasible',
+      reason: 'I do not think this can be done',
+    });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).toHaveBeenCalledOnce();
+    expect(vi.mocked(verifier).mock.calls[0]![0]).toMatchObject({
+      proposal: { status: 'blocked', blockerKind: 'infeasible' },
+      blockedPolicy: expect.stringContaining('external_fact evidence'),
+    });
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
       'verifier_reject',
     ]);
-    expect(causes).toEqual(['turn_finished', 'verifier_reject']);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'active',
+      lastReason: 'Only the assistant says it cannot be done',
     });
     expect(host.started).toHaveLength(2);
-  });
-
-  it('stops continuations when completion evidence exceeds the catalog', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0];
-    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    records = verifierEvidenceWindow(permit, cursorId, 101);
-    runtime.recordTerminalProposal(permit, {
-      status: 'complete',
-      reason: 'Delivered',
-      evidenceRefs: ['assistant-evidence-100'],
-    });
-    const causes: Array<GoalStateCause | undefined> = [];
-    runtime.subscribe((_snapshot, cause) => causes.push(cause));
-
-    await runtime.finishTurn(permit);
-
-    expect(verifier).not.toHaveBeenCalled();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        lastReason: expect.stringContaining('bounded evidence catalog'),
-        limitKind: 'evidence_catalog',
-      },
-    });
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'usage_limited',
-    ]);
-    expect(causes).toEqual(['turn_finished', 'usage_limited']);
-    expect(host.started).toHaveLength(1);
-
-    // Resuming restarts the evidence window rather than being refused, so the
-    // Goal keeps its objective and picks up from a cursor that fits.
-    const tailBeforeResume = journal.records.at(-1)!.uuid;
-    const resumed = await runtime.dispatch({
-      action: 'resume',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    expect(resumed.snapshot.goal).toMatchObject({
-      status: 'active',
-      revision: permit.revision,
-    });
-    expect(resumed.snapshot.goal?.evidenceCheckpoint).toBeUndefined();
-    expect(resumed.snapshot.goal?.limitKind).toBeUndefined();
-    expect(host.started).toHaveLength(2);
-
-    // The window really moved, and to a live position: the resumed Goal cites
-    // the transcript tail, not the cursor the exhausted catalog was measured
-    // against and not the null the evidence pipeline would reject.
-    expect(resumed.snapshot.goal?.evidenceCursor.recordId).toBe(
-      tailBeforeResume,
-    );
-    expect(tailBeforeResume).not.toBe(cursorId);
-
-    // Editing still works from there and still keeps the Goal running, which
-    // is the escape hatch that used to be the only one.
-    const edited = await runtime.dispatch({
-      action: 'edit',
-      objective: 'deliver result',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    expect(edited.snapshot.goal).toMatchObject({
-      status: 'active',
-      revision: 2,
-      lastReason: undefined,
-    });
-  });
-
-  it('does not accept catalog exhaustion as an external blocker', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn(async () => ({
-      decision: 'accept' as const,
-      reason: 'External blocker accepted',
-    }));
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    records = [
-      ...verifierEvidenceWindow(permit, cursorId, 100),
-      verifierUserEvidenceRecords(permit, cursorId, 'blocker-evidence')[1]!,
-    ];
-    runtime.recordTerminalProposal(permit, {
-      status: 'blocked',
-      blockerKind: 'external',
-      reason: 'The evidence catalog is truncated',
-      evidenceRefs: ['blocker-evidence'],
-    });
-
-    await runtime.finishTurn(permit);
-
-    expect(verifier).not.toHaveBeenCalled();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        lastReason: expect.stringContaining('bounded evidence catalog'),
-        limitKind: 'evidence_catalog',
-      },
-    });
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'usage_limited',
-    ]);
-    expect(host.started).toHaveLength(1);
   });
 
   it('lets a repeated blocker streak reach the verifier when the catalog truncates', async () => {
@@ -1199,13 +1357,11 @@ describe('goal runtime', () => {
       decision: 'accept' as const,
       reason: 'The repeated blocker is established',
     }));
-    const checkpointVerifier = vi.fn();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({
       journal,
       evidenceSource,
       verifier,
-      checkpointVerifier,
     });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
@@ -1265,7 +1421,6 @@ describe('goal runtime', () => {
 
     await runtime.finishTurn(thirdPermit);
 
-    expect(checkpointVerifier).not.toHaveBeenCalled();
     expect(verifier).toHaveBeenCalledOnce();
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
@@ -1278,2303 +1433,138 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).toMatchObject({ status: 'blocked' });
   });
 
-  it('checkpoints long-running evidence before starting the next turn', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const checkpointVerifier = vi.fn(async () => ({
+  // What a build that still compressed evidence into checkpoints journaled:
+  // a checkpoint on the record, a stall streak with its diagnostic, and a
+  // check left pending when the process stopped. The shapes are written out
+  // by hand because nothing can produce them any more.
+  const legacyCheckpointGoal = {
+    goalId: 'g-1',
+    revision: 1,
+    objective: 'deliver result',
+    status: 'active',
+    evidenceCursor: { recordId: 'checkpoint-record' },
+    turnCount: 6,
+    activeTimeMs: 10,
+    tokensUsed: 1200,
+    createdAt: 1,
+    updatedAt: 2,
+    evidenceCheckpoint: {
+      checkpointId: 'checkpoint-record',
+      createdAt: 2,
       claims: [
         {
-          proofKind: 'delivered_output' as const,
+          id: 'checkpoint-record:1',
+          proofKind: 'delivered_output',
           claim: 'The implementation result was delivered.',
           sourceRefs: ['assistant-evidence-79'],
         },
       ],
-    }));
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    records = verifierEvidenceWindow(permit, cursorId, 80);
-
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledOnce();
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'checkpoint',
-    ]);
-    const checkpoint = runtime.getSnapshot().goal!.evidenceCheckpoint!;
-    expect(journal.records.at(-1)?.uuid).toBe(checkpoint.checkpointId);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: {
-        status: 'active',
-        evidenceCursor: { recordId: checkpoint.checkpointId },
-        evidenceCheckpoint: {
-          claims: [
-            {
-              id: expect.any(String),
-              proofKind: 'delivered_output',
-              claim: 'The implementation result was delivered.',
-              sourceRefs: ['assistant-evidence-79'],
-            },
-          ],
-        },
-      },
-    });
-    expect(host.started).toHaveLength(2);
-
-    const nextPermit = host.started[1]!;
-    records = [
-      ...records,
-      {
-        uuid: checkpoint.checkpointId,
-        parentUuid: records.at(-1)!.uuid,
-        sessionId: 's-1',
-        timestamp: new Date(2).toISOString(),
-        type: 'system',
-        subtype: 'goal_state',
-        provenance: 'goal_control',
-        cwd: '/tmp',
-        version: 'test',
-      },
-      {
-        ...verifierEvidenceRecords(
-          nextPermit,
-          checkpoint.checkpointId,
-          'next-turn-output',
-        )[1]!,
-        parentUuid: checkpoint.checkpointId,
-      },
-    ];
-
-    await expect(runtime.getGoalForWorker(nextPermit)).resolves.toMatchObject({
-      evidenceCatalog: {
-        entries: [
-          {
-            uuid: checkpoint.claims[0]!.id,
-            proofKind: 'delivered_output',
-            preview: 'The implementation result was delivered.',
-          },
-          { uuid: 'next-turn-output' },
-        ],
-        truncated: false,
-      },
-    });
-
-    vi.mocked(verifier).mockResolvedValue({
-      decision: 'accept',
-      reason: 'Checkpoint and current evidence satisfy the objective',
-    });
-    runtime.recordTerminalProposal(nextPermit, {
-      status: 'complete',
-      reason: 'Delivered across both evidence windows',
-      evidenceRefs: [checkpoint.claims[0]!.id, 'next-turn-output'],
-    });
-
-    await runtime.finishTurn(nextPermit);
-
-    expect(verifier).toHaveBeenCalledWith(
-      expect.objectContaining({
-        evidence: [
-          expect.objectContaining({
-            uuid: checkpoint.claims[0]!.id,
-            provenance: 'goal_checkpoint',
-            content: 'The implementation result was delivered.',
-          }),
-          expect.objectContaining({ uuid: 'next-turn-output' }),
-        ],
-      }),
-      expect.any(AbortSignal),
-    );
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'complete',
-      lastReason: 'Checkpoint and current evidence satisfy the objective',
-    });
-  });
-
-  it('continues without a checkpoint while evidence remains below threshold', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const checkpointVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-    records = verifierEvidenceWindow(permit, cursorId, 79);
-
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).not.toHaveBeenCalled();
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'checkpoint',
-    ]);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
-    });
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
-    expect(runtime.getSnapshot().goal?.evidenceCursor.recordId).toBe(cursorId);
-    expect(host.started).toHaveLength(2);
-  });
-
-  it('keeps a goal active when an empty turn finishes during the checkpoint check', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const checkpointVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    // The turn finished without recording any goal-owned transcript records
-    // (e.g. a hook blocked the prompt before anything was recorded).
-    records = [journal.records[0]!];
-
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).not.toHaveBeenCalled();
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'checkpoint',
-    ]);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
-    });
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
-    expect(host.started).toHaveLength(2);
-  });
-
-  it('counts checkpoint check time below the compaction threshold', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(1_000);
-      const flushGate = deferred<void>();
-      const journal = fakeGoalJournal();
-      let records: readonly RuntimeRecord[] = [];
-      const evidenceSource = fakeEvidenceSource(() => records);
-      evidenceSource.flush.mockImplementationOnce(() => flushGate.promise);
-      const host = fakeGoalTurnHost();
-      const runtime = createGoalRuntime({
-        journal,
-        evidenceSource,
-        verifier: vi.fn(),
-        checkpointVerifier: vi.fn(),
-      });
-      runtime.bindHost(host);
-      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-      const permit = host.started[0]!;
-      records = verifierEvidenceRecords(
-        permit,
-        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      );
-
-      vi.setSystemTime(2_000);
-      const finishing = runtime.finishTurn(permit);
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(runtime.getSnapshot().goal?.activeTimeMs).toBe(1_000);
-
-      vi.setSystemTime(5_000);
-      flushGate.resolve();
-      await finishing;
-
-      expect(runtime.getSnapshot().goal?.activeTimeMs).toBe(4_000);
-      expect(journal.appended.at(-1)?.snapshot.goal?.activeTimeMs).toBe(4_000);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('counts active verifier time before committing a checkpoint', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(1_000);
-      const result = deferred<GoalCheckpointVerificationResult>();
-      const journal = fakeGoalJournal();
-      let records: readonly RuntimeRecord[] = [];
-      const evidenceSource = fakeEvidenceSource(() => records);
-      const checkpointVerifier = vi.fn(() => result.promise);
-      const host = fakeGoalTurnHost();
-      const runtime = createGoalRuntime({
-        journal,
-        evidenceSource,
-        verifier: vi.fn(),
-        checkpointVerifier,
-      });
-      runtime.bindHost(host);
-      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-      const permit = host.started[0]!;
-      records = verifierEvidenceWindow(
-        permit,
-        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-        80,
-      );
-
-      vi.setSystemTime(2_000);
-      const finishing = runtime.finishTurn(permit);
-      await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
-
-      vi.setSystemTime(5_000);
-      result.resolve({
-        claims: [
-          {
-            proofKind: 'delivered_output',
-            claim: 'The implementation result was delivered.',
-            sourceRefs: ['assistant-evidence-79'],
-          },
-        ],
-      });
-      await finishing;
-
-      const checkpointRecord = journal.appended.at(-1);
-      expect(checkpointRecord?.cause).toBe('checkpoint');
-      expect(checkpointRecord?.snapshot.goal?.activeTimeMs).toBe(4_000);
-      expect(runtime.getSnapshot()).toMatchObject({
-        goal: {
-          activeTimeMs: 4_000,
-          tokensUsed: 0,
-          evidenceCheckpoint: { checkpointId: expect.any(String) },
-        },
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('counts active checkpoint time before settling a failed checkpoint', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(1_000);
-      const result = deferred<GoalCheckpointVerificationResult>();
-      const journal = fakeGoalJournal();
-      let records: readonly RuntimeRecord[] = [];
-      const evidenceSource = fakeEvidenceSource(() => records);
-      const checkpointVerifier = vi.fn(() => result.promise);
-      const host = fakeGoalTurnHost();
-      const runtime = createGoalRuntime({
-        journal,
-        evidenceSource,
-        verifier: vi.fn(),
-        checkpointVerifier,
-      });
-      runtime.bindHost(host);
-      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-      const permit = host.started[0]!;
-      records = verifierEvidenceWindow(
-        permit,
-        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-        80,
-      );
-
-      vi.setSystemTime(2_000);
-      const finishing = runtime.finishTurn(permit);
-      await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
-
-      vi.setSystemTime(5_000);
-      result.reject(new Error('provider failed'));
-      await finishing;
-
-      const settledRecord = journal.appended.at(-1);
-      expect(settledRecord?.cause).toBe('checkpoint');
-      expect(settledRecord?.snapshot.goal?.activeTimeMs).toBe(4_000);
-      expect(runtime.getSnapshot().goal?.status).toBe('active');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('records the request limit when the checkpoint request is structurally oversized', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const checkpointVerifier = vi.fn(() => {
-      throw new GoalCheckpointVerifierInputTooLargeError(300_000);
-    });
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    // 101 records overflow the evidence window, so this also pins the
-    // precedence the stall branch relies on: a structurally oversized
-    // request must keep its immediate checkpoint_request stop instead of
-    // being counted as a stall on the truncated window.
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      101,
-    );
-
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledOnce();
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'usage_limited',
-      lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-      limitKind: 'checkpoint_request',
-    });
-    // The oversized request cannot shrink while the same evidence window is in
-    // play, so the resume drops that window instead of refusing outright.
-    const resumed = await runtime.dispatch({
-      action: 'resume',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    expect(resumed.snapshot.goal).toMatchObject({ status: 'active' });
-    expect(resumed.snapshot.goal?.evidenceCheckpoint).toBeUndefined();
-  });
-
-  it('skips a checkpoint that changes source proof semantics', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const checkpointVerifier = vi.fn(async () => ({
-      claims: [
-        {
-          proofKind: 'external_fact' as const,
-          claim: 'The delivered result was externally verified.',
-          sourceRefs: ['assistant-evidence-79'],
-        },
-      ],
-    }));
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-
-    await runtime.finishTurn(permit);
-
-    // A malformed verifier output is a transient verifier failure: the
-    // checkpoint is skipped so the healthy goal continues and a later turn
-    // retries, instead of aborting the goal on one bad compression.
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
-    });
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'checkpoint',
-    ]);
-    expect(host.started).toHaveLength(2);
-  });
-
-  it.each(['flush', 'read'] as const)(
-    'moves to usage_limited when checkpoint %s fails',
-    async (failurePoint) => {
-      const journal = fakeGoalJournal();
-      let records: readonly RuntimeRecord[] = [];
-      const evidenceSource = fakeEvidenceSource(() => records);
-      if (failurePoint === 'flush') {
-        evidenceSource.flush.mockRejectedValueOnce(new Error('flush failed'));
-      } else if (failurePoint === 'read') {
-        evidenceSource.readActiveTranscriptChain.mockRejectedValueOnce(
-          new Error('read failed'),
-        );
-      }
-      const checkpointVerifier = vi.fn(async () => ({
-        claims: [
-          {
-            proofKind: 'delivered_output' as const,
-            claim: 'The implementation result was delivered.',
-            sourceRefs: ['assistant-evidence-79'],
-          },
-        ],
-      }));
-      const host = fakeGoalTurnHost();
-      const runtime = createGoalRuntime({
-        journal,
-        evidenceSource,
-        verifier: vi.fn(),
-        checkpointVerifier,
-      });
-      runtime.bindHost(host);
-      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-      const permit = host.started[0]!;
-      records = verifierEvidenceWindow(
-        permit,
-        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-        80,
-      );
-
-      await runtime.finishTurn(permit);
-
-      expect(runtime.getSnapshot()).toMatchObject({
-        activity: 'idle',
-        goal: { status: 'usage_limited' },
-      });
-      expect(journal.appended.map((payload) => payload.cause)).toEqual([
-        'create',
-        'turn_finished',
-        'usage_limited',
-      ]);
-      expect(host.started).toHaveLength(1);
-      expect(checkpointVerifier).toHaveBeenCalledTimes(0);
     },
-  );
+    checkpointStalls: 2,
+    lastCheckpointFailure: 'InvalidGoalCheckpointError: claims were not JSON',
+  };
+  const legacyRecord = (
+    uuid: string,
+    systemPayload: Record<string, unknown>,
+  ): RuntimeRecord =>
+    ({
+      ...goalStateRecord({ v: 2, activity: 'idle', goal: null }),
+      uuid,
+      systemPayload,
+    }) as unknown as RuntimeRecord;
 
-  it('compresses a truncated window instead of stopping the Goal', async () => {
-    // A window that overflows its budget is the state compaction exists to
-    // resolve. It used to be the one state compaction refused to run in:
-    // `shouldCheckpoint` required `!truncated`, so an overflow went straight
-    // to `usage_limited` — the only Goal state the reducer refuses to resume.
-    // The evidence left behind is already covered by the previous checkpoint's
-    // claims, so folding in what did fit is strictly better than stopping.
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const checkpointVerifier = vi.fn(async () => ({
-      claims: [
-        {
-          proofKind: 'delivered_output' as const,
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-100'],
-        },
-      ],
-    }));
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      101,
-    );
-
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(1);
-    expect(runtime.getSnapshot()).toMatchObject({
-      goal: { status: 'active' },
-    });
-    expect(runtime.getSnapshot().goal).toHaveProperty('evidenceCheckpoint');
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'checkpoint',
-    ]);
-  });
-
-  it('keeps a goal active when the checkpoint verifier provider fails', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const checkpointVerifier = vi.fn(async () => {
-      throw new Error('provider failed');
-    });
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-
-    await runtime.finishTurn(permit);
-
-    // A single transient verifier failure must not abort a healthy goal; the
-    // checkpoint is skipped and retried on a later turn while the evidence
-    // remains citable.
-    expect(checkpointVerifier).toHaveBeenCalledOnce();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
-    });
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
-    // The window had room, so the failure proves nothing about compaction
-    // and must not spend a stall.
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'checkpoint',
-    ]);
-    expect(host.started).toHaveLength(2);
-  });
-
-  it('replaces an earlier checkpoint with a cumulative checkpoint', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const checkpointVerifier = vi
-      .fn()
-      .mockResolvedValueOnce({
-        claims: [
-          {
-            proofKind: 'delivered_output' as const,
-            claim: 'The first result was delivered.',
-            sourceRefs: ['first-window-79'],
-          },
-        ],
-      })
-      .mockImplementationOnce(async (input: GoalCheckpointVerifierInput) => ({
-        claims: [
-          {
-            proofKind: 'delivered_output' as const,
-            claim: 'The first result remains part of the evidence.',
-            sourceRefs: [input.previousClaims[0]!.id],
-          },
-          {
-            proofKind: 'delivered_output' as const,
-            claim: 'The second result was delivered.',
-            sourceRefs: ['second-window-78'],
-          },
-        ],
-      }));
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const firstPermit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      firstPermit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-      'first-window',
-    );
-    await runtime.finishTurn(firstPermit);
-    const firstCheckpoint = runtime.getSnapshot().goal!.evidenceCheckpoint!;
-    const secondPermit = host.started[1]!;
-    records = [
-      ...records,
-      {
-        uuid: firstCheckpoint.checkpointId,
-        parentUuid: records.at(-1)!.uuid,
-        sessionId: 's-1',
-        timestamp: new Date(2).toISOString(),
-        type: 'system',
-        subtype: 'goal_state',
-        provenance: 'goal_control',
-        cwd: '/tmp',
-        version: 'test',
-      },
-      ...verifierEvidenceWindow(
-        secondPermit,
-        firstCheckpoint.checkpointId,
-        79,
-        'second-window',
-      ).slice(1),
-    ];
-
-    await runtime.finishTurn(secondPermit);
-
-    const secondCheckpoint = runtime.getSnapshot().goal!.evidenceCheckpoint!;
-    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
-    expect(checkpointVerifier.mock.calls[1]![0]).toMatchObject({
-      previousClaims: firstCheckpoint.claims,
-      evidence: expect.arrayContaining([
-        expect.objectContaining({ uuid: 'second-window-78' }),
-      ]),
-    });
-    expect(secondCheckpoint.checkpointId).not.toBe(
-      firstCheckpoint.checkpointId,
-    );
-    expect(secondCheckpoint.claims).toMatchObject([
-      { sourceRefs: [firstCheckpoint.claims[0]!.id] },
-      { sourceRefs: ['second-window-78'] },
-    ]);
-    expect(runtime.getSnapshot().goal!.evidenceCursor.recordId).toBe(
-      secondCheckpoint.checkpointId,
-    );
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'checkpoint',
-      'turn_finished',
-      'checkpoint',
-    ]);
-    expect(host.started).toHaveLength(3);
-  });
-
-  // Drives one Goal turn through the checkpoint check. `count` records after
-  // the previous checkpoint: 101 overflows the raw-entry budget (truncated),
-  // 60 lands between the compaction threshold and the budget (an effective
-  // checkpoint once 32 claims sit in front of it), 10 stays below threshold
-  // (no checkpoint at all). `claims` is what the verifier answers with.
-  async function runCheckpointTurn(
-    runtime: ReturnType<typeof createGoalRuntime>,
-    host: ReturnType<typeof fakeGoalTurnHost>,
-    setRecords: (records: readonly RuntimeRecord[]) => void,
-    previous: readonly RuntimeRecord[],
-    count: number,
-    prefix: string,
-  ): Promise<RuntimeRecord[]> {
-    const permit = host.started.at(-1)!;
-    const goal = runtime.getSnapshot().goal!;
-    const checkpoint = goal.evidenceCheckpoint;
-    const records: RuntimeRecord[] = checkpoint
-      ? [
-          ...previous,
-          {
-            uuid: checkpoint.checkpointId,
-            parentUuid: previous.at(-1)!.uuid,
-            sessionId: 's-1',
-            timestamp: new Date(2).toISOString(),
-            type: 'system',
-            subtype: 'goal_state',
-            provenance: 'goal_control',
-            cwd: '/tmp',
-            version: 'test',
-          },
-          ...verifierEvidenceWindow(
-            permit,
-            checkpoint.checkpointId,
-            count,
-            prefix,
-          ).slice(1),
-        ]
-      : verifierEvidenceWindow(
-          permit,
-          goal.evidenceCursor.recordId!,
-          count,
-          prefix,
-        );
-    setRecords(records);
-    await runtime.finishTurn(permit);
-    return records;
-  }
-
-  const fullClaims = (input: GoalCheckpointVerifierInput) => ({
-    claims: Array.from({ length: GOAL_CHECKPOINT_CLAIM_LIMIT }, (_, index) => ({
-      proofKind: 'delivered_output' as const,
-      claim: `Claim ${index}`,
-      sourceRefs: [input.evidence[index % input.evidence.length]!.uuid],
-    })),
-  });
-
-  // How many window records each checkpoint verifier call was given, in call
-  // order. A 101-record turn leaves a 100-record window before any checkpoint
-  // and a 68-record one beside a full 32-claim checkpoint. A live check on an
-  // overflowing window sends it whole until one stalls, then in batches of
-  // 24, then of 12; a window with room and a restore replay go whole at any
-  // streak.
-  const batchSizes = (verifier: {
-    mock: {
-      calls: ReadonlyArray<
-        readonly [GoalCheckpointVerifierInput, ...unknown[]]
-      >;
-    };
-  }) => verifier.mock.calls.map(([input]) => input.evidence.length);
-
-  function stallHarness() {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const checkpointVerifier = vi.fn(
-      async (input: GoalCheckpointVerifierInput) => fullClaims(input),
-    );
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    return {
-      journal,
-      host,
-      runtime,
-      checkpointVerifier,
-      evidenceSource,
-      setRecords: (next: readonly RuntimeRecord[]) => {
-        records = next;
-      },
-    };
-  }
-
-  // Validated evidence for a prepared replay window, oldest first.
-  const restoredEvidence = (count: number): ValidatedGoalEvidenceRecord[] =>
-    Array.from({ length: count }, (_, index) => ({
-      uuid: `restored-evidence-${index}`,
-      provenance: 'assistant_output' as const,
-      turnId: 'turn-restored',
-      preview: `Delivered result ${index}`,
-      proofKind: 'delivered_output' as const,
-      content: `Delivered result ${index}`,
-    }));
-
-  // The crash-point state the runtime itself persists: a restored streak
-  // beside a pending checkpoint, journaled before the check ran, replayed at
-  // activation against a prepared window that still overflows. The streak and
-  // the evidence are what the replay tests vary, so neither has a default.
-  function replayHarness({
-    checkpointStalls,
-    evidence,
-    checkpointVerifier,
-  }: {
-    checkpointStalls: number;
-    evidence: ValidatedGoalEvidenceRecord[];
-    checkpointVerifier: GoalCheckpointVerifier;
-  }) {
+  it('restores a Goal an earlier build left mid-checkpoint, and continues it', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
-    let records: readonly RuntimeRecord[] = [];
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource: fakeEvidenceSource(() => records),
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
+    const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
-    const record = goalStateRecord(
-      {
+
+    await runtime.restore([
+      legacyRecord('checkpoint-record', {
         v: 2,
-        activity: 'idle',
-        goal: {
-          goalId: 'g-restored',
-          revision: 1,
-          objective: 'deliver result',
-          status: 'active',
-          evidenceCursor: { recordId: 'create-record' },
-          turnCount: 3,
-          activeTimeMs: 10,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-          checkpointStalls,
-        },
-      },
-      'turn_finished',
-    );
-    (record.systemPayload as GoalStateRecordPayloadV2).checkpointPending = {
-      permit: { goalId: 'g-restored', revision: 1, turnId: 'turn-restored' },
-      recordUuid: 'pending-checkpoint-record',
-    };
-    return {
-      journal,
-      host,
-      runtime,
-      setRecords: (next: readonly RuntimeRecord[]) => {
-        records = next;
-      },
-      activate: async () => {
-        await runtime.prepareRestore([record], {
-          previousClaims: [],
-          evidence,
-          truncated: true,
-          shouldCheckpoint: true,
-        });
-        await runtime.activateRestoredWork();
-      },
-    };
-  }
-
-  it('stops a Goal after three consecutive stalled checkpoints', async () => {
-    const { journal, host, runtime, checkpointVerifier, setRecords } =
-      stallHarness();
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    for (let stall = 1; stall < GOAL_CHECKPOINT_STALL_LIMIT; stall++) {
-      records = await runCheckpointTurn(
-        runtime,
-        host,
-        setRecords,
-        records,
-        101,
-        `window-${stall}`,
-      );
-      // Each stalled checkpoint is still written -- the streak is counted on
-      // the record, not held back in memory, and so is what it ran into.
-      expect(runtime.getSnapshot().goal).toMatchObject({
-        status: 'active',
-        checkpointStalls: stall,
-        lastCheckpointFailure: expect.stringContaining('full claim list'),
-      });
-    }
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
-
-    await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'window-final',
-    );
-
-    // Every check stalled, so each one after the first sent the window in
-    // smaller batches: the whole 100 records, then the 68 beside the full
-    // claim list in batches of 24, then of 12. None of the three was the
-    // same request.
-    expect(batchSizes(checkpointVerifier)).toEqual([
-      100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
-    ]);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-      },
-    });
-    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
-    // No continuation was minted for the stopped Goal.
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
-  });
-
-  it('resets the stall streak when a checkpoint finds room to absorb', async () => {
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'a',
-    );
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'b',
-    );
-    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
-
-    // A window that compacts without overflowing: the claims are still full,
-    // but nothing was left behind, so compaction is keeping up again.
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      60,
-      'c',
-    );
-    // The third check ran after two stalls, but on a window with room, which
-    // cannot spend a stall, so it went out whole.
-    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20, 60]);
-    expect(runtime.getSnapshot().goal?.status).toBe('active');
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
-    // A check that succeeded is the only thing that retires the diagnostic.
-    expect(runtime.getSnapshot().goal).not.toHaveProperty(
-      'lastCheckpointFailure',
-    );
-
-    // The streak restarts from zero rather than continuing from two.
-    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'd');
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 1,
-    });
-  });
-
-  it('resets the stall streak when a check needs no checkpoint at all', async () => {
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'a',
-    );
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'b',
-    );
-    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
-
-    await runCheckpointTurn(runtime, host, setRecords, records, 10, 'quiet');
-    // The quiet turn needs no checkpoint, so it calls nothing.
-    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20]);
-    expect(runtime.getSnapshot().goal?.status).toBe('active');
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
-    // The check that found room is the one that proved the window healthy,
-    // so it also retires the diagnostic the two stalls left behind.
-    expect(runtime.getSnapshot().goal).not.toHaveProperty(
-      'lastCheckpointFailure',
-    );
-  });
-
-  it('counts a verifier failure on an overflowing window as a stall', async () => {
-    const { journal, host, runtime, checkpointVerifier, setRecords } =
-      stallHarness();
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'a',
-    );
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'b',
-    );
-    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
-
-    // The window still overflows when the verifier fails, and the failed
-    // check folded nothing into claims: that is a compaction without relief
-    // whatever stopped it, so it spends the third stall and stops the Goal
-    // exactly as a full claim list would.
-    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'c');
-
-    // The third check ran in batches of 12 and ended at the first one.
-    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24, 20, 12]);
-    // The stop follows the check that spent the last stall. The first two
-    // came back full, but the last never answered, so the advice is not to
-    // narrow the objective -- and the record says what the failure was.
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        lastCheckpointFailure: 'batch 1/6: Error: provider failed',
-      },
-    });
-    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
-  });
-
-  it('stops a Goal whose verifier never answers on an overflowing window', async () => {
-    const { journal, host, runtime, checkpointVerifier, setRecords } =
-      stallHarness();
-    // The reported loop: one long turn overflowed the window, and every
-    // checkpoint after it timed out. Nothing was ever folded into claims,
-    // the cursor never moved, and each new turn was told to retry.
-    const timeout = 'Error: Goal checkpoint verifier timed out after 30000ms';
-    checkpointVerifier.mockRejectedValue(
-      new Error('Goal checkpoint verifier timed out after 30000ms'),
-    );
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-
-    let records: RuntimeRecord[] = [];
-    for (let turn = 1; turn < GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-      const permit = host.started.at(-1)!;
-      records = [
-        ...records,
-        ...verifierEvidenceWindow(permit, cursor, 101, `t${turn}`).slice(
-          records.length === 0 ? 0 : 1,
-        ),
-      ];
-      setRecords(records);
-      await runtime.finishTurn(permit);
-      // The failure is on the record from the first stall on, so every
-      // surface can show it long before the breaker has to stop the Goal.
-      expect(runtime.getSnapshot().goal).toMatchObject({
-        status: 'active',
-        checkpointStalls: turn,
-        // The check after the first stall split the window and timed out
-        // on its first batch, so the record names that batch.
-        lastCheckpointFailure: turn === 1 ? timeout : `batch 1/5: ${timeout}`,
-        evidenceCursor: { recordId: cursor },
-      });
-      expect(runtime.getSnapshot().goal).not.toHaveProperty(
-        'evidenceCheckpoint',
-      );
-    }
-
-    const permit = host.started.at(-1)!;
-    records = [
-      ...records,
-      ...verifierEvidenceWindow(permit, cursor, 101, 'last').slice(1),
-    ];
-    setRecords(records);
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(
-      GOAL_CHECKPOINT_STALL_LIMIT,
-    );
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        lastCheckpointFailure: `batch 1/9: ${timeout}`,
-      },
-    });
-    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
-    // No fourth continuation was minted.
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
-    // Every failed check leaves the same trace, so an investigation reads
-    // why the verifier failed from the first overflow on.
-    const failedChecks = failedCheckpointChecks();
-    expect(failedChecks).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
-    for (const [message, windowLabel, loggedError] of failedChecks) {
-      expect(message).toContain('Checkpoint check failed');
-      expect(windowLabel).toBe('windowTruncated=true');
-      expect(loggedError).toBeInstanceOf(Error);
-    }
-  });
-
-  it('stops a Goal whose verifier keeps returning unusable checkpoint results', async () => {
-    const { journal, host, runtime, checkpointVerifier, setRecords } =
-      stallHarness();
-    // An empty claim list fails materialization, so the check settles
-    // without advancing the cursor: while the window keeps overflowing,
-    // that is a compaction that produces nothing.
-    checkpointVerifier.mockResolvedValue({ claims: [] });
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-      const permit = host.started.at(-1)!;
-      const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-      const additions = verifierEvidenceWindow(
-        permit,
-        cursor,
-        101,
-        `window-${turn}`,
-      );
-      records = turn === 1 ? additions : [...records, ...additions.slice(1)];
-      setRecords(records);
-      await runtime.finishTurn(permit);
-      if (turn < GOAL_CHECKPOINT_STALL_LIMIT) {
-        // Each unusable result counts while the window still overflows.
-        expect(runtime.getSnapshot().goal).toMatchObject({
-          status: 'active',
-          checkpointStalls: turn,
-          lastCheckpointFailure: expect.stringMatching(
-            turn === 1
-              ? /^InvalidGoalCheckpointError: /
-              : /^batch 1\/5: InvalidGoalCheckpointError: /,
-          ),
-        });
-      }
-    }
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(
-      GOAL_CHECKPOINT_STALL_LIMIT,
-    );
-    // The verifier answered every time, just not with claims: the stop says
-    // so instead of sending the user to narrow an objective that was fine.
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_UNUSABLE_REASON,
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        lastCheckpointFailure: expect.stringMatching(
-          /^batch 1\/9: InvalidGoalCheckpointError: /,
-        ),
-      },
-    });
-    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
-    // No continuation was minted for the stopped Goal.
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
-  });
-
-  it.each([
-    ['claim-count', new GoalCheckpointClaimCountError(33)],
-    ['claim-budget', new GoalCheckpointClaimBudgetError(20_000)],
-    ['claim-length', new GoalCheckpointClaimLengthError(0, 9_000)],
-  ] as const)(
-    'reads a %s overrun as capacity, not as unusable output',
-    async (_label, overrun) => {
-      // An overrun of a claim bound is well-formed JSON that could not fit the
-      // window within the checkpoint's bounds -- the capacity failure a
-      // narrower objective fixes -- so its stop keeps that advice rather than
-      // telling the user to debug JSON that was valid.
-      const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-      checkpointVerifier.mockRejectedValue(overrun);
-      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-      let records: RuntimeRecord[] = [];
-      for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-        records = await runCheckpointTurn(
-          runtime,
-          host,
-          setRecords,
-          records,
-          101,
-          `overrun-${turn}`,
-        );
-      }
-
-      expect(runtime.getSnapshot().goal).toMatchObject({
-        status: 'usage_limited',
-        limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        // The third check ran in batches of 12 and ended at the first.
-        lastCheckpointFailure: `batch 1/9: ${overrun.name}: ${overrun.message}`,
-      });
-    },
-  );
-
-  it('reads any other subclass of the unusable-result error as unusable output', async () => {
-    // Pins `instanceof` rather than an exact-constructor check: the hierarchy
-    // is open, and a new unusable shape must keep the unusable advice.
-    class ProbeUnusableCheckpointError extends InvalidGoalCheckpointError {}
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValue(
-      new ProbeUnusableCheckpointError('probe'),
-    );
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-      records = await runCheckpointTurn(
-        runtime,
-        host,
-        setRecords,
-        records,
-        101,
-        `probe-${turn}`,
-      );
-    }
-
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'usage_limited',
-      lastReason: GOAL_CHECKPOINT_UNUSABLE_REASON,
-    });
-  });
-
-  it('records a bounded, one-line, display-safe failure', async () => {
-    // The only production call site of the record's bound: a provider error
-    // carrying a whole response body must not reach the journal, the model
-    // or a card intact.
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValueOnce(
-      new Error(
-        `upstream said:\n  ${'x'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS + 100)}\r\u202e`,
-      ),
-    );
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    await runCheckpointTurn(runtime, host, setRecords, [], 101, 'body');
-
-    const value = runtime.getSnapshot().goal!.lastCheckpointFailure!;
-    expect([...value]).toHaveLength(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
-    expect(value.endsWith('…')).toBe(true);
-    expect(value.startsWith('Error: upstream said: xxx')).toBe(true);
-    expect(value).not.toMatch(/[\n\r\u202e]/);
-  });
-
-  it('records the failure that made the checkpoint request too large on the stop it caused', async () => {
-    // The stop's diagnostic belongs to this stop, not to whatever an earlier
-    // check left: the too-large request is itself the failure to report.
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    const records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      [],
-      101,
-      'first',
-    );
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      checkpointStalls: 1,
-      lastCheckpointFailure: 'Error: provider failed',
-    });
-
-    checkpointVerifier.mockRejectedValueOnce(
-      new GoalCheckpointVerifierInputTooLargeError(300_000),
-    );
-    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
-
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'usage_limited',
-      limitKind: 'checkpoint_request',
-      lastReason: GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-      checkpointStalls: 1,
-      // The measured size, so a reader can tell how far over the limit it is,
-      // and the batch it was measured on: the check after a stall splits.
-      lastCheckpointFailure: expect.stringMatching(
-        /^batch 1\/5: GoalCheckpointVerifierInputTooLargeError: .*\b300000 bytes\b/,
-      ),
-    });
-  });
-
-  it('shows the failure of a checkpoint request too large to send, with no streak behind it', async () => {
-    // That stop spends no stall, so only its own limit kind can make the
-    // failure it recorded visible.
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValueOnce(
-      new GoalCheckpointVerifierInputTooLargeError(300_000),
-    );
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    await runCheckpointTurn(runtime, host, setRecords, [], 101, 'only');
-
-    const goal = runtime.getSnapshot().goal!;
-    expect(goal).toMatchObject({
-      status: 'usage_limited',
-      limitKind: 'checkpoint_request',
-      lastCheckpointFailure: expect.stringContaining('300000 bytes'),
-    });
-    expect(goal).not.toHaveProperty('checkpointStalls');
-    expect(goalCheckpointHealthVisible(goal)).toBe(true);
-  });
-
-  it('clears the diagnostic but keeps the streak when a checkpoint stop has a cause of its own', async () => {
-    // Its own lastReason says what happened; an earlier provider failure left
-    // on the record would read as the cause of this stop.
-    const { host, runtime, checkpointVerifier, evidenceSource, setRecords } =
-      stallHarness();
-    checkpointVerifier.mockRejectedValue(new Error('provider failed'));
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    for (let turn = 1; turn < GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-      records = await runCheckpointTurn(
-        runtime,
-        host,
-        setRecords,
-        records,
-        101,
-        `stall-${turn}`,
-      );
-    }
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
-      lastCheckpointFailure: 'batch 1/5: Error: provider failed',
-    });
-
-    evidenceSource.readActiveTranscriptChain.mockRejectedValueOnce(
-      new Error('evidence source unavailable'),
-    );
-    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'lost');
-
-    const goal = runtime.getSnapshot().goal!;
-    expect(goal).toMatchObject({
-      status: 'usage_limited',
-      lastReason: 'evidence source unavailable',
-      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
-    });
-    expect(goal).not.toHaveProperty('lastCheckpointFailure');
-  });
-
-  it('reruns a checkpoint that stalled on the whole window in batches that carry claims forward', async () => {
-    const { journal, host, runtime, checkpointVerifier, setRecords } =
-      stallHarness();
-    // A verifier that cannot answer for the whole window but can for a
-    // batch: the case a batched rerun is for. Each answer carries the first
-    // claim it was given forward and folds the first record of its batch.
-    checkpointVerifier.mockImplementation(
-      async (input: GoalCheckpointVerifierInput) => {
-        if (input.evidence.length > GOAL_CHECKPOINT_BATCH_RECORD_LIMIT) {
-          throw new Error('Goal checkpoint verifier timed out after 30000ms');
-        }
-        const carried = input.previousClaims[0];
-        return {
-          claims: [
-            ...(carried
-              ? [
-                  {
-                    proofKind: 'delivered_output' as const,
-                    claim: 'Carried forward.',
-                    sourceRefs: [carried.id],
-                  },
-                ]
-              : []),
-            {
-              proofKind: 'delivered_output' as const,
-              claim: `Folded ${input.evidence[0]!.uuid}.`,
-              sourceRefs: [input.evidence[0]!.uuid],
-            },
-          ],
-        };
-      },
-    );
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-
-    // The first check sends the whole window, as it always has, and stalls.
-    const records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      [],
-      101,
-      'first',
-    );
-    expect(batchSizes(checkpointVerifier)).toEqual([100]);
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 1,
-      lastCheckpointFailure:
-        'Error: Goal checkpoint verifier timed out after 30000ms',
-      evidenceCursor: { recordId: cursor },
-    });
-
-    // The check after it splits the window instead of resending it whole,
-    // covering every record once, oldest first.
-    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
-    const reruns = checkpointVerifier.mock.calls
-      .slice(1)
-      .map(([input]) => input);
-    expect(reruns.map(({ evidence }) => evidence.length)).toEqual([
-      24, 24, 24, 24, 4,
-    ]);
-    expect(
-      reruns.flatMap(({ evidence }) => evidence.map(({ uuid }) => uuid)),
-    ).toEqual(Array.from({ length: 100 }, (_, index) => `second-${index + 1}`));
-
-    const goal = runtime.getSnapshot().goal!;
-    const checkpointId = goal.evidenceCheckpoint!.checkpointId;
-    // Each batch is given the claims the one before it folded, under an id
-    // segment of its own, so none collides with the kept checkpoint's ids.
-    expect(reruns[0]!.previousClaims).toEqual([]);
-    expect(reruns[1]!.previousClaims.map(({ id }) => id)).toEqual([
-      `${checkpointId}:b1:1`,
-    ]);
-    for (let index = 2; index < reruns.length; index++) {
-      expect(reruns[index]!.previousClaims.map(({ id }) => id)).toEqual([
-        `${checkpointId}:b${index}:1`,
-        `${checkpointId}:b${index}:2`,
-      ]);
-    }
-    // Only the last batch's claims are kept, and the check that relieved
-    // the window ends the streak and retires the diagnostic.
-    expect(goal).toMatchObject({
-      status: 'active',
-      evidenceCursor: { recordId: checkpointId },
-      evidenceCheckpoint: {
-        claims: [
-          { id: `${checkpointId}:1`, sourceRefs: [`${checkpointId}:b4:1`] },
-          { id: `${checkpointId}:2`, sourceRefs: ['second-97'] },
-        ],
-      },
-    });
-    expect(goal).not.toHaveProperty('checkpointStalls');
-    expect(goal).not.toHaveProperty('lastCheckpointFailure');
-    // A kept claim citing an intermediate batch's id still passes the
-    // record validator recovery applies.
-    expect(recoverGoalFromRecords(journal.records)).toMatchObject({
-      kind: 'v2',
-      payload: {
         cause: 'checkpoint',
-        snapshot: { goal: { evidenceCheckpoint: { checkpointId } } },
-      },
-    });
-  });
-
-  it('ends a batched rerun at the batch that fails, leaving the cursor where it was', async () => {
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
-
-    const records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      [],
-      101,
-      'first',
-    );
-    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
-
-    checkpointVerifier
-      .mockImplementationOnce(async (input: GoalCheckpointVerifierInput) =>
-        fullClaims(input),
-      )
-      .mockRejectedValueOnce(new Error('provider failed'));
-    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
-
-    // The first batch folded, the second failed, and no batch after it ran.
-    expect(batchSizes(checkpointVerifier)).toEqual([100, 24, 24]);
-    const goal = runtime.getSnapshot().goal!;
-    expect(goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 2,
-      lastCheckpointFailure: 'batch 2/5: Error: provider failed',
-      evidenceCursor: { recordId: cursor },
-    });
-    // The first batch's claims are not kept: the cursor cannot move past
-    // records a later batch failed to fold.
-    expect(goal).not.toHaveProperty('evidenceCheckpoint');
-    expect(failedCheckpointChecks().at(-1)![4]).toBe('batch=2/5');
-  });
-
-  it('sends no further batch once the Goal is paused mid-rerun', async () => {
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      [],
-      101,
-      'first',
-    );
-    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
-
-    // The rerun's first batch answers only after the pause has landed.
-    const firstBatch = deferred<ReturnType<typeof fullClaims>>();
-    checkpointVerifier.mockImplementationOnce(() => firstBatch.promise);
-    const permit = host.started.at(-1)!;
-    const finishing = runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'second',
-    );
-    await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledTimes(2));
-    await runtime.dispatch({
-      action: 'pause',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    firstBatch.resolve(fullClaims(checkpointVerifier.mock.calls[1]![0]));
-    await finishing;
-
-    // The pause aborted the attempt between batches: no later batch went
-    // out, and the folded first batch was not kept.
-    expect(batchSizes(checkpointVerifier)).toEqual([100, 24]);
-    const goal = runtime.getSnapshot().goal!;
-    expect(goal.status).toBe('paused');
-    expect(goal).not.toHaveProperty('evidenceCheckpoint');
-  });
-
-  it('keeps the failed batch in a diagnostic cut to the record bound', async () => {
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      [],
-      101,
-      'first',
-    );
-
-    checkpointVerifier.mockRejectedValueOnce(
-      new Error('x'.repeat(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS + 100)),
-    );
-    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'second');
-
-    const value = runtime.getSnapshot().goal!.lastCheckpointFailure!;
-    expect(value.startsWith('batch 1/5: Error: xxx')).toBe(true);
-    expect([...value]).toHaveLength(GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS);
-  });
-
-  it('sends a checkpoint replay whole, whatever streak it restored', async () => {
-    // Session activation waits for the replay, and a replay spends no stall
-    // on either arm, so splitting it would only hold the session up for more
-    // calls.
-    const checkpointVerifier = vi.fn(
-      async (_input: GoalCheckpointVerifierInput): Promise<never> => {
-        throw new Error('provider failed');
-      },
-    );
-    const { runtime, activate } = replayHarness({
-      checkpointStalls: 1,
-      evidence: restoredEvidence(30),
-      checkpointVerifier,
-    });
-
-    await activate();
-
-    expect(batchSizes(checkpointVerifier)).toEqual([30]);
-    // Still exempt: the failed replay keeps the streak it restored.
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: {
-        status: 'active',
-        checkpointStalls: 1,
-        lastCheckpointFailure: 'Error: provider failed',
-      },
-    });
-    expect(failedCheckpointChecks()).toHaveLength(1);
-    expect(failedCheckpointChecks()[0]!.slice(3)).toEqual([
-      'replay=true',
-      'batch=1/1',
-    ]);
-  });
-
-  it('does not spend the restored streak on a replay that comes back with a full claim list', async () => {
-    // A replay that folds the window but comes back full is exempt like a
-    // failed one: it records what it ran into and writes its checkpoint, but
-    // keeps the streak it restored, so the session is not stopped at
-    // activation before any turn of its own has run.
-    const checkpointVerifier = vi.fn(
-      async (input: GoalCheckpointVerifierInput) => fullClaims(input),
-    );
-    const { journal, host, runtime, activate } = replayHarness({
-      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
-      evidence: restoredEvidence(30),
-      checkpointVerifier,
-    });
-
-    await activate();
-
-    expect(batchSizes(checkpointVerifier)).toEqual([30]);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: {
-        status: 'active',
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
-        lastCheckpointFailure: expect.stringContaining('full claim list'),
-        evidenceCursor: { recordId: 'pending-checkpoint-record' },
-        evidenceCheckpoint: { checkpointId: 'pending-checkpoint-record' },
-      },
-    });
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'checkpoint',
-    ]);
-    expect(host.started).toHaveLength(1);
-  });
-
-  it('does not count an unusable result while the window has room', async () => {
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    checkpointVerifier.mockResolvedValue({ claims: [] });
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-      records = await runCheckpointTurn(
-        runtime,
-        host,
-        setRecords,
-        records,
-        80,
-        `window-${turn}`,
-      );
-    }
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(
-      GOAL_CHECKPOINT_STALL_LIMIT,
-    );
-    expect(runtime.getSnapshot().goal?.status).toBe('active');
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
-    // Every unusable check was settled as bookkeeping and retried.
-    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
-  });
-
-  it('keeps the stall streak through a provider failure on a window with room', async () => {
-    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'a',
-    );
-    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
-
-    // A transient failure on a window with room proves nothing about
-    // compaction: the streak carries through instead of resetting. The
-    // streak must be non-zero here -- a preserved 0 and a reset 0 both
-    // render as an absent field, so only from 1 can this tell them apart.
-    // 60 records keep this window inside the budget once the stalled
-    // checkpoint's full claim list sits in front of it.
-    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
-    await runCheckpointTurn(runtime, host, setRecords, records, 60, 'b');
-
-    // The failure spends no stall, but it is still a failure the surfaces
-    // should show: the record carries it beside the unchanged streak. The
-    // check followed a stall, but a window with room cannot spend one, so it
-    // went out whole rather than in batches.
-    expect(batchSizes(checkpointVerifier)).toEqual([100, 60]);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: {
-        status: 'active',
-        checkpointStalls: 1,
-        lastCheckpointFailure: 'Error: provider failed',
-      },
-    });
-    // The room arm leaves the same trace the truncated arm does: the
-    // discarded error is diagnosable from the first failure, not only once
-    // the window overflows.
-    const failedChecks = failedCheckpointChecks();
-    expect(failedChecks).toHaveLength(1);
-    const [message, windowLabel, loggedError] = failedChecks[0]!;
-    expect(message).toContain('Checkpoint check failed');
-    expect(windowLabel).toBe('windowTruncated=false');
-    expect(loggedError).toBeInstanceOf(Error);
-    expect((loggedError as Error).message).toBe('provider failed');
-    expect(host.started).toHaveLength(3);
-  });
-
-  it('keeps the stall streak when a turn records no evidence at all', async () => {
-    const { host, runtime, setRecords } = stallHarness();
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-
-    let records: RuntimeRecord[] = [];
-    records = await runCheckpointTurn(
-      runtime,
-      host,
-      setRecords,
-      records,
-      101,
-      'a',
-    );
-    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
-
-    // A turn that records no goal-owned transcript leaves the lineage tail
-    // at the previous turn, so the checkpoint check closes as bookkeeping
-    // only. That close proved nothing about room, so it keeps the streak.
-    await runCheckpointTurn(runtime, host, setRecords, records, 0, 'quiet');
-
-    // The same close proved nothing about the failure either, so the
-    // diagnostic the stall left stays until a check actually succeeds.
-    expect(runtime.getSnapshot().goal).toMatchObject({
-      status: 'active',
-      checkpointStalls: 1,
-      lastCheckpointFailure: expect.stringContaining('full claim list'),
-    });
-    expect(host.started).toHaveLength(3);
-  });
-
-  it('promotes queued user input before an automatic post-checkpoint turn', async () => {
-    const result = deferred<GoalCheckpointVerificationResult>();
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const checkpointVerifier = vi.fn(() => result.promise);
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-
-    const finishing = runtime.finishTurn(permit);
-    await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
-    expect(runtime.beginTurn('real-user')).toBeUndefined();
-
-    result.resolve({
-      claims: [
-        {
-          proofKind: 'delivered_output',
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
-        },
-      ],
-    });
-    await finishing;
-
-    expect(runtime.permitForTurn('real-user')).toBeDefined();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { evidenceCheckpoint: { checkpointId: expect.any(String) } },
-    });
-    expect(host.started).toHaveLength(1);
-  });
-
-  it('keeps a user turn queued when it was reserved before a checkpoint commit', async () => {
-    const result = deferred<GoalCheckpointVerificationResult>();
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const checkpointVerifier = vi.fn(() => result.promise);
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-
-    expect(runtime.beginTurn('real-user')).toBeUndefined();
-    const finishing = runtime.finishTurn(permit);
-    await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
-
-    result.resolve({
-      claims: [
-        {
-          proofKind: 'delivered_output',
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
-        },
-      ],
-    });
-    await finishing;
-
-    expect(runtime.permitForTurn('real-user')).toBeDefined();
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { evidenceCheckpoint: { checkpointId: expect.any(String) } },
-    });
-    expect(host.started).toHaveLength(1);
-  });
-
-  it('recovers a durable pending checkpoint before continuing after a crash', async () => {
-    const result = deferred<GoalCheckpointVerificationResult>();
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const checkpointVerifier = vi.fn(() => result.promise);
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    const evidence = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-    records = evidence;
-
-    const finishing = runtime.finishTurn(permit);
-    await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-    ]);
-    runtime.dispose();
-    result.resolve({
-      claims: [
-        {
-          proofKind: 'delivered_output',
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
-        },
-      ],
-    });
-    await finishing;
-
-    const recoveryRecords = [
-      journal.records[0]!,
-      ...evidence.slice(1),
-      journal.records[1]!,
-    ];
-    const restoredJournal = fakeGoalJournal();
-    const restoredHost = fakeGoalTurnHost();
-    const restoredCheckpointVerifier = vi.fn(async () => ({
-      claims: [
-        {
-          proofKind: 'delivered_output' as const,
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
-        },
-      ],
-    }));
-    const restored = createGoalRuntime({
-      journal: restoredJournal,
-      evidenceSource: fakeEvidenceSource(() => recoveryRecords),
-      verifier: vi.fn(),
-      checkpointVerifier: restoredCheckpointVerifier,
-    });
-    restored.bindHost(restoredHost);
-
-    await restored.restore(recoveryRecords);
-
-    expect(restoredCheckpointVerifier).toHaveBeenCalledOnce();
-    expect(restoredJournal.appended.map((payload) => payload.cause)).toEqual([
-      'checkpoint',
-    ]);
-    expect(restored.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: {
-        evidenceCursor: { recordId: expect.any(String) },
-        evidenceCheckpoint: { checkpointId: expect.any(String) },
-      },
-    });
-    expect(restoredJournal.records.at(-1)?.uuid).toBe(
-      restored.getSnapshot().goal!.evidenceCheckpoint!.checkpointId,
-    );
-    expect(restoredHost.started).toHaveLength(1);
-  });
-
-  it('keeps a restored goal serviceable when the recovery checkpoint write fails', async () => {
-    const result = deferred<GoalCheckpointVerificationResult>();
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const checkpointVerifier = vi.fn(() => result.promise);
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier: vi.fn(),
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    const evidence = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-    records = evidence;
-
-    const finishing = runtime.finishTurn(permit);
-    await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
-    runtime.dispose();
-    result.resolve({
-      claims: [
-        {
-          proofKind: 'delivered_output',
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
-        },
-      ],
-    });
-    await finishing;
-
-    const recoveryRecords = [
-      journal.records[0]!,
-      ...evidence.slice(1),
-      journal.records[1]!,
-    ];
-    const restoredJournal = fakeGoalJournal({
-      appendError: new Error('writer lease inactive'),
-    });
-    const restoredHost = fakeGoalTurnHost();
-    const restoredCheckpointVerifier = vi.fn(async () => ({
-      claims: [
-        {
-          proofKind: 'delivered_output' as const,
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
-        },
-      ],
-    }));
-    const restored = createGoalRuntime({
-      journal: restoredJournal,
-      evidenceSource: fakeEvidenceSource(() => recoveryRecords),
-      verifier: vi.fn(),
-      checkpointVerifier: restoredCheckpointVerifier,
-    });
-    restored.bindHost(restoredHost);
-
-    await restored.restore(recoveryRecords);
-    expect(restoredCheckpointVerifier).toHaveBeenCalledOnce();
-    expect(restoredJournal.appended).toEqual([]);
-    // Recovery committed before the replay began, so the failed replay
-    // degrades instead of bricking the runtime: the pending checkpoint is
-    // dropped, the verifying activity rewinds, and the restored goal stays
-    // active and serviceable.
-    expect(restored.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
-    });
-    expect(restoredHost.started).toHaveLength(1);
-    await expect(
-      restored.dispatch({
-        action: 'clear',
-        expectedGoalId: permit.goalId,
-        expectedRevision: permit.revision,
+        snapshot: { v: 2, activity: 'idle', goal: legacyCheckpointGoal },
       }),
-    ).rejects.toMatchObject({ message: 'writer lease inactive' });
-  });
-
-  it('settles a post-commit checkpoint write failure instead of stalling', async () => {
-    const journal = fakeGoalJournal({
-      appendErrors: [
-        undefined, // create
-        undefined, // turn_finished
-        undefined, // verifier_reject with checkpointPending
-        new Error('writer lease lost'), // checkpoint record
-        new Error('writer lease lost'), // usage_limited fallback
-      ],
-    });
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn(async () => ({
-      decision: 'reject' as const,
-      reason: 'More work remains',
-    }));
-    const checkpointVerifier = vi.fn(async () => ({
-      claims: [
-        {
-          proofKind: 'delivered_output' as const,
-          claim: 'The implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
+      legacyRecord('turn-record', {
+        v: 2,
+        cause: 'turn_finished',
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: { ...legacyCheckpointGoal, turnCount: 7 },
         },
-      ],
-    }));
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-    runtime.recordTerminalProposal(permit, {
-      status: 'complete',
-      reason: 'Delivered',
-      evidenceRefs: ['assistant-evidence-79'],
-    });
-
-    // The turn already committed; the post-commit bookkeeping failure must
-    // not reject it or leave the goal stranded on a verifying activity.
-    await expect(runtime.finishTurn(permit)).resolves.toBeUndefined();
-
-    expect(checkpointVerifier).toHaveBeenCalledOnce();
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'verifier_reject',
-    ]);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active', lastReason: 'More work remains' },
-    });
-    expect(host.started).toHaveLength(2);
-    expect(host.inputs[1]?.verifierFeedback).toBe('More work remains');
-  });
-
-  it('checkpoints before continuing after the terminal verifier rejects', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn(async () => ({
-      decision: 'reject' as const,
-      reason: 'More work remains',
-    }));
-    const checkpointVerifier = vi.fn(async () => ({
-      claims: [
-        {
-          proofKind: 'delivered_output' as const,
-          claim: 'The latest implementation result was delivered.',
-          sourceRefs: ['assistant-evidence-79'],
+        checkpointPending: {
+          permit: { goalId: 'g-1', revision: 1, turnId: 'turn-7' },
+          recordUuid: 'pending-checkpoint-record',
         },
-      ],
-    }));
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
+      }),
+    ]);
+
+    // The Goal is recovered rather than lost to a parser that no longer
+    // knows the keys, nothing is replayed or written for the pending check,
+    // and the next turn starts.
+    const goal = runtime.getSnapshot().goal;
+    expect(goal).toMatchObject({
+      goalId: 'g-1',
+      status: 'active',
+      turnCount: 7,
+      tokensUsed: 1200,
+      evidenceCursor: { recordId: 'checkpoint-record' },
     });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
+    expect(goal).not.toHaveProperty('evidenceCheckpoint');
+    expect(goal).not.toHaveProperty('checkpointStalls');
+    expect(goal).not.toHaveProperty('lastCheckpointFailure');
+    expect(journal.appended).toEqual([]);
+    expect(runtime.getSnapshot().activity).toBe('running');
+    expect(host.started).toHaveLength(1);
+
+    // What it journals from here on carries none of the old keys.
+    await runtime.finishTurn(host.started[0]!);
+    expect(journal.appended.at(-1)).not.toHaveProperty('checkpointPending');
+    expect(journal.appended.at(-1)!.snapshot.goal).not.toHaveProperty(
+      'evidenceCheckpoint',
     );
-    runtime.recordTerminalProposal(permit, {
-      status: 'complete',
-      reason: 'Delivered',
-      evidenceRefs: ['assistant-evidence-79'],
-    });
-
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledOnce();
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'verifier_reject',
-      'verifier_reject',
-    ]);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: {
-        status: 'active',
-        evidenceCheckpoint: { checkpointId: expect.any(String) },
-      },
-    });
-    expect(host.started).toHaveLength(2);
-    expect(host.inputs[1]?.verifierFeedback).toBe('More work remains');
-
-    const restoredJournal = fakeGoalJournal();
-    const restoredHost = fakeGoalTurnHost();
-    const restored = createGoalRuntime({
-      journal: restoredJournal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    restored.bindHost(restoredHost);
-    await restored.restore([journal.records.at(-2)!]);
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
-    expect(restoredJournal.appended.map((payload) => payload.cause)).toEqual([
-      'verifier_reject',
-    ]);
-    expect(restoredHost.inputs[0]?.verifierFeedback).toBe('More work remains');
   });
 
-  it('persists the rejection cause when the checkpoint check stays below threshold', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn(async () => ({
-      decision: 'reject' as const,
-      reason: 'More work remains',
-    }));
-    const checkpointVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      79,
-    );
-    runtime.recordTerminalProposal(permit, {
-      status: 'complete',
-      reason: 'Delivered',
-      evidenceRefs: ['assistant-evidence-78'],
-    });
-
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).not.toHaveBeenCalled();
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'verifier_reject',
-      'verifier_reject',
-    ]);
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
-    expect(host.started).toHaveLength(2);
-    expect(host.inputs[1]?.verifierFeedback).toBe('More work remains');
-  });
-
-  it('keeps rejection feedback for continuation when the checkpoint fails after rejection', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn(async () => ({
-      decision: 'reject' as const,
-      reason: 'More work remains',
-    }));
-    const checkpointVerifier = vi.fn(async () => {
-      throw new Error('provider failed');
-    });
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({
-      journal,
-      evidenceSource,
-      verifier,
-      checkpointVerifier,
-    });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-    const permit = host.started[0]!;
-    records = verifierEvidenceWindow(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-      80,
-    );
-    runtime.recordTerminalProposal(permit, {
-      status: 'complete',
-      reason: 'Delivered',
-      evidenceRefs: ['assistant-evidence-79'],
-    });
-
-    await runtime.finishTurn(permit);
-
-    // The skipped checkpoint settles the rejection follow-up; the rejection
-    // feedback must still reach the continuation turn.
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: { status: 'active' },
-    });
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'create',
-      'turn_finished',
-      'verifier_reject',
-      'verifier_reject',
-    ]);
-    expect(host.started).toHaveLength(2);
-    expect(host.inputs[1]?.verifierFeedback).toBe('More work remains');
-  });
-
-  it.each(['pause', 'dispose'] as const)(
-    'aborts an in-flight checkpoint attempt on %s',
-    async (action) => {
-      const result = deferred<GoalCheckpointVerificationResult>();
-      let capturedSignal: AbortSignal | undefined;
+  it.each(['evidence_catalog', 'checkpoint_request'] as const)(
+    'resumes a Goal an earlier build stopped at the %s limit from a fresh window',
+    async (limitKind) => {
       const journal = fakeGoalJournal();
-      let records: readonly RuntimeRecord[] = [];
-      const evidenceSource = fakeEvidenceSource(() => records);
-      const checkpointVerifier = vi.fn(
-        (_input: GoalCheckpointVerifierInput, signal?: AbortSignal) => {
-          capturedSignal = signal;
-          return result.promise;
-        },
-      );
       const host = fakeGoalTurnHost();
-      const runtime = createGoalRuntime({
-        journal,
-        evidenceSource,
-        verifier: vi.fn(),
-        checkpointVerifier,
-      });
+      const runtime = createGoalRuntime({ journal });
       runtime.bindHost(host);
-      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
-      const permit = host.started[0]!;
-      records = verifierEvidenceWindow(
-        permit,
-        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-        80,
-      );
-
-      const finishing = runtime.finishTurn(permit);
-      await vi.waitFor(() => expect(checkpointVerifier).toHaveBeenCalledOnce());
-      expect(capturedSignal?.aborted).toBe(false);
-
-      if (action === 'pause') {
-        await runtime.dispatch({
-          action: 'pause',
-          expectedGoalId: permit.goalId,
-          expectedRevision: permit.revision,
-        });
-        expect(runtime.getSnapshot().goal?.status).toBe('paused');
-      } else {
-        runtime.dispose();
-      }
-      expect(capturedSignal?.aborted).toBe(true);
-
-      result.resolve({
-        claims: [
-          {
-            proofKind: 'delivered_output',
-            claim: 'The implementation result was delivered.',
-            sourceRefs: ['assistant-evidence-79'],
+      await runtime.restore([
+        legacyRecord('stop-record', {
+          v: 2,
+          cause: 'usage_limited',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              ...legacyCheckpointGoal,
+              status: 'usage_limited',
+              limitKind,
+              lastReason: 'The evidence window could not be compressed.',
+            },
           },
-        ],
+        }),
+      ]);
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'usage_limited',
+        limitKind,
       });
-      await finishing;
+      expect(host.started).toHaveLength(0);
 
-      expect(runtime.getSnapshot().goal).not.toHaveProperty(
-        'evidenceCheckpoint',
-      );
-      expect(journal.appended.map((payload) => payload.cause)).toEqual(
-        action === 'pause'
-          ? ['create', 'turn_finished', 'pause']
-          : ['create', 'turn_finished'],
-      );
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      });
+
+      const resumed = runtime.getSnapshot().goal!;
+      expect(resumed.status).toBe('active');
+      expect(resumed.limitKind).toBeUndefined();
+      expect(resumed.evidenceCursor.recordId).not.toBe('checkpoint-record');
       expect(host.started).toHaveLength(1);
     },
   );
@@ -3587,13 +1577,11 @@ describe('goal runtime', () => {
       decision: 'reject' as const,
       reason: 'The repeated blocker is not established',
     }));
-    const checkpointVerifier = vi.fn();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({
       journal,
       evidenceSource,
       verifier,
-      checkpointVerifier,
     });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
@@ -3638,7 +1626,6 @@ describe('goal runtime', () => {
     await runtime.finishTurn(thirdPermit);
 
     expect(verifier).toHaveBeenCalledOnce();
-    expect(checkpointVerifier).not.toHaveBeenCalled();
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -3650,17 +1637,15 @@ describe('goal runtime', () => {
       status: 'active',
       evidenceCursor: { recordId: cursorId },
     });
-    expect(runtime.getSnapshot().goal).not.toHaveProperty('evidenceCheckpoint');
     expect(host.started).toHaveLength(4);
   });
 
   it.each([
     ['flush', new Error('flush failed')],
     ['read', new Error('read failed')],
-    ['cursor', new Error('not in the active transcript chain')],
-    ['provider', new Error('provider failed')],
+    ['cursor', new Error('is not in the active transcript chain')],
   ] as const)(
-    'moves to usage_limited when verification %s fails',
+    'moves to usage_limited when verification %s fails before the verifier is asked',
     async (failurePoint, failure) => {
       const journal = fakeGoalJournal();
       let records: readonly RuntimeRecord[] = [];
@@ -3670,12 +1655,10 @@ describe('goal runtime', () => {
       } else if (failurePoint === 'read') {
         evidenceSource.readActiveTranscriptChain.mockRejectedValueOnce(failure);
       }
-      const verifier: GoalVerifier =
-        failurePoint === 'provider'
-          ? vi.fn(async () => {
-              throw failure;
-            })
-          : vi.fn(async () => ({ decision: 'accept', reason: 'ok' }));
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision: 'accept' as const,
+        reason: 'ok',
+      }));
       const host = fakeGoalTurnHost();
       const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
       runtime.bindHost(host);
@@ -3685,7 +1668,11 @@ describe('goal runtime', () => {
         permit,
         runtime.getSnapshot().goal!.evidenceCursor.recordId!,
       );
-      if (failurePoint === 'cursor') records = records.slice(1);
+      if (failurePoint === 'cursor') {
+        // The chain no longer holds the record the Goal's window starts
+        // after, so there is nothing to anchor the window in.
+        records = records.slice(1);
+      }
       runtime.recordTerminalProposal(permit, {
         status: 'complete',
         reason: 'Delivered',
@@ -3703,9 +1690,12 @@ describe('goal runtime', () => {
           lastReason: expect.stringContaining(failure.message),
         },
       });
+      expect(verifier).not.toHaveBeenCalled();
       expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
       expect(causes).toEqual(['turn_finished', 'usage_limited']);
       expect(host.started).toHaveLength(1);
+      // Not one of the evidence limits: those can no longer occur.
+      expect(runtime.getSnapshot().goal).not.toHaveProperty('limitKind');
       await runtime.dispatch({
         action: 'resume',
         expectedGoalId: permit.goalId,
@@ -3752,7 +1742,7 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().activity).toBe('running');
   });
 
-  it.each(['blocked', 'usage_limited'] as const)(
+  it.each(['blocked', 'paused'] as const)(
     'preserves queued user priority when verification stops as %s',
     async (terminalStatus) => {
       const result = deferred<Awaited<ReturnType<GoalVerifier>>>();
@@ -4137,12 +2127,10 @@ describe('goal runtime', () => {
     },
   );
 
-  it('returns only a bounded evidence catalog and rejects it after stale I/O', async () => {
-    const flushGate = deferred<void>();
+  it('returns the worker view without reading the transcript', async () => {
     const journal = fakeGoalJournal();
     let records: readonly RuntimeRecord[] = [];
     const evidenceSource = fakeEvidenceSource(() => records);
-    evidenceSource.flush.mockImplementationOnce(() => flushGate.promise);
     const verifier: GoalVerifier = vi.fn();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
@@ -4154,20 +2142,17 @@ describe('goal runtime', () => {
       runtime.getSnapshot().goal!.evidenceCursor.recordId!,
     );
 
-    const reading = runtime.getGoalForWorker(permit);
-    await vi.waitFor(() => expect(evidenceSource.flush).toHaveBeenCalledOnce());
-    const editing = runtime.dispatch({
-      action: 'edit',
-      objective: 'ship revised',
-      expectedGoalId: permit.goalId,
-      expectedRevision: permit.revision,
-    });
-    await expect(editing).resolves.toBeDefined();
-    flushGate.resolve();
+    const view = await runtime.getGoalForWorker(permit);
 
-    await expect(reading).rejects.toThrow(
-      'Goal turn permit is no longer valid',
-    );
+    expect(evidenceSource.flush).not.toHaveBeenCalled();
+    expect(evidenceSource.readActiveTranscriptChain).not.toHaveBeenCalled();
+    expect(view).toEqual({
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: 'ship',
+      evidenceCursor: runtime.getSnapshot().goal!.evidenceCursor,
+    });
+    expect(view).not.toHaveProperty('evidenceCatalog');
   });
 
   it.each(['accept', 'reject', 'usage_limited'] as const)(
@@ -4331,39 +2316,6 @@ describe('goal runtime', () => {
     });
   });
 
-  it('returns a bounded catalog without exposing full evidence content', async () => {
-    const journal = fakeGoalJournal();
-    let records: readonly RuntimeRecord[] = [];
-    const evidenceSource = fakeEvidenceSource(() => records);
-    const verifier: GoalVerifier = vi.fn();
-    const host = fakeGoalTurnHost();
-    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
-    runtime.bindHost(host);
-    await runtime.dispatch({ action: 'create', objective: 'ship' });
-    const permit = host.started[0];
-    records = verifierEvidenceRecords(
-      permit,
-      runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-    );
-
-    const view = await runtime.getGoalForWorker(permit);
-
-    expect(view.evidenceCatalog).toEqual({
-      entries: [
-        {
-          uuid: 'assistant-evidence',
-          provenance: 'assistant_output',
-          turnId: permit.turnId,
-          preview: 'Delivered result',
-          proofKind: 'delivered_output',
-        },
-      ],
-      lineageTurnIds: [permit.turnId],
-      truncated: false,
-    });
-    expect(view.evidenceCatalog?.entries[0]).not.toHaveProperty('content');
-  });
-
   it('keeps verification live when a pausing lifecycle append fails', async () => {
     const result = deferred<Awaited<ReturnType<GoalVerifier>>>();
     const journal = fakeGoalJournal({
@@ -4512,6 +2464,50 @@ describe('goal runtime', () => {
     ]);
 
     expect(observed).toEqual(['pause']);
+  });
+
+  it('marks only the restore broadcast as a replay', async () => {
+    // The restore broadcast carries the persisted record's cause. A subscriber
+    // counting transitions would otherwise count the recovered `pause` again
+    // on every resume, as if the user had just paused.
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(fakeGoalTurnHost());
+    const observed: Array<{
+      cause: GoalStateCause | undefined;
+      meta: GoalBroadcastMeta | undefined;
+    }> = [];
+    runtime.subscribe((_snapshot, cause, meta) =>
+      observed.push({ cause, meta }),
+    );
+
+    await runtime.restore([
+      goalStateRecord({
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'g-1',
+          revision: 1,
+          objective: 'ship it',
+          status: 'paused',
+          evidenceCursor: { recordId: 'create-record' },
+          turnCount: 2,
+          activeTimeMs: 10,
+          tokensUsed: 0,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      }),
+    ]);
+    await runtime.dispatch({
+      action: 'resume',
+      expectedGoalId: 'g-1',
+      expectedRevision: 1,
+    });
+
+    expect(observed[0]).toEqual({ cause: 'pause', meta: { replayed: true } });
+    const live = observed.slice(1);
+    expect(live.map(({ cause }) => cause)).toContain('resume');
+    expect(live.every(({ meta }) => meta === undefined)).toBe(true);
   });
 
   it('resumes an idle stopped goal exactly once', async () => {
@@ -5604,78 +3600,6 @@ describe('goal runtime', () => {
     }
   });
 
-  it('does not spend the stall streak on a failed checkpoint replay at restore', async () => {
-    const checkpointVerifier = vi.fn(async (): Promise<never> => {
-      throw new Error('provider failed');
-    });
-    // A streak one short of the limit, and the same overflowing chain the
-    // crashed process faced: the replayed window still truncates, and the
-    // one verifier call at startup fails for reasons that have nothing to do
-    // with compaction.
-    const { journal, host, runtime, activate, setRecords } = replayHarness({
-      checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
-      evidence: [],
-      checkpointVerifier,
-    });
-
-    await activate();
-
-    // A restore replay is not the turn loop the stall breaker exists to
-    // stop: the restored Goal keeps the streak it crashed with, and the
-    // continuation the replay mints re-earns any stall as a live turn.
-    expect(checkpointVerifier).toHaveBeenCalledOnce();
-    // The exemption covers the streak, not the diagnostic: the replay did
-    // fail, and the record says so without spending a stall on it.
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'running',
-      goal: {
-        status: 'active',
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT - 1,
-        lastCheckpointFailure: 'Error: provider failed',
-      },
-    });
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'checkpoint',
-    ]);
-    expect(host.started).toHaveLength(1);
-    // The trace separates the exempt replay from a live turn that spent a
-    // stall: both overflow the window, only the replay carries the flag.
-    expect(failedCheckpointChecks()).toHaveLength(1);
-    expect(failedCheckpointChecks()[0]![3]).toBe('replay=true');
-
-    // The exemption's bound: the continuation the replay minted is a live
-    // turn, so its own stalled check on a still-overflowing window spends
-    // the last stall the replay preserved and stops the Goal.
-    const permit = host.started.at(-1)!;
-    setRecords(verifierEvidenceWindow(permit, 'create-record', 101, 'resumed'));
-    await runtime.finishTurn(permit);
-
-    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
-    expect(runtime.getSnapshot()).toMatchObject({
-      activity: 'idle',
-      goal: {
-        status: 'usage_limited',
-        limitKind: 'evidence_catalog',
-        lastReason: GOAL_CHECKPOINT_UNREACHABLE_REASON,
-        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        // Two stalls restored, so the live check split into batches of 12.
-        lastCheckpointFailure: 'batch 1/9: Error: provider failed',
-      },
-    });
-    expect(journal.appended.map((payload) => payload.cause)).toEqual([
-      'checkpoint',
-      'turn_finished',
-      'usage_limited',
-    ]);
-    // No further continuation was minted for the stopped Goal.
-    expect(host.started).toHaveLength(1);
-    // The live turn's failed check logs the same rule without the
-    // exemption flag: the two arms are distinguishable in the trace.
-    const failedChecks = failedCheckpointChecks();
-    expect(failedChecks).toHaveLength(2);
-    expect(failedChecks[1]![3]).toBe('replay=false');
-  });
-
   it('coalesces preparation and activation and rejects activation before preparation', async () => {
     const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
     await expect(runtime.activateRestoredWork()).rejects.toThrow(
@@ -6556,7 +4480,6 @@ describe('goal runtime', () => {
         countToolResults?: boolean;
         throwOnCount?: boolean;
         countsNotANumber?: boolean;
-        checkpointVerifier?: GoalCheckpointVerifier;
       } = {},
     ) {
       const journal = fakeGoalJournal({
@@ -6566,7 +4489,6 @@ describe('goal runtime', () => {
       const host = fakeGoalTurnHost();
       const toolResults = new Map<string, number>();
       const spend = new Map<string, number>();
-      let records: readonly RuntimeRecord[] = [];
       const runtime = createGoalRuntime({
         journal,
         ledger: {
@@ -6585,22 +4507,12 @@ describe('goal runtime', () => {
                 },
               }),
         },
-        ...(options.checkpointVerifier
-          ? {
-              evidenceSource: fakeEvidenceSource(() => records),
-              verifier: vi.fn(),
-              checkpointVerifier: options.checkpointVerifier,
-            }
-          : {}),
         ...(options.tokenBudgetGrant === undefined
           ? {}
           : { tokenBudgetGrant: options.tokenBudgetGrant }),
       });
       runtime.bindHost(host);
-      const setEvidence = (next: readonly RuntimeRecord[]) => {
-        records = next;
-      };
-      return { journal, host, runtime, toolResults, spend, setEvidence };
+      return { journal, host, runtime, toolResults, spend };
     }
 
     async function finishAutonomousTurn(
@@ -6640,6 +4552,49 @@ describe('goal runtime', () => {
         lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
       });
       expect(causes.at(-1)).toBe('pause');
+    });
+
+    it('drops a stall count a previous build persisted and still pauses an idle Goal', async () => {
+      const { host, runtime } = noProgressHarness();
+      await runtime.restore([
+        goalStateRecord(
+          {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'g-1',
+              revision: 1,
+              objective: 'ship it',
+              status: 'active',
+              evidenceCursor: { recordId: 'create-record' },
+              turnCount: 4,
+              activeTimeMs: 10,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 2,
+              checkpointStalls: 2,
+              lastCheckpointFailure: 'InvalidGoalCheckpointError: old build',
+            },
+          } as unknown as GoalSnapshotV2,
+          'turn_finished',
+        ),
+      ]);
+      expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+      expect(runtime.getSnapshot().goal).not.toHaveProperty(
+        'lastCheckpointFailure',
+      );
+
+      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
+        await vi.waitFor(() =>
+          expect(host.started.length).toBeGreaterThan(turn),
+        );
+        await finishAutonomousTurn(runtime, host.started[turn]!);
+      }
+
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'paused',
+        lastReason: GOAL_PAUSE_REASON_NO_PROGRESS,
+      });
     });
 
     it('restarts the streak on a turn that records a tool result', async () => {
@@ -6755,54 +4710,6 @@ describe('goal runtime', () => {
       expect(runtime.getSnapshot().goal?.noProgressTurns).toBeUndefined();
     });
 
-    it('does not checkpoint the turn that spends the streak', async () => {
-      // A checkpoint is work done for the next turn. On the turn that stops
-      // the Goal there is no next turn, and the verifier call would be spent
-      // for nothing.
-      const checkpointVerifier = vi.fn(async () => ({
-        claims: [
-          {
-            proofKind: 'delivered_output' as const,
-            claim: 'The implementation result was delivered.',
-            sourceRefs: ['assistant-evidence-79'],
-          },
-        ],
-      }));
-      const { journal, host, runtime, setEvidence } = noProgressHarness({
-        checkpointVerifier,
-      });
-      await runtime.dispatch({ action: 'create', objective: 'ship' });
-
-      for (let turn = 0; turn < GOAL_NO_PROGRESS_TURN_LIMIT; turn++) {
-        const permit = host.started[turn]!;
-        setEvidence(
-          verifierEvidenceWindow(
-            permit,
-            runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-            80,
-          ),
-        );
-        await finishAutonomousTurn(runtime, permit);
-      }
-
-      expect(checkpointVerifier).toHaveBeenCalledTimes(
-        GOAL_NO_PROGRESS_TURN_LIMIT - 1,
-      );
-      expect(journal.appended.map((payload) => payload.cause)).toEqual([
-        'create',
-        'turn_finished',
-        'checkpoint',
-        'turn_finished',
-        'checkpoint',
-        'turn_finished',
-        'pause',
-      ]);
-      expect(runtime.getSnapshot()).toMatchObject({
-        activity: 'idle',
-        goal: { status: 'paused' },
-      });
-    });
-
     it('carries a restored streak into the turn that spends it', async () => {
       const { host, runtime } = noProgressHarness();
       await runtime.restore([
@@ -6891,67 +4798,6 @@ describe('goal runtime', () => {
       expect(host.started).toHaveLength(GOAL_NO_PROGRESS_TURN_LIMIT);
     });
 
-    it('lets a waiting user turn outrank the bound and keeps its checkpoint', async () => {
-      const checkpointVerifier = vi.fn(async () => ({
-        claims: [
-          {
-            proofKind: 'delivered_output' as const,
-            claim: 'The implementation result was delivered.',
-            sourceRefs: ['assistant-evidence-79'],
-          },
-        ],
-      }));
-      const { host, runtime, setEvidence } = noProgressHarness({
-        checkpointVerifier,
-      });
-      await runtime.restore([
-        goalStateRecord(
-          {
-            v: 2,
-            goal: {
-              goalId: 'g-1',
-              revision: 1,
-              objective: 'ship',
-              status: 'active',
-              evidenceCursor: { recordId: 'record-0' },
-              turnCount: 2,
-              activeTimeMs: 0,
-              tokensUsed: 0,
-              noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT - 1,
-              createdAt: 0,
-              updatedAt: 0,
-            },
-            activity: 'idle',
-          },
-          'turn_finished',
-        ),
-      ]);
-      await vi.waitFor(() => expect(host.started).toHaveLength(1));
-
-      // The user typed while the third turn was still running.
-      const last = host.started[0]!;
-      setEvidence(
-        verifierEvidenceWindow(
-          last,
-          runtime.getSnapshot().goal!.evidenceCursor.recordId!,
-          80,
-        ),
-      );
-      expect(runtime.beginTurn('user-turn')).toBeUndefined();
-      await finishAutonomousTurn(runtime, last);
-
-      // The reservation is served rather than stopped in front of, and the
-      // streak that reached the bound is still on the record for the turn
-      // after it to spend.
-      expect(runtime.getSnapshot().goal).toMatchObject({
-        status: 'active',
-        noProgressTurns: GOAL_NO_PROGRESS_TURN_LIMIT,
-      });
-      expect(runtime.permitForTurn('user-turn')).toBeDefined();
-      expect(checkpointVerifier).toHaveBeenCalledTimes(1);
-      expect(runtime.getSnapshot().goal).toHaveProperty('evidenceCheckpoint');
-    });
-
     it('serves a user turn reserved while the pause was being written', async () => {
       // `beginTurn` is synchronous and does not queue, so the reservation
       // can land in the middle of the pause record's append. The guard
@@ -7032,62 +4878,6 @@ describe('goal runtime', () => {
       });
       expect(runtime.getSnapshot().goal?.lastReason).toBeUndefined();
       expect(host.started).toHaveLength(2);
-    });
-
-    it('lets the checkpoint stall breaker outrank the bound on an overflowing window', async () => {
-      // A talkative model fills the evidence window with prose and calls no
-      // tool: every turn is quiet by this bound's measure, and every turn
-      // overflows the window by the checkpoint's. The Goal is drowning in
-      // evidence, not idling, so the checkpoint runs and the stall breaker
-      // stops it with the reason that fits -- a pause would send the user
-      // to resume straight back into the same overflowing window.
-      const checkpointVerifier = vi.fn(
-        async (input: GoalCheckpointVerifierInput) => fullClaims(input),
-      );
-      const { journal, host, runtime, setEvidence } = noProgressHarness({
-        checkpointVerifier,
-      });
-      await runtime.dispatch({ action: 'create', objective: 'ship' });
-
-      let records: RuntimeRecord[] = [];
-      for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
-        runtime.markTurnDelivered(
-          `goal-runtime:${host.started.at(-1)!.turnId}`,
-        );
-        records = await runCheckpointTurn(
-          runtime,
-          host,
-          setEvidence,
-          records,
-          101,
-          `window-${turn}`,
-        );
-        if (turn < GOAL_CHECKPOINT_STALL_LIMIT) {
-          expect(runtime.getSnapshot().goal).toMatchObject({
-            status: 'active',
-            checkpointStalls: turn,
-            noProgressTurns: turn,
-          });
-        }
-      }
-
-      // Three stalled checks, each after the first in smaller batches.
-      expect(batchSizes(checkpointVerifier)).toEqual([
-        100, 24, 24, 20, 12, 12, 12, 12, 12, 8,
-      ]);
-      expect(runtime.getSnapshot()).toMatchObject({
-        activity: 'idle',
-        goal: {
-          status: 'usage_limited',
-          limitKind: 'evidence_catalog',
-          lastReason: GOAL_CHECKPOINT_STALLED_REASON,
-          checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
-        },
-      });
-      expect(journal.appended.map((payload) => payload.cause)).not.toContain(
-        'pause',
-      );
-      expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
     });
 
     it('lets a spent token budget outrank the bound on the turn that crosses it', async () => {

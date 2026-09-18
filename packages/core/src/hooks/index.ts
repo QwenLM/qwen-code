@@ -15,6 +15,14 @@ export { HookAggregator } from './hookAggregator.js';
 export { HookPlanner, hookEventSupportsMatcher } from './hookPlanner.js';
 export { HookEventHandler } from './hookEventHandler.js';
 export { createInstructionsLoadedCallback } from './instructionsLoadedCallback.js';
+export { buildHooksListing, describeHookConfig } from './hooks-listing.js';
+export type {
+  HooksListing,
+  HooksListingConfig,
+  HooksListingDisabledReason,
+  HooksListingOrigin,
+  HooksListingRow,
+} from './hooks-listing.js';
 
 // Export new hook runners
 export { HttpHookRunner } from './httpHookRunner.js';
