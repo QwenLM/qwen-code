@@ -1423,6 +1423,103 @@ export class ExtensionManager {
     return snapshot;
   }
 
+  /**
+   * Refreshes the cache from manifest headers only: install metadata, the
+   * parsed manifest, and the identity fields derived from them. Skills,
+   * commands, agents, hooks, and context files are NOT loaded, so this costs
+   * one manifest read per extension instead of a full subresource scan.
+   *
+   * The cache and snapshot state this populates are the same objects a full
+   * `refreshCacheWithSnapshot` maintains, but the cached `Extension` entries
+   * carry no subresources. **After calling this, the manager's cache is
+   * manifest-only and must not be used by consumers that need skills,
+   * commands, agents, or hooks** — follow it with a full refresh on a manager
+   * shared with such consumers. Callers that only read identity fields
+   * (`id`, `name`, `version`, `installMetadata`) are unaffected.
+   *
+   * Like the full refresh, a full (unfiltered) refresh commits the directory
+   * fingerprint baseline; a name-filtered refresh does not. The fingerprint
+   * covers only install metadata and manifests — never skill files — so a
+   * skill-only edit does not trigger a catalog refresh, which is exactly the
+   * desired behavior: the catalog reads nothing from skill files.
+   */
+  async refreshCatalogSnapshot(options?: {
+    names?: string[];
+  }): Promise<ExtensionStoreSnapshot> {
+    const requestedNames = options?.names?.filter(Boolean) ?? [];
+    const dirFingerprintBeforeLoad =
+      requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
+    const { value: extensions, snapshot } =
+      await this.extensionStore.readConsistent(async () => {
+        const manifestOnly = async (
+          extensionsDir: string,
+          workspaceDir: string,
+        ): Promise<Extension[]> => {
+          let subdirs: string[];
+          try {
+            subdirs = fs.readdirSync(extensionsDir);
+          } catch {
+            return [];
+          }
+          // Same fail-closed semantics as `loadExtensionsFromExtensionsDir`:
+          // per-extension errors surface as nulls, but a broken entry stat
+          // (dangling symlink) fails the whole load. Sequential on purpose:
+          // the head reads one manifest file per entry, where the scan cost
+          // dominates and concurrency would buy nothing.
+          const loaded: Extension[] = [];
+          for (const subdir of subdirs) {
+            const extensionDir = path.join(extensionsDir, subdir);
+            if (!fs.statSync(extensionDir).isDirectory()) {
+              continue;
+            }
+            try {
+              const { extension } = await this.loadExtensionManifestHead(
+                { extensionDir, workspaceDir },
+                { loadMcpServers: false },
+              );
+              loaded.push(extension);
+            } catch {
+              // Corrupt manifest — same null treatment the full load gives.
+            }
+          }
+          return loaded;
+        };
+        let loaded: Extension[];
+        if (requestedNames.length > 0) {
+          // One head-only scan, filtered to the requested names — a name-
+          // filtered catalog refresh must not silently do a full subresource
+          // load via `loadExtensionByName`.
+          const wanted = new Set(
+            requestedNames.map((name) => name.toLowerCase()),
+          );
+          loaded = (
+            await manifestOnly(this.configDir, this.workspaceDir)
+          ).filter((extension) => wanted.has(extension.name.toLowerCase()));
+        } else {
+          loaded = await manifestOnly(this.configDir, this.workspaceDir);
+        }
+        return {
+          value: loaded,
+          extensions: loaded.map((extension) => ({
+            id: extension.id,
+            name: extension.name,
+          })),
+        };
+      });
+    const nextCache = new Map<string, Extension>();
+    extensions.forEach((extension) => {
+      nextCache.set(extension.name, extension);
+    });
+    this.extensionCache = nextCache;
+    this.applyStoreActivation(snapshot);
+    if (dirFingerprintBeforeLoad !== undefined) {
+      this.lastSourceFingerprint = this.sourceFingerprint(
+        dirFingerprintBeforeLoad,
+      );
+    }
+    return snapshot;
+  }
+
   private static stampPath(target: string, followSymlinks = true): string {
     try {
       const stats = followSymlinks ? fs.statSync(target) : fs.lstatSync(target);
@@ -1638,15 +1735,25 @@ export class ExtensionManager {
     return extensions;
   }
 
-  async loadExtension(
+  /**
+   * Loads everything an extension's manifest itself provides: install
+   * metadata, the parsed (and env-resolved) config, the extension id, and the
+   * base `Extension` object. Everything sourced from subresource directories
+   * (skills, commands, agents, hooks, context files) is left to the caller.
+   *
+   * With `loadMcpServers` (the default) the agent-plugins-v1 MCP merge runs
+   * here, including its `createDataDir` side effect. Catalog-style callers
+   * that never read `config.mcpServers` pass `false` so a read-only refresh
+   * does not create the plugin data root on disk.
+   */
+  private async loadExtensionManifestHead(
     context: LoadExtensionContext,
-    options: { throwOnError?: boolean } = {},
-  ): Promise<Extension | null> {
+    options: { loadMcpServers?: boolean } = {},
+  ): Promise<{
+    extension: Extension;
+    loadedManifest: LoadedExtensionManifest;
+  }> {
     const { extensionDir, workspaceDir } = context;
-    if (!fs.statSync(extensionDir).isDirectory()) {
-      return null;
-    }
-
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
 
@@ -1658,56 +1765,80 @@ export class ExtensionManager {
       effectiveExtensionPath = installMetadata.source;
     }
 
-    try {
-      const loadedManifest = this.loadExtensionManifest({
-        extensionDir: effectiveExtensionPath,
-        workspaceDir,
-      });
-      let config = loadedManifest.config;
-      if (loadedManifest.format === 'qwen') {
-        config = resolveEnvVarsInObject(config);
-      }
-      const extensionId = getExtensionId(config, installMetadata);
-      if (loadedManifest.format === 'agent-plugins-v1') {
-        config = {
-          ...config,
-          mcpServers: await loadAgentPluginMcpServers(
-            effectiveExtensionPath,
-            this.extensionStore.agentPluginDataRoot(extensionId),
-            { createDataDir: true },
-          ),
-        };
-      }
-
-      const extension: Extension = {
-        id: extensionId,
-        name: config.name,
-        displayName: config.displayName,
-        version:
-          config.version ||
-          installMetadata?.marketplaceConfig?.metadata?.version ||
-          '1.0.0',
-        path: effectiveExtensionPath,
-        format: loadedManifest.format,
-        installMetadata,
-        isActive: this.isEnabled(config.name, this.workspaceDir),
-        config,
-        settings: config.settings,
-        contextFiles: [],
+    const loadedManifest = this.loadExtensionManifest({
+      extensionDir: effectiveExtensionPath,
+      workspaceDir,
+    });
+    let config = loadedManifest.config;
+    if (loadedManifest.format === 'qwen') {
+      config = resolveEnvVarsInObject(config);
+    }
+    const extensionId = getExtensionId(config, installMetadata);
+    if (
+      loadedManifest.format === 'agent-plugins-v1' &&
+      options.loadMcpServers !== false
+    ) {
+      config = {
+        ...config,
+        mcpServers: await loadAgentPluginMcpServers(
+          effectiveExtensionPath,
+          this.extensionStore.agentPluginDataRoot(extensionId),
+          { createDataDir: true },
+        ),
       };
+    }
 
-      if (config.mcpServers) {
-        extension.mcpServers = Object.fromEntries(
-          Object.entries(config.mcpServers).map(([key, value]) => [
-            key,
-            filterMcpConfig(value),
-          ]),
-        );
-      }
+    const extension: Extension = {
+      id: extensionId,
+      name: config.name,
+      displayName: config.displayName,
+      version:
+        config.version ||
+        installMetadata?.marketplaceConfig?.metadata?.version ||
+        '1.0.0',
+      path: effectiveExtensionPath,
+      format: loadedManifest.format,
+      installMetadata,
+      isActive: this.isEnabled(config.name, this.workspaceDir),
+      config,
+      settings: config.settings,
+      contextFiles: [],
+    };
 
-      if (loadedManifest.format === 'qwen' && config.channels) {
-        extension.channels = config.channels;
-      }
+    if (config.mcpServers) {
+      extension.mcpServers = Object.fromEntries(
+        Object.entries(config.mcpServers).map(([key, value]) => [
+          key,
+          filterMcpConfig(value),
+        ]),
+      );
+    }
+
+    if (loadedManifest.format === 'qwen' && config.channels) {
+      extension.channels = config.channels;
+    }
+
+    return { extension, loadedManifest };
+  }
+
+  async loadExtension(
+    context: LoadExtensionContext,
+    options: { throwOnError?: boolean } = {},
+  ): Promise<Extension | null> {
+    const { extensionDir } = context;
+    if (!fs.statSync(extensionDir).isDirectory()) {
+      return null;
+    }
+
+    let extension: Extension | undefined;
+    try {
+      // Destructured separately so `extension` stays visible in the catch
+      // below for the skip warning's path.
+      const head = await this.loadExtensionManifestHead(context);
+      extension = head.extension;
+      const { loadedManifest } = head;
+      const config = extension.config;
+      const effectiveExtensionPath = extension.path;
 
       if (loadedManifest.format === 'agent-plugins-v1') {
         extension.commands = [];
@@ -1806,7 +1937,7 @@ export class ExtensionManager {
     } catch (e) {
       if (options.throwOnError) throw e;
       debugLogger.warn(
-        `Warning: Skipping extension in ${effectiveExtensionPath}: ${getErrorMessage(
+        `Warning: Skipping extension in ${extension?.path ?? extensionDir}: ${getErrorMessage(
           e,
         )}`,
       );

@@ -229,6 +229,10 @@ function mockExtensionManager(
     ExtensionManager.prototype,
     'refreshCacheWithSnapshot',
   ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'refreshCatalogSnapshot',
+  ).mockResolvedValue(snapshot);
   vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue([
     extension,
   ]);
@@ -434,8 +438,11 @@ describe('extension management v2 REST', () => {
         ],
       });
       expect(
-        ExtensionManager.prototype.refreshCacheWithSnapshot,
+        ExtensionManager.prototype.refreshCatalogSnapshot,
       ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).not.toHaveBeenCalled();
       expect(
         ExtensionManager.prototype.getExtensionStoreSnapshot,
       ).not.toHaveBeenCalled();
