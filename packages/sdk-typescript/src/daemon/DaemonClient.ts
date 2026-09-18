@@ -105,12 +105,15 @@ import type {
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
+  DaemonGitRemotesResult,
+  DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestList,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
@@ -1497,11 +1500,14 @@ export class DaemonClient {
     limit?: number,
     skip?: number,
     range?: string,
+    options?: DaemonGitLogOptions,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (range) params.set('range', range);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -6967,12 +6973,15 @@ export class WorkspaceDaemonClient {
     skip?: number,
     cwd?: string,
     range?: string,
+    options?: DaemonGitLogOptions,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (cwd != null) params.set('cwd', cwd);
     if (range) params.set('range', range);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
@@ -7089,6 +7098,50 @@ export class WorkspaceDaemonClient {
       suffix,
       'POST /workspaces/:workspace/git/commit',
       { method: 'POST', body: { message, ...opts }, mode: 'rest' },
+    );
+  }
+
+  workspaceGitRemotes(cwd?: string): Promise<DaemonGitRemotesResult> {
+    const suffix =
+      cwd != null ? `/git/remotes?cwd=${urlEncode(cwd)}` : '/git/remotes';
+    return this.client.workspaceJsonRequest<DaemonGitRemotesResult>(
+      this.workspaceSelector,
+      suffix,
+      'GET /workspaces/:workspace/git/remotes',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitRemoteAdd(
+    name: string,
+    url: string,
+    cwd?: string,
+    timeoutMs?: number,
+  ): Promise<DaemonGitRemoteMutationResult> {
+    const suffix =
+      cwd != null ? `/git/remote?cwd=${urlEncode(cwd)}` : '/git/remote';
+    return this.client.workspaceJsonRequest<DaemonGitRemoteMutationResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/remote',
+      { method: 'POST', body: { name, url }, mode: 'rest', timeoutMs },
+    );
+  }
+
+  workspaceGitRemoteRemove(
+    name: string,
+    cwd?: string,
+    timeoutMs?: number,
+  ): Promise<DaemonGitRemoteMutationResult> {
+    const suffix =
+      cwd != null
+        ? `/git/remote/remove?cwd=${urlEncode(cwd)}`
+        : '/git/remote/remove';
+    return this.client.workspaceJsonRequest<DaemonGitRemoteMutationResult>(
+      this.workspaceSelector,
+      suffix,
+      'POST /workspaces/:workspace/git/remote/remove',
+      { method: 'POST', body: { name }, mode: 'rest', timeoutMs },
     );
   }
 

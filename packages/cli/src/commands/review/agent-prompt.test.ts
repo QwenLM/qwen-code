@@ -3647,6 +3647,37 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(buildRoleBrief(PR_PLAN, '7')).not.toContain('it is not clean');
   });
 
+  it('prints the worktree absolute path so agents do not read the main checkout', () => {
+    // #11895: `working_dir` only resolves relative paths. The brief's only
+    // absolute path used to be the diff under the main checkout, and agents
+    // extrapolated `<repoRoot>/packages/...` — origin/main, not the PR head.
+    const wtAbs = resolve(PR_PLAN.worktreePath);
+    const repoRoot = resolve('.');
+    const p = buildRoleBrief(PR_PLAN, '1a');
+    expect(p).toContain(`The PR worktree's absolute path is \`${wtAbs}\``);
+    expect(p).toContain(`Source files live under \`${wtAbs}\``);
+    expect(p).toContain(`\`${repoRoot}/packages/...\``);
+    expect(p).toContain('that is a different tree');
+    expect(p).toContain(`The diff at \`${PR_PLAN.diffPathAbsolute}\``);
+    expect(p).toContain('is an artifact in the main checkout');
+
+    // Chunk and whole-diff agents go through the same builder.
+    expect(buildChunkAgentPrompt({ ...PLAN, ...PR_PLAN }, 13)).toContain(wtAbs);
+    expect(buildWholeDiffBlock({ ...PLAN, ...PR_PLAN })).toContain(wtAbs);
+    // Agent 7 does not get the shared-tree reader rule, but it still needs
+    // the location: its commands are equally capable of targeting the main
+    // checkout once they have an absolute path. It must not be handed the
+    // diff — that is a file its job does not open.
+    expect(buildRoleBrief(PR_PLAN, '7')).toContain(wtAbs);
+    expect(buildRoleBrief(PR_PLAN, '7')).not.toContain(PLAN.diffPathAbsolute);
+
+    // No worktree: nothing to pin, so nothing is printed.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain(
+      "The PR worktree's absolute path is",
+    );
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain('Source files live under');
+  });
+
   it('carries the command-aware subprocess-injection correction into Agent 2', () => {
     // The all-role test sees only that Agent 2 gets the diff and the format; it
     // cannot see whether the `--` correction reached it. If a revert restores the

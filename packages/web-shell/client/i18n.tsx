@@ -51,6 +51,7 @@ const EN: Messages = {
   'branchPicker.action.newBranch': 'New Branch…',
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
+  'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
   'branchPicker.invalidBranchName':
     'Invalid branch name — avoid spaces, ~, ^, :, ? * and leading -',
@@ -87,6 +88,36 @@ const EN: Messages = {
     `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'}`,
   'branchPicker.hint.changesUntracked': (v) =>
     `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'} (${v?.untracked ?? 0} untracked)`,
+  'branchPicker.action.manageRemotes': 'Manage Remotes…',
+  'branchPicker.remotes.title': 'Remotes',
+  'branchPicker.remotes.back': 'Back to branches',
+  'branchPicker.remotes.loading': 'Loading remotes…',
+  'branchPicker.remotes.empty': 'No remotes configured',
+  'branchPicker.remotes.noMatches': 'No remotes match the search',
+  'branchPicker.remotes.namePlaceholder': 'Remote name',
+  'branchPicker.remotes.urlPlaceholder': 'Remote URL',
+  'branchPicker.remotes.add': 'Add',
+  'branchPicker.remotes.remove': (v) => `Remove ${v?.name ?? ''}`,
+  'branchPicker.remotes.removeConfirm': 'Confirm',
+  'branchPicker.remotes.removeConfirmFor': (v) =>
+    `Confirm removing ${v?.name ?? ''}${v?.extras ? ` (${v.extras})` : ''}`,
+  'branchPicker.remotes.invisibleName': '(invisible name)',
+  'branchPicker.remotes.hiddenChars': '(hidden characters)',
+  'branchPicker.remotes.lookalikeName': '(lookalike name)',
+  'branchPicker.remotes.searchPlaceholder': 'Search remotes',
+  'branchPicker.remotes.urlTooltipFetch': (v) => `fetch: ${v?.url ?? ''}`,
+  'branchPicker.remotes.urlTooltipPush': (v) => `push: ${v?.url ?? ''}`,
+  'branchPicker.remotes.promisor': 'partial clone',
+  'branchPicker.remotes.partialClone': (v) => `partial clone (${v?.filter})`,
+  'branchPicker.remotes.customRefspec': 'custom refspec',
+  'branchPicker.remotes.extraUrls': (v) =>
+    `+${v?.count ?? 0} ${v?.count === 1 ? 'URL' : 'URLs'}`,
+  'branchPicker.remotes.otherSettings': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'other setting' : 'other settings'}`,
+  'branchPicker.remotes.added': (v) => `Added remote ${v?.name ?? ''}`,
+  'branchPicker.remotes.removed': (v) => `Removed remote ${v?.name ?? ''}`,
+  'branchPicker.remotes.invalidInput':
+    'Enter a remote name and URL (no leading -)',
   'gitCommit.title': 'Commit',
   'gitCommit.messagePlaceholder': 'Commit message (⌘/Ctrl+Enter to commit)',
   'gitCommit.generating': 'Generating commit message…',
@@ -161,6 +192,9 @@ const EN: Messages = {
   'gitLog.detailError': 'Failed to load commit details',
   'gitLog.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitLog.copySha': (v) => `Copy commit ${v?.sha ?? ''}`,
+  'gitLog.allBranches': 'All branches',
+  'gitLog.search': 'Search message, author, or hash',
+  'gitLog.noMatches': 'No commits match',
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -584,6 +618,8 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.dissatisfied': 'Not satisfied',
+  'assistant.satisfied': 'Satisfied',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -918,6 +954,8 @@ const EN: Messages = {
     'The daemon rejected that token; the stored credential was left unchanged.',
   'daemon.connection.reloadUnavailable':
     'Browser storage is unavailable, so the new token could not be applied to this connection.',
+  'daemon.connection.switchUnavailable':
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
   'daemon.connection.status.idle': 'Idle',
   'daemon.connection.status.connecting': 'Connecting',
   'daemon.connection.status.connected': 'Connected',
@@ -1196,6 +1234,7 @@ const EN: Messages = {
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
     `${v?.count ?? 0} file(s) exceeded the attachment size limit.`,
+  'editor.pastedTextShowInEditor': 'Show inline',
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -2039,6 +2078,7 @@ const EN: Messages = {
   'auth.step.group': 'Type',
   'auth.step.provider': 'Provider',
   'auth.step.protocol': 'Protocol',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': 'Model IDs',
@@ -2049,6 +2089,8 @@ const EN: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API format',
   'auth.protocol.gemini': 'Gemini-compatible',
   'auth.protocol.geminiDesc': 'Google Gemini API format',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key cannot be empty.',
   'auth.baseUrlInvalid': 'Base URL must start with http:// or https://.',
   'auth.baseUrlPrompt': 'Enter the API endpoint for this protocol.',
@@ -2470,10 +2512,6 @@ const EN: Messages = {
   'goal.judge': 'Judge',
   'goal.label': 'Goal',
   'goal.lastCheck': 'Last check',
-  'goal.checkpoint': 'Checkpoint',
-  'goal.checkpointStalled': (v) =>
-    `${v?.count ?? 0}/${v?.limit ?? 0} checks stalled`,
-  'goal.checkpointFailed': 'last evidence checkpoint failed',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
@@ -2686,10 +2724,11 @@ const EN: Messages = {
     'Use this provider for conversation. The current model is retained when it is included in the configuration.',
   'auth.purpose.image': 'Image generation',
   'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.realtime': 'Live Voice',
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
-    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -2892,6 +2931,11 @@ const EN: Messages = {
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
     'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+  'contextCompression.result': (v) =>
+    `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `Compression instructions were truncated to ${v?.max ?? ''} characters.`,
+  'contextCompression.noop': 'No compression needed.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
   'contextUsage.previousReading':
@@ -3871,6 +3915,7 @@ const ZH: Messages = {
   'branchPicker.action.newBranch': '新建分支…',
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
+  'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
   'branchPicker.invalidBranchName':
     '无效的分支名称 — 避免空格、~、^、:、? * 以及以 - 开头',
@@ -3905,6 +3950,34 @@ const ZH: Messages = {
   'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
   'branchPicker.hint.changesUntracked': (v) =>
     `${v?.count ?? 0} 处更改（${v?.untracked ?? 0} 未跟踪）`,
+  'branchPicker.action.manageRemotes': '管理远程仓库…',
+  'branchPicker.remotes.title': '远程仓库',
+  'branchPicker.remotes.back': '返回分支列表',
+  'branchPicker.remotes.loading': '加载远程仓库中…',
+  'branchPicker.remotes.empty': '未配置远程仓库',
+  'branchPicker.remotes.noMatches': '没有匹配的远程仓库',
+  'branchPicker.remotes.namePlaceholder': '名称',
+  'branchPicker.remotes.urlPlaceholder': 'URL',
+  'branchPicker.remotes.add': '添加',
+  'branchPicker.remotes.remove': (v) => `移除 ${v?.name ?? ''}`,
+  'branchPicker.remotes.removeConfirm': '确认',
+  'branchPicker.remotes.removeConfirmFor': (v) =>
+    `确认移除 ${v?.name ?? ''}${v?.extras ? `（${v.extras}）` : ''}`,
+  'branchPicker.remotes.invisibleName': '（不可见名称）',
+  'branchPicker.remotes.hiddenChars': '（隐藏字符）',
+  'branchPicker.remotes.lookalikeName': '（易混名称）',
+  'branchPicker.remotes.searchPlaceholder': '搜索远程仓库',
+  'branchPicker.remotes.urlTooltipFetch': (v) => `拉取: ${v?.url ?? ''}`,
+  'branchPicker.remotes.urlTooltipPush': (v) => `推送: ${v?.url ?? ''}`,
+  'branchPicker.remotes.promisor': '部分克隆',
+  'branchPicker.remotes.partialClone': (v) => `部分克隆（${v?.filter}）`,
+  'branchPicker.remotes.customRefspec': '自定义 refspec',
+  'branchPicker.remotes.extraUrls': (v) => `+${v?.count ?? 0} 个 URL`,
+  'branchPicker.remotes.otherSettings': (v) => `其他 ${v?.count ?? 0} 项设置`,
+  'branchPicker.remotes.added': (v) => `已添加远程仓库 ${v?.name ?? ''}`,
+  'branchPicker.remotes.removed': (v) => `已移除远程仓库 ${v?.name ?? ''}`,
+  'branchPicker.remotes.invalidInput':
+    '请输入远程仓库名称和 URL（不能以 - 开头）',
   'gitCommit.title': '提交',
   'gitCommit.messagePlaceholder': '提交信息（⌘/Ctrl+Enter 提交）',
   'gitCommit.generating': '正在生成提交信息…',
@@ -3975,6 +4048,9 @@ const ZH: Messages = {
   'gitLog.detailError': '加载提交详情失败',
   'gitLog.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
   'gitLog.copySha': (v) => `复制提交 ${v?.sha ?? ''}`,
+  'gitLog.allBranches': '全部分支',
+  'gitLog.search': '搜索提交信息、作者或哈希',
+  'gitLog.noMatches': '没有匹配的提交',
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',
@@ -4466,6 +4542,8 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.dissatisfied': '不满意',
+  'assistant.satisfied': '满意',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
@@ -4763,6 +4841,8 @@ const ZH: Messages = {
     'Daemon 拒绝了该 token，已保存的凭据未被修改。',
   'daemon.connection.reloadUnavailable':
     '浏览器存储不可用，因此新 token 无法应用到当前连接。',
+  'daemon.connection.switchUnavailable':
+    '浏览器存储不可用，因此无法把 token 带到该 daemon。',
   'daemon.connection.status.idle': '空闲',
   'daemon.connection.status.connecting': '连接中',
   'daemon.connection.status.connected': '已连接',
@@ -5026,6 +5106,7 @@ const ZH: Messages = {
   'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
+  'editor.pastedTextShowInEditor': '显示到输入框',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -5796,6 +5877,7 @@ const ZH: Messages = {
   'auth.step.group': '类型',
   'auth.step.provider': '供应商',
   'auth.step.protocol': '协议',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': '模型 ID',
@@ -5806,6 +5888,8 @@ const ZH: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API 格式',
   'auth.protocol.gemini': 'Gemini 兼容',
   'auth.protocol.geminiDesc': 'Google Gemini API 格式',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key 不能为空。',
   'auth.baseUrlInvalid': 'Base URL 必须以 http:// 或 https:// 开头。',
   'auth.baseUrlPrompt': '输入此协议的 API endpoint。',
@@ -6193,10 +6277,6 @@ const ZH: Messages = {
   'goal.judge': '判断',
   'goal.label': '目标',
   'goal.lastCheck': '上次检查',
-  'goal.checkpoint': '检查点',
-  'goal.checkpointStalled': (v) =>
-    `连续 ${v?.count ?? 0}/${v?.limit ?? 0} 次检查停滞`,
-  'goal.checkpointFailed': '最近一次证据检查点失败',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',
@@ -6395,10 +6475,11 @@ const ZH: Messages = {
     '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
   'auth.purpose.image': '生图',
   'auth.purpose.voice': '语音转写',
+  'auth.purpose.realtime': '实时语音',
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
-    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
@@ -6588,6 +6669,11 @@ const ZH: Messages = {
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
     '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+  'contextCompression.result': (v) =>
+    `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `压缩指令已截断为 ${v?.max ?? ''} 个字符。`,
+  'contextCompression.noop': '无需压缩。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',
