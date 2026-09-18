@@ -38,7 +38,8 @@ function collectExportTargets(value, targets = new Set()) {
     return targets;
   }
   if (value && typeof value === 'object') {
-    for (const nested of Object.values(value)) collectExportTargets(nested, targets);
+    for (const nested of Object.values(value))
+      collectExportTargets(nested, targets);
   }
   return targets;
 }

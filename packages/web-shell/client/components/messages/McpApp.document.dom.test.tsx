@@ -14,7 +14,9 @@ vi.mock('@modelcontextprotocol/ext-apps/app-bridge', () => ({
   },
   PostMessageTransport: class PostMessageTransport {
     constructor() {
-      throw new Error('A read-only document must not construct an MCP transport');
+      throw new Error(
+        'A read-only document must not construct an MCP transport',
+      );
     }
   },
 }));

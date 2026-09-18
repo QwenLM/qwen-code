@@ -22,9 +22,9 @@ describe('web-shell package build boundary', () => {
     expect(
       shouldExternalizeWebShellDependency('@xterm/xterm/css/xterm.css'),
     ).toBe(false);
-    expect(shouldExternalizeWebShellDependency('katex/dist/katex.min.css')).toBe(
-      false,
-    );
+    expect(
+      shouldExternalizeWebShellDependency('katex/dist/katex.min.css'),
+    ).toBe(false);
   });
 
   it('does not externalize local or undeclared modules', () => {
@@ -52,7 +52,9 @@ describe('web-shell package build boundary', () => {
       ]) {
         expect(external(id, undefined, false)).toBe(true);
       }
-      expect(external('katex/dist/katex.min.css', undefined, false)).toBe(false);
+      expect(external('katex/dist/katex.min.css', undefined, false)).toBe(
+        false,
+      );
       expect(external('@xterm/xterm/css/xterm.css', undefined, false)).toBe(
         false,
       );
