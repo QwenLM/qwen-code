@@ -56,6 +56,7 @@ const mockConfigConstructorParams = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: mockWriteStderrLine,
   writeStdoutLine: mockWriteStdoutLine,
   clearScreen: vi.fn(),
 }));

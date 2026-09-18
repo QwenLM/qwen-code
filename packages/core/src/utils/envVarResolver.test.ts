@@ -155,6 +155,47 @@ describe('resolveEnvVarsInString', () => {
         ),
       ).toBe('$QWEN_SERVER_TOKEN');
     });
+
+    describe('win32 case folding in customEnv', () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(
+        process,
+        'platform',
+      )!;
+
+      afterEach(() => {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      });
+
+      function setPlatform(platform: NodeJS.Platform): void {
+        Object.defineProperty(process, 'platform', {
+          configurable: true,
+          enumerable: true,
+          value: platform,
+        });
+      }
+
+      it('resolves a differently-cased customEnv key on win32', () => {
+        setPlatform('win32');
+        expect(
+          resolveEnvVarsInString(
+            '${path}',
+            { PATH: 'x' },
+            { processEnvFallback: false },
+          ),
+        ).toBe('x');
+      });
+
+      it('does not fold case on non-win32 platforms', () => {
+        setPlatform('linux');
+        expect(
+          resolveEnvVarsInString(
+            '${path}',
+            { PATH: 'x' },
+            { processEnvFallback: false },
+          ),
+        ).toBe('${path}');
+      });
+    });
   });
 });
 

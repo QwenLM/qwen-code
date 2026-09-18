@@ -13,6 +13,7 @@ const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
   writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
   clearScreen: vi.fn(),
 }));
 

@@ -11,7 +11,7 @@ import {
 } from './mcpJson.js';
 import { buildWorkspaceEnvSnapshot } from './environment.js';
 import type { Settings } from './settings.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 export type McpExpansionOptions = LoadProjectMcpServersOptions;
 
@@ -65,7 +65,7 @@ export function assembleMcpServers(
 
   const projectResult = loadProjectMcpServers(cwd, options);
   for (const error of projectResult.errors) {
-    writeStderrLine(`Warning: ${error}`);
+    writeStderrLineSafe(`Warning: ${error}`);
   }
 
   return {

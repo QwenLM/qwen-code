@@ -64,6 +64,22 @@ export function resolveEnvVarsInString(
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }
+    // win32: process.env is case-insensitive; with the fallback off, the snapshot must be too.
+    if (
+      customEnv &&
+      options.processEnvFallback === false &&
+      process.platform === 'win32'
+    ) {
+      const upperVarName = varName.toUpperCase();
+      for (const key of Object.keys(customEnv)) {
+        if (
+          key.toUpperCase() === upperVarName &&
+          typeof customEnv[key] === 'string'
+        ) {
+          return customEnv[key]!;
+        }
+      }
+    }
     if (
       options.processEnvFallback !== false &&
       process &&
