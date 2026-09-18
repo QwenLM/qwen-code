@@ -3483,9 +3483,10 @@ export function createServeApp(
                 }
                 liveCoordinator.attachBrowserHost(ws, {
                   takeover:
-                    new URL(req.url ?? '/', 'http://localhost').searchParams.get(
-                      'takeover',
-                    ) === '1',
+                    new URL(
+                      req.url ?? '/',
+                      'http://localhost',
+                    ).searchParams.get('takeover') === '1',
                 });
               },
             } satisfies ExtraWsRoute,
