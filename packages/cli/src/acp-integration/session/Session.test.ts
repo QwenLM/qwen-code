@@ -26946,6 +26946,184 @@ describe('Session', () => {
         });
       });
 
+      it('forwards the structured compression result and records it for replay', async () => {
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: true,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> ~100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The English sentence still reaches text-only ACP hosts; the payload
+        // rides alongside it for hosts that render the result themselves.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(2, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Context compressed (200 -> ~100).',
+            },
+            _meta: { source: 'slash_command', contextCompression: compression },
+          },
+        });
+        // Replay rebuilds the structured line from the record, so it travels
+        // with the joined text rather than replacing it.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> ~100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('carries a compression notice on its own meta key and record item', async () => {
+        const notice = { phase: 'notice' as const, instructionsLimit: 2000 };
+        const compression = {
+          phase: 'done' as const,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: false,
+        };
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compression instructions were truncated to 2000 chars.',
+              contextCompressionNotice: notice,
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'Context compressed (200 -> 100).',
+              contextCompression: compression,
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        // The notice rides its own `_meta` key: the reducer folds this turn into
+        // one block and spreads `_meta` key by key, so a shared key would hide
+        // the note behind the compression payload that follows.
+        expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(1, {
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Compression instructions were truncated to 2000 chars.',
+            },
+            _meta: {
+              source: 'slash_command',
+              contextCompressionNotice: notice,
+            },
+          },
+        });
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                // Newline kept so the folded block still reads as two lines.
+                text: 'Compression instructions were truncated to 2000 chars.\n',
+                contextCompressionNotice: notice,
+              },
+              {
+                type: 'assistant',
+                text: 'Compressing context...\nContext compressed (200 -> 100).',
+                contextCompression: compression,
+              },
+            ],
+          }),
+        );
+      });
+
+      it('records a terminal no-op result for replay', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'stream_messages',
+          messages: (async function* () {
+            yield {
+              messageType: 'info' as const,
+              content: 'Compressing context (fast)...',
+              contextCompression: { phase: 'progress' as const },
+            };
+            yield {
+              messageType: 'info' as const,
+              content: 'No compression needed.',
+              contextCompression: { phase: 'noop' as const },
+            };
+          })(),
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress-fast' }],
+        });
+
+        // The no-op is terminal, so it is recorded like the result: replay
+        // rebuilds the row in the client's language instead of leaving the
+        // joined English sentences.
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith(
+          expect.objectContaining({
+            outputHistoryItems: [
+              {
+                type: 'assistant',
+                text: 'Compressing context (fast)...\nNo compression needed.',
+                contextCompression: { phase: 'noop' },
+              },
+            ],
+          }),
+        );
+      });
+
       it('emits canonical Goal state for an ACP /goal status query', async () => {
         const snapshot: core.GoalSnapshotV2 = {
           v: 2,
@@ -27095,6 +27273,121 @@ describe('Session', () => {
         mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
         await session.publishRecoveredGoalState([]);
         expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      });
+
+      // A transcript from before Goal state was journaled restores with no
+      // Goal and no cause, and nothing corrects the legacy `set` card the
+      // replay ended on. The trailing `cleared` card says nothing drives it.
+      it('supersedes a replayed legacy goal card when the runtime recovered no Goal', async () => {
+        mockGoalRuntime.getRecoveryCause.mockReturnValue(undefined);
+
+        await session.publishRecoveredGoalState([
+          {
+            uuid: 'legacy-goal',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: new Date(0).toISOString(),
+            type: 'system',
+            subtype: 'slash_command',
+            cwd: '/tmp',
+            version: 'test',
+            systemPayload: {
+              phase: 'result',
+              outputHistoryItems: [
+                {
+                  type: 'goal_status',
+                  kind: 'set',
+                  condition: 'ship the thing',
+                  iterations: 2,
+                  setAt: 1234,
+                },
+              ],
+            },
+          } as unknown as core.ChatRecord,
+        ]);
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                lastReason: expect.stringContaining(
+                  'recorded by an earlier version of Qwen Code',
+                ),
+              }),
+            },
+          },
+        });
+      });
+
+      // The live-restore path appends the same card from the runtime as it
+      // stands, without waiting for readiness, and only while the session
+      // drives no Goal.
+      it('renders the legacy supersession for a live replay only while no Goal is live', () => {
+        const legacyCard = {
+          uuid: 'legacy-goal',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: new Date(0).toISOString(),
+          type: 'system',
+          subtype: 'slash_command',
+          cwd: '/tmp',
+          version: 'test',
+          systemPayload: {
+            phase: 'result',
+            outputHistoryItems: [
+              {
+                type: 'goal_status',
+                kind: 'checking',
+                condition: 'ship the thing',
+                iterations: 3,
+              },
+            ],
+          },
+        } as unknown as core.ChatRecord;
+
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: '' },
+            _meta: {
+              goalStatus: expect.objectContaining({
+                kind: 'cleared',
+                condition: 'ship the thing',
+                iterations: 3,
+              }),
+            },
+          },
+        ]);
+        expect(
+          (
+            mockConfig as unknown as {
+              getGoalRuntimeReady: ReturnType<typeof vi.fn>;
+            }
+          ).getGoalRuntimeReady,
+        ).not.toHaveBeenCalled();
+
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'live-goal',
+            revision: 1,
+            objective: 'set after the resume',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        });
+        expect(session.renderLegacyGoalSupersession([legacyCard])).toEqual([]);
       });
 
       // R3-6's second trigger: `recoverGoalFromRecords` returns
