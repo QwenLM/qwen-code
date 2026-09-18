@@ -119,7 +119,8 @@ plus the normalized `Host` authority — forwarded headers are never consulted �
 and bearer-authenticates the match before deleting `Origin`, so the built-in Web
 Shell's same-origin HTTP mutations need no `--allow-origin`. Its pre-auth
 predicate (`web-shell-preauth.ts`) exempts the shell entry points (`/`, `//`,
-`/assets*`, `/mcp-app-sandbox`, exact `/session/:id` document navigations) from
+`/assets*`, `/manifest.webmanifest`, `/sw.js`, `/mcp-app-sandbox`, exact
+`/session/:id` document navigations) from
 the credential check because browser module-script fetches carry `Origin`
 without `Authorization`. WebSocket upgrades and TLS-front-proxy `https` origins
 are not covered: the upgrade gate keeps its own CSWSH policy (loopback origin,
@@ -163,7 +164,7 @@ Control is enabled (the LAN origin is added/removed with the listener):
 - Non-matching `Origin` values receive the same deterministic
   `403 { error: 'Request denied by CORS policy' }` as deny mode.
 - `--allow-origin '*'` requires a bearer token; on loopback binds boot refuses when none is configured, while on non-loopback binds the generated ephemeral token satisfies the guard (the refusal is loopback-only).
-- Without a token, HTTP(S) `--allow-origin` values are limited to loopback hosts on loopback binds; on non-loopback binds the generated token satisfies the same guard. A non-loopback browser origin authenticates with the bearer on every API route because it could otherwise exercise the full operator API, including code execution as the daemon user; the pre-auth exceptions are the Web Shell document/asset routes and the MCP App sandbox (`/`, `/assets*`, `/mcp-app-sandbox`, exact `/session/:id` navigations), plus the channel webhook ingress, which branches ahead of `bearerAuth` and authenticates with its own `x-qwen-webhook-secret` instead of the bearer, and — on loopback binds only — `/health` (bearer-gated elsewhere).
+- Without a token, HTTP(S) `--allow-origin` values are limited to loopback hosts on loopback binds; on non-loopback binds the generated token satisfies the same guard. A non-loopback browser origin authenticates with the bearer on every API route because it could otherwise exercise the full operator API, including code execution as the daemon user; the pre-auth exceptions are the Web Shell document/asset routes and the MCP App sandbox (`/`, `/assets*`, `/manifest.webmanifest`, `/sw.js`, `/mcp-app-sandbox`, exact `/session/:id` navigations), plus the channel webhook ingress, which branches ahead of `bearerAuth` and authenticates with its own `x-qwen-webhook-secret` instead of the bearer, and — on loopback binds only — `/health` (bearer-gated elsewhere).
 - Explicit browser-extension origins retain their tokenless local-automation path. Startup logs that any tokenless allowed browser origin receives full operator authority.
 - `parseAllowOriginPatterns()` validates pattern syntax at boot.
 - The `allow_origin` capability tag is advertised only when this mode is

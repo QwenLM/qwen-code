@@ -8949,9 +8949,13 @@ class QwenAgent implements Agent {
       const workspaceCwd = this.workspaceCwd(config);
       const listing = buildHooksListing(config);
       // The workspace view lists the registry only; session hooks have their
-      // own per-session status method.
+      // own per-session status method. Entries a subagent attached while it
+      // runs sit in the registry too, but they are not workspace
+      // configuration.
       const hooks: ServeHookEntry[] = listing.rows
-        .filter((row) => row.origin === 'registry')
+        .filter(
+          (row) => row.origin === 'registry' && row.agentScope === undefined,
+        )
         .map(
           (row): ServeHookEntry => ({
             kind: 'hook',

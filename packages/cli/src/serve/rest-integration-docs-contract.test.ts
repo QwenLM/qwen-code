@@ -27,6 +27,10 @@ const OPENAPI = path.join(
   REPO_ROOT,
   'docs/developers/daemon-rest-api.openapi.json',
 );
+const QUICKSTART = path.join(
+  REPO_ROOT,
+  'docs/developers/examples/daemon-client-quickstart.md',
+);
 const SERVE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /** Operations the guide presents as the supported integration surface. */
@@ -368,6 +372,38 @@ describe('REST integration documentation contract', () => {
     expect([...openApiOperations(openApi).keys()].sort()).toEqual(expected);
   });
 
+  it('links every guide operation to its own protocol section', () => {
+    const guide = readFileSync(GUIDE, 'utf8');
+    const links = guideRouteRows(guide).flatMap((row) => [
+      ...routeCell(row).matchAll(/\[`([^`]+)`\]\(([^)\s]+)\)/g),
+    ]);
+    expect(
+      links.length,
+      'guide operation links must not be empty',
+    ).toBeGreaterThan(0);
+    expect(links.map((link) => link[1]).sort()).toEqual(
+      [...GUIDE_OPERATIONS].sort(),
+    );
+
+    const headings = protocolHeadings();
+    const routePattern = new RegExp('^' + ROUTE_METHODS + ' /[^`]+$');
+    const routeLinks = [...guide.matchAll(/\[([^\]]+)\]\(([^)\s]+)\)/g)];
+    for (const link of routeLinks) {
+      const operation = link[1].replace(/^`([^`]+)`$/, '$1');
+      if (!routePattern.test(operation)) {
+        continue;
+      }
+      const ownHeadings = headings.filter((heading) =>
+        heading.startsWith(`\`${operation}\``),
+      );
+      expect(
+        ownHeadings,
+        `${operation} must have exactly one heading in qwen-serve-protocol.md`,
+      ).toHaveLength(1);
+      expect(link[2]).toBe(`./qwen-serve-protocol.md#${slug(ownHeadings[0])}`);
+    }
+  });
+
   it('keeps the OpenAPI contract self-describing', () => {
     const openApi = JSON.parse(
       readFileSync(OPENAPI, 'utf8'),
@@ -522,6 +558,47 @@ describe('REST integration documentation contract', () => {
       expect(cells[4]).toBe(`\`${operation['x-qwen-sdk-method']}\``);
     }
     expect([...operations.keys()].filter((key) => !seen.has(key))).toEqual([]);
+  });
+
+  it('indexes every operation with a dedicated protocol section', () => {
+    const headings = protocolHeadings();
+    const operationPattern = /`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`/g;
+    const expected = headings.flatMap((heading) =>
+      [...heading.matchAll(operationPattern)].map((match) => match[1]),
+    );
+    const links = [
+      ...readFileSync(REFERENCE, 'utf8').matchAll(
+        /\[`((?:GET|POST|PATCH|PUT|DELETE) \/[^`]+)`\]\(\.\/qwen-serve-protocol\.md#([a-z0-9_-]+)\)/g,
+      ),
+    ];
+    expect(links.map((link) => link[1]).sort()).toEqual(expected.sort());
+
+    for (const link of links) {
+      const ownHeadings = headings.filter((heading) =>
+        [...heading.matchAll(operationPattern)].some(
+          (match) => match[1] === link[1],
+        ),
+      );
+      expect(ownHeadings).toHaveLength(1);
+      expect(link[2]).toBe(slug(ownHeadings[0]));
+    }
+  });
+
+  it('keeps the quickstart versioned and lifecycle-complete', () => {
+    const quickstart = readFileSync(QUICKSTART, 'utf8');
+    const sdkVersion = quickstart.match(
+      /targets Qwen Code `v\d+\.\d+\.\d+` and\s+`@qwen-code\/sdk@(\d+\.\d+\.\d+)`/,
+    )?.[1];
+    expect(sdkVersion).toBeTruthy();
+    expect(quickstart).toContain(`npm install @qwen-code/sdk@${sdkVersion}`);
+    for (const method of [
+      'loadSession',
+      'resumeSession',
+      'sessionStatus',
+      'getSessionTranscriptPage',
+    ]) {
+      expect(quickstart).toContain(`client.${method}(`);
+    }
   });
 
   it('links only to documentation files and protocol anchors that exist', () => {
