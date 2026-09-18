@@ -291,6 +291,7 @@ import {
   registerWorkspaceGitBranchRoutes,
   registerWorkspaceQualifiedGitBranchRoutes,
 } from './routes/workspace-git-branches.js';
+import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -357,7 +358,16 @@ import {
   resolveLiveProviderCredential,
   type LiveProviderCredential,
 } from './live/provider-credentials.js';
-import type { ChildHeapPolicySnapshot } from '@qwen-code/acp-bridge/childHeapPolicy';
+import type {
+  ChildHeapPolicy,
+  ChildHeapPolicySnapshot,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
+import type { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
+import {
+  createIdleAcpReclaimer,
+  type IdleAcpReclaimer,
+} from './idle-acp-reclamation.js';
+import { readWorkspaceActivity } from './workspace-activity.js';
 import { invalidateWorkspaceSessionListCache } from './server/session-list.js';
 
 export {
@@ -592,6 +602,11 @@ export interface ServeAppDeps {
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  managedChildProcesses?: {
+    registry: ProcessRegistry;
+    policy: ChildHeapPolicy;
+    ownsBridge?: (bridge: AcpSessionBridge) => boolean;
+  };
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -623,6 +638,7 @@ export interface ServeAppDeps {
     }>,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
   sessionArtifactsPersistenceAvailable?: boolean;
   /**
    * Test/embed override for the native directory picker probe. Production
@@ -677,6 +693,7 @@ export interface ServeAppDeps {
   primaryWorkspaceTrusted?: boolean;
   primaryRuntimeEnv?: WorkspaceRuntimeEnvMetadata;
   daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+  modelSelectionBaseEnv?: Readonly<NodeJS.ProcessEnv>;
   runtimePlatform?: NodeJS.Platform;
   voiceTranscriber?: WorkspaceVoiceRouteDeps['transcribe'];
   voiceCoordinator?: WorkspaceVoiceCoordinator;
@@ -786,6 +803,12 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  if (
+    opts.childHeapMode === 'admit' &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== 'admit'
+  ) {
+    throw new TypeError('ACP admission requires managed child process wiring.');
+  }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
   const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
@@ -1151,6 +1174,7 @@ export function createServeApp(
     createDaemonStatusProvider(
       primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
     );
+  let reclaimIdleAcp: IdleAcpReclaimer | undefined;
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
   const totalSessionAdmission =
     !deps.bridge && !injectedWorkspaceRegistry
@@ -1196,9 +1220,21 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs
+      ...(acpChildArgs || deps.managedChildProcesses
         ? {
             channelFactory: createSpawnChannelFactory({
+              processRegistry: deps.managedChildProcesses?.registry,
+              childHeapPolicy: deps.managedChildProcesses?.policy,
+              ...(deps.managedChildProcesses
+                ? {
+                    reclaimIdleChild: async (signal?: AbortSignal) => {
+                      await reclaimIdleAcp?.(
+                        hashDaemonWorkspace(boundWorkspace),
+                        signal,
+                      );
+                    },
+                  }
+                : {}),
               extraArgs: acpChildArgs,
             }),
           }
@@ -2196,6 +2232,7 @@ export function createServeApp(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
   const syncModelProvidersRuntime = async (
     route: string,
+    writeScope?: SettingScope,
   ): Promise<ServeModelProviderRuntimeSyncResult> => {
     const trusted = isPrimaryWorkspaceTrusted();
     const settings = loadSettings(primaryBoundWorkspace, {
@@ -2203,7 +2240,8 @@ export function createServeApp(
       skipWorkspaceSettings: !trusted,
       workspaceTrusted: trusted,
     });
-    const scope = getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+    const scope =
+      writeScope ?? getModelProvidersOwnerScope(settings) ?? SettingScope.User;
     const primaryContext = buildWorkspaceCtx(route);
     const secondaryRuntimes =
       scope === SettingScope.User
@@ -2276,7 +2314,14 @@ export function createServeApp(
     getMetricsSeries: deps.getMetricsSeries,
     getTotalSessionAdmissionSnapshot:
       deps.getTotalSessionAdmissionSnapshot ?? totalSessionAdmission?.snapshot,
-    getChildHeapPolicySnapshot: deps.getChildHeapPolicySnapshot,
+    getChildHeapPolicySnapshot: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.policy.snapshot()
+      : deps.getChildHeapPolicySnapshot,
+    getCommittedAcpChildCount: deps.managedChildProcesses
+      ? () => deps.managedChildProcesses!.registry.committedProcessCount
+      : undefined,
+    childAdmissionEnforced:
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit',
   });
 
   if (conversationRuntimeManager) {
@@ -2452,6 +2497,11 @@ export function createServeApp(
     mutate,
   });
   registerWorkspaceQualifiedGitBranchRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitRemotesRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
     mutate,
@@ -2762,6 +2812,8 @@ export function createServeApp(
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
+      syncImageModel: (scope) =>
+        syncModelProvidersRuntime('POST /workspace/settings imageModel', scope),
       updateSessionWorkflow: (enabled) =>
         primaryBridge.invokeWorkspaceCommand(
           SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
@@ -2890,16 +2942,19 @@ export function createServeApp(
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      env: primaryRuntimeEffectiveEnv,
+      baseEnv: deps.modelSelectionBaseEnv ?? daemonEnvAtBoot,
       isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,
       safeBody,
       persistSettings: deps.persistSettings,
+      updateModelContextWindow: deps.updateModelContextWindow,
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
-      syncModelProvidersRuntime: () =>
-        syncModelProvidersRuntime('DELETE /workspace/models'),
+      syncModelProvidersRuntime: (writeScope, method) =>
+        syncModelProvidersRuntime(`${method} /workspace/models`, writeScope),
     });
   }
 
@@ -3462,6 +3517,30 @@ export function createServeApp(
   });
   if (acpHandleRef.current) {
     app.locals['acpHandle'] = acpHandleRef.current;
+  }
+  if (deps.managedChildProcesses) {
+    reclaimIdleAcp = createIdleAcpReclaimer({
+      registry: workspaceRegistry,
+      processes: deps.managedChildProcesses.registry,
+      policy: deps.managedChildProcesses.policy,
+      ownsBridge:
+        deps.managedChildProcesses.ownsBridge ??
+        ((candidate) => candidate === defaultBridgeForAdmission),
+      getActivity: (runtime) => {
+        if (
+          !deps.workspaceRuntimeRemoval ||
+          !acpHandleRef.current ||
+          !supportsWorkspaceRuntimeLifecycle(runtime.bridge)
+        )
+          return undefined;
+        return readWorkspaceActivity(
+          runtime,
+          deps.workspaceRuntimeRemoval.getActivity(runtime),
+          acpHandleRef.current.getWorkspaceActivity(runtime.workspaceId),
+        );
+      },
+    });
+    app.locals['reclaimIdleAcp'] = reclaimIdleAcp;
   }
 
   // Local Control: the LAN listener serves THIS app, so the service is built

@@ -47,6 +47,26 @@ export type TurnInterruption =
 // still leaving ample room for repeated failed sends and tool-result retries.
 export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = 50;
 
+export function completedToolCallBoundary(
+  history: readonly Content[],
+  toolCallIds: readonly string[] | undefined,
+): number {
+  if (!toolCallIds?.length) return 0;
+  const ids = new Set(toolCallIds);
+  const boundaries = new Map<string, number>();
+  for (let i = 0; i < history.length; i++) {
+    for (const part of history[i].parts ?? []) {
+      const id = part.functionResponse?.id;
+      if (!id || !ids.has(id)) continue;
+      boundaries.set(
+        id,
+        boundaries.has(id) || history[i].role !== 'user' ? 0 : i + 1,
+      );
+    }
+  }
+  return Math.max(0, ...boundaries.values());
+}
+
 /**
  * Detect whether the last turn of `history` was left unfinished, and if so
  * what kind of continuation applies. Pure read — never mutates `history`.
@@ -58,7 +78,12 @@ export const TURN_INTERRUPTION_HISTORY_TAIL_COUNT = 50;
  * @param history - Chat history in Gemini `Content[]` form, oldest first.
  * @returns The interruption classification; see {@link TurnInterruption}.
  */
-export function detectTurnInterruption(history: Content[]): TurnInterruption {
+export function detectTurnInterruption(
+  history: Content[],
+  completedToolCallIds?: readonly string[],
+): TurnInterruption {
+  const boundary = completedToolCallBoundary(history, completedToolCallIds);
+  if (boundary === history.length) return { kind: 'none' };
   const last = history[history.length - 1];
   if (!last) {
     return { kind: 'none' };
@@ -66,7 +91,7 @@ export function detectTurnInterruption(history: Content[]): TurnInterruption {
 
   if (last.role === 'user') {
     const trailingUserEntries: Content[] = [];
-    for (let i = history.length - 1; i >= 0; i--) {
+    for (let i = history.length - 1; i >= boundary; i--) {
       const entry = history[i];
       if (!entry || entry.role !== 'user') {
         break;

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.23.3",
+  "version": "0.24.0",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -12,6 +12,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./omni": {
+      "types": "./dist/src/omni/index.d.ts",
+      "import": "./dist/src/omni/index.js"
+    },
+    "./omniPolicyCollection": {
+      "types": "./dist/src/omni/policy/model-call-collection.d.ts",
+      "import": "./dist/src/omni/policy/model-call-collection.js"
     },
     "./subagentRuntime": {
       "types": "./dist/src/subagent-runtime.d.ts",
@@ -44,6 +52,10 @@
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"
+    },
+    "./board": {
+      "types": "./dist/src/board.d.ts",
+      "import": "./dist/src/board.js"
     },
     "./noFollowOpen": {
       "types": "./dist/src/utils/no-follow-open.d.ts",
@@ -93,6 +105,7 @@
     "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": "^0.221.0",
     "@opentelemetry/core": "^2.0.1",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.221.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.221.0",
@@ -102,7 +115,13 @@
     "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
     "@opentelemetry/instrumentation-http": "^0.221.0",
     "@opentelemetry/instrumentation-undici": "^0.31.0",
+    "@opentelemetry/otlp-exporter-base": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
     "@opentelemetry/sdk-node": "^0.221.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@opentelemetry/semantic-conventions": "^1.36.0",
     "@xterm/headless": "5.5.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",
@@ -140,7 +159,8 @@
     "web-tree-sitter": "^0.24.7",
     "ws": "^8.18.0",
     "yaml": "^2.8.1",
-    "yauzl": "^2.10.0"
+    "yauzl": "^2.10.0",
+    "zod": "^3.25.76"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",
@@ -151,6 +171,7 @@
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "devDependencies": {
+    "@qwen-code/browser-use": "file:../browser-use",
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",
@@ -163,6 +184,7 @@
     "@types/ws": "^8.5.10",
     "@types/yauzl": "^2.9.1",
     "msw": "^2.3.4",
+    "strip-json-comments": "^3.1.1",
     "tree-sitter-wasms": "^0.1.13",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"

@@ -3013,6 +3013,99 @@ describe('runNonInteractive', () => {
     expect(stdoutDestroySpy).toHaveBeenCalled();
   });
 
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'surfaces Stop hook system messages only in text mode (%s)',
+    async (format) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      const warning =
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([
+          { type: LlmEventType.HookSystemMessage, value: warning },
+        ]),
+      );
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-cap');
+      const warnings = processStderrSpy.mock.calls.filter(([text]) =>
+        String(text).includes(warning),
+      );
+      expect(warnings).toHaveLength(format === OutputFormat.TEXT ? 1 : 0);
+    },
+  );
+
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'sanitizes queued Stop hook messages only in text mode (%s)',
+    async (format) => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      mockMonitorRegistry.setNotificationCallback.mockImplementation(
+        (callback) => {
+          if (!callback) return;
+          callback(
+            'Monitor event',
+            '<task-notification>ready</task-notification>',
+            {
+              monitorId: 'mon_1',
+              toolUseId: 'tool_mon_1',
+              status: 'running',
+              eventCount: 1,
+            },
+          );
+        },
+      );
+      const warning =
+        'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.';
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'done' },
+            ...finishedEvents,
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.HookSystemMessage,
+              value: '\u001b[2J' + warning + '\u202e',
+            },
+            ...finishedEvents,
+          ]),
+        );
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-drain');
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        processStderrSpy.mock.calls.filter(([text]) =>
+          String(text).includes(warning),
+        ),
+      ).toHaveLength(format === OutputFormat.TEXT ? 1 : 0);
+      const output = processStderrSpy.mock.calls
+        .map(([text]) => String(text))
+        .join('');
+      expect(output).not.toContain('\u001b');
+      expect(output).not.toContain('\u202e');
+    },
+  );
+
+  it('neutralizes terminal control characters in Stop hook system messages', async () => {
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.HookSystemMessage,
+          value: 'hook says \u001b[2Jhello\u202e',
+        },
+      ]),
+    );
+    await runNonInteractive(mockConfig, mockSettings, 'test', 'stop-output');
+    const output = processStderrSpy.mock.calls
+      .map(([text]) => String(text))
+      .join('');
+    expect(output).toContain('hook says');
+    expect(output).toContain('hello');
+    expect(output).not.toContain('\u001b');
+    expect(output).not.toContain('\u202e');
+  });
+
   it('returns non-zero and skips pending tool calls after loop detection', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerLlmStreamEvent = {
@@ -4939,6 +5032,83 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
+
+  it.each([
+    {
+      label: 'a call denied for approval',
+      approvalRequired: true as const,
+      reason:
+        'Qwen Code requires permission to use "run_shell_command", but that permission was declined (non-interactive mode cannot prompt for confirmation).',
+      expected: 'use the -y flag (YOLO mode)',
+      unexpected: 'was not run',
+    },
+    {
+      label: 'a call blocked by a hook',
+      approvalRequired: undefined,
+      reason: 'no shell today',
+      expected: 'Warning: Tool "run_shell_command" was not run: no shell today',
+      unexpected: 'requires user approval',
+    },
+  ])(
+    'tells the headless user why $label did not run',
+    async ({ approvalRequired, reason, expected, unexpected }) => {
+      setupMetricsMock();
+      const toolCallEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'tool-denied',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-denied',
+        },
+      };
+      mockCoreExecuteToolCall.mockResolvedValue({
+        callId: 'tool-denied',
+        error: new Error(reason),
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'tool-denied',
+              name: 'run_shell_command',
+              response: { error: reason },
+            },
+          },
+        ],
+        resultDisplay: reason,
+        ...(approvalRequired ? { approvalRequired } : {}),
+      });
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Done.' },
+            {
+              type: LlmEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 10 },
+              },
+            },
+          ]),
+        );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Run ls',
+        'prompt-id-denied',
+      );
+
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(expected);
+      expect(stderr).not.toContain(unexpected);
+    },
+  );
 
   it('should exit with error if sendMessageStream throws initially', async () => {
     setupMetricsMock();
@@ -9288,6 +9458,42 @@ describe('formatGoalState', () => {
     },
   });
 
+  it('shows budgets on a stopped Goal in the usage order', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'paused',
+          turnCount: 3,
+          turnBudget: 20,
+          activeTimeMs: 723_000,
+          activeTimeBudgetMs: 1_800_000,
+          tokensUsed: 1234,
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal paused: ship the release notes\nUsage: 3 of 20 turns · 12m 3s of 30m active · 1,234 tokens',
+    );
+  });
+
+  it('does not add active time without a budget', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnCount: 1, activeTimeMs: 723_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes\nUsage: 1 turn');
+  });
+
+  it('hides budgets before any usage', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({ turnBudget: 20, activeTimeBudgetMs: 1_800_000 }),
+        'status',
+      ),
+    ).toBe('Goal active: ship the release notes');
+  });
+
   it('reports turns and spend against the budget', () => {
     // Spelled out rather than abbreviated: this output is read in a terminal
     // and piped into scripts, neither of which is helped by `1.2k`.
@@ -9362,46 +9568,6 @@ describe('formatGoalState', () => {
     expect(output).not.toContain('\r');
     expect(output).not.toContain('\u001b');
     expect(output).not.toContain('\u0007');
-  });
-
-  it('names the checkpoint failure below the stop reason', () => {
-    // The stop reason names the kind of checkpoint failure; only this line
-    // says which one it was.
-    expect(
-      formatGoalState(
-        goalSnapshot({
-          status: 'usage_limited',
-          lastReason: 'Checkpoints stalled.',
-          checkpointStalls: 3,
-          lastCheckpointFailure:
-            'Error: Goal checkpoint verifier timed out after 30000ms',
-        }),
-        'status',
-      ),
-    ).toBe(
-      'Goal usage limited: ship the release notes\nReason: Checkpoints stalled.\nCheckpoint: 3/3 stalled · Error: Goal checkpoint verifier timed out after 30000ms',
-    );
-  });
-
-  it('shows checkpoint health under the rule the interactive cards use', () => {
-    expect(
-      formatGoalState(
-        goalSnapshot({ lastCheckpointFailure: 'Error: provider failed' }),
-        'status',
-      ),
-    ).toBe(
-      'Goal active: ship the release notes\nCheckpoint: last check failed · Error: provider failed',
-    );
-    expect(
-      formatGoalState(
-        goalSnapshot({
-          status: 'complete',
-          checkpointStalls: 1,
-          lastCheckpointFailure: 'Error: provider failed',
-        }),
-        'status',
-      ),
-    ).not.toContain('Checkpoint');
   });
 
   it('has no usage to report for a cleared Goal', () => {

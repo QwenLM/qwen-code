@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { devices, expect, test } from '@playwright/test';
-import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import { devices, expect, test, type Page } from '@playwright/test';
+import type {
+  DaemonEvent,
+  DaemonSessionSummary,
+  DaemonSessionContextUsageStatus,
+  DaemonSettingDescriptor,
+} from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -13,6 +18,7 @@ import {
   toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
+  type WebShellDaemonScenario,
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
@@ -20,6 +26,7 @@ import {
   fillComposer,
   gotoNewSession,
   gotoSession,
+  gotoSettingsHarness,
   installScenario,
   resolveBaseURL,
   submitLocalCommand,
@@ -98,8 +105,174 @@ function createTerminalGoalStatusEvent(
   };
 }
 
+/**
+ * The settings panel's host-driven exclusions only exist when the host passes
+ * the `settings` prop, which the standalone entry never does — so these
+ * scenarios render the shell through the settings harness page, which maps
+ * `?exclude=` onto that prop.
+ */
+function createSettingsPanelScenario(
+  theme: VisualTheme,
+): WebShellDaemonScenario {
+  const descriptors: DaemonSettingDescriptor[] = [
+    {
+      key: 'general.enableAutoUpdate',
+      type: 'boolean',
+      label: 'Auto-update',
+      category: 'General',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'general.showSessionRecap',
+      type: 'boolean',
+      label: 'Session Recap',
+      category: 'General',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'ui.theme',
+      type: 'enum',
+      label: 'Theme',
+      category: 'UI',
+      requiresRestart: false,
+      default: 'Qwen Dark',
+      options: [
+        { value: 'Qwen Dark', label: 'Qwen Dark' },
+        { value: 'Qwen Light', label: 'Qwen Light' },
+      ],
+      values: {
+        effective: theme === 'light' ? 'Qwen Light' : 'Qwen Dark',
+      },
+    },
+    {
+      key: 'output.showTimestamps',
+      type: 'boolean',
+      label: 'Show Timestamps',
+      // The real schema files this under General; the panel must render the
+      // category set a daemon actually serves.
+      category: 'General',
+      requiresRestart: false,
+      default: false,
+      values: { effective: false },
+    },
+    {
+      key: 'tools.webSearch.enabled',
+      type: 'boolean',
+      label: 'Web Search',
+      category: 'Tools',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    },
+    {
+      key: 'fastModel',
+      type: 'string',
+      label: 'Fast Model',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    },
+    {
+      key: 'modelFallbacks',
+      type: 'string',
+      label: 'Model Fallbacks',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: '' },
+    },
+  ];
+  return createWebShellDaemonScenario({
+    settings: { settings: descriptors },
+  });
+}
+
+async function openSettingsPanel(page: Page): Promise<void> {
+  await submitLocalCommand(page, '/settings');
+  const nav = page.getByRole('navigation', { name: 'Settings' });
+  await expect(nav).toBeVisible();
+  // Rows render only for the active category, and which category is active
+  // follows the fixture's descriptor order — gate on a descriptor-derived nav
+  // button instead, which renders for every group. Only a General descriptor
+  // creates one, so this still cannot resolve before the settings fetch lands.
+  await expect(nav.getByRole('button', { name: /^General/ })).toBeVisible();
+}
+
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('context usage', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        supportedCommands: {
+          availableCommands: [
+            {
+              name: 'compress',
+              description: 'Compress context',
+              input: null,
+              _meta: { source: 'builtin-command' },
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 5_000,
+                memoryFiles: 5_000,
+                skills: 10_000,
+                messages: 20_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [{ name: 'read_file', tokens: 10_000 }],
+              mcpTools: [{ name: 'mcp__github__create_issue', tokens: 5_000 }],
+              memoryFiles: [{ path: '/workspace/QWEN.md', tokens: 5_000 }],
+              skills: [
+                {
+                  name: 'review',
+                  tokens: 5_000,
+                  loaded: true,
+                  bodyTokens: 5_000,
+                },
+              ],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await expect(
+        panel.getByRole('button', { name: 'Compress context', exact: true }),
+      ).toBeEnabled();
+      await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
     test('session overview', async ({ page }, testInfo) => {
       const workspaceCwd = '/workspace/session-overview';
       const scenario = createWebShellDaemonScenario({
@@ -1223,6 +1396,88 @@ for (const theme of THEMES) {
       await submitLocalCommand(page, '/theme');
       await expect(page.locator('[data-web-shell-theme-dialog]')).toBeVisible();
       await captureScreenshot(page, `theme-dialog-${theme}`);
+    });
+
+    test(`settings panel`, async ({ page }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      // The mock daemon has no GET /workspace/models route; answer with an
+      // empty list so the model block renders providers without an error hint.
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ json: { models: [] } });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme);
+      await openSettingsPanel(page);
+
+      const nav = page.getByRole('navigation', { name: 'Settings' });
+      await expect(nav.getByRole('button', { name: /^UI/ })).toBeVisible();
+      await expect(nav.getByRole('button', { name: /^Tools/ })).toBeVisible();
+      await nav.getByRole('button', { name: /^Model/ }).click();
+      await expect(page.getByText('Fast Model', { exact: true })).toBeVisible();
+      await expect(page.getByTestId('model-management')).toBeVisible();
+      await captureScreenshot(page, `settings-panel-${theme}`);
+    });
+
+    test(`settings panel with host exclusions`, async ({ page }, testInfo) => {
+      const scenario = createSettingsPanelScenario(theme);
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route('**/workspace/models', async (route) => {
+        if (route.request().method() === 'GET') {
+          await route.fulfill({ json: { models: [] } });
+        } else {
+          await route.fallback();
+        }
+      });
+      await gotoSettingsHarness(page, scenario, daemon, theme, [
+        'builtin:chat-width',
+        'builtin:model-management',
+        'setting:fast-model',
+        'setting:timestamps',
+        'setting:web-search',
+      ]);
+      await openSettingsPanel(page);
+
+      // Excluded rows vanish, and a category left with nothing visible —
+      // here Tools — drops out of the nav entirely.
+      const nav = page.getByRole('navigation', { name: 'Settings' });
+      await expect(nav.getByRole('button', { name: /^Tools/ })).toHaveCount(0);
+      // Rows render only for the active category, so the chat-width absence
+      // is observable only after opening UI — pin the category itself first.
+      await nav.getByRole('button', { name: /^UI/ }).click();
+      await expect(page.getByText('Theme', { exact: true })).toBeVisible();
+      await expect(page.getByText('Chat width', { exact: true })).toHaveCount(
+        0,
+      );
+      // General lost only `setting:timestamps`, so the category keeps its nav
+      // button and its surviving rows while the excluded row leaves.
+      await nav.getByRole('button', { name: /^General/ }).click();
+      await expect(
+        page.getByText('Auto-update', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText('Show Timestamps', { exact: true }),
+      ).toHaveCount(0);
+      await nav.getByRole('button', { name: /^Model/ }).click();
+      await expect(
+        page.getByText('Model Fallbacks', { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText('Fast Model', { exact: true })).toHaveCount(
+        0,
+      );
+      await expect(page.getByTestId('model-management')).toHaveCount(0);
+      await captureScreenshot(page, `settings-panel-exclusions-${theme}`);
     });
 
     test(`permission panel`, async ({ page }, testInfo) => {

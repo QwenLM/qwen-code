@@ -861,6 +861,9 @@ export async function* livePromptEvents(
     // callIds whose real invocation description already went out (one per
     // call, ink mapToDisplay parity).
     const descriptionSeen = new Set<string>();
+    // Calls last seen in the scheduler's queued state, so a status only goes
+    // out when it changes.
+    const queuedSeen = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config,
       getPreferredEditor: () => undefined,
@@ -931,6 +934,17 @@ export async function* livePromptEvents(
             name: c.request.name,
             confirmationDetails: c.confirmationDetails,
           });
+        }
+        // A call approved while the batch still holds another approval goes
+        // back to 'scheduled' rather than straight to 'executing'; ink's card
+        // reads that status and holds its pending glyph until the call runs.
+        for (const c of calls) {
+          const callId = c.request.callId;
+          const queued = c.status === 'scheduled';
+          if (queuedSeen.has(callId) === queued) continue;
+          if (queued) queuedSeen.add(callId);
+          else queuedSeen.delete(callId);
+          live.push({ type: 'tool-queued', id: callId, queued });
         }
       },
       onAllToolCallsComplete: async (calls) => {

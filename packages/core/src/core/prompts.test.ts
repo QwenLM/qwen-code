@@ -322,6 +322,39 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot();
   });
 
+  it('describes the bwrap filesystem boundary and distinguishes ordinary permissions', () => {
+    vi.stubEnv('SANDBOX', 'bwrap');
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain('# Kernel Sandbox (bwrap)');
+    expect(prompt).toContain(
+      'repository Git metadata, including config and hooks, remains writable',
+    );
+    expect(prompt).toContain('later unconfined Git commands');
+    expect(prompt).toContain("'Read-only file system' (EROFS)");
+    expect(prompt).toContain(
+      "'Permission denied' (EACCES) can instead come from ordinary file permissions",
+    );
+    expect(prompt).toContain(
+      'Host services reached through Unix sockets remain outside this filesystem boundary',
+    );
+    expect(prompt).toContain('changing the writable roots requires restarting');
+    // /dev is a fresh minimal devtmpfs, so host device nodes are absent
+    // (ENOENT), not read-only — the remedy is an argv change, not a root grant.
+    expect(prompt).toContain('minimal synthetic device tree');
+    expect(prompt).toContain('QWEN_SANDBOX=bwrap qwen sandbox');
+    // The inspection remedy is addressed to the user, from the project
+    // directory, with the settings-derived scope of the report named.
+    expect(prompt).toContain(
+      'tell the user to run it from this project directory on the host',
+    );
+    expect(prompt).toContain('Do NOT work around a refusal');
+    expect(prompt).not.toContain("(EROFS) or 'Permission denied'");
+    expect(prompt).not.toContain('You are running in a sandbox container');
+    expect(prompt).not.toContain('# Outside of Sandbox');
+    expect(prompt).not.toContain('# macOS Seatbelt');
+    expect(prompt).toMatchSnapshot();
+  });
+
   it('should include non-sandbox instructions when SANDBOX env var is not set', () => {
     vi.stubEnv('SANDBOX', undefined); // Ensure it's not set
     const prompt = getCoreSystemPrompt();
