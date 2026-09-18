@@ -3861,6 +3861,11 @@ export interface DaemonLiveStatus {
   host?: {
     version?: string;
     protocolVersion?: number;
+    /**
+     * Present as `'browser'` when the Web Shell page itself holds the Host
+     * lease over WS `/live/web`. Absent for the native macOS Host.
+     */
+    kind?: 'native' | 'browser';
   };
 }
 
