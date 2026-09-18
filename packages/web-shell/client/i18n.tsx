@@ -498,6 +498,8 @@ const EN: Messages = {
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
   'live.browser.connect': 'Talk in this browser',
   'live.browser.connecting': 'Connecting microphone…',
+  'live.browser.requirement.host': 'This browser tab',
+  'live.browser.requirement.runtime': 'Live runtime',
   'live.browser.takeOver': 'Take over in this tab',
   'live.browser.disconnect': 'Release microphone',
   'live.browser.setupDescription':
@@ -4447,6 +4449,8 @@ const ZH: Messages = {
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
   'live.browser.connect': '在此浏览器中通话',
   'live.browser.connecting': '正在连接麦克风…',
+  'live.browser.requirement.host': '此浏览器标签页',
+  'live.browser.requirement.runtime': 'Live 运行时',
   'live.browser.takeOver': '在此标签页接管',
   'live.browser.disconnect': '释放麦克风',
   'live.browser.setupDescription':

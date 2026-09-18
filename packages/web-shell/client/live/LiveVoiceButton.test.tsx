@@ -207,6 +207,15 @@ describe('LiveVoiceButton as a browser Host', () => {
   beforeEach(() => {
     mocks.result.nativeSupported = false;
     mocks.result.browserSupported = true;
+    mocks.result.status = {
+      v: 1,
+      available: false,
+      state: 'unavailable',
+      shortcut: '',
+      blocker: 'host_missing',
+      message: 'Qwen Live Host is not connected.',
+      requirements: { host: 'missing' },
+    };
     mocks.result.browserHost = {
       phase: 'idle',
       closeReason: undefined,
@@ -230,13 +239,15 @@ describe('LiveVoiceButton as a browser Host', () => {
     );
     // No OS permissions a page could never grant.
     expect(requirementLabels()).toEqual([
-      'live.requirement.host',
+      'live.browser.requirement.host',
       'live.requirement.microphone',
       'live.requirement.audioInput',
       'live.requirement.audioOutput',
-      'live.requirement.appshot',
+      'live.browser.requirement.runtime',
       'live.requirement.provider',
     ]);
+    // The daemon's "Qwen Live Host is not connected" is about the native app.
+    expect(document.body.textContent).not.toContain('Qwen Live Host');
 
     click(buttonNamed('live.browser.connect'));
     expect(mocks.result.browserHost.connect).toHaveBeenCalledWith({
@@ -358,6 +369,7 @@ describe('LiveVoiceButton as a browser Host', () => {
 
   it('keeps the native gate first on macOS and offers the browser second', () => {
     mocks.result.nativeSupported = true;
+    mocks.result.status = { ...mocks.result.status!, shortcut: 'Command+Q' };
     openDialog();
 
     // Until a Host is chosen the dialog is still the native one...
