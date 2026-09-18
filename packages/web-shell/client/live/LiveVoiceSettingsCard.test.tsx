@@ -134,6 +134,7 @@ describe('LiveVoiceSettingsCard', () => {
           keySource: 'route',
           keyEnv: 'DASHSCOPE_API_KEY',
           keyConfigured: true,
+          enabled: false,
         }),
       );
 
@@ -143,6 +144,10 @@ describe('LiveVoiceSettingsCard', () => {
       expect(
         container.querySelector('[data-live-key-route]')?.textContent,
       ).toBe('settings.liveSetup.keyFromEnv');
+      // Nor a way to "remove" a key that lives in the environment.
+      expect(container.textContent).not.toContain(
+        'settings.liveSetup.removeKey',
+      );
     });
 
     it('says the variable is unset rather than just "not configured"', () => {

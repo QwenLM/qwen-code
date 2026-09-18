@@ -206,7 +206,7 @@ export function LiveVoiceSettingsCard({
                     : 'settings.liveSetup.notConfigured',
                 )}
               </Badge>
-              {status?.keyConfigured && !enabled ? (
+              {status?.keyConfigured && !enabled && !keyFromRoute ? (
                 <Button
                   type="button"
                   size="xs"
