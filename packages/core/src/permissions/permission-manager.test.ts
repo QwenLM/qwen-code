@@ -2604,6 +2604,25 @@ describe('PermissionManager', () => {
       expect(buildPm('cmd', ask).hasMatchingAskRule(ctx)).toBe(true);
     });
 
+    // The three above pin the rule lookups; this pins the decision they add up
+    // to. Under a deny-only config the collapse demotes a hard `deny` to the
+    // tool default `ask`. That is the direction #11815 asks for — Bash runs
+    // only the pre-comment `echo`, so a rule about `rm` has nothing to match —
+    // and it cannot be gated away without also breaking the allow+deny arm,
+    // which must stay `allow`. It is pinned because `ask` is a behaviour change
+    // rather than a no-op: the confirmation dialog it lands on still segments
+    // with the legacy comment-blind splitter, so it lists the never-executed
+    // `rm -rf /tmp/x` and proposes `Bash(rm *)` from text inside the comment.
+    // See docs/design/safe-bash-comment-splitting.md, "Risks and constraints".
+    // Reverting `splitCommandForRules` to `splitCompoundCommand` reds the bash
+    // arm back to `deny`.
+    it('deny-only config: the commented command asks instead of denying', async () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(await buildPm('bash', deny).evaluate(ctx)).toBe('ask');
+      expect(await buildPm('cmd', deny).evaluate(ctx)).toBe('deny');
+    });
+
     // The splitter's array is an intermediate result; the verdict is the
     // guarantee. Before the fix the backward scan read these characters as
     // whitespace, the `&` was not an async operator, and the whole command was

@@ -45,6 +45,10 @@
 
 该快速路径只覆盖四条 `Bash(...)` 规则路径。同一个 `evaluate()` 中的虚拟 shell-operation 通路仍然对完整命令调用 `extractShellOperationsAcrossCommand`——它必须如此，因为该调用是 `cd` 与递归 shell wrapper 下 cwd 跟踪的唯一事实来源——而 `walkCompoundCommand` 及其委托的 `splitCompoundCommandSegments` 都完全没有 `#` 处理。因此 `Read`/`Edit`/`Write`/`WebFetch` 规则仍会针对被注释掉的文本评估，被注释掉的 `rm`、`cat` 或 `curl` 可能产生一个幻影 operation 并升级判定。该残留只升不降，且早于本 PR 存在（本 PR 未触及 extractor 通路）：两个判定只有在 `DECISION_PRIORITY[virtual] > DECISION_PRIORITY[bash]` 时才合并，所以幻影 operation 只会过度 deny 或过度 ask，绝不会放宽 allow。要消除它需要两个所有者共用同一个切分决策，那属于 #11882 的 parser ownership 工作。
 
+在仅配置 deny 规则的情况下，快速路径还会把含注释命令的判定从 `deny` 变为 `ask`。配置 `deny: ['Bash(rm *)']`（无 allow 规则）时，`echo 'a' # comment ; rm -rf /tmp/x` 在 merge base 上会被硬拦截，因为无注释感知的切分把 `rm -rf /tmp/x` 暴露成独立 segment；而这里整条命令保持为一个 segment，于是 `findMatchingDenyRule` 与 `hasRelevantRules` 都为空，判定落到工具默认的 `ask`。这正是本修复的预期方向——Bash 只执行注释前的 `echo`，关于 `rm` 的规则无可匹配——并且无法在不破坏「允许的 `echo` 判定为 `allow`」这条验收标准的前提下回退：任何在隐藏 segment 命中 deny 时就退出的门禁，在 allow+deny 的情况下同样会退出。
+
+残留风险位于该 `ask` 的另一侧。现在落到的确认对话框仍使用旧的、无注释感知的切分器（见上文「非目标」，由 #11882 负责），所以对这条命令它会把 Bash 永远不会执行的 `rm -rf /tmp/x` 列为可确认子命令，并由 `extractCommandRules('rm -rf /tmp/x')` 得到 `permissionRules: ['Bash(rm *)']`。因此点一次「Always allow」就会把一条宽泛的 `Bash(rm *)` allow 规则持久化进 `settings.json`，而这完全由注释内的文本驱动。在操作者自己的 deny 存在期间它保持惰性（实测：两条规则同时存在时 `rm -rf /tmp/x` 仍判定为 `deny`），一旦该 deny 被修改或移除即刻生效（实测：仅有 allow 时判定为 `allow`）。在 #11882 收敛对话框切分器之前，依赖 deny-only 配置的操作者应把含注释命令上被提议的 `Bash(...)` allow 规则视为不可信，而不是把它当成对 shell 实际执行内容的描述。
+
 ## 验证与验收标准
 
 - #11815 的命令在 Bash 下只有一个 segment，允许的 `echo` 判定为 `allow`。该标准只针对 `Bash(...)` 规则：它假设没有任何 `Read`/`Edit`/`Write`/`WebFetch` 规则匹配被注释掉的文本，而虚拟 operation 通路仍会读取这些文本（见「风险与约束」）。
@@ -52,4 +56,5 @@
 - 多行命令、包含 substitution 语法的命令，以及注释前存在 operator 的命令保持旧的保守切分。
 - 首个非空白字符是 `#` 的命令（无论位于下标 0 还是在前导空格/制表符之后）同样保持旧的保守切分，因此显式 `deny` 规则仍能匹配注释之后的文本。
 - `monitor` 命令中只存在于 wrapper 内层引号里的 `#` 仍会切分，因此 spawned 命令真正执行的分隔符不会被当成注释吞掉。
+- 在仅配置 deny 规则的情况下，同一条命令判定为 `ask` 而非 `deny`。这是有意钉住的行为，不是偶然结果：`ask` 落到的对话框仍会用旧切分器提议规则（见「风险与约束」）。
 - 现有 permission-manager 测试、格式化、lint、typecheck 和 build 检查通过。
