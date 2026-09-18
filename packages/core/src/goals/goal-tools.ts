@@ -36,7 +36,6 @@ import { goalTurnContext } from './goal-turn-context.js';
 import {
   type GoalBlockerKind,
   type GoalControlRequest,
-  goalCheckpointHealthVisible,
   GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
   type GoalRecord,
   type GoalSnapshotV2,
@@ -82,8 +81,6 @@ type LastGoalSummary = Pick<
   | 'tokenBudget'
   | 'turnBudget'
   | 'activeTimeBudgetMs'
-  | 'checkpointStalls'
-  | 'lastCheckpointFailure'
   | 'lastReason'
 >;
 
@@ -147,7 +144,7 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      `Read the current Goal for this permitted Goal turn: its identity, objective, status, budget figures (tokens, turns, active time and their ceilings when set), and the independent verifier's feedback on the previous proposal when there is any. It returns no transcript history: the verifier reads the most recent transcript records by itself, so there is nothing to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget, turnBudget, activeTimeBudgetMs and lastReason when recorded, and checkpointStalls and lastCheckpointFailure while a stall streak stands, while the Goal is active, or when an oversized checkpoint request stopped it, never for a completed Goal) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
+      `Read the current Goal for this permitted Goal turn: its identity, objective, status, budget figures (tokens, turns, active time and their ceilings when set), and the independent verifier's feedback on the previous proposal when there is any. It returns no transcript history: the verifier reads the most recent transcript records by itself, so there is nothing to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, plus tokenBudget, turnBudget, activeTimeBudgetMs and lastReason when recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
       Kind.Read,
       {
         type: 'object',
@@ -213,20 +210,6 @@ export class GetGoalTool extends BaseDeclarativeTool<
       ...(goal.activeTimeBudgetMs === undefined
         ? {}
         : { activeTimeBudgetMs: goal.activeTimeBudgetMs }),
-      // A Goal the stall breaker stopped names the kind of failure in
-      // `lastReason`; these two say how often and what exactly it was. They
-      // follow the visibility rule every rendered card uses, so a Goal that
-      // completed cleanly is not reported with a stale failure.
-      ...(goalCheckpointHealthVisible(goal)
-        ? {
-            ...(goal.checkpointStalls
-              ? { checkpointStalls: goal.checkpointStalls }
-              : {}),
-            ...(goal.lastCheckpointFailure === undefined
-              ? {}
-              : { lastCheckpointFailure: goal.lastCheckpointFailure }),
-          }
-        : {}),
       ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
     };
   }
@@ -447,33 +430,11 @@ function staleGoalTurnError(): Error {
 function projectWorkerView(view: GoalWorkerView, snapshot: GoalSnapshotV2) {
   return {
     active: true,
-    snapshot: summarizeSnapshot(snapshot),
+    snapshot: structuredClone(snapshot),
     ...(view.verifierFeedback
       ? { verifierFeedback: view.verifierFeedback }
       : {}),
   };
-}
-
-/**
- * The checkpoint's claims are the largest thing a Goal record carries -- up to
- * 32 claims of up to 2,000 characters -- and none of them is something the
- * model can act on: the verifier no longer reads them. The summary keeps the
- * checkpoint's identity and drops the text.
- */
-function summarizeSnapshot(snapshot: GoalSnapshotV2) {
-  const goal = snapshot.goal;
-  const checkpoint = goal?.evidenceCheckpoint;
-  if (!goal || !checkpoint) return structuredClone(snapshot);
-  // Collapse the claims to their count before cloning, not after: the claims
-  // are the bulk of a checkpoint and none of them survives the summary.
-  const { claims, ...checkpointRest } = checkpoint;
-  return structuredClone({
-    ...snapshot,
-    goal: {
-      ...goal,
-      evidenceCheckpoint: { ...checkpointRest, claimCount: claims.length },
-    },
-  });
 }
 
 // ── propose_goal ────────────────────────────────────────────────────────────

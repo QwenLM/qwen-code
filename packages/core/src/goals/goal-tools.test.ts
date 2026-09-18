@@ -248,11 +248,10 @@ describe('GetGoalTool', () => {
     );
   });
 
-  it('reports checkpoint health in the last Goal summary', async () => {
-    // A Goal the stall breaker stopped names the kind of failure in
-    // lastReason; only these two fields say how often and what it was.
-    const failure =
-      'InvalidGoalCheckpointError: Goal checkpoint verifier returned invalid JSON';
+  it('leaves checkpoint health out of the summary, whatever an earlier build recorded', async () => {
+    // Goals no longer run evidence checkpoints. A record an earlier build
+    // stopped on one still carries the streak and the failure; the model is
+    // told why the Goal stopped, not about a mechanism that is gone.
     const config = makeConfig({
       getGoalForWorker: vi.fn(),
       getSnapshot: () => ({
@@ -263,6 +262,7 @@ describe('GetGoalTool', () => {
           revision: 3,
           objective: 'Ship Goal v3',
           status: 'usage_limited' as const,
+          limitKind: 'checkpoint_request' as const,
           evidenceCursor: { recordId: 'record-1' },
           turnCount: 5,
           activeTimeMs: 10,
@@ -270,155 +270,8 @@ describe('GetGoalTool', () => {
           createdAt: 1,
           updatedAt: 2,
           checkpointStalls: 3,
-          lastCheckpointFailure: failure,
-          lastReason: 'checkpoints stalled',
-          limitKind: 'evidence_catalog' as const,
-        },
-      }),
-    });
-
-    const result = await execute(new GetGoalTool(config));
-
-    expect(JSON.parse(String(result.llmContent))).toEqual({
-      active: false,
-      lastGoal: {
-        goalId: 'goal-1',
-        revision: 3,
-        status: 'usage_limited',
-        turnCount: 5,
-        activeTimeMs: 10,
-        tokensUsed: 0,
-        checkpointStalls: 3,
-        lastCheckpointFailure: failure,
-        lastReason: 'checkpoints stalled',
-      },
-    });
-  });
-
-  it('leaves checkpoint health out of the summary of a completed Goal', async () => {
-    // The terminal snapshot keeps whatever the record carried; a Goal that
-    // completed cleanly must not be reported with a stale failure.
-    const config = makeConfig({
-      getGoalForWorker: vi.fn(),
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 3,
-          objective: 'Ship Goal v3',
-          status: 'complete' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 5,
-          activeTimeMs: 10,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-          checkpointStalls: 1,
           lastCheckpointFailure: 'Error: provider failed',
-          lastReason: 'Evidence satisfies the objective',
-        },
-      }),
-    });
-
-    const { lastGoal } = JSON.parse(
-      String((await execute(new GetGoalTool(config))).llmContent),
-    );
-
-    expect(lastGoal).toMatchObject({
-      status: 'complete',
-      lastReason: 'Evidence satisfies the objective',
-    });
-    expect(lastGoal).not.toHaveProperty('checkpointStalls');
-    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
-  });
-
-  it('leaves a stall-free failure out of the summary of a Goal paused for another reason', async () => {
-    const config = makeConfig({
-      getGoalForWorker: vi.fn(),
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 3,
-          objective: 'Ship Goal v3',
-          status: 'paused' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 5,
-          activeTimeMs: 10,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-          lastCheckpointFailure: 'Error: provider failed',
-          lastReason: 'no progress in three turns',
-        },
-      }),
-    });
-
-    const { lastGoal } = JSON.parse(
-      String((await execute(new GetGoalTool(config))).llmContent),
-    );
-
-    expect(lastGoal).toMatchObject({ status: 'paused' });
-    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
-  });
-
-  it('reports a stall-free checkpoint failure while the Goal is still active', async () => {
-    // A turn without a Goal permit can find the Goal still active; the failure
-    // is what its later checks keep running into before any stall stops it.
-    const config = makeConfig({
-      getGoalForWorker: vi.fn(),
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 3,
-          objective: 'Ship Goal v3',
-          status: 'active' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 5,
-          activeTimeMs: 10,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-          lastCheckpointFailure: 'Error: provider failed',
-        },
-      }),
-    });
-
-    const { lastGoal } = JSON.parse(
-      String((await execute(new GetGoalTool(config))).llmContent),
-    );
-
-    expect(lastGoal.lastCheckpointFailure).toBe('Error: provider failed');
-    expect(lastGoal).not.toHaveProperty('checkpointStalls');
-  });
-
-  it('reports the failure that stopped a Goal whose checkpoint request was too large', async () => {
-    // That stop spends no stall, and its failure is the whole explanation.
-    const failure =
-      'GoalCheckpointVerifierInputTooLargeError: Goal checkpoint verifier request of 300000 bytes exceeds the 256000-byte limit';
-    const config = makeConfig({
-      getGoalForWorker: vi.fn(),
-      getSnapshot: () => ({
-        v: 2 as const,
-        activity: 'idle' as const,
-        goal: {
-          goalId: 'goal-1',
-          revision: 3,
-          objective: 'Ship Goal v3',
-          status: 'usage_limited' as const,
-          evidenceCursor: { recordId: 'record-1' },
-          turnCount: 5,
-          activeTimeMs: 10,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-          lastCheckpointFailure: failure,
-          lastReason: 'checkpoint request too large',
-          limitKind: 'checkpoint_request' as const,
+          lastReason: 'Three evidence checkpoints stalled.',
         },
       }),
     });
@@ -429,9 +282,10 @@ describe('GetGoalTool', () => {
 
     expect(lastGoal).toMatchObject({
       status: 'usage_limited',
-      lastCheckpointFailure: failure,
+      lastReason: 'Three evidence checkpoints stalled.',
     });
     expect(lastGoal).not.toHaveProperty('checkpointStalls');
+    expect(lastGoal).not.toHaveProperty('lastCheckpointFailure');
   });
 
   it('keeps the objective and the evidence checkpoint behind the permit', async () => {
@@ -556,7 +410,7 @@ describe('GetGoalTool', () => {
     expect(result.returnDisplay).toBe('Active goal · revision 3');
   });
 
-  it('collapses checkpoint claims to a count and ignores the deprecated view parameter', async () => {
+  it('returns the snapshot as it is and ignores the deprecated view parameter', async () => {
     const snapshot = {
       v: 2 as const,
       activity: 'running' as const,
@@ -571,16 +425,6 @@ describe('GetGoalTool', () => {
         tokensUsed: 0,
         createdAt: 10,
         updatedAt: 20,
-        evidenceCheckpoint: {
-          checkpointId: 'checkpoint-9',
-          createdAt: 15,
-          claims: Array.from({ length: 2 }, (_, index) => ({
-            id: `checkpoint-9:${index + 1}`,
-            proofKind: 'external_fact' as const,
-            claim: `SECRET_CLAIM_TEXT ${index}`,
-            sourceRefs: [`src-${index}`],
-          })),
-        },
       },
     };
     const tool = new GetGoalTool(
@@ -601,21 +445,7 @@ describe('GetGoalTool', () => {
     };
 
     const payload = await read({});
-    expect(payload).toEqual({
-      active: true,
-      snapshot: {
-        ...snapshot,
-        goal: {
-          ...snapshot.goal,
-          evidenceCheckpoint: {
-            checkpointId: 'checkpoint-9',
-            createdAt: 15,
-            claimCount: 2,
-          },
-        },
-      },
-    });
-    expect(JSON.stringify(payload)).not.toContain('SECRET_CLAIM_TEXT');
+    expect(payload).toEqual({ active: true, snapshot });
     expect(await read({ view: 'full' })).toEqual(payload);
   });
 

@@ -30,7 +30,7 @@ import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDispl
 import * as jsonl from '../utils/jsonl-utils.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import type { Part } from '@google/genai';
-import type { FileDiff } from '../tools/tools.js';
+import type { FileDiff, McpAppResultDisplay } from '../tools/tools.js';
 import {
   deserializeSnapshots,
   serializeSnapshot,
@@ -2483,6 +2483,53 @@ describe('ChatRecordingService', () => {
       expect(resultDisplay).toContain('-tail');
       expect(resultDisplay).toContain('truncated for saved session preview');
       expect(resultDisplay).not.toContain('CLI history display');
+    });
+
+    // https://github.com/QwenLM/qwen-code/issues/10369 - the Web Shell mounts
+    // the sandboxed iframe only when the recorded `html` is non-empty, and it
+    // never re-fetches the `ui://` resource. Recording an empty `html` makes
+    // every replayed MCP App fall back to plain text permanently.
+    it('keeps MCP App html and toolResult in the recorded transcript', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'mcp__demo__dashboard',
+            response: { output: 'Dashboard ready' },
+          },
+        },
+      ];
+      const html = '<main id="dashboard">MCP_APP_HTML_MARKER</main>';
+      const toolResult = {
+        content: [{ type: 'text', text: 'Dashboard ready' }],
+      };
+      const metadata = {
+        callId: 'call-1',
+        status: 'success',
+        responseParts: toolResultParts,
+        resultDisplay: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html,
+          toolResult,
+          toolArguments: { region: 'APAC' },
+          fallbackText: 'Dashboard ready',
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any;
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const recorded = record.toolCallResult
+        ?.resultDisplay as McpAppResultDisplay;
+
+      expect(recorded.type).toBe('mcp_app');
+      expect(recorded.html).toBe(html);
+      expect(recorded.toolResult).toEqual(toolResult);
+      expect(recorded.fallbackText).toBe('Dashboard ready');
     });
 
     it('records promptId on tool results when provided', async () => {

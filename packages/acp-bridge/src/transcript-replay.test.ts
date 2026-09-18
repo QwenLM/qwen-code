@@ -434,7 +434,9 @@ describe('createTranscriptReplayMachine', () => {
       updates(machine, goalStateRecord('goal-turn', 'turn_finished', turned)),
     ).toHaveLength(1);
 
-    const checkpointed: GoalRecord = {
+    // As a build that still compressed evidence into checkpoints journaled
+    // it: the parser accepts the old key and leaves it behind.
+    const checkpointed: GoalRecord & { evidenceCheckpoint: unknown } = {
       ...turned,
       evidenceCursor: { recordId: 'checkpoint-1' },
       evidenceCheckpoint: {
@@ -460,7 +462,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    const rejected: GoalRecord = {
+    const rejected = {
       ...checkpointed,
       lastReason: 'More work remains',
     };
@@ -471,7 +473,7 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toHaveLength(1);
 
-    const recommitted: GoalRecord = {
+    const recommitted = {
       ...rejected,
       activeTimeMs: 2900,
       tokensUsed: 0,
@@ -488,7 +490,8 @@ describe('createTranscriptReplayMachine', () => {
       ),
     ).toEqual([]);
 
-    expect(machine.snapshot().goalState?.goal).toEqual(recommitted);
+    const { evidenceCheckpoint: _legacy, ...parsed } = recommitted;
+    expect(machine.snapshot().goalState?.goal).toEqual(parsed);
   });
 
   it('persists goalCause so bookkeeping suppression survives a page boundary', () => {
