@@ -430,33 +430,11 @@ function staleGoalTurnError(): Error {
 function projectWorkerView(view: GoalWorkerView, snapshot: GoalSnapshotV2) {
   return {
     active: true,
-    snapshot: summarizeSnapshot(snapshot),
+    snapshot: structuredClone(snapshot),
     ...(view.verifierFeedback
       ? { verifierFeedback: view.verifierFeedback }
       : {}),
   };
-}
-
-/**
- * The checkpoint's claims are the largest thing a Goal record carries -- up to
- * 32 claims of up to 2,000 characters -- and none of them is something the
- * model can act on: the verifier no longer reads them. The summary keeps the
- * checkpoint's identity and drops the text.
- */
-function summarizeSnapshot(snapshot: GoalSnapshotV2) {
-  const goal = snapshot.goal;
-  const checkpoint = goal?.evidenceCheckpoint;
-  if (!goal || !checkpoint) return structuredClone(snapshot);
-  // Collapse the claims to their count before cloning, not after: the claims
-  // are the bulk of a checkpoint and none of them survives the summary.
-  const { claims, ...checkpointRest } = checkpoint;
-  return structuredClone({
-    ...snapshot,
-    goal: {
-      ...goal,
-      evidenceCheckpoint: { ...checkpointRest, claimCount: claims.length },
-    },
-  });
 }
 
 // ── propose_goal ────────────────────────────────────────────────────────────
