@@ -133,17 +133,33 @@ function isWrappedIn(part: Part, open: string, close: string): boolean {
  * reminder allowance was meant to cover is refused independently by the
  * `#hasActiveTurn()` guard in `Session.getRecoveryStatus()`.
  *
- * Residual, by shape alone: a FAILED live notification turn whose entry
- * carries no reminders (no plan mode, no output style, no active todo chain)
- * is a single-envelope user entry, indistinguishable from a cold record, and
- * is still trimmed. Closing that needs `provenance` to survive the projection
- * (`session-api-history.ts`) or a daemon-side re-drive; no shape predicate at
- * this layer can reach it.
+ * Shape alone cannot separate that from a real user prompt whose entire text
+ * IS a bare envelope (the user pasted one, or asked for a verbatim echo): the
+ * entry is user-role, single-part and wrapped, so every clause above matches.
+ * Trimming it exposes the PREVIOUS model turn as the tail and returns `none`,
+ * certifying `clean` for a prompt that was never answered — and the next send
+ * pops it out of live history through `stripOrphanedUserEntriesFromHistory`.
+ * Callers that have the source records therefore pass
+ * `trailingSystemNotifications` to {@link effectiveHistoryEnd}, which narrows
+ * the trim to entries the recorder actually stamped as notifications. This
+ * predicate stays shape-based because it is also the fallback for callers that
+ * hold only raw `Content[]`.
+ *
+ * Residual, still open: a FAILED live notification turn whose entry carries no
+ * reminders (no plan mode, no output style, no active todo chain) is a
+ * single-envelope user entry and is still trimmed — provenance does NOT reach
+ * it, because the delivered turn (`recordNotification`, client.ts) and the
+ * cold persisted record (`recordNotificationStrict`) both funnel through the
+ * same `createNotificationRecord` and so carry an identical
+ * `provenance: 'system'` + `subtype: 'notification'` stamp. The only field that
+ * differs is `backgroundTurn`, and the `channelTask` admission branch runs it
+ * with `backgroundTurnContext.exit(...)`, so it is not a reliable discriminator.
+ * Closing that needs a distinguishing record field or a daemon-side re-drive.
  *
  * Needed at all because the record's `subtype: 'notification'` and
- * `provenance: 'system'` do not survive the projection into `Content`
- * (`session-api-history.ts`), so the live history tail carries no metadata to
- * read.
+ * `provenance: 'system'` cannot ride along on `Content` (that type comes from
+ * `@google/genai`), so the live history tail carries no metadata to read and
+ * the projection has to report it separately (`session-api-history.ts`).
  */
 function isSystemNotificationContent(content: Content): boolean {
   if (content.role !== 'user') return false;
@@ -166,11 +182,38 @@ function isSystemNotificationContent(content: Content): boolean {
  * `tailHoldsAnyFunctionCall` in `packages/cli/src/serve/prompt-terminal-ledger.ts`.
  *
  * @param history - Chat history in Gemini `Content[]` form, oldest first.
+ * @param trailingSystemNotifications - Optional authoritative count of trailing
+ *   `history` entries whose source record the recorder stamped
+ *   `provenance: 'system'` + `subtype: 'notification'`, as reported by
+ *   `buildSessionHistoryFromConversation`. When supplied it NARROWS the trim:
+ *   an entry is only trimmed if its shape matches AND it falls inside that
+ *   authoritative run. Passing `undefined` (what every caller that has no
+ *   record metadata does) preserves the shape-only behaviour exactly, so the
+ *   cross-package caller above needs no change. It can never widen the trim —
+ *   the shape predicate still gates every entry — so a count larger than the
+ *   envelope-shaped run simply stops at the first non-matching entry.
  * @returns The exclusive end index of the classifiable prefix.
  */
-export function effectiveHistoryEnd(history: readonly Content[]): number {
+export function effectiveHistoryEnd(
+  history: readonly Content[],
+  trailingSystemNotifications?: number,
+): number {
   let end = history.length;
-  while (end > 0 && isSystemNotificationContent(history[end - 1]!)) end--;
+  // Index of the first entry the authoritative run covers. Entries before it
+  // are not known to be system notifications, whatever they look like.
+  const authoritativeFrom =
+    trailingSystemNotifications === undefined
+      ? -Infinity
+      : history.length - trailingSystemNotifications;
+  while (end > 0 && isSystemNotificationContent(history[end - 1]!)) {
+    // Shape says notification, but the record's own provenance says this is
+    // real user input that merely looks like an envelope. Trimming it would
+    // expose the previous model turn as the tail, certify `clean` for a prompt
+    // that was never answered, and the next send would pop it out of live
+    // history — silent loss, and the one case shape alone cannot rule out.
+    if (end - 1 < authoritativeFrom) break;
+    end--;
+  }
   return end;
 }
 
@@ -183,11 +226,18 @@ export function effectiveHistoryEnd(history: readonly Content[]): number {
  * raw transcript fixtures in tests.
  *
  * @param history - Chat history in Gemini `Content[]` form, oldest first.
+ * @param completedToolCallIds - Ids whose call/response pair is already closed.
+ * @param trailingSystemNotifications - Optional authoritative notification
+ *   provenance forwarded to {@link effectiveHistoryEnd}. Omit it when the
+ *   caller only has raw `Content[]`; supply it when the history came from
+ *   `buildSessionHistoryFromConversation`, which can read the records' own
+ *   `provenance`.
  * @returns The interruption classification; see {@link TurnInterruption}.
  */
 export function detectTurnInterruption(
   history: Content[],
   completedToolCallIds?: readonly string[],
+  trailingSystemNotifications?: number,
 ): TurnInterruption {
   const boundary = completedToolCallBoundary(history, completedToolCallIds);
   // Trailing background notifications are not an unfinished turn: the daemon
@@ -195,7 +245,7 @@ export function detectTurnInterruption(
   // turn never ran leaves a `user` tail that nothing will ever answer. Left in
   // place it classifies as `interrupted_prompt`, which keeps the recovery
   // banner pinned on a session whose last real turn ended cleanly.
-  const end = effectiveHistoryEnd(history);
+  const end = effectiveHistoryEnd(history, trailingSystemNotifications);
   if (boundary >= end) return { kind: 'none' };
   const last = history[end - 1];
   if (!last) {

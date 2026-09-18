@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   buildSyntheticToolResponseParts,
   detectTurnInterruption,
+  effectiveHistoryEnd,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from './turn-interruption.js';
 
@@ -386,6 +387,84 @@ describe('detectTurnInterruption with background notifications', () => {
       { role: 'user', parts: [notification('Agent "explore" completed.')] },
     ];
     expect(detectTurnInterruption(history, ['ended'])).toEqual({
+      kind: 'none',
+    });
+  });
+});
+
+describe('detectTurnInterruption with authoritative notification provenance', () => {
+  const notification = (summary: string) => ({
+    text:
+      `<task-notification><task-id>agent-1</task-id>` +
+      `<status>completed</status><summary>${summary}</summary>` +
+      `</task-notification>`,
+  });
+
+  // A real prompt whose ENTIRE text is a bare envelope satisfies every clause
+  // of the shape predicate: user-role, one part, wrapped in the envelope. Only
+  // the recorder's `provenance` can tell it from a cold notification record.
+  const envelopeTailHistory = (): Content[] => [
+    { role: 'user', parts: [{ text: 'earlier prompt' }] },
+    { role: 'model', parts: [{ text: 'earlier answer' }] },
+    { role: 'user', parts: [notification('Agent "explore" completed.')] },
+  ];
+
+  it('keeps a real user prompt that is a bare envelope interrupted', () => {
+    const history = envelopeTailHistory();
+    // `trailingSystemNotifications: 0` is what the projection reports when the
+    // tail record was stamped `provenance: 'real_user'`.
+    expect(effectiveHistoryEnd(history, 0)).toBe(3);
+    expect(detectTurnInterruption(history, undefined, 0)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [notification('Agent "explore" completed.')],
+    });
+  });
+
+  it('still trims a genuine cold notification when provenance confirms it', () => {
+    const history = envelopeTailHistory();
+    expect(effectiveHistoryEnd(history, 1)).toBe(2);
+    expect(detectTurnInterruption(history, undefined, 1)).toEqual({
+      kind: 'none',
+    });
+  });
+
+  it('leaves the shape-only contract untouched for one-argument callers', () => {
+    // `tailHoldsAnyFunctionCall` (packages/cli/src/serve/prompt-terminal-ledger.ts)
+    // calls `effectiveHistoryEnd(apiHistory)` with no provenance; it must keep
+    // getting exactly the trim it gets today.
+    const history = envelopeTailHistory();
+    expect(effectiveHistoryEnd(history)).toBe(2);
+    expect(effectiveHistoryEnd(history, undefined)).toBe(2);
+    expect(detectTurnInterruption(history)).toEqual({ kind: 'none' });
+  });
+
+  it('stops the trim at the first entry provenance does not cover', () => {
+    // Two envelope-shaped tail entries, only the LAST one authoritative: the
+    // real prompt underneath must survive even though its shape matches.
+    const history: Content[] = [
+      { role: 'model', parts: [{ text: 'earlier answer' }] },
+      { role: 'user', parts: [notification('Agent "explore" completed.')] },
+      { role: 'user', parts: [notification('Agent "build" completed.')] },
+    ];
+    expect(effectiveHistoryEnd(history, 1)).toBe(2);
+    expect(detectTurnInterruption(history, undefined, 1)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: [
+        notification('Agent "explore" completed.'),
+        notification('Agent "build" completed.'),
+      ],
+    });
+  });
+
+  it('never trims further than the shape predicate would', () => {
+    // A provenance count larger than the envelope-shaped run must not eat a
+    // plain model tail: the signal narrows the trim, it never widens it.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'do the thing' }] },
+      { role: 'model', parts: [{ text: 'done' }] },
+    ];
+    expect(effectiveHistoryEnd(history, 2)).toBe(2);
+    expect(detectTurnInterruption(history, undefined, 2)).toEqual({
       kind: 'none',
     });
   });

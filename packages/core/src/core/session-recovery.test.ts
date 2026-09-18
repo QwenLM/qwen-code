@@ -46,9 +46,10 @@ function taskNotification(summary: string): string {
 /**
  * A record shaped like `ChatRecordingService.createNotificationRecord` output:
  * user-role, `subtype: 'notification'`, `provenance: 'system'`, envelope as its
- * only part. Neither the subtype nor the provenance survives into `Content`, so
- * the api history projection holds a plain `role: 'user'` entry that role alone
- * cannot tell apart from a real prompt.
+ * only part. Neither the subtype nor the provenance can ride along on
+ * `Content`, so the api history projection holds a plain `role: 'user'` entry
+ * that role alone cannot tell apart from a real prompt — the projection
+ * therefore reports the stamp separately as `trailingSystemNotifications`.
  */
 function notificationRecord(index: number, summary: string): ChatRecord {
   return {
@@ -293,5 +294,59 @@ describe('buildSessionRecoveryPlan with unanswered notifications', () => {
       mode: 'tool_result_parts',
       parts: [{ functionResponse: { id: 'call-1', name: 'read_file' } }],
     });
+  });
+
+  it('keeps a REAL prompt whose whole text is a bare envelope interrupted', () => {
+    // Shape-identical to `notificationRecord` above — user-role, one part,
+    // wrapped in the envelope — but stamped `provenance: 'real_user'`, so it is
+    // a prompt the user actually typed. Before the projection reported
+    // provenance, the trim ate it, the previous model turn became the tail, and
+    // the plan certified `clean` for a session that died with an unanswered
+    // prompt: no banner, no Retry, and the next send popped it out of live
+    // history.
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([
+        promptRecord(0, 'earlier prompt'),
+        modelRecord(1, { role: 'model', parts: [{ text: 'earlier answer' }] }),
+        {
+          ...promptRecord(2, taskNotification('Agent "explore" completed.')),
+          provenance: 'real_user',
+        },
+      ]),
+    });
+
+    expect(plan.kind).toBe('interrupted_prompt');
+    expect(plan.canContinue).toBe(true);
+    expect(plan.continuation?.mode).toBe('retry_user_parts');
+    expect(plan.continuation?.parts).toEqual([
+      { text: taskNotification('Agent "explore" completed.') },
+    ]);
+  });
+
+  it('honours a caller-supplied trailingSystemNotifications in both directions', () => {
+    // Pins the thread-through itself: the same apiHistory, opposite verdicts,
+    // decided only by the count the caller passes.
+    const apiHistory: Content[] = [
+      { role: 'model', parts: [{ text: 'earlier answer' }] },
+      { role: 'user', parts: [{ text: taskNotification('Agent done.') }] },
+    ];
+
+    expect(
+      buildSessionRecoveryPlanFromApiHistory({
+        sessionId: 'session-1',
+        apiHistory,
+        trailingSystemNotifications: 0,
+      }).kind,
+    ).toBe('interrupted_prompt');
+
+    const cold = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: 'session-1',
+      apiHistory,
+      trailingSystemNotifications: 1,
+    });
+    expect(cold.kind).toBe('clean');
+    expect(cold.canContinue).toBe(false);
+    expect(cold.visibleNotice).toBeUndefined();
   });
 });
