@@ -550,8 +550,9 @@ class ExportSessionContext implements SessionContext {
   /**
    * Writes the Goal transitions journaled before `position`. A transition
    * waits for the next record so the `/goal …` line replayed from its own
-   * record lands ahead of it; whatever is buffered came from an earlier
-   * record, so it is flushed first.
+   * record lands ahead of it. The buffered message is flushed before the
+   * transition card, using a fresh uuid only when that buffer came from the
+   * transition itself.
    */
   private emitGoalStatesBefore(position: number): void {
     while (
@@ -563,7 +564,7 @@ class ExportSessionContext implements SessionContext {
       // `/goal …` line). The record's uuid belongs to the transition, which
       // is what a snapshot's record references resolve to, so the text does
       // not take it as well.
-      this.flushCurrentMessage(this.activeRecordId === uuid);
+      this.flushCurrentMessage(this.currentMessage?.sourceUuid === uuid);
       this.messages.push({
         uuid,
         sessionId: this.sessionId,
@@ -610,6 +611,11 @@ class ExportSessionContext implements SessionContext {
       this.currentMessage.role === messageRole
     ) {
       this.currentMessage.parts.push({ text: content.text });
+      // Keep the first source uuid for merged messages, but use the timestamp
+      // of the latest record that contributed text to the buffer.
+      if (this.activeRecordTimestamp) {
+        this.currentMessage.sourceTimestamp = this.activeRecordTimestamp;
+      }
       // Merge usageMetadata if provided (for assistant messages)
       if (usageMetadata && role === 'assistant') {
         this.currentMessage.usageMetadata = usageMetadata;
@@ -731,9 +737,8 @@ class ExportSessionContext implements SessionContext {
     const uuid = freshUuid
       ? randomUUID()
       : (this.currentMessage.sourceUuid ?? this.getMessageUuid());
-    const timestamp = freshUuid
-      ? this.getMessageTimestamp()
-      : (this.currentMessage.sourceTimestamp ?? this.getMessageTimestamp());
+    const timestamp =
+      this.currentMessage.sourceTimestamp ?? this.getMessageTimestamp();
     const exportMessage: ExportMessage = {
       uuid,
       sessionId: this.sessionId,
@@ -759,8 +764,8 @@ class ExportSessionContext implements SessionContext {
   }
 
   flushMessages(): void {
-    this.flushCurrentMessage();
     this.emitGoalStatesBefore(Number.POSITIVE_INFINITY);
+    this.flushCurrentMessage();
   }
 
   getMessages(): ExportMessage[] {

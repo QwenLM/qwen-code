@@ -344,13 +344,23 @@ describe('collectSessionData', () => {
       const uuids = data.messages.map((message) => message.uuid);
       expect(new Set(uuids).size).toBe(uuids.length);
       expect(data.messages[0]).toMatchObject({
+        uuid: 'user-1',
         type: 'user',
         timestamp: '2026-09-17T00:00:01.000Z',
       });
-      expect(data.messages[0]!.uuid).not.toBe('goal-create');
       expect(data.messages[1]).toMatchObject({
         uuid: 'goal-create',
         goalState: { v: 2, cause: 'create' },
+      });
+
+      const assistant = data.messages.find((message) =>
+        message.message?.parts?.some(
+          (part) => part.text === 'assistant assistant-1',
+        ),
+      );
+      expect(assistant).toMatchObject({
+        uuid: 'assistant-1',
+        timestamp: '2026-09-17T00:00:02.000Z',
       });
 
       const reject = data.messages.find(
@@ -390,6 +400,15 @@ describe('collectSessionData', () => {
         message: { parts: [{ text: 'Goal clear' }] },
         goalState: { cause: 'clear', snapshot: { goal: null } },
       });
+      const clearLine = data.messages.find((message) =>
+        message.message?.parts?.some((part) => part.text === '/goal clear'),
+      );
+      expect(clearLine).toMatchObject({
+        timestamp: '2026-09-17T00:00:02.000Z',
+      });
+      expect(clearLine?.uuid).not.toBe('goal-clear');
+      const uuids = data.messages.map((message) => message.uuid);
+      expect(new Set(uuids).size).toBe(uuids.length);
       const lines = toJsonl(data)
         .split('\n')
         .map((line) => JSON.parse(line));

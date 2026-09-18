@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
+import { collectSessionData } from './collect.js';
 import { normalizeSessionData } from './normalize.js';
 import type { ExportConfig } from './types.js';
 
@@ -13,6 +14,95 @@ describe('normalizeSessionData', () => {
   const config = {
     getToolRegistry: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
+
+  it('attaches assistant usage to the answer after collection', async () => {
+    const records: ChatRecord[] = [
+      {
+        uuid: 'user-usage-1',
+        parentUuid: null,
+        sessionId: 'session-usage',
+        timestamp: '2026-09-17T15:52:44.524Z',
+        type: 'user',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'first question' }] },
+      },
+      {
+        uuid: 'assistant-usage-1',
+        parentUuid: 'user-usage-1',
+        sessionId: 'session-usage',
+        timestamp: '2026-09-17T15:52:48.291Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'thinking about the first answer', thought: true },
+            { text: 'the first answer' },
+          ],
+        },
+        usageMetadata: { totalTokenCount: 222 },
+      },
+      {
+        uuid: 'user-usage-2',
+        parentUuid: 'assistant-usage-1',
+        sessionId: 'session-usage',
+        timestamp: '2026-09-17T15:53:10.000Z',
+        type: 'user',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'second question' }] },
+      },
+      {
+        uuid: 'assistant-usage-2',
+        parentUuid: 'user-usage-2',
+        sessionId: 'session-usage',
+        timestamp: '2026-09-17T15:53:14.500Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'thinking about the second answer', thought: true },
+            { text: 'the second answer' },
+          ],
+        },
+        usageMetadata: { totalTokenCount: 333 },
+      },
+    ];
+
+    const collected = await collectSessionData(
+      {
+        sessionId: 'session-usage',
+        startTime: '2026-09-17T15:52:48.291Z',
+        messages: records,
+      },
+      config,
+    );
+    const normalized = normalizeSessionData(collected, records, config);
+
+    const thinkingMessages = normalized.messages.filter(
+      (message) => message.message?.role === 'thinking',
+    );
+    const answerMessages = normalized.messages.filter(
+      (message) => message.message?.role === 'assistant',
+    );
+    expect(thinkingMessages).toHaveLength(2);
+    expect(thinkingMessages.every((message) => !message.usageMetadata)).toBe(
+      true,
+    );
+    expect(
+      answerMessages.map((message) => [
+        message.uuid,
+        message.usageMetadata?.totalTokenCount,
+      ]),
+    ).toEqual([
+      ['assistant-usage-1', 222],
+      ['assistant-usage-2', 333],
+    ]);
+  });
 
   it('does not export truncated saved-session previews as full diffs', () => {
     const record: ChatRecord = {
