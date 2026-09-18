@@ -6009,15 +6009,21 @@ export class Session implements SessionContext {
               const attachmentReferences = readDaemonAttachmentReferences(
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
+              const resourceLinks = params.prompt
+                .filter((block) => block.type === 'resource_link')
+                .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
               recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
-                promptDisplayText !== undefined || attachmentReferences
+                promptDisplayText !== undefined ||
+                  attachmentReferences ||
+                  resourceLinks.length > 0
                   ? {
                       displayText: promptDisplayText ?? promptText,
                       hookContext: '',
                       ...(attachmentReferences ? { attachmentReferences } : {}),
+                      ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
                     }
                   : undefined,
                 daemonPromptId,

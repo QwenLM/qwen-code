@@ -755,11 +755,28 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
     const references = payload?.['attachmentReferences'];
-    if (!Array.isArray(references)) return;
-    for (const reference of references) {
+    for (const reference of Array.isArray(references) ? references : []) {
       if (!isObjectRecord(reference)) continue;
       const update = createTranscriptAttachmentReferenceUpdate(reference, meta);
       if (update) yield emit(update);
+    }
+    const resourceLinks = payload?.['resourceLinks'];
+    for (const link of Array.isArray(resourceLinks) ? resourceLinks : []) {
+      if (
+        !isObjectRecord(link) ||
+        link['type'] !== 'resource_link' ||
+        typeof link['uri'] !== 'string' ||
+        link['uri'].length === 0 ||
+        typeof link['name'] !== 'string'
+      ) {
+        continue;
+      }
+      const updateMeta = buildUpdateMeta(meta);
+      yield emit({
+        sessionUpdate: 'user_message_chunk',
+        content: structuredClone(link),
+        ...(updateMeta ? { _meta: updateMeta } : {}),
+      } as SessionUpdate);
     }
   }
 
