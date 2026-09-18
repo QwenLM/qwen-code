@@ -115,4 +115,140 @@ describe('LiveVoiceSettingsCard', () => {
       );
     },
   );
+
+  describe('key, model and voice', () => {
+    function type(input: HTMLInputElement, value: string): void {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      act(() => {
+        setter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
+
+    it('names the variable instead of asking for a key the route would ignore', () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+          keyConfigured: true,
+        }),
+      );
+
+      // The daemon refuses `apiKey: replace` for a route; offering the field
+      // would only produce that error.
+      expect(container.querySelector('#live-realtime-key')).toBeNull();
+      expect(
+        container.querySelector('[data-live-key-route]')?.textContent,
+      ).toBe('settings.liveSetup.keyFromEnv');
+    });
+
+    it('says the variable is unset rather than just "not configured"', () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+          keyConfigured: false,
+        }),
+      );
+      expect(
+        container.querySelector('[data-live-key-route]')?.textContent,
+      ).toBe('settings.liveSetup.keyFromEnvMissing');
+    });
+
+    it.each(['settings', undefined] as const)(
+      'keeps the key field when keySource is %s (older daemons omit it)',
+      (keySource) => {
+        const container = mount(setupResult({ keySource }));
+        expect(container.querySelector('#live-realtime-key')).not.toBeNull();
+        expect(container.querySelector('[data-live-key-route]')).toBeNull();
+      },
+    );
+
+    it('saves a changed voice and nothing else', () => {
+      const setup = setupResult({ voice: 'Tina' });
+      const container = mount(setup);
+      const input = container.querySelector<HTMLInputElement>(
+        '#live-realtime-voice',
+      )!;
+      const save = container.querySelector<HTMLButtonElement>(
+        '[data-live-voice-save]',
+      )!;
+      expect(input.value).toBe('Tina');
+      expect(save.disabled).toBe(true);
+
+      type(input, '  Ethan ');
+      expect(save.disabled).toBe(false);
+      act(() => {
+        save.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(setup.update).toHaveBeenCalledExactlyOnceWith({ voice: 'Ethan' });
+    });
+
+    it('puts the saved voice back when the provider rejects the new one', async () => {
+      const setup = setupResult({ voice: 'Tina' });
+      vi.mocked(setup.update).mockRejectedValueOnce(new Error('unknown voice'));
+      const container = mount(setup);
+      const input = container.querySelector<HTMLInputElement>(
+        '#live-realtime-voice',
+      )!;
+      type(input, 'Nope');
+      await act(async () => {
+        container
+          .querySelector('[data-live-voice-save]')!
+          .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(input.value).toBe('Tina');
+    });
+
+    it('offers a picker once there is more than one model to pick from', () => {
+      const single = mount(
+        setupResult({
+          model: 'omni-realtime',
+          models: [{ id: 'omni-realtime', provider: 'openai' }],
+        }),
+      );
+      expect(single.querySelector('[role="combobox"]')).toBeNull();
+      expect(single.querySelector('#live-realtime-model')?.textContent).toBe(
+        'omni-realtime',
+      );
+
+      const several = mount(
+        setupResult({
+          model: 'omni-realtime',
+          models: [
+            { id: 'omni-realtime', provider: 'openai', name: 'Omni Realtime' },
+            { id: 'omni-flash-realtime', provider: 'openai' },
+          ],
+        }),
+      );
+      const picker = several.querySelector('[role="combobox"]');
+      expect(picker).not.toBeNull();
+      expect(picker?.textContent).toContain('Omni Realtime');
+    });
+
+    it('explains how to get a picker when no realtime route exists', () => {
+      const container = mount(setupResult({ models: [] }));
+      expect(container.textContent).toContain('settings.liveSetup.modelHint');
+    });
+
+    it('shows why the configured model does not resolve', () => {
+      const container = mount(
+        setupResult({
+          models: [
+            { id: 'omni-realtime', provider: 'openai' },
+            { id: 'omni-realtime', provider: 'dashscope-intl' },
+          ],
+          model: 'omni-realtime',
+          modelError:
+            "experimental.liveVoice.model 'omni-realtime' matches more than one realtimeOnly route; qualify it as provider:modelId.",
+        }),
+      );
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'matches more than one realtimeOnly route',
+      );
+    });
+  });
 });

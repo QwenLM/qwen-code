@@ -225,6 +225,36 @@ describe('LiveSetupController', () => {
       expect(status.keyConfigured).toBe(true);
     });
 
+    it('says where the key comes from, naming the variable but never its value', async () => {
+      const routed = createHarness({
+        modelProviders: { openai: [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      const status = await routed.controller.getStatus();
+      expect(status).toMatchObject({
+        keySource: 'route',
+        keyEnv: 'DASHSCOPE_API_KEY',
+      });
+      expect(JSON.stringify(status)).not.toContain('env-secret');
+
+      const legacy = createHarness({ modelProviders: { openai: [chat] } });
+      const legacyStatus = await legacy.controller.getStatus();
+      expect(legacyStatus.keySource).toBe('settings');
+      expect(legacyStatus.keyEnv).toBeUndefined();
+      expect(legacyStatus.modelError).toBeUndefined();
+    });
+
+    it('reports an unresolvable model instead of only "no key"', async () => {
+      const harness = createHarness({
+        modelProviders: { openai: [route], 'dashscope-intl': [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      const status = await harness.controller.getStatus();
+      expect(status.modelError).toMatch(/more than one realtimeOnly route/);
+      expect(status.keyConfigured).toBe(false);
+      expect(status.keySource).toBe('settings');
+    });
+
     it('reports no usable key when the route variable is unset', async () => {
       const harness = createHarness({
         modelProviders: { openai: [route] },

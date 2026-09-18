@@ -31,6 +31,19 @@ export interface LiveSetupStatus {
    * `model` names a `realtimeOnly` route, else `liveVoice.apiKey`.
    */
   keyConfigured: boolean;
+  /**
+   * Where the selected model's key comes from. `route`: the `envKey` of its
+   * `realtimeOnly` route — `liveVoice.apiKey` is unused and cannot be set.
+   * `settings`: the free-standing `liveVoice.apiKey`.
+   */
+  keySource: 'route' | 'settings';
+  /** The environment variable a `route` key is read from. Never its value. */
+  keyEnv?: string;
+  /**
+   * Why `model` cannot be resolved (ambiguous id, provider without such a
+   * route). Absent when it resolves, to a route or to the free-standing path.
+   */
+  modelError?: string;
   model: string;
   voice: string;
   /** `realtimeOnly` routes from user-scope `modelProviders`, for a picker. */
@@ -141,10 +154,23 @@ export class LiveSetupController {
     }
     const settings = this.deps.loadSettings();
     const live = readLiveVoiceConfiguration(settings);
+    let route: ReturnType<typeof findLiveRealtimeRoute>;
+    let modelError: string | undefined;
+    try {
+      route = findLiveRealtimeRoute(settings, live.model);
+    } catch (error) {
+      modelError =
+        error instanceof LiveProviderConfigError
+          ? error.message
+          : 'The Live Voice model could not be resolved.';
+    }
     return {
       v: 1,
       enabled: this.deps.getEnabled(),
       keyConfigured: this.hasUsableKey(settings),
+      keySource: route ? 'route' : 'settings',
+      ...(route?.envKey ? { keyEnv: route.envKey } : {}),
+      ...(modelError ? { modelError } : {}),
       model: live.model,
       voice: live.voice,
       models: listLiveRealtimeRoutes(settings).map((route) => ({

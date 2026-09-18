@@ -186,7 +186,13 @@ export function useLiveVoice(): UseLiveVoiceResult {
   );
 
   const pushStatus = useCallback((next: DaemonLiveStatus) => {
-    if (mountedRef.current) setStatus(next);
+    if (!mountedRef.current) return;
+    // A poll already in flight was answered before this push, so it is older
+    // however late it lands. Bumping the generation makes it a no-op instead
+    // of letting it overwrite the fresher status for up to a poll interval.
+    generationRef.current += 1;
+    setLoading(false);
+    setStatus(next);
   }, []);
 
   // The daemon pushes status over the Host socket; it beats the 1 s poll.

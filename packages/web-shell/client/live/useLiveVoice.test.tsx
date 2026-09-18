@@ -31,6 +31,23 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => mocks.workspace,
 }));
 
+const browserHostMock = vi.hoisted(() => ({
+  onStatus: undefined as ((status: unknown) => void) | undefined,
+}));
+
+vi.mock('./useLiveBrowserHost', () => ({
+  useLiveBrowserHost: (options: { onStatus?: (status: unknown) => void }) => {
+    browserHostMock.onStatus = options.onStatus;
+    return {
+      phase: 'idle',
+      closeReason: undefined,
+      errorMessage: undefined,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  },
+}));
+
 afterEach(() => {
   document.body.replaceChildren();
   mocks.workspace.client = mocks.client;
@@ -232,6 +249,47 @@ describe('useLiveVoice', () => {
     });
     expect(container.textContent).toBe('listening');
 
+    act(() => root.unmount());
+  });
+
+  it('does not let a slow poll overwrite a fresher pushed status', async () => {
+    let resolvePoll: ((value: unknown) => void) | undefined;
+    mocks.liveStatus.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePoll = resolve;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function Harness() {
+      const live = useLiveVoice();
+      return (
+        <span>
+          {live.status?.state ?? 'pending'}|{String(live.loading)}
+        </span>
+      );
+    }
+    act(() => root.render(<Harness />));
+
+    // The daemon pushes "speaking" over the Host socket while the poll that
+    // was sent earlier is still in flight...
+    act(() => {
+      browserHostMock.onStatus?.({
+        v: 1,
+        available: true,
+        state: 'speaking',
+        shortcut: '',
+      });
+    });
+    expect(container.textContent).toBe('speaking|false');
+
+    // ...and that older answer finally arrives.
+    await act(async () => {
+      resolvePoll?.({ v: 1, available: true, state: 'idle', shortcut: '' });
+      await Promise.resolve();
+    });
+    expect(container.textContent).toBe('speaking|false');
     act(() => root.unmount());
   });
 });
