@@ -156,12 +156,8 @@ export class LiveUnavailableError extends Error {
 export class LiveBrowserHostUnsupportedError extends Error {
   readonly code = 'live_browser_host_unsupported' as const;
 
-  constructor(readonly feature: 'shortcut' | 'screen') {
-    super(
-      feature === 'screen'
-        ? 'Screen capture is unavailable in browser Live sessions.'
-        : 'The global Live shortcut is unavailable in browser Live sessions.',
-    );
+  constructor(readonly feature: 'screen') {
+    super('Screen capture is unavailable in browser Live sessions.');
     this.name = 'LiveBrowserHostUnsupportedError';
   }
 }
@@ -611,10 +607,6 @@ export class LiveHostCoordinator {
     this.acquireLease(socket, 'browser', options.takeover === true);
   }
 
-  getHostKind(): LiveHostKind | undefined {
-    return this.host?.hello ? this.host.kind : undefined;
-  }
-
   private acquireLease(
     socket: WebSocket,
     kind: LiveHostKind,
@@ -899,7 +891,10 @@ export class LiveHostCoordinator {
       );
     }
     if (host.kind === 'browser') {
-      return Promise.reject(new LiveBrowserHostUnsupportedError('shortcut'));
+      // A page cannot register a global shortcut, so there is nothing to
+      // confirm. The value is still the user's setting: keep it, and the next
+      // native Host picks it up from its welcome.
+      return Promise.resolve(this.setConfiguredShortcut(normalized));
     }
     const requestId = randomUUID();
     return new Promise<LiveStatus>((resolve, reject) => {

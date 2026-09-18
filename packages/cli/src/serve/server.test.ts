@@ -43392,7 +43392,6 @@ describe('Live Appshot server integration', () => {
           const coordinator = app.locals[
             'liveCoordinator'
           ] as LiveHostCoordinator;
-          expect(coordinator.getHostKind()).toBe('browser');
           expect(coordinator.getStatus().host).toMatchObject({
             kind: 'browser',
           });
@@ -43426,7 +43425,7 @@ describe('Live Appshot server integration', () => {
           const coordinator = app.locals[
             'liveCoordinator'
           ] as LiveHostCoordinator;
-          expect(coordinator.getHostKind()).toBeUndefined();
+          expect(coordinator.getStatus().host).toBeUndefined();
         },
       );
     });

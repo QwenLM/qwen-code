@@ -159,7 +159,6 @@ describe('LiveHostCoordinator browser Host', () => {
       audioOutput: 'ready',
       appshot: 'ready',
     });
-    expect(value.getHostKind()).toBe('browser');
     expect(socket.messages().map((message) => message.type)).toEqual([
       'host.welcome',
       'host.state',
@@ -173,7 +172,6 @@ describe('LiveHostCoordinator browser Host', () => {
       version: '1.0.0',
       protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
     });
-    expect(value.getHostKind()).toBe('native');
   });
 
   it('rejects a hello whose bundle or kind does not match its ingress', () => {
@@ -242,7 +240,11 @@ describe('LiveHostCoordinator browser Host', () => {
 
     expect(browser.closeCode).toBe(4009);
     expect(native.closeCode).toBeUndefined();
-    expect(value.getHostKind()).toBe('native');
+    // Still the native Host: its status carries no kind.
+    expect(value.getStatus().host).toEqual({
+      version: '1.0.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    });
   });
 
   it('lets a native Host supersede a browser and stops its call first', () => {
@@ -260,7 +262,11 @@ describe('LiveHostCoordinator browser Host', () => {
       callId: call.callId,
     });
     expect(native.closeCode).toBeUndefined();
-    expect(value.getHostKind()).toBe('native');
+    // Still the native Host: its status carries no kind.
+    expect(value.getStatus().host).toEqual({
+      version: '1.0.0',
+      protocolVersion: LIVE_HOST_PROTOCOL_VERSION,
+    });
     expect(value.getStatus()).toMatchObject({ available: true, state: 'idle' });
   });
 
@@ -309,7 +315,7 @@ describe('LiveHostCoordinator browser Host', () => {
     );
   });
 
-  it('refuses screen capture and the global shortcut without asking the page', async () => {
+  it('refuses screen capture without asking the page', async () => {
     const value = coordinator();
     const socket = connectBrowser(value);
     const call = value.start('resume');
@@ -321,11 +327,27 @@ describe('LiveHostCoordinator browser Host', () => {
     await expect(
       value.captureVisualContext('coordinator-1'),
     ).rejects.toBeInstanceOf(LiveBrowserHostUnsupportedError);
-    await expect(value.setShortcut('Alt+Space')).rejects.toThrow(
-      'unavailable in browser Live sessions',
+    expect(socket.messages().map((message) => message.type)).not.toContain(
+      'host.capture_visual',
     );
-    const types = socket.messages().map((message) => message.type);
-    expect(types).not.toContain('host.capture_visual');
-    expect(types).not.toContain('host.set_shortcut');
+  });
+
+  it('keeps a shortcut change as a setting for the next native Host', async () => {
+    const value = coordinator();
+    const browser = connectBrowser(value);
+
+    // Resolves at once: a page has no global shortcut to confirm, and the
+    // native round trip would otherwise time out.
+    const status = await value.setShortcut('Alt+Space');
+    expect(status.shortcut).toBe('Alt+Space');
+    expect(browser.messages().map((message) => message.type)).not.toContain(
+      'host.set_shortcut',
+    );
+
+    const native = connectNative(value);
+    const welcome = native
+      .messages()
+      .find((message) => message.type === 'host.welcome');
+    expect(welcome).toMatchObject({ status: { shortcut: 'Alt+Space' } });
   });
 });
