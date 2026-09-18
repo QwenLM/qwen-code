@@ -23,6 +23,10 @@ start happy 8899; start tools 8900; start failed 8901; start stuck 8902
 
 cd $ROOT
 export HOME=$SCR/home OPENAI_API_KEY=sk-fake OPENAI_MODEL=qwen-plus
+# R1 asserts "exactly one batch", which only means anything with the relaunch
+# enabled. An outer qwen shell exports QWEN_CODE_NO_RELAUNCH to its children,
+# and with the relaunch off the unfixed code also creates exactly one batch.
+unset QWEN_CODE_NO_RELAUNCH
 PASS=0; FAIL=0
 check() { # name expected actual
   if [ "$2" = "$3" ]; then echo "PASS  $1"; PASS=$((PASS+1)); else echo "FAIL  $1 (expected '$2', got '$3')"; FAIL=$((FAIL+1)); fi

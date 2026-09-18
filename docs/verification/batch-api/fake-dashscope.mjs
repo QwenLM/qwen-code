@@ -124,13 +124,20 @@ function pollJob(job) {
       SCENARIO === 'tools' && job.seq === 1 && i === 0 ? 'tool_call' : 'text';
     return JSON.stringify({
       custom_id: JSON.parse(line).custom_id ?? String(i),
-      response: { status_code: 200, body: completionBody(kind, `${job.id}-${i}`) },
+      response: {
+        status_code: 200,
+        body: completionBody(kind, `${job.id}-${i}`),
+      },
     });
   });
   const outId = `file-out-${++fileSeq}`;
   files.set(outId, { content: lines.join('\n') + '\n' });
   job.output_file_id = outId;
-  job.request_counts = { total: job.lines.length, completed: job.lines.length, failed: 0 };
+  job.request_counts = {
+    total: job.lines.length,
+    completed: job.lines.length,
+    failed: 0,
+  };
   return job;
 }
 
@@ -155,7 +162,12 @@ const server = http.createServer((req, res) => {
       const lines = extractJsonl(raw);
       files.set(id, { content: lines.join('\n'), lines });
       log({ event: 'upload', id, lineCount: lines.length, lines });
-      return send(res, 200, { id, object: 'file', purpose: 'batch', bytes: raw.length });
+      return send(res, 200, {
+        id,
+        object: 'file',
+        purpose: 'batch',
+        bytes: raw.length,
+      });
     }
     let m = p.match(/^\/files\/([^/]+)\/content$/);
     if (m && req.method === 'GET') {
@@ -186,11 +198,20 @@ const server = http.createServer((req, res) => {
         input_file_id: body.input_file_id,
         created_at: now(),
         expires_at: now() + 86400,
-        request_counts: { total: input?.lines?.length ?? 1, completed: 0, failed: 0 },
+        request_counts: {
+          total: input?.lines?.length ?? 1,
+          completed: 0,
+          failed: 0,
+        },
         lines: input?.lines ?? ['{"custom_id":"turn"}'],
       };
       batches.set(id, job);
-      log({ event: 'batch_created', id, endpoint: body.endpoint, window: body.completion_window });
+      log({
+        event: 'batch_created',
+        id,
+        endpoint: body.endpoint,
+        window: body.completion_window,
+      });
       return send(res, 200, job);
     }
     m = p.match(/^\/batches\/([^/]+)\/cancel$/);
@@ -221,7 +242,13 @@ const server = http.createServer((req, res) => {
         object: 'chat.completion.chunk',
         created: completion.created,
         model: completion.model,
-        choices: [{ index: 0, delta: { role: 'assistant', content: 'REALTIME_OK' }, finish_reason: 'stop' }],
+        choices: [
+          {
+            index: 0,
+            delta: { role: 'assistant', content: 'REALTIME_OK' },
+            finish_reason: 'stop',
+          },
+        ],
         usage: completion.usage,
       };
       res.write(`data: ${JSON.stringify(chunk)}\n\n`);
@@ -230,10 +257,14 @@ const server = http.createServer((req, res) => {
     }
 
     log({ event: 'unhandled', method: req.method, path: p });
-    send(res, 404, { error: { message: `fake server: no route ${req.method} ${p}` } });
+    send(res, 404, {
+      error: { message: `fake server: no route ${req.method} ${p}` },
+    });
   });
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  process.stdout.write(`fake-dashscope listening on ${PORT} scenario=${SCENARIO} log=${LOG}\n`);
+  process.stdout.write(
+    `fake-dashscope listening on ${PORT} scenario=${SCENARIO} log=${LOG}\n`,
+  );
 });

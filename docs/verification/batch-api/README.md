@@ -79,8 +79,9 @@ TUI 下 `--batch` 会被 `.check()` 拒绝；QWEN_OAUTH 下会在第一次请求
 
 `fake-dashscope.mjs` 是一个假的百炼兼容服务（`/files`、`/batches`、`/batches/:id/cancel`、
 `/files/:id/content`、`/chat/completions`），按场景推进 batch 状态并记录每条请求；
-`regression.sh` 驱动**真实 CLI 进程**跑完 happy / tools / failed / slow / stuck 五个场景，
-断言退出码、stdout 与请求序列：
+`regression.sh` 驱动**真实 CLI 进程**跑完 happy / tools / failed / stuck 四个场景，
+断言退出码、stdout 与请求序列（`fake-dashscope.mjs` 支持 `SLOW_SECONDS`，但本脚本没有启动
+slow 场景，`pollJob` 的 slow 分支未被覆盖）：
 
 ```sh
 bash docs/verification/batch-api/regression.sh   # 约 5 分钟，26 条断言
