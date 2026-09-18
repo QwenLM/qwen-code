@@ -1424,40 +1424,34 @@ export class ExtensionManager {
   }
 
   /**
-   * Refreshes the cache from manifest headers only: install metadata, the
-   * parsed manifest, and the identity fields derived from them. Skills,
-   * commands, agents, hooks, and context files are NOT loaded, so this costs
-   * one manifest read per extension instead of a full subresource scan.
+   * Loads the extension catalog — identity fields only (id, name, version,
+   * install metadata, activation policy) — and returns it with the store's
+   * snapshot. Skills, commands, agents, hooks, and context files are NOT
+   * loaded, so this costs one manifest read per extension instead of a full
+   * subresource scan. The inclusion set matches the full load exactly: the
+   * manifest head rejects the same manifests the full load's catch rejects.
    *
-   * With `names` the load is restricted to those extension names, mirroring
-   * `refreshCacheWithSnapshot`'s filter. A name-filtered refresh leaves the
-   * cache partial and therefore does not commit the directory fingerprint
-   * baseline — a full refresh after it still runs.
+   * Unlike `refreshCacheWithSnapshot`, this touches no manager state: no
+   * `extensionCache` write (the entries carry no subresources, so caching
+   * them would poison a shared manager) and no fingerprint baseline commit
+   * (which would make a later `refreshCacheIfSourcesChanged` on a shared
+   * manager report "unchanged" over a manifest-only cache). That also keeps
+   * the per-request cost down — no fingerprint walk on this path.
    *
-   * The cache and snapshot state this populates are the same objects a full
-   * `refreshCacheWithSnapshot` maintains, but the cached `Extension` entries
-   * carry no subresources. **After calling this, the manager's cache is
-   * manifest-only and must not be used by consumers that need skills,
-   * commands, agents, or hooks** — follow it with a full refresh on a manager
-   * shared with such consumers. Callers that only read identity fields
-   * (`id`, `name`, `version`, `installMetadata`) are unaffected.
-   *
-   * An unfiltered refresh commits the directory fingerprint baseline. The
-   * fingerprint covers only install metadata and manifests — never skill
-   * files — so a skill-only edit does not trigger a catalog refresh, which is
-   * exactly the desired behavior: the catalog reads nothing from skill files.
+   * The fingerprint still governs invalidation for full refreshes and is
+   * unaffected by this method: it covers only install metadata and manifests
+   * — never skill files — so a skill-only edit does not change the catalog's
+   * inputs either, which is exactly the desired behavior.
    */
   async refreshCatalogSnapshot(options?: {
     names?: string[];
-  }): Promise<ExtensionStoreSnapshot> {
+  }): Promise<{ snapshot: ExtensionStoreSnapshot; extensions: Extension[] }> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
-    const dirFingerprintBeforeLoad =
-      requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
     const { value: extensions, snapshot } =
       await this.extensionStore.readConsistent(async () => {
         // Default: load all extensions from QWEN_HOME-aware user extensions
-        // dir, then filter names from the head-only result so a filtered
-        // catalog refresh never falls back to a full subresource load.
+        // dir, then filter names from the manifest-only result so a filtered
+        // catalog never falls back to a full subresource load.
         const loadedAll = await this.loadExtensionsFromExtensionsDir(
           this.configDir,
           this.workspaceDir,
@@ -1479,18 +1473,7 @@ export class ExtensionManager {
           })),
         };
       });
-    const nextCache = new Map<string, Extension>();
-    extensions.forEach((extension) => {
-      nextCache.set(extension.name, extension);
-    });
-    this.extensionCache = nextCache;
-    this.applyStoreActivation(snapshot);
-    if (dirFingerprintBeforeLoad !== undefined) {
-      this.lastSourceFingerprint = this.sourceFingerprint(
-        dirFingerprintBeforeLoad,
-      );
-    }
-    return snapshot;
+    return { snapshot, extensions };
   }
 
   private static stampPath(target: string, followSymlinks = true): string {
@@ -1698,27 +1681,10 @@ export class ExtensionManager {
     const extensions: Extension[] = [];
     for (const subdir of subdirs) {
       const extensionDir = path.join(extensionsDir, subdir);
-      let extension: Extension | null;
-      if (options.manifestOnly) {
-        // Catalog-style loads share the full load's traversal and fail
-        // semantics: the entry stat sits outside the catch, so a dangling
-        // symlink at the extensions root fails the whole load, while a
-        // corrupt manifest is skipped like the full load skips it.
-        if (!fs.statSync(extensionDir).isDirectory()) {
-          continue;
-        }
-        extension = await this.loadExtensionManifestHead(
-          { extensionDir, workspaceDir },
-          { loadMcpServers: false },
-        )
-          .then(({ extension: loaded }) => loaded)
-          .catch(() => null);
-      } else {
-        extension = await this.loadExtension({
-          extensionDir,
-          workspaceDir,
-        });
-      }
+      const extension = await this.loadExtension(
+        { extensionDir, workspaceDir },
+        { manifestOnly: options.manifestOnly },
+      );
       if (extension != null) {
         extensions.push(extension);
       }
@@ -1732,19 +1698,20 @@ export class ExtensionManager {
    * base `Extension` object. Everything sourced from subresource directories
    * (skills, commands, agents, hooks, context files) is left to the caller.
    *
-   * With `loadMcpServers` (the default) the agent-plugins-v1 MCP merge runs
-   * here, including its `createDataDir` side effect. Catalog-style callers
-   * that never read `config.mcpServers` pass `false` so a read-only refresh
-   * does not create the plugin data root on disk.
+   * The agent-plugins-v1 MCP load always runs here because its throws are
+   * part of this head's rejection set — skipping it would change which
+   * extensions a caller sees. With `createDataDir` (the default) a
+   * successful load also mkdirs the plugin data root; catalog-style callers
+   * pass `false` so a read-only refresh performs no write.
    */
   private async loadExtensionManifestHead(
     context: LoadExtensionContext,
-    options: { loadMcpServers?: boolean } = {},
+    options: { createDataDir?: boolean } = {},
   ): Promise<{
     extension: Extension;
     loadedManifest: LoadedExtensionManifest;
   }> {
-    const { extensionDir, workspaceDir } = context;
+    const { extensionDir } = context;
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
 
@@ -1756,6 +1723,36 @@ export class ExtensionManager {
       effectiveExtensionPath = installMetadata.source;
     }
 
+    try {
+      return await this.loadExtensionManifestHeadResolved(
+        context,
+        installMetadata,
+        effectiveExtensionPath,
+        options,
+      );
+    } catch (error) {
+      // Name the path where the failure actually happened — the linked
+      // source for linked installs, not the install dir that only holds the
+      // metadata sidecar. loadExtension's catch surfaces this for its skip
+      // warning.
+      const withManifestPath = error as Error & { manifestPath?: string };
+      if (!withManifestPath.manifestPath) {
+        withManifestPath.manifestPath = effectiveExtensionPath;
+      }
+      throw error;
+    }
+  }
+
+  private async loadExtensionManifestHeadResolved(
+    context: LoadExtensionContext,
+    installMetadata: ExtensionInstallMetadata | undefined,
+    effectiveExtensionPath: string,
+    options: { createDataDir?: boolean },
+  ): Promise<{
+    extension: Extension;
+    loadedManifest: LoadedExtensionManifest;
+  }> {
+    const { workspaceDir } = context;
     const loadedManifest = this.loadExtensionManifest({
       extensionDir: effectiveExtensionPath,
       workspaceDir,
@@ -1765,16 +1762,19 @@ export class ExtensionManager {
       config = resolveEnvVarsInObject(config);
     }
     const extensionId = getExtensionId(config, installMetadata);
-    if (
-      loadedManifest.format === 'agent-plugins-v1' &&
-      options.loadMcpServers !== false
-    ) {
+    if (loadedManifest.format === 'agent-plugins-v1') {
+      // The MCP load runs on the manifest-only path too (with its data-dir
+      // creation disabled): its throws are part of the head's rejection set,
+      // so skipping it there would make the catalog list extensions the full
+      // load skips — e.g. a plugin whose mcp.json is a path-escaping symlink.
+      // With createDataDir (the default) a successful load also mkdirs the
+      // plugin data root for stdio servers.
       config = {
         ...config,
         mcpServers: await loadAgentPluginMcpServers(
           effectiveExtensionPath,
           this.extensionStore.agentPluginDataRoot(extensionId),
-          { createDataDir: true },
+          { createDataDir: options.createDataDir !== false },
         ),
       };
     }
@@ -1814,7 +1814,7 @@ export class ExtensionManager {
 
   async loadExtension(
     context: LoadExtensionContext,
-    options: { throwOnError?: boolean } = {},
+    options: { throwOnError?: boolean; manifestOnly?: boolean } = {},
   ): Promise<Extension | null> {
     const { extensionDir } = context;
     if (!fs.statSync(extensionDir).isDirectory()) {
@@ -1825,8 +1825,20 @@ export class ExtensionManager {
     try {
       // Destructured separately so `extension` stays visible in the catch
       // below for the skip warning's path.
-      const head = await this.loadExtensionManifestHead(context);
+      const head = await this.loadExtensionManifestHead(context, {
+        createDataDir: !options.manifestOnly,
+      });
       extension = head.extension;
+
+      if (options.manifestOnly) {
+        // Catalog-style loads: everything after the head is subresource work
+        // the catalog never reads, and skipping it here keeps the inclusion
+        // set identical to the full load — the head throws for the same
+        // manifests the full load's catch would reject, so both paths list
+        // exactly the same extensions.
+        return extension;
+      }
+
       const { loadedManifest } = head;
       const config = extension.config;
       const effectiveExtensionPath = extension.path;
@@ -1928,7 +1940,7 @@ export class ExtensionManager {
     } catch (e) {
       if (options.throwOnError) throw e;
       debugLogger.warn(
-        `Warning: Skipping extension in ${extension?.path ?? extensionDir}: ${getErrorMessage(
+        `Warning: Skipping extension in ${(e as Error & { manifestPath?: string }).manifestPath ?? extension?.path ?? extensionDir}: ${getErrorMessage(
           e,
         )}`,
       );

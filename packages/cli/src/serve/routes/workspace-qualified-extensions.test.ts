@@ -232,7 +232,7 @@ function mockExtensionManager(
   vi.spyOn(
     ExtensionManager.prototype,
     'refreshCatalogSnapshot',
-  ).mockResolvedValue(snapshot);
+  ).mockResolvedValue({ snapshot, extensions: [extension] });
   vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue([
     extension,
   ]);
@@ -448,6 +448,83 @@ describe('extension management v2 REST', () => {
       ).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serves an unmocked catalog whose identity fields match a full refresh', async () => {
+    // No manager mocks: real fixture files on disk, real manifest-head load.
+    // Pins the response mapping against entries built by the head-only path,
+    // including a linked install's extension id and install type.
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-catalog-'));
+    process.env['QWEN_HOME'] = qwenHome;
+    const extensionsDir = path.join(qwenHome, 'extensions');
+    await fsp.mkdir(path.join(extensionsDir, 'plain'), { recursive: true });
+    await fsp.writeFile(
+      path.join(extensionsDir, 'plain', 'qwen-extension.json'),
+      JSON.stringify({ name: 'plain', version: '1.1.0' }),
+    );
+    const linkedSource = path.join(qwenHome, 'linked-source');
+    await fsp.mkdir(linkedSource, { recursive: true });
+    await fsp.writeFile(
+      path.join(linkedSource, 'qwen-extension.json'),
+      JSON.stringify({ name: 'linked', version: '2.0.0' }),
+    );
+    await fsp.mkdir(path.join(extensionsDir, 'linked-install'), {
+      recursive: true,
+    });
+    await fsp.writeFile(
+      path.join(
+        extensionsDir,
+        'linked-install',
+        '.qwen-extension-install.json',
+      ),
+      JSON.stringify({ type: 'link', source: linkedSource }),
+    );
+    try {
+      const h = await makeHarness();
+      const manager = new ExtensionManager({
+        workspaceDir: h.primary.workspaceCwd,
+        isWorkspaceTrusted: true,
+      });
+      const full = await manager.refreshCacheWithSnapshot();
+      const expected = manager
+        .getLoadedExtensions()
+        .map((extension) => {
+          const policy = full.extensions[extension.id];
+          return {
+            id: extension.id,
+            name: extension.name,
+            version: extension.version,
+            ...(extension.installMetadata?.type
+              ? { installType: extension.installMetadata.type }
+              : {}),
+            defaultActivation: policy?.defaultActivation ?? 'enabled',
+            workspaceOverrideCount: 0,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      const response = await auth(request(h.app).get('/extensions'));
+      expect(response.status).toBe(200);
+      expect(response.body.v).toBe(1);
+      expect(
+        response.body.extensions.sort(
+          (a: { name: string }, b: { name: string }) =>
+            a.name.localeCompare(b.name),
+        ),
+      ).toEqual(expected);
+      expect(expected.map((e) => e.name)).toEqual(['linked', 'plain']);
+      expect(expected.find((e) => e.name === 'linked')?.installType).toBe(
+        'link',
+      );
+    } finally {
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(qwenHome, { recursive: true, force: true });
     }
   });
 

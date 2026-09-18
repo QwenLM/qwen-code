@@ -39,7 +39,10 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
-import { ExtensionManager } from '../src/extension/extensionManager.js';
+import {
+  ExtensionManager,
+  type Extension,
+} from '../src/extension/extensionManager.js';
 import { ExtensionStore } from '../src/extension/extension-store.js';
 
 const EXTENSION_COUNT = 100;
@@ -49,9 +52,9 @@ const AGENTS_PER_EXTENSION = 5;
 const EXPECTED_EXTENSIONS = EXTENSION_COUNT;
 const EXPECTED_SKILLS = EXTENSION_COUNT * SKILLS_PER_EXTENSION;
 
-// import.meta.url is packages/core/scripts/bench-extension-load.ts, so three
-// dirname hops land on the repo root.
-const REPO_ROOT = path.resolve(fileURLToPath(import.meta.url), '../../..');
+// import.meta.url is packages/core/scripts/bench-extension-load.ts, so four
+// dirname hops land on the repo root (scripts -> core -> packages -> repo).
+const REPO_ROOT = path.resolve(fileURLToPath(import.meta.url), '../../../..');
 const BASELINE_PATH = path.join(REPO_ROOT, '.qwen', 'bench-baseline.json');
 
 interface RunResult {
@@ -164,17 +167,18 @@ async function runOnce(
     }),
   });
   const start = performance.now();
+  let loaded: Extension[];
   if (mode === 'manifest-only') {
-    await manager.refreshCatalogSnapshot();
+    loaded = (await manager.refreshCatalogSnapshot()).extensions;
   } else {
     await manager.refreshCacheWithSnapshot();
+    loaded = manager.getLoadedExtensions();
   }
   const elapsedMs = performance.now() - start;
-  const extensions = manager.getLoadedExtensions();
   return {
     elapsedMs,
-    extensionCount: extensions.length,
-    skillCount: extensions.reduce(
+    extensionCount: loaded.length,
+    skillCount: loaded.reduce(
       (sum, extension) => sum + (extension.skills?.length ?? 0),
       0,
     ),

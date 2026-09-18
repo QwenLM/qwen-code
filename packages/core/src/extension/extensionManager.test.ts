@@ -2892,22 +2892,46 @@ describe('extension tests', () => {
       });
 
       const manager = createExtensionManager();
-      await manager.refreshCatalogSnapshot();
+      const { snapshot, extensions } = await manager.refreshCatalogSnapshot();
 
-      const extensions = manager.getLoadedExtensions();
+      expect(snapshot.extensions).toEqual(
+        expect.objectContaining({
+          [extensions[0]!.id]: expect.objectContaining({
+            name: expect.any(String),
+          }),
+        }),
+      );
       expect(extensions).toHaveLength(2);
       const qwenExt = extensions.find((e) => e.name === 'qwen-ext');
       const pluginExt = extensions.find((e) => e.name === 'plugin-ext');
       expect(qwenExt?.version).toBe('1.2.3');
       expect(qwenExt?.installMetadata?.credentialPersistence).toBe('stored');
       expect(pluginExt?.version).toBe('2.0.0');
-      // Manifest-only: no subresource is populated on the cached entries.
+      // Manifest-only: no subresource is populated on the returned entries.
       for (const extension of extensions) {
         expect(extension.skills).toBeUndefined();
         expect(extension.commands).toBeUndefined();
         expect(extension.agents).toBeUndefined();
         expect(extension.hooks).toBeUndefined();
+        expect(extension.contextFiles).toEqual([]);
       }
+    });
+
+    it('leaves the manager cache and fingerprint baseline untouched', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext-a',
+      });
+      const manager = createExtensionManager();
+
+      await manager.refreshCatalogSnapshot();
+
+      // The catalog is stateless: nothing enters extensionCache, and the
+      // fingerprint baseline is not committed — a later refresh on this
+      // manager must not be masked by a manifest-only result.
+      expect(manager.getLoadedExtensions()).toEqual([]);
+      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
+      expect(manager.getLoadedExtensions()).toHaveLength(1);
     });
 
     it('does not re-read subresources between catalog refreshes but picks up manifest edits', async () => {
@@ -2917,7 +2941,10 @@ describe('extension tests', () => {
         addContextFile: true,
       });
       const manager = createExtensionManager();
-      await manager.refreshCatalogSnapshot();
+
+      const first = await manager.refreshCatalogSnapshot();
+      expect(first.extensions[0]?.skills).toBeUndefined();
+      expect(first.extensions[0]?.contextFiles).toEqual([]);
 
       // A skill-file-only edit does not change the catalog's inputs, so the
       // second refresh reloads the same manifest head — the fingerprint never
@@ -2931,8 +2958,9 @@ describe('extension tests', () => {
       );
       fs.mkdirSync(path.dirname(skillFile), { recursive: true });
       fs.writeFileSync(skillFile, '---\nname: s\ndescription: d\n---\nbody');
-      await manager.refreshCatalogSnapshot();
-      expect(manager.getLoadedExtensions()).toHaveLength(1);
+      const second = await manager.refreshCatalogSnapshot();
+      expect(second.extensions).toHaveLength(1);
+      expect(second.extensions[0]?.skills).toBeUndefined();
 
       const manifestPath = path.join(
         userExtensionsDir,
@@ -2943,10 +2971,8 @@ describe('extension tests', () => {
         manifestPath,
         JSON.stringify({ name: 'ext-a', version: '9.9.9' }),
       );
-      await manager.refreshCatalogSnapshot();
-      expect(manager.getLoadedExtensions().map((e) => e.version)).toEqual([
-        '9.9.9',
-      ]);
+      const third = await manager.refreshCatalogSnapshot();
+      expect(third.extensions.map((e) => e.version)).toEqual(['9.9.9']);
     });
 
     it('keeps the full-load fail semantics: corrupt manifest skipped, broken entry stat throws', async () => {
@@ -2962,16 +2988,50 @@ describe('extension tests', () => {
       );
 
       const manager = createExtensionManager();
-      await manager.refreshCatalogSnapshot();
-      expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
-        'good-ext',
-      ]);
+      const first = await manager.refreshCatalogSnapshot();
+      expect(first.extensions.map((e) => e.name)).toEqual(['good-ext']);
 
       // A dangling symlink at the extensions root must fail the whole load,
       // mirroring `loadExtensionsFromExtensionsDir` fail-closed behavior.
       fs.rmSync(badExtDir, { recursive: true });
       fs.symlinkSync(path.join(userExtensionsDir, 'missing-target'), badExtDir);
       await expect(manager.refreshCatalogSnapshot()).rejects.toThrow();
+    });
+
+    it('excludes an extension whose manifest head throws, matching the full load', async () => {
+      // The head's throws (manifest parse, extension id, the v1 MCP load)
+      // define the inclusion set the full load's catch rejects. Whatever
+      // throws there must be excluded from the catalog too — otherwise the
+      // catalog advertises an id that detail/enable/update routes reject as
+      // nonexistent. The subresource loaders and the MCP loader swallow
+      // their own errors today, so simulate the head throwing via the MCP
+      // dependency rather than a disk shape.
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'good-ext',
+      });
+      createAgentPlugin(path.join(userExtensionsDir, 'broken-plugin'), {
+        name: 'broken-plugin',
+      });
+      const mcpSpy = vi
+        .spyOn(
+          await import('./agent-plugins-v1/index.js'),
+          'loadAgentPluginMcpServers',
+        )
+        .mockRejectedValue(new Error('mcp unavailable'));
+
+      try {
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const fullNames = manager.getLoadedExtensions().map((e) => e.name);
+        expect(fullNames).toEqual(['good-ext']);
+
+        const manager2 = createExtensionManager();
+        const catalog = await manager2.refreshCatalogSnapshot();
+        expect(catalog.extensions.map((e) => e.name)).toEqual(fullNames);
+      } finally {
+        mcpSpy.mockRestore();
+      }
     });
 
     it('does not create the agent plugin data root', async () => {
@@ -2991,20 +3051,7 @@ describe('extension tests', () => {
       expect(fs.existsSync(path.join(storeDir, 'plugin-data'))).toBe(false);
     });
 
-    it('commits the fingerprint baseline so an unchanged directory skips the next refresh', async () => {
-      createExtension({
-        extensionsDir: userExtensionsDir,
-        name: 'ext-a',
-      });
-      const manager = createExtensionManager();
-      await manager.refreshCatalogSnapshot();
-      expect(manager.getLoadedExtensions()).toHaveLength(1);
-
-      expect(await manager.refreshCacheIfSourcesChanged()).toBe(false);
-      expect(manager.getLoadedExtensions()).toHaveLength(1);
-    });
-
-    it('a name-filtered refresh does not commit the fingerprint baseline', async () => {
+    it('a name-filtered catalog only returns the requested extensions', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
         name: 'ext-a',
@@ -3015,20 +3062,11 @@ describe('extension tests', () => {
       });
       const manager = createExtensionManager();
 
-      await manager.refreshCatalogSnapshot({ names: ['ext-a'] });
-      expect(manager.getLoadedExtensions().map((e) => e.name)).toEqual([
-        'ext-a',
-      ]);
-
-      // The partial cache must not claim the whole directory is fresh: the
-      // next full refresh still runs and picks up ext-b.
-      expect(await manager.refreshCacheIfSourcesChanged()).toBe(true);
-      expect(
-        manager
-          .getLoadedExtensions()
-          .map((e) => e.name)
-          .sort(),
-      ).toEqual(['ext-a', 'ext-b']);
+      const { extensions } = await manager.refreshCatalogSnapshot({
+        names: ['ext-a'],
+      });
+      expect(extensions.map((e) => e.name)).toEqual(['ext-a']);
+      expect(manager.getLoadedExtensions()).toEqual([]);
     });
   });
 
