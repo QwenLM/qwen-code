@@ -2184,6 +2184,14 @@ export class LlmChat {
   private lastOutputTokenCount = 0;
 
   /**
+   * Per-chat last cached-content token count from usageMetadata. Mirrors
+   * UiTelemetryService for the main session so /context in a `serve`
+   * daemon does not subtract another session's cache from this chat's
+   * total (#12047).
+   */
+  private lastCachedContentTokenCount = 0;
+
+  /**
    * Route identity (model + auth type + endpoint; see
    * Config.getModelRouteIdentity) of the content generator that produced
    * the counts above. API-reported sizes are wire-specific: one route's
@@ -2428,6 +2436,7 @@ export class LlmChat {
       this.lastPromptTokenCountIsEstimated =
         retained.promptTokenCountIsEstimated;
       this.lastOutputTokenCount = retained.outputTokenCount;
+      this.lastCachedContentTokenCount = retained.cachedContentTokenCount;
       this.tokenCountsRouteKey = targetRouteKey;
       this.telemetryService?.setLastPromptTokenCount(retained.promptTokenCount);
       this.telemetryService?.setLastCachedContentTokenCount(
@@ -2449,6 +2458,7 @@ export class LlmChat {
     this.lastPromptTokenCount = 0;
     this.lastPromptTokenCountIsEstimated = false;
     this.lastOutputTokenCount = 0;
+    this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = targetRouteKey;
     // Keep the telemetry mirror in sync, or the UI context counters
     // and compression banners keep reading the foreign count. The cached
@@ -2461,8 +2471,8 @@ export class LlmChat {
    * Save the current slots into {@link tokenCountsByRouteKey} under their
    * owning route key so a later read keyed back to that route restores the
    * exact API-reported values. Zero slots carry nothing worth retaining;
-   * the telemetry mirror still holds the owning route's cached-content
-   * count at this point, so it is captured here too.
+   * the cached-content count is carried in the per-chat slot and retained
+   * with it so a route switch cannot substitute another session's value.
    */
   private retainCurrentTokenCounts(): void {
     if (
@@ -2481,10 +2491,7 @@ export class LlmChat {
       promptTokenCount: this.lastPromptTokenCount,
       promptTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
       outputTokenCount: this.lastOutputTokenCount,
-      // Optional chaining keeps partial telemetry test mocks from throwing
-      // (same convention as currentRouteKey's Config lookups).
-      cachedContentTokenCount:
-        this.telemetryService?.getLastCachedContentTokenCount?.() ?? 0,
+      cachedContentTokenCount: this.lastCachedContentTokenCount,
     });
   }
 
@@ -2504,6 +2511,16 @@ export class LlmChat {
   getLastOutputTokenCount(): number {
     this.adoptTokenCountsForRoute();
     return this.lastOutputTokenCount;
+  }
+
+  /**
+   * Most recent cached-content token count reported by the model for *this*
+   * chat. Prefer this over {@link UiTelemetryService} in multi-session
+   * daemons (#12047).
+   */
+  getLastCachedContentTokenCount(targetRouteKey?: string): number {
+    this.adoptTokenCountsForRoute(targetRouteKey);
+    return this.lastCachedContentTokenCount;
   }
 
   /**
@@ -2569,14 +2586,16 @@ export class LlmChat {
    * threshold check sees `0` and refuses to compress — so the first API call
    * can 400 from oversized history. Callers pass the parent chat's
    * `getLastPromptTokenCount()` here. This also clears any remembered
-   * previous-response output token count because the seeded prompt count
-   * comes from a different chat instance and should not inherit this chat's
-   * last response size.
+   * previous-response output and cached-content token counts because the
+   * seeded prompt count comes from a different chat instance and should not
+   * inherit this chat's last response metadata.
    */
   setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+    this.lastCachedContentTokenCount = 0;
+    this.telemetryService?.setLastCachedContentTokenCount(0);
     this.tokenCountsRouteKey = this.currentRouteKey();
     // A fresh count supersedes anything this route retained while another
     // route owned the slots. Without the delete this writer alone among the
@@ -2866,12 +2885,14 @@ export class LlmChat {
     this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
+    this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
     // Fast compression rewrote the shared history every retained entry
     // sizes, so ALL retained counts are stale — the other routes' entries
     // describe the same pre-compression history (#9506).
     this.tokenCountsByRouteKey.clear();
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
+    this.telemetryService?.setLastCachedContentTokenCount(0);
     this.consecutiveFailures = 0;
 
     return { info, microcompactMeta: mcMeta };
@@ -3118,12 +3139,11 @@ export class LlmChat {
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       const lastPromptTokenCountWasEstimatedBeforeHardRescue =
         this.lastPromptTokenCountIsEstimated;
-      // The rescue's COMPRESSED stamp zeroes lastOutputTokenCount (via
-      // setLastPromptTokenCount), so the rollback below must restore the
-      // output half of the resurrected count pair alongside the prompt
-      // half, or the next turn's additive prompt estimate under-counts by
-      // the last response's size (#9506).
+      // The rescue's COMPRESSED stamp clears response metadata (via
+      // setLastPromptTokenCount), so rollback must restore both counts.
       const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
+      const lastCachedContentTokenCountBeforeHardRescue =
+        this.lastCachedContentTokenCount;
       // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
       // setLastPromptTokenCount on the success path) even though this send
       // targets the REQUEST route — and hard-rescue only fires for
@@ -3223,6 +3243,8 @@ export class LlmChat {
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
+          this.lastCachedContentTokenCount =
+            lastCachedContentTokenCountBeforeHardRescue;
           this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
           // Restore the retention map alongside the slots: the rescue's
           // compression consumed/cleared entries mid-flight, and without
@@ -3239,6 +3261,9 @@ export class LlmChat {
           }
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
+          );
+          this.telemetryService?.setLastCachedContentTokenCount(
+            lastCachedContentTokenCountBeforeHardRescue,
           );
         }
         const compressionStatus =
@@ -6041,11 +6066,13 @@ export class LlmChat {
             this.telemetryService?.setLastPromptTokenCount(
               lastPromptTokenCount,
             );
-            if (cachedContentTokenCount && this.telemetryService) {
-              this.telemetryService.setLastCachedContentTokenCount(
-                cachedContentTokenCount,
-              );
-            }
+            // Always mirror onto the chat — including zero — so a later
+            // /context in this session cannot keep another session's cache
+            // hit, and route retain/restore has a per-chat source (#12047).
+            this.lastCachedContentTokenCount = cachedContentTokenCount;
+            this.telemetryService?.setLastCachedContentTokenCount(
+              cachedContentTokenCount,
+            );
           }
         }
 

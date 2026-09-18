@@ -258,6 +258,13 @@ describe('tokenLimit', () => {
       expect(tokenLimit('deepseek-v4-pro')).toBe(1000000);
     });
 
+    it('should return 1M/384K for the official API deepseek-flash name', () => {
+      // api.deepseek.com serves V4 flash as `deepseek-flash`; the DashScope
+      // spelling `deepseek-v4.1-flash` is rejected by the official endpoint.
+      expect(tokenLimit('deepseek-flash')).toBe(1000000);
+      expect(tokenLimit('deepseek-flash', 'output')).toBe(384000);
+    });
+
     it('should return 128K for DeepSeek models', () => {
       expect(tokenLimit('deepseek-r1')).toBe(131072);
       expect(tokenLimit('deepseek-v3')).toBe(131072);

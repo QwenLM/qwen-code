@@ -811,8 +811,6 @@ export type GoalSnapshotLike = {
     activeTimeBudgetMs?: number;
     tokensUsed?: number;
     tokenBudget?: number;
-    checkpointStalls?: number;
-    lastCheckpointFailure?: string;
     lastReason?: string;
   } | null;
   activity?: string;
