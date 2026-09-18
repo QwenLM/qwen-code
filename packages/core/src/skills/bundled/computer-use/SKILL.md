@@ -46,7 +46,7 @@ whole result, so do not use `image(result)` either.
 If `node_repl` is unavailable, run:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.5
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.1.6
 npm install --no-save --package-lock=false @qwen-code/cua-sdk@0.20.9
 ```
 
