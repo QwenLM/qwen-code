@@ -364,7 +364,10 @@ type MainSessionPromptConfig = Pick<
   // the resolver reads the live verdict on this path too. Optional, because
   // the sessionless callers that build this shape by hand have no trust to
   // report and only ever carry built-in styles.
-  Partial<Pick<Config, 'isTrustedFolder'>>;
+  // Optional for the same reason: a hand-built prompt config has no session and
+  // therefore no declared-tool snapshot, which the builder reads as "everything
+  // is declared" (#12032).
+  Partial<Pick<Config, 'isTrustedFolder' | 'getPromptToolSnapshot'>>;
 
 export function getMainSessionBaseSystemPrompt(
   config: MainSessionPromptConfig,
@@ -384,6 +387,7 @@ export function getMainSessionBaseSystemPrompt(
         resolveMainSessionOutputStyle(config),
         config.isTodoWriteEnabled(),
         config.getCodeModeOnly(),
+        { declaredTools: config.getPromptToolSnapshot?.() },
       );
 }
 
@@ -2297,6 +2301,27 @@ export class LlmClient {
       profiler.timeSync('deferred_tool_preload', () => {
         this.preloadDeferredToolsWithinBudget();
       });
+      // Snapshot what this session declares once the registry is warm and the
+      // preload has settled, so the prompt built below can gate its
+      // tool-specific text on it and `/context` can report the same set
+      // (#12032). Mid-session reveals deliberately do not update this: they
+      // change only the tools block, keeping the cached system prefix stable.
+      //
+      // Not wrapped in a profiler stage: it is a map over declarations the
+      // registry has already built, and the startup stage list is asserted in
+      // client.test.ts — a stage here would be noise in that profile.
+      //
+      // Optional call: partial Config stubs (tests, derived agent shims) do not
+      // carry the setter, and a missing snapshot simply leaves the prompt
+      // ungated rather than failing session startup.
+      this.config.setPromptToolSnapshot?.(
+        new Set(
+          toolRegistry
+            .getFunctionDeclarations()
+            .map((declaration) => declaration.name)
+            .filter((name): name is string => Boolean(name)),
+        ),
+      );
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
