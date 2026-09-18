@@ -38,7 +38,7 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
-    'packages/acp-bridge/src/bridge.ts',
+    'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
       accesses: { 'key:QWEN_SERVE_DEBUG': 1 },
@@ -287,6 +287,15 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:no_proxy': 2,
         whole: 9,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-git-branches.ts',
+    {
+      reason:
+        "The git error redaction mirrors the daemon process's own HOME/" +
+        'XDG_CONFIG_HOME to label the inherited config paths git echoes.',
+      accesses: { 'key:HOME': 1, 'key:XDG_CONFIG_HOME': 1 },
     },
   ],
   [

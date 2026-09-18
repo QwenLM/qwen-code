@@ -279,9 +279,16 @@ describe('code mode exposure', () => {
     const initial = registry.getFunctionDeclarations();
     expect(initial.map((item) => item.name)).toEqual(['exec', 'tool_search']);
     expect(initial[0]?.description).toContain('"name":"deferred_tool"');
+    expect(initial[0]?.description).not.toContain('tools.deferred_tool(args:');
     expect(registry.getDeferredToolSummary().map((item) => item.name)).toEqual([
       'deferred_tool',
     ]);
+
+    const filtered = registry.getFunctionDeclarationsFiltered(
+      ['exec', 'tool_search'],
+      new Set(['deferred_tool']),
+    );
+    expect(filtered[0]?.description).toContain('tools.deferred_tool(args:');
 
     const revealed = registry.getFunctionDeclarations({
       includeDeferred: true,
@@ -465,9 +472,46 @@ describe('code mode exposure', () => {
     expect(buildExecDescription(first)).toContain(
       'Pending timeouts do not keep exec alive by themselves',
     );
+    expect(buildExecDescription(first, false)).toContain(
+      'A denied or failed call aborts the whole program',
+    );
     expect(buildExecDescription(first)).toContain(
       'clearTimeout(timeoutId?: number)',
     );
+  });
+
+  it('describes normalized-name collisions on the hybrid surface', () => {
+    const registry = new ToolRegistry(
+      makeFakeConfig({ toolMode: ToolMode.CodeMode }),
+    );
+    registry.registerTool(new MockTool({ name: 'exec' }));
+    registry.registerTool(
+      new MockTool({
+        name: 'read-file',
+        params: {
+          type: 'object',
+          properties: { path: { type: 'string' } },
+        },
+      }),
+    );
+    registry.registerTool(new MockTool({ name: 'read_file' }));
+
+    const declarations = registry.getFunctionDeclarations();
+    const execDescription = declarations.find(
+      (item) => item.name === 'exec',
+    )?.description;
+    const keptDescription = declarations.find(
+      (item) => item.name === 'read-file',
+    )?.description;
+    const omittedDescription = declarations.find(
+      (item) => item.name === 'read_file',
+    )?.description;
+
+    expect(execDescription).toContain(
+      '- read_file is omitted because it collides with read-file as tools.read_file.',
+    );
+    expect(keptDescription).toContain('declare const tools: { read_file(args:');
+    expect(omittedDescription).not.toContain('declare const tools:');
   });
 
   it('expands deferred tool schemas because nothing can reveal them later', () => {

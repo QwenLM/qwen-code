@@ -13,6 +13,7 @@ import type {
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import { type Config, matchesAnyServerPattern } from '../config/config.js';
+import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -875,6 +876,9 @@ export class ToolRegistry {
   private decorateCodeModeDeclarations(
     tools: AnyDeclarativeTool[],
     allowedNames?: ReadonlySet<string>,
+    canRevealDeferred = tools.some(
+      (tool) => tool.name === ToolNames.TOOL_SEARCH,
+    ),
   ): FunctionDeclaration[] {
     if (!tools.some((tool) => tool.name === ToolNames.EXEC)) {
       return tools.map((tool) => tool.schema);
@@ -888,9 +892,6 @@ export class ToolRegistry {
         .filter((tool) => tool.name !== ToolNames.EXEC)
         .filter((tool) => bindings.has(tool.name))
         .map((tool) => tool.name),
-    );
-    const canRevealDeferred = tools.some(
-      (tool) => tool.name === ToolNames.TOOL_SEARCH,
     );
     return tools.map((tool) => {
       if (tool.name === ToolNames.EXEC) {
@@ -1192,6 +1193,7 @@ export class ToolRegistry {
       return this.decorateCodeModeDeclarations(
         tools,
         codeModeAllowedNames ?? allowedNames,
+        false,
       );
     }
     const declarations: FunctionDeclaration[] = [];
@@ -1205,6 +1207,10 @@ export class ToolRegistry {
   }
 
   isToolDeclared(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (tool && isMediaPolicyToolHiddenFromModel(this.config, tool)) {
+      return false;
+    }
     return (
       name !== ToolNames.PROPOSE_GOAL || this.config.isGoalProposalAvailable()
     );

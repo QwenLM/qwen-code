@@ -26,6 +26,7 @@ import {
   ToolNames,
   buildSkillLlmContent,
   computeThresholds,
+  isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
   formatContextFileDisplayPath,
   type CompactionThresholds,
@@ -114,10 +115,12 @@ export async function collectContextData(
   const apiTotalTokens = activeChat
     ? activeChat.getLastPromptTokenCount()
     : uiTelemetryService.getLastPromptTokenCount();
-  // Cached-content tokens have no per-chat mirror today (only the global
-  // singleton is written, llm-chat.ts), so this read stays global. It only
-  // refines the messages-vs-cache split, not the headline total or tier.
-  const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
+  // Same per-session preference as the total (#5763 / #12047): the global
+  // singleton reports whichever session last completed a turn in a `serve`
+  // daemon. Fall back only when no chat exists yet.
+  const apiCachedTokens =
+    activeChat?.getLastCachedContentTokenCount?.() ??
+    uiTelemetryService.getLastCachedContentTokenCount();
 
   const systemPromptText = getMainSessionBaseSystemPrompt(config);
   const systemPromptTokens = estimateContextTextTokens(systemPromptText);
@@ -133,6 +136,11 @@ export async function collectContextData(
   const toolDeclarations = toolRegistry
     ? toolRegistry.getFunctionDeclarations()
     : [];
+  const toolDeclarationsByName = new Map(
+    toolDeclarations
+      .filter((declaration) => declaration.name)
+      .map((declaration) => [declaration.name!, declaration] as const),
+  );
   const toolsJsonStr = JSON.stringify(toolDeclarations);
   const allToolsTokens = estimateContextTextTokens(toolsJsonStr);
 
@@ -142,7 +150,16 @@ export async function collectContextData(
     if (toolRegistry?.isDeferredAndHidden(tool.name)) {
       continue;
     }
-    const toolJsonStr = JSON.stringify(tool.schema);
+    // Same alignment rule for omni media-policy tools: fixed-only tools
+    // (declared descriptor, modelAccess not enabled) are stripped from
+    // getFunctionDeclarations() and cost the model zero prompt tokens, so
+    // listing them here would make the breakdown sum exceed allToolsTokens.
+    if (isMediaPolicyToolHiddenFromModel(config, tool)) {
+      continue;
+    }
+    const toolJsonStr = JSON.stringify(
+      toolDeclarationsByName.get(tool.name) ?? tool.schema,
+    );
     const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
       mcpTools.push({
@@ -170,7 +187,11 @@ export async function collectContextData(
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
   const skillToolDefinitionTokens = skillTool
-    ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
+    ? estimateContextTextTokens(
+        JSON.stringify(
+          toolDeclarationsByName.get(ToolNames.SKILL) ?? skillTool.schema,
+        ),
+      )
     : 0;
 
   const loadedSkillNames: ReadonlySet<string> =

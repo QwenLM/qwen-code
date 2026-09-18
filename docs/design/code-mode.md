@@ -47,7 +47,7 @@ force `direct`.
 | Ordinary eager tools | Direct                   | Direct and nested               | Nested only      |
 | Deferred tools       | `tool_search`            | `tool_search` and nested        | Nested only      |
 | Direct-control tools | Direct                   | Direct only                     | Direct only      |
-| `exec`               | Hidden                   | Direct                          | Direct           |
+| `exec`               | Not registered           | Direct                          | Direct           |
 | Hidden bridge tools  | Existing direct behavior | Direct where already applicable | Hidden           |
 
 In `code_mode`, ordinary visible tool descriptions gain an `exec` declaration
@@ -70,6 +70,8 @@ all surviving code-mode-callable bindings.
   telemetry.
 - Duplicating every schema in hybrid mode would increase prompt size, so only
   the per-tool nested declaration is appended there.
+- A denied or failed nested call aborts the whole `exec` program, so a call
+  that may be refused should stay out of a batch that would need to be repeated.
 
 ## Validation
 

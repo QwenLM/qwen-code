@@ -75,9 +75,12 @@ CodeModeOnly 会隐藏 `tool_search`，嵌套调用也不会以 `functionCall` �
 - 全新的异步 JavaScript 执行环境；
 - 用于嵌套调用的 `tools.<normalizedName>(args)`；
 - 包含规范名称和 JavaScript 名称的 `ALL_TOOLS`；
-- `text(value)`、`image(value)`、`audio(value)` 和 `exit()`；
+- `text(value)`、`image(value)`、`audio(value)`、`generatedImage(value)`、
+  `setTimeout(callback, delayMs)`、`clearTimeout(timeoutId)` 和 `exit()`；
 - 从 JSON Schema 确定性生成的类 TypeScript 签名；
-- 不提供 Node.js、import、网络 API、timer 和持久状态。
+- 不提供 Node.js、`process`、`require`、文件系统、网络、import、`console`、
+  `WebAssembly`、`Atomics`、`SharedArrayBuffer` 和持久状态。待处理的 timer
+  本身不会让 `exec` 保持运行。
 
 嵌套调用返回一个 JSON-safe 对象，其中包含真实 call id、工具名、状态、输出和
 structured content。调用失败或取消时，guest promise 会使用 scheduler/ACP 错误
@@ -91,7 +94,7 @@ reject。
 名称，并分派每次调用。
 
 guest 不提供 Node 全局变量、`require`、`process`、文件系统、socket、模块加载器、
-`console`、timer、`Atomics`、`SharedArrayBuffer` 或 `WebAssembly`。由于没有安装
+`console`、`Atomics`、`SharedArrayBuffer` 或 `WebAssembly`。由于没有安装
 模块加载器，动态和静态 import 都会失败。runtime 的内存和 stack 限制固定。
 QuickJS 的 interrupt hook 会限制 guest CPU 预算。当 guest 挂起等待已注册的 host
 工具时，该预算和父进程的兜底 watchdog 会暂停；在 guest job 再次运行前恢复。

@@ -27,7 +27,12 @@ import type {
   Part,
   PartListUnion,
 } from '@google/genai';
-import { LlmClient, SendMessageType, type SteerInput } from './client.js';
+import {
+  LlmClient,
+  SendMessageType,
+  MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
+  type SteerInput,
+} from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -58,6 +63,8 @@ import {
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
+import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
+import type { MediaMemoryRecallResult } from '../services/media-memory/index.js';
 
 type MockSessionStartProfiler = {
   time: Mock;
@@ -427,6 +434,15 @@ vi.mock(
 );
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
+// Only the selector itself is stubbed — the reminder the client injects is
+// formatted by the real omni module, so the assertions below match the
+// exact block a production passive recall would put on the wire.
+const runOmniMemorySideQueryMock = vi.hoisted(() => vi.fn());
+vi.mock('../omni/memory-side-query.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../omni/memory-side-query.js')>()),
+  runOmniMemorySideQuery: runOmniMemorySideQueryMock,
+}));
+
 /**
  * Array.fromAsync ponyfill, which will be available in es 2024.
  *
@@ -670,6 +686,7 @@ describe('Gemini Client (client.ts)', () => {
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getJsonSchema: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getExecutionEnvironment: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -731,6 +748,115 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('keeps the restored tool boundary through startup reminder refresh', async () => {
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getSessionRestoreRuntime).mockReturnValue({
+        apiHistory: [result],
+        completedToolCallIds: ['ended'],
+        uiTelemetryEvents: [],
+      } as unknown as ReturnType<Config['getSessionRestoreRuntime']>);
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      await resumedClient.refreshStartupContextReminder();
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
+    it('restores a completed tool boundary from the legacy transcript', async () => {
+      const base = {
+        sessionId: 'session',
+        timestamp: new Date(0).toISOString(),
+        cwd: '/test/project',
+        version: 'test',
+        goalContext: { goalId: 'goal', revision: 1, turnId: 'turn' },
+      };
+      const result: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'ended',
+              name: 'update_goal',
+              response: {},
+            },
+          },
+        ],
+      };
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          sessionId: 'session',
+          projectHash: 'project',
+          startTime: base.timestamp,
+          lastUpdated: base.timestamp,
+          messages: [
+            {
+              ...base,
+              uuid: 'call',
+              parentUuid: null,
+              type: 'assistant',
+              message: {
+                role: 'model',
+                parts: [{ functionCall: { id: 'ended', name: 'update_goal' } }],
+              },
+            },
+            {
+              ...base,
+              uuid: 'result',
+              parentUuid: 'call',
+              type: 'tool_result',
+              message: result,
+            },
+            {
+              ...base,
+              uuid: 'end',
+              parentUuid: 'result',
+              type: 'system',
+              subtype: 'goal_turn_end',
+              systemPayload: { toolCallId: 'ended' },
+            },
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: 'end',
+      });
+      const resumedClient = new LlmClient(mockConfig);
+      await resumedClient.initialize();
+
+      expect(resumedClient.getChat().getCompletedToolCallIds()).toEqual([
+        'ended',
+      ]);
+      expect(resumedClient.getChat().getHistoryForRecovery()).toEqual([]);
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'next request' }],
+      };
+      resumedClient.getChat().addHistory(input);
+      expect(resumedClient.stripOrphanedUserEntriesFromHistory()).toEqual([
+        input,
+      ]);
+      expect(resumedClient.getHistory().at(-1)).toEqual(result);
+    });
+
     it('initializes from the selective runtime projection without the full transcript', async () => {
       // Crossing a macrotask boundary is what makes this an oracle for the
       // `await`: a mock that returns `undefined` (or resolves in the same
@@ -1914,6 +2040,7 @@ describe('Gemini Client (client.ts)', () => {
         { role: 'model', parts: [{ text: 'hi' }] },
       ];
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1922,7 +2049,10 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.refreshStartupContextReminder();
 
-      expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        currentHistory.slice(1),
+        undefined,
+      );
     });
 
     it('removes the full legacy 2-entry prelude, not just the first entry', async () => {
@@ -1952,6 +2082,7 @@ describe('Gemini Client (client.ts)', () => {
         ],
       };
       const mockChat: Partial<LlmChat> = {
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(currentHistory),
         setHistory: vi.fn(),
       };
@@ -1964,10 +2095,10 @@ describe('Gemini Client (client.ts)', () => {
       await client.refreshStartupContextReminder();
 
       // slice(2) drops BOTH legacy entries; slice(1) would have left legacyAck.
-      expect(mockChat.setHistory).toHaveBeenCalledWith([
-        newPrelude,
-        ...currentHistory.slice(2),
-      ]);
+      expect(mockChat.setHistory).toHaveBeenCalledWith(
+        [newPrelude, ...currentHistory.slice(2)],
+        undefined,
+      );
     });
   });
 
@@ -2170,6 +2301,115 @@ describe('Gemini Client (client.ts)', () => {
         h.parts?.some((p) => p.functionResponse),
       );
       expect(hasAnyFunctionResponse).toBe(false);
+    });
+  });
+
+  describe('omni passive media-memory recall injection', () => {
+    /** Minimal materialized recall — the client neither builds nor reads
+     * this payload, it only has to get the formatted block onto the wire. */
+    const recallResult = {
+      status: 'hit',
+      files: [{ resourceId: 'media-1-abcdef01', mediaType: 'image' }],
+      entries: [{ entryId: 'e-1', kind: 'derived_media' }],
+      gaps: [],
+    } as unknown as MediaMemoryRecallResult;
+
+    function enableOmni(): void {
+      (
+        mockConfig as unknown as { isOmniEnabled: () => boolean }
+      ).isOmniEnabled = () => true;
+    }
+
+    async function runUserQuery(): Promise<unknown[]> {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: LlmEventType.Content, value: 'response' };
+        })(),
+      );
+      const stream = client.sendMessageStream(
+        [{ text: 'what changed in this clip?' }],
+        new AbortController().signal,
+        'prompt-omni-recall',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+      return mockTurnRunFn.mock.lastCall?.[1] as unknown[];
+    }
+
+    it('prepends the recalled block ahead of the user parts of the outgoing request', async () => {
+      // This is the ONLY place the sideQuery surface reaches a model
+      // request. The whole point of passive recall is that it lands
+      // BEFORE the main request is sent (M §9.3) — retrofitting it after
+      // the systemReminders spread, or dropping the call, leaves a
+      // pipeline that still selects and materializes entries and then
+      // throws them away, with no other symptom than the model behaving
+      // as if memory were empty.
+      enableOmni();
+      runOmniMemorySideQueryMock.mockResolvedValue({
+        result: recallResult,
+        resourceIds: ['media-1-abcdef01'],
+      });
+
+      const request = await runUserQuery();
+
+      const reminder = formatOmniMemorySideQueryReminder(recallResult);
+      expect(request).toContain(reminder);
+      // The user's own text has been flattened to a bare string by this
+      // point; the reminder block must sit ahead of it.
+      const userPartIndex = request.indexOf('what changed in this clip?');
+      expect(userPartIndex).toBeGreaterThanOrEqual(0);
+      expect(request.indexOf(reminder)).toBeLessThan(userPartIndex);
+
+      // The selector must see the request as it stands BEFORE injection —
+      // that text (and the media handles inside it) is the only thing
+      // scoping passive recall to what this request actually references.
+      const [params] = runOmniMemorySideQueryMock.mock.calls[0] as [
+        { requestParts: unknown[]; promptId?: string },
+      ];
+      expect(params.promptId).toBe('prompt-omni-recall');
+      expect(params.requestParts).toContain('what changed in this clip?');
+      expect(params.requestParts).not.toContain(reminder);
+    });
+
+    it('injects nothing when the selector declines', async () => {
+      // A null outcome is the normal path in active mode (where the recall
+      // TOOL is registered instead — see memory-side-query.test.ts for the
+      // D10 gate), and also covers a request with no handles, a selector
+      // timeout, and every other degraded case. None of them may put an
+      // empty 【媒体记忆】 shell in front of the user's question.
+      enableOmni();
+      runOmniMemorySideQueryMock.mockResolvedValue(null);
+
+      const request = await runUserQuery();
+
+      expect(runOmniMemorySideQueryMock).toHaveBeenCalledTimes(1);
+      expect(
+        request.filter(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            'text' in part &&
+            (part as { text?: string }).text?.includes('【媒体记忆】'),
+        ),
+      ).toEqual([]);
+    });
+
+    it('never consults the selector when omni is off', async () => {
+      // Omni is opt-in and experimental: a session without it must pay no
+      // recall latency and touch no memory store.
+      runOmniMemorySideQueryMock.mockResolvedValue({
+        result: recallResult,
+        resourceIds: [],
+      });
+
+      const request = await runUserQuery();
+
+      expect(runOmniMemorySideQueryMock).not.toHaveBeenCalled();
+      expect(request).not.toContain(
+        formatOmniMemorySideQueryReminder(recallResult),
+      );
     });
   });
 
@@ -3067,7 +3307,7 @@ describe('Gemini Client (client.ts)', () => {
       warnSpy.mockRestore();
     });
 
-    it('reports that withheld tools remain callable through exec in CodeMode', async () => {
+    it('reports withheld tools as unreachable when exec is absent in CodeMode', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockReturnValue(null);
       reg.getDeferredToolSummary.mockReturnValue([
@@ -3081,10 +3321,37 @@ describe('Gemini Client (client.ts)', () => {
       await client.setTools();
 
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('they remain callable through exec'),
+        expect.stringContaining('These tools are unreachable until restart'),
       );
       expect(warnSpy).not.toHaveBeenCalledWith(
-        expect.stringContaining('they are unreachable until restart'),
+        expect.stringContaining('remain callable through exec'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('reports only code-mode-callable withheld tools as reachable through exec', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.EXEC ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'write_file', description: 'write' },
+        { name: 'send_message', description: 'send' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await client.setTools();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('remain callable through exec: write_file'),
+      );
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'These tools are unreachable until restart: send_message',
+        ),
       );
       warnSpy.mockRestore();
     });
@@ -4104,6 +4371,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(['mc-call-0']),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4119,13 +4387,48 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalled();
+      expect(setHistory).toHaveBeenCalledWith(expect.any(Array), ['mc-call-0']);
       // The blanket wipe is gone — read-before-write state is preserved.
       expect(clear).not.toHaveBeenCalled();
       // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
       // fast-path disarmed.
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
     });
+
+    it.each([false, true])(
+      'synchronizes evicted paths with the execution environment (failure=%s)',
+      async (fails) => {
+        const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+        const invalidateReadCache = vi.fn().mockResolvedValue(undefined);
+        if (fails) {
+          invalidateReadCache.mockRejectedValueOnce(
+            new Error('worker unavailable'),
+          );
+        }
+        vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue({
+          invalidateReadCache,
+        } as unknown as ReturnType<Config['getExecutionEnvironment']>);
+        const { history, paths } = await makeReadFileResponses(6);
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
+          getHistory: () => history,
+          setHistory: vi.fn(),
+        } as unknown as LlmChat;
+        client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+        for await (const _ of client.sendMessageStream(
+          [{ text: 'hi' }],
+          new AbortController().signal,
+          'container-compaction',
+          { type: SendMessageType.UserQuery },
+        )) {
+          /* drain */
+        }
+        expect(invalidateReadCache).toHaveBeenCalledWith([paths[0]]);
+        expect(clear).toHaveBeenCalledTimes(fails ? 1 : 0);
+        expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      },
+    );
 
     it('does not abort the turn when microcompaction cleanup fails', async () => {
       const { markReadEvictedFromHistory } = mockFileReadCacheStub();
@@ -4136,6 +4439,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4164,6 +4468,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4200,6 +4505,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4237,6 +4543,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4286,6 +4593,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4317,6 +4625,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4345,6 +4654,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4404,6 +4714,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(idless),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4463,6 +4774,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4534,6 +4846,7 @@ describe('Gemini Client (client.ts)', () => {
       }
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4566,6 +4879,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4592,6 +4906,7 @@ describe('Gemini Client (client.ts)', () => {
       const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory: vi.fn(),
       } as unknown as LlmChat;
@@ -4618,6 +4933,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4644,6 +4960,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4671,6 +4988,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4728,6 +5046,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4778,6 +5097,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4824,6 +5144,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4849,6 +5170,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -4878,6 +5200,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         getHistoryLength: vi.fn().mockReturnValue(history.length),
         stripOrphanedUserEntriesFromHistory: vi.fn(),
@@ -4907,6 +5230,7 @@ describe('Gemini Client (client.ts)', () => {
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(history),
         setHistory,
       } as unknown as LlmChat;
@@ -5039,6 +5363,38 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
+    it('preserves fast compression and requires cache resynchronization when worker invalidation fails', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      const evictedPath = join(mcTmpDir, 'test-file.ts');
+      const invalidateReadCache = vi
+        .fn()
+        .mockRejectedValue(new Error('worker unavailable'));
+      vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue({
+        invalidateReadCache,
+      } as unknown as ReturnType<Config['getExecutionEnvironment']>);
+      const info = {
+        originalTokenCount: 1000,
+        newTokenCount: 400,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      };
+      client['chat'] = {
+        compressFast: vi.fn().mockReturnValue({
+          info,
+          microcompactMeta: {
+            unresolvedEvictedReads: 0,
+            evictedReadPaths: [evictedPath],
+          },
+        }),
+      } as unknown as LlmChat;
+      client['forceFullIdeContext'] = false;
+
+      expect(await client.tryCompressChatFast()).toEqual(info);
+      expect(invalidateReadCache).toHaveBeenCalledWith([evictedPath]);
+      expect(clear).toHaveBeenCalledOnce();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+    });
+
     it('succeeds with surgical disarm when all inodes match (no clear)', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockReturnValue(true); // all match
@@ -5134,6 +5490,7 @@ describe('Gemini Client (client.ts)', () => {
           compressionStatus: CompressionStatus.COMPRESSED,
         }),
         isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue([]),
       } as unknown as LlmChat;
       client['forceFullIdeContext'] = false;
@@ -5148,11 +5505,29 @@ describe('Gemini Client (client.ts)', () => {
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'completed-call', name: 'update_goal' } },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'completed-call',
+                name: 'update_goal',
+                response: { readyForVerification: true },
+              },
+            },
+          ],
+        },
       ];
       const originalChat = client.getChat();
       originalChat.setLastPromptTokenCount(200, true);
       vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
-        originalChat.setHistory(compressedHistory);
+        originalChat.setHistory(compressedHistory, ['completed-call']);
         return {
           originalTokenCount: 1000,
           newTokenCount: 200,
@@ -5178,6 +5553,10 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
       expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
+      expect(client.getChat().getCompletedToolCallIds()).toEqual([
+        'completed-call',
+      ]);
+      expect(client.getChat().getHistoryForRecovery()).toEqual([]);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -5614,6 +5993,7 @@ describe('Gemini Client (client.ts)', () => {
       );
       client['chat'] = {
         addHistory: vi.fn(),
+        getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
         getHistory: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
       } as unknown as LlmChat;
@@ -5628,17 +6008,20 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalledWith([
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nMocked env context\n</system-reminder>',
-            },
-          ],
-        },
-        ...compactedHistory,
-      ]);
+      expect(setHistory).toHaveBeenCalledWith(
+        [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nMocked env context\n</system-reminder>',
+              },
+            ],
+          },
+          ...compactedHistory,
+        ],
+        undefined,
+      );
     });
   });
 
@@ -12748,15 +13131,15 @@ Other open files:
           mockMessageBus.request.mock.calls
             .filter(([request]) => request.eventName === 'Stop')
             .map(([request]) => request.input.stop_hook_active);
-        // Run `toolRun` of the model returns a tool call; every run yields
+        // Selected model runs return a tool call; every run yields
         // plain content.
-        const mockRunsWithToolCallOn = (toolRun: number) => {
+        const mockRunsWithToolCallOn = (...toolRuns: number[]) => {
           let runs = 0;
           mockTurnRunFn.mockImplementation(function (this: {
             pendingToolCalls: unknown[];
           }) {
             runs++;
-            if (runs === toolRun) {
+            if (toolRuns.includes(runs)) {
               this.pendingToolCalls.push({
                 callId: 'tool-1',
                 name: 'read_file',
@@ -12778,6 +13161,155 @@ Other open files:
             },
           },
         ];
+
+        describe('Stop-hook consecutive-block cap across top-level sends', () => {
+          const blockAlways = () => {
+            const bus = blockOnceThenAllow();
+            bus.request.mockReset().mockResolvedValue({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            });
+            vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(2);
+            return bus;
+          };
+          const warning = {
+            type: LlmEventType.HookSystemMessage,
+            value:
+              'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+          };
+          const send = (
+            promptId: string,
+            type = SendMessageType.UserQuery,
+            isConcurrentSideQuery = false,
+          ) =>
+            fromAsync(
+              client.sendMessageStream(
+                type === SendMessageType.ToolResult
+                  ? toolResult
+                  : [{ text: 'Hi' }],
+                new AbortController().signal,
+                promptId,
+                { type, isConcurrentSideQuery },
+              ),
+            );
+
+          it('caps the second blocking decision after a tool round trip', async () => {
+            const bus = blockAlways();
+            const runs = mockRunsWithToolCallOn(2);
+            await send('main');
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, true]);
+            expect(events).toContainEqual(warning);
+            expect(runs()).toBe(3);
+            expect(client['stopHookChains'].size).toBe(0);
+          });
+
+          it('keeps a concurrent side question from resetting or advancing the main chain', async () => {
+            const bus = blockAlways();
+            const runs = mockRunsWithToolCallOn(2, 4);
+            await send('main');
+            const sideEvents = await send(
+              'side',
+              SendMessageType.UserQuery,
+              true,
+            );
+            expect(sideEvents).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')?.count).toBe(1);
+            expect(client['stopHookChains'].get('side')?.count).toBe(1);
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, false, true]);
+            expect(events).toContainEqual(warning);
+            expect(runs()).toBe(5);
+            expect(client['stopHookChains'].get('side')?.count).toBe(1);
+          });
+
+          it('starts the count again when retry reuses the prompt id', async () => {
+            const bus = blockAlways();
+            Object.assign(client['chat'] as object, {
+              getHistoryLength: vi.fn(() => 1),
+              stripOrphanedUserEntriesFromHistory: vi.fn(() => []),
+            });
+            mockRunsWithToolCallOn(2, 4);
+            await send('main');
+            const events = await send('main', SendMessageType.Retry);
+            expect(stopFlags(bus)).toEqual([false, false]);
+            expect(events).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')).toEqual({
+              count: 1,
+              reasons: ['Keep working'],
+            });
+          });
+
+          it('does not accumulate allowed stops across tool results', async () => {
+            const bus = blockAlways();
+            bus.request.mockResolvedValue({ output: undefined });
+            mockRunsWithToolCallOn(1, 2, 3, 4, 5);
+            const events = [...(await send('main'))];
+            for (let i = 0; i < 5; i++) {
+              events.push(...(await send('main', SendMessageType.ToolResult)));
+            }
+            expect(events).not.toContainEqual(warning);
+            expect(stopFlags(bus)).toEqual([false]);
+            expect(client['stopHookChains'].size).toBe(0);
+          });
+
+          it('retires both the count and reasons when a Stop is allowed', async () => {
+            const bus = blockAlways();
+            bus.request
+              .mockResolvedValueOnce({
+                output: { decision: 'block', reason: 'first chain' },
+                stopHookCount: 1,
+              })
+              .mockResolvedValueOnce({ output: undefined })
+              .mockResolvedValue({
+                output: { decision: 'block', reason: 'new chain' },
+                stopHookCount: 1,
+              });
+            mockRunsWithToolCallOn(2, 5);
+            await send('main');
+            await send('main', SendMessageType.ToolResult);
+            expect(client['stopHookChains'].size).toBe(0);
+            const events = await send('main', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, true, false]);
+            expect(events).not.toContainEqual(warning);
+            expect(client['stopHookChains'].get('main')).toEqual({
+              count: 1,
+              reasons: ['new chain'],
+            });
+          });
+
+          it('bounds tracked chains and refreshes the least-recently-used order', () => {
+            for (let i = 0; i <= MAX_STOP_HOOK_CHAIN_PROMPT_IDS; i++) {
+              client['recordStopHookBlock'](`p-${i}`, 1, ['r']);
+            }
+            const chains = client['stopHookChains'];
+            expect(chains.size).toBe(MAX_STOP_HOOK_CHAIN_PROMPT_IDS);
+            expect(chains.has('p-0')).toBe(false);
+            expect(chains.has(`p-${MAX_STOP_HOOK_CHAIN_PROMPT_IDS}`)).toBe(
+              true,
+            );
+            client['recordStopHookBlock']('p-5', 2, ['r', 'again']);
+            expect([...chains.keys()].at(-1)).toBe('p-5');
+            expect(chains.get('p-5')).toEqual({
+              count: 2,
+              reasons: ['r', 'again'],
+            });
+          });
+
+          it('starts a re-minted teammate prompt fresh without clearing the original chain', async () => {
+            const bus = blockAlways();
+            mockRunsWithToolCallOn(2, 4);
+            await send('p');
+            const teammateEvents = await send(
+              'p/teammate/1',
+              SendMessageType.Teammate,
+            );
+            expect(teammateEvents).not.toContainEqual(warning);
+            const events = await send('p', SendMessageType.ToolResult);
+            expect(stopFlags(bus)).toEqual([false, false, true]);
+            expect(events).toContainEqual(warning);
+          });
+        });
 
         it('keeps stop_hook_active across a tool round trip', async () => {
           const mockMessageBus = blockOnceThenAllow();
@@ -14717,6 +15249,7 @@ Other open files:
         undefined,
         false,
         false,
+        { declaredTools: undefined },
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -14751,6 +15284,7 @@ Other open files:
         concise,
         false,
         false,
+        { declaredTools: undefined },
       );
     });
 
@@ -14776,6 +15310,7 @@ Other open files:
         undefined,
         false,
         true,
+        { declaredTools: undefined },
       );
     });
 
@@ -14810,6 +15345,7 @@ Other open files:
           undefined,
           false,
           false,
+          { declaredTools: undefined },
         );
       },
     );

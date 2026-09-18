@@ -85,9 +85,12 @@ The description defines:
 - a fresh async JavaScript execution environment;
 - `tools.<normalizedName>(args)` for nested calls;
 - `ALL_TOOLS`, including canonical and JavaScript names;
-- `text(value)`, `image(value)`, `audio(value)`, and `exit()`;
+- `text(value)`, `image(value)`, `audio(value)`, `generatedImage(value)`,
+  `setTimeout(callback, delayMs)`, `clearTimeout(timeoutId)`, and `exit()`;
 - TypeScript-like signatures generated deterministically from JSON Schema;
-- the absence of Node.js, imports, network APIs, timers, and persistent state.
+- the absence of Node.js, `process`, `require`, filesystem, network, imports,
+  `console`, `WebAssembly`, `Atomics`, `SharedArrayBuffer`, and persistent
+  state. Pending timers do not keep `exec` alive by themselves.
 
 The nested call returns a JSON-safe object containing the real call id, tool
 name, status, output, and structured content. Failed and cancelled calls reject
@@ -102,8 +105,8 @@ configuration. The parent maps JavaScript names back to canonical registry
 names and dispatches each call.
 
 The guest has no Node globals, `require`, `process`, filesystem, sockets,
-module loader, `console`, timers, `Atomics`, `SharedArrayBuffer`, or
-`WebAssembly`. Dynamic and static imports fail because no module loader is
+module loader, `console`, `Atomics`, `SharedArrayBuffer`, or `WebAssembly`.
+Dynamic and static imports fail because no module loader is
 installed. Runtime memory and stack limits are fixed. QuickJS's interrupt hook
 enforces a guest CPU budget. That budget and the parent's fallback watchdog
 pause while the guest is suspended on registered host tools, whose own

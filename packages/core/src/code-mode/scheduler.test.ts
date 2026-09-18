@@ -39,7 +39,8 @@ describe('CodeModeOnly scheduler dispatch', () => {
     const getGoalForWorker = vi.fn().mockResolvedValue({
       goalId: permit.goalId,
       revision: permit.revision,
-      evidenceCatalog: { entries: [{ uuid: 'evidence-1' }] },
+      objective: 'Verified output',
+      evidenceCursor: { recordId: 'goal-created' },
     });
     const getSnapshotForPermit = vi.fn().mockReturnValue({
       goal: { status: 'active' },
@@ -56,7 +57,6 @@ describe('CodeModeOnly scheduler dispatch', () => {
     const proposal = {
       status: 'complete' as const,
       reason: 'Verified output',
-      evidenceRefs: ['evidence-1'],
     };
     const exec = new MockTool({
       name: 'exec',
