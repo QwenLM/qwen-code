@@ -614,6 +614,69 @@ describe('buildHooksListing', () => {
       ]);
     });
 
+    it('collapses the duplicates the registry collapses', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: './a.sh' }] },
+          // Same command, event, matcher and sequential: one entry.
+          { matcher: 'Bash', hooks: [{ type: 'command', command: './a.sh' }] },
+          // Same name as an earlier hook: the name is the identity.
+          {
+            matcher: 'Bash',
+            hooks: [
+              { type: 'command', command: './b.sh', name: 'guard' },
+              { type: 'command', command: './c.sh', name: 'guard' },
+            ],
+          },
+        ],
+      };
+      const registry = await registryEntries(userHooks);
+
+      const listing = buildHooksListing(
+        makeConfig({ hookSystem: false, disableAll: true, userHooks }),
+      );
+
+      const kept = registry
+        .getAllHooks()
+        .map((e) => (e.config as { command: string }).command);
+      expect(kept).toEqual(['./a.sh', './b.sh']);
+      expect(listing.rows.map((row) => row.commandText)).toEqual(kept);
+    });
+
+    it('keeps the entries the registry keeps apart', async () => {
+      const userHooks = {
+        [HookEventName.PreToolUse]: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: './a.sh' }] },
+          { matcher: 'Read', hooks: [{ type: 'command', command: './a.sh' }] },
+          {
+            matcher: 'Bash',
+            sequential: true,
+            hooks: [{ type: 'command', command: './a.sh' }],
+          },
+          { matcher: null, hooks: [{ type: 'command', command: './a.sh' }] },
+          { hooks: [{ type: 'command', command: './a.sh' }] },
+        ],
+        [HookEventName.Stop]: [
+          { hooks: [{ type: 'command', command: './a.sh' }] },
+        ],
+      };
+      const registry = await registryEntries(userHooks);
+
+      const listing = buildHooksListing(
+        makeConfig({
+          hookSystem: false,
+          disableAll: true,
+          userHooks,
+          extensions: [{ isActive: true, hooks: userHooks }],
+        }),
+      );
+
+      expect(registry.getAllHooks()).toHaveLength(6);
+      // Every user entry, then every extension entry: a different source is
+      // never a duplicate.
+      expect(listing.rows).toHaveLength(12);
+    });
+
     it('does not read settings when a hook system exists', () => {
       const config = makeConfig({
         disableAll: true,

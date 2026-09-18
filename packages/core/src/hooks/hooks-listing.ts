@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import type { HookConfig } from './types.js';
+import { hookRegistryIdentity } from './hookRegistry.js';
 import { HookEventName, HookType, HooksConfigSource } from './types.js';
 
 /**
@@ -289,6 +290,32 @@ function rowsFromSettings(
   gates: HooksListingGates,
 ): HooksListingRow[] {
   const rows: HooksListingRow[] = [];
+  // The registry drops a hook whose source, event, identity, matcher and
+  // `sequential` all equal an earlier entry's, comparing the raw values with
+  // `===`. Mirror that so this listing shows the rows the registry would keep.
+  // A value `===` cannot match (an object or array) never collapses.
+  const seen = new Set<string>();
+  const keyPart = (value: unknown): string | undefined =>
+    value === null || typeof value !== 'object'
+      ? `${typeof value}:${String(value)}`
+      : undefined;
+  const isDuplicate = (
+    eventName: string,
+    source: HooksConfigSource,
+    raw: unknown,
+    definition: Record<string, unknown>,
+  ): boolean => {
+    const parts = [
+      keyPart(hookRegistryIdentity(raw as HookConfig)),
+      keyPart(definition['matcher']),
+      keyPart(definition['sequential']),
+    ];
+    if (parts.some((part) => part === undefined)) return false;
+    const key = JSON.stringify([eventName, source, ...parts]);
+    if (seen.has(key)) return true;
+    seen.add(key);
+    return false;
+  };
   const addScope = (hooks: unknown, source: HooksConfigSource) => {
     if (!isRecord(hooks)) return;
     for (const [eventName, definitions] of Object.entries(hooks)) {
@@ -310,6 +337,7 @@ function rowsFromSettings(
         for (const raw of definition['hooks'] as unknown[]) {
           const hookConfig = displayableSettingsHook(raw);
           if (!hookConfig) continue;
+          if (isDuplicate(eventName, source, raw, definition)) continue;
           rows.push(
             toRow(
               hookConfig,
