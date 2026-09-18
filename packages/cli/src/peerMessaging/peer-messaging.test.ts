@@ -1468,6 +1468,66 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(asked).toContain('hosted-1');
   });
 
+  it('keeps an old message that still waits, however many are consumed after it', async () => {
+    // Sessions drain on their own schedules: a message can wait in one
+    // while a hundred others arrive and are handled in another.
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start();
+    const waitingIds = new Set<string>();
+    m.setSubmitFn((_modelText, _displayText, delivery) => {
+      waitingIds.add(canonicalizeMsgId(delivery!.msgId));
+      return true;
+    });
+    m.setQueuedPeerIds(() => waitingIds);
+
+    const old = peerFrame({ content: 'old', from: sender.socketPath });
+    await send(m.socketPath!, old);
+    for (let i = 0; i < 101; i++) {
+      const later = peerFrame({
+        content: `later ${i}`,
+        from: sender.socketPath,
+      });
+      await send(m.socketPath!, later);
+      await settle();
+      waitingIds.delete(canonicalizeMsgId(later.msgId));
+    }
+
+    await m.close();
+    messaging = null;
+    expect(
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === old.msgId)
+        .map((r) => (r as { status: string }).status),
+    ).toEqual(['delivered', 'expired']);
+  });
+
+  it('corrects the queued messages of a closing session once', async () => {
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start();
+    const deliveries: PeerQueuedDelivery[] = [];
+    m.setSubmitFn((_modelText, _displayText, delivery) => {
+      deliveries.push(delivery!);
+      return true;
+    });
+
+    const queued = peerFrame({ content: 'queued', from: sender.socketPath });
+    await send(m.socketPath!, queued);
+    await settle();
+
+    expect(m.expireUnconsumed([queued.msgId.toUpperCase()])).toBe(1);
+    // The persist failing afterwards, and exit, find nothing left to fix.
+    m.expireUndelivered(deliveries[0]!);
+    expect(m.expireUnconsumed([queued.msgId])).toBe(0);
+    await m.close();
+    messaging = null;
+    await settle();
+    expect(
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === queued.msgId)
+        .map((r) => (r as { status: string }).status),
+    ).toEqual(['delivered', 'expired']);
+  });
+
   it('settles a partially flushed buffer alongside queued frames at exit', async () => {
     // deliver() flushes the buffer before admitting anything new, so the
     // unflushed tail of the buffer always sits after every queued frame in

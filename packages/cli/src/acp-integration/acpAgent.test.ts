@@ -5364,6 +5364,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expireHeldFor: vi.fn(
           (_isFor: (toSessionId: string | undefined) => boolean) => 0,
         ),
+        expireUnconsumed: vi.fn((_msgIds: Iterable<string>) => 0),
+        getHeld: vi.fn((): unknown[] => []),
       };
     }
 
@@ -5584,6 +5586,22 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ) {
       mockPeerMessagingStart.mockResolvedValue(inbox);
       const innerConfig = await setupSessionMocks(sessionId);
+      // What the host subscribes to, so a test can fire a change and see
+      // the subscription dropped when the session goes.
+      const modeListeners = new Set<() => void>();
+      const settingsListeners = new Set<() => void>();
+      Object.assign(innerConfig, {
+        onApprovalModeChanged: vi.fn((listener: () => void) => {
+          modeListeners.add(listener);
+          return () => modeListeners.delete(listener);
+        }),
+      });
+      Object.assign(settings, {
+        onChange: vi.fn((listener: () => void) => {
+          settingsListeners.add(listener);
+          return () => settingsListeners.delete(listener);
+        }),
+      });
       vi.mocked(loadSettings).mockReturnValue(settings);
       const booted = await bootInitializedAcpAgent(settings);
       await booted.agent.newSession({ cwd: '/tmp', mcpServers: [] });
@@ -5594,7 +5612,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         string,
         ReturnType<typeof vi.fn>
       >;
-      return { ...booted, innerConfig, options, session };
+      return {
+        ...booted,
+        innerConfig,
+        options,
+        session,
+        modeListeners,
+        settingsListeners,
+      };
     }
 
     function heldFor(toSessionId: string, content = 'please rebase') {
@@ -5694,9 +5719,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const inbox = fakeInbox();
       inbox.heldExpiresAt.mockReturnValue(123_456);
       const { session, agentPromise } = await bootWithInbox('hosted-r', inbox);
-      const listener = inbox.onHeldChange.mock.calls[0]![0] as (
+      const hostListener = inbox.onHeldChange.mock.calls[0]![0] as (
         held: Array<ReturnType<typeof heldFor>>,
       ) => void;
+      // The gate's held set as the host would read it back.
+      const listener = (held: Array<ReturnType<typeof heldFor>>) => {
+        inbox.getHeld.mockReturnValue(held);
+        hostListener(held);
+      };
       const answers: Array<(decision: string) => void> = [];
       session['requestPeerMessageReview']!.mockImplementation(
         () => new Promise((resolve) => answers.push(resolve)),
@@ -5794,6 +5824,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // /clear gave the session a new id since its review started.
       vi.mocked(innerConfig.getSessionId).mockReturnValue('hosted-x-2');
 
+      session['queuedPeerMessageIds']!.mockReturnValue(['msg-queued']);
       // Disposed, its removal still awaiting cleanup.
       session['isOpenForPeerMessages']!.mockReturnValue(false);
       expect(options.getPolicySetting('hosted-x')).toBe('refuse');
@@ -5811,51 +5842,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(isFor('hosted-x-2')).toBe(true);
       expect(isFor('someone-else')).toBe(false);
       expect(isFor(undefined)).toBe(false);
+      // Accepted messages still waiting in its queue get their receipts
+      // corrected too.
+      expect(inbox.expireUnconsumed).toHaveBeenCalledWith(['msg-queued']);
 
       mockConnectionState.resolve();
       await agentPromise;
     });
 
-    it('re-judges held messages when a hosted session changes mode', async () => {
+    it('re-judges held messages whenever the mode or the settings change, until the session goes', async () => {
       const inbox = fakeInbox();
-      const { agent, agentPromise, innerConfig } = await bootWithInbox(
-        'hosted-m',
-        inbox,
-      );
-      let approvalMode = 'default';
-      Object.assign(innerConfig, {
-        getApprovalMode: vi.fn(() => approvalMode),
-        setApprovalMode: vi.fn((mode: string) => {
-          approvalMode = mode;
-        }),
-        setDisabledTools: vi.fn(),
-      });
+      const { agent, agentPromise, modeListeners, settingsListeners } =
+        await bootWithInbox('hosted-m', inbox);
+      expect(modeListeners.size).toBe(1);
+      expect(settingsListeners.size).toBe(1);
 
-      await (
-        agent as unknown as {
-          setSessionMode(params: {
-            sessionId: string;
-            modeId: string;
-          }): Promise<unknown>;
-        }
-      ).setSessionMode({ sessionId: 'hosted-m', modeId: 'yolo' });
+      // Any path that changes the mode — a tool leaving plan mode, a
+      // reload — reaches the Config, and the Config tells the host.
+      for (const listener of modeListeners) listener();
       await vi.waitFor(() =>
         expect(inbox.reevaluate).toHaveBeenCalledWith('approval-mode-changed'),
       );
+      for (const listener of settingsListeners) listener();
+      await vi.waitFor(() =>
+        expect(inbox.reevaluate).toHaveBeenCalledWith('settings-changed'),
+      );
 
-      // The daemon's control route too, and only when the mode moved.
-      inbox.reevaluate.mockClear();
-      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
         sessionId: 'hosted-m',
-        mode: 'yolo',
       });
-      await vi.waitFor(() => expect(inbox.reevaluate).toHaveBeenCalledOnce());
-      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
-        sessionId: 'hosted-m',
-        mode: 'yolo',
-      });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(inbox.reevaluate).toHaveBeenCalledOnce();
+      expect(modeListeners.size).toBe(0);
+      expect(settingsListeners.size).toBe(0);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('looks again for the session of a held message it could not place', async () => {
+      const inbox = fakeInbox();
+      const { session, innerConfig, agentPromise } = await bootWithInbox(
+        'hosted-l',
+        inbox,
+      );
+      const listener = inbox.onHeldChange.mock.calls[0]![0] as (
+        held: Array<ReturnType<typeof heldFor>>,
+      ) => void;
+      // Addressed to an id this session will answer to a moment later.
+      const early = heldFor('hosted-l-next');
+      inbox.getHeld.mockReturnValue([early]);
+      listener([early]);
+      expect(session['requestPeerMessageReview']).not.toHaveBeenCalled();
+
+      vi.mocked(innerConfig.getSessionId).mockReturnValue('hosted-l-next');
+      await vi.waitFor(
+        () =>
+          expect(session['requestPeerMessageReview']).toHaveBeenCalledWith(
+            expect.objectContaining({ entry: early }),
+            expect.any(AbortSignal),
+          ),
+        { timeout: 3000 },
+      );
 
       mockConnectionState.resolve();
       await agentPromise;

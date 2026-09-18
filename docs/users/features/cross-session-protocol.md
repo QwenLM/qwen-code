@@ -344,7 +344,9 @@ editor that does not read the field may keep showing the dialog until
 someone answers it.
 
 When a session closes and its process stays up, the messages still held
-for it are settled `expired`.
+for it are settled `expired`, and so are the accepted ones still waiting
+in its queue. A held message is re-judged whenever the session's
+approval mode or settings change.
 
 ## 7. Compatibility
 

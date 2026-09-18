@@ -13137,6 +13137,32 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
     });
 
+    it('tells subscribers about each actual approval mode change', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const seen: Array<[ApprovalMode, ApprovalMode]> = [];
+      config.onApprovalModeChanged(() => {
+        throw new Error('a broken listener');
+      });
+      const unsubscribe = config.onApprovalModeChanged((mode, previous) =>
+        seen.push([mode, previous]),
+      );
+      const start = config.getApprovalMode();
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setPlanMode(true, ApprovalMode.AUTO_EDIT);
+      expect(seen).toEqual([
+        [ApprovalMode.YOLO, start],
+        [ApprovalMode.PLAN, ApprovalMode.YOLO],
+      ]);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+
+      unsubscribe();
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(seen).toHaveLength(2);
+    });
+
     it('queues a one-shot manual plan-exit notice on a manual exit', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);

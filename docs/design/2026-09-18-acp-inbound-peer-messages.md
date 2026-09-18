@@ -54,7 +54,11 @@ up to 20 per session, apart from the 20 background results. A message
 that was told `delivered` must not be evicted later by a burst of
 results, and a message must not evict a result the model has not seen.
 Room is reserved before the sender is told, counting the messages still
-being recorded, and a full budget answers `queue-full`. A message accepted and then not queued,
+being recorded, and a full budget answers `queue-full`. A session with no
+transcript recorder turns messages away at the same point, since
+queuing starts with a record. A session that starts closing while a
+message is being recorded reports it not queued, so the sender's
+receipt is corrected. A message accepted and then not queued,
 because its session closed or the transcript write failed, has its
 `delivered` receipt taken back with `expired`, which is a legal step
 from `delivered`.
@@ -104,11 +108,14 @@ moment, or at its configured permission timeout if that comes first. A
 request with no expiry keeps the configured behavior. The daemon's
 pending list never shows a message that already expired.
 
-**Leaving a mode re-judges the backlog.** Parity may release a held
-message once the addressed session changes review class. Both ways a
-driven session changes mode, the ACP `session/set_mode` call and the
-daemon's approval-mode control, re-evaluate held messages. Each message
-is re-judged for its own session.
+**Any change to what judges a message re-judges the backlog.** Parity
+may release a held message once the addressed session changes review
+class, and a changed inbound policy or hold lifetime changes the verdict
+too. The host subscribes, per hosted session, to its Config's approval
+mode and to its settings, instead of calling in from the paths it knows
+about: a client call, plan mode entered or left by a tool, a settings
+reload all reach the same two places. Each message is re-judged for its
+own session.
 
 **A closing session settles its holds.** A session can close while
 its process keeps running. From the moment it is disposed it counts as
@@ -117,7 +124,15 @@ its removal awaits cleanup. Its reviews are withdrawn by the session
 object, since /clear may have changed its id, and the messages still
 held for it are settled `expired`. A message held for a session that is
 no longer here is never judged by another session's policy: a re-judge
-answers it `misaddressed`.
+answers it `misaddressed`. Accepted messages still waiting in its queue
+are corrected to `expired` too: the queue is read before the session is
+disposed, and a message already corrected is not corrected twice.
+
+**A held message whose session is not found is looked at again.** A
+message can be held for an id a moment before the session answers to it,
+during publication or a /clear. The host looks again with the same
+backoff as a review, rather than waiting for an unrelated change to the
+held set.
 
 **Holds are capped per session.** The ceiling of 50 held messages
 applies to each hosted session, so one workspace's backlog cannot turn
@@ -127,7 +142,9 @@ away every message for another.
 their receipts corrected. A single session's queue drains oldest first,
 so a count was enough. Sessions in one process drain on their own
 schedules, so the host now reports exactly which message ids are still
-waiting.
+waiting. The list of accepted messages it corrects from is pruned by the
+same ids, not cut at a fixed length: a message that waits in one session
+while many others are handled in another is still there to correct.
 
 ## What it does not do
 

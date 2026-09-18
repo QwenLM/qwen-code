@@ -519,7 +519,11 @@ export class PeerMessaging {
     const index = this.outstanding.findIndex(
       (frame) => canonicalizeMsgId(frame.msgId) === key,
     );
-    if (index !== -1) this.outstanding.splice(index, 1);
+    // Not outstanding means already corrected — its session's removal
+    // expired it (`expireUnconsumed`) — and a second receipt would be a
+    // transition the sender has already made.
+    if (index === -1) return;
+    this.outstanding.splice(index, 1);
     debugLogger.debug(
       `accepted peer message ${delivery.msgId} could not be queued; expiring it`,
     );
@@ -537,6 +541,37 @@ export class PeerMessaging {
     if (delivery.admissionKey !== undefined) {
       this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
     }
+  }
+
+  /**
+   * Take back the `delivered` receipts of accepted messages that will now
+   * never be consumed: they were waiting in the queue of a session that is
+   * going away while the process stays up. Ids not outstanding are
+   * skipped, so a message already corrected is not corrected twice.
+   * Returns how many were expired.
+   */
+  expireUnconsumed(msgIds: Iterable<string>): number {
+    const wanted = new Set<string>();
+    for (const id of msgIds) wanted.add(canonicalizeMsgId(id));
+    let expired = 0;
+    for (let index = this.outstanding.length - 1; index >= 0; index--) {
+      const frame = this.outstanding[index]!;
+      if (!wanted.has(canonicalizeMsgId(frame.msgId))) continue;
+      this.outstanding.splice(index, 1);
+      expired += 1;
+      if (frame.from !== undefined) {
+        void sendDeliveryStatus(
+          frame.from,
+          {
+            status: 'expired',
+            origMsgId: frame.msgId,
+            from: this.inbox?.socketPath,
+          },
+          frame.replyToken,
+        );
+      }
+    }
+    return expired;
   }
 
   getHeld(): readonly HeldMessage[] {
@@ -1043,6 +1078,17 @@ export class PeerMessaging {
 
   private trackOutstanding(frame: PeerUserFrame): void {
     this.outstanding.push(frame);
+    if (this.queuedPeerIds) {
+      // A host of several sessions says exactly which messages still
+      // wait, and nothing else can matter: keep those and drop the rest.
+      // Its sessions drain on their own schedules, so a count would drop
+      // a message that is old but still waiting, and its correction with
+      // it. The host bounds what waits, per session.
+      const waiting = this.unconsumedFrames();
+      this.outstanding.length = 0;
+      this.outstanding.push(...waiting);
+      return;
+    }
     // Only the unconsumed tail can ever matter, and it is bounded: at
     // most MAX_ACCEPTED_BACKLOG frames wait here and another
     // MAX_ACCEPTED_BACKLOG in the session's input queue. Anything older

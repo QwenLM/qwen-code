@@ -3723,6 +3723,17 @@ class QwenAgent implements Agent {
     string,
     { session: Session; controller: AbortController }
   >();
+  /** Per registered session: what to call to stop re-judging on its changes. */
+  private readonly peerJudgeSubscriptions = new Map<
+    string,
+    Array<() => void>
+  >();
+  /**
+   * A pending second look at held messages whose session could not be
+   * found when they were first seen, and how many looks there have been.
+   */
+  private heldRecheck: { timer: ReturnType<typeof setTimeout> } | null = null;
+  private heldRecheckAttempts = 0;
   // Set by closePeerMessaging: a retry must not resurrect an inbox after
   // teardown ran.
   private peerMessagingClosed = false;
@@ -4409,6 +4420,14 @@ class QwenAgent implements Agent {
     options: { shutdownConfig?: boolean } = {},
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) return;
+    // Read before dispose, which empties the queue: these senders were
+    // told `delivered`, and now nobody will read their messages.
+    let queuedPeerIds: string[] = [];
+    try {
+      queuedPeerIds = session.queuedPeerMessageIds();
+    } catch {
+      queuedPeerIds = [];
+    }
     try {
       session.dispose();
     } catch (error) {
@@ -4418,7 +4437,7 @@ class QwenAgent implements Agent {
     // a record left behind advertises a session that is gone, and peers
     // would keep addressing it until this process exits.
     this.registeredSessions.delete(sessionId);
-    this.abortPeerReviewsFor(session, sessionId);
+    this.abortPeerReviewsFor(session, sessionId, queuedPeerIds);
     try {
       await session.getConfig().unregisterSessionRegistry();
     } catch (error) {
@@ -4973,15 +4992,54 @@ class QwenAgent implements Agent {
         this.peerReviews.delete(key);
       }
     }
+    let unplaced = false;
     for (const entry of held) {
       const key = peerReviewKey(entry);
       if (this.peerReviews.has(key)) continue;
       const session = this.hostedSession(entry.frame.toSessionId);
-      if (!session) continue;
+      if (!session) {
+        unplaced = true;
+        continue;
+      }
       const controller = new AbortController();
       this.peerReviews.set(key, { session, controller });
       this.askPeerReview(messaging, session, entry, controller.signal, 0);
     }
+    this.scheduleHeldRecheck(messaging, unplaced);
+  }
+
+  /**
+   * Look again at held messages whose session could not be found — it
+   * may be mid-publication, or mid-/clear — instead of waiting for an
+   * unrelated change to the held set. A driven session has no /peers to
+   * fall back on. Backs off like a review; stops once every held message
+   * has a review, or none is held. A message whose session never comes
+   * back is settled by its expiry or by the session's removal.
+   */
+  private scheduleHeldRecheck(
+    messaging: PeerMessaging,
+    unplaced: boolean,
+  ): void {
+    if (!unplaced) {
+      if (this.heldRecheck) clearTimeout(this.heldRecheck.timer);
+      this.heldRecheck = null;
+      this.heldRecheckAttempts = 0;
+      return;
+    }
+    if (this.heldRecheck) return;
+    const attempt = this.heldRecheckAttempts;
+    const delayMs = Math.min(
+      PEER_REVIEW_RETRY_MAX_MS,
+      PEER_REVIEW_RETRY_BASE_MS * 2 ** attempt,
+    );
+    const timer = setTimeout(() => {
+      this.heldRecheck = null;
+      if (this.peerMessagingClosed) return;
+      this.heldRecheckAttempts = attempt + 1;
+      this.reviewHeldPeerMessages(messaging, messaging.getHeld());
+    }, delayMs);
+    timer.unref?.();
+    this.heldRecheck = { timer };
   }
 
   /**
@@ -5104,13 +5162,22 @@ class QwenAgent implements Agent {
 
   /**
    * Withdraw the reviews out for one session, which is going away, and
-   * settle the messages still held for it.
+   * settle the messages still held for it and the accepted ones still
+   * waiting in its queue.
    *
    * Reviews are matched by the session object, not by id: /clear changes
    * the id a session answers to. Held messages are matched by every id
    * the session was known by.
    */
-  private abortPeerReviewsFor(session: Session, mapKey: string): void {
+  private abortPeerReviewsFor(
+    session: Session,
+    mapKey: string,
+    queuedPeerIds: readonly string[] = [],
+  ): void {
+    for (const unsubscribe of this.peerJudgeSubscriptions.get(mapKey) ?? []) {
+      unsubscribe();
+    }
+    this.peerJudgeSubscriptions.delete(mapKey);
     for (const [key, review] of this.peerReviews) {
       if (review.session === session) {
         review.controller.abort();
@@ -5122,13 +5189,16 @@ class QwenAgent implements Agent {
       normalizeSessionIdForLookup(session.getConfig().getSessionId()),
     ]);
     void this.peerMessagingStart
-      ?.then((messaging) =>
+      ?.then((messaging) => {
         messaging?.expireHeldFor(
           (toSessionId) =>
             toSessionId !== undefined &&
             ids.has(normalizeSessionIdForLookup(toSessionId)),
-        ),
-      )
+        );
+        if (queuedPeerIds.length > 0) {
+          messaging?.expireUnconsumed(queuedPeerIds);
+        }
+      })
       .catch(() => {});
   }
 
@@ -5137,9 +5207,9 @@ class QwenAgent implements Agent {
    * changed: parity may now release them. Process-wide, because each
    * held message is judged for its own session.
    */
-  private hostedSessionModeChanged(): void {
+  private rejudgeHeldPeerMessages(reason: string): void {
     void this.peerMessagingStart
-      ?.then((messaging) => messaging?.reevaluate('approval-mode-changed'))
+      ?.then((messaging) => messaging?.reevaluate(reason))
       .catch(() => {});
   }
 
@@ -5148,6 +5218,14 @@ class QwenAgent implements Agent {
     this.peerMessagingClosed = true;
     for (const review of this.peerReviews.values()) review.controller.abort();
     this.peerReviews.clear();
+    if (this.heldRecheck) clearTimeout(this.heldRecheck.timer);
+    this.heldRecheck = null;
+    for (const unsubscribe of [
+      ...this.peerJudgeSubscriptions.values(),
+    ].flat()) {
+      unsubscribe();
+    }
+    this.peerJudgeSubscriptions.clear();
     const pending = this.peerMessagingStart;
     if (!pending) return;
     this.peerMessagingStart = null;
@@ -5209,6 +5287,27 @@ class QwenAgent implements Agent {
         this.inboxAddress.ipcToken,
       );
     }
+    // Held messages are re-judged whenever what judges them may have
+    // changed — the session's approval mode by any path (a client call,
+    // plan mode entered or left by a tool, a reload), or its settings
+    // (the inbound policy, the hold lifetime). Subscribed here rather than
+    // at each call site, so a path added later cannot be missed.
+    const unsubscribe: Array<() => void> = [];
+    if (typeof config.onApprovalModeChanged === 'function') {
+      unsubscribe.push(
+        config.onApprovalModeChanged(() =>
+          this.rejudgeHeldPeerMessages('approval-mode-changed'),
+        ),
+      );
+    }
+    if (typeof settings.onChange === 'function') {
+      unsubscribe.push(
+        settings.onChange(() =>
+          this.rejudgeHeldPeerMessages('settings-changed'),
+        ),
+      );
+    }
+    this.peerJudgeSubscriptions.set(sessionId, unsubscribe);
   }
 
   /**
@@ -6666,7 +6765,6 @@ class QwenAgent implements Agent {
     const result = await this.runInSessionContext(session, () =>
       session.setMode({ ...params, sessionId }),
     );
-    this.hostedSessionModeChanged();
     return result;
   }
 
@@ -12346,7 +12444,6 @@ class QwenAgent implements Agent {
         } else if (previous === 'plan') {
           session.clearActiveTodoPlanRevision();
         }
-        if (current !== previous) this.hostedSessionModeChanged();
         return {
           previous,
           current,

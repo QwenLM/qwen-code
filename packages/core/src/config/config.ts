@@ -2714,6 +2714,9 @@ export class Config {
   private prePlanMode?: ApprovalMode;
   private planExecutionMode?: ApprovalMode;
   private approvalModeRevision = 0;
+  private readonly approvalModeListeners = new Set<
+    (mode: ApprovalMode, previous: ApprovalMode) => void
+  >();
   private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
     version: 0,
     kind: 'clear',
@@ -8074,6 +8077,22 @@ export class Config {
     return this.approvalModeRevision;
   }
 
+  /**
+   * Be told whenever this session's approval mode changes, by any path:
+   * a client call, a tool entering or leaving plan mode, a settings
+   * reload. Only the session's own Config reports; a derived agent
+   * overlay changing its local mode does not. Listeners must not throw;
+   * one that does is ignored. Returns the unsubscribe function.
+   */
+  onApprovalModeChanged(
+    listener: (mode: ApprovalMode, previous: ApprovalMode) => void,
+  ): () => void {
+    this.approvalModeListeners.add(listener);
+    return () => {
+      this.approvalModeListeners.delete(listener);
+    };
+  }
+
   private getManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
     if (
       !Object.prototype.hasOwnProperty.call(
@@ -8186,6 +8205,15 @@ export class Config {
     if (mode !== ApprovalMode.PLAN) this.planExecutionMode = undefined;
     if (fromMode !== mode) {
       this.approvalModeRevision++;
+      if (!isDerivedConfig(this)) {
+        for (const listener of this.approvalModeListeners) {
+          try {
+            listener(mode, fromMode);
+          } catch {
+            // A listener is a bystander; the mode change already happened.
+          }
+        }
+      }
     }
   }
 

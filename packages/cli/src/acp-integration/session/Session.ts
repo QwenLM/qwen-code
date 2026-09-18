@@ -10664,6 +10664,9 @@ export class Session implements SessionContext {
     return (
       !this.disposed &&
       !this.closing &&
+      // Queuing starts with a transcript record, and without a recorder
+      // every message would be accepted only to be taken back.
+      this.config.getChatRecordingService() !== undefined &&
       this.#countQueuedNotifications((queued) => queued.kind === 'peer') +
         this.acceptingPeerMessageIds.size <
         MAX_QUEUED_PEER_MESSAGES
@@ -10745,14 +10748,19 @@ export class Session implements SessionContext {
     }
 
     this.persistedBackgroundNotificationTaskIds.add(item.taskId);
-    if (!this.disposed && !this.closing) {
-      this.#enqueueBackgroundNotification({
-        ...item,
-        continuesTodoStopGuardWorkChain:
-          this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
-        persisted: true,
-      });
+    if (this.disposed || this.closing) {
+      // The session began closing while the record was written. A result
+      // is durable in the transcript and counts as accepted; a message
+      // from another session is not handled by anyone now, and saying
+      // "accepted" would leave its sender holding `delivered`.
+      return item.kind !== 'peer';
     }
+    this.#enqueueBackgroundNotification({
+      ...item,
+      continuesTodoStopGuardWorkChain:
+        this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
+      persisted: true,
+    });
     return true;
   }
 

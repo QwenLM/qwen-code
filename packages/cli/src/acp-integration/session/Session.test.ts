@@ -2971,6 +2971,33 @@ describe('Session', () => {
       expect(shells[0]?.taskId).toBe('shell-1');
     });
 
+    it('does not claim a message it could not queue because the session closed', async () => {
+      let finishRecord!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishRecord = resolve;
+          }),
+      );
+      const queued = session.enqueuePeerMessage({
+        msgId: 'msg-closing',
+        displayText: 'm',
+        modelText: 'm',
+      });
+      await vi.waitFor(() => expect(finishRecord).toBeDefined());
+      session.dispose();
+      finishRecord();
+
+      await expect(queued).resolves.toEqual({ accepted: false });
+    });
+
+    it('turns messages away up front when nothing can record them', () => {
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        undefined as never,
+      );
+      expect(session.hasRoomForPeerMessage()).toBe(false);
+    });
+
     it('asks the client about a held message outside the tool approval queue', async () => {
       vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
         outcome: { outcome: 'selected', optionId: 'peer_deliver' },
