@@ -27,6 +27,7 @@ function compileInChild(source: string, identifier: string): void {
           "let source='';" +
           'for await (const chunk of process.stdin) source += chunk;' +
           'new vm.SourceTextModule(source, { identifier: process.argv[1] });',
+        identifier,
       ],
       { input: source, stdio: ['pipe', 'ignore', 'pipe'] },
     );
@@ -72,80 +73,148 @@ describe('prepareNodeReplCell', () => {
     // carried-reference tail, and the commit itself — and the commit must sort last
     // among them. A leading `;` is what makes that true whatever the user wrote.
     //
-    // Each route to a shared offset gets a fixture, because each fails differently:
-    // an expression statement, a declaration in a fresh kernel (the hoisted `var`
-    // seed), a statement ending in a quote, one ending in a backtick, an assignment to
-    // a carried reference, and an unterminated `await`, where the guard's closing
-    // paren shares the commit's offset.
+    // The fixtures cover an inherited expression (with two bindings), a fresh `var`
+    // declaration, quote and template tails, a carried reference, an `await` guard,
+    // and an intermediate boundary in a multi-statement cell.
     const cases = {
-      expression: await prepareNodeReplCell('next', {
-        previousBindings: [{ name: 'previous', kind: 'const' }],
-        cellId: 'cell-omit-semicolon',
-      }),
-      declaration: await prepareNodeReplCell('var next = 1', {
-        previousBindings: [],
-        cellId: 'cell-omit-semicolon-declaration',
-      }),
-      literal: await prepareNodeReplCell("'literal'", {
-        previousBindings: [{ name: 'previous', kind: 'const' }],
-        cellId: 'cell-omit-semicolon-literal',
-      }),
-      template: await prepareNodeReplCell('`done: ${previous}`', {
-        previousBindings: [{ name: 'previous', kind: 'const' }],
-        cellId: 'cell-omit-semicolon-template',
-      }),
-      carried: await prepareNodeReplCell('handler = () => 1', {
-        previousBindings: [{ name: 'handler', kind: 'let' }],
-        cellId: 'cell-omit-semicolon-carried',
-      }),
-      guard: await prepareNodeReplCell('await load()', {
-        previousBindings: [{ name: 'previous', kind: 'const' }],
-        cellId: 'cell-omit-semicolon-guard',
-      }),
+      expression: {
+        firstCommitKey: 'a',
+        prepared: await prepareNodeReplCell('next', {
+          previousBindings: [
+            { name: 'a', kind: 'const' },
+            { name: 'b', kind: 'const' },
+          ],
+          cellId: 'cell-omit-semicolon',
+        }),
+      },
+      declaration: {
+        firstCommitKey: 'next',
+        prepared: await prepareNodeReplCell('var next = 1', {
+          previousBindings: [],
+          cellId: 'cell-omit-semicolon-declaration',
+        }),
+      },
+      literal: {
+        firstCommitKey: 'previous',
+        prepared: await prepareNodeReplCell("'literal'", {
+          previousBindings: [{ name: 'previous', kind: 'const' }],
+          cellId: 'cell-omit-semicolon-literal',
+        }),
+      },
+      template: {
+        firstCommitKey: 'previous',
+        prepared: await prepareNodeReplCell('`done: ${previous}`', {
+          previousBindings: [{ name: 'previous', kind: 'const' }],
+          cellId: 'cell-omit-semicolon-template',
+        }),
+      },
+      carried: {
+        firstCommitKey: 'handler',
+        prepared: await prepareNodeReplCell('handler = () => 1', {
+          previousBindings: [{ name: 'handler', kind: 'let' }],
+          cellId: 'cell-omit-semicolon-carried',
+        }),
+      },
+      guard: {
+        firstCommitKey: 'previous',
+        prepared: await prepareNodeReplCell('await load()', {
+          previousBindings: [{ name: 'previous', kind: 'const' }],
+          cellId: 'cell-omit-semicolon-guard',
+        }),
+      },
+      multi: {
+        firstCommitKey: 'a',
+        prepared: await prepareNodeReplCell('const a = 1\nconst b = 2', {
+          previousBindings: [],
+          cellId: 'cell-omit-semicolon-multi',
+        }),
+      },
     };
 
-    for (const [name, { source }] of Object.entries(cases)) {
-      expect(() => compileInChild(source, `cell:${name}`), name).not.toThrow();
+    for (const [
+      name,
+      {
+        prepared: { source },
+      },
+    ] of Object.entries(cases)) {
+      expect(() => compileInChild(source, `cell:${name}`)).not.toThrow();
     }
 
-    // Compiling is not enough on its own, because two weakenings of the terminator
-    // compile perfectly:
-    //   * gluing an identifier tail — `next__qwen_repl_…_snapshot[…] = …` — is a legal
-    //     assignment to a legal identifier, so the cell parses and only fails at
-    //     evaluation with `ReferenceError: next__qwen_repl_…_snapshot is not defined`,
-    //     with the user's own expression never run. Identifier tails are the most
-    //     common way a model-written cell ends without a `;`.
-    //   * dropping the commit for a specific tail shape (quotes, backticks) leaves the
-    //     statement terminated and the source parseable, while silently losing the
-    //     statement-boundary snapshot the commit exists for.
-    // So every fixture must also show the terminator and the commit on the user's own
-    // physical line — the line the one-line prelude cannot reach.
+    // Compiling alone cannot catch a legal glued identifier tail or a missing commit,
+    // so pin the leading terminator to the first binding of each commit. The expression
+    // fixture carries two bindings to ensure an interior assignment separator cannot
+    // satisfy this assertion.
     const bodyLine = (source: string): string => source.split('\n')[1] ?? '';
-    for (const [name, { source }] of Object.entries(cases)) {
+    for (const [
+      name,
+      {
+        firstCommitKey,
+        prepared: { source },
+      },
+    ] of Object.entries(cases)) {
       expect(bodyLine(source), `${name}: terminator before the commit`).toMatch(
-        /;__qwen_repl_\w+__snapshot\[/,
+        new RegExp(
+          `;__qwen_repl_\\w+__snapshot\\[${JSON.stringify(firstCommitKey)}\\] = \\{binding:`,
+        ),
       );
     }
 
-    // Two ties are about edit order rather than the `;` alone, so pin them explicitly:
-    // the commit must follow the declarator marker's `undefined)`, and the
-    // carried-reference tail's `})["handler"]`.
-    expect(bodyLine(cases.declaration.source)).toMatch(
+    // The declaration marker and carried-reference rewrite share a commit offset, so
+    // the commit must still sort after each of them.
+    expect(bodyLine(cases.declaration.prepared.source)).toMatch(
       /undefined\);__qwen_repl_\w+__snapshot\["next"\] = \{binding:/,
     );
-    expect(bodyLine(cases.carried.source)).toContain(
+    expect(bodyLine(cases.carried.prepared.source)).toContain(
       '})["handler"];__qwen_repl_',
+    );
+    // `multi` reaches the first commit at an intermediate statement boundary.
+    expect(bodyLine(cases.multi.prepared.source)).toMatch(
+      /undefined\);__qwen_repl_\w+__snapshot\["a"\] = \{binding:/,
     );
 
     // LINE_OFFSET invariant: the prelude occupies exactly one physical line, so the
     // user's first line stays physical line 2 and stack traces keep lining up with the
     // code the model wrote. Terminating the commit must not add a line.
-    expect(bodyLine(cases.expression.source)).toContain('next');
-    expect(bodyLine(cases.declaration.source)).toContain('var next = 1');
+    expect(bodyLine(cases.expression.prepared.source)).toContain('next');
+    expect(bodyLine(cases.declaration.prepared.source)).toContain(
+      'var next = 1',
+    );
     // The carried-reference rewrite keeps the user's code on physical line 2 too.
-    expect(bodyLine(cases.carried.source)).toContain(
+    expect(bodyLine(cases.carried.prepared.source)).toContain(
       '({["handler"]:() => 1})["handler"];',
     );
+  });
+
+  it('rejects ambiguous tagged-template statement boundaries', async () => {
+    const options = {
+      previousBindings: [{ name: 'previous', kind: 'const' }] as const,
+      cellId: 'tagged-template-newline',
+    };
+
+    for (const code of [
+      'const t = html\n`<p>`',
+      'make()\n`<p>`',
+      'tag /* comment */\n`<p>`',
+      'if (true) tag\n`<p>`',
+    ]) {
+      await expect(prepareNodeReplCell(code, options)).rejects.toThrow(
+        /tagged template/,
+      );
+    }
+
+    for (const [index, code] of [
+      'const t = html; /* separate statements */\n`<p>`',
+      'const t = html; // separate statements\n`<p>`',
+      'const t = html`<p>`',
+      'function f() {}\n`<p>`',
+      'class C {}\n`<p>`',
+      'if (true) {}\n`<p>`',
+    ].entries()) {
+      const { source } = await prepareNodeReplCell(code, options);
+      expect(() =>
+        compileInChild(source, `template-control:${index}`),
+      ).not.toThrow();
+    }
   });
 
   it('carries a previous binding with its declaration kind so conflicts are native', async () => {

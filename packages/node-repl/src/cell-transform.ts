@@ -431,6 +431,73 @@ function isSourceItem(node: Parser.SyntaxNode): boolean {
   return node.type !== 'comment' && node.type !== 'hash_bang_line';
 }
 
+function lastSignificantLeaf(
+  node: Parser.SyntaxNode,
+): Parser.SyntaxNode | null {
+  if (node.type === 'comment') return null;
+  for (let child = node.lastChild; child; child = child.previousSibling) {
+    const leaf = lastSignificantLeaf(child);
+    if (leaf) return leaf;
+  }
+  return node;
+}
+
+function mayContinueWithTemplateLiteral(
+  node: Parser.SyntaxNode | null,
+): boolean {
+  if (!node) return false;
+  switch (node.type) {
+    case 'expression_statement':
+    case 'throw_statement':
+      return true;
+    case 'lexical_declaration':
+    case 'variable_declaration': {
+      const declarator = node.lastNamedChild;
+      return (
+        declarator?.type === 'variable_declarator' &&
+        declarator.childForFieldName('value') !== null
+      );
+    }
+    case 'export_statement': {
+      const declaration = node.childForFieldName('declaration');
+      return declaration
+        ? mayContinueWithTemplateLiteral(declaration)
+        : node.childForFieldName('value') !== null;
+    }
+    case 'if_statement':
+      return mayContinueWithTemplateLiteral(
+        node.childForFieldName('alternative') ??
+          node.childForFieldName('consequence'),
+      );
+    case 'else_clause':
+      return mayContinueWithTemplateLiteral(node.lastNamedChild);
+    case 'while_statement':
+    case 'for_statement':
+    case 'for_in_statement':
+    case 'with_statement':
+    case 'labeled_statement':
+      return mayContinueWithTemplateLiteral(node.childForFieldName('body'));
+    default:
+      return false;
+  }
+}
+
+// tree-sitter can split a V8 tagged template into two source items. Reject only
+// statement forms whose final expression can absorb the template; declarations
+// and blocks that are already unambiguously separate keep their usual behavior.
+function hasAmbiguousTemplateBoundary(
+  source: string,
+  item: Parser.SyntaxNode,
+  nextItem: Parser.SyntaxNode | undefined,
+): boolean {
+  return (
+    nextItem !== undefined &&
+    source[nextItem.startIndex] === '`' &&
+    lastSignificantLeaf(item)?.type !== ';' &&
+    mayContinueWithTemplateLiteral(item)
+  );
+}
+
 function cancellationGuardEdits(root: Parser.SyntaxNode): Edit[] {
   const edits: Edit[] = [];
   const pending = [root];
@@ -658,7 +725,7 @@ export async function prepareNodeReplCell(
     let generatedCommitChars = 0;
     let commitCounter = 0;
 
-    for (const item of sourceItems) {
+    for (const [itemIndex, item] of sourceItems.entries()) {
       const declaration = topLevelVariableDeclaration(item);
       if (declaration) {
         const completedBindings = new Map(activeBindings);
@@ -721,6 +788,13 @@ export async function prepareNodeReplCell(
       generatedCommitChars += commit.length;
 
       if (commit) {
+        if (
+          hasAmbiguousTemplateBoundary(code, item, sourceItems[itemIndex + 1])
+        ) {
+          throw new Error(
+            'JavaScript cell cannot be transformed safely: a template literal after an unterminated statement may be a tagged template. Add `;` to make the statements separate, or keep the tag and template on the same line.',
+          );
+        }
         edits.push({
           start: item.endIndex,
           end: item.endIndex,
