@@ -1929,7 +1929,7 @@ describe('WorkflowOrchestrator', () => {
       expect(dispatch).toHaveBeenCalledOnce();
       expect(entries.map((entry) => entry.type)).toEqual(['started', 'result']);
       expect(
-        entries.some((entry) => entry.type !== 'source' && entry.key === keyB),
+        entries.some((entry) => 'key' in entry && entry.key === keyB),
       ).toBe(false);
       expect(respawns).toEqual([]);
     } finally {

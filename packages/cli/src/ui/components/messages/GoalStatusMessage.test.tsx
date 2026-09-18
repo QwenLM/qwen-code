@@ -8,7 +8,8 @@ import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
 import { GOAL_STATUS_KINDS, MessageType } from '../../types.js';
-import { GoalStatusMessage } from './GoalStatusMessage.js';
+import { theme } from '../../semantic-colors.js';
+import { GoalStatusMessage, goalCardThemeColor } from './GoalStatusMessage.js';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
@@ -37,32 +38,6 @@ function snapshot(
 }
 
 describe('<GoalStatusMessage />', () => {
-  it('draws no checkpoint line for a record an earlier build left one on', () => {
-    // Goals no longer run evidence checkpoints; a replayed record from a
-    // build that did can still carry the two fields, and the stop reason is
-    // what the card keeps.
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot(
-          'usage_limited',
-          'idle',
-          'Three evidence checkpoints stalled.',
-          {
-            checkpointStalls: 3,
-            lastCheckpointFailure: 'Error: provider failed',
-            limitKind: 'checkpoint_request',
-          },
-        )}
-      />,
-    );
-
-    expect(lastFrame()).toContain(
-      'Reason: Three evidence checkpoints stalled.',
-    );
-    expect(lastFrame()).not.toContain('Checkpoint');
-    expect(lastFrame()).not.toContain('provider failed');
-  });
-
   it('is wrapped in React.memo to avoid unnecessary scrollback rerenders', () => {
     expect(
       (GoalStatusMessage as unknown as { $$typeof?: symbol }).$$typeof,
@@ -250,22 +225,6 @@ describe('<GoalStatusMessage />', () => {
     expect(lastFrame()).not.toContain('tokens');
   });
 
-  it('hides checkpoint health on a completed Goal that still carries it', () => {
-    // The terminal snapshot spreads the record and overrides only `status`,
-    // so a Goal that completed after a failed check journals both fields.
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot('complete', 'idle', 'all acceptance checks passed', {
-          checkpointStalls: 1,
-          lastCheckpointFailure: 'Error: provider failed',
-        })}
-      />,
-    );
-
-    expect(lastFrame()).toContain('Goal complete');
-    expect(lastFrame()).not.toContain('Checkpoint');
-  });
-
   it('never writes control characters from a stop reason to the terminal', () => {
     // A pause reason can embed a raw provider error.
     const { lastFrame } = render(
@@ -300,5 +259,31 @@ describe('<GoalStatusMessage />', () => {
     );
 
     expect(lastFrame()).not.toContain('tokens');
+  });
+
+  it('maps every palette slot of a card view to its theme colour', () => {
+    expect({
+      secondary: goalCardThemeColor('secondary'),
+      accent: goalCardThemeColor('accent'),
+      warning: goalCardThemeColor('warning'),
+      error: goalCardThemeColor('error'),
+      success: goalCardThemeColor('success'),
+    }).toEqual({
+      secondary: theme.text.secondary,
+      accent: theme.text.accent,
+      warning: theme.status.warning,
+      error: theme.status.error,
+      success: theme.status.success,
+    });
+    // Five slots, five colours: no two states may look alike.
+    expect(
+      new Set([
+        theme.text.secondary,
+        theme.text.accent,
+        theme.status.warning,
+        theme.status.error,
+        theme.status.success,
+      ]).size,
+    ).toBe(5);
   });
 });

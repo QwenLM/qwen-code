@@ -1191,6 +1191,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         continue;
       }
       if (!isObjectRecord(item) || typeof item['text'] !== 'string') continue;
+      const contextCompression = isObjectRecord(item['contextCompression'])
+        ? item['contextCompression']
+        : undefined;
+      const contextCompressionNotice = isObjectRecord(
+        item['contextCompressionNotice'],
+      )
+        ? item['contextCompressionNotice']
+        : undefined;
       yield emit(
         createTranscriptMessageUpdate({
           role: 'assistant',
@@ -1198,6 +1206,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           ...meta,
           extra: {
             source: 'slash_command',
+            ...(contextCompression ? { contextCompression } : {}),
+            // Replayed on its own key, exactly as it was recorded: the folded
+            // block keeps both, so the note survives beside the result.
+            ...(contextCompressionNotice ? { contextCompressionNotice } : {}),
             ...(Array.isArray(item['sessionArtifacts'])
               ? { sessionArtifacts: item['sessionArtifacts'] }
               : {}),

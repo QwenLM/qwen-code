@@ -1113,6 +1113,7 @@ button.treeRow:hover {
   display: block;
   max-width: 100%;
   max-height: calc(100vh - 120px);
+  max-height: calc(100dvh - 120px);
   object-fit: contain;
 }
 

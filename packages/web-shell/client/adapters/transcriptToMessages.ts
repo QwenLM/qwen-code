@@ -33,6 +33,7 @@ import {
   projectTerminalBackgroundAgentTool,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
+import { parseContextCompressionMeta } from '../utils/contextCompression.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -677,6 +678,61 @@ export function transcriptBlocksToDaemonMessages(
             ...(meta['visionBridgeNotice'] !== undefined
               ? { data: meta['visionBridgeNotice'] }
               : {}),
+            timestamp: blockTime,
+          });
+          break;
+        }
+        const noticePayload = meta?.['contextCompressionNotice'];
+        const notice = parseContextCompressionMeta(noticePayload);
+        const compressionPayload = meta?.['contextCompression'];
+        const compression = parseContextCompressionMeta(compressionPayload);
+        // A payload this client cannot read means it and the daemon disagree on
+        // the schema. Take the ordinary path then and let the block's own text
+        // through: rendering only the half that still parses would drop the
+        // other half's sentence, and `content` carries both.
+        const unreadable =
+          (noticePayload !== undefined && notice === undefined) ||
+          (compressionPayload !== undefined && compression === undefined);
+        if ((notice || compression) && !unreadable) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          // The invocation note keeps its own `_meta` key, so folding the turn
+          // into one block cannot overwrite it; it renders as the row ahead of
+          // the compression it belongs to.
+          if (notice) {
+            messages.push({
+              id: `${block.id}-notice`,
+              role: 'system',
+              content: textBlock.text,
+              variant: 'info',
+              source: 'context_compression',
+              data: noticePayload,
+              timestamp: blockTime,
+            });
+          }
+          if (!compression) break;
+          // One block carries the whole compression: the progress frame creates
+          // it and the result merges into the same id, flipping `phase` to
+          // 'done', so the row is replaced in place rather than doubled. A block
+          // that stopped streaming without a result is a failed or cancelled
+          // run — its turn reports that itself, and a stale "compressing" row
+          // would only contradict it.
+          if (
+            compression.phase === 'progress' &&
+            textBlock.streaming !== true
+          ) {
+            break;
+          }
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'context_compression',
+            // The raw payload, not the parsed view: SystemMessage falls back to
+            // `content` when it meets a payload this client cannot read.
+            data: compressionPayload,
             timestamp: blockTime,
           });
           break;

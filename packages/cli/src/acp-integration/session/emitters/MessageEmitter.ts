@@ -224,12 +224,20 @@ export class MessageEmitter extends BaseEmitter {
     text: string,
     timestamp?: string | number,
     artifacts?: readonly ToolArtifact[],
+    /**
+     * Extra `_meta` keys for clients that render slash-command output
+     * themselves. Spread first, so a payload can never displace `source`, the
+     * typed `sessionArtifacts`, nor the `timestamp` this emitter adds when the
+     * caller supplied one.
+     */
+    extra?: Record<string, unknown>,
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       _meta: {
+        ...extra,
         source: 'slash_command',
         // Deliberately not `artifacts`: the bridge's sanitizer strips that key
         // from every published frame and only ingests it on tool_call_update

@@ -156,6 +156,7 @@ import {
   resolveSavedWorkflowScript,
   extractAndStripMeta,
   listWorkflowSnapshots,
+  claimInterruptedWorkflowRuns,
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
@@ -8949,9 +8950,13 @@ class QwenAgent implements Agent {
       const workspaceCwd = this.workspaceCwd(config);
       const listing = buildHooksListing(config);
       // The workspace view lists the registry only; session hooks have their
-      // own per-session status method.
+      // own per-session status method. Entries a subagent attached while it
+      // runs sit in the registry too, but they are not workspace
+      // configuration.
       const hooks: ServeHookEntry[] = listing.rows
-        .filter((row) => row.origin === 'registry')
+        .filter(
+          (row) => row.origin === 'registry' && row.agentScope === undefined,
+        )
         .map(
           (row): ServeHookEntry => ({
             kind: 'hook',
@@ -15343,6 +15348,14 @@ class QwenAgent implements Agent {
         `Session ${sessionId} is already active.`,
         { errorKind: 'session_id_conflict', sessionId },
       );
+    }
+    // A run the previous daemon process was running when it exited has no
+    // snapshot until something claims it; claimed here, it joins the history
+    // this session lists as a failed run.
+    try {
+      await claimInterruptedWorkflowRuns(config);
+    } catch (error) {
+      debugLogger.debug(`Claiming interrupted workflow runs failed: ${error}`);
     }
     const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(
