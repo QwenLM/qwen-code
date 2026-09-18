@@ -987,6 +987,14 @@ jobs:
           fi
           exit 0
 
+      - name: 'Prepare review scratch directory'
+        id: review_scratch
+        if: "steps.context.outputs.should_run == 'true'"
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |-
+          scratch=$(mktemp -d "${RUNNER_TEMP:?}/qwen-review-scratch.XXXXXXXX")
+          echo "dir=$scratch" >> "$GITHUB_OUTPUT"
+
       - name: 'Run review'
         id: 'review'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1067,6 +1075,7 @@ jobs:
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
+          TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail
           fail() {
@@ -1784,6 +1793,7 @@ jobs:
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
+              --append-system-prompt "Store all temporary verification clones, scratch worktrees, and test files under TMPDIR=$TMPDIR. Use mktemp -d inside that directory; do not create hardcoded /tmp/verify-* or /tmp/qwen-verify-* paths. Pass this directory requirement to every subagent. Keep final review artifacts in the normal review artifact paths so they are uploaded before cleanup." \
               --prompt "$attempt_prompt" \
               --output-format stream-json \
               | tee "$LOG_PATH"
@@ -2900,6 +2910,30 @@ jobs:
           path: '${{ steps.stage.outputs.dir }}'
           retention-days: 90
           if-no-files-found: 'ignore'
+
+      - name: 'Clean review scratch directory'
+        if: "always() && steps.review_scratch.outputs.dir != ''"
+        timeout-minutes: 5
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+        env:
+          REVIEW_SCRATCH: '${{ steps.review_scratch.outputs.dir }}'
+          PATH: /usr/local/bin:/usr/bin:/bin
+        run: |-
+          case "$REVIEW_SCRATCH" in
+            "${RUNNER_TEMP:?}"/qwen-review-scratch.*)
+              suffix=${REVIEW_SCRATCH#"$RUNNER_TEMP"/qwen-review-scratch.}
+              case "$suffix" in
+                ''|*[!a-zA-Z0-9]*) echo '::error::Invalid review scratch path'; exit 1 ;;
+              esac
+              ;;
+            *) echo '::error::Review scratch path is outside runner temp'; exit 1 ;;
+          esac
+          if rm -rf -- "$REVIEW_SCRATCH"; then
+            echo 'Removed job-owned review scratch directory'
+          else
+            echo '::error::Could not remove job-owned review scratch directory'
+            exit 1
+          fi
 
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
       # Remove both the worktree directories and Git's worktree registrations so

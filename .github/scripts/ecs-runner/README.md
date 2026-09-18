@@ -101,15 +101,23 @@ This cleanup intentionally does not delete runner workspaces, package caches,
 containerd leases, or containerd snapshots directly. Those resources require
 separate disk-pressure monitoring and a host drain before manual cleanup.
 
-Arbitrary review/verification copies in `/tmp` are only covered by the
-seven-day policy, not per-job cleanup. This service does not remove them by
-name: they may belong to an active job. Build-cache reclamation does not fix
-their lifecycle or initialize unused data disks.
+The PR review workflow creates a private scratch directory under `RUNNER_TEMP`,
+exports it as `TMPDIR`, and instructs the agent and its subagents to keep
+verification copies there. An `always()` step removes that directory after
+artifact upload, including on failed or cancelled reviews when cleanup steps
+can run. Cleanup failures are reported in the job log.
+
+This is a temporary-directory convention, not filesystem isolation: commands
+that explicitly write elsewhere bypass it. Existing arbitrary copies in `/tmp`
+remain covered only by the seven-day policy. This service does not remove them
+by name because they may belong to an active job. Host crashes or forced kills
+can also prevent job cleanup; the host policy remains a fallback. Build-cache
+reclamation does not initialize unused data disks.
 
 ## Regression check
 
 ```bash
-node --test .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs
+node --test .github/scripts/ecs-runner/*.test.mjs
 ```
 
 The check runs the cleanup script with mocked host commands and temporary
