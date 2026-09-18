@@ -592,6 +592,14 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     mkdirSync(destWebShellDir, { recursive: true });
     copyFileSync(webShellIndexHtml, join(destWebShellDir, 'index.html'));
     copyRecursiveSync(webShellAssetsDir, join(destWebShellDir, 'assets'));
+    for (const file of ['manifest.webmanifest', 'sw.js']) {
+      const source = join(webShellDistDir, file);
+      if (existsSync(source)) {
+        copyFileSync(source, join(destWebShellDir, file));
+      } else {
+        console.warn(`Warning: Web Shell PWA asset not found: ${source}`);
+      }
+    }
     console.log('Copied Web Shell UI to dist/web-shell/');
   } else {
     console.warn(
