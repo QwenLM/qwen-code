@@ -4730,7 +4730,15 @@ export function createSessionControlPlane(
       // lifecycle marker before installing a session from a response that was
       // admitted immediately ahead of the fatal frame.
       await Promise.resolve();
-      if (ci.harness.isDying) {
+      // Channel retirement can leave the shared channel draining while this
+      // request is in flight. It must not accept fresh work after that point.
+      if (ci.harness.isDying || ci.harness.retireWhenSessionsDrain) {
+        await settleAbandonedNewSession(
+          ci,
+          abandonedToken,
+          newSessionResp.sessionId,
+          requestedSessionId,
+        );
         throw new BridgeChannelClosedError('after newSession');
       }
 
