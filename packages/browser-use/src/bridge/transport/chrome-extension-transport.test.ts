@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { connect } from 'node:net';
+import { connect, type Socket } from 'node:net';
+import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -18,17 +20,17 @@ import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
   MAX_BRIDGE_FRAME_BYTES,
-  defaultChromeBridgeSocketDirectory,
   defaultChromeBridgeSocketPath,
+  defaultChromeBridgeSocketDirectory,
   type BridgeRequest,
 } from '../protocol.js';
 import {
   ChromeExtensionTransport,
-  ensureSocketDirectory,
   isAddressInUse,
   type ChromeExtensionTransportOptions,
 } from './chrome-extension-transport.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
+import { PlaywrightRuntime } from '../../playwright/playwright-runtime.js';
 
 const roots: string[] = [];
 const transports: ChromeExtensionTransport[] = [];
@@ -40,65 +42,96 @@ afterEach(async () => {
   }
 });
 
-describe('ensureSocketDirectory', () => {
-  it('creates a missing directory with owner-only permissions', async () => {
-    if (process.platform === 'win32') return;
-    // The ancestor sweep rejects symlinks, and macOS reaches its temp root
-    // through one (/var -> /private/var), so resolve the real path first.
-    const root = fs.mkdtempSync(
-      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
-    );
-    roots.push(root);
-    const dir = path.join(root, 'qwen-browser-use', '1000');
-    await ensureSocketDirectory(dir);
-    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
-  });
-
-  it('tightens a permissive owned directory and rejects a non-directory', async () => {
-    if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(
-      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
-    );
-    roots.push(root);
-    const dir = path.join(root, 'loose');
-    fs.mkdirSync(dir, { mode: 0o755 });
-    await ensureSocketDirectory(dir);
-    expect(fs.statSync(dir).mode & 0o077).toBe(0);
-    const squat = path.join(root, 'squat');
-    fs.writeFileSync(squat, '');
-    await expect(ensureSocketDirectory(squat)).rejects.toThrow('not usable');
-  });
-
-  it('rejects a socket directory behind a symlinked parent', async () => {
-    if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(
-      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
-    );
-    roots.push(root);
-    const target = path.join(root, 'target');
-    fs.mkdirSync(target);
-    fs.symlinkSync(target, path.join(root, 'link'));
-    await expect(
-      ensureSocketDirectory(path.join(root, 'link', 'leaf')),
-    ).rejects.toThrow('not usable');
-  });
-
-  it('rejects a socket directory under a group/other-writable ancestor', async () => {
-    if (process.platform === 'win32') return;
-    const root = fs.mkdtempSync(
-      path.join(fs.realpathSync(os.tmpdir()), 'qbu-dir-'),
-    );
-    roots.push(root);
-    const loose = path.join(root, 'loose');
-    fs.mkdirSync(loose);
-    fs.chmodSync(loose, 0o777);
-    await expect(
-      ensureSocketDirectory(path.join(loose, 'leaf')),
-    ).rejects.toThrow('not usable');
-  });
-});
-
 describe('ChromeExtensionTransport', () => {
+  it.each(['before', 'during'])(
+    'reports an outdated extension seen %s the connection wait',
+    async (when) => {
+      const transport = await startProfileTransport();
+      const wait = () =>
+        transport.request('ping', {}, 150).catch((error: unknown) => error);
+      const pending = when === 'during' ? wait() : undefined;
+      await rejectedHello(transport, { protocolVersion: 1 });
+      expect(await (pending ?? wait())).toMatchObject({
+        code: 'EXTENSION_VERSION_MISMATCH',
+        message: expect.stringContaining('extension is out of date'),
+      });
+      expect(transport.isConnected()).toBe(false);
+      await transport.stop();
+      await transport.start();
+      await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+        message: expect.stringContaining('extension is not connected'),
+      });
+    },
+  );
+
+  it('allows a compatible profile to connect after an incompatible hello', async () => {
+    const transport = await startProfileTransport();
+    const pending = transport.request('ping');
+    await rejectedHello(transport, { protocolVersion: 1 });
+    const owner = await connectProfile(transport, 'profile-a');
+    await expect(pending).resolves.toBe('profile-a');
+    owner.destroy();
+    await vi.waitFor(() => expect(transport.isConnected()).toBe(false));
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      message: expect.stringContaining('extension is not connected'),
+    });
+  });
+
+  it.each([
+    { extensionId: 'other-extension', protocolVersion: 1 },
+    { protocolVersion: '1' },
+    { protocolVersion: -1 },
+  ])('does not diagnose an upgrade from an invalid peer: %j', async (hello) => {
+    const transport = await startProfileTransport();
+    await rejectedHello(transport, hello);
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      message: expect.stringContaining('extension is not connected'),
+    });
+  });
+
+  it('scopes mismatch guidance to discovery or the disconnected selected profile', async () => {
+    const transport = await startProfileTransport();
+    const owner = await connectProfile(transport, 'profile-a');
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+    await rejectedHello(transport, { protocolVersion: 1 });
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+    owner.destroy();
+    await vi.waitFor(() => expect(transport.isConnected()).toBe(false));
+    await rejectedHello(transport, {
+      protocolVersion: 1,
+      extensionInstanceId: 'profile-b',
+    });
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      message: expect.stringContaining('extension is not connected'),
+    });
+    await rejectedHello(transport, {
+      protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION + 1,
+      extensionInstanceId: 'profile-a',
+    });
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      code: 'EXTENSION_VERSION_MISMATCH',
+      message: expect.stringContaining('Update Qwen Code'),
+    });
+    await connectProfile(transport, 'profile-a');
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+  });
+
+  it('surfaces an outdated extension from browser discovery instead of an empty list', async () => {
+    const transport = await startProfileTransport({ connectTimeoutMs: 200 });
+    await rejectedHello(transport, { protocolVersion: 1 });
+    const runtime = new PlaywrightRuntime({ bridge: transport });
+    await expect(runtime.dispatch('browsers.list', {})).rejects.toMatchObject({
+      code: 'EXTENSION_VERSION_MISMATCH',
+      message: expect.stringContaining('out of date'),
+    });
+  });
+
+  it('reports no browsers when no extension connects at all', async () => {
+    const transport = await startProfileTransport({ connectTimeoutMs: 200 });
+    const runtime = new PlaywrightRuntime({ bridge: transport });
+    await expect(runtime.dispatch('browsers.list', {})).resolves.toEqual([]);
+  });
+
   it.skipIf(process.platform === 'win32').each([
     ['Input.dispatchMouseEvent', undefined],
     ['Input.dispatchKeyEvent', undefined],
@@ -202,13 +235,185 @@ describe('ChromeExtensionTransport', () => {
     },
   );
 
+  it('parks other profiles without interrupting requests or accepting their events', async () => {
+    const transport = await startProfileTransport();
+    const changes: boolean[] = [];
+    const events: unknown[] = [];
+    transport.onConnectionChange((connected) => changes.push(connected));
+    transport.onEvent((event) => events.push(event));
+    let requestId: string | undefined;
+    const a = await connectProfile(transport, 'profile-a', (request) => {
+      requestId = request.id;
+    });
+    const pending = transport.request('cdp.send', {
+      tabId: 7,
+      method: 'Input.dispatchMouseEvent',
+    });
+    await vi.waitFor(() => expect(requestId).toBeDefined());
+    const b = await connectProfile(transport, 'profile-b');
+    b.write(
+      encodeFrame({
+        type: 'response',
+        id: requestId,
+        ok: true,
+        result: 'wrong profile',
+      }),
+    );
+    b.write(
+      encodeFrame({
+        type: 'event',
+        tabId: 7,
+        method: 'Page.javascriptDialogOpening',
+        params: { type: 'alert', message: 'other profile' },
+      }),
+    );
+    a.write(encodeFrame({ type: 'event', tabId: 7, method: 'Page.fromA' }));
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    a.write(
+      encodeFrame({
+        type: 'response',
+        id: requestId,
+        ok: true,
+        result: 'profile-a:7',
+      }),
+    );
+    await expect(pending).resolves.toBe('profile-a:7');
+    expect(events).toEqual([
+      { type: 'event', tabId: 7, method: 'Page.fromA', params: undefined },
+    ]);
+    expect(changes).toEqual([true]);
+    expect(a.destroyed).toBe(false);
+    expect(b.destroyed).toBe(false);
+    b.destroy();
+    await vi.waitFor(() => expect(b.closed).toBe(true));
+    // `b.closed` flips synchronously on destroy(); the server observes the
+    // close only on a later event-loop turn, so settle before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(changes).toEqual([true]);
+    expect(transport.isConnected()).toBe(true);
+    const firstRequestId = requestId;
+    const followUp = transport.request('ping', {}, 500);
+    await vi.waitFor(() => expect(requestId).not.toBe(firstRequestId));
+    a.write(
+      encodeFrame({
+        type: 'response',
+        id: requestId,
+        ok: true,
+        result: 'profile-a:still-selected',
+      }),
+    );
+    await expect(followUp).resolves.toBe('profile-a:still-selected');
+    expect(changes).toEqual([true]);
+    expect(a.destroyed).toBe(false);
+  });
+
+  it('waits for the original profile after disconnect instead of failing over', async () => {
+    const transport = await startProfileTransport();
+    const a = await connectProfile(transport, 'profile-a');
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+    await connectProfile(transport, 'profile-b');
+    a.destroy();
+    await vi.waitFor(() => expect(transport.isConnected()).toBe(false));
+    await connectProfile(transport, 'profile-b');
+    await expect(transport.request('ping', {}, 20)).rejects.toMatchObject({
+      code: 'BROWSER_DISCONNECTED',
+    });
+    const waiting = transport.request('ping');
+    await connectProfile(transport, 'profile-a');
+    await expect(waiting).resolves.toBe('profile-a');
+  });
+
+  it('can select another profile after the transport is stopped and restarted', async () => {
+    const transport = await startProfileTransport();
+    const a = await connectProfile(transport, 'profile-a');
+    await expect(transport.request('ping')).resolves.toBe('profile-a');
+    const b = await connectProfile(transport, 'profile-b');
+    await transport.stop();
+    await vi.waitFor(() => expect(a.destroyed && b.destroyed).toBe(true));
+    await transport.start();
+    await connectProfile(transport, 'profile-b');
+    await expect(transport.request('ping')).resolves.toBe('profile-b');
+  });
+
+  it.each([undefined, '', ' ', 42, 'x'.repeat(129)])(
+    'rejects an invalid instance identity (%s) before selecting a profile',
+    async (extensionInstanceId) => {
+      const transport = await startProfileTransport();
+      const candidate = connect(transport.socketPath);
+      candidate.on('error', () => undefined);
+      await once(candidate, 'connect');
+      candidate.write(
+        encodeFrame({
+          type: 'hello',
+          protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+          extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId,
+        }),
+      );
+      await once(candidate, 'close');
+      expect(transport.isConnected()).toBe(false);
+      await connectProfile(transport, 'profile-b');
+      await expect(transport.request('ping')).resolves.toBe('profile-b');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'delivers a response ahead of the events that share its socket chunk',
+    async () => {
+      // Playwright installs a page's renderer and lifecycle listeners inside
+      // `Page.getFrameTree().then(...)`. A response only settles a promise, so
+      // its consumer runs on the microtask queue; events emitted synchronously
+      // from the same chunk overtook it, found no listener, and a claimed tab
+      // never regained its main world. Delivery must follow arrival order.
+      const { transport, socket, requests } = await connectedTransport();
+      const order: string[] = [];
+      transport.onEvent((event) => order.push(`event:${event.method}`));
+      const result = transport
+        .request('cdp.send', { tabId: 7, method: 'Page.getFrameTree' }, 1_000)
+        .then((value) => {
+          order.push('response:Page.getFrameTree');
+          return value;
+        });
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      socket.write(
+        Buffer.concat([
+          encodeFrame({
+            type: 'response',
+            id: requests[0]!.id,
+            ok: true,
+            result: { frameTree: {} },
+          }),
+          encodeFrame({
+            type: 'event',
+            tabId: 7,
+            method: 'Runtime.executionContextCreated',
+            params: {},
+          }),
+          encodeFrame({
+            type: 'event',
+            tabId: 7,
+            method: 'Page.lifecycleEvent',
+            params: { name: 'load' },
+          }),
+        ]),
+      );
+      await expect(result).resolves.toEqual({ frameTree: {} });
+      await vi.waitFor(() => expect(order).toHaveLength(3));
+      expect(order).toEqual([
+        'response:Page.getFrameTree',
+        'event:Runtime.executionContextCreated',
+        'event:Page.lifecycleEvent',
+      ]);
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'does not reopen a stopped socket for a late request',
     async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
       roots.push(root);
       const transport = new ChromeExtensionTransport({
-        socketPath: path.join(root, 'bridge.sock'),
+        socketPath: testSocketPath(root),
         connectTimeoutMs: 20,
       });
       transports.push(transport);
@@ -310,13 +515,53 @@ describe('ChromeExtensionTransport', () => {
     expect(defaultChromeBridgeSocketPath({ TMPDIR: '/tmp/one' })).toBe(
       defaultChromeBridgeSocketPath({ TMPDIR: '/tmp/two' }),
     );
+    expect(path.dirname(defaultChromeBridgeSocketPath({}))).not.toBe('/tmp');
     expect(
       defaultChromeBridgeSocketPath({
         AGENT_BROWSER_SOCKET_PATH: '/tmp/legacy.sock',
       }),
     ).not.toBe('/tmp/legacy.sock');
-    expect(CHROME_BRIDGE_PROTOCOL_VERSION).toBe(1);
+    expect(CHROME_BRIDGE_PROTOCOL_VERSION).toBe(2);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a shared socket directory without changing its permissions',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      fs.chmodSync(root, 0o777);
+      const transport = new ChromeExtensionTransport({
+        socketPath: testSocketPath(root),
+      });
+      transports.push(transport);
+      await expect(transport.start()).rejects.toMatchObject({
+        code: 'TRANSPORT_UNAVAILABLE',
+      });
+      expect(fs.statSync(root).mode & 0o777).toBe(0o777);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'names the private-directory requirement for a world-readable socket directory',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const shared = path.join(root, 'shared');
+      fs.mkdirSync(shared, { mode: 0o755 });
+      fs.chmodSync(shared, 0o755);
+      const transport = new ChromeExtensionTransport({
+        socketPath: path.join(shared, 'bridge.sock'),
+      });
+      transports.push(transport);
+      await expect(transport.start()).rejects.toMatchObject({
+        code: 'TRANSPORT_UNAVAILABLE',
+        message: expect.stringContaining(
+          `requires a private user-owned directory: ${shared}`,
+        ),
+      });
+      expect(fs.existsSync(transport.socketPath)).toBe(false);
+    },
+  );
 
   it('honours an explicit QWEN_BROWSER_USE_SOCKET_PATH and ignores a blank one', () => {
     expect(
@@ -381,6 +626,56 @@ describe('ChromeExtensionTransport', () => {
       ),
     ).toBe('/tmp');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'creates a private socket directory and rejects directory symlinks',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const directory = path.join(root, 'private');
+      const transport = new ChromeExtensionTransport({
+        socketPath: path.join(directory, 'bridge.sock'),
+      });
+      transports.push(transport);
+      await transport.start();
+      expect(fs.statSync(directory).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(transport.socketPath).mode & 0o777).toBe(0o600);
+      const link = path.join(root, 'link');
+      fs.symlinkSync(directory, link);
+      const linked = new ChromeExtensionTransport({
+        socketPath: path.join(link, 'bridge.sock'),
+      });
+      transports.push(linked);
+      await expect(linked.start()).rejects.toMatchObject({
+        code: 'TRANSPORT_UNAVAILABLE',
+      });
+      expect(transport.isConnected()).toBe(false);
+      expect(fs.existsSync(transport.socketPath)).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a private directory belonging to another UID',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+      roots.push(root);
+      const transport = new ChromeExtensionTransport({
+        socketPath: testSocketPath(root),
+      });
+      transports.push(transport);
+      const uid = vi
+        .spyOn(process as { getuid: () => number }, 'getuid')
+        .mockReturnValue(fs.statSync(root).uid + 1);
+      try {
+        await expect(transport.start()).rejects.toMatchObject({
+          code: 'TRANSPORT_UNAVAILABLE',
+        });
+        expect(fs.existsSync(transport.socketPath)).toBe(false);
+      } finally {
+        uid.mockRestore();
+      }
+    },
+  );
 
   it('derives the macOS socket directory without reading ambient TMPDIR', () => {
     const original = process.env.TMPDIR;
@@ -477,7 +772,7 @@ describe('ChromeExtensionTransport', () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
       roots.push(root);
       const transport = new ChromeExtensionTransport({
-        socketPath: path.join(root, 'bridge.sock'),
+        socketPath: testSocketPath(root),
       });
       transports.push(transport);
       await transport.start();
@@ -488,6 +783,7 @@ describe('ChromeExtensionTransport', () => {
           type: 'hello',
           protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
           extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId: 'profile-a',
         }),
       );
       const decoder = new FrameDecoder();
@@ -495,17 +791,32 @@ describe('ChromeExtensionTransport', () => {
         for (const message of decoder.push(chunk)) {
           const request = message as { id: string; method: string };
           socket.write(
-            encodeFrame({
-              type: 'response',
-              id: request.id,
-              ok: true,
-              result: { method: request.method },
-            }),
+            encodeFrame(
+              request.method === 'conflict'
+                ? {
+                    type: 'response',
+                    id: request.id,
+                    ok: false,
+                    error: {
+                      code: 'TAB_DEBUGGER_CONFLICT',
+                      message: 'Another debugger is already attached',
+                    },
+                  }
+                : {
+                    type: 'response',
+                    id: request.id,
+                    ok: true,
+                    result: { method: request.method },
+                  },
+            ),
           );
         }
       });
       await expect(transport.request('ping')).resolves.toEqual({
         method: 'ping',
+      });
+      await expect(transport.request('conflict')).rejects.toMatchObject({
+        code: 'TAB_DEBUGGER_CONFLICT',
       });
       const events: unknown[] = [];
       transport.onEvent((event) => events.push(event));
@@ -539,13 +850,59 @@ describe('ChromeExtensionTransport', () => {
     },
   );
 
+  it('allows browser listing to wait for discovery while keeping explicit probes short', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
+    roots.push(root);
+    const transport = new ChromeExtensionTransport({
+      socketPath: testSocketPath(root),
+      connectTimeoutMs: 5_000,
+      requestTimeoutMs: 500,
+    });
+    transports.push(transport);
+    await transport.start();
+    await expect(transport.request('ping', {}, 5)).rejects.toMatchObject({
+      code: 'BROWSER_DISCONNECTED',
+    });
+    const runtime = new PlaywrightRuntime({ bridge: transport });
+    const request = runtime.dispatch('browsers.list', {});
+    // Discovery also needs to outlast the old 1.5-second browser-list probe.
+    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    const socket = connect(transport.socketPath);
+    const decoder = new FrameDecoder();
+    socket.on('data', (chunk: Buffer) => {
+      for (const message of decoder.push(chunk)) {
+        socket.write(
+          encodeFrame({
+            type: 'response',
+            id: (message as { id: string }).id,
+            ok: true,
+            result: 'ready',
+          }),
+        );
+      }
+    });
+    await new Promise<void>((resolve) => socket.once('connect', resolve));
+    socket.write(
+      encodeFrame({
+        type: 'hello',
+        protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+        extensionId: CHROME_EXTENSION_ID,
+        extensionInstanceId: 'profile-a',
+      }),
+    );
+    await expect(request).resolves.toEqual([
+      expect.objectContaining({ id: 'chrome' }),
+    ]);
+    socket.destroy();
+  });
+
   it.skipIf(process.platform === 'win32')(
     'rejects an oversized request before registering its timeout',
     async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
       roots.push(root);
       const transport = new ChromeExtensionTransport({
-        socketPath: path.join(root, 'bridge.sock'),
+        socketPath: testSocketPath(root),
       });
       transports.push(transport);
       await transport.start();
@@ -556,6 +913,7 @@ describe('ChromeExtensionTransport', () => {
           type: 'hello',
           protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
           extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId: 'profile-a',
         }),
       );
       await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
@@ -605,6 +963,7 @@ describe('ChromeExtensionTransport', () => {
           type: 'hello',
           protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
           extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId: 'profile-a',
         }),
       );
       const decoder = new FrameDecoder();
@@ -638,7 +997,7 @@ describe('ChromeExtensionTransport', () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
       roots.push(root);
       const transport = new ChromeExtensionTransport({
-        socketPath: path.join(root, 'bridge.sock'),
+        socketPath: testSocketPath(root),
       });
       transports.push(transport);
       await transport.start();
@@ -655,7 +1014,7 @@ describe('ChromeExtensionTransport', () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
       roots.push(root);
       const transport = new ChromeExtensionTransport({
-        socketPath: path.join(root, 'bridge.sock'),
+        socketPath: testSocketPath(root),
       });
       transports.push(transport);
       await transport.start();
@@ -672,6 +1031,7 @@ describe('ChromeExtensionTransport', () => {
       {
         protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION + 1,
         extensionId: CHROME_EXTENSION_ID,
+        extensionInstanceId: 'profile-a',
       },
     ],
     [
@@ -679,6 +1039,7 @@ describe('ChromeExtensionTransport', () => {
       {
         protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
         extensionId: 'wrong-extension-id',
+        extensionInstanceId: 'profile-a',
       },
     ],
   ] as const)(
@@ -687,7 +1048,7 @@ describe('ChromeExtensionTransport', () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
       roots.push(root);
       const transport = new ChromeExtensionTransport({
-        socketPath: path.join(root, 'bridge.sock'),
+        socketPath: testSocketPath(root),
       });
       transports.push(transport);
       await transport.start();
@@ -706,6 +1067,7 @@ describe('ChromeExtensionTransport', () => {
           type: 'hello',
           protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
           extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId: 'profile-a',
         }),
       );
       await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
@@ -719,7 +1081,7 @@ describe('ChromeExtensionTransport', () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
       roots.push(root);
       const transport = new ChromeExtensionTransport({
-        socketPath: path.join(root, 'bridge.sock'),
+        socketPath: testSocketPath(root),
       });
       transports.push(transport);
       await transport.start();
@@ -734,6 +1096,7 @@ describe('ChromeExtensionTransport', () => {
           type: 'hello',
           protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
           extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId: 'profile-a',
         }),
       );
       await vi.waitFor(() => expect(states).toEqual([true]));
@@ -748,6 +1111,7 @@ describe('ChromeExtensionTransport', () => {
           type: 'hello',
           protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
           extensionId: CHROME_EXTENSION_ID,
+          extensionInstanceId: 'profile-a',
         }),
       );
       await vi.waitFor(() => expect(transport.isConnected()).toBe(true));
@@ -838,13 +1202,82 @@ describe('ChromeExtensionTransport', () => {
   );
 });
 
+function testSocketPath(root: string): string {
+  return process.platform === 'win32'
+    ? String.raw`\\.\pipe\qbu-test-${randomUUID()}`
+    : path.join(root, 'bridge.sock');
+}
+
+async function startProfileTransport(
+  options: Omit<ChromeExtensionTransportOptions, 'socketPath'> = {},
+): Promise<ChromeExtensionTransport> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-profiles-'));
+  roots.push(root);
+  const transport = new ChromeExtensionTransport({
+    socketPath: testSocketPath(root),
+    ...options,
+  });
+  transports.push(transport);
+  await transport.start();
+  return transport;
+}
+
+async function connectProfile(
+  transport: ChromeExtensionTransport,
+  extensionInstanceId: string,
+  onRequest?: (request: { id: string }) => void,
+): Promise<Socket> {
+  const socket = connect(transport.socketPath);
+  socket.on('error', () => undefined);
+  const decoder = new FrameDecoder();
+  socket.on('data', (chunk: Buffer) => {
+    for (const message of decoder.push(chunk)) {
+      const request = message as { id: string };
+      if (onRequest) onRequest(request);
+      else
+        socket.write(
+          encodeFrame({
+            type: 'response',
+            id: request.id,
+            ok: true,
+            result: extensionInstanceId,
+          }),
+        );
+    }
+  });
+  await once(socket, 'connect');
+  socket.write(
+    encodeFrame({
+      type: 'hello',
+      protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+      extensionId: CHROME_EXTENSION_ID,
+      extensionInstanceId,
+    }),
+  );
+  return socket;
+}
+
+async function rejectedHello(
+  transport: ChromeExtensionTransport,
+  hello: Record<string, unknown>,
+): Promise<void> {
+  const socket = connect(transport.socketPath);
+  socket.on('error', () => undefined);
+  await once(socket, 'connect');
+  const closed = once(socket, 'close');
+  socket.write(
+    encodeFrame({ type: 'hello', extensionId: CHROME_EXTENSION_ID, ...hello }),
+  );
+  await closed;
+}
+
 async function connectedTransport(
   options: Omit<ChromeExtensionTransportOptions, 'socketPath'> = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-transport-'));
   roots.push(root);
   const transport = new ChromeExtensionTransport({
-    socketPath: path.join(root, 'bridge.sock'),
+    socketPath: testSocketPath(root),
     ...options,
   });
   transports.push(transport);
@@ -861,6 +1294,7 @@ async function connectedTransport(
       type: 'hello',
       protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
       extensionId: CHROME_EXTENSION_ID,
+      extensionInstanceId: 'profile-a',
     }),
   );
   await vi.waitFor(() => expect(transport.isConnected()).toBe(true));

@@ -51,6 +51,7 @@ const EN: Messages = {
   'branchPicker.action.newBranch': 'New Branch…',
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
+  'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
   'branchPicker.invalidBranchName':
     'Invalid branch name — avoid spaces, ~, ^, :, ? * and leading -',
@@ -191,6 +192,9 @@ const EN: Messages = {
   'gitLog.detailError': 'Failed to load commit details',
   'gitLog.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitLog.copySha': (v) => `Copy commit ${v?.sha ?? ''}`,
+  'gitLog.allBranches': 'All branches',
+  'gitLog.search': 'Search message, author, or hash',
+  'gitLog.noMatches': 'No commits match',
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -614,6 +618,8 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.dissatisfied': 'Not satisfied',
+  'assistant.satisfied': 'Satisfied',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -2924,6 +2930,11 @@ const EN: Messages = {
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
     'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+  'contextCompression.result': (v) =>
+    `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `Compression instructions were truncated to ${v?.max ?? ''} characters.`,
+  'contextCompression.noop': 'No compression needed.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
   'contextUsage.previousReading':
@@ -3903,6 +3914,7 @@ const ZH: Messages = {
   'branchPicker.action.newBranch': '新建分支…',
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
+  'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
   'branchPicker.invalidBranchName':
     '无效的分支名称 — 避免空格、~、^、:、? * 以及以 - 开头',
@@ -4035,6 +4047,9 @@ const ZH: Messages = {
   'gitLog.detailError': '加载提交详情失败',
   'gitLog.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
   'gitLog.copySha': (v) => `复制提交 ${v?.sha ?? ''}`,
+  'gitLog.allBranches': '全部分支',
+  'gitLog.search': '搜索提交信息、作者或哈希',
+  'gitLog.noMatches': '没有匹配的提交',
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',
@@ -4526,6 +4541,8 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.dissatisfied': '不满意',
+  'assistant.satisfied': '满意',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
@@ -6650,6 +6667,11 @@ const ZH: Messages = {
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
     '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+  'contextCompression.result': (v) =>
+    `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `压缩指令已截断为 ${v?.max ?? ''} 个字符。`,
+  'contextCompression.noop': '无需压缩。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',

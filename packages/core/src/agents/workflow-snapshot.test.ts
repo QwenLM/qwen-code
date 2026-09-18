@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
   toSnapshot,
+  readWorkflowSnapshot,
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
   deleteWorkflowSnapshot,
@@ -197,6 +198,57 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
         at: 1_700_000_005_000,
       },
     ]);
+  });
+
+  // A resume after a restart has a run id and no registry entry, and the
+  // snapshot is what still says what the run recorded about itself.
+  it('reads one run back by id, its source reference included', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({
+        runId: 'wf_one',
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      }),
+    );
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_other' }));
+
+    const snapshot = await readWorkflowSnapshot(config, 'wf_one');
+    expect(snapshot?.runId).toBe('wf_one');
+    expect(snapshot?.sourceRef).toEqual({
+      id: 'definition-7',
+      revision: 'rev-3',
+    });
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_other'))?.sourceRef,
+    ).toBeUndefined();
+  });
+
+  it('reads nothing for a run with no snapshot, an unparseable one, or a file that is not one', async () => {
+    const config = fakeConfig(projectDir);
+    await expect(
+      readWorkflowSnapshot(config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+
+    const broken = config.storage.getWorkflowRunSnapshotPath('wf_broken');
+    await fs.mkdir(path.dirname(broken), { recursive: true });
+    await fs.writeFile(broken, '{not json', 'utf8');
+    await expect(
+      readWorkflowSnapshot(config, 'wf_broken'),
+    ).resolves.toBeUndefined();
+
+    await fs.writeFile(
+      config.storage.getWorkflowRunSnapshotPath('wf_other_shape'),
+      JSON.stringify({ sourceRef: { id: 'a', revision: 'b' } }),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_other_shape'),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      readWorkflowSnapshot({} as Config, 'wf_absent'),
+    ).resolves.toBeUndefined();
   });
 
   it('loads a legacy snapshot without an event ledger', async () => {
