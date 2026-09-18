@@ -197,6 +197,12 @@ case "${step}" in
       publish_package "packages/channels/${channel}" "${publish_marker}" "${channel}"
       echo "::endgroup::"
     done
+
+    # Last on purpose: this is the only name in the sequence CI has never
+    # published, so a failure here leaves every long-shipped package already
+    # out instead of stranding them under `set -eo pipefail`.
+    publish_package 'packages/web-shell'
+
     if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${publish_marker}" ]]; then
       echo "::warning::Every channel package was already published; nothing shipped"
     fi
