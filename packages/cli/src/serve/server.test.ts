@@ -43458,6 +43458,7 @@ describe('Live Appshot server integration', () => {
       try {
         app = createServeApp(baseOpts, undefined, {
           bridge: fakeBridge(),
+          persistSetting: vi.fn(async () => undefined),
           daemonEnv: {},
           runtimePlatform,
           webShellDir: path.join(tmp, 'web-shell'),
@@ -43474,6 +43475,15 @@ describe('Live Appshot server integration', () => {
         expect(capabilities.body.features.includes('realtime_voice')).toBe(
           native,
         );
+        // Shipped Web Shells turn these keys into the native install card.
+        const settings = await request(app)
+          .get('/workspace/settings')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(
+          settings.body.settings.some((setting: { key: string }) =>
+            setting.key.startsWith('experimental.liveVoice.'),
+          ),
+        ).toBe(native);
       } finally {
         (app?.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
         restoreEnv('QWEN_HOME', previousQwenHome);

@@ -2854,7 +2854,12 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
-      includeLiveVoice: liveVoiceSurfaceAvailable,
+      // Shipped Web Shells render the native-Host install card as soon as
+      // `experimental.liveVoice.enabled` is listed, which is a dead end off
+      // macOS. Keep the keys native-only until the browser client that can
+      // act on them ships; until then Live Voice is enabled off macOS through
+      // settings.json.
+      includeLiveVoice: liveNativeHostAvailable,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
