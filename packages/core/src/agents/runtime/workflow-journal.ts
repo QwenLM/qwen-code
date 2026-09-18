@@ -31,8 +31,8 @@
  *
  * The `canonicalOpts` projection keeps only the dispatch-affecting opts
  * (`schema`, `model`, `effort`, `isolation`, `agentType`, `workingDir`,
- * `disallowedTools`) with object keys sorted, so cosmetic opt differences (a
- * re-ordered schema, a `label` change) don't bust the cache.
+ * `disallowedTools`, `tools`) with object keys sorted, so cosmetic opt
+ * differences (a re-ordered schema, a `label` change) don't bust the cache.
  *
  * Determinism requirement: workflow scripts are deterministic (`Date.now`
  * / `Math.random` throw in the sandbox), so the sequence of `agent()`
@@ -119,22 +119,24 @@ export const DISPATCH_AFFECTING_AGENT_OPTS = [
   'agentType',
   'workingDir',
   'disallowedTools',
+  'tools',
 ] as const;
 
 /**
  * Project the dispatch-affecting opts into a stable canonical string. Only
  * `schema` / `model` / `effort` / `isolation` / `agentType` / `workingDir` /
- * `disallowedTools` change what the dispatch does; `label` / `phase` /
+ * `disallowedTools` / `tools` change what the dispatch does; `label` / `phase` /
  * `stallMs` are cosmetic or operational and must NOT bust the cache. Object
  * keys are sorted recursively so a re-serialized schema with reordered keys
  * hashes the same.
  *
- * `effort` and `disallowedTools` change how hard the agent thinks and what it
- * may do, so a resume that changed either has to run live. The sandbox
- * normalizes both before they get here — an effort alias to its tier, a deny
- * list to a sorted, de-duplicated array of tool names — so `'med'` and
- * `'medium'`, `Edit` and `edit`, or the same tools in another order, are one
- * key.
+ * `effort`, `disallowedTools` and `tools` change how hard the agent thinks and
+ * what it may do, so a resume that changed any of them has to run live. The
+ * sandbox normalizes them before they get here — an effort alias to its tier, a
+ * tool list to a sorted, de-duplicated array with built-in display names mapped
+ * to tool names — so `'med'` and `'medium'`, `Edit` and `edit`, or the same
+ * tools in another order, are one key. Any other name is kept as written, so
+ * two spellings that reach the same MCP tool are two keys.
  *
  * `workingDir` is dispatch-affecting for the same reason it exists: the same
  * prompt run against two different worktrees is two different questions. Were

@@ -34,6 +34,18 @@ export interface WorkflowResumeTarget {
   args?: unknown;
   /** Preserve background execution when the current surface accepts it. */
   resumeInBackground?: boolean;
+  /**
+   * The name this run can be resumed by: set by the runner only when the name
+   * resolved, when the run started, to the very script it ran. Read only when
+   * `nameOnly` is set.
+   */
+  resumeName?: string;
+  /**
+   * The session runs named workflows only (`tools.workflowNameOnly`), where a
+   * `scriptPath` call is refused. The resume call then names the workflow, and
+   * a run without a `resumeName` has none the model could make.
+   */
+  nameOnly?: boolean;
 }
 
 /**
@@ -67,17 +79,24 @@ export function hasUninlinableResumeArgs(
 }
 
 /**
- * The resume call for this run, or `null` when there is no script on disk to
- * resume from (an inline script that could not be persisted).
+ * The resume call for this run, or `null` when there is none to offer: no
+ * script on disk to resume from (an inline script that could not be
+ * persisted), or, in a name-only session, no name that leads back to it.
  */
 export function buildResumeCall(target: WorkflowResumeTarget): string | null {
-  if (!target.scriptPath) return null;
-  const scriptPath = stripAnsiAndControl(target.scriptPath);
+  let source: string;
+  if (target.nameOnly) {
+    if (!target.resumeName) return null;
+    source = `name: ${JSON.stringify(stripAnsiAndControl(target.resumeName))}`;
+  } else {
+    if (!target.scriptPath) return null;
+    source = `scriptPath: ${JSON.stringify(stripAnsiAndControl(target.scriptPath))}`;
+  }
   const runId = stripAnsiAndControl(target.runId);
   const args = serializeResumeArgs(target.args);
   const argsPart = args === null ? '' : `, args: ${args}`;
   const backgroundPart = target.resumeInBackground
     ? ', run_in_background: true'
     : '';
-  return `Workflow({ scriptPath: ${JSON.stringify(scriptPath)}, resumeFromRunId: ${JSON.stringify(runId)}${argsPart}${backgroundPart} })`;
+  return `Workflow({ ${source}, resumeFromRunId: ${JSON.stringify(runId)}${argsPart}${backgroundPart} })`;
 }

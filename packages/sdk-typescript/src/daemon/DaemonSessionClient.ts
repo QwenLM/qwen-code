@@ -64,6 +64,7 @@ import type {
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
@@ -1191,7 +1192,15 @@ export class DaemonSessionClient {
 
   controlWorkflowTask(
     taskId: string,
-    action: 'pause' | 'resume' | 'retry' | 'rerun' | 'delete-history',
+    action:
+      | 'pause'
+      | 'resume'
+      | 'retry'
+      | 'rerun'
+      | 'delete-history'
+      | 'run-saved'
+      | 'run-script',
+    input?: DaemonWorkflowActionInput,
   ): Promise<{
     changed: boolean;
     status?: DaemonSessionWorkflowTaskStatus['status'];
@@ -1202,6 +1211,7 @@ export class DaemonSessionClient {
       taskId,
       action,
       this.clientId,
+      input,
     );
   }
 

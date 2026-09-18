@@ -37,6 +37,32 @@ function snapshot(
 }
 
 describe('<GoalStatusMessage />', () => {
+  it('draws no checkpoint line for a record an earlier build left one on', () => {
+    // Goals no longer run evidence checkpoints; a replayed record from a
+    // build that did can still carry the two fields, and the stop reason is
+    // what the card keeps.
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot(
+          'usage_limited',
+          'idle',
+          'Three evidence checkpoints stalled.',
+          {
+            checkpointStalls: 3,
+            lastCheckpointFailure: 'Error: provider failed',
+            limitKind: 'checkpoint_request',
+          },
+        )}
+      />,
+    );
+
+    expect(lastFrame()).toContain(
+      'Reason: Three evidence checkpoints stalled.',
+    );
+    expect(lastFrame()).not.toContain('Checkpoint');
+    expect(lastFrame()).not.toContain('provider failed');
+  });
+
   it('is wrapped in React.memo to avoid unnecessary scrollback rerenders', () => {
     expect(
       (GoalStatusMessage as unknown as { $$typeof?: symbol }).$$typeof,
@@ -148,6 +174,43 @@ describe('<GoalStatusMessage />', () => {
     }
   });
 
+  it.each([
+    [3, 20, 723_000, 1_800_000, '3/20 turns · 12m 3s/30m'],
+    [1, 20, 0, undefined, '1/20 turns'],
+    [1, 1, 0, undefined, '1/1 turn'],
+    [3, undefined, 723_000, undefined, '3 turns · 12m 3s'],
+  ])(
+    'shows turn and active-time budgets (%s/%s)',
+    (turnCount, turnBudget, activeTimeMs, activeTimeBudgetMs, expected) => {
+      const { lastFrame } = render(
+        <GoalStatusMessage
+          snapshot={snapshot('paused', 'idle', undefined, {
+            turnCount,
+            turnBudget,
+            activeTimeMs,
+            activeTimeBudgetMs,
+          })}
+        />,
+      );
+      expect(lastFrame()).toContain(expected);
+    },
+  );
+
+  it('hides unused turn and active-time budgets', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        snapshot={snapshot('active', 'idle', undefined, {
+          turnCount: 0,
+          turnBudget: 20,
+          activeTimeMs: 0,
+          activeTimeBudgetMs: 1_800_000,
+        })}
+      />,
+    );
+    expect(lastFrame()).not.toContain('turns');
+    expect(lastFrame()).not.toContain('/30m');
+  });
+
   it('reports spend against the budget on a lifecycle card', () => {
     const { lastFrame } = render(
       <GoalStatusMessage
@@ -187,52 +250,6 @@ describe('<GoalStatusMessage />', () => {
     expect(lastFrame()).not.toContain('tokens');
   });
 
-  it('shows stalled checkpoints and the last failure on an active card', () => {
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot('active', 'running', undefined, {
-          checkpointStalls: 2,
-          lastCheckpointFailure: 'Error: provider failed',
-        })}
-      />,
-    );
-
-    expect(lastFrame()).toContain(
-      'Checkpoint: 2/3 stalled · Error: provider failed',
-    );
-  });
-
-  it('shows a checkpoint failure that spent no stall', () => {
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot('active', 'running', undefined, {
-          lastCheckpointFailure: 'Error: provider failed',
-        })}
-      />,
-    );
-
-    expect(lastFrame()).toContain(
-      'Checkpoint: last check failed · Error: provider failed',
-    );
-  });
-
-  it('keeps the failure on the card of a Goal the stall breaker stopped', () => {
-    // The stop reason names the kind of failure; only this line says which.
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot('usage_limited', 'idle', 'checkpoints stalled', {
-          checkpointStalls: 3,
-          lastCheckpointFailure: 'Error: provider failed',
-        })}
-      />,
-    );
-
-    expect(lastFrame()).toContain('Reason: checkpoints stalled');
-    expect(lastFrame()).toContain(
-      'Checkpoint: 3/3 stalled · Error: provider failed',
-    );
-  });
-
   it('hides checkpoint health on a completed Goal that still carries it', () => {
     // The terminal snapshot spreads the record and overrides only `status`,
     // so a Goal that completed after a failed check journals both fields.
@@ -247,58 +264,6 @@ describe('<GoalStatusMessage />', () => {
 
     expect(lastFrame()).toContain('Goal complete');
     expect(lastFrame()).not.toContain('Checkpoint');
-  });
-
-  it('hides a stall-free failure once the Goal stops for another reason', () => {
-    const paused = render(
-      <GoalStatusMessage
-        snapshot={snapshot('paused', 'idle', 'no progress in three turns', {
-          lastCheckpointFailure: 'Error: provider failed',
-        })}
-      />,
-    );
-    expect(paused.lastFrame()).not.toContain('Checkpoint');
-
-    // A running streak is still the truth about the window a resume re-enters.
-    const streak = render(
-      <GoalStatusMessage
-        snapshot={snapshot('paused', 'idle', 'paused by the user', {
-          checkpointStalls: 2,
-          lastCheckpointFailure: 'Error: provider failed',
-        })}
-      />,
-    );
-    expect(streak.lastFrame()).toContain('Checkpoint: 2/3 stalled');
-  });
-
-  it('shows a bare stall streak without a trailing separator', () => {
-    // A stop for another reason clears the diagnostic and keeps the streak.
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot('paused', 'idle', 'paused by the user', {
-          checkpointStalls: 2,
-        })}
-      />,
-    );
-
-    expect(lastFrame()).toContain('Checkpoint: 2/3 stalled');
-    expect(lastFrame()).not.toContain('stalled ·');
-  });
-
-  it('never writes control or bidi characters from the diagnostic to the terminal', () => {
-    const { lastFrame } = render(
-      <GoalStatusMessage
-        snapshot={snapshot('active', 'running', undefined, {
-          checkpointStalls: 1,
-          lastCheckpointFailure: 'stalled\rGoal complete \u202efailed',
-        })}
-      />,
-    );
-
-    const frame = lastFrame() ?? '';
-    expect(frame).toContain('Checkpoint: 1/3 stalled');
-    expect(frame).not.toContain('\r');
-    expect(frame).not.toContain('\u202e');
   });
 
   it('never writes control characters from a stop reason to the terminal', () => {

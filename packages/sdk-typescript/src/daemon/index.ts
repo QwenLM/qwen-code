@@ -50,6 +50,10 @@ export type { RestSseTransport } from './RestSseTransport.js';
 // The `NegotiateTransportOptions` *type* stays available from this barrel
 // for backward compatibility (type-only, no bundle cost).
 export type { NegotiateTransportOptions } from './negotiateTransport.js';
+export {
+  WEB_SHELL_PWA_ASSETS,
+  WEB_SHELL_SERVICE_WORKER_ROUTE,
+} from './pwa-assets.js';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
@@ -181,6 +185,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
@@ -231,6 +236,7 @@ export type {
   DaemonUiFollowupSuggestionEvent,
   DaemonUiStatusEvent,
   DaemonUiTextEvent,
+  DaemonUiUserResourceLinkEvent,
   DaemonUiToolProvenance,
   DaemonUiToolUpdateEvent,
   DaemonUiWorkspaceAgentChangedEvent,
@@ -542,6 +548,9 @@ export type {
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
+  DaemonGitRemoteInfo,
+  DaemonGitRemotesResult,
+  DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestReviewDecision,
   DaemonGitHubPullRequestChecks,
   DaemonGitHubPullRequest,
@@ -614,6 +623,7 @@ export type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,
+  DaemonWorkflowActionInput,
   DaemonWorkflowApprovalStatusEntry,
   DaemonWorkflowSizeWarning,
   DaemonWorkflowDispatchStatus,
