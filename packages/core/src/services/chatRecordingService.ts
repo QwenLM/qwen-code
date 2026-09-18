@@ -5,6 +5,7 @@
  */
 
 import type { SessionSourcesSnapshot } from './session-sources.js';
+import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
 import {
@@ -452,13 +453,15 @@ export interface UserPromptRecordPayload {
   /**
    * Core/headless: submitted projection, otherwise expanded pre-hook text.
    * ACP: display projection or raw request text before expansion. ACP omits
-   * this payload when neither a projection nor attachment references exist.
+   * this payload when no projection, attachment references, or resource links exist.
    */
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
   /** Daemon-owned attachment references used to restore prompt previews. */
   attachmentReferences?: UserPromptAttachmentReference[];
+  /** Original ACP resource references, independent of model-input expansion. */
+  resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
 }
 
 export interface UserPromptAttachmentReference {

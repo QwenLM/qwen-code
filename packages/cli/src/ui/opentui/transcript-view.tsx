@@ -53,6 +53,7 @@ import {
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
 import {
   getCachedStringWidth,
   sanitizeTerminalText,
@@ -79,6 +80,15 @@ export interface TranscriptViewProps {
   availableTerminalHeight?: number;
   /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
   thoughtsExpanded?: boolean;
+  /** `ui.showToolCallArgs`: ink draws each call's raw arguments on their own
+   * line under the card header. */
+  showToolCallArgs?: boolean;
+  /** The call whose confirmation is on screen. ink's trailing marker points at
+   * the call the user can answer, and only the waiting queue knows which that
+   * is: a PreToolUse `ask` hook re-arms an already approved call by appending it
+   * *behind* another waiting call, while its card goes back to pending in place,
+   * so transcript order and queue order disagree. */
+  awaitingCallId?: string;
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -105,8 +115,17 @@ export function OpenTuiTranscriptView({
   availableWidth = 80,
   availableTerminalHeight = 24,
   thoughtsExpanded = false,
+  showToolCallArgs = false,
+  awaitingCallId,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  const awaitingId = items.find(
+    (item) =>
+      item.kind === 'tool' &&
+      item.confirm === 'pending' &&
+      !item.done &&
+      item.id === awaitingCallId,
+  )?.id;
   return (
     <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
@@ -121,6 +140,8 @@ export function OpenTuiTranscriptView({
             terminalHeight={availableTerminalHeight}
             width={availableWidth}
             thoughtsExpanded={thoughtsExpanded}
+            showToolCallArgs={showToolCallArgs}
+            awaitingApproval={item.id === awaitingId}
           />
         </box>
       ))}
@@ -134,12 +155,16 @@ function TranscriptItem({
   terminalHeight,
   width,
   thoughtsExpanded,
+  showToolCallArgs,
+  awaitingApproval,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
   thoughtsExpanded: boolean;
+  showToolCallArgs: boolean;
+  awaitingApproval: boolean;
 }) {
   switch (item.kind) {
     case 'user':
@@ -155,6 +180,9 @@ function TranscriptItem({
           maxRows={maxRows}
           terminalHeight={terminalHeight}
           width={width}
+          fullDetail={thoughtsExpanded}
+          showToolCallArgs={showToolCallArgs}
+          awaitingApproval={awaitingApproval}
         />
       );
     case 'task':
@@ -296,11 +324,17 @@ function ToolCard({
   maxRows,
   terminalHeight,
   width,
+  fullDetail,
+  showToolCallArgs,
+  awaitingApproval,
 }: {
   item: LiveToolItem;
   maxRows: number;
   terminalHeight: number;
   width: number;
+  fullDetail: boolean;
+  showToolCallArgs: boolean;
+  awaitingApproval: boolean;
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
@@ -312,13 +346,13 @@ function ToolCard({
   // fallback path does (R6-2).
   const text = toolCardText(description);
   // The description stays visible while a call awaits approval: an MCP
-  // confirmation dialog shows only the server and tool names, so the card
-  // is the only surface carrying the arguments (R5-9) — the settled 5-row
-  // cap would hide the tail of exactly the payload being approved. The
-  // pending budget stays viewport- and payload-aware (pendingCardMaxRows):
-  // the dialog renders in flow below the transcript, and a hook-forced
+  // confirmation body shows only the server and tool names, so the card is
+  // the only surface carrying the arguments (R5-9) — the settled 5-row cap
+  // would hide the tail of exactly the payload being approved. The pending
+  // budget stays viewport- and payload-aware (pendingCardMaxRows): the
+  // confirmation renders in flow below the transcript, and a hook-forced
   // confirmation renders this same payload in its body, so the card must
-  // yield rows for it or ctrl-s expansion pushes the dialog off screen.
+  // yield rows for it or ctrl-s expansion pushes the options off screen.
   const cap = capToolCardDescription(
     text,
     name,
@@ -328,6 +362,19 @@ function ToolCard({
       : TOOL_CARD_DESCRIPTION_ROWS,
   );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
+  // ink measures the args row against the header's own inner width (the status
+  // glyph's columns are not available to it), so the wrapped-row cap bounds
+  // what actually reaches the screen.
+  const innerWidth = width - STATUS_INDICATOR_WIDTH;
+  const argsRow =
+    showToolCallArgs && item.args
+      ? formatInlineToolArgsJson(
+          item.args,
+          description,
+          fullDetail,
+          innerWidth > 0 ? innerWidth : undefined,
+        )
+      : undefined;
   return (
     <box flexDirection="column">
       <box flexDirection="row">
@@ -348,12 +395,21 @@ function ToolCard({
           </text>
         ) : null}
         {suffix ? <text fg={C.dim}>{sanitizeTerminalText(suffix)}</text> : null}
+        {awaitingApproval ? (
+          // ink's TrailingIndicator: a primary-coloured arrow at the end of the
+          // awaiting call's own row, not a row of its own.
+          <text fg={C.text}>{' ←'}</text>
+        ) : null}
       </box>
       {cap.hiddenRows > 0 && (
         <text fg={C.dim}>{hiddenTailLinesLabel(cap.hiddenRows)}</text>
       )}
-      {item.confirm === 'pending' && !item.done ? (
-        <text fg={C.yellow}> (awaiting approval)</text>
+      {argsRow ? (
+        <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+          <text fg={C.dim} {...selectionProps()}>
+            {argsRow}
+          </text>
+        </box>
       ) : null}
       <ToolCardBody item={item} maxRows={maxRows} width={width} />
     </box>
@@ -578,11 +634,6 @@ function GoalCard({
       {view.reason ? (
         <text fg={C.dim} {...selectionProps()}>
           {`  ${sanitizeTerminalText(view.reason)}`}
-        </text>
-      ) : null}
-      {view.checkpoint ? (
-        <text fg={C.yellow} {...selectionProps()}>
-          {`  ${sanitizeTerminalText(view.checkpoint)}`}
         </text>
       ) : null}
     </box>

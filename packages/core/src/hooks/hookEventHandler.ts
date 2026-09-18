@@ -60,6 +60,7 @@ import type {
 import {
   createHookOutput,
   HookPhase,
+  isBlockingHookOutput,
   PermissionMode,
   PreToolUseHookOutput,
 } from './types.js';
@@ -78,6 +79,12 @@ import type { CronJob } from '../services/cronScheduler.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+/**
+ * Serial for {@link HookProgress.invocationId}. Module level, so ids are unique
+ * across every HookEventHandler and every MessageBus in this process.
+ */
+let hookInvocationSerial = 0;
 
 /** Longest prompt text used as a hook's display name. */
 const HOOK_DISPLAY_NAME_MAX_LENGTH = 80;
@@ -114,18 +121,11 @@ function toProgressOutcome(
   if (!result.success) {
     return { outcome: 'error' };
   }
-  if (result.output) {
-    const output = createHookOutput(eventName, result.output);
-    const denied =
-      output instanceof PreToolUseHookOutput
-        ? output.isDenied()
-        : output.isBlockingDecision();
-    if (denied) {
-      return {
-        outcome: 'blocked',
-        blockedReason: blockedReasonOf(eventName, result),
-      };
-    }
+  if (result.output && isBlockingHookOutput(eventName, result.output)) {
+    return {
+      outcome: 'blocked',
+      blockedReason: blockedReasonOf(eventName, result),
+    };
   }
   return { outcome: 'success' };
 }
@@ -1007,6 +1007,16 @@ export class HookEventHandler {
       };
 
       const totalHooks = allHookConfigs.length;
+      // One id per hook in this batch, allocated at start and reused at end, so
+      // a consumer pairs the two even when several batches of the same event
+      // overlap (tool calls run up to QWEN_CODE_MAX_TOOL_CONCURRENCY at a time).
+      const invocationIds = allHookConfigs.map(
+        () => `hook-${++hookInvocationSerial}`,
+      );
+      // Read once per batch so a hook's start and end carry the same value by
+      // construction rather than by relying on async context propagation.
+      // Same source as the hook input's `agent_id`.
+      const agentId = getCurrentAgentId() ?? undefined;
       const onHookStart = (config: HookConfig, index: number) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
@@ -1017,6 +1027,8 @@ export class HookEventHandler {
           eventName,
           hookName: getHookDisplayName(config),
           hookType: config.type,
+          invocationId: invocationIds[index],
+          ...(agentId ? { agentId } : {}),
           index,
           total: totalHooks,
           ...(config.statusMessage
@@ -1041,6 +1053,8 @@ export class HookEventHandler {
           eventName,
           hookName: getHookDisplayName(config),
           hookType: config.type,
+          invocationId: invocationIds[index],
+          ...(agentId ? { agentId } : {}),
           index,
           total: totalHooks,
           ...(config.statusMessage
@@ -1111,6 +1125,17 @@ export class HookEventHandler {
    * Publishes a hook's start or end on the MessageBus. Progress is only
    * observed, so a missing bus or a failing subscriber never affects the hook
    * or its result.
+   *
+   * Every execution publishes exactly one start and one end; nothing here
+   * throttles or drops events, even for a high-frequency event such as
+   * MessageDisplay:
+   * - dropping any end would break the start/end pairing by `invocationId`
+   *   and leave a consumer's status line hanging forever;
+   * - how to present a frequent event differs per surface (fold it in the
+   *   terminal UI, dedupe it in headless output, keep all of it for
+   *   telemetry), so that choice belongs to the consumer;
+   * - Claude Code likewise dedupes hook progress in its display layer, not
+   *   at the publisher.
    */
   private publishHookProgress(message: Omit<HookProgress, 'type'>): void {
     const bus = this.config.getMessageBus?.();

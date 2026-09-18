@@ -2289,6 +2289,83 @@ describe('WorkflowRunRegistry', () => {
     expect(diagnostics).not.toContain('Re-run the saved /gcp:audit');
   });
 
+  // In a name-only session the model may not pass a script path, so the
+  // notification must not offer one: a run resumes by the name the runner
+  // verified, and any other run is only its starter's to retry.
+  it('resumes by the verified name in a name-only session, and says who can retry the rest', () => {
+    const r = new WorkflowRunRegistry();
+    r.setNameOnly(true);
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const named = r.register(
+      reg('wf_named', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+        journalPath: '/runtime/workflows/wf_named/journal.jsonl',
+      }),
+    );
+    r.fail(named.runId, 'boom', 2_000);
+    const namedText = completion.mock.calls[0][1] as string;
+    expect(namedText).toContain(
+      'Resume: Workflow({ name: "audit", resumeFromRunId: "wf_named" })',
+    );
+    expect(namedText).not.toContain('scriptPath:');
+    expect(namedText).not.toContain('only whoever started it');
+
+    // A name without a verified resume name — one recorded from a path that
+    // a lookup would not lead back to — is not offered.
+    const shadowed = r.register(
+      reg('wf_shadowed', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        scriptPath: '/home/u/.qwen/workflows/audit.js',
+      }),
+    );
+    r.fail(shadowed.runId, 'boom', 3_000);
+    const shadowedText = completion.mock.calls[1][1] as string;
+    expect(shadowedText).toContain('<recovery>');
+    expect(shadowedText).toContain(
+      'This session runs named workflows only, and this run cannot be resumed by name, so only whoever started it can retry it.',
+    );
+    expect(shadowedText).not.toContain('Workflow({');
+
+    const completed = r.register(
+      reg('wf_named_done', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+      }),
+    );
+    r.complete(completed.runId, [], 4_000);
+    expect(completion.mock.calls[2][1] as string).toContain(
+      'Re-run the saved /audit workflow: Workflow({ name: "audit", resumeFromRunId: "wf_named_done" })',
+    );
+  });
+
+  // Outside the lock a verified name changes nothing: the call names the path.
+  it('ignores the resume name outside a name-only session', () => {
+    const r = new WorkflowRunRegistry();
+    const completion = vi.fn();
+    r.setCompletionCallback(completion);
+    const entry = r.register(
+      reg('wf_unlocked', {
+        isBackgrounded: true,
+        workflowName: 'audit',
+        resumeName: 'audit',
+        scriptPath: '/proj/.qwen/workflows/audit.js',
+      }),
+    );
+    r.fail(entry.runId, 'boom', 2_000);
+    const text = completion.mock.calls[0][1] as string;
+    expect(text).toContain(
+      'Workflow({ scriptPath: "/proj/.qwen/workflows/audit.js", resumeFromRunId: "wf_unlocked" })',
+    );
+    expect(text).not.toContain('only whoever started it');
+  });
+
   // An unpersisted inline script (no storage, symlinked root) leaves nothing
   // to resume from, and a run with no journal has nothing to read: the
   // notification must then say neither rather than name a path that is not
