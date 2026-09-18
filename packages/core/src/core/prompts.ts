@@ -355,6 +355,7 @@ function exampleToolNames(block: string): string[] {
     (match) => match[1] ?? match[2] ?? match[3] ?? match[4]!,
   );
 }
+
 // Matched as a pair rather than split on blank lines: a single example can
 // contain blank lines of its own, and splitting on them orphans the tool calls
 // in its later paragraphs from the `<example>` tag that gates them.
@@ -384,6 +385,9 @@ function filterToolCallExamples(
     keptExamples++;
     return block;
   });
+  // Defensive: every shipped example set has blocks that call no tool at all
+  // (`user: 1 + 2`), so they survive any declared set and the heading always
+  // has something under it. This guards an example set that one day has none.
   if (keptExamples === 0) return '';
   // Dropping a block from the middle can leave the gap behind it.
   return filtered.replace(/\n{3,}/g, '\n\n').trimEnd();

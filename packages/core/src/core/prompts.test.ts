@@ -1362,6 +1362,27 @@ describe('resident tool gating (#12032)', () => {
     expect(countExamples(trimmed)).toBe(countExamples(full));
   });
 
+  it('keeps the policy text of every tool that is declared', () => {
+    const prompt = promptFor(FILE_WORK_TOOLS);
+
+    // The other half of the invariant: gating must not take guidance for a
+    // tool the session does have.
+    expect(prompt).toContain(`To read files use '${ToolNames.READ_FILE}'`);
+    expect(prompt).toContain(`To edit files use '${ToolNames.EDIT}'`);
+    expect(prompt).toContain(`To create files use '${ToolNames.WRITE_FILE}'`);
+    expect(prompt).toContain(`To search for files use '${ToolNames.GLOB}'`);
+    expect(prompt).toContain(
+      `To search the content of files, use '${ToolNames.GREP}'`,
+    );
+    expect(prompt).toContain('- **Prefer Dedicated Tools:**');
+    expect(prompt).toContain('- **File Paths:**');
+    expect(prompt).toContain('- **Background Processes:**');
+    expect(prompt).toContain('- **Interactive Commands:**');
+    // Only the two bullets whose tools are absent go.
+    expect(prompt).not.toContain('- **Subagent Delegation:**');
+    expect(prompt).not.toContain('- **Codebase Search:**');
+  });
+
   it('drops example blocks too once the allowlist is narrower', () => {
     const narrow = new Set<string>([
       ToolNames.READ_FILE,
@@ -1446,6 +1467,44 @@ describe('resident tool gating (#12032)', () => {
         !declared.has(name) &&
         new RegExp(`(?<![a-z_])${name}(?![a-z_])`).test(gated),
     );
+
+    expect(leaked).toEqual([]);
+  });
+
+  it('gates every tool name the gated sections can mention, on every example set', () => {
+    const everyTool = new Set<string>(Object.values(ToolNames));
+    const modelPrompt = (model: string, declaredTools: ReadonlySet<string>) =>
+      getCoreSystemPrompt(
+        undefined,
+        model,
+        undefined,
+        'interactive',
+        undefined,
+        false,
+        false,
+        { declaredTools },
+      );
+    const leaked: string[] = [];
+
+    // Withhold one tool at a time, against each model's example set: the
+    // config-independent version of the invariant above, and the check that
+    // would have caught the example notations going ungated.
+    for (const model of ['gpt-4', 'qwen3-coder', 'qwen3-vl', 'gemma4']) {
+      for (const tool of everyTool) {
+        // `ask_user_question` is exempt from `tools.eager`, so it is declared
+        // in practice, and the interaction-mode bullet naming it also carries
+        // the policy for not asking questions — gating that bullet would drop
+        // real guidance. Recorded as residue in the design's §6.
+        if (tool === ToolNames.ASK_USER_QUESTION) continue;
+        const declared = new Set(everyTool);
+        declared.delete(tool);
+        const [guidance, examples] = gatedParts(modelPrompt(model, declared));
+        const gated = `${guidance}\n${examples}`;
+        if (new RegExp(`(?<![a-z_])${tool}(?![a-z_])`).test(gated)) {
+          leaked.push(`${model}: ${tool}`);
+        }
+      }
+    }
 
     expect(leaked).toEqual([]);
   });

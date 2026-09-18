@@ -104,7 +104,7 @@ for t in agent web_fetch web_search notebook_edit list_directory monitor cron_cr
 done
 ```
 
-**已知残留（不是回归）：** `read_file` 在 persisted-output 条目与 plan mode 提醒里是无条件出现的，位于被门控段落之外；`subagent_type=Explore` 同样保持无条件。设计文档 §4.3 与 §6 有记录。所以上面的检查只针对 `## Using Your Tools` 与 `# Examples` 两段。
+**已知残留（不是回归）：** `ask_user_question` 在被门控段落内仍无条件出现（它豁免于 `tools.eager`，且那条文案同时承载 headless 下"不得提问"的策略）。另外， `read_file` 在 persisted-output 条目与 plan mode 提醒里是无条件出现的，位于被门控段落之外；`subagent_type=Explore` 同样保持无条件。设计文档 §4.3 与 §6 有记录。所以上面的检查只针对 `## Using Your Tools` 与 `# Examples` 两段。
 
 **第 3 条 · 安全条款一条都没少**
 
