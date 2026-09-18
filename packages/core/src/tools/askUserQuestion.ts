@@ -21,24 +21,10 @@ import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { resolveInteractionMode } from '../core/prompts.js';
+import { InputFormat } from '../output/types.js';
+import { parseAnswerQuestionIndex } from '../permissions/trusted-user-answers.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
-
-function parseAnswerQuestionIndex(
-  key: string,
-  questionCount: number,
-): number | undefined {
-  const index = Number(key);
-  if (
-    !Number.isSafeInteger(index) ||
-    index < 0 ||
-    index >= questionCount ||
-    String(index) !== key
-  ) {
-    return undefined;
-  }
-  return index;
-}
 
 export interface QuestionOption {
   label: string;
@@ -171,14 +157,37 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     return `Ask user ${questionCount} question${questionCount > 1 ? 's' : ''}`;
   }
 
+  override canAutoApproveOnAllow(): boolean {
+    return false;
+  }
+
   /**
    * Whether a host is present that can put the questions in front of the
-   * user. ACP hosts (VSCode extension, Zed, stream-json clients) run in
-   * non-interactive mode but still collect answers through the
-   * confirmation channel.
+   * user *and* answer them. ACP hosts (VSCode extension, Zed, stream-json
+   * clients) run in non-interactive mode but still collect answers through
+   * the confirmation channel.
+   *
+   * The modality half is `resolveInteractionMode()`. The responder half is
+   * what that helper cannot know: a stream-json session only has something
+   * to answer a confirmation round once the SDK control system is up. In
+   * stream-json *direct* mode the first stdin frame is a plain user message,
+   * so `Session.handleFirstMessage()` leaves the control system off, no
+   * `PermissionController` is built and `onToolCallsUpdate` is never wired
+   * (`nonInteractiveCli.ts`, gated on `options.controlService`). Claiming a
+   * host there parks the call in `awaiting_approval` forever: the scheduler's
+   * non-interactive auto-deny carries `getInputFormat() !== STREAM_JSON` as a
+   * required conjunct, so it does not fire either.
    */
   private canCollectAnswers(): boolean {
-    return resolveInteractionMode(this._config) !== 'headless';
+    if (resolveInteractionMode(this._config) === 'headless') {
+      return false;
+    }
+    return (
+      this._config.isInteractive() ||
+      this._config.getExperimentalZedIntegration() ||
+      this._config.getInputFormat() !== InputFormat.STREAM_JSON ||
+      this._config.getSdkMode()
+    );
   }
 
   /**
@@ -262,6 +271,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       }
 
       // Format the answers for LLM consumption
+      const answers: Array<{ question: string; answer: string }> = [];
       const answersContent = Object.entries(this.userAnswers)
         .flatMap(([key, value]) => {
           const questionIndex = parseAnswerQuestionIndex(
@@ -270,6 +280,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
           );
           if (questionIndex === undefined) return [];
           const question = this.params.questions[questionIndex]!;
+          answers.push({ question: question.question, answer: value });
           return `**${question.header || `Question ${questionIndex + 1}`}**: ${value}`;
         })
         .join('\n');
@@ -278,12 +289,15 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         answersContent.length > 0
           ? answersContent
           : 'No valid answers were provided.';
-      const llmMessage = `User has provided the following answers:\n\n${messageBody}`;
-      const displayMessage = `User has provided the following answers:\n\n${messageBody}`;
+      const message = `User has provided the following answers:\n\n${messageBody}`;
 
       return {
-        llmContent: llmMessage,
-        returnDisplay: displayMessage,
+        llmContent: message,
+        returnDisplay: {
+          type: 'ask_user_question_answers',
+          text: message,
+          answers,
+        },
       };
     } catch (error) {
       const errorMessage =

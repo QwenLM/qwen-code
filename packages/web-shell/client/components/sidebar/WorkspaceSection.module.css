@@ -4,6 +4,7 @@
 }
 
 .headerRow {
+  position: relative;
   display: flex;
   align-items: center;
   width: 100%;
@@ -17,12 +18,13 @@
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 5px;
+  padding: 5px 4px 5px 8px;
   border: none;
   background: transparent;
   color: var(--sidebar-foreground);
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
 }
@@ -78,43 +80,26 @@
   border-radius: 4px;
 }
 
-/* Live git chip in the folder header. */
-.gitPill {
-  --git-branch-icon-size: 12px;
-  --git-branch-badge-size: 5px;
-  --git-branch-badge-offset: -1px;
-
-  display: inline-flex;
-  flex: 0 0 24px;
-  width: 24px;
-  padding: 0;
-  border: none;
-  background: none;
-  font: inherit;
-  color: inherit;
-  text-align: inherit;
-  cursor: pointer;
-}
-
-.gitPill [data-web-shell-git-branch] {
-  width: 24px;
-  max-width: 24px;
-  flex-basis: 24px;
-  padding: 0 5px;
-}
-
-/* Keep the icon directly after the folder name. */
-.headerRow:has(.gitPill) .header {
-  flex-grow: 0;
-}
-
 /* Trusted sessions use the sidebar's shared row with its own left indent;
    read-only rows apply the same indent below. */
 .sessions {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   margin-bottom: 12px;
+}
+
+/* Tree guide under the folder icon, in the spirit of file-explorer indent
+   guides; hovered/selected rows paint over it with their own background. */
+.sessions::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 10px;
+  left: 15px;
+  width: 1px;
+  background: color-mix(in srgb, var(--sidebar-foreground) 14%, transparent);
 }
 
 .empty {

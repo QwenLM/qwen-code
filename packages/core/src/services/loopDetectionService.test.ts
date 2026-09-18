@@ -5,6 +5,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
+import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type {
   ServerLlmContentEvent,
@@ -18,6 +20,7 @@ import { LlmEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
+import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -50,12 +53,14 @@ describe('LoopDetectionService', () => {
   const makeConfig = (
     cap: number = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
     explicit = false,
+    skipLoopDetection = true,
   ): Config =>
     ({
       getTelemetryEnabled: () => true,
       getMaxToolCallsPerTurn: () => cap,
       isMaxToolCallsPerTurnExplicit: () => explicit,
       getDebugLogger: () => mockDebugLogger,
+      getSkipLoopDetection: () => skipLoopDetection,
     }) as unknown as Config;
 
   beforeEach(() => {
@@ -2694,6 +2699,598 @@ describe('LoopDetectionService', () => {
           loop_type: 'alternating_tool_call_pattern',
         }),
       );
+    });
+  });
+
+  describe('Result-aware guards for stateful read tools (issue #9450)', () => {
+    // Identical `task_list` arguments do not imply an identical result:
+    // teammates mutate the shared task board between calls. These tests pin
+    // the fix for the false positive where a polling teammate was halted by
+    // the argument-only guards while the board kept changing.
+    const TASK_LIST_ARGS = {
+      status: 'in_progress',
+      owner: 'peer-a',
+      blockedBy: '',
+    };
+
+    const taskListEvent = (
+      callId: string,
+      args: Record<string, unknown> = TASK_LIST_ARGS,
+    ): ServerLlmToolCallRequestEvent => ({
+      type: LlmEventType.ToolCallRequest,
+      value: {
+        name: 'task_list',
+        args,
+        callId,
+        isClientInitiated: false,
+        prompt_id: 'test-prompt-id',
+      },
+    });
+
+    const taskListResult = (boardState: string, callId = 'call-x'): Part[] => [
+      {
+        functionResponse: {
+          id: callId,
+          name: 'task_list',
+          response: { output: boardState },
+        },
+      },
+    ];
+
+    it('still halts at the threshold when no results were recorded (fail-safe)', () => {
+      // A wiring gap must never loosen the DashScope protection (#5019):
+      // without result evidence the guard behaves exactly as pre-fix.
+      const event = taskListEvent('call-1');
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(event)).toBe(false);
+      }
+      expect(service.checkAlwaysOnSafeties(event)).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('still halts when result evidence is only partial (fail-safe)', () => {
+      // Incomplete evidence (a dropped/failed execution records no result)
+      // must never grant the result-aware exemption: the guard needs one
+      // recorded result per preceding request before it trusts a streak.
+      let fired = false;
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        if (fired) break;
+        if (i !== 2) {
+          // Skip one recording mid-streak: 4 results for 5 requests.
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult('frozen board'),
+          );
+        }
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('still halts at the threshold when every result is unchanged', () => {
+      const unchanged = '#1 [in_progress] @peer-a — task';
+      let fired = false;
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        if (fired) break;
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(unchanged),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(service.getConsecutiveToolCallCount()).toBe(
+        TOOL_CALL_LOOP_THRESHOLD,
+      );
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('does not halt while the task board keeps changing between identical calls', () => {
+      let fired = false;
+      // Well past the argument-only threshold: every poll returns a changed
+      // board (a peer completed/claimed a task between calls), which is the
+      // productive polling pattern the team prompt encourages.
+      for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        if (fired) break;
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(`board state v${i}`),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('keeps productive polling alive past the adaptive per-turn cap', () => {
+      // With the default (adaptive) cap, a turn beyond the soft cap halts
+      // only on a stuck-repetition signal. Changed results must not build
+      // that signal, so polling continues past the soft cap.
+      const defaultCapService = new LoopDetectionService(makeConfig());
+      defaultCapService.reset('cap-prompt');
+      let fired = false;
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 20; i++) {
+        fired = defaultCapService.checkAlwaysOnSafeties(
+          taskListEvent(`call-${i}`),
+        );
+        if (fired) break;
+        defaultCapService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(`board state v${i}`),
+        );
+      }
+      expect(fired).toBe(false);
+    });
+
+    it('does not accumulate an oscillating board toward the global-duplicate halt (heuristics on)', () => {
+      // A board flipping between two byte-identical states returns a result
+      // different from its predecessor on EVERY poll — changed-state
+      // progress — even though each (call, result) pair recurs across the
+      // turn. Turn-wide pair totals would reach the threshold here; the
+      // consecutive identical-result count must not.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('oscillating-global');
+      let detected = false;
+      for (let i = 0; i < 4 * GLOBAL_DUPLICATE_THRESHOLD && !detected; i++) {
+        detected = heuristicService.addAndCheck(taskListEvent(`call-${i}`));
+        if (detected) break;
+        detected = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(i % 2 === 0 ? 'board A' : 'board B'),
+        );
+      }
+      expect(detected).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('keeps an oscillating board alive past the adaptive cap (skipLoopDetection default)', () => {
+      // CLI default (skipLoopDetection=true): the pair totals previously
+      // fed capMaxKeyRepeat, so an oscillating board past the 100-call soft
+      // cap was halted by the always-on adaptive cap. Every poll changing
+      // the result must keep the stuck signal at bay instead.
+      const defaultCapService = new LoopDetectionService(makeConfig());
+      defaultCapService.reset('oscillating-cap');
+      let fired = false;
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 20; i++) {
+        fired = defaultCapService.checkAlwaysOnSafeties(
+          taskListEvent(`call-${i}`),
+        );
+        if (fired) break;
+        fired = defaultCapService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(i % 2 === 0 ? 'board A' : 'board B'),
+        );
+        if (fired) break;
+      }
+      expect(fired).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('still halts an interleaved frozen board via the adaptive cap', () => {
+      // The other direction under the CLI default: a genuinely frozen board
+      // (same result on every poll) interleaved with other calls must still
+      // build the stuck signal and trip the adaptive cap past the soft cap.
+      const svc = new LoopDetectionService(makeConfig());
+      svc.reset('frozen-cap');
+      let fired = false;
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD && !fired; i++) {
+        fired = svc.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('filler', { i }),
+        );
+        if (fired) break;
+        fired = svc.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        if (fired) break;
+        fired = svc.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+      }
+      expect(fired).toBe(false);
+      // Diverse filler calls push the turn past the soft cap; the frozen
+      // result streak (>= threshold) is the stuck signal that halts it.
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 20 && !fired; i++) {
+        fired = svc.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('filler', { j: i }),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(svc.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    describe('oversized (persisted) results fingerprint as stubs (issue #9450)', () => {
+      // Results over the persistence threshold are rewritten into stubs
+      // whose envelope embeds a per-call unique path. Hashing the envelope
+      // verbatim would fingerprint uniquely every poll, silently disabling
+      // every result-aware guard for exactly the largest results.
+      const digestOf = (content: string): string =>
+        createHash('sha256').update(content).digest('hex');
+
+      const persistedStub = (
+        boardState: string,
+        opts: { digest?: string; path?: string } = {},
+      ): string => {
+        const digestLine =
+          opts.digest !== undefined
+            ? `\n${FULL_OUTPUT_DIGEST_LABEL}${opts.digest}`
+            : '';
+        return `<persisted-output>
+Output too large (42 KB). Full output saved to: ${opts.path ?? '/tool-results/call-x.txt'}${digestLine}
+Note: this file may be cleaned up after 24 hours.
+
+Preview (up to 2000 chars):
+${boardState}
+</persisted-output>`;
+      };
+
+      const driveUntilFireOrEnd = (
+        results: () => Part[],
+        rounds: number,
+      ): boolean => {
+        let fired = false;
+        for (let i = 0; i < rounds && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            results(),
+          );
+        }
+        return fired;
+      };
+
+      it('halts a frozen oversized board despite per-call unique stub paths', () => {
+        // Same frozen content persisted to a DIFFERENT per-call path each
+        // poll: the envelope varies, the digest does not, so the guard must
+        // still see five unchanged results and halt at the same threshold.
+        let callCounter = 0;
+        const fired = driveUntilFireOrEnd(() => {
+          callCounter += 1;
+          return taskListResult(
+            persistedStub('frozen oversized board', {
+              digest: digestOf('frozen oversized board'),
+              path: `/tool-results/call-${callCounter}.txt`,
+            }),
+            `call-${callCounter}`,
+          );
+        }, 8);
+        expect(fired).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        );
+      });
+
+      it('keeps an oversized board alive when mutations land beyond the preview window', () => {
+        // The preview covers only the first chars; the full-output digest is
+        // what keeps the fingerprint sensitive to mutations past it.
+        let version = 0;
+        const fired = driveUntilFireOrEnd(() => {
+          version += 1;
+          const content = `board head\n${'x'.repeat(3000)}\ntail v${version}`;
+          return taskListResult(
+            persistedStub('board head', { digest: digestOf(content) }),
+          );
+        }, 4 * TOOL_CALL_LOOP_THRESHOLD);
+        expect(fired).toBe(false);
+      });
+
+      it('falls back to the path-free preview for digest-less stubs', () => {
+        // Stubs produced before the digest line existed: identical previews
+        // in different envelopes must still collide (halt), changed previews
+        // must not.
+        let callCounter = 0;
+        const frozen = driveUntilFireOrEnd(() => {
+          callCounter += 1;
+          return taskListResult(
+            persistedStub('legacy frozen preview', {
+              path: `/tool-results/legacy-${callCounter}.txt`,
+            }),
+            `call-${callCounter}`,
+          );
+        }, 8);
+        expect(frozen).toBe(true);
+
+        const svc = new LoopDetectionService(makeConfig());
+        svc.reset('legacy-changed');
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD && !fired; i++) {
+          fired = svc.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+          if (fired) break;
+          fired = svc.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult(
+              persistedStub(`legacy preview v${i}`, {
+                path: `/tool-results/legacy-${i}.txt`,
+              }),
+            ),
+          );
+        }
+        expect(fired).toBe(false);
+      });
+
+      it('fingerprints quoted stub markers mid-content as ordinary text', () => {
+        // Board content can QUOTE a stub (label + hex); only LEADING
+        // producer shapes are stubs, so two boards differing only in quoted
+        // content must still count as changed.
+        const quoted = (hex: string) =>
+          `peer said:\n${FULL_OUTPUT_DIGEST_LABEL}${hex}\nend`;
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+          if (fired) break;
+          fired = service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult(quoted(digestOf(`content ${i}`))),
+          );
+        }
+        expect(fired).toBe(false);
+      });
+    });
+
+    it('restarts the streak when a result changed, then halts on a fresh unchanged streak', () => {
+      const args = TASK_LIST_ARGS;
+      // R1..R4: the board changes once mid-streak (v2), so R5 must NOT halt.
+      const states = ['v1', 'v1', 'v2', 'v1'];
+      for (let i = 0; i < 4; i++) {
+        expect(service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`))).toBe(
+          false,
+        );
+        service.recordToolResult(
+          { name: 'task_list', args },
+          taskListResult(states[i]),
+        );
+      }
+      expect(service.checkAlwaysOnSafeties(taskListEvent('call-4'))).toBe(
+        false,
+      );
+      service.recordToolResult(
+        { name: 'task_list', args },
+        taskListResult('v1'),
+      );
+
+      // The streak restarted at call-4 (the reset made it request #1 of the
+      // new streak): call-5..call-7 stay below the threshold, and their
+      // unchanged results corroborate the loop, so call-8 — the 5th request
+      // of the restarted streak — halts.
+      for (let i = 5; i <= 7; i++) {
+        expect(service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`))).toBe(
+          false,
+        );
+        service.recordToolResult(
+          { name: 'task_list', args },
+          taskListResult('v1'),
+        );
+      }
+      expect(service.checkAlwaysOnSafeties(taskListEvent('call-8'))).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('does not change behavior for deterministic (non-stateful) tools', () => {
+      const event = createToolCallRequestEvent('read_file', {
+        file_path: '/a',
+      });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        service.checkAlwaysOnSafeties(event);
+        // Results are recorded but ignored for non-stateful tools: identical
+        // args still mean an identical result, so the argument-only guard
+        // must fire unchanged.
+        service.recordToolResult(
+          { name: 'read_file', args: { file_path: '/a' } },
+          [
+            {
+              functionResponse: {
+                id: `call-${i}`,
+                name: 'read_file',
+                response: { output: `content v${i}` },
+              },
+            },
+          ],
+        );
+      }
+      expect(service.checkAlwaysOnSafeties(event)).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
+    it('records results by callId pairing from ToolCallRequest events', () => {
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`))).toBe(
+          false,
+        );
+        expect(
+          service.recordToolResultByCallId(
+            `call-${i}`,
+            taskListResult(`board state v${i}`, `call-${i}`),
+          ),
+        ).toBe(false);
+      }
+      // Changed results arrived through the callId pairing, so the
+      // threshold-th identical request is accepted.
+      expect(
+        service.checkAlwaysOnSafeties(
+          taskListEvent(`call-${TOOL_CALL_LOOP_THRESHOLD - 1}`),
+        ),
+      ).toBe(false);
+      // Unknown callIds (never streamed through this service) are ignored.
+      expect(
+        service.recordToolResultByCallId('never-seen', taskListResult('x')),
+      ).toBe(false);
+    });
+
+    it('counts global duplicates on (call, result) pairs when heuristics run', () => {
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('global-dup');
+
+      // Identical task_list calls whose results CHANGE never reach the
+      // global-duplicate threshold, no matter how they are interleaved.
+      const interleaved = ['task_list', 'tool_b', 'tool_c'];
+      let stateOrdinal = 0;
+      for (let round = 0; round < 3; round++) {
+        for (const name of interleaved) {
+          const args = name === 'task_list' ? TASK_LIST_ARGS : { step: round };
+          expect(
+            heuristicService.addAndCheck(
+              createToolCallRequestEvent(name, args),
+            ),
+          ).toBe(false);
+          if (name === 'task_list') {
+            expect(
+              heuristicService.recordToolResult(
+                { name, args },
+                taskListResult(`state-${stateOrdinal++}`),
+              ),
+            ).toBe(false);
+          }
+        }
+      }
+
+      // A genuinely stuck poll — same call, SAME result, interleaved so the
+      // consecutive guard never fires — trips the result-aware global
+      // duplicate at the threshold.
+      const stuckService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      stuckService.reset('global-dup-stuck');
+      let detected = false;
+      for (
+        let round = 0;
+        round < GLOBAL_DUPLICATE_THRESHOLD && !detected;
+        round++
+      ) {
+        for (const name of interleaved) {
+          const args = name === 'task_list' ? TASK_LIST_ARGS : { step: round };
+          if (
+            stuckService.addAndCheck(createToolCallRequestEvent(name, args))
+          ) {
+            detected = true;
+            break;
+          }
+          if (name === 'task_list') {
+            detected = stuckService.recordToolResult(
+              { name, args },
+              taskListResult('frozen board'),
+            );
+            if (detected) break;
+          }
+        }
+      }
+      expect(detected).toBe(true);
+      expect(stuckService.getLastLoopType()).toBe(
+        LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      );
+    });
+
+    it('treats changed results as progress for action stagnation', () => {
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('stagnation');
+
+      // 8+ same-name task_list calls with VARYING args (the consecutive
+      // guard never fires) and CHANGING results: productive polling, no
+      // ACTION_STAGNATION halt.
+      for (let i = 0; i < 12; i++) {
+        const args = { owner: `peer-${i % 3}` };
+        expect(
+          heuristicService.addAndCheck(
+            createToolCallRequestEvent('task_list', args),
+          ),
+        ).toBe(false);
+        expect(
+          heuristicService.recordToolResult(
+            { name: 'task_list', args },
+            taskListResult(`state v${i}`),
+          ),
+        ).toBe(false);
+      }
+
+      // Same shape but the board is FROZEN: the same-name streak is not
+      // reset and stagnation fires.
+      const frozenService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      frozenService.reset('stagnation-frozen');
+      let fired = false;
+      for (let i = 0; i < 12; i++) {
+        const args = { owner: `peer-${i % 3}` };
+        fired = frozenService.addAndCheck(
+          createToolCallRequestEvent('task_list', args),
+        );
+        if (fired) break;
+        frozenService.recordToolResult(
+          { name: 'task_list', args },
+          taskListResult('frozen board'),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(frozenService.getLastLoopType()).toBe(LoopType.ACTION_STAGNATION);
+    });
+
+    it('resets result evidence on retry so a replay is judged on its own results', () => {
+      const unchanged = '#1 [in_progress] @peer-a — task';
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(unchanged),
+        );
+      }
+      expect(
+        service.checkAlwaysOnSafeties({
+          type: LlmEventType.Retry,
+        } as ServerLlmStreamEvent),
+      ).toBe(false);
+
+      // After the retry the replayed attempt starts with fresh evidence:
+      // four unchanged results are not yet enough to halt.
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD - 1; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(taskListEvent(`replay-${i}`)),
+        ).toBe(false);
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(unchanged),
+        );
+      }
+      expect(service.checkAlwaysOnSafeties(taskListEvent('replay-4'))).toBe(
+        true,
+      );
+    });
+
+    it('clears stateful tracking on reset()', () => {
+      const unchanged = '#1 [in_progress] @peer-a — task';
+      service.checkAlwaysOnSafeties(taskListEvent('call-0'));
+      service.recordToolResult(
+        { name: 'task_list', args: TASK_LIST_ARGS },
+        taskListResult(unchanged),
+      );
+      service.reset('fresh-prompt');
+
+      // Changed results in the fresh prompt must not be compared against
+      // the previous prompt's fingerprint.
+      let fired = false;
+      for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        if (fired) break;
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(`fresh v${i}`),
+        );
+      }
+      expect(fired).toBe(false);
     });
   });
 });

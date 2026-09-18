@@ -76,7 +76,11 @@ const MCP_APP_SANDBOX_HTML = String.raw`<!doctype html>
         if (window.self === window.top) return;
         const configuredHostOrigin = new URL(window.location.href).searchParams.get('hostOrigin');
         const hostUrl = new URL(configuredHostOrigin || document.referrer);
-        if (!['localhost', '127.0.0.1', '[::1]'].includes(hostUrl.hostname)) return;
+        const hostOctets = hostUrl.hostname.split('.');
+        const isIpv4Loopback = hostOctets.length === 4
+          && hostOctets[0] === '127'
+          && hostOctets.slice(1).every((octet) => /^\d+$/.test(octet) && Number(octet) <= 255);
+        if (!['localhost', '[::1]'].includes(hostUrl.hostname) && !isIpv4Loopback) return;
         const hostOrigin = hostUrl.origin;
         const inner = document.createElement('iframe');
         inner.setAttribute('sandbox', 'allow-scripts allow-forms');

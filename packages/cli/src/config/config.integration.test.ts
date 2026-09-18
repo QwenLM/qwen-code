@@ -425,8 +425,9 @@ describe('Configuration Integration Tests', () => {
   });
 });
 
-describe('buildDisabledSkillNamesProvider', async () => {
-  const { buildDisabledSkillNamesProvider } = await import('./config.js');
+describe('skill settings providers', async () => {
+  const { buildDisabledSkillNamesProvider, buildEnabledSkillNamesProvider } =
+    await import('./config.js');
 
   function fakeSettings(
     disabled: unknown,
@@ -484,5 +485,16 @@ describe('buildDisabledSkillNamesProvider', async () => {
     );
 
     expect(provider()).toEqual(new Set(['hard']));
+  });
+
+  it('reads explicit enables from the current merged settings', () => {
+    const settings = {
+      merged: { skills: { enabled: [' REVIEW '] } },
+      forScope: () => ({ settings: { skills: {} } }),
+    };
+    const provider = buildEnabledSkillNamesProvider(settings as never);
+    expect(provider()).toEqual(new Set(['review']));
+    settings.merged = { skills: { enabled: ['plan'] } };
+    expect(provider()).toEqual(new Set(['plan']));
   });
 });

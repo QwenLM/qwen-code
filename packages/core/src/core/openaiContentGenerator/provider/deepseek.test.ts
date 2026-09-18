@@ -553,10 +553,8 @@ describe('DeepSeekOpenAICompatibleProvider', () => {
   });
 
   describe('getDefaultGenerationConfig', () => {
-    it('returns temperature 0', () => {
-      expect(provider.getDefaultGenerationConfig()).toEqual({
-        temperature: 0,
-      });
+    it('does not force a deterministic temperature by default', () => {
+      expect(provider.getDefaultGenerationConfig()).toEqual({});
     });
   });
 });

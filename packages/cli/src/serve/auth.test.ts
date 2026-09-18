@@ -12,8 +12,11 @@ import {
   bearerAuth,
   createMutationGate,
   denyBrowserOriginCors,
+  findNonLoopbackHttpOrigin,
   InvalidAllowOriginPatternError,
+  isTrustedLoopbackMode,
   parseAllowOriginPatterns,
+  requestHasOperatorAuthority,
 } from './auth.js';
 import { CredentialStore } from './local-control/credentials.js';
 import { tagListener } from './local-control/listener-identity.js';
@@ -27,7 +30,10 @@ interface GateResult {
 
 function invokeGate(
   handler: RequestHandler,
-  req: { headers?: Record<string, string | undefined> } = {},
+  req: {
+    headers?: Record<string, string | undefined>;
+    socket?: unknown;
+  } = {},
 ): GateResult {
   let status: number | undefined;
   let body: unknown;
@@ -50,16 +56,28 @@ function invokeGate(
     nextCalled = true;
   };
 
-  handler({ headers: req.headers ?? {} } as Request, response, next);
+  handler(
+    {
+      headers: req.headers ?? {},
+      ...(req.socket !== undefined ? { socket: req.socket } : {}),
+    } as Request,
+    response,
+    next,
+  );
   return { status, body, headers, nextCalled };
 }
 
 function invokeGatedRoute(
-  deps: { tokenConfigured: boolean; requireAuth: boolean },
+  deps: {
+    tokenConfigured: boolean;
+    requireAuth: boolean;
+    trustedLoopbackMode?: boolean;
+  },
   gateOpts?: { strict?: boolean },
+  req?: Parameters<typeof invokeGate>[1],
 ): GateResult {
   const gate = createMutationGate(deps);
-  return invokeGate(gate(gateOpts));
+  return invokeGate(gate(gateOpts), req);
 }
 
 describe('denyBrowserOriginCors', () => {
@@ -74,6 +92,24 @@ describe('denyBrowserOriginCors', () => {
 });
 
 describe('createMutationGate (#4175 PR 15)', () => {
+  it.each([
+    [true, false, false, true],
+    [true, true, false, false],
+    [true, false, true, false],
+    [false, false, false, false],
+  ])(
+    'derives trusted loopback from bind=%s token=%s requireAuth=%s',
+    (loopbackBind, tokenConfigured, requireAuth, expected) => {
+      expect(
+        isTrustedLoopbackMode({
+          loopbackBind,
+          tokenConfigured,
+          requireAuth,
+        }),
+      ).toBe(expected);
+    },
+  );
+
   it('scopes runtime and pairing credentials to opposite listeners', () => {
     const credentials = new CredentialStore('runtime-token');
     credentials.addPairingToken('pair', 'pairing-token');
@@ -124,10 +160,20 @@ describe('createMutationGate (#4175 PR 15)', () => {
     expect(res.status).toBeUndefined();
   });
 
-  it('refuses strict routes with token_required on loopback no-token default', () => {
-    // The cell that makes the helper substantive: routes that opt
-    // into strictness (Wave 4 file edit / memory CRUD / device-flow
-    // auth) refuse to serve until the operator configures a token.
+  it('allows strict routes on the trusted tokenless primary listener', () => {
+    const res = invokeGatedRoute(
+      {
+        tokenConfigured: false,
+        requireAuth: false,
+        trustedLoopbackMode: true,
+      },
+      { strict: true },
+    );
+    expect(res.nextCalled).toBe(true);
+    expect(res.status).toBeUndefined();
+  });
+
+  it('refuses strict routes with token_required when trusted mode is omitted', () => {
     const res = invokeGatedRoute(
       { tokenConfigured: false, requireAuth: false },
       { strict: true },
@@ -146,6 +192,46 @@ describe('createMutationGate (#4175 PR 15)', () => {
     // `run-qwen-serve.ts`). The error must point operators at fixes that
     // work standalone.
     expect(body.error).not.toMatch(/--require-auth/);
+  });
+
+  it('does not treat requireAuth without a token as proof of authentication', () => {
+    const res = invokeGatedRoute(
+      {
+        tokenConfigured: false,
+        requireAuth: true,
+        trustedLoopbackMode: true,
+      },
+      { strict: true },
+    );
+    expect(res.nextCalled).toBe(false);
+    expect(res.status).toBe(401);
+    expect((res.body as { code?: string }).code).toBe('token_required');
+  });
+
+  it('does not grant trusted-loopback authority to the Local Control listener', () => {
+    const server = createServer();
+    tagListener(server, {
+      kind: 'local-control',
+      authority: '192.168.1.10:4170',
+      origin: 'http://192.168.1.10:4170',
+    });
+    const req = {
+      headers: {},
+      socket: { server },
+    } as unknown as Request;
+
+    expect(requestHasOperatorAuthority(req, true)).toBe(false);
+    const res = invokeGatedRoute(
+      {
+        tokenConfigured: false,
+        requireAuth: false,
+        trustedLoopbackMode: true,
+      },
+      { strict: true },
+      req as unknown as Parameters<typeof invokeGate>[1],
+    );
+    expect(res.nextCalled).toBe(false);
+    expect(res.status).toBe(401);
   });
 
   it('allows a verified pairing request through a strict route on a tokenless daemon', () => {
@@ -178,7 +264,7 @@ describe('createMutationGate (#4175 PR 15)', () => {
   });
 
   it('returns the same passthrough handler instance across calls when global auth is on (allocation discipline)', () => {
-    // The factory caches the no-op when `requireAuth || tokenConfigured`
+    // The factory caches the no-op when `tokenConfigured`
     // so a route table with N mutation routes doesn't allocate N
     // identical closures. Not a behavioral guarantee for callers, but
     // useful as a regression anchor — if a future change makes the
@@ -194,10 +280,10 @@ describe('createMutationGate (#4175 PR 15)', () => {
     expect(a).toBe(b);
   });
 
-  it('caches both passthrough and strict denier across calls on no-token loopback (allocation symmetry, PR #4236 review #3254467193)', () => {
-    // Symmetric to the test above but for the no-token branch: with N
-    // strict routes in a Wave 4 route table, the denier must be cached
-    // too so we don't allocate N identical 401 closures. Identity
+  it('caches both handlers for the non-trusted tokenless branch (allocation symmetry, PR #4236 review #3254467193)', () => {
+    // Symmetric to the test above but for the non-trusted tokenless branch:
+    // with N strict routes in a route table, the denier must be cached so we
+    // don't allocate N identical 401 closures. Identity
     // checks anchor the cache; non-strict and strict gates yield
     // distinct singletons (one passthrough, one denier).
     const gate = createMutationGate({
@@ -366,6 +452,31 @@ describe('parseAllowOriginPatterns (T2.4 #4514)', () => {
       expect(e.pattern).toBe('http://broken/');
       expect(e.message).toContain('http://broken/');
     }
+  });
+});
+
+describe('findNonLoopbackHttpOrigin', () => {
+  it.each([
+    'http://localhost:3000',
+    'http://127.0.0.2:3000',
+    'https://[::1]:3000',
+    'chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk',
+  ])('does not classify %s as a remote browser origin', (origin) => {
+    expect(
+      findNonLoopbackHttpOrigin(parseAllowOriginPatterns([origin])),
+    ).toBeUndefined();
+  });
+
+  it('returns the first non-loopback HTTP(S) origin', () => {
+    expect(
+      findNonLoopbackHttpOrigin(
+        parseAllowOriginPatterns([
+          'http://localhost:3000',
+          'https://app.example.com',
+          'http://192.0.2.1:4170',
+        ]),
+      ),
+    ).toBe('https://app.example.com');
   });
 });
 

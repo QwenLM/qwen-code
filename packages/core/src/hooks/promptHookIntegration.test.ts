@@ -322,7 +322,7 @@ describe('Prompt Hook Integration', () => {
   });
 
   describe('Timeout Handling', () => {
-    it('should timeout and cancel when LLM is slow', async () => {
+    it('should report a timeout when LLM is slow', async () => {
       mockGenerateContent.mockImplementation(
         () =>
           new Promise((resolve) => {
@@ -352,7 +352,7 @@ describe('Prompt Hook Integration', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.outcome).toBe('cancelled');
+      expect(result.outcome).toBe('timeout');
     }, 10000);
   });
 });

@@ -98,6 +98,29 @@ describe('CaptureScreenContextTool', () => {
     },
   );
 
+  it('reports the dedicated symlink error on every platform', async () => {
+    const target = await captureFile();
+    const link = join(target.directory, 'linked.png');
+    await symlink(target.path, link);
+    const tool = new CaptureScreenContextTool(
+      async () => ({
+        appName: 'Finder',
+        accessibilityText: '',
+        screenshotPath: link,
+      }),
+      target.directory,
+    );
+
+    const result = await tool.build({}).execute(new AbortController().signal);
+
+    // The exact message pins the explicit lstat guard: without it, win32
+    // reads through the link (no error at all) while POSIX falls back to
+    // O_NOFOLLOW's generic ELOOP message.
+    expect(result.error?.message).toBe(
+      'Host returned a symbolic link screenshot path.',
+    );
+  });
+
   it('rejects a screenshot outside the Host private directory', async () => {
     const outside = await captureFile();
     const allowed = await mkdtemp(join(tmpdir(), 'capture-screen-allowed-'));

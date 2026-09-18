@@ -49,6 +49,21 @@ describe('createExtensionsController', () => {
     vi.restoreAllMocks();
   });
 
+  it('does not impose a public-only extension network policy', () => {
+    const controller = createExtensionsController({
+      boundWorkspace: '/work/bound',
+      bridge: {} as AcpSessionBridge,
+      workspace: {} as DaemonWorkspaceService,
+      isWorkspaceTrusted: () => true,
+    });
+
+    const manager = controller.createExtensionManager() as unknown as {
+      networkPolicy?: string;
+    };
+
+    expect(manager.networkPolicy).toBeUndefined();
+  });
+
   it('releases the commit lane when a manual refresh times out', async () => {
     vi.useFakeTimers();
     let refreshCalls = 0;

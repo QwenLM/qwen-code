@@ -4,6 +4,7 @@
   "description": "Native macOS audio and global-shortcut host for Qwen Code Live Voice",
   "main": "dist/main.cjs",
   "private": true,
+  "workspaces": [],
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -22,12 +23,14 @@
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",
+    "@types/jsdom": "28.0.3",
     "@types/node": "^25.0.8",
     "@types/semver": "^7.7.1",
     "@types/ws": "^8.18.1",
     "electron": "^39.2.7",
     "electron-builder": "^26.0.12",
     "esbuild": "^0.25.0",
+    "jsdom": "26.1.0",
     "semver": "^7.7.2",
     "tsx": "^4.20.3",
     "typescript": "^5.0.0",

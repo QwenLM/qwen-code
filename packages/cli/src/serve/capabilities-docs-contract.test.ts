@@ -7,7 +7,10 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CONDITIONAL_SERVE_FEATURES } from './capabilities.js';
+import {
+  CONDITIONAL_SERVE_FEATURES,
+  SERVE_PROTOCOL_VERSION,
+} from './capabilities.js';
 
 const START = '<!-- conditional-serve-features:start -->';
 const END = '<!-- conditional-serve-features:end -->';
@@ -33,5 +36,16 @@ describe('conditional serve capability documentation', () => {
     expect([...documented].sort()).toEqual(
       [...CONDITIONAL_SERVE_FEATURES.keys()].sort(),
     );
+  });
+
+  it('keeps volatile capability totals out of the daemon index', async () => {
+    const index = await readFile(
+      resolve(process.cwd(), '../../docs/developers/daemon/00-index.md'),
+      'utf8',
+    );
+    expect(index).toContain(
+      `SERVE_PROTOCOL_VERSION = '${SERVE_PROTOCOL_VERSION}'`,
+    );
+    expect(index).not.toMatch(/\d+ (?:registered|conditional) tags/);
   });
 });

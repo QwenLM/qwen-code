@@ -7,6 +7,7 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
+import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
@@ -27,6 +28,19 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_RUNTIME_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
+  // These two select which file becomes the System / SystemDefaults settings
+  // layer. A project `.env` must never redirect them: the System layer
+  // outranks the operator's own User settings, so a repository could promote
+  // its own file into the highest-precedence layer — renaming the product in
+  // every connected browser via `ui.brand`, among other operator-only
+  // settings that read only the operator scopes.
+  'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+  'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+  // Downloaded updates execute as the user; a project must not select them.
+  'QWEN_UPDATE_BASE_URL',
+  // This points to a host temp file that carries build warnings. A project
+  // `.env` must not redirect it to an arbitrary file to read or delete.
+  'QWEN_CODE_WARNINGS_FILE',
   // Runtime attribution markers are stamped by trusted launchers. A project
   // `.env` must not spoof client channel telemetry.
   QWEN_CODE_SERVE_ENV,
@@ -43,6 +57,26 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // The name-only lock is a deployment policy. A project that wants it sets
+  // tools.workflowNameOnly, which a workspace may only turn on; a project
+  // .env must not be able to unset the operator's exported value.
+  'QWEN_CODE_WORKFLOW_NAME_ONLY',
+  // The review prebuild (commands/review/lib/prebuild.ts) is an operator
+  // decision: CI welds it as real step env, a local operator exports it. A
+  // project `.env` must not opt its own review into the blocking
+  // install+build prefix — and the read-time provenance check there cannot
+  // see file-sourcing across a process boundary (a child inherits the value
+  // with an empty registry), so the key must never enter the environment
+  // from repository content at all. prebuild.test.ts pins the membership
+  // with both real symbols.
+  'QWEN_REVIEW_PREBUILD',
+  // The automatic-review marker (commands/review/lib/docs-nav-profile.ts
+  // `automaticReviewRequested`) is an operator decision in the same class:
+  // it selects the reduced docs-nav profile, so a repository must not
+  // declare its own — possibly manual — review automatic and shrink the
+  // review of its own change to one reviewer with no reverse audit. CI
+  // welds it as a real step env, never a file.
+  'QWEN_REVIEW_AUTOMATIC',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo
@@ -129,6 +163,35 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'XDG_CONFIG_HOME',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
+  // The sandbox backend selection and network mode are confinement decisions.
+  // QWEN_SANDBOX decides whether confinement runs at all and which backend
+  // (an untrusted repo could cancel it with `QWEN_SANDBOX=false`, or force a
+  // backend over the operator's choice), and QWEN_SANDBOX_IMAGE selects the
+  // container image the agent runs inside. `resolveSandboxNetworkMode` flips
+  // to `proxied` purely on the presence of QWEN_SANDBOX_PROXY_COMMAND, and
+  // the bwrap branch then executes that value through `bash -c` on the host,
+  // outside the confinement, before the agent starts. A project `.env` or
+  // settings.env supplying any of them is repository content deciding the
+  // confinement — the same class as GIT_PROXY_COMMAND. The operator's launch
+  // environment or a home `.env` remains the only trusted source.
+  'QWEN_SANDBOX',
+  'QWEN_SANDBOX_IMAGE',
+  'QWEN_SANDBOX_PROXY_COMMAND',
+  'QWEN_SANDBOX_NET',
+  // Runtime markers come from the launcher, never from configuration files.
+  // They also belong to the all-scope provenance gate below.
+  'SANDBOX',
+  'SANDBOX_ENFORCEMENT',
+  // The bwrap writable-root derivation reads XDG_CACHE_HOME and, via
+  // os.tmpdir(), TMPDIR/TMP/TEMP (its POSIX fallback order). A project `.env`
+  // pointing one inside the home directory ($HOME/.ssh, $HOME/.aws, …) would
+  // make the confinement bind that directory read-write. Values from the
+  // launch environment or a home `.env` are the operator's own choice and
+  // stay honored.
+  'XDG_CACHE_HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
   // git falls back to executing $SSH_ASKPASS for passphrase prompts (its
   // askpass order is GIT_ASKPASS > core.askPass > SSH_ASKPASS, and ssh runs
   // it whenever SSH_ASKPASS_REQUIRE=force or no terminal is available), so a
@@ -192,12 +255,26 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // (documented as a per-daemon opt-in), so only the daemon's launch
   // environment or a home `.env` may set it.
   'QWEN_SERVE_NEW_FILE_MODE',
+  'QWEN_SERVE_MAX_WORKSPACES',
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT decides where the daemon stores
+  // every workspace's session attachments. A project `.env` redirecting it
+  // would capture uploads for ALL workspaces the daemon serves — and reads
+  // consult the configured root first, so attacker-modified bytes would be
+  // served back — with no recovery after unsetting the variable. The
+  // location is an operator decision (documented as a per-daemon opt-in), so
+  // only the daemon's launch environment or a home `.env` may set it.
+  'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env
   // distributed to every workspace's session children — reopening the #8653
   // vector for any repo whose .env happens to carry DEV=true.
   'DEV',
+  // The Conversations provenance marker is a private daemon-to-child signal:
+  // a project `.env` or settings.env must never mark an ordinary workspace
+  // child as Conversations-hosted (it would force the writer lease and the
+  // unbound-durable-task skip onto sessions the contract does not cover).
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let
@@ -231,6 +308,22 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
       pattern.test(lowerKey),
     )
   );
+}
+
+// Launcher→child provenance markers. Unlike the private ACP capability
+// (a random per-spawn nonce), these are fixed constants, so a home-scoped
+// `.env` could forge one — and home-scoped files are deliberately exempt from
+// the hardcoded project exclusions above. No env file at any scope may set
+// them: the legitimate carrier is the spawner's child env. Sandbox markers
+// stay inherited; the CLI captures and deletes the Conversations marker.
+const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
+  'sandbox',
+  'sandbox_enforcement',
+]);
+
+export function isPrivateProvenanceEnvKey(key: string): boolean {
+  return PRIVATE_PROVENANCE_ENV_KEYS.has(key.toLowerCase());
 }
 
 export const HOME_ENV_BOOTSTRAP_KEYS = [

@@ -58,7 +58,9 @@ let rmMockOverride:
 // otherwise the real readFile runs.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs/promises')>();
-  type ReadFileHook = (...args: Parameters<typeof original.readFile>) => unknown;
+  type ReadFileHook = (
+    ...args: Parameters<typeof original.readFile>
+  ) => unknown;
   let readFileHook: ReadFileHook | undefined;
   return {
     ...original,

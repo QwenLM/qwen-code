@@ -5,11 +5,14 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { RequestError } from '@agentclientprotocol/sdk';
 import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import {
+  AcpChildCapacityExceededError,
   BridgeChannelQuarantinedError,
+  BridgeTimeoutError,
   InvalidSessionMetadataError,
   RestoreInProgressError,
   SessionRestoreTimeoutError,
@@ -17,7 +20,83 @@ import {
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
+describe('capacity RPC errors', () => {
+  it('carries an explicit HTTP status and machine reason', () => {
+    const error = new AcpChildCapacityExceededError(6, 6);
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        httpStatus: 503,
+        errorKind: error.code,
+        maxConcurrentChildren: 6,
+        committedAcpChildren: 6,
+      },
+    });
+  });
+  it('preserves standalone rollback classification with nested capacity', () => {
+    const capacity = {
+      code: 'acp_child_capacity_exhausted' as const,
+      maxConcurrentChildren: 1,
+      committedAcpChildren: 1,
+    };
+    expect(
+      toRpcError(
+        new StandaloneSessionServiceError(
+          'standalone_creation_rolled_back',
+          'id',
+          'rollback',
+          true,
+          capacity,
+        ),
+      ),
+    ).toMatchObject({
+      data: {
+        code: 'standalone_creation_rolled_back',
+        httpStatus: 503,
+        capacity,
+        sessionId: 'id',
+      },
+    });
+  });
+});
+
 describe('toRpcError', () => {
+  it.each(['request', 'wire'] as const)(
+    'preserves workflow parameter details from a %s error',
+    (transport) => {
+      const source = RequestError.invalidParams(
+        { errorKind: 'workflow_invalid_params' },
+        '`sourceRef` must contain non-empty id and revision strings',
+      );
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
+
+      expect(toRpcError(error)).toEqual({
+        code: RPC.INVALID_PARAMS,
+        message: source.message,
+        data: { errorKind: 'workflow_invalid_params', httpStatus: 400 },
+      });
+    },
+  );
+
+  it.each([
+    new Error('Unexpected workflow failure'),
+    RequestError.invalidParams(undefined, 'Unclassified parameter error'),
+    RequestError.internalError(
+      { errorKind: 'unknown_workflow_error' },
+      'Unexpected workflow failure',
+    ),
+  ])('keeps unclassified errors as internal failures: %s', (error) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: 'Internal error',
+      data: { errorKind: 'internal' },
+    });
+  });
+
   it('maps sealed maintenance to a JSON-RPC server error', () => {
     expect(toRpcError(new DaemonDrainingError())).toEqual({
       code: RPC.INTERNAL_ERROR,
@@ -69,6 +148,30 @@ describe('toRpcError', () => {
     });
   });
 
+  it('maps session initialization timeouts with the public retry contract', () => {
+    const error = new BridgeTimeoutError('newSession', 10_000);
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        code: 'init_timeout',
+        errorKind: 'init_timeout',
+        httpStatus: 504,
+        retryable: true,
+        retryAfterSeconds: 10,
+        timeoutMs: 10_000,
+      },
+    });
+  });
+
+  it('leaves non-session-initialization bridge timeouts on the generic path', () => {
+    expect(toRpcError(new BridgeTimeoutError('initialize', 10_000))).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: 'Internal error',
+      data: { errorKind: 'internal' },
+    });
+  });
+
   it('maps the abandoned-restore fence with its reason and hint', () => {
     // SDK transport negotiation prefers acp-ws and acp-http over REST, so
     // without this mapping the default arm turns a retryable fence into an
@@ -110,21 +213,24 @@ describe('toRpcError', () => {
     });
   });
 
-  it('carries the quarantine backoff hint for a settlement-overdue channel', () => {
-    // Quarantine outlives the fence, and a fresh-id request never reaches the
-    // 409 that carries the real hint — so this payload is the only backoff
-    // signal such a caller gets.
-    const error = new BridgeChannelQuarantinedError(
+  it('carries every quarantine reason and its backoff hint', () => {
+    // A fresh-id request never reaches the same-id 409, so this payload is the
+    // only operation-budget-scale backoff signal such a caller gets.
+    for (const reason of [
+      'restore_cleanup_failed',
       'restore_settlement_overdue',
-      90,
-    );
-    expect(toRpcError(error)).toMatchObject({
-      data: {
-        reason: 'restore_settlement_overdue',
-        retryAfterSeconds: 90,
-        httpStatus: 503,
-      },
-    });
+      'new_session_cleanup_failed',
+      'new_session_settlement_overdue',
+    ] as const) {
+      const error = new BridgeChannelQuarantinedError(reason, 90);
+      expect(toRpcError(error)).toMatchObject({
+        data: {
+          reason,
+          retryAfterSeconds: 90,
+          httpStatus: 503,
+        },
+      });
+    }
   });
 
   it('maps invalid session metadata to the REST-equivalent invalid_metadata contract', () => {

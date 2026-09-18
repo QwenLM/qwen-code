@@ -63,6 +63,23 @@ export interface ToolInvocation<
   requiresUserInteraction?(): boolean;
 
   /**
+   * Parameters that permission rules match against, when they differ from
+   * `params`. Called after {@link getDefaultPermission} resolves, so an
+   * invocation can derive values from work done there, such as the digest of
+   * the file a name resolves to. A derived key must overwrite any value the
+   * model supplied under it: a rule scoped by that key must never match a
+   * value the model chose.
+   */
+  getPermissionMatchParams?(): Record<string, unknown>;
+
+  /**
+   * Whether a host-level allow decision may be confirmed without forwarding
+   * an interaction payload. Tools that collect data through their approval
+   * surface should return false so the host-provided payload is preserved.
+   */
+  canAutoApproveOnAllow?(): boolean;
+
+  /**
    * Constructs the confirmation dialog details for this invocation.
    * Only called when the final permission decision is `'ask'` and the user
    * needs to be prompted interactively.
@@ -115,6 +132,10 @@ export abstract class BaseToolInvocation<
     return false;
   }
 
+  canAutoApproveOnAllow(): boolean {
+    return true;
+  }
+
   /**
    * Default fallback: returns a generic 'info' confirmation dialog using the
    * tool's getDescription(). This ensures that even tools whose
@@ -151,6 +172,62 @@ export abstract class BaseToolInvocation<
  * A type alias for a tool invocation where the specific parameter and result types are not known.
  */
 export type AnyToolInvocation = ToolInvocation<object, ToolResult>;
+
+/** One declared output of a media-policy tool (see
+ * {@link MediaPolicyToolDescriptor}). */
+export interface MediaPolicyToolOutputSpec {
+  /** What the output is: a derived media artifact, a disclosure text, or
+   * a non-media file artifact (e.g. a `role: 'transcript'` UTF-8
+   * text/plain file — policy design §6.2). */
+  kind: 'media' | 'text' | 'file';
+  /** Role label for text/file outputs (e.g. 'disclosure', 'transcript'). */
+  role?: string;
+  /** MIME types the output may carry (media and file outputs). */
+  mimeTypes?: string[];
+  /** Whether a successful run MUST produce this output. */
+  required: boolean;
+  /** Whether the output is a lossy transformation of its input. A lossy
+   * media output obligates a disclosure text alongside it. */
+  lossy?: boolean;
+}
+
+/**
+ * Code-registration fact marking a tool as an omni media-policy tool —
+ * declared by the tool class itself, immutable at runtime, and never
+ * configurable. Its presence is what the scheduler's modelAccess gate,
+ * the declaration surfaces, and the fixed-policy orchestrator key off:
+ * config can never turn an ordinary tool into a policy tool (or the
+ * reverse).
+ */
+export interface MediaPolicyToolDescriptor {
+  kind: 'media_policy';
+  /** Media modalities the tool accepts as input. */
+  inputMediaTypes: Array<'image' | 'audio' | 'video'>;
+  /** Outputs a successful run may/must produce. */
+  outputs: MediaPolicyToolOutputSpec[];
+  /** JSON schema for `omni.processing.policyTools.<name>.settings`. */
+  settingsSchema?: object;
+  /**
+   * Parameter names only the OPERATOR may set — via
+   * `policyTools.<name>.settings` or `modelAccess.defaultArguments` /
+   * `lockedArguments` — never the caller of a gated model/client call.
+   * For endpoint/credential selectors (e.g. a request base URL plus the
+   * NAME of the env var read for its bearer token): a model-controlled
+   * pair would let injected content exfiltrate arbitrary environment
+   * secrets to an attacker host. The modelAccess gate rejects gated calls
+   * that name these keys, and the declaration projection hides them from
+   * the model. Fixed-policy arguments (operator-authored settings.json)
+   * are unaffected.
+   */
+  operatorOnlyParams?: readonly string[];
+  /**
+   * Transform-semantics version, part of the degradation-cache
+   * fingerprint (decision D2). Bump it whenever the tool starts producing
+   * different bytes for the same input and arguments (encoder change,
+   * default pipeline change), so stale cached derivatives are not reused.
+   */
+  version?: string;
+}
 
 /**
  * Interface for a tool builder that validates parameters and creates invocations.
@@ -249,6 +326,16 @@ export abstract class DeclarativeTool<
   }
 
   /**
+   * Present iff this tool is an omni media-policy tool. A code-level fact
+   * of the tool class (not configuration): the scheduler's modelAccess
+   * gate, the declaration surfaces, and the fixed-policy orchestrator all
+   * key off it. Default: not a media-policy tool.
+   */
+  get mediaPolicyDescriptor(): MediaPolicyToolDescriptor | undefined {
+    return undefined;
+  }
+
+  /**
    * Max model-facing characters for this tool's output before the scheduler
    * spills it to disk (mirrors Claude Code's per-tool `maxResultSizeChars`).
    *   - `undefined` → use the global truncation threshold.
@@ -284,12 +371,15 @@ export abstract class DeclarativeTool<
    *   - undefined: fall back to raw params (only safe when the tool is
    *     known to have no sensitive params)
    *
-   * Default is the empty-string sentinel — fail-closed: a third-party
-   * MCP tool (or any tool that has not opted in) does not leak its raw
-   * parameters (potentially containing API keys, tokens, file contents)
-   * into the classifier LLM prompt. Tools that want their args inspected
-   * by the classifier for safety judgement should override this and
-   * return an object with only the security-relevant fields.
+   * Default is the empty-string sentinel — fail-closed: a tool that has
+   * not opted in does not leak its raw parameters (potentially containing
+   * API keys, tokens, file contents) into the classifier LLM prompt.
+   * Tools that want their args inspected by the classifier for safety
+   * judgement should override this and return an object with only the
+   * security-relevant fields. Note that `DiscoveredMCPTool` overrides
+   * this and forwards a bounded projection of every MCP call's arguments
+   * by default (see `mcp-classifier-input.ts`; opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`).
    */
   toAutoClassifierInput(
     _params: TParams,
@@ -500,6 +590,19 @@ export interface ToolResult {
   persistedOutputFiles?: string[];
 
   /**
+   * Internal runtime marker: the producer already sized `llmContent` against
+   * its own declared character budget, whether or not anything was cut. Records
+   * the size decision, where `persistedOutputFiles` records the persistence
+   * one. Set it only on paths that ran that check, never by tool identity: the
+   * scheduler's generic single-result gate stands down for a marked body. On
+   * the success path the per-tool budget still applies, and a timed-out call's
+   * detail is re-bounded at the producer's declared budget; the ordinary
+   * failure path has no per-tool pass, so a producer that marks a body there
+   * is bounding it alone. The aggregate batch budget applies on every path.
+   */
+  outputBudgetApplied?: boolean;
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -635,10 +738,13 @@ export interface AgentResultDisplay {
   taskDescription: string;
   taskPrompt: string;
   executionMode?: 'foreground' | 'background';
+  /** Whether the registered subagent session is available for inspection. */
+  subagentSessionReady?: boolean;
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  skills?: string[];
   /** Real-time output-token count during execution, accumulated across subagent rounds. */
   tokenCount?: number;
 
@@ -777,8 +883,15 @@ export function isTerminalImageDisplay(
   );
 }
 
+export interface AskUserQuestionResultDisplay {
+  type: 'ask_user_question_answers';
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+}
+
 export type ToolResultDisplay =
   | string
+  | AskUserQuestionResultDisplay
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
@@ -813,6 +926,13 @@ export interface TaskListResultDisplay {
 export interface FileDiff {
   fileDiff: string;
   fileName: string;
+  /**
+   * Full (project-relative or absolute) path to the edited file, as passed
+   * to the tool. UI consumers must prefer this over `fileName` when
+   * resolving a clickable/openable location — `fileName` is a basename and
+   * cannot be used to locate files outside the workspace root.
+   */
+  filePath?: string;
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
@@ -933,6 +1053,8 @@ export interface ToolEditConfirmationDetails {
 }
 
 export interface ToolConfirmationPayload {
+  /** Execution permission displayed when approving a DAC plan. */
+  expectedPlanExecutionMode?: string;
   // used to override `modifiedProposedContent` for modifiable tools in the
   // inline modify flow
   newContent?: string;
@@ -1012,7 +1134,13 @@ export interface ToolInfoConfirmationDetails {
 }
 
 export interface AutoModeFallbackConfirmation {
-  reason: 'classifier_unavailable';
+  reason:
+    | 'classifier_blocked_retry'
+    | 'classifier_unavailable'
+    | 'consecutive_block'
+    | 'consecutive_unavailable'
+    | 'total_denial'
+    | 'external_write';
   message: string;
 }
 

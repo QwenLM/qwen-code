@@ -65,7 +65,12 @@ async function writeJson(file: string, value: unknown): Promise<void> {
 }
 
 async function makeHarness(
-  opts: { persistSetting?: boolean; token?: string; trusted?: boolean } = {},
+  opts: {
+    persistSetting?: boolean;
+    token?: string;
+    trusted?: boolean;
+    hostname?: string;
+  } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -106,6 +111,7 @@ async function makeHarness(
     transport: 'qwen-asr-chat',
   }));
   const serveOpts: ServeOptions = { ...baseOpts };
+  serveOpts.hostname = opts.hostname ?? baseOpts.hostname;
   if ('token' in opts) {
     serveOpts.token = opts.token;
   }
@@ -135,15 +141,19 @@ async function teardown(h: Harness): Promise<void> {
   resetTrustedFoldersForTesting();
 }
 
-async function writeVoiceModelSettings(h: Harness): Promise<void> {
+async function writeVoiceModelSettings(
+  h: Harness,
+  baseUrl = 'https://dashscope.example/compatible-mode/v1',
+): Promise<void> {
   await writeJson(path.join(h.home, 'settings.json'), {
     modelProviders: {
       openai: [
         {
           id: 'qwen3-asr-flash',
-          label: 'Qwen ASR',
-          baseUrl: 'https://dashscope.example/compatible-mode/v1',
+          name: 'Qwen ASR',
+          baseUrl,
           envKey: 'DASHSCOPE_API_KEY',
+          generationConfig: { contextWindowSize: 65536 },
         },
         {
           id: 'gpt-4o',
@@ -203,8 +213,11 @@ describe('workspace voice routes', () => {
     await teardown(h);
   });
 
-  it('GET returns voice status and selectable ASR models without secrets', async () => {
-    await writeVoiceModelSettings(h);
+  it.each([
+    'https://dashscope.example/compatible-mode/v1',
+    'https://private-user:private-password@dashscope.example/compatible-mode/v1?token=private-query#private-fragment',
+  ])('GET returns voice metadata without secrets from %s', async (baseUrl) => {
+    await writeVoiceModelSettings(h, baseUrl);
 
     const res = await request(h.app)
       .get('/workspace/voice')
@@ -219,14 +232,22 @@ describe('workspace voice routes', () => {
       mode: 'tap',
       language: 'chinese',
       voiceModel: 'qwen3-asr-flash',
-      availableVoiceModels: [
-        { id: 'qwen3-asr-flash', transport: 'qwen-asr-chat' },
-      ],
     });
+    expect(res.body.availableVoiceModels).toEqual([
+      {
+        id: 'qwen3-asr-flash',
+        name: 'Qwen ASR',
+        baseUrl: 'https://dashscope.example/compatible-mode/v1',
+        contextWindow: 65536,
+        transport: 'qwen-asr-chat',
+      },
+    ]);
     const serialized = JSON.stringify(res.body);
     expect(serialized).not.toContain('sk-secret');
-    expect(serialized).not.toContain('dashscope.example');
     expect(serialized).not.toContain('envKey');
+    expect(serialized).not.toMatch(
+      /private-user|private-password|private-query|private-fragment/,
+    );
   });
 
   it('GET returns 503 while the workspace generation is closed', async () => {
@@ -954,7 +975,7 @@ describe('workspace voice routes', () => {
     expect(h.transcribe).not.toHaveBeenCalled();
   });
 
-  it('POST /workspace/voice/transcribe requires a configured token on loopback defaults', async () => {
+  it('POST /workspace/voice/transcribe runs on trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness({ token: '' });
     await writeVoiceModelSettings(h);
@@ -962,6 +983,20 @@ describe('workspace voice routes', () => {
     const res = await request(h.app)
       .post('/workspace/voice/transcribe?voiceModel=qwen3-asr-flash')
       .set('Host', hostHeader)
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1, 2, 3, 4]));
+
+    expect(res.status).toBe(200);
+    expect(res.body.text).toBe('hello from audio');
+    expect(h.transcribe).toHaveBeenCalledOnce();
+  });
+
+  it('POST /workspace/voice/transcribe denies a non-trusted tokenless embed', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: '', hostname: '192.0.2.1' });
+
+    const res = await request(h.app)
+      .post('/workspace/voice/transcribe')
       .set('Content-Type', 'audio/wav')
       .send(Buffer.from([1, 2, 3, 4]));
 

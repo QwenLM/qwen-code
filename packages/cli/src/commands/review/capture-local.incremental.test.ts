@@ -12,6 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdtempSync,
   rmSync,
@@ -21,6 +22,7 @@ import {
   realpathSync,
   symlinkSync,
   existsSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -41,6 +43,11 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   }),
   writeStderrLineSafe: vi.fn(),
 }));
+
+// Spy-mode interception (as in local-anchor.test.ts): every fs call still
+// delegates to the real implementation, but the absence-walk probes can be
+// counted.
+vi.mock('node:fs', { spy: true });
 
 let repo: string;
 let cwd: string;
@@ -470,6 +477,177 @@ describe('capture-local — round-2 regressions from the stop work', () => {
       readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
     ) as Record<string, unknown>;
     expect(sidecar['runId']).toBe('run-abc');
+  });
+
+  it('stamps the fence’s binding fields — null hash when no cache was seen', () => {
+    // A first clean-tree stop saw no cache: null is the stampable value,
+    // and the compose fence fails closed on a cache file appearing since.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    const plan = capture();
+    expect(plan['nothingToReview']).toEqual({ reason: 'clean-tree' });
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['cachePath']).toBe(plan['cachePath']);
+    expect(sidecar['findingsHash']).toBeNull();
+  });
+
+  it('stamps the cache a cached stop saw — the ledger’s content hash', () => {
+    // The compose grant re-hashes the cache the plan names and refuses on
+    // any departure, so a ledger edited between capture and compose fails
+    // closed like a foreign stamp.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['cachePath']).toBe(second['cachePath']);
+    expect(sidecar['findingsHash']).toBe(
+      createHash('sha256').update(readFileSync(cachePath)).digest('hex'),
+    );
+  });
+
+  it('binds the ledger the stop DECIDED from — a file-form --cache outside the canonical dir', () => {
+    // The stop decision reads the `--cache`-resolved ledger; the stamp and
+    // the plan's published `cachePath` must name that same file. Stamping
+    // the canonical `.qwen/review-cache/…` path while the decision
+    // consulted a caller-named file had the fence verify a baseline the
+    // stop never saw — an ENOENT null hash over a nonexistent canonical
+    // file, an empty grant baseline, and an exit 0 over the open Critical
+    // the stop had just consumed.
+    seedDirtyTree();
+    const canonical = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    // Outside the repo entirely, so the hand-named copy is not a new
+    // untracked file that would itself defeat the unchanged stop.
+    const outside = join(repo, '..', `hand-named-ledger-${Date.now()}.json`);
+    writeFileSync(outside, readFileSync(canonical));
+    rmSync(canonical);
+    recordOpenCritical(outside);
+    const second = capture({ cache: outside, model: 'model-a' });
+    expect(second['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
+    // ONE resolved value for every consumer: plan, sidecar, and hash.
+    expect(second['cachePath']).toBe(outside);
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['cachePath']).toBe(outside);
+    expect(sidecar['findingsHash']).toBe(
+      createHash('sha256').update(readFileSync(outside)).digest('hex'),
+    );
+  });
+
+  it('hashes the DECISION-time ledger bytes, not a second read at stamp time', async () => {
+    // A ledger edit landing in the decision→stamp window (a concurrent
+    // round's Step-8 rewrite of the shared file) must not be baked into
+    // the stamp: the stamp and the decision are projections of ONE read.
+    // The spy makes every cache read AFTER the first return bytes with the
+    // blocker dropped — with the fix the stamp still hashes the
+    // decision-time bytes; without it the stamp followed the second read.
+    const { readFileSync: realRead } =
+      await vi.importActual<typeof import('node:fs')>('node:fs');
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    const original = realRead(cachePath) as Buffer;
+    const expected = createHash('sha256').update(original).digest('hex');
+    const mutatedCache = JSON.parse(original.toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+    mutatedCache['findings'] = [];
+    const mutated = Buffer.from(JSON.stringify(mutatedCache));
+    let cacheReads = 0;
+    vi.mocked(readFileSync).mockImplementation(((
+      path: unknown,
+      opts: unknown,
+    ) => {
+      if (path === cachePath) {
+        cacheReads++;
+        if (cacheReads > 1) {
+          return typeof opts === 'string' ? mutated.toString('utf8') : mutated;
+        }
+      }
+      return realRead(
+        path as Parameters<typeof realRead>[0],
+        opts as Parameters<typeof realRead>[1],
+      );
+    }) as typeof readFileSync);
+    try {
+      const second = capture({ cache: cachePath, model: 'model-a' });
+      expect(second['nothingToReview']).toEqual({
+        reason: 'unchanged-since-last-round',
+      });
+    } finally {
+      vi.mocked(readFileSync).mockRestore();
+    }
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['findingsHash']).toBe(expected);
+  });
+
+  it('stamps the scope-emptied split into the sidecar beside the hash', () => {
+    // The `superseded` deduction reads membership off `supersededPaths`,
+    // and the plan copy is model-editable after this write — only the
+    // capture-stamped copy certifies the split, and the compose fence
+    // refuses a plan whose split departs from it.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    recordOpenCritical(cachePath);
+    git('checkout', '--', '.');
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan['nothingToReview']).toEqual({ reason: 'scope-emptied' });
+    const scope = (
+      plan['incremental'] as { scope: { supersededPaths?: string[] } }
+    ).scope;
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['supersededPaths']).toEqual(scope.supersededPaths);
+    expect((sidecar['supersededPaths'] as string[]).length).toBeGreaterThan(0);
+  });
+
+  it('unlinks a stale stop sidecar when a later capture proves the tree moved', () => {
+    // An earlier round's sidecar at this stable name stays fence-valid
+    // (same reason, same cache, same hash) after the tree moves on — a
+    // hand-written stop plan could ride it. A capture that decides NO stop
+    // removes it: absent is the truthful state.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    const stopped = capture();
+    expect(stopped['nothingToReview']).toEqual({ reason: 'clean-tree' });
+    expect(
+      existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
+    ).toBe(true);
+    // The tree moves; the next capture decides a real round.
+    writeFileSync(join(repo, CHANGED), 'export const moved = 1;\n');
+    const moved = capture();
+    expect(moved['nothingToReview']).toBeUndefined();
+    expect(
+      existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
+    ).toBe(false);
   });
 });
 
@@ -1874,5 +2052,56 @@ describe('capture-local — round-15 findings: the candidate under visibility bi
     expect(readFileSync(join(repo, next.diffPath), 'utf8')).toContain(
       'hidden edit',
     );
+  });
+});
+
+describe('capture-local — a vanished subtree probes its missing chain once', () => {
+  it('shares ancestor probes across vanished siblings, not one walk per path', () => {
+    // A bulk deletion committed between rounds drops the whole subtree from
+    // both the plan and the cache: every vanished path misses the round's
+    // hashes and proves absence through the SAME missing ancestor chain.
+    // Without the per-enumeration memo, every path re-walks the chain — one
+    // statSync per missing ancestor per path, depth times siblings (R2-1).
+    const siblingCount = 5;
+    const chain = ['vendor', 'a', 'b', 'c'];
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/keep.ts', 'export const k = 0;\n');
+    for (let i = 0; i < siblingCount; i++) {
+      write(
+        join('vendor', 'a', 'b', 'c', `f${i}.ts`),
+        `export const f = ${i};\n`,
+      );
+    }
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    // Dirty every tracked file so round 1 captures them all.
+    write('src/keep.ts', 'export const k = 1;\n');
+    for (let i = 0; i < siblingCount; i++) {
+      write(
+        join('vendor', 'a', 'b', 'c', `f${i}.ts`),
+        `export const f = ${i}; // edited\n`,
+      );
+    }
+    const cachePath = promoteCandidate(capture(), 'model-a');
+
+    // The bulk deletion, COMMITTED: HEAD moves, round 2 degrades to the full
+    // capture — and still asks which cached paths vanished from the tree.
+    rmSync(join(repo, 'vendor'), { recursive: true, force: true });
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'drop the vendor subtree');
+
+    vi.mocked(statSync).mockClear();
+    capture({ cache: cachePath, model: 'model-a' });
+    const chainProbes = vi
+      .mocked(statSync)
+      .mock.calls.filter(([p]) => String(p).startsWith(join(repo, 'vendor')));
+    // The walk was measured — at least one full chain under the deleted
+    // subtree (a broken filter would answer 0 and fail here, not pass
+    // vacuously below).
+    expect(chainProbes.length).toBeGreaterThanOrEqual(chain.length);
+    // Shared, not multiplied: one probe per missing ancestor, never depth
+    // per vanished path. Without the memo this is siblingCount ×
+    // chain.length (20); with it, exactly chain.length (4).
+    expect(chainProbes.length).toBeLessThanOrEqual(chain.length + siblingCount);
   });
 });

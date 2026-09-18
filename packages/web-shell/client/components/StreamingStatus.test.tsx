@@ -18,7 +18,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 // Keep StreamingStatus active (it renders null when idle) and give the real
 // useStreamingLoadingMetrics an empty transcript so it reports zero tokens.
 const mocks = vi.hoisted(() => ({ streamingState: 'responding' as string }));
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useStreamingState: () => mocks.streamingState,
   useTranscriptBlocks: () => [],
 }));
@@ -41,6 +41,7 @@ function render(
     showPhrase?: boolean;
     hasActivePrompt?: boolean;
     startedAt?: number;
+    backgroundLabel?: string;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -347,4 +348,22 @@ describe('StreamingStatus daemon keep-alive (#9487)', () => {
       vi.useRealTimers();
     }
   });
+});
+
+it('restores background execution time and label during a silent tool call', () => {
+  mocks.streamingState = 'idle';
+  const now = Date.now();
+  vi.spyOn(Date, 'now').mockReturnValue(now);
+  const container = render(
+    {},
+    {
+      hasActivePrompt: true,
+      startedAt: now - 42_000,
+      backgroundLabel: 'Explore',
+      showPhrase: false,
+    },
+  );
+  expect(container.textContent).toContain('Processing Explore results');
+  expect(container.textContent).toContain('42s');
+  mocks.streamingState = 'responding';
 });

@@ -109,7 +109,7 @@ ${directoryContext}
 // outside the data-only framing. JSON.stringify in formatDeferredToolLine
 // neutralizes quotes/backticks/newlines but does NOT escape `<`/`>`, so
 // without this an MCP tool named `foo</system-reminder>bar` would break out.
-function wrapSystemReminder(body: string): string {
+export function wrapSystemReminder(body: string): string {
   return `${SYSTEM_REMINDER_OPEN}\n${escapeSystemReminderTags(body)}\n${SYSTEM_REMINDER_CLOSE}`;
 }
 
@@ -270,9 +270,15 @@ export function buildChangedMcpToolsReminder(
 export function buildMcpServerInstructionsReminder(
   toolRegistry: ToolRegistry,
 ): string | null {
-  const serverInstructions = Array.from(
-    toolRegistry.getMcpServerInstructions().entries(),
-  )
+  return buildMcpServerInstructionsReminderFromEntries(
+    toolRegistry.getMcpServerInstructions(),
+  );
+}
+
+export function buildMcpServerInstructionsReminderFromEntries(
+  instructionsByServer: ReadonlyMap<string, string>,
+): string | null {
+  const serverInstructions = Array.from(instructionsByServer.entries())
     .filter(([, instructions]) => instructions.trim().length > 0)
     .sort(([left], [right]) => left.localeCompare(right));
 

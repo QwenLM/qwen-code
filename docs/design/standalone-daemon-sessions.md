@@ -1,5 +1,15 @@
 # Standalone Daemon Sessions
 
+> **Conversations ownership cutover (2026-09-06):**
+> [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
+> for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) is implemented
+> by the mandatory writer fences in [#10924](https://github.com/QwenLM/qwen-code/pull/10924)
+> and the global-owner cutover in [#11207](https://github.com/QwenLM/qwen-code/pull/11207).
+> Updated daemons may host different sessions concurrently; the same session
+> remains fenced by its writer lease. A live legacy owner retains the
+> transitional `conversation_runtime_in_use` response. Other isolation,
+> persistence, and lifecycle requirements remain in force.
+
 ## Status
 
 This document is the versioned architecture companion to
@@ -52,8 +62,8 @@ product surface while preserving Live-specific behavior.
   WebShell.
 - Reuse the Conversations runtime, ACP bridge, transcript catalog, admission
   limits, and permission pipeline.
-- Allow only one daemon process at a time to own the user-level Conversations
-  runtime.
+- Allow updated daemons to share the user-level Conversations runtime while
+  each loaded session retains one cross-process writer.
 - Fail closed when an internal runtime or managed directory cannot be validated;
   never fall back to the primary workspace.
 
@@ -119,11 +129,26 @@ The entry-point behavior is fixed:
 | Current-session **New Chat**                     | Inherit explicit context |
 | Live Voice                                       | `live`                   |
 
-Standalone sessions appear in a top-level **Recents** group separate from Live
-and project groups. Their chat surface hides workspace selection, Git status,
-branch and worktree controls, project files, project settings, pin/group
-controls, and attachments/uploads. Normal model, approval, tool, permission,
-transcript, and supported session metadata controls remain available.
+> **Amended 2026-09-02.** The WebShell sidebar's top-level **New Chat** is
+> project navigation rather than a global entry point, so it inherits the
+> current explicit context: a workspace chat stays in its workspace and a cold
+> draft lands on the primary workspace. Standalone creation is an option of the
+> composer's workspace picker ("No workspace"), offered while the
+> daemon advertises the capability, no workspace is locked and no projectless
+> session is attached; the picker stays enabled for projectless drafts so the
+> target can be changed before the first prompt. The workspace navigation tree
+> also stays rendered inside a standalone chat — the hiding rule below applies
+> to the chat surface and to project-only controls, and dropping the tree left
+> a standalone chat with no way back to a workspace.
+
+Standalone sessions appear under **No workspace sessions** inside the Projects
+tree, with archived entries in the shared Archived section. Their chat surface
+hides workspace selection, Git status, branch and worktree controls, project
+files, and pin/group controls. Project navigation and management stay available
+against the registered primary workspace. Attachments are available only when
+the standalone session advertises `session_attachments`. Normal model,
+approval, tool, permission, transcript, and supported session metadata controls
+remain available.
 Approval-mode changes are session-local: the generic `persist: true` form is
 rejected because it would write the shared Conversations root as a workspace
 setting and affect unrelated standalone and Live sessions. User-global settings
@@ -168,7 +193,8 @@ reclassified.
 
 `create_sub_session` invoked by a standalone session explicitly persists
 `sourceType: "standalone"` together with `parentSessionId`. Children remain
-loadable by identity but are excluded from top-level Recents. Parent and child
+loadable by identity but are excluded from the No workspace sessions
+group. Parent and child
 archive or deletion operations do not cascade; each transcript and private
 directory has an independent lifecycle.
 
@@ -234,29 +260,24 @@ as a second runtime.
 
 ### Cross-daemon ownership
 
-The Conversations root is user-global, while multiple `qwen serve` processes
-can run concurrently. In-process one-flight and per-session locks are therefore
-insufficient.
+The Conversations root is user-global, while multiple updated `qwen serve`
+processes can host unrelated sessions concurrently. Every Conversations writer
+must acquire the cross-process session writer lease for its loaded lifetime.
+Standalone lifecycle and maintenance mutations acquire the same lease.
 
-- Before publishing or using the runtime, acquire a secure process-owner record
-  using the atomic-write, nonce, PID-liveness, owner/mode, and fail-closed
-  patterns already used by Live discovery.
-- Store the record in a stable user runtime location independent of a custom
-  project runtime base. Serialize replacement with `proper-lockfile`.
-- Reclaim only a dead owner, wait a short drain grace before starting a
-  replacement ACP child, and treat PID reuse as active and fail-closed.
-- Release ownership only after routes, sessions, bridge, and child teardown have
-  drained, and only if the record nonce still matches.
-- An active foreign owner returns `503 conversation_runtime_in_use`. Malformed
-  or unsafe ownership state returns
-  `503 conversation_runtime_ownership_compromised`.
-- Capability advertisement describes support rather than current owner
-  availability. An ownership error never permits fallback to the primary
-  runtime.
+Updated daemons do not publish or retain a global runtime owner. Before first
+runtime publication, they inspect the legacy owner under its checked directory
+lock. A live legacy owner returns `503 conversation_runtime_in_use`; an exactly
+revalidated stale record is retired with durability and drain grace. Unsafe
+legacy state returns `503 conversation_runtime_ownership_compromised`.
+The legacy record has only a PID and nonce, so its liveness check cannot prove
+foreign-host or foreign-namespace death. All old writers must be drained before
+cutover; the one-shot check does not detect an older daemon started later.
 
-Acquisition also respects an already-running legacy Live discovery owner. A
-pre-feature daemon started after a new standalone owner cannot be made to honor
-the new record, so concurrent mixed-version access is explicitly unsupported.
+Live discovery retains its independent exact-publisher admission requirement.
+A daemon refused Live activation may still serve unrelated standalone sessions.
+Capability advertisement describes support rather than current availability.
+No ownership error permits fallback to the primary runtime.
 
 ### Managed working directories
 
@@ -848,8 +869,8 @@ unarchive, delete, and rename mutations all use this coordinator. Closing
 active ownership means closing new prompt admission, waiting for the active
 prompt to settle or cancel, closing the session in the shared Conversations ACP
 child, and removing it from the live owner index. Transcript mutation also
-acquires the existing writer lease. Cross-daemon Conversations ownership is the
-outer boundary; ambiguous ownership never permits fallback.
+acquires the existing cross-process writer lease. That per-session lease is
+the cross-daemon boundary; ambiguous ownership never permits fallback.
 
 ### Archive, rename, and export
 
@@ -1017,7 +1038,7 @@ unreadable transcript state proves neither outcome and fails closed.
 | Create cleanup outcome is unknown                          | `500 standalone_creation_outcome_unknown` with UUID |
 | Conversations root identity or trust fails                 | `503 conversation_root_compromised`                 |
 | Runtime owner record is unsafe                             | `503 conversation_runtime_ownership_compromised`    |
-| Another daemon owns the runtime                            | `503 conversation_runtime_in_use`                   |
+| A live legacy runtime-owner record exists                  | `503 conversation_runtime_in_use` during migration  |
 | Conversations runtime cannot be initialized                | `503 conversation_runtime_unavailable`              |
 | Transcript was deleted but final file cleanup failed       | `200` with `fileCleanupPending`                     |
 
@@ -1213,32 +1234,59 @@ Estimated size: 300-500 production lines and 450-800 test lines.
 Exit criterion: consumers use the complete lifecycle without constructing
 routes or supplying internal cwd.
 
-### PR5: Explicit WebUI context
+### PR5: Explicit WebShell session context
 
-Suggested title: `feat(webui): Add explicit daemon session contexts`
+Suggested title: `feat(web-shell): Add explicit daemon session contexts`
 
-Dependency: PR4. [PR #8882](https://github.com/QwenLM/qwen-code/pull/8882) is
-merged; re-audit its final API and extend its transaction rather than
-duplicating it.
+Dependency: PR4. PR5 targets the current `main` ownership boundary: WebShell
+continues to consume the daemon React provider from `@qwen-code/webui`, so the
+provider changes land there and WebShell-facing types remain exported through
+the existing `daemon-react-sdk` entry. The later WebShell cutover can carry the
+same files by rename; it is not a prerequisite.
 
-- Add `standalone | workspace { cwd } | live` to connection and transition
-  state.
-- Classify from persisted source plus validated ownership, never cwd/runtime
-  kind alone.
-- Atomically commit or roll back client, transcript, internal cwd, product
-  context, warnings, and deferred intent.
-- Accept legacy `workspaceCwd` only at the workspace compatibility boundary,
-  normalize it immediately, and reject conflicts. It never selects standalone.
-- Add directory-recreated/missing/compromised and outcome-unknown notice state.
+- Add `standalone | workspace { cwd } | live` to provider props, connection
+  state, and transition state. Use a distinct `sessionContext` name because
+  `connection.context` already stores model context-window status.
+- Classify from an explicit requested context plus the authoritative restore
+  path. Standalone uses the dedicated capability-gated SDK methods. Workspace
+  uses its exact ordinary runtime cwd. Live resolves exactly one trusted
+  capability-advertised Live runtime and then relies on the daemon's persisted
+  source and ownership validation. Source strings or cwd alone never select a
+  product context.
+- Follow the loading-skeleton switching model restored by
+  [PR #9129](https://github.com/QwenLM/qwen-code/pull/9129): publish the target
+  context, clear the old transcript, and keep the failed target visible with an
+  explicit error. Do not restore the transaction or roll back to the previous
+  conversation. A generation guard prevents a superseded completion from
+  publishing its client, transcript, warnings, or context.
+- Accept legacy `workspaceCwd` only at one compatibility boundary, normalize it
+  immediately to `{ kind: 'workspace', cwd }`, and reject conflicts with an
+  explicit context. It never selects standalone or Live. Existing callers that
+  provide neither field retain the current primary-workspace behavior.
+- Keep daemon-internal routing cwd private. `connection.workspaceCwd` remains a
+  product workspace only and is absent for standalone and Live sessions.
+  Standalone working-directory state and outcome-unknown recovery remain in
+  target-scoped standalone connection state.
+- Skip workspace providers, Git, preheat, and workspace event invalidation for
+  standalone and Live contexts. Session-scoped commands, model context, Goal,
+  transcript, prompt, and permission behavior remain shared.
+- Standalone creation awaits the SDK operation directly so the SDK can complete
+  its single exact recovery lookup. It is never wrapped in the provider's
+  shorter generic action timeout and is never retried automatically.
 
-Verification covers all #8882 failure and supersession cases plus cross-context
-switching, capability absence, legacy source, outcome recovery, warning
-rollback, and no-primary-fallback.
+Verification covers normalization conflicts, exact workspace/standalone/Live
+dispatch, cross-context switching, capability absence, ambiguous Live runtime,
+legacy callers, reconnect and reload, outcome recovery, target-scoped directory
+warnings, supersession, and no-primary-fallback.
 
-Estimated size: 350-650 production lines and 650-1,100 test lines.
+Audited implementation footprint: approximately 910 added production lines and
+1,250 added test lines. Most production churn is the explicit routing,
+transition, reconnect, and target-scoped error handling inside the existing
+provider rather than new abstraction surface.
 
-Exit criterion: WebUI represents and switches all contexts explicitly while
-existing visible WebShell behavior remains unchanged.
+Exit criterion: the daemon React provider represents and switches all contexts
+explicitly without changing visible WebShell entry points. PR6 owns global New
+Chat, Recents, lifecycle controls, deep links, and project-control visibility.
 
 ### PR6: WebShell product UI
 
@@ -1251,14 +1299,16 @@ Suggested title: `feat(web-shell): Add standalone chats`
   failure preserves standalone intent and displays the error.
 - Store explicit pending context for deferred creation; undefined cwd is never
   standalone semantics.
-- Add top-level Recents with rename, export, archive, unarchive, and delete.
-- Hide project-only selectors, browsers, controls, settings, and uploads.
+- Add No workspace sessions under Projects with rename, export, archive,
+  unarchive, and delete.
+- Hide session-bound project selectors, browsers, and controls; keep registered
+  project management available and capability-gate standalone attachments.
 - Resolve deep links only after standalone/Live/workspace catalogs are ready and
   use exact lookup; never guess primary.
 - Surface directory recovery/compromise, outcome-unknown, and deferred-cleanup
   state.
-- Retain second delete confirmation and remove the session from Recents once the
-  transcript is deleted, even if cleanup is pending.
+- Retain second delete confirmation and remove the session from No workspace
+  sessions once the transcript is deleted, even if cleanup is pending.
 
 Verification covers every entry point, old/capable daemons, capable failure,
 deferred creation, deep links and restart, context switching, directory states,
@@ -1268,7 +1318,7 @@ coexistence, and platform differences.
 Estimated size: 450-800 production lines and 800-1,400 test lines.
 
 Exit criterion: the end-to-end product matches this contract and keeps
-project-only controls and uploads out of standalone chats.
+session-bound project controls out of standalone chats.
 
 ### Dependencies and merge order
 
@@ -1278,15 +1328,15 @@ flowchart LR
     PR1 --> PR2["PR2 standalone core"]
     PR2 --> PR3["PR3 complete daemon API"]
     PR3 --> PR4["PR4 SDK"]
-    PR4 --> PR5["PR5 WebUI context"]
-    T["PR #8882 transactional switching"] --> PR5
+    PR4 --> PR5["PR5 WebShell session context"]
+    S["PR #9129 loading-skeleton switching"] --> PR5
     PR5 --> PR6["PR6 WebShell"]
 ```
 
-PR0 through PR6 are the required feature sequence. PR5 builds on the final API
-merged by PR #8882. PR #8874 (workspace uploads) and PR #8817 (fork/move
-foundations) are follow-up dependencies rather than MVP blockers. No capability
-is advertised before PR3.
+PR0 through PR6 are the required feature sequence. PR5 builds on the
+loading-skeleton switching model restored by PR #9129. PR #8874 (workspace
+uploads) and PR #8817 (fork/move foundations) are follow-up dependencies rather
+than MVP blockers. No capability is advertised before PR3.
 
 Expected total implementation size is approximately 3,800-6,170 production
 lines plus 7,600-11,800 test lines. The companion document is excluded from
@@ -1300,15 +1350,19 @@ the daemon contract.
 
 - Global/Home New Chat creates standalone on a capable daemon; project,
   locked-project, Goals, and Git New Chat remain workspace-bound;
-  current-session New Chat inherits explicit context.
+  current-session New Chat inherits explicit context. Amended 2026-09-02: the
+  WebShell sidebar's top-level New Chat inherits as well, leaving the host API
+  and missing-session recovery as the remaining global entry points, and
+  standalone creation moved to the composer workspace picker's no-workspace
+  option (draft state only).
 - An old daemon without capability preserves legacy primary behavior, and an old
   client against a new daemon retains generic primary behavior.
 - Capable-daemon errors, owner contention, and compromised roots never silently
   downgrade to primary.
 - Workspace selectors and project controls never display or target the internal
   Conversations runtime.
-- Attachments/uploads and other project-only controls are unavailable in the
-  standalone MVP.
+- Attachments/uploads require the standalone session attachment capability;
+  session-bound project controls remain unavailable.
 
 ### Runtime and source
 
@@ -1351,7 +1405,7 @@ the daemon contract.
 - Explicit standalone, compatible legacy, Live, unrelated source, top-level, and
   child classification are covered.
 - Standalone children persist source, remain independently loadable, and stay
-  out of top-level Recents.
+  out of the No workspace sessions group.
 - Standalone cannot load or create durable cron tasks from the Conversations
   root.
 

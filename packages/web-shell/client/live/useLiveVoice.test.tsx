@@ -27,7 +27,7 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => mocks.workspace,
 }));
 

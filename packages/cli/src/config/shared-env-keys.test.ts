@@ -40,9 +40,36 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     );
   });
 
+  it('excludes QWEN_CODE_WARNINGS_FILE so a project .env cannot redirect temp warnings', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WARNINGS_FILE',
+    );
+  });
+
+  // These select which file becomes the System / SystemDefaults layer. A
+  // project .env pointing them at a repo-shipped file would promote
+  // repository content into the highest-precedence settings layer — above
+  // the operator's own User settings (e.g. rebranding the Web Shell).
+  it('keeps the System settings layer selection operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+    );
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+    );
+  });
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+    );
+  });
+
+  // The name-only lock is a deployment policy: a repo-shipped .env, or a
+  // mid-session edit of one, must not overwrite the operator's exported =1
+  // and silently let the model run workflow scripts again.
+  it('keeps the named-workflows-only lock operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_WORKFLOW_NAME_ONLY',
     );
   });
 
@@ -86,6 +113,20 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('DEV');
   });
 
+  // QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME is the private daemon-to-child
+  // Conversations provenance marker. A project `.env` or settings.env setting
+  // it would mark ordinary workspace children as Conversations-hosted,
+  // forcing the writer lease and the unbound-durable-task skip onto sessions
+  // the contract does not cover.
+  it('excludes the Conversations provenance marker from project env files', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME',
+    );
+    expect(
+      isHardcodedProjectEnvExclusion('qwen_code_private_conversations_runtime'),
+    ).toBe(true);
+  });
+
   // QWEN_SERVE_NEW_FILE_MODE sets the daemon-wide creation mode for
   // agent-written NEW files. A project `.env` flipping it to `system` would
   // silently widen file visibility (0600 -> umask-derived) for every
@@ -95,6 +136,19 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       'QWEN_SERVE_NEW_FILE_MODE',
     );
+  });
+
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT is the daemon-wide attachment
+  // storage location. A project `.env` redirecting it would capture uploads
+  // for every workspace the daemon serves (and serve back tampered bytes on
+  // reads), so only the daemon's launch env or a home `.env` may set it.
+  it('excludes QWEN_SERVE_SESSION_ATTACHMENTS_ROOT so a project .env cannot redirect attachment storage', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
+    );
+    expect(
+      isHardcodedProjectEnvExclusion('qwen_serve_session_attachments_root'),
+    ).toBe(true);
   });
 
   // The non-Node TLS trust-anchor vars reach the same MITM outcome as
@@ -298,6 +352,24 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(
       isHardcodedProjectEnvExclusion('qwen_serve_cdp_tunnel_over_ws'),
     ).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_PROXY_COMMAND')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_proxy_command')).toBe(
+      true,
+    );
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_NET')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_net')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('QWEN_SANDBOX_IMAGE')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('qwen_sandbox_image')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('XDG_CACHE_HOME')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('xdg_cache_home')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TMPDIR')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('tmpdir')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TMP')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('TEMP')).toBe(true);
   });
 
   // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded

@@ -22,6 +22,12 @@ import { isSameFile } from './same-file.js';
 // Lets a test pose as a volume that exposes no inode numbers: statSync
 // reports ino 0 while enabled, everything else delegates to the real thing.
 const inoZeroVolume = vi.hoisted(() => ({ enabled: false }));
+// Lets a test pose as a Windows NTFS volume whose 64-bit file indices are
+// rounded at the JS boundary: while set, every stat reports that (unsafe)
+// inode value, so distinct files can surface with an equal `ino`.
+const roundedInodeVolume = vi.hoisted(() => ({
+  inode: undefined as number | undefined,
+}));
 // Lets a test pose as a case-insensitive volume (FAT/exFAT/SMB): every
 // registered case-variant spelling stats and canonicalises as the file it
 // names. The NATIVE canonicaliser reports the on-disk spelling — that is
@@ -38,6 +44,8 @@ vi.mock('node:fs', async (importOriginal) => {
   const statSync = ((filePath: string) => {
     const stats = actual.statSync(resolveAlias(String(filePath)));
     if (inoZeroVolume.enabled) stats.ino = 0;
+    else if (roundedInodeVolume.inode !== undefined)
+      stats.ino = roundedInodeVolume.inode;
     return stats;
   }) as typeof actual.statSync;
   const realpathSync = Object.assign(
@@ -79,10 +87,19 @@ describe('isSameFile', () => {
     writeFileSync(original, '{}');
     const linked = join(dir, 'linked.json');
     linkSync(original, linked);
-    // Hard-link identity rides dev/ino; on volumes that expose no inode
-    // numbers (ino 0) the comparison degrades to canonical spellings by
-    // design and cannot see through a hard link.
-    if (Number(statSync(original).ino) === 0) {
+    // Hard-link identity rides dev/ino, so the gate below covers two cases
+    // that must not be read as one:
+    //   ino === 0 (FAT/exFAT/SMB) — degrading to canonical spellings is BY
+    //     DESIGN, and 'decides by canonical spelling when inodes are
+    //     unverifiable' below is the test that pins it.
+    //   ino above the safe-integer range (NTFS 64-bit file index) — the
+    //     degradation is a DEFECT, not a design: the id is knowable exactly,
+    //     and is only lost because `tryStat` asks for a number-backed `Stats`.
+    //     The alias guards that consume this answer fail open there.
+    // The second is tracked in #11848; converting `tryStat` to `{ bigint: true }`
+    // narrows this gate to the ino-0 case alone.
+    const inode = statSync(original).ino;
+    if (!Number.isSafeInteger(inode) || inode <= 0) {
       ctx.skip();
       return;
     }
@@ -134,6 +151,44 @@ describe('isSameFile', () => {
       expect(isSameFile(real, other)).toBe(false);
     } finally {
       inoZeroVolume.enabled = false;
+      caseInsensitiveVolume.aliases.clear();
+    }
+  });
+
+  it('refuses inode identity above the safe-integer range', () => {
+    // Windows surfaces 64-bit NTFS file indices rounded at the JS boundary:
+    // distinct indices (say 2^60+1 and 2^60+2) can both surface as 2^60.
+    // Comparing those rounded doubles as identity would equate distinct
+    // files, so an unsafe `ino` must degrade to canonical-spelling
+    // comparison — never a dev/ino match.
+    const left = join(dir, 'unsafe-left.json');
+    const right = join(dir, 'unsafe-right.json');
+    writeFileSync(left, '{}');
+    writeFileSync(right, '{}');
+    roundedInodeVolume.inode = 2 ** 60;
+    try {
+      expect(isSameFile(left, right)).toBe(false);
+      expect(isSameFile(right, left)).toBe(false);
+    } finally {
+      roundedInodeVolume.inode = undefined;
+    }
+  });
+
+  it('still finds one file through an unsafe inode via canonical spelling', () => {
+    // The degradation must not over-refuse: two spellings of ONE file stay
+    // one file when the comparison falls back to the case-folding
+    // canonicaliser (hard-link identity is lost there by design, exactly as
+    // on ino-0 volumes — the affordable direction).
+    const real = join(dir, 'Unsafe.md');
+    writeFileSync(real, '{}');
+    const variant = join(dir, 'unsafe.md');
+    caseInsensitiveVolume.aliases.set(variant, real);
+    roundedInodeVolume.inode = 2 ** 60;
+    try {
+      expect(isSameFile(real, variant)).toBe(true);
+      expect(isSameFile(variant, real)).toBe(true);
+    } finally {
+      roundedInodeVolume.inode = undefined;
       caseInsensitiveVolume.aliases.clear();
     }
   });

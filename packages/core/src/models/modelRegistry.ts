@@ -50,7 +50,7 @@ function validateAuthTypeKey(key: string): AuthType | undefined {
  * Returns `undefined` for an unknown provider id with no mapping, or an explicit
  * mapping whose value is not a known protocol, so the caller skips it (keeping
  * the typo guard for hand-edited settings). Pure: callers decide how loudly to
- * report a skip. Additive — configs without `providerProtocol` behave as before.
+ * report a skip. Released Responses provider declarations remain readable.
  */
 export function resolveProviderProtocol(
   providerId: string,
@@ -64,6 +64,117 @@ export function resolveProviderProtocol(
     return validateAuthTypeKey(explicit);
   }
   return validateAuthTypeKey(providerId);
+}
+
+export function resolveModelProtocol(
+  providerId: string,
+  model: Pick<ModelConfig, 'wireApi'>,
+  providerProtocol?: ProviderProtocolConfig,
+): AuthType | undefined {
+  const protocol = resolveProviderProtocol(providerId, providerProtocol);
+  if (!protocol || model.wireApi === undefined) return protocol;
+  if (model.wireApi !== 'chat-completions' && model.wireApi !== 'responses') {
+    throw new Error(
+      `Invalid wireApi "${model.wireApi}" for provider "${providerId}". Expected "chat-completions" or "responses".`,
+    );
+  }
+  if (
+    protocol !== AuthType.USE_OPENAI &&
+    protocol !== AuthType.USE_OPENAI_RESPONSES
+  ) {
+    throw new Error(
+      `Provider "${providerId}" uses protocol "${protocol}"; wireApi is only supported for OpenAI-compatible models.`,
+    );
+  }
+  return model.wireApi === 'responses'
+    ? AuthType.USE_OPENAI_RESPONSES
+    : AuthType.USE_OPENAI;
+}
+
+/**
+ * {@link resolveModelProtocol} for read paths: returns `undefined` instead of
+ * throwing for invalid provider protocols or `wireApi` values, so one entry
+ * cannot take down a whole listing or an unrelated install. Write and startup paths
+ * keep using the throwing resolver — an invalid value stays a config error
+ * there.
+ */
+export function tryResolveModelProtocol(
+  providerId: string,
+  model: Pick<ModelConfig, 'wireApi'>,
+  providerProtocol?: ProviderProtocolConfig,
+): AuthType | undefined {
+  try {
+    return resolveModelProtocol(providerId, model, providerProtocol);
+  } catch {
+    return undefined;
+  }
+}
+
+export function validateModelProvidersConfig(
+  modelProviders?: ModelProvidersConfig,
+  providerProtocol?: ProviderProtocolConfig,
+): void {
+  for (const providerId of new Set([
+    ...Object.keys(modelProviders ?? {}),
+    ...Object.keys(providerProtocol ?? {}),
+  ])) {
+    resolveProviderProtocol(providerId, providerProtocol);
+    const models = modelProviders?.[providerId];
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      resolveModelProtocol(providerId, model, providerProtocol);
+    }
+  }
+}
+
+/** Resolve raw startup settings, never an explicit switch or saved route. */
+export function resolveModelSelectionAuthType(
+  authType: AuthType,
+  modelId: string | undefined,
+  modelProviders?: ModelProvidersConfig,
+  providerProtocol?: ProviderProtocolConfig,
+  baseUrl?: string | null,
+): AuthType {
+  if (
+    !modelId ||
+    (authType !== AuthType.USE_OPENAI &&
+      authType !== AuthType.USE_OPENAI_RESPONSES)
+  ) {
+    return authType;
+  }
+  const candidates: Array<{ model: ModelConfig; authType: AuthType }> = [];
+  for (const [providerId, models] of Object.entries(modelProviders ?? {})) {
+    if (!Array.isArray(models)) continue;
+    for (const model of models) {
+      const protocol = resolveModelProtocol(
+        providerId,
+        model,
+        providerProtocol,
+      );
+      if (
+        model.id === modelId &&
+        (protocol === authType ||
+          ((model.wireApi !== undefined ||
+            resolveProviderProtocol(providerId, providerProtocol) ===
+              AuthType.USE_OPENAI_RESPONSES) &&
+            (protocol === AuthType.USE_OPENAI ||
+              protocol === AuthType.USE_OPENAI_RESPONSES)))
+      ) {
+        candidates.push({ model, authType: protocol });
+      }
+    }
+  }
+  const preferred = (entries: typeof candidates) =>
+    entries.find((entry) => entry.authType === authType) ?? entries[0];
+  const exact =
+    baseUrl === undefined
+      ? undefined
+      : preferred(
+          candidates.filter(
+            (entry) => (entry.model.baseUrl || null) === (baseUrl || null),
+          ),
+        );
+  return (exact ?? preferred(candidates))?.authType ?? authType;
 }
 
 function shouldUseCanonicalModalities(modelId: string): boolean {
@@ -89,6 +200,9 @@ export class ModelRegistry {
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
 
+  /** Raw providers config this registry was last built from. */
+  private modelProvidersConfig?: ModelProvidersConfig;
+
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
       case AuthType.QWEN_OAUTH:
@@ -104,8 +218,10 @@ export class ModelRegistry {
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
   ) {
+    validateModelProvidersConfig(modelProvidersConfig, providerProtocolConfig);
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
+    this.modelProvidersConfig = modelProvidersConfig;
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -132,7 +248,9 @@ export class ModelRegistry {
       );
 
       if (!protocol) {
-        const knownProtocols = Object.values(AuthType).join(', ');
+        const knownProtocols = Object.values(AuthType)
+          .filter((value) => value !== AuthType.USE_OPENAI_RESPONSES)
+          .join(', ');
         const mapped = Object.hasOwn(this.providerProtocolConfig, providerId)
           ? this.providerProtocolConfig[providerId]
           : undefined;
@@ -149,6 +267,15 @@ export class ModelRegistry {
 
       // qwen-oauth uses hard-coded models and cannot be overridden
       if (protocol === AuthType.QWEN_OAUTH) {
+        if (Array.isArray(models)) {
+          for (const model of models) {
+            resolveModelProtocol(
+              providerId,
+              model,
+              this.providerProtocolConfig,
+            );
+          }
+        }
         continue;
       }
 
@@ -185,27 +312,31 @@ export class ModelRegistry {
     // resolve to the same protocol (e.g. `openai` and a custom `idealab` both
     // routing to the openai protocol). First registration of a composite
     // (id + baseUrl) key wins.
-    const modelMap =
-      this.modelsByAuthType.get(authType) ??
-      new Map<string, ResolvedModelConfig>();
     const providerLabel =
       providerId && providerId !== authType
         ? ` (provider "${providerId}")`
         : '';
 
     for (const config of models) {
+      const modelAuthType = resolveModelProtocol(
+        providerId ?? authType,
+        config,
+        providerId ? this.providerProtocolConfig : undefined,
+      )!;
+      const modelMap =
+        this.modelsByAuthType.get(modelAuthType) ??
+        new Map<string, ResolvedModelConfig>();
       const key = modelRegistryKey(config.id, config.baseUrl);
       if (modelMap.has(key)) {
         debugLogger.warn(
-          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for protocol "${authType}"${providerLabel}. Using the first registered config.`,
+          `Duplicate model id "${config.id}"${config.baseUrl ? ` with baseUrl "${config.baseUrl}"` : ''} for protocol "${modelAuthType}"${providerLabel}. Using the first registered config.`,
         );
         continue;
       }
-      const resolved = this.resolveModelConfig(config, authType);
+      const resolved = this.resolveModelConfig(config, modelAuthType);
       modelMap.set(key, resolved);
+      this.modelsByAuthType.set(modelAuthType, modelMap);
     }
-
-    this.modelsByAuthType.set(authType, modelMap);
   }
 
   /**
@@ -297,7 +428,9 @@ export class ModelRegistry {
     }
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
-    return Array.from(models.values()).find((model) => !model.imageOnly);
+    return Array.from(models.values()).find(
+      (model) => !model.imageOnly && !model.voiceOnly,
+    );
   }
 
   /**
@@ -369,18 +502,21 @@ export class ModelRegistry {
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
   ): void {
-    if (providerProtocolConfig !== undefined) {
-      this.providerProtocolConfig = providerProtocolConfig;
-    }
+    const reloaded = new ModelRegistry(
+      modelProvidersConfig,
+      providerProtocolConfig ?? this.providerProtocolConfig,
+    );
+    this.modelsByAuthType = reloaded.modelsByAuthType;
+    this.providerProtocolConfig = reloaded.providerProtocolConfig;
+    this.modelProvidersConfig = reloaded.modelProvidersConfig;
+  }
 
-    // Clear existing user-configured models (preserve qwen-oauth)
-    for (const authType of this.modelsByAuthType.keys()) {
-      if (authType !== AuthType.QWEN_OAUTH) {
-        this.modelsByAuthType.delete(authType);
-      }
-    }
+  /** The raw providers config this registry was last built from. */
+  getModelProvidersConfig(): ModelProvidersConfig | undefined {
+    return this.modelProvidersConfig;
+  }
 
-    // Re-register user-configured models under their resolved protocol
-    this.registerProvidersConfig(modelProvidersConfig);
+  getProviderProtocolConfig(): ProviderProtocolConfig {
+    return this.providerProtocolConfig;
   }
 }

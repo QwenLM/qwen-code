@@ -17,12 +17,34 @@
 
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 
+function getTextBlockCopyText(
+  block: Extract<
+    DaemonTranscriptBlock,
+    { kind: 'user' | 'assistant' | 'thought' }
+  >,
+): string | null {
+  const parts = [
+    block.text.trim(),
+    ...(block.images ?? []).map((image) => `![image](${image.data})`),
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join('\n\n') : null;
+}
+
+function buildFence(content: string): string {
+  const longestRun = Math.max(
+    0,
+    ...Array.from(content.matchAll(/`+/g), (match) => match[0].length),
+  );
+  return '`'.repeat(Math.max(3, longestRun + 1));
+}
+
 /** Plain-text payload of one block, or null when it carries no copyable text. */
 export function getBlockCopyText(block: DaemonTranscriptBlock): string | null {
   switch (block.kind) {
     case 'user':
     case 'assistant':
     case 'thought':
+      return getTextBlockCopyText(block);
     case 'status':
     case 'error':
     case 'debug':
@@ -89,7 +111,10 @@ export function formatBlocksForCopyAll(
       }
       if (block.kind === 'tool') {
         const label = block.toolKind ?? block.toolName ?? 'tool';
-        parts.push(`**[Tool: ${label}]**\n\n${content}`);
+        const toolParts = getToolContentCopyParts(block, true);
+        parts.push(
+          `**[Tool: ${label}]**\n\n${toolParts.length > 0 ? toolParts.join('\n\n') : content}`,
+        );
       } else if (block.kind === 'status') {
         parts.push(`**Status:** ${content}`);
       } else if (block.kind === 'user_shell') {
@@ -110,7 +135,7 @@ export function formatBlocksForCopyAll(
     ) {
       continue;
     }
-    const content = block.text.trim();
+    const content = getTextBlockCopyText(block);
     if (!content) {
       continue;
     }
@@ -143,7 +168,10 @@ export function findLastAssistantText(
  * Mirrors the shapes `normalizeToolContent` accepts in web-shell and the
  * `---/+++` diff rendering of the pre-PR `formatToolCallForCopy`.
  */
-function getToolContentCopyParts(block: { content?: unknown }): string[] {
+function getToolContentCopyParts(
+  block: { content?: unknown },
+  wrapCodeBlock = false,
+): string[] {
   if (!Array.isArray(block.content)) {
     return [];
   }
@@ -160,7 +188,12 @@ function getToolContentCopyParts(block: { content?: unknown }): string[] {
         typeof body === 'object' &&
         typeof (body as Record<string, unknown>).text === 'string'
       ) {
-        parts.push((body as Record<string, unknown>).text as string);
+        const text = (body as Record<string, unknown>).text as string;
+        parts.push(
+          wrapCodeBlock
+            ? `${buildFence(text)}\n${text}\n${buildFence(text)}`
+            : text,
+        );
       }
       continue;
     }
@@ -176,11 +209,19 @@ function getToolContentCopyParts(block: { content?: unknown }): string[] {
           .split('\n')
           .map((line) => `+${line}`)
           .join('\n');
+        const diff = `--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}`;
         parts.push(
-          `--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}`,
+          wrapCodeBlock
+            ? `${buildFence(diff)}diff\n${diff}\n${buildFence(diff)}`
+            : diff,
         );
       } else {
-        parts.push(`${filePath}:\n${record.newText}`);
+        const text = record.newText;
+        parts.push(
+          wrapCodeBlock
+            ? `${filePath}:\n${buildFence(text)}\n${text}\n${buildFence(text)}`
+            : `${filePath}:\n${text}`,
+        );
       }
     }
   }

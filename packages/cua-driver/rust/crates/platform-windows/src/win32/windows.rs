@@ -113,6 +113,33 @@ pub(crate) fn window_owner_pid(hwnd: u64) -> Option<u32> {
     (thread_id != 0 && pid != 0).then_some(pid)
 }
 
+/// Return the direct native owner of one exact HWND.
+pub(crate) fn window_owner_handle(hwnd: u64) -> Option<u64> {
+    let native = HWND(hwnd as *mut _);
+    if native.0.is_null() || !unsafe { IsWindow(native) }.as_bool() {
+        return None;
+    }
+    unsafe { GetWindow(native, GW_OWNER) }
+        .ok()
+        .filter(|owner| !owner.0.is_null())
+        .map(|owner| owner.0 as usize as u64)
+}
+
+/// Return visible same-process windows whose complete native owner chain
+/// reaches the requested HWND. This is an exact Win32 relationship, not a UIA
+/// or title-based surface inference.
+pub(crate) fn visible_owned_windows(requested: u64, pid: u32) -> Vec<WindowInfo> {
+    list_windows_via_win32(Some(pid))
+        .into_iter()
+        .filter(|window| {
+            window.hwnd != requested
+                && owner_chain_reaches_target(requested, window.hwnd, |hwnd| {
+                    window_owner_handle(hwnd)
+                })
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PostActionForegroundRelation {
     exact_match: bool,
@@ -165,10 +192,7 @@ pub(crate) struct ForegroundTarget {
 /// Snapshot the exact target identity and owner before global input is sent.
 pub(crate) fn capture_foreground_target(target: u64) -> Option<ForegroundTarget> {
     let pid = window_owner_pid(target)?;
-    let owner = unsafe { GetWindow(HWND(target as *mut _), GW_OWNER) }
-        .ok()
-        .filter(|owner| !owner.0.is_null())
-        .map(|owner| owner.0 as usize as u64);
+    let owner = window_owner_handle(target);
     Some(ForegroundTarget {
         hwnd: target,
         pid,

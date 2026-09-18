@@ -34,7 +34,7 @@ import {
   useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { trimDialogLabel } from '../../utils/dialogLabels';
 import styles from './ExtensionsManagerPage.module.css';
@@ -439,6 +439,10 @@ export function ExtensionsManagerPage({
   const workspace = useWorkspace();
   const actions = useWorkspaceActions();
   const signals = useWorkspaceEventSignals();
+  const activationRequiresExplicitRefresh =
+    workspace.capabilities?.features.includes(
+      'extension_activation_explicit_refresh',
+    ) === true;
   const [extensions, setExtensions] = useState<ManagedExtensionEntry[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -452,6 +456,11 @@ export function ExtensionsManagerPage({
   const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
   const [messageOwner, setMessageOwner] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [workspaceTrusted, setWorkspaceTrusted] = useState(true);
+  const [refreshError, setRefreshError] = useState<{
+    name: string;
+    text: string;
+  } | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [uninstallName, setUninstallName] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -471,6 +480,7 @@ export function ExtensionsManagerPage({
   const [submittingInteraction, setSubmittingInteraction] = useState(false);
   const [operationsRecovered, setOperationsRecovered] = useState(false);
   const mutationInFlightRef = useRef(false);
+  const refreshTokenRef = useRef(0);
   const uninstallInFlightNameRef = useRef<string | null>(null);
   const interactionOperationIdRef = useRef<string | null>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
@@ -521,6 +531,11 @@ export function ExtensionsManagerPage({
         : Promise.resolve(null);
       return Promise.all([actions.loadExtensionsStatus(), projection])
         .then(([status, activation]) => {
+          // Keep the last known trust when the projection fails: defaulting
+          // to trusted would re-arm a refresh the runtime must reject.
+          if (activation) {
+            setWorkspaceTrusted(activation.trusted);
+          }
           const activations = new Map(
             (activation?.extensions ?? []).map((entry) => [
               entry.extensionId,
@@ -564,6 +579,9 @@ export function ExtensionsManagerPage({
               ? name
               : preserveSelectedExtensionName(name, nextExtensions),
           );
+          // Resolve the trust this load observed so awaiting callers decide
+          // on the fresh value, not the render-time state snapshot.
+          return activation ? activation.trusted : null;
         })
         .catch((error: unknown) => {
           if (!preserveMessage) {
@@ -602,8 +620,12 @@ export function ExtensionsManagerPage({
               },
           );
         }
+        // `refresh` reconciles the runtime; adopting it would lock the page
+        // behind an action the user never started.
         const activeMutation = operations.find(
-          (operation) => operation.operation !== 'install',
+          (operation) =>
+            operation.operation !== 'install' &&
+            operation.operation !== 'refresh',
         );
         if (activeMutation) {
           mutationInFlightRef.current = true;
@@ -899,6 +921,7 @@ export function ExtensionsManagerPage({
   }, [actions, clearInteraction, load, pendingMutation, showInteraction, t]);
 
   const refreshList = useCallback(() => {
+    setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('info');
     setMessage(null);
@@ -908,6 +931,7 @@ export function ExtensionsManagerPage({
   const checkUpdates = useCallback(
     (name: string) => {
       setCheckingName(name);
+      setRefreshError(null);
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('info');
       setMessage(null);
@@ -953,6 +977,7 @@ export function ExtensionsManagerPage({
     )
       return;
     setInstalling(true);
+    setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('progress');
     setMessage(null);
@@ -1013,6 +1038,7 @@ export function ExtensionsManagerPage({
         uninstallInFlightNameRef.current = name;
       }
       setBusyName(name);
+      setRefreshError(null);
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('progress');
       setMessage(options.startMessage ?? null);
@@ -1086,6 +1112,7 @@ export function ExtensionsManagerPage({
           : activation === 'disabled'
             ? 'disable'
             : 'inherit';
+      setRefreshError(null);
       setBusyName(extension.name);
       setMessageOwner(extension.name);
       setMessageTone('progress');
@@ -1115,13 +1142,34 @@ export function ExtensionsManagerPage({
             completed.error ?? t('extensions.manage.operationFailed'),
           );
         }
-        await load(true);
+        const observedTrust = (await load(true)) ?? workspaceTrusted;
         setMessageTone('success');
         setMessage(
           operation === 'inherit'
             ? t('extensions.manage.inherited', { name: extension.name })
             : mutationSuccessMessage(operation, extension.name, t),
         );
+        // An untrusted runtime rejects this refresh; the reconciler is the
+        // only path that can serve it.
+        if (activationRequiresExplicitRefresh && observedTrust) {
+          // A rejection from a superseded refresh must not evict the banner
+          // of the refresh that is still current.
+          const refreshToken = ++refreshTokenRef.current;
+          void workspace.client
+            .workspaceByCwd(workspace.workspaceCwd)
+            .refreshExtensionRuntime()
+            .catch((error: unknown) => {
+              if (refreshToken !== refreshTokenRef.current) {
+                return;
+              }
+              setRefreshError({
+                name: extension.name,
+                text: t('extensions.manage.refreshFailed', {
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              });
+            });
+        }
       } catch (error) {
         setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
@@ -1130,6 +1178,7 @@ export function ExtensionsManagerPage({
       }
     },
     [
+      activationRequiresExplicitRefresh,
       busyName,
       checkingName,
       load,
@@ -1138,6 +1187,7 @@ export function ExtensionsManagerPage({
       t,
       workspace.client,
       workspace.workspaceCwd,
+      workspaceTrusted,
     ],
   );
 
@@ -1235,6 +1285,19 @@ export function ExtensionsManagerPage({
   ) : (
     standaloneNavigation
   );
+
+  // Hoisted so both views show it beside the activation success it qualifies.
+  const refreshNotice = refreshError ? (
+    <ManagementNotice
+      tone="error"
+      noticeKey={refreshError.text}
+      closeLabel={t('common.close')}
+      onDismiss={() => setRefreshError(null)}
+      className="break-words"
+    >
+      {refreshError.text}
+    </ManagementNotice>
+  ) : null;
 
   if (selectedExtension) {
     const details = selectedExtension.details;
@@ -1356,6 +1419,8 @@ export function ExtensionsManagerPage({
               {message}
             </ManagementNotice>
           ) : null}
+
+          {refreshError?.name === selectedExtension.name ? refreshNotice : null}
 
           {activationUnavailable ? (
             <Alert variant="destructive">
@@ -1673,6 +1738,8 @@ export function ExtensionsManagerPage({
             {(messageOwner === null ? message : null) ?? recoveryError}
           </ManagementNotice>
         ) : null}
+
+        {refreshNotice}
 
         <div className="relative">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />

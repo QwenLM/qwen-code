@@ -4,8 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AuthType } from '../core/contentGenerator.js';
-import type { ModelProvidersConfig } from '../models/types.js';
+import { isDeepStrictEqual } from 'node:util';
+import { getModelsForProviderProtocol } from './provider-config.js';
+import { AuthType } from '../core/contentGenerator.js';
+import { isImageGenerationCapable } from '../models/image-generation-capability.js';
+import {
+  resolveModelProtocol,
+  resolveProviderProtocol,
+  tryResolveModelProtocol,
+  resolveModelSelectionAuthType,
+} from '../models/modelRegistry.js';
+import { ModelsConfig } from '../models/modelsConfig.js';
+import type {
+  ModelProvidersConfig,
+  ProviderProtocolConfig,
+} from '../models/types.js';
 import type {
   ProviderInstallPlan,
   ProviderModelProvidersPatch,
@@ -46,7 +59,21 @@ function isSameModelIdentity(
 function applyModelProvidersPatch(
   existingModelProviders: ModelProvidersConfig,
   patch: ProviderModelProvidersPatch,
+  mapping?: ProviderProtocolConfig,
 ): ModelProvidersConfig {
+  if (
+    patch.authType === AuthType.USE_OPENAI &&
+    resolveProviderProtocol(patch.authType, mapping) ===
+      AuthType.USE_OPENAI_RESPONSES
+  ) {
+    patch = {
+      ...patch,
+      models: patch.models.map((model) => ({
+        ...model,
+        wireApi: model.wireApi ?? 'chat-completions',
+      })),
+    };
+  }
   const existingModels = existingModelProviders[patch.authType] ?? [];
 
   let updatedModels = patch.models;
@@ -56,10 +83,20 @@ function applyModelProvidersPatch(
     const ownsModel = patch.ownsModel;
     const preservedModels = existingModels.filter((model) => {
       if (ownsModel) {
-        return !ownsModel(model);
+        return (
+          !ownsModel(model) ||
+          !patch.models.some(
+            (newModel) =>
+              resolveModelProtocol(patch.authType, newModel) ===
+              tryResolveModelProtocol(patch.authType, model, mapping),
+          )
+        );
       }
-      return !patch.models.some((newModel) =>
-        isSameModelIdentity(newModel, model),
+      return !patch.models.some(
+        (newModel) =>
+          isSameModelIdentity(newModel, model) &&
+          resolveModelProtocol(patch.authType, newModel) ===
+            tryResolveModelProtocol(patch.authType, model, mapping),
       );
     });
 
@@ -139,6 +176,16 @@ export async function applyProviderInstallPlan(
     doRefreshAuth = true,
   } = options;
 
+  const selectedAuthType = settings.getValue('security.auth.selectedType');
+  const mapping = settings.getValue('providerProtocol') as
+    | ProviderProtocolConfig
+    | undefined;
+  const serviceOnly = (plan.modelProviders ?? []).flatMap(
+    (patch) => patch.models,
+  );
+  const preserveSelection =
+    serviceOnly.length > 0 &&
+    serviceOnly.every((model) => model.imageOnly || model.voiceOnly);
   const previousEnvValues = new Map<string, string | undefined>();
   // Snapshot the runtime providers map *before* any setValue/reload so we can
   // restore in-memory state if a callback later in the flow rejects (e.g.
@@ -147,6 +194,164 @@ export async function applyProviderInstallPlan(
   const previousRuntimeProviders: ModelProvidersConfig = {
     ...settings.getModelProviders(),
   };
+  const writeContext = settings.getModelProvidersForWrite?.();
+  const writeMapping = writeContext ? writeContext.providerProtocol : mapping;
+  for (const [providerId, models] of Object.entries(
+    writeContext?.modelProviders ?? {},
+  )) {
+    if (!Array.isArray(models)) continue;
+    if (
+      providerId !== AuthType.USE_OPENAI_RESPONSES &&
+      resolveProviderProtocol(providerId, writeMapping) !==
+        AuthType.USE_OPENAI_RESPONSES
+    )
+      continue;
+    const overwritten = models.filter((existing) =>
+      plan.modelProviders?.some(
+        (patch) =>
+          patch.authType === AuthType.USE_OPENAI &&
+          patch.models.some(
+            (model) =>
+              isSameModelIdentity(existing, model) &&
+              tryResolveModelProtocol(providerId, existing, writeMapping) ===
+                resolveModelProtocol(patch.authType, model),
+          ),
+      ),
+    );
+    if (
+      overwritten.length &&
+      (writeContext?.shadowedProviders.includes(providerId) ||
+        overwritten.some(
+          (model) =>
+            tryResolveModelProtocol(providerId, model, writeMapping) !==
+            tryResolveModelProtocol(providerId, model, mapping),
+        ))
+    ) {
+      throw new ProviderInstallError(
+        'A higher-precedence settings scope overrides this released provider declaration. Reconfigure it in the owning scope without that override.',
+        'modelProviders',
+        plan.authType,
+      );
+    }
+  }
+  for (const patch of plan.modelProviders ?? []) {
+    // Route-aware view: every bucket resolving to the patch's protocol. Only
+    // the purpose-change guard may use it — the legacy-bucket cleanup below
+    // can delete an identity match from a sibling bucket, so a purpose change
+    // there is a real removal.
+    const existingModels = getModelsForProviderProtocol(
+      previousRuntimeProviders,
+      patch.authType,
+      mapping,
+    );
+    // The removal guards must look only at the bucket the patch rewrites
+    // (applyModelProvidersPatch): an owned model in a sibling bucket is never
+    // dropped by this install, so counting it would reject installs that
+    // remove nothing.
+    const ownBucketModels = previousRuntimeProviders[patch.authType] ?? [];
+    const changesRole = existingModels.some((existing) =>
+      patch.models.some(
+        (model) =>
+          (isSameModelIdentity(existing, model) ||
+            (existing.id === model.id &&
+              patch.ownsModel?.(existing) &&
+              (preserveSelection || patch.mergeStrategy !== 'append'))) &&
+          (Boolean(existing.imageOnly) !== Boolean(model.imageOnly) ||
+            Boolean(existing.voiceOnly) !== Boolean(model.voiceOnly) ||
+            (isImageGenerationCapable(existing) &&
+              !isImageGenerationCapable(model))),
+      ),
+    );
+    const removesConversation =
+      preserveSelection &&
+      ownBucketModels.some(
+        (existing) =>
+          !existing.imageOnly &&
+          !existing.voiceOnly &&
+          (patch.ownsModel?.(existing) ??
+            patch.models.some((model) => isSameModelIdentity(existing, model))),
+      );
+    const removesService =
+      !preserveSelection &&
+      patch.mergeStrategy !== 'append' &&
+      ownBucketModels.some(
+        (existing) =>
+          (existing.imageOnly || existing.voiceOnly) &&
+          patch.ownsModel?.(existing) &&
+          !patch.models.some((model) => model.id === existing.id),
+      );
+    if (changesRole || removesConversation || removesService) {
+      throw new ProviderInstallError(
+        removesConversation
+          ? 'This install would remove existing conversation models. Include them in the provider selection, or add the service model with Custom Provider.'
+          : removesService
+            ? 'This install would remove existing service models. Include them in the provider selection, or add the conversation model with Custom Provider.'
+            : 'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
+        'modelPurpose',
+        plan.authType,
+      );
+    }
+  }
+
+  const voiceIds = new Set(
+    [
+      ...Object.values(previousRuntimeProviders).flatMap((models) =>
+        Array.isArray(models) ? models : [],
+      ),
+      ...serviceOnly,
+    ]
+      .filter((model) => model?.voiceOnly)
+      .map((model) => model.id),
+  );
+  const selectedVoice = settings.getValue('voiceModel');
+  if (typeof selectedVoice === 'string' && selectedVoice)
+    voiceIds.add(selectedVoice);
+  const changedVoiceIds = [...voiceIds].filter((id) =>
+    plan.modelProviders?.some((patch) =>
+      patch.models.some((model) => model.id === id),
+    ),
+  );
+  if (changedVoiceIds.length) {
+    let prospective = previousRuntimeProviders;
+    for (const patch of plan.modelProviders ?? []) {
+      prospective = applyModelProvidersPatch(prospective, patch, mapping);
+    }
+    // The registry constructor validates every entry it is handed, so a
+    // hand-edited invalid `wireApi` in a bucket this plan never touches would
+    // refuse the install with a bare Error the daemon cannot map to
+    // `model_purpose_conflict`. Drop only the entries whose protocol does not
+    // resolve: the probe counts a voice id at another endpoint, so buckets
+    // themselves must stay.
+    const configured = new ModelsConfig({
+      modelProvidersConfig: Object.fromEntries(
+        Object.entries(prospective).map(([providerId, models]) => [
+          providerId,
+          Array.isArray(models)
+            ? models.filter(
+                (model) =>
+                  tryResolveModelProtocol(providerId, model, mapping) !==
+                  undefined,
+              )
+            : models,
+        ]),
+      ),
+      providerProtocolConfig: mapping,
+    }).getAllConfiguredModels();
+    if (
+      changedVoiceIds.some(
+        (id) => configured.filter((entry) => entry.id === id).length > 1,
+      )
+    ) {
+      throw new ProviderInstallError(
+        'A voice model with this ID is already configured at another endpoint. Edit that model or use a different model ID.',
+        'modelPurpose',
+        plan.authType,
+      );
+    }
+  }
+
+  const previousModelId = settings.getValue('model.name');
+  const previousBaseUrl = settings.getValue('model.baseUrl');
 
   // Track which step is in flight so a rethrow at the bottom can name it
   // (an EACCES from persist vs a refreshAuth rejection look identical
@@ -203,17 +408,113 @@ export async function applyProviderInstallPlan(
     for (const patch of plan.modelProviders ?? []) {
       updatedModelProviders = applyModelProvidersPatch(
         updatedModelProviders,
-        patch,
+        preserveSelection
+          ? {
+              ...patch,
+              mergeStrategy: 'replace-owned',
+              ownsModel: (existing) =>
+                (patch.ownsModel?.(existing) ?? false) ||
+                patch.models.some((model) =>
+                  isSameModelIdentity(existing, model),
+                ),
+            }
+          : patch,
+        mapping,
       );
       settings.setValue(
         `modelProviders.${patch.authType}`,
         updatedModelProviders[patch.authType] ?? [],
       );
+      if (patch.authType !== AuthType.USE_OPENAI) continue;
+      const ownProviders =
+        settings.getModelProvidersForWrite?.().modelProviders ??
+        settings.getModelProviders();
+      for (const [providerId, models] of Object.entries(ownProviders)) {
+        if (providerId === patch.authType || !Array.isArray(models)) continue;
+        // Both settings adapters treat `modelProviders.<id>` as a bucket
+        // write only when the key has exactly two segments; a dotted bucket
+        // id would be walked as a nested path instead (corrupting settings
+        // and bypassing placeholder preservation). Leave such buckets alone —
+        // if the stale entry still wins, the post-write verification below
+        // fails the install loudly rather than corrupting the file.
+        if (providerId.includes('.')) continue;
+        if (
+          providerId !== AuthType.USE_OPENAI_RESPONSES &&
+          resolveProviderProtocol(providerId, writeMapping) !==
+            AuthType.USE_OPENAI_RESPONSES
+        )
+          continue;
+        const remaining = models.filter(
+          (existing) =>
+            !patch.models.some(
+              (model) =>
+                isSameModelIdentity(existing, model) &&
+                tryResolveModelProtocol(providerId, existing, writeMapping) ===
+                  resolveModelProtocol(patch.authType, model),
+            ),
+        );
+        if (remaining.length !== models.length)
+          settings.setValue(`modelProviders.${providerId}`, remaining);
+      }
+    }
+
+    const effectiveProviders = settings.getModelProviders();
+    for (const patch of plan.modelProviders ?? []) {
+      const effectiveModels = getModelsForProviderProtocol(
+        effectiveProviders,
+        patch.authType,
+        mapping,
+      );
+      const expectedModels = getModelsForProviderProtocol(
+        { [patch.authType]: patch.models },
+        patch.authType,
+      );
+      const ownProviders =
+        settings.getModelProvidersForWrite?.().modelProviders;
+      const installedModels = ownProviders
+        ? getModelsForProviderProtocol(
+            { [patch.authType]: ownProviders[patch.authType] ?? [] },
+            patch.authType,
+            mapping,
+          )
+        : expectedModels;
+      if (
+        expectedModels.some((model) => {
+          const winner = effectiveModels.find(
+            (effective) =>
+              isSameModelIdentity(model, effective) &&
+              resolveModelProtocol(patch.authType, model) ===
+                resolveModelProtocol(patch.authType, effective),
+          );
+          const installed = installedModels.find(
+            (entry) =>
+              isSameModelIdentity(model, entry) &&
+              resolveModelProtocol(patch.authType, model) ===
+                resolveModelProtocol(patch.authType, entry),
+          );
+          return (
+            !winner ||
+            !installed ||
+            !isDeepStrictEqual(
+              JSON.parse(JSON.stringify({ ...installed, wireApi: undefined })),
+              JSON.parse(JSON.stringify({ ...winner, wireApi: undefined })),
+            )
+          );
+        })
+      ) {
+        throw new ProviderInstallError(
+          'A higher-precedence settings scope overrides the installed models. Update the scope that owns this provider.',
+          'modelProviders',
+          plan.authType,
+        );
+      }
     }
 
     // Set auth type
     currentStep = 'authType';
-    settings.setValue('security.auth.selectedType', plan.authType);
+    if (!preserveSelection) {
+      settings.setValue('security.auth.selectedType', plan.authType);
+    }
 
     // Legacy credentials
     currentStep = 'legacyCredentials';
@@ -233,7 +534,13 @@ export async function applyProviderInstallPlan(
     // off a model they chose. If the plan still offers the current model, keep
     // it; a genuine first-time setup still adopts the provider default. (#5819)
     currentStep = 'modelSelection';
-    let effectiveModelSelection = plan.modelSelection;
+    let effectiveModelSelection = preserveSelection
+      ? undefined
+      : plan.modelSelection;
+    // When the install moves the current model onto a different API route, the
+    // live session must still be re-synced below even though the model itself
+    // is kept.
+    let routeResyncSelection: { modelId: string; baseUrl?: string } | undefined;
     if (effectiveModelSelection?.modelId) {
       const currentModelId = settings.getValue('model.name');
       const currentBaseUrl = settings.getValue('model.baseUrl') as
@@ -243,17 +550,58 @@ export async function applyProviderInstallPlan(
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
         (plan.modelProviders ?? []).some((patch) =>
-          patch.models.some((model) =>
-            currentBaseUrl === '' || currentBaseUrl === undefined
-              ? model.id === currentModelId
-              : isSameModelIdentity(
-                  { id: currentModelId, baseUrl: currentBaseUrl },
-                  model,
-                ),
+          patch.models.some(
+            (model) =>
+              resolveModelProtocol(patch.authType, model) === plan.authType &&
+              (currentBaseUrl === '' || currentBaseUrl === undefined
+                ? model.id === currentModelId
+                : isSameModelIdentity(
+                    { id: currentModelId, baseUrl: currentBaseUrl },
+                    model,
+                  )),
           ),
         );
       if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
+        // Resolved lazily and only for OpenAI-family plans (the only ones a
+        // wire switch applies to). The selection resolver walks EVERY bucket
+        // of the pre-install providers map with the throwing per-model
+        // resolver, so a hand-edited invalid `wireApi` sitting in an unrelated
+        // bucket must not abort this install: skip the route-resync probe
+        // instead. The plan's own write path still validates the buckets it
+        // writes with the throwing resolver.
+        let previousAuthType: AuthType | undefined;
+        if (
+          (plan.authType === AuthType.USE_OPENAI ||
+            plan.authType === AuthType.USE_OPENAI_RESPONSES) &&
+          typeof selectedAuthType === 'string'
+        ) {
+          try {
+            previousAuthType = resolveModelSelectionAuthType(
+              selectedAuthType as AuthType,
+              typeof previousModelId === 'string' ? previousModelId : undefined,
+              previousRuntimeProviders,
+              settings.getValue('providerProtocol') as
+                | ProviderProtocolConfig
+                | undefined,
+              typeof previousBaseUrl === 'string' ? previousBaseUrl : undefined,
+            );
+          } catch {
+            previousAuthType = undefined;
+          }
+        }
+        if (
+          previousAuthType !== undefined &&
+          previousAuthType !== plan.authType
+        ) {
+          // Keep the user's model, but re-sync onto the new wire for the SAME
+          // model rather than adopting the plan's default (whose modelId is
+          // always the plan's first model).
+          routeResyncSelection = {
+            modelId: currentModelId,
+            ...(currentBaseUrl ? { baseUrl: currentBaseUrl } : {}),
+          };
+        }
       }
     }
     if (effectiveModelSelection?.modelId) {
@@ -284,16 +632,20 @@ export async function applyProviderInstallPlan(
 
     // Reload runtime config
     currentStep = 'reloadModelProviders';
+    updatedModelProviders = settings.getModelProviders();
     reloadModelProviders?.(updatedModelProviders);
-    if (effectiveModelSelection?.modelId) {
+    const syncSelection = effectiveModelSelection?.modelId
+      ? effectiveModelSelection
+      : routeResyncSelection;
+    if (syncSelection) {
       currentStep = 'syncAuthState';
       syncAuthState?.(
         plan.authType,
-        effectiveModelSelection.modelId,
-        effectiveModelSelection.baseUrl,
+        syncSelection.modelId,
+        syncSelection.baseUrl,
       );
     }
-    if (doRefreshAuth && refreshAuth) {
+    if (!preserveSelection && doRefreshAuth && refreshAuth) {
       currentStep = 'refreshAuth';
       await refreshAuth(plan.authType);
     }

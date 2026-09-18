@@ -387,6 +387,9 @@ export function mapToDisplay(
         callId: trackedCall.request.callId,
         name: displayName,
         description,
+        // Same object reference the scheduler already holds — rendered only
+        // when `ui.showToolCallArgs` is on (see ToolMessage's args row).
+        args: trackedCall.request.args as Record<string, unknown>,
         renderOutputAsMarkdown,
         isMemoryOp:
           projectRoot && trackedCall.status !== 'error'

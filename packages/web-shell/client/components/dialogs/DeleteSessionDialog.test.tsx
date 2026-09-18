@@ -41,7 +41,7 @@ const deleteSessionsMock = vi.fn();
 let scopedSessionsOptions: unknown;
 const initialSessions = sessions.slice();
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
 }));
 
@@ -150,6 +150,21 @@ afterEach(() => {
 });
 
 describe('DeleteSessionDialog selection', () => {
+  it('excludes Qwen Live tasks from permanent deletion', () => {
+    sessions = [
+      {
+        ...initialSessions[0],
+        sourceType: 'qwen-live',
+        displayName: 'Live task',
+      },
+      initialSessions[1],
+    ];
+    mount();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('S1');
+    expect(container!.textContent).not.toContain('Live task');
+  });
+
   it('keeps the keyboard cursor separate from the checked set; Enter only toggles', () => {
     mount();
 

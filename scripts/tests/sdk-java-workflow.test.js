@@ -28,4 +28,38 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(block).toContain(fragment);
     }
   });
+
+  it('serializes latency-sensitive tests on each physical ECS host', () => {
+    const block = job('test');
+    expect(block).toContain(
+      'if: "${{ runner.environment == \'self-hosted\' }}"',
+    );
+    expect(block).toContain(
+      'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+    );
+    expect(block).toContain('flock --wait 1200 9');
+    expect(block).toContain(
+      '::error::sdk-java host lock not acquired within 20 minutes',
+    );
+    expect(block).toContain(
+      'if: "${{ runner.environment == \'github-hosted\' }}"',
+    );
+  });
+
+  it.each(['test', 'daemon-e2e'])(
+    'keeps setup-java Maven files job-local in the %s job',
+    (name) => {
+      const block = job(name);
+      expect(block).toContain(
+        "settings-path: '${{ runner.temp }}/setup-java-m2'",
+      );
+      expect(
+        block.match(
+          /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+        ),
+      ).toHaveLength(name === 'test' ? 4 : 1);
+      expect(block).not.toContain('Drop shared Maven toolchains.xml');
+      expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
+    },
+  );
 });

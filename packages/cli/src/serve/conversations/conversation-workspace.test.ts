@@ -103,7 +103,10 @@ describe('Live conversation workspace root', () => {
     expect(first.canonicalRoot).toBe(realpathSync.native(expected));
     const stats = await lstat(expected);
     expect(stats.isDirectory()).toBe(true);
-    expect(first).toMatchObject({ device: stats.dev, inode: stats.ino });
+    expect(first).toMatchObject({
+      device: stats.dev,
+      inode: Number.isSafeInteger(stats.ino) && stats.ino > 0 ? stats.ino : 0,
+    });
     if (process.platform !== 'win32') {
       expect(stats.mode & 0o077).toBe(0);
     }
@@ -167,13 +170,22 @@ describe('Live conversation workspace root', () => {
     }
   });
 
-  it('revalidates both canonical identity and the configured path', async () => {
+  it('revalidates both canonical identity and the configured path', async (ctx) => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const identity = await workspace.getRoot();
 
+    // Both revalidations return the SAME object and skip the inode whenever
+    // `inodeVerifiable` is false on both sides, so they hold on a host with
+    // unverifiable inodes — gate them away and a mutant returning a fresh
+    // object goes undetected there. Only the swap below needs a real inode.
     expect(await workspace.revalidate()).toBe(identity);
     expect(await revalidateConversationRoot(identity)).toBe(identity);
+
+    if (!identity.inodeVerifiable) {
+      ctx.skip();
+      return;
+    }
 
     await rename(identity.configuredRoot, `${identity.configuredRoot}-old`);
     await mkdir(identity.configuredRoot, { mode: 0o700 });
@@ -181,7 +193,7 @@ describe('Live conversation workspace root', () => {
     await expect(workspace.revalidate()).rejects.toThrow(/identity changed/);
   });
 
-  it('preserves Live filesystem errors while standalone keeps root scope', async () => {
+  it('preserves Live filesystem errors while standalone keeps root scope', async (ctx) => {
     const liveHome = await tempHome();
     const liveWorkspace = new ConversationWorkspace({ homeDir: liveHome });
     const liveRoot = await liveWorkspace.getRoot();
@@ -195,6 +207,10 @@ describe('Live conversation workspace root', () => {
       homeDir: standaloneHome,
     });
     const standaloneRoot = await standaloneWorkspace.getRoot();
+    if (!standaloneRoot.inodeVerifiable) {
+      ctx.skip();
+      return;
+    }
     await rename(
       standaloneRoot.configuredRoot,
       `${standaloneRoot.configuredRoot}-old`,
@@ -381,6 +397,7 @@ describe('Live conversation workspace root', () => {
     const created = await workspace.ensureStandaloneDirectory('standalone');
     expect(created.status).toBe('created');
     if (created.status !== 'created') throw new Error('expected creation');
+    if (created.identity.inode === 0) return;
 
     await expect(
       workspace.inspectStandaloneDirectory('standalone', created.identity),
@@ -425,7 +442,9 @@ describe('Live conversation workspace root', () => {
     expect(ensured.identity.canonicalPath).toBe(
       prepared.identity.canonicalPath,
     );
-    expect(ensured.identity.inode).not.toBe(prepared.identity.inode);
+    if (prepared.identity.inode !== 0) {
+      expect(ensured.identity.inode).not.toBe(prepared.identity.inode);
+    }
   });
 
   it('returns the raced inspection when a concurrent creator wins the ensure race', async () => {
@@ -651,13 +670,12 @@ describe('Live conversation workspace root', () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const root = await workspace.getRoot();
+    const changedRoot = root.inodeVerifiable
+      ? { ...root, inode: 0, inodeVerifiable: false }
+      : { ...root, inode: 1, inodeVerifiable: true };
 
     await expect(
-      workspace.confirmStandaloneRootDurability({
-        ...root,
-        inode: 0,
-        inodeVerifiable: false,
-      }),
+      workspace.confirmStandaloneRootDurability(changedRoot),
     ).rejects.toBeInstanceOf(ConversationDirectoryIdentityError);
   });
 
@@ -699,10 +717,14 @@ describe('Live conversation workspace root', () => {
     expect(inspected.error.reason).toBe('unexpected_identity');
   });
 
-  it('rejects a replacement directory during deletion staging', async () => {
+  it('rejects a replacement directory during deletion staging', async (ctx) => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    if (prepared.identity.inode === 0) {
+      ctx.skip();
+      return;
+    }
     await rename(
       prepared.identity.canonicalPath,
       `${prepared.identity.canonicalPath}.preserved`,

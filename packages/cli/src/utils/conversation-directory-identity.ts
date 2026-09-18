@@ -12,16 +12,35 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 /**
  * True iff `ino` can be used as proof of file identity.
  *
- * FAT/exFAT and some SMB-style filesystems do not expose inode numbers and
- * report `Stats.ino === 0` for every entry, so comparing by `dev:ino` there
- * collapses unrelated directories onto one identity.
+ * FAT/exFAT and some SMB-style filesystems report `Stats.ino === 0`, while
+ * Windows can expose file IDs that exceed JavaScript's safe integer range.
+ * Neither value can be compared as an exact identity proof.
  *
- * This restates core's `hasVerifiableInode()` rather than importing it: this
- * module is reachable from the serve pre-listen fast path, and importing the
- * core package barrel pulls its whole module graph into that bundle closure.
+ * This predicate is the shared verifiability semantics for the
+ * conversation-identity checks that import it (the standalone deletion
+ * journal, the ACP agent, and review/lib/same-file.ts). Two call sites keep
+ * a deliberate local restatement — edit them in lockstep with this
+ * predicate:
+ *
+ * - `syncStandaloneRoot` (serve/conversations/conversation-workspace.ts)
+ *   inlines the predicate and the root-identity composite around the open
+ *   file handle it re-validates before and after `sync`;
+ * - `hasExpectedManagedDirectoryIdentity` (acp-integration/acpAgent.ts)
+ *   inlines the composite because the wire expectation `{ device, inode }`
+ *   carries no `inodeVerifiable` field and must keep deriving verifiability
+ *   from `inode !== 0`.
+ *
+ * Core's canonical predicate (core/src/utils/file-identity.ts) is
+ * deliberately LOOSER (`Number(ino) !== 0`) — do not align the two; see the
+ * same-file.ts import site for why.
  */
-function hasVerifiableInode(ino: number): boolean {
-  return Number(ino) !== 0;
+export function hasVerifiableInode(ino: number): boolean {
+  return Number.isSafeInteger(ino) && ino > 0;
+}
+
+/** The inode value to store: the input when verifiable, else 0. */
+export function normalizedInode(ino: number): number {
+  return hasVerifiableInode(ino) ? ino : 0;
 }
 
 export interface ConversationRootIdentity {
@@ -134,11 +153,11 @@ function hasRootIdentity(
   stats: Stats,
   root: ConversationRootIdentity,
 ): boolean {
-  if (!root.inodeVerifiable) return stats.dev === root.device;
+  const inodeVerifiable = hasVerifiableInode(stats.ino);
   return (
-    hasVerifiableInode(stats.ino) &&
     stats.dev === root.device &&
-    stats.ino === root.inode
+    inodeVerifiable === root.inodeVerifiable &&
+    (!inodeVerifiable || stats.ino === root.inode)
   );
 }
 
@@ -149,12 +168,18 @@ function hasRootIdentity(
  * are available they must match; where the filesystem reports none, there is
  * nothing to compare and reporting a change would be a false positive that
  * blocks the feature outright, so only the device is required.
+ *
+ * Also the anti-swap comparator for ACP managed relocation: acpAgent.ts
+ * imports it directly rather than restating it.
  */
-function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
-  if (!hasVerifiableInode(before.ino) || !hasVerifiableInode(after.ino)) {
-    return before.dev === after.dev;
-  }
-  return before.dev === after.dev && before.ino === after.ino;
+export function isSameDirectoryIdentity(before: Stats, after: Stats): boolean {
+  const beforeVerifiable = hasVerifiableInode(before.ino);
+  const afterVerifiable = hasVerifiableInode(after.ino);
+  return (
+    before.dev === after.dev &&
+    beforeVerifiable === afterVerifiable &&
+    (!beforeVerifiable || before.ino === after.ino)
+  );
 }
 
 function hasExpectedDirectoryIdentity(
@@ -225,7 +250,7 @@ export async function createConversationRootIdentity(
     configuredRoot,
     canonicalRoot,
     device: after.dev,
-    inode: after.ino,
+    inode: normalizedInode(after.ino),
     inodeVerifiable: hasVerifiableInode(after.ino),
   };
 }
@@ -350,7 +375,7 @@ async function inspectConversationNamedDirectoryIdentity(
     name,
     canonicalPath: canonical,
     device: after.dev,
-    inode: after.ino,
+    inode: normalizedInode(after.ino),
   };
   if (expected && !hasExpectedDirectoryIdentity(identity, expected)) {
     throw new ConversationDirectoryIdentityError(

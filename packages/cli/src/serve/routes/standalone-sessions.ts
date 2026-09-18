@@ -6,6 +6,7 @@
 
 import {
   APPROVAL_MODES,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   type ApprovalMode,
   type SessionArchiveState,
@@ -19,6 +20,7 @@ import type {
   StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { omitSkillDetailsFromReplayArrays } from '../skill-details-redaction.js';
+import { redactWorkflowsFromReplayArrays } from '../workflow-session-gate.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { InvalidCursorError } from '../server/session-list.js';
 import {
@@ -33,6 +35,7 @@ export interface RegisterStandaloneSessionRoutesDeps {
   service: StandaloneSessionService;
   mutate: (options?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
+  isWorkspaceTrusted: () => boolean;
 }
 
 function sendInvalidRequest(res: Response, message: string): void {
@@ -107,6 +110,7 @@ function parseRestoreOptions(
   const body = requireExactBody(req, res, [
     'historyPageSize',
     'liveReplayMode',
+    'compactedReplayMode',
     'hideInheritedHistory',
     'approvalMode',
   ]);
@@ -135,6 +139,18 @@ function parseRestoreOptions(
     sendInvalidRequest(res, '`liveReplayMode` must be `full` or `summary`.');
     return undefined;
   }
+  const compactedReplayMode = body['compactedReplayMode'];
+  if (
+    compactedReplayMode !== undefined &&
+    compactedReplayMode !== 'full' &&
+    compactedReplayMode !== 'summary'
+  ) {
+    sendInvalidRequest(
+      res,
+      '`compactedReplayMode` must be `full` or `summary`.',
+    );
+    return undefined;
+  }
   const hideInheritedHistory = body['hideInheritedHistory'];
   if (
     hideInheritedHistory !== undefined &&
@@ -154,6 +170,7 @@ function parseRestoreOptions(
       ? { historyPageSize: historyPageSize as number }
       : {}),
     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+    ...(compactedReplayMode !== undefined ? { compactedReplayMode } : {}),
     ...(hideInheritedHistory !== undefined ? { hideInheritedHistory } : {}),
     ...(approvalMode !== undefined ? { approvalMode } : {}),
   };
@@ -264,6 +281,16 @@ export function registerStandaloneSessionRoutes(
     }
   };
 
+  app.get('/standalone/session-options', (req, res) =>
+    handle('GET /standalone/session-options', req, res, async () => {
+      if (Object.keys(req.query).length > 0) {
+        sendInvalidRequest(res, 'The request query contains unknown fields.');
+        return;
+      }
+      res.status(200).json(await deps.service.getOptions());
+    }),
+  );
+
   app.post('/standalone/sessions', deps.mutate({ strict: true }), (req, res) =>
     handle('POST /standalone/sessions', req, res, async () => {
       const body = requireExactBody(req, res, [
@@ -280,11 +307,11 @@ export function registerStandaloneSessionRoutes(
         body['modelServiceId'] !== undefined &&
         (typeof body['modelServiceId'] !== 'string' ||
           body['modelServiceId'].length === 0 ||
-          body['modelServiceId'].length > 256)
+          body['modelServiceId'].length > MAX_CRON_TASK_ROUTING_ID_LENGTH)
       ) {
         sendInvalidRequest(
           res,
-          '`modelServiceId` must be a non-empty string of at most 256 characters.',
+          `\`modelServiceId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters.`,
         );
         return;
       }
@@ -426,7 +453,14 @@ export function registerStandaloneSessionRoutes(
               await cleanupRestore()?.catch(() => undefined);
               return;
             }
-            res.status(200).json(omitSkillDetailsFromReplayArrays(restored));
+            const shaped = omitSkillDetailsFromReplayArrays(restored);
+            res
+              .status(200)
+              .json(
+                deps.isWorkspaceTrusted()
+                  ? shaped
+                  : redactWorkflowsFromReplayArrays(shaped),
+              );
           },
         ),
     );

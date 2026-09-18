@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { act, renderHook } from '@testing-library/react';
 import {
@@ -147,7 +148,7 @@ describe('useShellCommandProcessor', () => {
       isUserInitiated: true,
     });
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
-    const wrappedCommand = `{ ls -l; }; __code=$?; pwd > "${tmpFile}"; exit $__code`;
+    const wrappedCommand = `{ ls -l;\n}; __code=$?; pwd > "${tmpFile}"; exit $__code`;
     expect(mockShellExecutionService).toHaveBeenCalledWith(
       wrappedCommand,
       '/test/dir',
@@ -157,6 +158,30 @@ describe('useShellCommandProcessor', () => {
       expect.any(Object),
     );
     expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise));
+  });
+
+  it('closes a dangling line continuation before appending the terminator so it is not escaped (R6-8)', async () => {
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'echo hi \\',
+        new AbortController().signal,
+      );
+    });
+
+    const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
+    // The appended `;` must start its own line: a bare `;` right after the
+    // backslash is escaped into a literal `;` argument (bash runs `ls ';'`).
+    const wrappedCommand = `{ echo hi \\\n;\n}; __code=$?; pwd > "${tmpFile}"; exit $__code`;
+    expect(mockShellExecutionService).toHaveBeenCalledWith(
+      wrappedCommand,
+      '/test/dir',
+      expect.any(Function),
+      expect.any(Object),
+      false,
+      expect.any(Object),
+    );
   });
 
   it('should handle successful execution and update history correctly', async () => {
@@ -323,7 +348,7 @@ describe('useShellCommandProcessor', () => {
       });
 
       // Verify it's using the non-pty shell
-      const wrappedCommand = `{ stream; }; __code=$?; pwd > "${path.join(
+      const wrappedCommand = `{ stream;\n}; __code=$?; pwd > "${path.join(
         os.tmpdir(),
         'shell_pwd_abcdef.tmp',
       )}"; exit $__code`;
@@ -567,12 +592,18 @@ describe('useShellCommandProcessor', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
 
     const { result } = renderProcessorHook();
+    const abortController = new AbortController();
+    const addEventListenerSpy = vi.spyOn(
+      abortController.signal,
+      'addEventListener',
+    );
+    const removeEventListenerSpy = vi.spyOn(
+      abortController.signal,
+      'removeEventListener',
+    );
 
     act(() => {
-      result.current.handleShellCommand(
-        'a-command',
-        new AbortController().signal,
-      );
+      result.current.handleShellCommand('a-command', abortController.signal);
     });
     const execPromise = onExecMock.mock.calls[0][0];
 
@@ -587,6 +618,10 @@ describe('useShellCommandProcessor', () => {
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
     // Verify that the temporary file was cleaned up
     expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
+    expect(removeEventListenerSpy).toHaveBeenCalledWith(
+      'abort',
+      addEventListenerSpy.mock.calls[0][1],
+    );
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 

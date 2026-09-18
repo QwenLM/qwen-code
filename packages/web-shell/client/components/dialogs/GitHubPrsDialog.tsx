@@ -12,7 +12,7 @@ import {
   GitPullRequestDraftIcon,
   XIcon,
 } from 'lucide-react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import type {
   DaemonGitHubPullRequest,
   DaemonGitHubPullRequestChecks,

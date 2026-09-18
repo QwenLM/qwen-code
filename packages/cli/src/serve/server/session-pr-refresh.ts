@@ -13,9 +13,11 @@
 // static barrel importer (ACP agent included).
 import { existsSync } from 'node:fs';
 import {
+  fetchGitHubPullRequestIssues,
   fetchGitHubPullRequests,
   readSessionPrs,
   updateSessionPrStates,
+  type SessionPrIssue,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -49,6 +51,46 @@ const FIRST_RUN_DELAY_MS = 60_000;
  * rotating window retries it on later sweeps.
  */
 export const AONE_SWEEP_VIEW_BUDGET_MS = 60_000;
+
+/**
+ * Identity of a PR url as `host/owner/repo` plus number, tolerant of the
+ * spellings the bind path accepts (`www.`, `http:`, a `/files` suffix,
+ * case). Wider than `canonicalSessionPrUrl` on purpose and local to this
+ * sweep's lookup matching: same-PR identity everywhere else (re-binds, the
+ * sidecar's write gate, the session-list merge) keeps the canonical rule.
+ */
+function pullRequestKey(
+  url: string,
+): { repo: string; number: number } | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  // GitHub also serves `/pull/N.diff` and `/pull/N.patch`.
+  const match =
+    /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/.exec(
+      parsed.pathname,
+    );
+  if (!match) return undefined;
+  const host = parsed.hostname.replace(/^www\./, '');
+  return {
+    repo: `${host}/${match[1]}/${match[2]}`.toLowerCase(),
+    number: Number(match[3]),
+  };
+}
+
+function samePullRequest(left: string, right: string): boolean {
+  const a = pullRequestKey(left);
+  const b = pullRequestKey(right);
+  return (
+    a !== undefined &&
+    b !== undefined &&
+    a.repo === b.repo &&
+    a.number === b.number
+  );
+}
 
 /**
  * The slice of {@link SessionArchiveCoordinator} the sweep needs: the
@@ -113,7 +155,7 @@ export function resolveSessionPrRefreshIntervalMs(
 export interface SessionPrRefreshResult {
   /** Sidecars read (sessions with at least one binding). */
   scanned: number;
-  /** Bindings whose state was rewritten (open → merged/closed). */
+  /** Bindings whose state or issue snapshot was rewritten. */
   updated: number;
   /**
    * Aone only: how many unique numbers the view loop actually started this
@@ -127,14 +169,17 @@ export interface SessionPrRefreshResult {
 }
 
 /**
- * Refreshes the persisted `state` snapshot of one workspace's PR bindings.
- * Only merged is terminal (closed PRs can reopen), so workspaces whose
- * bindings are all merged cost no platform call at all. GitHub workspaces
- * pay one slim `gh pr list --state all` per sweep; Aone workspaces pay one
- * `a1 repo mr view` per unique pending number (list output carries no
- * state+URL pair, and closed MRs are not listable — a reopen reappears as
- * opened and self-heals). Rewritten in place (order and createdAt
- * preserved).
+ * Refreshes the persisted `state` snapshot of one workspace's PR bindings,
+ * and on GitHub the `issues` snapshot (the closing references) too. Only
+ * merged is terminal (closed PRs can reopen), so workspaces whose bindings
+ * are all merged — with an issue snapshot in place — cost no platform call
+ * at all. GitHub workspaces pay one slim `gh pr list --state all` per sweep
+ * for states plus one by-number GraphQL lookup for the closing issues
+ * (which can change while the PR is open, and which legacy bindings lack);
+ * Aone workspaces pay one `a1 repo mr view` per unique pending number (list
+ * output carries no state+URL pair, and closed MRs are not listable — a
+ * reopen reappears as opened and self-heals). Rewritten in place (order and
+ * createdAt preserved).
  */
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
@@ -155,6 +200,8 @@ export async function refreshWorkspaceSessionPrStates(
     numbers: number[];
     /** Every stored URL per pending number — the Aone refreshability filter. */
     urls: Map<number, string[]>;
+    /** GitHub only: bindings whose issue snapshot is refreshed this sweep. */
+    issueEntries: Array<{ number: number; url: string; merged: boolean }>;
   }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
@@ -192,7 +239,16 @@ export async function refreshWorkspaceSessionPrStates(
         // keep participating in the sweep.
         (p) => p.state !== 'merged',
       );
-      if (pending.length > 0) {
+      // Closing references change while a PR is open; a merged binding
+      // still needs one lookup when it predates the issue snapshot.
+      const issueEntries = prs
+        .filter((p) => p.state !== 'merged' || p.issues === undefined)
+        .map(({ number, url, state }) => ({
+          number,
+          url,
+          merged: state === 'merged',
+        }));
+      if (pending.length > 0 || issueEntries.length > 0) {
         const urls = new Map<number, string[]>();
         for (const entry of pending) {
           const known = urls.get(entry.number);
@@ -204,6 +260,7 @@ export async function refreshWorkspaceSessionPrStates(
           prPath,
           numbers: pending.map((p) => p.number),
           urls,
+          issueEntries,
         });
       }
     }
@@ -211,13 +268,28 @@ export async function refreshWorkspaceSessionPrStates(
   if (pendingNumbers.length === 0) return { scanned, updated: 0 };
 
   assertGenerationOpen();
-  // The url rides along with the state: the map is keyed by number, but a
+  // The url rides along with the snapshot: the map is keyed by number, but a
   // binding may point at another repository whose same-numbered PR must
-  // never supply this workspace's state.
+  // never supply this workspace's state or issues.
   const numberToFetch = new Map<
     number,
-    { state: SessionPrState; url: string }
+    { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
   >();
+  // Once true, a merged binding lacking a snapshot that no lookup resolved
+  // gets a converging empty one, so it leaves the sweep instead of
+  // re-entering the lookup forever: the lookup succeeded (the repository
+  // does not know the number), it is structurally impossible (no gh, no
+  // git root), or the platform has no closing references at all (Aone).
+  // A transient failure never converges — the PR may well have references.
+  let convergeMerged = false;
+  // The repository the list query resolved, as a `host/owner/repo` key. A
+  // binding outside it (another repository's same-numbered PR) can never
+  // resolve here, so it stays out of the lookup — the GitHub twin of the
+  // Aone refreshability filter. Unknown (no list result) fails open into
+  // the lookup, whose per-alias NOT_FOUND then converges it.
+  let repoKey: string | undefined;
+  const isForeign = (url: string): boolean =>
+    repoKey !== undefined && pullRequestKey(url)?.repo !== repoKey;
   const aoneRepo = await resolveAoneWorkspaceRepo(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -278,28 +350,73 @@ export async function refreshWorkspaceSessionPrStates(
     // this, so a budget-truncated sweep's tail is picked up next sweep
     // instead of falling in the gap between fixed-cap windows.
     aoneConsumed = consumed;
-    if (numberToFetch.size === 0) {
-      return { scanned, updated: 0, aoneConsumed };
-    }
+    // Closing references are a GitHub notion; without this a merged Aone
+    // binding would keep the workspace pending (one origin resolution per
+    // sweep) forever.
+    convergeMerged = true;
   } else {
-    const result = await fetchPullRequests(
-      runtime.workspaceCwd,
-      runtime.env.effectiveEnv,
-      { state: 'all', limit: 500, slim: true },
-    );
-    if (result.kind !== 'ok') return { scanned, updated: 0 };
-    for (const pr of result.pullRequests) {
-      // The sidecar snapshot has no 'draft' variant — a draft is still open.
-      numberToFetch.set(pr.number, {
-        state: pr.state === 'draft' ? 'open' : pr.state,
-        url: pr.url,
-      });
+    if (pendingNumbers.some((target) => target.numbers.length > 0)) {
+      const result = await fetchPullRequests(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+        { state: 'all', limit: 500, slim: true },
+      );
+      if (result.kind === 'ok') {
+        for (const pr of result.pullRequests) {
+          // The sidecar snapshot has no 'draft' variant — a draft is still
+          // open.
+          numberToFetch.set(pr.number, {
+            state: pr.state === 'draft' ? 'open' : pr.state,
+            url: pr.url,
+          });
+        }
+        const sample = result.pullRequests[0]?.url;
+        if (sample !== undefined) repoKey = pullRequestKey(sample)?.repo;
+      }
+    }
+    const issueNumbers = [
+      ...new Set(
+        pendingNumbers.flatMap((target) =>
+          target.issueEntries
+            .filter((entry) => !isForeign(entry.url))
+            .map((entry) => entry.number),
+        ),
+      ),
+    ];
+    if (issueNumbers.length > 0) {
+      assertGenerationOpen();
+      const issuesResult = await fetchGitHubPullRequestIssues(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+        issueNumbers,
+      );
+      if (issuesResult.kind === 'ok') {
+        convergeMerged = true;
+        for (const [number, { url, issues }] of issuesResult.pullRequests) {
+          // Both queries resolve the same repository, so a number present
+          // in both names one PR; the state (if any) stays from the list
+          // query.
+          numberToFetch.set(number, {
+            ...(numberToFetch.get(number) ?? { url }),
+            issues,
+          });
+        }
+      } else if (
+        issuesResult.kind === 'cli_unavailable' ||
+        issuesResult.kind === 'not_a_repo' ||
+        issuesResult.kind === 'repo_unresolved'
+      ) {
+        convergeMerged = true;
+      }
     }
   }
 
   let updated = 0;
   for (const target of pendingNumbers) {
-    const states = new Map<number, { state: SessionPrState; url: string }>();
+    const states = new Map<
+      number,
+      { state?: SessionPrState; url: string; issues?: SessionPrIssue[] }
+    >();
     for (const number of target.numbers) {
       const fetched = numberToFetch.get(number);
       // Only a number ABSENT from the fetched set is skipped (out of gh's
@@ -307,6 +424,21 @@ export async function refreshWorkspaceSessionPrStates(
       // is authoritative — including an 'open' that supersedes a stale
       // 'closed' after a reopen.
       if (fetched !== undefined) states.set(number, fetched);
+    }
+    for (const entry of target.issueEntries) {
+      const fetched = numberToFetch.get(entry.number);
+      if (fetched !== undefined && samePullRequest(fetched.url, entry.url)) {
+        // Written under the entry's own url: the sidecar's canonical gate
+        // would drop a `/files`-spelled binding's state or snapshot
+        // otherwise — the state too, so a lookup outage never leaves such
+        // a binding's badge stale.
+        states.set(entry.number, { ...fetched, url: entry.url });
+      } else if (entry.merged && (convergeMerged || isForeign(entry.url))) {
+        // No lookup will ever snapshot this merged binding; an empty
+        // snapshot (renders as none) retires it from the sweep. Open ones
+        // stay pending for their state anyway.
+        states.set(entry.number, { url: entry.url, issues: [] });
+      }
     }
     if (states.size === 0) continue;
     const commit = (): Promise<number> =>

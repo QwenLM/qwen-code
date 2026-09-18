@@ -1,0 +1,62 @@
+name: 'Assign PR owner'
+
+# Assign one area owner to a PR once it touches that area's paths. Routing is
+# a pure function of the changed file paths and .github/issue-owners.json —
+# no model runs here and the script never reads PR title, body, or comments.
+# Runs on pull_request_target so fork PRs are covered too; the checkout stays
+# on the trusted base ref and the script only reads the PR's file list from
+# the API, so PR content never executes here.
+
+on:
+  pull_request_target:
+    types: ['opened', 'synchronize', 'reopened', 'ready_for_review']
+  workflow_dispatch:
+    inputs:
+      number:
+        description: 'PR number to evaluate'
+        required: true
+        type: 'string'
+      dry_run:
+        description: 'Report the chosen assignee without assigning'
+        required: false
+        default: true
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'assign-pr-owner-${{ github.event.pull_request.number || inputs.number }}'
+  cancel-in-progress: false
+
+jobs:
+  assign:
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+      issues: 'read'
+      pull-requests: 'write'
+    steps:
+      - name: 'Checkout owner map'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.pull_request.base.sha || github.sha }}'
+          sparse-checkout: |-
+            .github/issue-owners.json
+            .github/scripts/assign-issue-owner.mjs
+            .github/scripts/assign-pr-owner.mjs
+          persist-credentials: false
+
+      - name: 'Assign area owner'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number || inputs.number }}'
+          DRY_RUN: "${{ inputs.dry_run || 'false' }}"
+        run: |-
+          if [ ! -f .github/scripts/assign-pr-owner.mjs ]; then
+            echo 'Assignment: skipped — trusted base does not contain assign-pr-owner.mjs yet'
+            exit 0
+          fi
+          node .github/scripts/assign-pr-owner.mjs
