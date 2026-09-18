@@ -13,7 +13,6 @@ export const PUBLISHED_PACKAGES = [
   '@qwen-code/qwen-code',
   '@qwen-code/external-context-mem0',
   '@qwen-code/audio-capture',
-  '@qwen-code/web-shell',
   '@qwen-code/channel-base',
   '@qwen-code/channel-dingtalk',
   '@qwen-code/channel-dws',
@@ -23,6 +22,7 @@ export const PUBLISHED_PACKAGES = [
   '@qwen-code/channel-telegram',
   '@qwen-code/channel-wecom',
   '@qwen-code/channel-weixin',
+  '@qwen-code/web-shell',
 ];
 
 // Deliberately a copy of `scripts/lib/release-helpers.js`, not an import:

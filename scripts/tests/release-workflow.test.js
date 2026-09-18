@@ -665,8 +665,8 @@ describe('release workflow', () => {
           .map((line) => line.split('\t'));
         expect(publishCalls.map(([cwd]) => cwd)).toEqual([
           join(canonicalDirectory, 'dist'),
-          join(canonicalDirectory, 'packages/web-shell'),
           join(canonicalDirectory, 'packages/channels/base'),
+          join(canonicalDirectory, 'packages/web-shell'),
         ]);
         // The dist-tag is the reason NPM_TAG is set in this child env at all.
         // Without it `npm publish` defaults to `latest`, so the 21:00 UTC
