@@ -509,6 +509,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  // The Web Shell page may itself be the Live Voice audio endpoint over WS
+  // `/live/web`, on any platform. Separate from `realtime_voice` so clients
+  // that only know the native Host never offer its macOS install flow here.
+  realtime_voice_web: { since: 'v1' },
   web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
@@ -573,6 +577,7 @@ export interface AdvertiseFeatureToggles {
    */
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
+  realtimeVoiceWebEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   standaloneSessionsAvailable?: boolean;
 }
@@ -777,6 +782,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'realtime_voice',
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
+  ],
+  [
+    'realtime_voice_web',
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.realtimeVoiceWebEnabled === true,
   ],
   ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);
