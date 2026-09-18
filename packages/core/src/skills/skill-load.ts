@@ -19,20 +19,88 @@ const debugLogger = createDebugLogger('SKILL_LOAD');
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 /**
- * Upper bound on concurrently open manifests while loading skills or
- * extensions. Every queued `fs.promises.readFile` opens its descriptor as
- * soon as the libuv pool dequeues it, so an unbounded fan-out over a large
- * extensions tree can exhaust the process file-descriptor limit under a low
+ * Upper bound on the **total** number of manifest reads in flight across all
+ * loading levels at once. Loading nests (extensions fan out to per-extension
+ * command/skill/agent scans, which fan out to per-file reads), so a per-level
+ * cap cannot express a global descriptor budget — with outer 64 × 3 loaders ×
+ * inner 64 the peak in-flight reads multiply far past any single level's
+ * limit. Every queued `fs.promises.readFile` opens its descriptor as soon as
+ * the libuv pool dequeues it, so an unbounded fan-out over a large extensions
+ * tree can exhaust the process file-descriptor limit under a low
  * `RLIMIT_NOFILE`, and the per-entry skips would then silently commit a
- * truncated load. 64 keeps peak descriptors well under typical limits while
- * still saturating the default 4-thread pool.
+ * truncated load that the (pre-load-stamped) fingerprint never retries. All
+ * loaders share one semaphore so the guarantee is on total open descriptors.
+ * 64 still saturates the default 4-thread libuv pool.
  */
 export const SKILL_LOAD_CONCURRENCY = 64;
 
 /**
- * Order-preserving bounded-concurrency map. Per-item rejections propagate
- * (callers that skip invalid entries handle their own errors and resolve to
- * null instead).
+ * How many extensions the top-level directory scan allows into their
+ * per-extension phase simultaneously. The per-extension work itself draws
+ * from the shared semaphore, so this only bounds scheduling fan-out, not
+ * descriptors; keeping it modest avoids queueing tens of thousands of
+ * closures at once.
+ */
+export const EXTENSION_SCAN_CONCURRENCY = 8;
+
+/**
+ * Module-wide semaphore shared by every loader level (extensions, commands,
+ * skills, agents, plugin skills) so the in-flight descriptor budget is
+ * global, not per-level. Intentionally tiny; avoids pulling in a dependency
+ * for what is ~30 lines.
+ */
+class CountdownGate {
+  private readonly queue: Array<() => void> = [];
+  private active = 0;
+  private peakActive = 0;
+
+  constructor(private readonly limit: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+      this.peakActive = Math.max(this.peakActive, this.active);
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.queue.push(() => {
+        this.active += 1;
+        this.peakActive = Math.max(this.peakActive, this.active);
+        resolve();
+      });
+    });
+  }
+
+  release(): void {
+    this.active -= 1;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+
+  /** Peak simultaneous holders since process start; exported for tests. */
+  peak(): number {
+    return this.peakActive;
+  }
+}
+
+const descriptorGate = new CountdownGate(SKILL_LOAD_CONCURRENCY);
+
+/**
+ * Test-only observation: the peak number of simultaneous manifest-read
+ * admissions since process start. Lets a test pin the global descriptor
+ * ceiling without mocking `fs.promises`.
+ */
+export function peakDescriptorGateInFlight(): number {
+  return descriptorGate.peak();
+}
+
+/**
+ * Order-preserving map whose per-item work is admitted through the shared
+ * descriptor gate, so nesting `mapWithConcurrency` at multiple levels still
+ * keeps the total in-flight reads ≤ SKILL_LOAD_CONCURRENCY. Per-item
+ * rejections propagate (callers that skip invalid entries handle their own
+ * errors and resolve to null instead). The `limit` parameter is retained for
+ * call-site readability but only bounds batch scheduling, not descriptors.
  */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -44,10 +112,17 @@ export async function mapWithConcurrency<T, R>(
   const results: R[] = new Array(items.length);
   for (let i = 0; i < items.length; i += effective) {
     const slice = items.slice(i, i + effective);
-    const batch = await Promise.all(slice.map((item) => fn(item)));
-    for (let j = 0; j < batch.length; j++) {
-      results[i + j] = batch[j] as R;
-    }
+    const batch = Promise.all(
+      slice.map(async (item, j) => {
+        await descriptorGate.acquire();
+        try {
+          results[i + j] = await fn(item);
+        } finally {
+          descriptorGate.release();
+        }
+      }),
+    );
+    await batch;
   }
   return results;
 }
