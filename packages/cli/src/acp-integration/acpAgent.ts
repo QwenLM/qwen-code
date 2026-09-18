@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   buildHooksListing,
   type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  type ModelWireApi,
+  resolveModelProtocol,
+  tryResolveModelProtocol,
+  resolveModelSelectionAuthType,
   hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
@@ -17,6 +22,7 @@ import {
   ALL_PROVIDERS,
   applyProviderInstallPlan,
   buildInstallPlan,
+  getModelsForProviderProtocol,
   clearCachedCredentialFile,
   createDebugLogger,
   generateSessionRecap,
@@ -88,6 +94,7 @@ import {
   parseGoalSnapshotV2,
   parseGoalStateCause,
   ToolNames,
+  ToolErrorType,
   FORK_SUBAGENT_TYPE,
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
@@ -140,6 +147,7 @@ import {
   type ChatRecord,
   type ToolInvocationGuard,
   type WorkflowParams,
+  type WorkflowSourceRef,
   type WorkflowToolResult,
   type WorkflowRunRegistry,
   getWorkflowTaskMutationKey,
@@ -149,6 +157,7 @@ import {
   resolveSavedWorkflowScript,
   extractAndStripMeta,
   listWorkflowSnapshots,
+  claimInterruptedWorkflowRuns,
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
@@ -203,19 +212,17 @@ import type {
   SetSessionModeRequest,
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
-import {
-  buildAuthMethods,
-  pickAuthMethodsForAuthRequired,
-} from './authMethods.js';
+import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
 } from '@qwen-code/channel-base';
 import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
-import { Readable, Writable } from 'node:stream';
+import { Readable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
@@ -476,10 +483,6 @@ import {
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
 import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
-import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   executeGeneration,
@@ -506,6 +509,39 @@ function isSessionOwnedWorkflowTool(
     'buildSessionOwnedBackground' in value &&
     typeof value.buildSessionOwnedBackground === 'function'
   );
+}
+
+/**
+ * Start a session-owned run, reporting a rejected parameter as one.
+ *
+ * `buildSessionOwnedBackground` validates the call the way the tool would for
+ * the model — a `sourceRef` that is not `{id, revision}`, an empty script —
+ * and throws a plain `Error`. Left alone that reaches the caller as an
+ * internal error, which reads as a daemon fault rather than the request
+ * problem it is.
+ */
+async function startSessionOwnedWorkflow(
+  tool: SessionOwnedWorkflowTool,
+  params: Omit<WorkflowParams, 'run_in_background'>,
+  workflowName: string | undefined,
+): Promise<WorkflowToolResult> {
+  let invocation;
+  try {
+    invocation = tool.buildSessionOwnedBackground(params, workflowName);
+  } catch (error) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const result = await invocation.execute(new AbortController().signal);
+  if (result.error?.type === ToolErrorType.INVALID_TOOL_PARAMS) {
+    throw RequestError.invalidParams(
+      { errorKind: 'workflow_invalid_params' },
+      result.error.message,
+    );
+  }
+  return result;
 }
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -1062,6 +1098,36 @@ function validateLoadReplayEnvelope(
   }
 }
 
+/**
+ * Append the Goal updates a load publishes after its replayed page, unless
+ * that would take the page over the limits it was cut to. Returns whether
+ * they were appended: a page already at a limit ships without them rather
+ * than failing the load, and the caller delivers them another way.
+ */
+function appendGoalUpdatesWithinLimits(
+  sessionId: string,
+  envelope: BridgeLoadReplayEnvelope,
+  goalUpdates: readonly SessionUpdate[],
+  enforceLimits: boolean,
+): boolean {
+  if (goalUpdates.length === 0) return true;
+  const withGoal = {
+    ...envelope,
+    updates: [...envelope.updates, ...goalUpdates],
+  };
+  try {
+    validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
+  } catch (error) {
+    if (!(error instanceof HistoryReplayLimitError)) throw error;
+    debugLogger.debug(
+      `Kept ${goalUpdates.length} Goal update(s) off a full replay page: ${error.message}`,
+    );
+    return false;
+  }
+  envelope.updates = withGoal.updates;
+  return true;
+}
+
 function replayGoalBootstrap(
   projection:
     | SessionRestoreProjection
@@ -1096,19 +1162,7 @@ function replayGoalBootstrap(
         payload?.['cause'],
       );
     }
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(projection.goalRecords ?? []),
-    );
-    return active
-      ? {
-          goalStatus: {
-            kind: active.iterations > 0 ? 'checking' : 'set',
-            condition: active.condition,
-            iterations: active.iterations,
-            ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-          },
-        }
-      : undefined;
+    return undefined;
   }
   const sourceUuid = projection?.replay?.goalRecoverySourceUuid;
   if (!projection?.replay || !sourceUuid) return undefined;
@@ -1128,18 +1182,7 @@ function replayGoalBootstrap(
       payload?.['cause'],
     );
   }
-  const active = findGoalToRestore(
-    collectGoalStatusItemsFromRecords(goalBootstrapRecords),
-  );
-  if (!active) return undefined;
-  return {
-    goalStatus: {
-      kind: active.iterations > 0 ? 'checking' : 'set',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-    },
-  };
+  return undefined;
 }
 
 function replayInitialGoalState(
@@ -1685,6 +1728,12 @@ function readExistingProviderConfig(
     (settings.merged as Record<string, unknown>)['modelProviders'] as
       | Record<string, unknown>
       | undefined,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
   );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
@@ -1704,7 +1753,20 @@ function readExistingProviderConfig(
   const advancedConfig = readExistingAdvancedConfig(firstModel);
 
   return {
-    protocol,
+    protocol:
+      protocol === AuthType.USE_OPENAI_RESPONSES
+        ? AuthType.USE_OPENAI
+        : protocol,
+    ...(protocol === AuthType.USE_OPENAI ||
+    protocol === AuthType.USE_OPENAI_RESPONSES
+      ? {
+          wireApi:
+            firstModel?.wireApi ??
+            (protocol === AuthType.USE_OPENAI_RESPONSES
+              ? 'responses'
+              : 'chat-completions'),
+        }
+      : {}),
     baseUrl: sanitizeProviderBaseUrl(baseUrl),
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
@@ -1734,31 +1796,50 @@ function resolveExistingProviderApiKey(
   baseUrl: string,
   modelIds: string[],
 ): string | undefined {
-  const owns = resolveOwnsModel(config);
-  const models = (settings.merged.modelProviders?.[protocol] ?? []).filter(
+  const ownsModel = resolveOwnsModel(config);
+  const canonicalProtocol =
+    protocol === AuthType.USE_OPENAI_RESPONSES ? AuthType.USE_OPENAI : protocol;
+  const candidates = getModelsForProviderProtocol(
+    settings.merged.modelProviders,
+    canonicalProtocol,
+    settings.merged.providerProtocol,
+  ).filter(
     (model) =>
-      owns?.(model) && model.baseUrl === baseUrl && modelIds.includes(model.id),
+      model.baseUrl === baseUrl &&
+      model.envKey &&
+      (ownsModel?.(model) || config.mergeModelsByIdentity) &&
+      modelIds.includes(model.id) &&
+      tryResolveModelProtocol(canonicalProtocol, model) === protocol,
   );
-  const conversation = models.filter(
-    (model) => !model.imageOnly && !model.voiceOnly,
+  // Keep the first entry per model id (scan order) so this resolver agrees
+  // with buildInstallPlan's first-wins identity match.
+  const matched = candidates.filter(
+    (model, index) =>
+      candidates.findIndex((entry) => entry.id === model.id) === index,
+  );
+  // Service-role models (imageOnly/voiceOnly) carry their own suffixed env key,
+  // so a reconnect reads the key of the conversation model being connected and
+  // only falls back to service entries when no conversation model matched.
+  const conversation = matched.filter(
+    (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
   );
   if (
     !conversation.length &&
-    modelIds.some((id) => !models.some((model) => model.id === id))
+    modelIds.some((id) => !matched.some((model) => model.id === id))
   ) {
     return readSettingsEnv(
       settings,
-      resolveProviderEnvKey(config, protocol, baseUrl),
+      resolveProviderEnvKey(config, canonicalProtocol, baseUrl),
     );
   }
   const keys = new Set(
-    (conversation.length ? conversation : models).map((model) => model.envKey),
+    (conversation.length ? conversation : matched).map((model) => model.envKey),
   );
   if (keys.size === 1) return readSettingsEnv(settings, [...keys][0]);
   if (keys.size > 1) return undefined;
   return readSettingsEnv(
     settings,
-    resolveProviderEnvKey(config, protocol, baseUrl),
+    resolveProviderEnvKey(config, canonicalProtocol, baseUrl),
   );
 }
 
@@ -1817,12 +1898,28 @@ function readProviderSetupInputs(
     );
   }
 
+  const wireApi = params['wireApi'] as ModelWireApi | undefined;
+  let effectiveProtocol: AuthType;
+  try {
+    effectiveProtocol = resolveModelProtocol(protocol ?? config.protocol, {
+      wireApi,
+    })!;
+  } catch (error) {
+    throw RequestError.invalidParams(
+      undefined,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
   let baseUrl = resolveBaseUrl(
     config,
     readOptionalString(params['baseUrl'], 'baseUrl'),
   ).trim();
   if (!baseUrl && config.baseUrl === undefined) {
-    baseUrl = getDefaultBaseUrlForProtocol(protocol ?? config.protocol);
+    // Default to the EFFECTIVE route's endpoint: a Responses selection dials
+    // the /v1-less default, so deriving from the raw bucket protocol would
+    // persist the Chat Completions endpoint on the Responses wire.
+    baseUrl = getDefaultBaseUrlForProtocol(effectiveProtocol);
   }
   if (!baseUrl) {
     throw RequestError.invalidParams(
@@ -1845,11 +1942,7 @@ function readProviderSetupInputs(
   // received `hasApiKey` from the list response), fall back to the stored key.
   const apiKey =
     readOptionalString(params['apiKey'], 'apiKey') ??
-    resolveExistingApiKey?.(
-      protocol ?? config.protocol,
-      baseUrl,
-      resolvedModelIds,
-    );
+    resolveExistingApiKey?.(effectiveProtocol, baseUrl, resolvedModelIds);
   if (!apiKey) {
     throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
   }
@@ -1862,6 +1955,7 @@ function readProviderSetupInputs(
 
   return {
     ...(protocol ? { protocol } : {}),
+    ...(wireApi ? { wireApi } : {}),
     baseUrl,
     apiKey,
     modelIds: resolvedModelIds,
@@ -2852,9 +2946,10 @@ export async function runAcpAgent(
 
   let agentInstance: QwenAgent | undefined;
   let connection: AgentSideConnection;
+  let output: ReturnType<typeof createAcpOutput>;
   markAcpStartup('transportSetupStart');
   try {
-    const stdout = Writable.toWeb(process.stdout) as WritableStream;
+    output = createAcpOutput(process.stdout);
     const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
     // Stdout is used to send messages to the client, so console.log/console.info
@@ -2865,7 +2960,7 @@ export async function runAcpAgent(
 
     let initializeRequestId: string | number | null | undefined;
     const pendingNewSessionRequestIds = new Set<string | number | null>();
-    const stream = ndJsonStream(stdout, stdin, {
+    const stream = ndJsonStream(output.stream, stdin, {
       onMessageObserved: ({ direction, bytes, message }) => {
         if (direction === 'sent') {
           observeAcpToolResultWire(message, bytes);
@@ -3149,6 +3244,7 @@ export async function runAcpAgent(
   const shutdownHandler = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    prepareFileWatchersForProcessExit();
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
 
     if (agentInstance?.isTrustedManagedParent()) {
@@ -3208,8 +3304,10 @@ export async function runAcpAgent(
   process.on('SIGTERM', shutdownHandler);
   process.on('SIGINT', shutdownHandler);
 
+  const shutdownFailures: unknown[] = [];
   try {
     await connection.closed;
+    prepareFileWatchersForProcessExit();
     if (agentInstance?.isTrustedManagedParent()) {
       try {
         await shutdownManagedAgent(
@@ -3228,10 +3326,21 @@ export async function runAcpAgent(
       await drainPoolBeforeExit('ide_close');
       await disposeSessionsOnce();
     }
+  } catch (error) {
+    shutdownFailures.push(error);
   } finally {
+    try {
+      if (!shuttingDown) await output.close();
+    } catch (error) {
+      if (!shuttingDown) shutdownFailures.push(error);
+    }
     process.off('SIGTERM', shutdownHandler);
     process.off('SIGINT', shutdownHandler);
     eventLoopMonitor.dispose();
+  }
+  if (shutdownFailures.length === 1) throw shutdownFailures[0];
+  if (shutdownFailures.length > 1) {
+    throw new AggregateError(shutdownFailures, 'ACP EOF shutdown failed');
   }
 }
 
@@ -4055,6 +4164,7 @@ class QwenAgent implements Agent {
           cwd,
           undefined,
           {
+            systemHooks: settings.getSystemHooks(),
             userHooks: settings.getUserHooks(),
             projectHooks: settings.getProjectHooks(),
           },
@@ -5077,7 +5187,9 @@ class QwenAgent implements Agent {
       }
     }
     this.clientCapabilities = args.clientCapabilities;
-    const authMethods = buildAuthMethods();
+    const authMethods = pickAuthMethodsForAuthRequired(
+      this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.(),
+    );
     const version = process.env['CLI_VERSION'] || process.version;
 
     const response: InitializeResponse = {
@@ -5200,6 +5312,31 @@ class QwenAgent implements Agent {
 
   async authenticate({ methodId }: AuthenticateRequest): Promise<void> {
     const method = z.nativeEnum(AuthType).parse(methodId);
+    const currentAuthType =
+      this.config.getCurrentAuthType?.() ?? this.config.getAuthType?.();
+    // The wire resolver throws on a hand-edited invalid `wireApi` anywhere in
+    // modelProviders; re-authentication is the repair path, so tolerate the
+    // failure instead of rejecting it outright. The fallback must preserve
+    // the wire the session is actually on — falling back to the requested
+    // method could re-authenticate onto a wire that holds no models.
+    let authType = method;
+    if (method === AuthType.USE_OPENAI) {
+      const seeded =
+        currentAuthType === AuthType.USE_OPENAI_RESPONSES
+          ? currentAuthType
+          : method;
+      try {
+        authType = resolveModelSelectionAuthType(
+          seeded,
+          this.config.getModel(),
+          this.settings.merged.modelProviders,
+          this.settings.merged.providerProtocol,
+          this.config.getCurrentModelRegistryBaseUrl?.(),
+        );
+      } catch {
+        authType = seeded;
+      }
+    }
 
     let authUri: string | undefined;
     const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
@@ -5218,12 +5355,16 @@ class QwenAgent implements Agent {
       await this.refreshAuthWithPersistedReasoning(
         this.config,
         this.settings,
-        method,
+        authType,
       );
       this.settings.setValue(
         SettingScope.User,
         'security.auth.selectedType',
-        method,
+        method === AuthType.USE_OPENAI &&
+          this.settings.forScope(SettingScope.User).settings.security?.auth
+            ?.selectedType === AuthType.USE_OPENAI_RESPONSES
+          ? AuthType.USE_OPENAI_RESPONSES
+          : method,
       );
     } finally {
       if (method === AuthType.QWEN_OAUTH) {
@@ -5552,6 +5693,30 @@ class QwenAgent implements Agent {
               'qwen-code.daemon.session_restore.partial_replay',
               replay.replayError !== undefined,
             );
+            // A cold load publishes the recovered Goal after the replay; a
+            // live session's Goal is already published, so the only thing
+            // to append is the card that supersedes a running legacy card
+            // the page ended on. Nothing, for any transcript this build
+            // wrote. A partial replay gets nothing either: the page did not
+            // end where the transcript does. The card is presentation, so
+            // failing to render it is logged, never a failed load. Rendered
+            // once the page is delivered, so it reads the Goal as it stands
+            // then, not as it stood before the replay's awaits.
+            const renderGoalUpdates = (): SessionUpdate[] => {
+              if (replay.replayError !== undefined) return [];
+              try {
+                return liveSession.renderLegacyGoalSupersession(
+                  replayPage.records,
+                );
+              } catch (error) {
+                debugLogger.debug(
+                  `Failed to render the legacy Goal supersession: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+                return [];
+              }
+            };
             if (!bulkReplay) {
               try {
                 for (const update of replay.updates) {
@@ -5569,9 +5734,21 @@ class QwenAgent implements Agent {
               if (replay.replayError !== undefined) {
                 throw RequestError.internalError(undefined, replay.replayError);
               }
+              for (const update of renderGoalUpdates()) {
+                try {
+                  await liveSession.sendUpdate(update);
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to send the legacy Goal supersession: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
+              }
               return withRestoreHint(liveSession, response);
             }
 
+            const enforceLimits = restoreOptions.replay.kind === 'recent';
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
               updates: replay.updates,
@@ -5586,10 +5763,13 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
-            validateLoadReplayEnvelope(
+            validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
+            // The card is presentation: a full page simply goes without it.
+            appendGoalUpdatesWithinLimits(
               sessionId,
               envelope,
-              restoreOptions.replay.kind === 'recent',
+              renderGoalUpdates(),
+              enforceLimits,
             );
             return withRestoreHint(liveSession, {
               ...response,
@@ -5772,6 +5952,7 @@ class QwenAgent implements Agent {
                     ? { hideRuntimeGoal: true }
                     : {}),
                   ...(goalBootstrap ? { bootstrap: goalBootstrap } : {}),
+                  ...(replayEnvelope?.partial ? { partialReplay: true } : {}),
                 },
               ).catch((error) => {
                 if (suppressRecoveredGoalPresentation) throw error;
@@ -5792,18 +5973,23 @@ class QwenAgent implements Agent {
                 streamGoalUpdates = rendered.updates;
                 return;
               }
-              const goalUpdates = rendered.updates;
-              if (goalUpdates.length > 0) {
+              if (rendered.updates.length > 0) {
                 replayEnvelope ??= {
                   v: LOAD_REPLAY_VERSION,
                   updates: [],
                 };
-                replayEnvelope.updates.push(...goalUpdates);
-                validateLoadReplayEnvelope(
+                const appended = appendGoalUpdatesWithinLimits(
                   sessionId,
                   replayEnvelope,
+                  rendered.updates,
                   restoreOptions.replay.kind === 'recent',
                 );
+                // What a full page cannot carry is the recovered Goal
+                // state, which the client must still get: it is sent as
+                // live updates once the session is up, as a streamed load
+                // sends it. The publication key is primed either way, so
+                // the subscription does not publish the same state twice.
+                if (!appended) streamGoalUpdates = rendered.updates;
               }
             },
             beforeSessionPublish: () => {
@@ -5860,17 +6046,17 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
-                try {
-                  for (const update of streamGoalUpdates) {
-                    await createdSession.sendUpdate(update);
-                  }
-                } catch (error) {
-                  debugLogger.debug(
-                    `Failed to publish recovered Goal state: ${
-                      error instanceof Error ? error.message : String(error)
-                    }`,
-                  );
+              }
+              try {
+                for (const update of streamGoalUpdates) {
+                  await createdSession.sendUpdate(update);
                 }
+              } catch (error) {
+                debugLogger.debug(
+                  `Failed to publish recovered Goal state: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
               }
               await profiler.time('post_replay_services', async () => {
                 if (!provisionalStandalone && !suppressWorktreeContextRestore) {
@@ -8507,6 +8693,9 @@ class QwenAgent implements Agent {
         sourceRef: true,
         agentStepId: true,
         workflowStepId: true,
+        runSavedArgs: true,
+        runScript: true,
+        nameOnly: config.isWorkflowNameOnly?.() === true,
       },
       savedWorkflows,
     };
@@ -8812,9 +9001,13 @@ class QwenAgent implements Agent {
       const workspaceCwd = this.workspaceCwd(config);
       const listing = buildHooksListing(config);
       // The workspace view lists the registry only; session hooks have their
-      // own per-session status method.
+      // own per-session status method. Entries a subagent attached while it
+      // runs sit in the registry too, but they are not workspace
+      // configuration.
       const hooks: ServeHookEntry[] = listing.rows
-        .filter((row) => row.origin === 'registry')
+        .filter(
+          (row) => row.origin === 'registry' && row.agentScope === undefined,
+        )
         .map(
           (row): ServeHookEntry => ({
             kind: 'hook',
@@ -9199,9 +9392,16 @@ class QwenAgent implements Agent {
         const plan = buildInstallPlan(
           providerConfig,
           inputs,
-          this.settings.merged.modelProviders?.[
-            inputs.protocol ?? providerConfig.protocol
-          ],
+          getModelsForProviderProtocol(
+            this.settings.merged.modelProviders,
+            inputs.protocol ?? providerConfig.protocol,
+            this.settings.merged.providerProtocol,
+          ),
+          {
+            authType: this.settings.merged.security?.auth?.selectedType,
+            id: this.settings.merged.model?.name,
+            baseUrl: this.settings.merged.model?.baseUrl,
+          },
         );
         const adapter = createLoadedSettingsAdapter(
           this.settings,
@@ -9212,9 +9412,7 @@ class QwenAgent implements Agent {
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
           syncAuthState: (authType, modelId, baseUrl) =>
-            this.config
-              .getModelsConfig()
-              .syncAfterAuthRefresh(authType, modelId, baseUrl),
+            this.config.syncModelSelection(authType, modelId, baseUrl),
           refreshAuth: (authType) =>
             this.refreshAuthWithPersistedReasoning(
               this.config,
@@ -12545,22 +12743,39 @@ class QwenAgent implements Agent {
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'action must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+            'action must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           );
         }
+        // What the two start actions run with. A retry or rerun replays the
+        // original run's own args and `sourceRef` — that is what keeps it the
+        // same run — so anything sent alongside those actions is ignored.
+        const startInput: Omit<WorkflowParams, 'run_in_background'> = {
+          // `args` is any JSON value, `null` included, so presence decides.
+          ...(Object.hasOwn(params, 'args') ? { args: params['args'] } : {}),
+          ...(params['sourceRef'] !== undefined
+            ? { sourceRef: params['sourceRef'] as WorkflowSourceRef }
+            : {}),
+        };
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         if (!this.canUseWorkflowControls(config)) {
           return { changed: false };
         }
+        // `taskId` is a run id for the control actions, a definition name for
+        // `run-saved` and the caller's own start key for `run-script`. Each
+        // namespace claims separately, so one cannot block another; within a
+        // namespace, a second concurrent start of the same key is refused.
         const mutationClaim =
           action === 'run-saved'
             ? getWorkflowTaskMutationKey(config, taskId, 'saved')
-            : getWorkflowTaskMutationKey(config, taskId);
+            : action === 'run-script'
+              ? getWorkflowTaskMutationKey(config, taskId, 'script')
+              : getWorkflowTaskMutationKey(config, taskId);
         if (action === 'delete-history') {
           const attempt = await tryWithWorkflowTaskMutation(
             mutationClaim,
@@ -12608,14 +12823,56 @@ class QwenAgent implements Agent {
                   'The workflow tool is unavailable; cannot run this saved workflow.',
                 );
               }
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  {
-                    scriptPath: savedWorkflow.scriptPath,
-                  },
-                  savedWorkflow.name,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, scriptPath: savedWorkflow.scriptPath },
+                savedWorkflow.name,
+              );
+              const startedTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              return startedTask
+                ? {
+                    changed: true,
+                    status: startedTask.status,
+                    taskId: startedTask.runId,
+                  }
+                : { changed: false };
+            },
+          );
+          if (!attempt.acquired) {
+            return { changed: false };
+          }
+          return attempt.value;
+        }
+        if (action === 'run-script') {
+          const script = params['script'];
+          if (typeof script !== 'string' || script.length === 0) {
+            throw RequestError.invalidParams(
+              { errorKind: 'workflow_invalid_params' },
+              '`script` is required for the "run-script" action',
+            );
+          }
+          const attempt = await tryWithWorkflowTaskMutation(
+            mutationClaim,
+            async () => {
+              const workflowTool = config
+                .getToolRegistry()
+                .getTool(ToolNames.WORKFLOW);
+              if (!isSessionOwnedWorkflowTool(workflowTool)) {
+                throw RequestError.invalidParams(
+                  undefined,
+                  'The workflow tool is unavailable; cannot run this script.',
+                );
+              }
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                { ...startInput, script },
+                // No definition name: a caller-supplied script is named by its
+                // own `export const meta`, which is where the run's label
+                // comes from when no saved workflow backs it.
+                undefined,
+              );
               const startedTask = result.workflowRunId
                 ? registry.get(result.workflowRunId)
                 : undefined;
@@ -12696,12 +12953,11 @@ class QwenAgent implements Agent {
                 ...(task.sourceRef ? { sourceRef: task.sourceRef } : {}),
                 ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
               };
-              const result = (await workflowTool
-                .buildSessionOwnedBackground(
-                  startParams,
-                  readableScriptPath ? task.workflowName : undefined,
-                )
-                .execute(new AbortController().signal)) as WorkflowToolResult;
+              const result = await startSessionOwnedWorkflow(
+                workflowTool,
+                startParams,
+                readableScriptPath ? task.workflowName : undefined,
+              );
               if (action === 'rerun') {
                 const rerunTask = result.workflowRunId
                   ? registry.get(result.workflowRunId)
@@ -14665,6 +14921,7 @@ class QwenAgent implements Agent {
       undefined,
       // Pass separated hooks for proper source attribution
       {
+        systemHooks: settings.getSystemHooks(),
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
@@ -15142,6 +15399,14 @@ class QwenAgent implements Agent {
         `Session ${sessionId} is already active.`,
         { errorKind: 'session_id_conflict', sessionId },
       );
+    }
+    // A run the previous daemon process was running when it exited has no
+    // snapshot until something claims it; claimed here, it joins the history
+    // this session lists as a failed run.
+    try {
+      await claimInterruptedWorkflowRuns(config);
+    } catch (error) {
+      debugLogger.debug(`Claiming interrupted workflow runs failed: ${error}`);
     }
     const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(

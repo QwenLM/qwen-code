@@ -44,6 +44,7 @@ import {
 import { CompactModeContext } from '../WebShellContexts';
 import {
   useWebShellCustomization,
+  type WebShellAssistantFeedbackRating,
   type WebShellAssistantTurnFooterRenderInfo,
   type WebShellSource,
 } from '../customization';
@@ -51,6 +52,12 @@ import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
+import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
+import {
+  feedbackUserMessageOf,
+  notifyAssistantFeedback,
+  shouldOfferAssistantFeedback,
+} from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
@@ -549,7 +556,17 @@ export function attachTurnOutputs(
     ) {
       return;
     }
-    result.push({
+    // The card closes the turn's own content, so it belongs above a local recap
+    // that trails the turn rather than after it. Status rows are not turn
+    // content, and the walk stops at the turn's own last row, so the card can
+    // never land inside the turn.
+    let insertAt = result.length;
+    for (let index = result.length - 1; index >= 0; index -= 1) {
+      const item = result[index];
+      if (item.type !== 'message' || item.message.role !== 'system') break;
+      if (item.message.source === 'recap') insertAt = index;
+    }
+    result.splice(insertAt, 0, {
       type: 'turn_outputs',
       key: turnId,
       turnId,
@@ -3483,8 +3500,56 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns, sourceReferences } =
+    const { collapseCompletedTurns, sourceReferences, assistantFeedback } =
       useWebShellCustomization();
+    // `sourceSessionId` is the transcript's own session, which is what a mark
+    // belongs to.
+    const {
+      ratings: assistantFeedbackRatings,
+      rate: rateAssistantFeedback,
+      ratingForTurn: assistantFeedbackRatingForTurn,
+    } = useAssistantFeedback(sourceSessionId);
+    // A turn's mark is keyed by the daemon-stamped prompt id, which a replay
+    // only carries on the prompt's own (turn-head) block — see
+    // `shouldOfferAssistantFeedback` and the adapter's prompt-id pass.
+    const assistantFeedbackHeadById = useMemo(() => {
+      const heads = new Map<string, Message>();
+      for (const message of messages) {
+        if (isTurnStartMessage(message)) heads.set(message.id, message);
+      }
+      return heads;
+    }, [messages]);
+    const assistantFeedbackEnabled = shouldOfferAssistantFeedback({
+      renderMode: transcriptRenderMode,
+      sessionId: sourceSessionId,
+      options: assistantFeedback,
+    });
+    // Kept in a ref so a host passing the options object inline does not
+    // invalidate the handler (and therefore every rendered message) per render.
+    const assistantFeedbackOptionsRef = useRef(assistantFeedback);
+    assistantFeedbackOptionsRef.current = assistantFeedback;
+    const messagesRef = useRef(messages);
+    messagesRef.current = messages;
+    const handleAssistantFeedbackRate = useCallback(
+      (
+        promptId: string,
+        turnId: string,
+        rating: WebShellAssistantFeedbackRating | null,
+      ) => {
+        const previousRating = assistantFeedbackRatingForTurn(promptId);
+        rateAssistantFeedback(promptId, rating);
+        const onRate = assistantFeedbackOptionsRef.current?.onRate;
+        if (!onRate) return;
+        notifyAssistantFeedback(onRate, {
+          rating,
+          previousRating,
+          sessionId: sourceSessionId,
+          promptId,
+          userMessage: feedbackUserMessageOf(messagesRef.current, turnId),
+        });
+      },
+      [assistantFeedbackRatingForTurn, rateAssistantFeedback, sourceSessionId],
+    );
     const sourcesByTurnCache = useRef<
       | {
           sourceMessages: readonly Message[];
@@ -5594,6 +5659,13 @@ export const MessageList = memo(
               },
             };
           }
+          const feedbackHead = finalAssistantTurnId
+            ? assistantFeedbackHeadById.get(finalAssistantTurnId)
+            : undefined;
+          // A live turn stamps the answer's own block while a replayed turn
+          // only stamps the prompt's; both carry the same value.
+          const feedbackPromptId =
+            displayItem.message.promptId ?? feedbackHead?.promptId;
           const branchRecordId =
             displayItem.message.role === 'assistant'
               ? displayItem.message.branchRecordId
@@ -5639,6 +5711,7 @@ export const MessageList = memo(
               onShowContextDetail={onShowContextDetail}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
+              onTurnOutputOpen={onTurnOutputOpen}
               onInsightReportOpen={onInsightReportOpen}
               onEditUserMessage={
                 onEditUserMessage && userMessageEditTarget
@@ -5677,6 +5750,18 @@ export const MessageList = memo(
                 !isResponding &&
                 branchRecordId !== undefined
               }
+              assistantFeedbackTurnId={
+                assistantFeedbackEnabled ? finalAssistantTurnId : undefined
+              }
+              assistantFeedbackPromptId={
+                assistantFeedbackEnabled ? feedbackPromptId : undefined
+              }
+              assistantFeedbackRating={
+                assistantFeedbackEnabled && feedbackPromptId
+                  ? assistantFeedbackRatings[feedbackPromptId]
+                  : undefined
+              }
+              onAssistantFeedbackRate={handleAssistantFeedbackRate}
               isLocateFlashing={displayItemMatchesLocateTarget(
                 displayItem,
                 flashTarget,
@@ -5737,6 +5822,10 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        assistantFeedbackEnabled,
+        assistantFeedbackHeadById,
+        assistantFeedbackRatings,
+        handleAssistantFeedbackRate,
         frozenViewport,
         workspaceCwd,
         showRetryHint,

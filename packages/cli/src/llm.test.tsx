@@ -40,6 +40,17 @@ import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat, Storage } from '@qwen-code/qwen-code-core';
 import { EXTERNAL_TOOL_GUARD_REQUIRED_VALUE } from '@qwen-code/acp-bridge/externalToolGuard';
 
+const mockPrepareFileWatchersForProcessExit = vi.hoisted(() => vi.fn());
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+    >()),
+    prepareFileWatchersForProcessExit: mockPrepareFileWatchersForProcessExit,
+  }),
+);
+
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
@@ -441,6 +452,8 @@ describe('llm.tsx main function', () => {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
             EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -480,6 +493,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -510,6 +524,8 @@ describe('llm.tsx main function', () => {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD:
             EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         },
         onUpdateRelaunch: expect.any(Function),
       }),
@@ -543,6 +559,8 @@ describe('llm.tsx main function', () => {
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -587,6 +605,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -608,6 +627,8 @@ describe('llm.tsx main function', () => {
         childEnv: {
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
           QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         },
         onUpdateRelaunch: expect.any(Function),
       }),
@@ -675,6 +696,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -715,6 +737,8 @@ describe('llm.tsx main function', () => {
       async (_memoryArgs, _extraArgs, options) => {
         expect(options?.childEnv).toEqual({
           QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+          QWEN_CODE_PRIVATE_RELAUNCH_ENV_PROVENANCE:
+            '{"dotEnv":[],"settingsEnv":[]}',
         });
       },
     );
@@ -754,6 +778,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -806,6 +831,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never;
@@ -890,6 +916,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -966,6 +993,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1031,6 +1059,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1163,6 +1192,7 @@ describe('llm.tsx main function', () => {
         setValue: vi.fn(),
         forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
         migrationWarnings: [],
+        getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => undefined,
       } as never);
@@ -1215,6 +1245,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1261,6 +1292,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1328,6 +1360,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     };
@@ -1671,6 +1704,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -1934,6 +1968,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2006,6 +2041,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2255,6 +2291,7 @@ describe('llm.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2490,6 +2527,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2701,6 +2739,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2830,6 +2869,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -2958,6 +2998,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3082,6 +3123,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3185,6 +3227,14 @@ describe('llm.tsx main function kitty protocol', () => {
     }
 
     expect(cleanupModule.runExitCleanup).toHaveBeenCalledTimes(2);
+    expect(mockPrepareFileWatchersForProcessExit).toHaveBeenCalledTimes(2);
+    for (const index of [0, 1]) {
+      expect(
+        mockPrepareFileWatchersForProcessExit.mock.invocationCallOrder[index],
+      ).toBeLessThan(
+        vi.mocked(cleanupModule.runExitCleanup).mock.invocationCallOrder[index],
+      );
+    }
   });
 
   // Shared config/settings mocks for the interactive signal-handler tests.
@@ -3233,6 +3283,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3547,6 +3598,7 @@ describe('llm.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getSystemHooks: () => undefined,
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
@@ -3722,6 +3774,7 @@ describe('startInteractiveUI', () => {
       // options; the messaging path is covered in startInteractiveUI.test.
       agents: { crossSessionMessaging: false },
     },
+    getSystemHooks: () => undefined,
     getUserHooks: () => undefined,
     getProjectHooks: () => undefined,
   } as LoadedSettings;

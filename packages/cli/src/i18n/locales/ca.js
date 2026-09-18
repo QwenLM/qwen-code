@@ -432,6 +432,12 @@ export default {
   active: 'activa',
   disabled: 'desactivada',
   enabled: 'activada',
+  'disabled (bare mode)': 'desactivada (mode mínim)',
+  'disabled (safe mode)': 'desactivada (mode segur)',
+  'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
+  'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
+  'disabled (turned off for this session)':
+    'desactivada (apagada en aquesta sessió)',
   'View Details': 'Visualitza els detalls',
   'Update failed:': "Error en l'actualització:",
   'Updating {{name}}...': 'Actualitzant {{name}}...',
@@ -792,6 +798,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurats',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Aquest menú és de només lectura. Per afegir o modificar hooks, editeu settings.json directament o demaneu-ho a Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Torneu a obrir aquest menú per recarregar les definicions dels hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Els controls dels hooks i la configuració de seguretat HTTP requereixen un reinici.',
+  'Failed to reload hook definitions: {{error}}':
+    'No s’han pogut recarregar les definicions dels hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Return per seleccionar · Esc per cancel·lar',
   'Exit codes:': 'Codis de sortida:',

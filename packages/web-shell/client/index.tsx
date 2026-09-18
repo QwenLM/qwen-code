@@ -269,6 +269,11 @@ export type {
   WebShellSessionArtifactsChangeReason,
   WebShellModelInfo,
   WebShellSkillInfo,
+  WebShellAssistantFeedbackInfo,
+  WebShellAssistantFeedbackOptions,
+  WebShellAssistantFeedbackRating,
+  WebShellAssistantFeedbackUserMessage,
+  AssistantFeedbackHandler,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
 export type {
@@ -297,3 +302,9 @@ export type {
   EchartsRuntime,
   EchartsRuntimeLoader,
 } from './components/messages/MarkdownChartRenderer';
+
+export { WEB_SHELL_SETTING_ITEM_IDS } from './settings';
+export type {
+  WebShellSettingItemId,
+  WebShellSettingsOptions,
+} from './settings';
