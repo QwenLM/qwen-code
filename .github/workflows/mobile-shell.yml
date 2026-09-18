@@ -56,10 +56,10 @@ jobs:
       matrix:
         include:
           - api-level: 26
-            arch: x86
+            arch: 'x86'
             require-profiles: 'false'
           - api-level: 36
-            arch: x86_64
+            arch: 'x86_64'
             require-profiles: 'true'
     steps:
       - name: 'Checkout'
