@@ -200,6 +200,10 @@ describe('<CollapsibleToolGroupMessage />', () => {
         expandedHandler?.(mouseEvent('left-press', 5));
         expandedHandler?.(mouseEvent('left-release', 5));
       });
+      expect(lastFrame()).toContain('very long result');
+      act(() => {
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
+      });
 
       const frame = lastFrame() ?? '';
       expect(frame).toContain('click to expand');
@@ -210,7 +214,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
     }
   });
 
-  it('leaves the group expanded when a second click completes a double-click', () => {
+  it('leaves the group expanded when a double-click starts while expanded', () => {
     vi.useFakeTimers();
     try {
       const { handler, lastFrame } = renderCollapsedTool();
@@ -219,11 +223,15 @@ describe('<CollapsibleToolGroupMessage />', () => {
         handler?.(mouseEvent('left-press', 5));
         handler?.(mouseEvent('left-release', 5));
       });
+      vi.advanceTimersByTime(MULTI_CLICK_MS);
 
       const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
       act(() => {
         expandedHandler?.(mouseEvent('left-press', 5));
         expandedHandler?.(mouseEvent('left-release', 5));
+        expandedHandler?.(mouseEvent('left-press', 5));
+        expandedHandler?.(mouseEvent('left-release', 5));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
       });
 
       expect(lastFrame()).toContain('very long result');
@@ -272,6 +280,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
       act(() => {
         expandedHandler?.(mouseEvent('left-press', 5));
         expandedHandler?.(mouseEvent('left-release', 5));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
       });
 
       expect(lastFrame()).toContain('very long result');
@@ -326,6 +335,7 @@ describe('<CollapsibleToolGroupMessage />', () => {
       act(() => {
         expandedHandler?.(mouseEvent('left-press', 5));
         expandedHandler?.(mouseEvent('left-release', 5));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
       });
 
       expect(lastFrame()).toContain('click to expand');
@@ -481,6 +491,102 @@ describe('<CollapsibleToolGroupMessage />', () => {
 
     expect(lastFrame()).not.toContain('veryLongSource');
     expect(lastFrame()).not.toContain('very long result');
+  });
+
+  it('keeps a multi-click chain while dragging after the second press', () => {
+    vi.useFakeTimers();
+    try {
+      const { handler, lastFrame } = renderCollapsedTool();
+
+      act(() => {
+        handler?.(mouseEvent('left-press', 5));
+        handler?.(mouseEvent('left-release', 5));
+      });
+      vi.advanceTimersByTime(MULTI_CLICK_MS);
+
+      const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      act(() => {
+        expandedHandler?.(mouseEvent('left-press', 5));
+        expandedHandler?.(mouseEvent('left-release', 5));
+        expandedHandler?.(mouseEvent('left-press', 5));
+        expandedHandler?.(mouseEvent('move', 6));
+        expandedHandler?.(mouseEvent('left-release', 6));
+        expandedHandler?.(mouseEvent('left-press', 6));
+        expandedHandler?.(mouseEvent('left-release', 6));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
+      });
+
+      expect(lastFrame()).toContain('very long result');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('recognizes one-column drift in a multi-click chain', () => {
+    vi.useFakeTimers();
+    try {
+      const { handler, lastFrame } = renderCollapsedTool();
+
+      act(() => {
+        handler?.(mouseEvent('left-press', 5));
+        handler?.(mouseEvent('left-release', 5));
+      });
+
+      const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      act(() => {
+        expandedHandler?.(mouseEvent('left-press', 6));
+        expandedHandler?.(mouseEvent('left-release', 6));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
+      });
+
+      expect(lastFrame()).toContain('very long result');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats two-column drift as a new click', () => {
+    vi.useFakeTimers();
+    try {
+      const { handler, lastFrame } = renderCollapsedTool();
+
+      act(() => {
+        handler?.(mouseEvent('left-press', 5));
+        handler?.(mouseEvent('left-release', 5));
+      });
+
+      const expandedHandler = vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+      act(() => {
+        expandedHandler?.(mouseEvent('left-press', 7));
+        expandedHandler?.(mouseEvent('left-release', 7));
+        vi.advanceTimersByTime(MULTI_CLICK_MS);
+      });
+
+      expect(lastFrame()).toContain('click to expand');
+      expect(lastFrame()).not.toContain('very long result');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats a different row as a new click', () => {
+    vi.mocked(measureElementPosition).mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 80,
+      height: 2,
+    });
+    vi.mocked(hyperlinkAtCell).mockReturnValueOnce('https://example.com');
+    const { handler, lastFrame } = renderCollapsedTool();
+
+    act(() => {
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('left-release', 5));
+      handler?.(mouseEvent('left-press', 5, 2));
+      handler?.(mouseEvent('left-release', 5, 2));
+    });
+
+    expect(lastFrame()).toContain('very long result');
   });
 
   it('falls back to Ctrl+O when viewport clicking is unavailable', () => {

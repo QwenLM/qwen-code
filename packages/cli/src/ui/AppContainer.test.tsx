@@ -6735,9 +6735,17 @@ describe('AppContainer State Management', () => {
     );
 
     expect(capturedToolDetailsExpanded.expandedBatchIds).toEqual(new Set());
-    expect(capturedToolDetailsExpanded.toggleBatch.toString()).toContain(
-      'toggleInSet',
+    act(() => {
+      capturedToolDetailsExpanded.toggleBatch('tool-batch-1');
+    });
+    expect(capturedToolDetailsExpanded.expandedBatchIds).toEqual(
+      new Set(['tool-batch-1']),
     );
+
+    act(() => {
+      capturedToolDetailsExpanded.toggleBatch('tool-batch-1');
+    });
+    expect(capturedToolDetailsExpanded.expandedBatchIds).toEqual(new Set());
   });
 
   describe('Model Dialog Integration', () => {

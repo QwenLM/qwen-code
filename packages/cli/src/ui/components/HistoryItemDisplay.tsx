@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { memo, useMemo, useRef, useCallback, useState } from 'react';
+import { memo, useMemo, useRef, useCallback, useState, useEffect } from 'react';
 import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
@@ -260,6 +260,7 @@ export const CollapsibleToolGroupMessage: React.FC<
     time: number;
     count: number;
   } | null>(null);
+  const collapseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
   const { stdout } = useStdout();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
@@ -276,10 +277,35 @@ export const CollapsibleToolGroupMessage: React.FC<
     ? expandedBatchIds.has(expansionKey)
     : locallyExpanded;
   const collapsed = canToggle && !expanded;
+  const toggleExpanded = useCallback(() => {
+    if (expansionKey) {
+      toggleBatch(expansionKey);
+    } else {
+      setLocallyExpanded((value) => !value);
+    }
+  }, [expansionKey, toggleBatch]);
+  const cancelPendingCollapse = useCallback(() => {
+    if (collapseTimerRef.current !== null) {
+      clearTimeout(collapseTimerRef.current);
+      collapseTimerRef.current = null;
+    }
+  }, []);
+  const armPendingCollapse = useCallback(() => {
+    cancelPendingCollapse();
+    collapseTimerRef.current = setTimeout(() => {
+      collapseTimerRef.current = null;
+      toggleExpanded();
+    }, MULTI_CLICK_MS);
+  }, [cancelPendingCollapse, toggleExpanded]);
+
+  useEffect(() => cancelPendingCollapse, [cancelPendingCollapse]);
 
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
+        if (event.name.endsWith('-press')) {
+          cancelPendingCollapse();
+        }
         if (!canToggle || !ref.current) return;
         if (event.name === 'move') {
           if (
@@ -288,7 +314,9 @@ export const CollapsibleToolGroupMessage: React.FC<
               event.row !== pressRef.current.row)
           ) {
             pressRef.current = null;
-            lastClickRef.current = null;
+            if (lastClickRef.current?.count === 1) {
+              lastClickRef.current = null;
+            }
           }
           return;
         }
@@ -339,22 +367,23 @@ export const CollapsibleToolGroupMessage: React.FC<
             row,
           );
           if (url) return;
-          if (expansionKey) {
-            toggleBatch(expansionKey);
+          if (collapsed) {
+            toggleExpanded();
           } else {
-            setLocallyExpanded((value) => !value);
+            armPendingCollapse();
           }
         }
       },
       [
+        armPendingCollapse,
         canToggle,
+        cancelPendingCollapse,
         collapsed,
         terminalHeight,
         props.isPending,
         stdout,
         expanded,
-        expansionKey,
-        toggleBatch,
+        toggleExpanded,
       ],
     ),
     { isActive: isActive && clickable },
