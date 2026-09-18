@@ -7,12 +7,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DaemonLiveMuteUpdate, DaemonLiveStatus } from '@qwen-code/sdk';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  useLiveBrowserHost,
+  type UseLiveBrowserHostResult,
+} from './useLiveBrowserHost';
 
-const LIVE_FEATURE = 'realtime_voice';
+// A native macOS Host can attach (`/live/host`).
+const LIVE_NATIVE_FEATURE = 'realtime_voice';
+// This page may itself be the audio endpoint (`/live/web`), on any platform.
+const LIVE_BROWSER_FEATURE = 'realtime_voice_web';
 const POLL_INTERVAL_MS = 1_000;
 
 export interface UseLiveVoiceResult {
+  /** Either kind of Host is available on this daemon. */
   supported: boolean;
+  nativeSupported: boolean;
+  browserSupported: boolean;
+  /** This page as the audio endpoint; idle until the user connects it. */
+  browserHost: UseLiveBrowserHostResult;
   status: DaemonLiveStatus | undefined;
   loading: boolean;
   mutating: boolean;
@@ -34,9 +46,10 @@ function unavailableStatus(message: string): DaemonLiveStatus {
 
 export function useLiveVoice(): UseLiveVoiceResult {
   const workspace = useWorkspace();
-  const supported = (workspace.capabilities?.features ?? []).includes(
-    LIVE_FEATURE,
-  );
+  const features = workspace.capabilities?.features ?? [];
+  const nativeSupported = features.includes(LIVE_NATIVE_FEATURE);
+  const browserSupported = features.includes(LIVE_BROWSER_FEATURE);
+  const supported = nativeSupported || browserSupported;
   const [status, setStatus] = useState<DaemonLiveStatus>();
   const [loading, setLoading] = useState(false);
   const [mutating, setMutating] = useState(false);
@@ -172,8 +185,22 @@ export function useLiveVoice(): UseLiveVoiceResult {
     [mutate, workspace.client],
   );
 
+  const pushStatus = useCallback((next: DaemonLiveStatus) => {
+    if (mountedRef.current) setStatus(next);
+  }, []);
+
+  // The daemon pushes status over the Host socket; it beats the 1 s poll.
+  const browserHost = useLiveBrowserHost({
+    baseUrl: workspace.baseUrl,
+    token: workspace.token,
+    onStatus: pushStatus,
+  });
+
   return {
     supported,
+    nativeSupported,
+    browserSupported,
+    browserHost,
     status,
     loading,
     mutating,
