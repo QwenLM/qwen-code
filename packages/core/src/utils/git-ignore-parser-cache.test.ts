@@ -8,10 +8,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { GitIgnoreParser } from './gitIgnoreParser.js';
+import {
+  GitIgnoreParser,
+  MATCHER_CACHE_RESET_INTERVAL,
+} from './gitIgnoreParser.js';
 
 // Exercise a complete production matcher-evaluation window.
-const LOOKUP_WINDOW = 10_000;
+const LOOKUP_WINDOW = MATCHER_CACHE_RESET_INTERVAL;
 
 describe('GitIgnoreParser cache retention', () => {
   let root: string;

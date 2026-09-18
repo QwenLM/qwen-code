@@ -10,7 +10,7 @@ import ignore from 'ignore';
 import { isPathWithinRoot } from './workspaceContext.js';
 
 // Bound transient compiled matcher and per-path matcher caches during large scans.
-const MATCHER_CACHE_RESET_INTERVAL = 10_000;
+export const MATCHER_CACHE_RESET_INTERVAL = 10_000;
 
 export interface GitIgnoreFilter {
   isIgnored(filePath: string): boolean;

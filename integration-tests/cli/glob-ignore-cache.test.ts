@@ -7,6 +7,7 @@
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MATCHER_CACHE_RESET_INTERVAL } from '@qwen-code/qwen-code-core/utils/gitIgnoreParser.js';
 import { fakeToolCall } from '../fake-openai-server.js';
 import { runForcedToolCallScenario, TestRig } from '../test-helper.js';
 
@@ -28,8 +29,10 @@ describe('Glob ignore-cache rollover', () => {
     rig.createFile('needle.txt', 'root match');
 
     // A sparse pattern must traverse the whole tree rather than hit Glob's
-    // result-count cap. Directory checks exceed one matcher-cache window.
-    for (let i = 0; i < 6000; i++) {
+    // result-count cap. Each fixture entry adds two traversed directories, so
+    // this exceeds one production matcher-cache window without a stale literal.
+    const scratchDirectories = Math.floor(MATCHER_CACHE_RESET_INTERVAL / 2) + 1;
+    for (let i = 0; i < scratchDirectories; i++) {
       rig.mkdir(`scratch/${i}/nested`);
     }
     rig.mkdir('a/nested/cache');

@@ -7,13 +7,13 @@ negation, directory-only patterns, and `.git/info/exclude` keep their existing
 precedence; ignore files below an ignored ancestor are not consulted.
 
 Transient compiled matchers are discarded before the next ignore query after
-at least 10,000 matcher evaluations have accumulated. The counter includes both
-final path checks and ancestor-pruning checks performed while building a matcher
-on a cache miss, so deep paths consume multiple units instead of bypassing the
-bound. One query can cross the threshold; the rollover happens before the
-following query. This also releases the matchers' internal per-path result
-caches. Per-directory rule lookups, including empty `.gitignore` probes, are
-retained for the session, and `.git/info/exclude` is read at most once per
+the production matcher-evaluation window has accumulated. The counter includes
+both final path checks and ancestor-pruning checks performed while building a
+matcher on a cache miss, so deep paths consume multiple units instead of
+bypassing the bound. One query can cross the threshold; the rollover happens
+before the following query. This also releases the matchers' internal per-path
+result caches. Per-directory rule lookups, including empty `.gitignore` probes,
+are retained for the session, and `.git/info/exclude` is read at most once per
 process. The interval is an internal memory/performance tradeoff, not a user
 setting or a reload mechanism. Restart the session after changing ignore files.
 
