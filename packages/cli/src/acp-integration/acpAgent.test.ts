@@ -140,9 +140,11 @@ const { mockPreloadContentGenerator } = vi.hoisted(() => ({
   mockPreloadContentGenerator: vi.fn().mockResolvedValue(undefined),
 }));
 
-const { mockListWorkflowSnapshots } = vi.hoisted(() => ({
-  mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
-}));
+const { mockListWorkflowSnapshots, mockClaimInterruptedWorkflowRuns } =
+  vi.hoisted(() => ({
+    mockListWorkflowSnapshots: vi.fn().mockResolvedValue([]),
+    mockClaimInterruptedWorkflowRuns: vi.fn().mockResolvedValue([]),
+  }));
 const { mockListSavedWorkflows } = vi.hoisted(() => ({
   mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
 }));
@@ -400,6 +402,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).extractAndStripMeta,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
+  claimInterruptedWorkflowRuns: mockClaimInterruptedWorkflowRuns,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
   withDaemonSpan: mockWithDaemonSpan,
@@ -9739,7 +9742,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('lists workspace hooks from the registry with their stored config and state', async () => {
+  it('lists workspace hooks from the registry with their stored config and state, without subagent entries', async () => {
     const getAllSessionHooks = vi.fn().mockReturnValue([
       {
         hookId: 'session-hook-1',
@@ -9756,6 +9759,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getBareMode: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('workspace-session'),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getHookSystem: vi.fn().mockReturnValue({
         getAllHooks: () => [
           {
@@ -9775,6 +9779,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             eventName: 'Stop',
             source: 'session',
             agentScope: 'agent-1',
+            enabled: true,
+            config: {
+              type: 'http',
+              url: 'https://hooks.example.com/agent-stop',
+            },
+          },
+          {
+            eventName: 'Stop',
+            source: 'project',
             enabled: true,
             config: {
               type: 'http',
@@ -9831,7 +9844,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             headers: { 'X-Team': 'core' },
             once: true,
           },
-          source: 'session',
+          source: 'project',
           enabled: true,
         },
       ],
@@ -13448,6 +13461,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(2);
+    // A run the previous process left unfinished becomes history before the
+    // session first reads it.
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledOnce();
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledWith(innerConfig);
+    expect(
+      mockClaimInterruptedWorkflowRuns.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockListWorkflowSnapshots.mock.invocationCallOrder[0]!);
 
     mockConnectionState.resolve();
     await agentPromise;
