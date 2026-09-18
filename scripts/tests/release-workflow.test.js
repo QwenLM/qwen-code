@@ -652,6 +652,7 @@ describe('release workflow', () => {
               NPM_TAG: 'latest',
               PUBLISH_AUDIO_CAPTURE: 'false',
               PUBLISH_EXTERNAL_CONTEXT_MEM0: 'false',
+              PUBLISH_WEB_SHELL: 'true',
               PUBLISH_LOG: publishLog,
               RELEASE_VERSION: '1.2.3',
             },
@@ -680,6 +681,81 @@ describe('release workflow', () => {
         expect(result.stdout).toContain(
           'Every channel package was already published; nothing shipped',
         );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'skips the web-shell publish until trusted publishing is enabled',
+    () => {
+      // Same scaffold as the enabled-path test above; the gate must leave the
+      // long-shipped packages untouched and drop only packages/web-shell.
+      const directory = mkdtempSync(join(tmpdir(), 'release-publish-'));
+      const bin = join(directory, 'bin');
+      const publishLog = join(directory, 'published');
+      const channels = [
+        'dingtalk',
+        'dws',
+        'feishu',
+        'github',
+        'qqbot',
+        'telegram',
+        'wecom',
+        'weixin',
+      ];
+      mkdirSync(bin);
+      for (const path of [
+        'dist',
+        'packages/web-shell',
+        'packages/channels/base',
+        ...channels.map((channel) => `packages/channels/${channel}`),
+      ]) {
+        mkdirSync(join(directory, path), { recursive: true });
+      }
+      writeFileSync(join(bin, 'node'), '#!/bin/sh\nbasename "$PWD"\n', {
+        mode: 0o755,
+      });
+      writeFileSync(
+        join(bin, 'npm'),
+        '#!/bin/sh\n' +
+          'if [ "$1" = view ]; then\n' +
+          '  case "$PWD" in */channels/base) exit 1 ;; */channels/*) exit 0 ;; *) exit 1 ;; esac\n' +
+          'fi\n' +
+          'if [ "$1" = publish ]; then printf "%s\\t%s\\n" "$PWD" "$*" >> "$PUBLISH_LOG"; fi\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'publish-packages'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              IS_DRY_RUN: 'false',
+              NPM_TAG: 'latest',
+              PUBLISH_AUDIO_CAPTURE: 'false',
+              PUBLISH_EXTERNAL_CONTEXT_MEM0: 'false',
+              PUBLISH_WEB_SHELL: 'false',
+              PUBLISH_LOG: publishLog,
+              RELEASE_VERSION: '1.2.3',
+            },
+          },
+        );
+        expect(result.status).toBe(0);
+        const canonicalDirectory = realpathSync(directory);
+        const publishCalls = readFileSync(publishLog, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => line.split('\t'));
+        expect(publishCalls.map(([cwd]) => cwd)).toEqual([
+          join(canonicalDirectory, 'dist'),
+          join(canonicalDirectory, 'packages/channels/base'),
+        ]);
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -2301,6 +2377,33 @@ describe('release workflow', () => {
     expect(
       releaseStepScript.indexOf('integrations/external-context-mem0'),
     ).toBeLessThan(releaseStepScript.indexOf('packages/audio-capture'));
+  });
+
+  it('publishes web-shell only after trusted publishing bootstrap', () => {
+    // Same one-time npm bootstrap as the Mem0 Extension above: a trusted
+    // publisher binds only to a package that already exists on npm, so the
+    // publish waits on the repository variable. The repo clause additionally
+    // keeps a fork running this workflow from publishing
+    // @qwen-code/web-shell, exactly like PUBLISH_AUDIO_CAPTURE.
+    const publishStep = releaseYaml.jobs.publish.steps.find(
+      (step) => step.name === 'Publish npm packages',
+    );
+    expect(publishStep.env.PUBLISH_WEB_SHELL).toContain(
+      "vars.NPM_WEB_SHELL_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    expect(publishStep.env.PUBLISH_WEB_SHELL).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
+    );
+    expect(releaseStepScript).toContain(
+      'if [[ "${PUBLISH_WEB_SHELL}" == "true" ]]; then',
+    );
+    // The gate must wrap the publish: enabled or not, web-shell stays the
+    // last publish so its failure never strands the long-shipped packages.
+    expect(
+      releaseStepScript.indexOf('if [[ "${PUBLISH_WEB_SHELL}" == "true" ]]'),
+    ).toBeLessThan(
+      releaseStepScript.indexOf("publish_package 'packages/web-shell'"),
+    );
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {

@@ -198,10 +198,14 @@ case "${step}" in
       echo "::endgroup::"
     done
 
-    # Last on purpose: this is the only name in the sequence CI has never
-    # published, so a failure here leaves every long-shipped package already
-    # out instead of stranding them under `set -eo pipefail`.
-    publish_package 'packages/web-shell'
+    # Last on purpose: a failure here leaves every long-shipped package
+    # already out instead of stranding them under `set -eo pipefail`. Gated
+    # like external-context-mem0: npm binds a trusted publisher only to a
+    # package that already exists, so the publish stays behind the repository
+    # variable until a maintainer finishes the one-time npm-side binding.
+    if [[ "${PUBLISH_WEB_SHELL}" == "true" ]]; then
+      publish_package 'packages/web-shell'
+    fi
 
     if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${publish_marker}" ]]; then
       echo "::warning::Every channel package was already published; nothing shipped"

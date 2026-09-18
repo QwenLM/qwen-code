@@ -718,6 +718,7 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           PUBLISH_AUDIO_CAPTURE: "${{ github.repository == 'QwenLM/qwen-code' }}"
           PUBLISH_EXTERNAL_CONTEXT_MEM0: "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true' }}"
+          PUBLISH_WEB_SHELL: "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_WEB_SHELL_TRUSTED_PUBLISHING_ENABLED == 'true' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh publish-packages'
 
       - *reset_release_workflow_scripts
