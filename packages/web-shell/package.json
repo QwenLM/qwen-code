@@ -30,7 +30,9 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json",
+    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json && node scripts/rewrite-declaration-aliases.mjs && npm run verify:package",
+    "verify:package": "node scripts/verify-package.mjs",
+    "prepublishOnly": "npm run verify:package",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
