@@ -70,6 +70,17 @@ export interface ServeOptions {
    * still fails the remote-bind check.
    */
   token?: string;
+  /**
+   * Print the token-bearing pairing QR even when it would be withheld —
+   * an operator-supplied (stable) token on captured (non-TTY) stdout. The
+   * default suppression keeps stable credentials out of collected logs; this
+   * opt-in declares the log pipeline as trusted as the daemon host. An
+   * explicit value (either polarity) wins over the `serve.pairingQr` setting;
+   * `undefined` means the flag was omitted and the setting applies. No effect
+   * for generated tokens or interactive terminals, where the QR already
+   * prints.
+   */
+  pairingQr?: boolean;
   mode: ServeMode;
   /** Registration capacity, including primary and user scratch workspaces.
    * Defaults to QWEN_SERVE_MAX_WORKSPACES or 256; accepts integers 1..256.

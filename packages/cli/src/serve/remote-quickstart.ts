@@ -132,6 +132,7 @@ export async function printRemoteQuickstart(input: {
   token: string;
   generated: boolean;
   web: boolean;
+  pairingQr?: boolean;
   interfaces?: ReturnType<typeof networkInterfaces>;
 }): Promise<void> {
   // An informational block whose reader going away (`qwen serve | head`) must
@@ -183,26 +184,43 @@ export async function printRemoteQuickstart(input: {
       );
       return;
     }
-    // The QR encodes the resolved bearer. Print it when the credential is the
-    // ephemeral one this process generated (it has no other delivery channel)
-    // or the operator is at an interactive terminal; a stable operator token
-    // must not be re-published into captured stdout (container/systemd logs)
-    // on every restart. A pty-allocated container counts as interactive, so
-    // its logs remain secret-bearing by design.
-    if (!input.generated && !process.stdout.isTTY) return;
+    // The QR may encode the resolved bearer. That happens when the
+    // credential is the ephemeral one this process generated (it has no
+    // other delivery channel), when the operator is at an interactive
+    // terminal, or when the operator explicitly opted in via --pairing-qr /
+    // serve.pairingQr; otherwise a stable operator token must not be
+    // re-published into captured stdout (container/systemd logs) on every
+    // restart. A pty-allocated container counts as interactive, so its logs
+    // remain secret-bearing by design. The suppressed case still delivers
+    // the address by QR — the same URL is printed as plain text above, so
+    // the marginal disclosure is zero, and the Web Shell's auth gate asks
+    // for the token on arrival.
+    const suppressTokenQr =
+      !input.generated && !process.stdout.isTTY && input.pairingQr !== true;
+    if (suppressTokenQr)
+      writeStdoutLineSafe(
+        'Token-bearing QR suppressed: stable operator token with ' +
+          'non-interactive stdout. Pass --pairing-qr to print it anyway.',
+      );
     try {
       const { default: qrcode } = (await import('qrcode-terminal')) as {
         default: typeof import('qrcode-terminal');
       };
       qrcode.setErrorLevel('Q');
       qrcode.generate(
-        `${candidate.url}/#token=${encodeURIComponent(input.token)}`,
+        suppressTokenQr
+          ? candidate.url
+          : `${candidate.url}/#token=${encodeURIComponent(input.token)}`,
         { small: true },
         (code) => {
           writeStdoutLineSafe(
             `Scan to open Web Shell: ${candidate.url} (${candidate.label})`,
           );
-          writeStdoutLineSafe('SECRET QR: grants daemon access. Do not share.');
+          writeStdoutLineSafe(
+            suppressTokenQr
+              ? 'Address-only QR: the Web Shell will ask for the bearer token.'
+              : 'SECRET QR: grants daemon access. Do not share.',
+          );
           writeStdoutLineSafe(code.trimEnd());
         },
       );

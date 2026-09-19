@@ -4032,10 +4032,11 @@ async function runQwenServeImpl(
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* / serve.channels ` +
+        `policy.* / serve.channels / serve.pairingQr ` +
         `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
-        `to apply context.fileName / policy.* / serve.channels overrides.`,
+        `to apply context.fileName / policy.* / serve.channels / ` +
+        `serve.pairingQr overrides.`,
     );
   }
   // Init daemon logger early so all subsequent lifecycle events
@@ -9883,6 +9884,15 @@ async function runQwenServeImpl(
           token,
           generated: generatedToken,
           web: webShellMounted,
+          // The settings source is resolved here rather than in the yargs
+          // command layer so the serve fast path (which never runs that
+          // handler) honors serve.pairingQr identically. An explicit flag
+          // (either polarity) wins over the setting; the setting applies
+          // only when the flag was omitted.
+          pairingQr:
+            opts.pairingQr !== undefined
+              ? opts.pairingQr === true
+              : bootSettings?.serve?.pairingQr === true,
         });
       }
       // Operator log on stderr too (systemd/docker/k8s default
