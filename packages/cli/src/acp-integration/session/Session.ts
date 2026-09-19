@@ -431,6 +431,12 @@ import {
   toPermissionOptions,
 } from './permissionUtils.js';
 import {
+  buildPeerReviewRequest,
+  type PeerReviewDecision,
+  peerReviewDecision,
+  type PeerReviewSubject,
+} from '../peer-inbound.js';
+import {
   MessageRewriteMiddleware,
   loadRewriteConfig,
 } from './rewrite/index.js';
@@ -460,6 +466,11 @@ const GOAL_HELD_RECOVERY_COMMANDS =
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
+/**
+ * Queued messages from other sessions, kept apart from the budget for
+ * background results so neither can push the other out.
+ */
+const MAX_QUEUED_PEER_MESSAGES = MAX_BACKGROUND_NOTIFICATION_QUEUE;
 function readDaemonAttachmentReferences(
   value: unknown,
 ): SessionAttachmentReference[] | undefined {
@@ -1500,7 +1511,7 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
@@ -2157,10 +2168,13 @@ export class Session implements SessionContext {
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
   private currentWorkflowNotificationTaskId: string | null = null;
+  private currentPeerNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
   private currentNotificationWorkChainId?: string;
   private readonly channelTaskCaptures = new Set<ChannelTaskResponseCapture>();
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
+  /** Ids of peer messages accepted and not yet in the notification queue. */
+  private readonly acceptingPeerMessageIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
@@ -10554,7 +10568,19 @@ export class Session implements SessionContext {
   }
 
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
-    while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
+    // Messages from other sessions have a budget of their own, reserved
+    // before the sender was told `delivered` (`hasRoomForPeerMessage`).
+    // They neither take a slot a result needs nor can be evicted by one:
+    // an evicted message would leave its sender holding a `delivered`
+    // receipt for something the model never saw.
+    while (
+      item.kind !== 'peer' &&
+      this.#countQueuedNotifications((queued) => queued.kind !== 'peer') >=
+        MAX_BACKGROUND_NOTIFICATION_QUEUE
+    ) {
+      const candidates = this.notificationQueue.filter(
+        (queued) => queued.kind !== 'peer',
+      );
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
       // that can release it — so those are protected and the unrelated ones
@@ -10568,14 +10594,14 @@ export class Session implements SessionContext {
       // reads the original entry by index, since the guard predicate needs
       // fields the projection deliberately drops.
       const admission = decideNotificationAdmission(
-        this.notificationQueue.map(toAdmissibleNotification),
+        candidates.map(toAdmissibleNotification),
         toAdmissibleNotification(item),
         {
           max: MAX_BACKGROUND_NOTIFICATION_QUEUE,
           isProtected: (_projected, index) =>
             guardDefersUnrelatedWork &&
             this.#notificationContinuesTodoStopGuardWorkChain(
-              this.notificationQueue[index]!,
+              candidates[index]!,
             ),
         },
       );
@@ -10591,7 +10617,10 @@ export class Session implements SessionContext {
         return;
       }
       if (admission.action === 'push') break;
-      const [evicted] = this.notificationQueue.splice(admission.index, 1);
+      const [evicted] = this.notificationQueue.splice(
+        this.notificationQueue.indexOf(candidates[admission.index]!),
+        1,
+      );
       debugLogger.warn(
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
@@ -10651,6 +10680,114 @@ export class Session implements SessionContext {
     }
   }
 
+  /**
+   * Queue a cross-session message this session's gate accepted.
+   *
+   * It travels as a background notification: recorded in the transcript
+   * first, then handled in a turn of its own once the session is idle —
+   * after whatever prompt is running, the same "next turn" a person at a
+   * terminal gets. The message id is the task id, so a repeat of it is
+   * recognised rather than handled twice.
+   */
+  async enqueuePeerMessage(message: {
+    msgId: string;
+    displayText: string;
+    modelText: string;
+    label?: string;
+  }): Promise<{ accepted: boolean }> {
+    this.acceptingPeerMessageIds.add(message.msgId);
+    try {
+      return await this.enqueueBackgroundNotification({
+        taskId: message.msgId,
+        // A task status to the notification pipeline; for a message it
+        // means the message arrived, which is all there is to say.
+        status: 'completed',
+        kind: 'peer',
+        displayText: message.displayText,
+        modelText: message.modelText,
+        ...(message.label !== undefined ? { label: message.label } : {}),
+      });
+    } finally {
+      this.acceptingPeerMessageIds.delete(message.msgId);
+    }
+  }
+
+  /**
+   * Whether another peer message fits in the budget peer messages have
+   * in the notification queue. Checked before a message is accepted, and
+   * counting the ones still being recorded, so a full budget turns the
+   * sender away with an honest receipt. Peer messages are never evicted
+   * and never evict anything else.
+   */
+  hasRoomForPeerMessage(): boolean {
+    return (
+      !this.disposed &&
+      !this.closing &&
+      // Queuing starts with a transcript record, and without a recorder
+      // every message would be accepted only to be taken back.
+      this.config.getChatRecordingService() !== undefined &&
+      this.#countQueuedNotifications((queued) => queued.kind === 'peer') +
+        this.acceptingPeerMessageIds.size <
+        MAX_QUEUED_PEER_MESSAGES
+    );
+  }
+
+  /**
+   * Whether this session can still be addressed at all. False once it is
+   * disposed, which happens before the host finishes removing it.
+   */
+  isOpenForPeerMessages(): boolean {
+    return !this.disposed;
+  }
+
+  #countQueuedNotifications(
+    matches: (item: QueuedBackgroundNotification) => boolean,
+  ): number {
+    let count = 0;
+    for (const queued of this.notificationQueue) if (matches(queued)) count++;
+    return count;
+  }
+
+  /**
+   * Ids of peer messages accepted here that no turn has handled yet —
+   * including the one a turn is handling right now: it was spliced out of
+   * the queue and may still be put back, so it only leaves this list once
+   * its turn actually ran.
+   */
+  queuedPeerMessageIds(): string[] {
+    return [
+      ...this.acceptingPeerMessageIds,
+      ...(this.currentPeerNotificationTaskId !== null
+        ? [this.currentPeerNotificationTaskId]
+        : []),
+      ...this.notificationQueue
+        .filter((item) => item.kind === 'peer')
+        .map((item) => item.taskId),
+    ];
+  }
+
+  /**
+   * Ask this session's client whether to deliver a held cross-session
+   * message.
+   *
+   * Sent straight to the client rather than through the queue tool
+   * approvals share: a hold can wait minutes for an answer, and a tool
+   * call in the meantime must not wait behind it. Rejects when `signal`
+   * aborts; resolves `cancelled` for any answer that is not one of the
+   * two offered options.
+   */
+  async requestPeerMessageReview(
+    subject: PeerReviewSubject,
+    signal: AbortSignal,
+  ): Promise<PeerReviewDecision> {
+    const response = await requestPermissionWithAbort(
+      this.client,
+      buildPeerReviewRequest(this.sessionId, subject),
+      signal,
+    );
+    return peerReviewDecision(response);
+  }
+
   async #persistDaemonBackgroundNotification(
     item: BackgroundNotificationQueueItem,
   ): Promise<boolean> {
@@ -10678,14 +10815,19 @@ export class Session implements SessionContext {
     }
 
     this.persistedBackgroundNotificationTaskIds.add(item.taskId);
-    if (!this.disposed && !this.closing) {
-      this.#enqueueBackgroundNotification({
-        ...item,
-        continuesTodoStopGuardWorkChain:
-          this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
-        persisted: true,
-      });
+    if (this.disposed || this.closing) {
+      // The session began closing while the record was written. A result
+      // is durable in the transcript and counts as accepted; a message
+      // from another session is not handled by anyone now, and saying
+      // "accepted" would leave its sender holding `delivered`.
+      return item.kind !== 'peer';
     }
+    this.#enqueueBackgroundNotification({
+      ...item,
+      continuesTodoStopGuardWorkChain:
+        this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
+      persisted: true,
+    });
     return true;
   }
 
@@ -10871,6 +11013,12 @@ export class Session implements SessionContext {
           item.kind === 'agent' ? item.taskId : null;
         this.currentWorkflowNotificationTaskId =
           item.kind === 'workflow' ? item.taskId : null;
+        // A peer message is spliced out of the queue while its turn runs
+        // and put back when the turn never happened; the host's waiting-ids
+        // snapshot must keep naming it either way, or a correction keyed on
+        // that snapshot loses a message the sender was told was delivered.
+        this.currentPeerNotificationTaskId =
+          item.kind === 'peer' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
         this.currentNotificationWorkChainId = item.todoWorkChainId;
         this.#activeWorkChanged();
@@ -10930,6 +11078,7 @@ export class Session implements SessionContext {
         } finally {
           this.currentAgentNotificationTaskId = null;
           this.currentWorkflowNotificationTaskId = null;
+          this.currentPeerNotificationTaskId = null;
           this.currentShellNotificationActive = false;
           this.currentNotificationWorkChainId = undefined;
           this.#activeWorkChanged();

@@ -40,6 +40,7 @@ import {
   forgetSendPacerMessages,
   formatPeerDisplay,
   formatPeerEnvelope,
+  peerSenderLabel,
   getPeerControllerRegistryPath,
   InboundGate,
   MAX_HELD_MESSAGES,
@@ -75,6 +76,8 @@ export interface PeerQueuedDelivery {
   from?: string;
   replyToken?: string;
   toSessionId?: string;
+  /** Who sent it, as a person should see it (see `peerSenderLabel`). */
+  senderLabel?: string;
 }
 
 export {
@@ -154,15 +157,20 @@ export interface PeerReceipt {
 }
 
 export interface PeerMessagingOptions {
-  getApprovalMode: () => ApprovalMode | null;
-  getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * The four settings readers take the session a message is addressed to
+   * (its `toSessionId`). A process holding one session ignores it; one
+   * hosting several reads the settings of that session. See the gate.
+   */
+  getApprovalMode: (sessionId?: string) => ApprovalMode | null;
+  getPolicySetting: (sessionId?: string) => InboundPolicy | undefined;
   /**
    * How long a held message waits, in milliseconds, or null for "until
    * the session ends". Omitted in tests, which take the default.
    */
-  getHeldExpiryMs?: () => number | null;
+  getHeldExpiryMs?: (sessionId?: string) => number | null;
   /** Which scope set the policy, for wording a hold cause. See the gate. */
-  getPolicyScope?: () => PolicyScope | undefined;
+  getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -281,8 +289,12 @@ export class PeerMessaging {
    * still buffered here or still queued in the session's input queue.
    * Settled with a corrective receipt at close.
    */
-  private readonly outstanding: PeerUserFrame[] = [];
+  private readonly outstanding: Array<{
+    frame: PeerUserFrame;
+    admissionKey: string;
+  }> = [];
   private queuedPeerCount: (() => number) | null = null;
+  private queuedPeerIds: (() => ReadonlySet<string>) | null = null;
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
   >();
@@ -484,6 +496,91 @@ export class PeerMessaging {
     this.queuedPeerCount = fn;
   }
 
+  /**
+   * Register the ids of peer messages still waiting to be consumed, for a
+   * host whose queues do not drain in arrival order.
+   *
+   * The count above assumes one queue drained oldest-first, so the
+   * unconsumed messages are the newest ones. A process hosting several
+   * sessions has a queue per session, each draining on its own schedule,
+   * and only the ids say which messages are still waiting. Ids are
+   * compared canonicalized. When set, this is used instead of the count.
+   */
+  setQueuedPeerIds(fn: () => ReadonlySet<string>): void {
+    this.queuedPeerIds = fn;
+  }
+
+  /**
+   * Take back the `delivered` receipt of a message the host accepted and
+   * then could not queue — its session went away, or the transcript write
+   * the queue depends on failed. The sender is told `expired`, which is a
+   * legal step from `delivered`, and the message stops counting against
+   * its sender's duplicate window so an honest retry can land.
+   */
+  expireUndelivered(delivery: PeerQueuedDelivery): void {
+    const key = canonicalizeMsgId(delivery.msgId);
+    const index = this.outstanding.findIndex(
+      (entry) => canonicalizeMsgId(entry.frame.msgId) === key,
+    );
+    // Not outstanding means already corrected — its session's removal
+    // expired it (`expireUnconsumed`) — and a second receipt would be a
+    // transition the sender has already made.
+    if (index === -1) return;
+    this.outstanding.splice(index, 1);
+    debugLogger.debug(
+      `accepted peer message ${delivery.msgId} could not be queued; expiring it`,
+    );
+    if (delivery.from) {
+      void sendDeliveryStatus(
+        delivery.from,
+        {
+          status: 'expired',
+          origMsgId: delivery.msgId,
+          from: this.inbox?.socketPath,
+        },
+        delivery.replyToken,
+      );
+    }
+    if (delivery.admissionKey !== undefined) {
+      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
+    }
+  }
+
+  /**
+   * Take back the `delivered` receipts of accepted messages that will now
+   * never be consumed: they were waiting in the queue of a session that is
+   * going away while the process stays up. Ids not outstanding are
+   * skipped, so a message already corrected is not corrected twice.
+   * Returns how many were expired.
+   */
+  expireUnconsumed(msgIds: Iterable<string>): number {
+    const wanted = new Set<string>();
+    for (const id of msgIds) wanted.add(canonicalizeMsgId(id));
+    let expired = 0;
+    for (let index = this.outstanding.length - 1; index >= 0; index--) {
+      const { frame, admissionKey } = this.outstanding[index]!;
+      if (!wanted.has(canonicalizeMsgId(frame.msgId))) continue;
+      this.outstanding.splice(index, 1);
+      expired += 1;
+      if (frame.from !== undefined) {
+        void sendDeliveryStatus(
+          frame.from,
+          {
+            status: 'expired',
+            origMsgId: frame.msgId,
+            from: this.inbox?.socketPath,
+          },
+          frame.replyToken,
+        );
+      }
+      // The receipt tells the sender to re-send if it still matters; the
+      // duplicate window must not then call that retry a repeat of a
+      // delivery nobody consumed. Same release `expireUndelivered` makes.
+      this.gate?.forgetAdmittedMessage(admissionKey, frame.msgId);
+    }
+    return expired;
+  }
+
   getHeld(): readonly HeldMessage[] {
     return this.withControllerValidity(() => this.gate?.getHeld() ?? []);
   }
@@ -494,6 +591,15 @@ export class PeerMessaging {
    */
   getHeldExpiryMs(): number | null {
     return this.gate?.getHeldExpiryMs() ?? null;
+  }
+
+  /**
+   * When a held message will expire, as a wall-clock epoch in
+   * milliseconds, or null when it will not — judged for the session it is
+   * addressed to, the way the gate will judge it.
+   */
+  heldExpiresAt(entry: HeldMessage): number | null {
+    return this.gate?.heldExpiresAt(entry) ?? null;
   }
 
   /**
@@ -574,6 +680,15 @@ export class PeerMessaging {
     return this.withControllerValidity(
       () => this.gate?.decide(msgId, decision) ?? 'gone',
     );
+  }
+
+  /**
+   * Settle as expired the held messages addressed to a session that is
+   * going away while the process stays up. `isFor` is asked about each
+   * held message's `toSessionId`. Returns how many were settled.
+   */
+  expireHeldFor(isFor: (toSessionId: string | undefined) => boolean): number {
+    return this.gate?.expireHeldWhere((frame) => isFor(frame.toSessionId)) ?? 0;
   }
 
   /** Remove a revoked grant's authority from messages already waiting. */
@@ -726,10 +841,7 @@ export class PeerMessaging {
    * exist to carry.
    */
   private async settleUnconsumed(): Promise<void> {
-    const queued = this.queuedPeerCount?.() ?? 0;
-    const dropped = this.outstanding.slice(
-      Math.max(0, this.outstanding.length - this.buffered.length - queued),
-    );
+    const dropped = this.unconsumedFrames();
     const receipts = dropped
       .filter((frame) => frame.from !== undefined)
       .map((frame) =>
@@ -744,6 +856,44 @@ export class PeerMessaging {
         ),
       );
     await Promise.allSettled(receipts);
+  }
+
+  private unconsumedFrames(): PeerUserFrame[] {
+    if (this.queuedPeerIds) {
+      // A reader that cannot answer says nothing about what waits; only the
+      // buffered frames — known locally — are certain. Throwing must not
+      // read as "everything was consumed".
+      const waiting = this.waitingPeerIds() ?? new Set<string>();
+      const buffered = new Set(
+        this.buffered.map((entry) => canonicalizeMsgId(entry.frame.msgId)),
+      );
+      return this.outstanding
+        .filter((entry) => {
+          const key = canonicalizeMsgId(entry.frame.msgId);
+          return buffered.has(key) || waiting.has(key);
+        })
+        .map((entry) => entry.frame);
+    }
+    const queued = this.queuedPeerCount?.() ?? 0;
+    return this.outstanding
+      .slice(
+        Math.max(0, this.outstanding.length - this.buffered.length - queued),
+      )
+      .map((entry) => entry.frame);
+  }
+
+  /** What the host says still waits, or undefined when it cannot say. */
+  private waitingPeerIds(): ReadonlySet<string> | undefined {
+    try {
+      return this.queuedPeerIds?.();
+    } catch (error) {
+      debugLogger.debug(
+        `queued-peer-ids reader threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -924,7 +1074,7 @@ export class PeerMessaging {
         throw new Error('accepted-message backlog is full');
       }
       this.buffered.push({ frame, origin });
-      this.trackOutstanding(frame);
+      this.trackOutstanding(frame, origin);
       return;
     }
     if (this.buffered.length > 0) {
@@ -941,11 +1091,35 @@ export class PeerMessaging {
     if (!this.submit(frame, origin)) {
       throw new Error('accepted-message backlog is full');
     }
-    this.trackOutstanding(frame);
+    this.trackOutstanding(frame, origin);
   }
 
-  private trackOutstanding(frame: PeerUserFrame): void {
-    this.outstanding.push(frame);
+  private trackOutstanding(frame: PeerUserFrame, origin: PeerOrigin): void {
+    this.outstanding.push({
+      frame,
+      admissionKey: peerSenderKey(frame, origin),
+    });
+    if (this.queuedPeerIds) {
+      // A host of several sessions says exactly which messages still
+      // wait, and nothing else can matter: keep those and drop the rest.
+      // Its sessions drain on their own schedules, so a count would drop
+      // a message that is old but still waiting, and its correction with
+      // it. The host bounds what waits, per session. A reader that cannot
+      // answer right now says nothing — pruning on that would clear the
+      // ledger — so the set is left to the next arrival.
+      const waiting = this.waitingPeerIds();
+      if (waiting === undefined) return;
+      const buffered = new Set(
+        this.buffered.map((entry) => canonicalizeMsgId(entry.frame.msgId)),
+      );
+      const kept = this.outstanding.filter((entry) => {
+        const key = canonicalizeMsgId(entry.frame.msgId);
+        return buffered.has(key) || waiting.has(key);
+      });
+      this.outstanding.length = 0;
+      this.outstanding.push(...kept);
+      return;
+    }
     // Only the unconsumed tail can ever matter, and it is bounded: at
     // most MAX_ACCEPTED_BACKLOG frames wait here and another
     // MAX_ACCEPTED_BACKLOG in the session's input queue. Anything older
@@ -1017,6 +1191,13 @@ export class PeerMessaging {
           ...(frame.toSessionId !== undefined
             ? { toSessionId: frame.toSessionId }
             : {}),
+          senderLabel: peerSenderLabel({
+            from,
+            ...(frame.fromName !== undefined
+              ? { fromName: frame.fromName }
+              : {}),
+            ...(origin.controller ? { controller: origin.controller } : {}),
+          }),
         },
       ) ?? false
     );

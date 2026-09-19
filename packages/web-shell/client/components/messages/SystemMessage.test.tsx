@@ -958,6 +958,34 @@ describe('background continuation', () => {
     act(() => container.querySelectorAll('button')[1]!.click());
     expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
   });
+  it('offers no details action for a peer turn', () => {
+    // A peer turn handled an inbound message in this session itself: its
+    // content is the transcript already shown, so there is no separate
+    // panel to open (a dedicated rendering is a documented follow-up).
+    const details = vi.fn();
+    const turn = {
+      turnId: 'turn-peer',
+      taskId: 'msg-1',
+      kind: 'peer' as const,
+      startedAt: 100,
+      label: 'build bot',
+    };
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="build bot"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{ ...turn, backgroundTask: { status: 'completed' } }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    // The marker still renders the message's label; only the details
+    // button is withheld.
+    expect(container.textContent).toContain('build bot');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
   it.each([
     ['failed', 'Background task failed'],
     ['cancelled', 'Background task cancelled'],

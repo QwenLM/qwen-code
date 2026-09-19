@@ -3837,6 +3837,20 @@ The active policy is configured in `settings.json` under `policy.permissionStrat
 > ordinary permissions and `ask_user_question` wait indefinitely for a human
 > decision. Voter cancellation, session cancellation, disconnect cleanup, and
 > daemon shutdown still resolve pending interactions as cancelled.
+>
+> **A request with its own deadline.** A request whose top-level
+> `_meta.expiresAt` is a number, in epoch milliseconds, times out at that
+> moment, or at the configured timeout if that comes first. Its pending
+> interaction leaves the list the same way. The agent uses this for a held
+> cross-session message: the request's `_meta.qwenInteractionKind` is
+> `peer_message`, its options are `peer_deliver` and `peer_drop`, and the
+> pending interaction's `action.peerMessage` carries the sender, origin,
+> hold cause and expiry. A vote for `peer_deliver` delivers the message to
+> the session, and `peer_drop` drops it. The request carries no `promptId`,
+> so a turn ending does not cancel it. A cancellation, such as the one
+> `POST /session/:id/cancel` applies to every pending request, leaves the
+> message held, and the session asks again shortly. See
+> [Cross-Session Protocol](../users/features/cross-session-protocol.md#sessions-a-program-drives-over-acp).
 
 Request:
 

@@ -610,6 +610,18 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
 
   it('exposes the workspace session live-state surface at the public entry', () => {
     expect(typeof Public.parseDaemonBackgroundTurn).toBe('function');
+    // A turn that handles a message from another session is a kind of
+    // its own, and a client reading live state has to accept it.
+    const peerTurn = {
+      turnId: 't-1',
+      taskId: 'msg-1',
+      kind: 'peer',
+      startedAt: 1,
+    };
+    expect(Public.parseDaemonBackgroundTurn(peerTurn)).toEqual(peerTurn);
+    expect(
+      Public.parseDaemonBackgroundTurn({ ...peerTurn, kind: 'mail' }),
+    ).toBeUndefined();
     // The prototype checks execute under vitest (type-only imports are
     // erased). The type shape assertions pin the wire contract via the
     // package typecheck, which compiles this file through

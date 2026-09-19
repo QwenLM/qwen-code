@@ -210,7 +210,8 @@ export function parseBackgroundNotificationTurn(
     (kind !== 'agent' &&
       kind !== 'monitor' &&
       kind !== 'shell' &&
-      kind !== 'workflow') ||
+      kind !== 'workflow' &&
+      kind !== 'peer') ||
     typeof startedAt !== 'number' ||
     !Number.isFinite(startedAt) ||
     startedAt < 0
@@ -829,6 +830,13 @@ export interface BridgePendingPermissionInteraction {
     content?: unknown;
     locations?: unknown;
     input?: unknown;
+    /**
+     * Present when the request asks about a held cross-session message
+     * (`_meta.qwenInteractionKind: 'peer_message'`): its id, sender, why it
+     * was held and when the hold expires. The `peer_deliver` option delivers
+     * it to the session and `peer_drop` drops it.
+     */
+    peerMessage?: Record<string, unknown>;
   };
   options: BridgePendingInteractionOption[];
 }

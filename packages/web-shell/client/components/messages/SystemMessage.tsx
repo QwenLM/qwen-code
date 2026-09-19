@@ -240,7 +240,7 @@ export const SystemMessage = memo(function SystemMessage({
               {t('background.source')}
             </Button>
           )}
-          {backgroundDetails && turn && (
+          {backgroundDetails && turn && turn.kind !== 'peer' && (
             <Button
               type="button"
               variant="ghost"

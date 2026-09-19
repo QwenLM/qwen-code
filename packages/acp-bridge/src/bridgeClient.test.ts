@@ -50,6 +50,7 @@ import {
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   BridgeClient,
+  requestTimeoutMs,
   type BridgeClientDeferredArtifactBatch,
   type BridgeClientSessionEntry,
 } from './bridgeClient.js';
@@ -3587,6 +3588,86 @@ describe('BridgeClient — pending interaction classification', () => {
     expect(entry.pendingPermissionIds.size).toBe(0);
   });
 
+  it('times a held-message review out when the message expires and projects its details', async () => {
+    const pendingInteractions = new Map<string, BridgePendingInteraction>();
+    let resolveRequest:
+      | ((value: { kind: 'cancelled'; reason: 'agent_cancelled' }) => void)
+      | undefined;
+    const timeouts: number[] = [];
+    const records: Array<{ promptId?: string; originatorClientId?: string }> =
+      [];
+    const publish = vi.fn().mockReturnValue(true);
+    // Asked while a prompt is running: the review still belongs to no
+    // turn, so the prompt ending cannot cancel it.
+    const entry = {
+      sessionId: 'sess:peer-review',
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions,
+      events: { publish },
+      promptActive: true,
+      activePromptId: 'prompt-1',
+      activePromptOriginatorClientId: 'client-1',
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === entry.sessionId ? entry : undefined) as never,
+      (() => undefined) as never,
+      {
+        request: (
+          record: { promptId?: string; originatorClientId?: string },
+          timeoutMs: number,
+        ) => {
+          records.push(record);
+          timeouts.push(timeoutMs);
+          return new Promise((resolve) => {
+            resolveRequest = resolve as typeof resolveRequest;
+          });
+        },
+      } as never,
+      // Reviews of tool calls stay untimed; the message's own expiry
+      // still bounds this one.
+      0,
+      Infinity,
+    );
+    const peerMessage = { msgId: 'm-1', sender: 'build bot', origin: 'peer' };
+
+    const request = client.requestPermission({
+      sessionId: entry.sessionId,
+      toolCall: {
+        toolCallId: 'peer-message:m-1',
+        title: 'Cross-session message: build bot',
+        kind: 'other',
+        _meta: { qwenInteractionKind: 'peer_message', peerMessage },
+      },
+      options: [
+        { optionId: 'peer_deliver', name: 'Deliver', kind: 'allow_once' },
+        { optionId: 'peer_drop', name: 'Drop', kind: 'reject_once' },
+      ],
+      _meta: {
+        qwenInteractionKind: 'peer_message',
+        expiresAt: Date.now() + 30_000,
+      },
+    });
+
+    await vi.waitFor(() => expect(pendingInteractions.size).toBe(1));
+    expect(timeouts).toHaveLength(1);
+    expect(timeouts[0]).toBeGreaterThan(29_000);
+    expect(timeouts[0]).toBeLessThanOrEqual(30_000);
+    expect([...pendingInteractions.values()][0]).toMatchObject({
+      kind: 'permission',
+      action: { type: 'other', peerMessage },
+    });
+    expect(records[0]?.promptId).toBeUndefined();
+    expect(records[0]?.originatorClientId).toBeUndefined();
+    const published = publish.mock.calls[0]![0] as Record<string, unknown>;
+    expect(published['type']).toBe('permission_request');
+    expect(published).not.toHaveProperty('promptId');
+    expect(published).not.toHaveProperty('originatorClientId');
+
+    resolveRequest!({ kind: 'cancelled', reason: 'agent_cancelled' });
+    await request;
+  });
+
   it('uses rawInput questions and assigns sequential answer keys', async () => {
     const pendingInteractions = new Map<string, BridgePendingInteraction>();
     let resolveRequest:
@@ -5268,5 +5349,37 @@ describe('background execution ownership', () => {
       outcome: { outcome: 'cancelled' },
     });
     expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+});
+
+describe('requestTimeoutMs', () => {
+  it('keeps the configured timeout when the request names no expiry', () => {
+    expect(requestTimeoutMs({}, 60_000, 1_000)).toBe(60_000);
+    expect(requestTimeoutMs({ _meta: { expiresAt: 'soon' } }, 0, 1_000)).toBe(
+      0,
+    );
+    expect(
+      requestTimeoutMs({ _meta: { expiresAt: Number.NaN } }, 60_000, 1_000),
+    ).toBe(60_000);
+  });
+
+  it('ends the request by its expiry when that comes first', () => {
+    expect(
+      requestTimeoutMs({ _meta: { expiresAt: 31_000 } }, 60_000, 1_000),
+    ).toBe(30_000);
+    expect(
+      requestTimeoutMs({ _meta: { expiresAt: 120_000 } }, 60_000, 1_000),
+    ).toBe(60_000);
+    // No configured timeout: the expiry alone bounds it.
+    expect(requestTimeoutMs({ _meta: { expiresAt: 31_000 } }, 0, 1_000)).toBe(
+      30_000,
+    );
+  });
+
+  it('never turns an already-passed expiry into "no timeout"', () => {
+    expect(requestTimeoutMs({ _meta: { expiresAt: 500 } }, 0, 1_000)).toBe(1);
+    expect(requestTimeoutMs({ _meta: { expiresAt: 500 } }, 60_000, 1_000)).toBe(
+      1,
+    );
   });
 });

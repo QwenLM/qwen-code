@@ -318,6 +318,43 @@ function normalizeChannelDeliveryHostResult(
   return { status: 'failed', code: code as ChannelDeliveryErrorCode, error };
 }
 
+/**
+ * How long one permission request may stay pending.
+ *
+ * A request can say when its question stops mattering — `_meta.expiresAt`,
+ * wall-clock epoch milliseconds — and is then resolved as cancelled at
+ * that moment, or at the configured timeout if that comes first. The agent
+ * cannot withdraw a request it sent, so this is how one that answers a
+ * deadline of its own (a held cross-session message expires) leaves every
+ * client's pending list on time rather than waiting for a vote that can
+ * no longer change anything. `0` means no timeout, as for the setting.
+ */
+export function requestTimeoutMs(
+  params: Pick<RequestPermissionRequest, '_meta'>,
+  configuredMs: number,
+  nowMs: number,
+): number {
+  const expiresAt = params._meta?.['expiresAt'];
+  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
+    return configuredMs;
+  }
+  // Never zero: that would read as "no timeout" and wait forever.
+  const untilExpiry = Math.max(1, Math.ceil(expiresAt - nowMs));
+  return configuredMs > 0 ? Math.min(configuredMs, untilExpiry) : untilExpiry;
+}
+
+/**
+ * Whether a permission request belongs to no turn. A review of a held
+ * cross-session message (`_meta.qwenInteractionKind: "peer_message"`) is
+ * one: the agent sends it whenever a message is held, which can be in the
+ * middle of an unrelated turn.
+ */
+function isTurnlessInteraction(
+  params: Pick<RequestPermissionRequest, '_meta'>,
+): boolean {
+  return params._meta?.['qwenInteractionKind'] === 'peer_message';
+}
+
 function pendingInteractionOptions(
   options: RequestPermissionRequest['options'],
 ): BridgePendingInteraction['options'] {
@@ -382,6 +419,12 @@ function pendingInteractionFromRequest(
         ? { locations: toolCall['locations'] }
         : {}),
       ...(rawInput !== undefined ? { input: rawInput } : {}),
+      // A held cross-session message asked about as a permission: the
+      // details a client needs to show it as a message, not a tool call.
+      ...(meta?.['qwenInteractionKind'] === 'peer_message' &&
+      isRecord(meta['peerMessage'])
+        ? { peerMessage: meta['peerMessage'] }
+        : {}),
     },
     options,
   };
@@ -980,19 +1023,28 @@ export class BridgeClient implements Client {
     const explicitBackgroundTurn = parseBackgroundNotificationTurn(
       params._meta?.['backgroundTurn'],
     );
+    // A held cross-session message is asked about outside any turn: it
+    // waits on its own expiry, not on whatever prompt or background turn
+    // happens to be running, so a turn ending must not cancel it.
+    const turnless = isTurnlessInteraction(params);
     if (
+      !turnless &&
       explicitBackgroundTurn &&
       entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn =
-      explicitBackgroundTurn ??
-      (entry.promptActive ? undefined : entry.backgroundTurn);
-    const permissionPromptId = backgroundTurn?.turnId ?? entry.activePromptId;
-    const permissionOriginator = backgroundTurn
+    const backgroundTurn = turnless
       ? undefined
-      : entry.activePromptOriginatorClientId;
+      : (explicitBackgroundTurn ??
+        (entry.promptActive ? undefined : entry.backgroundTurn));
+    const permissionPromptId = turnless
+      ? undefined
+      : (backgroundTurn?.turnId ?? entry.activePromptId);
+    const permissionOriginator =
+      turnless || backgroundTurn
+        ? undefined
+        : entry.activePromptOriginatorClientId;
     // Bd1z5: per-session cap. Reject before issuing so we never
     // grow `pendingPermissionIds` past the limit.
     if (entry.pendingPermissionIds.size >= this.maxPendingPerSession) {
@@ -1079,7 +1131,7 @@ export class BridgeClient implements Client {
       };
       const resolution = await this.mediator.request(
         record,
-        this.permissionTimeoutMs,
+        requestTimeoutMs(params, this.permissionTimeoutMs, record.issuedAtMs),
       );
       return resolutionToAcpResponse(resolution);
     } finally {

@@ -88,6 +88,8 @@ behalf: holding would leave every sender waiting out a five-minute expiry
 to learn nothing. `refused` says so immediately. Where a held message
 _should_ surface for these sessions — the ACP client, the daemon's own
 API — is a real question, and answering it is separate work.
+_Superseded:_ [ACP inbound peer messages](2026-09-18-acp-inbound-peer-messages.md)
+puts a held message to the session's client and delivers accepted ones.
 
 **Register when the session's own settings turn messaging on.** The
 interactive UI registers unconditionally, because its record also
@@ -140,6 +142,7 @@ would mostly contribute stale records.
 **Outbound only.** A hosted session can send and receives its own
 receipts; what it cannot do is take a message in. That is the next step,
 and the protocol page says so rather than leaving a reader to discover it.
+_Since done:_ see [ACP inbound peer messages](2026-09-18-acp-inbound-peer-messages.md).
 
 **`kind` is still a self-report.** `serve` comes from the environment
 marker the daemon sets on its children, which a process could set for

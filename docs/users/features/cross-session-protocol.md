@@ -280,7 +280,7 @@ In order:
 1. **Admission.** Per sender: a burst of 30, then one message every two seconds. All senders together: a burst of 32, then one a second — a sender names itself on the frame, so rotating that name buys a fresh allowance from the first limit but not the second. The same body from another session inside 30 seconds is a `duplicate`; a process the session started and a trusted controller are exempt from that check, and rate-limited like everyone else. A dropped message is never held, never delivered, and leaves no record, so a sender that waits out its burst and retries still lands.
 2. **Settled ids.** A `msgId` the gate already decided repeats its earlier verdict.
 3. **Policy.** `agents.crossSessionInbound` set to `accept`, `hold` or `refuse` wins. Unset: a process the session started or a trusted controller is accepted; otherwise a message is accepted only when `fromMode` names the same review class the receiver is in, and held in every other case, including when `fromMode` is absent.
-4. **Hold.** Up to 50 messages wait. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`; a mode change re-evaluates the backlog.
+4. **Hold.** Up to 50 messages wait per session. A message arriving at a full buffer is `dropped` with `queue-full` rather than evicting one already parked. A held message expires after `agents.crossSessionHeldExpiry` (`1m`, `5m`, `10m`, `never`; default `5m`). The user releases or denies from `/peers`, or from the client of a session a program drives (below); a mode change re-evaluates the backlog.
 5. **Queue.** An accepted message joins the session's input queue, which holds at most 50 from peers. A full queue is `dropped` with `queue-full` too.
 
 A sender does not have to discover the limits the hard way: a Qwen Code
@@ -300,6 +300,60 @@ or `origin="controller" controller="<label>"` is added by the receiver
 from what the connection presented, never from the frame; a controller's
 label comes from the grant the user minted, not from `fromName`. Tags
 that look like the envelope are defanged inside `content`.
+
+### Sessions a program drives over ACP
+
+A `qwen --acp` process can host several sessions behind one inbox. Each
+message is judged by the settings of the session it is addressed to:
+that session's approval mode, `agents.crossSessionInbound` and
+`agents.crossSessionHeldExpiry`. The rules above apply unchanged.
+
+- **Accepted.** The message is recorded in the session's transcript and
+  handed to its model in a background turn the next time the session is
+  idle, the way a finished background task is. Up to 20 accepted
+  messages wait per session, apart from the queue for background
+  results, so neither can push the other out. Past that, a message is
+  `dropped` with `queue-full`.
+- **Held.** The message is put to the session's client as an ACP
+  `session/request_permission` request:
+  - `_meta.qwenInteractionKind` is `peer_message`, on the request and on
+    its `toolCall`.
+  - `toolCall.toolCallId` is `peer-message:<msgId>`, and the tool call's
+    text content is the message body, with control characters other than
+    line breaks and tabs removed, CRLF normalized to LF, and the result
+    cut to 2000 code points.
+  - `toolCall.rawInput` and `toolCall._meta.peerMessage` carry `msgId`,
+    `sender`, `origin` (`peer`, `own-process` or `controller`), `cause`,
+    `causeText`, `heldAt` and `expiresAt`; `from` and `fromName` appear
+    only when the frame gave them, `controller` only for a
+    controller-sent message, and `expiresAt` is `null` when the hold
+    never expires.
+  - The options are `peer_deliver` and `peer_drop`. Any other answer,
+    including a cancellation, leaves the message held, and the session
+    asks again after a delay that doubles each time, up to a minute.
+  - When `peer_deliver` is chosen but the session cannot take the
+    message yet, the message stays held and delivery is retried on the
+    same schedule. The person is not asked again.
+  - The request belongs to no prompt. A turn ending does not cancel it.
+  - `_meta.expiresAt` is when the request stops mattering, in epoch
+    milliseconds: the hold's expiry, or one minute from when the request
+    was made when the hold never expires. The daemon ends the request
+    there, and the session asks again while the message is still held.
+
+ACP gives an agent no way to withdraw a request it sent. When a hold
+ends some other way, such as a mode change that releases it or the
+session closing, the session stops waiting for the answer, and a late
+answer changes nothing. The daemon ends each request at
+`_meta.expiresAt` by itself — or at its configured permission-response
+timeout, if that comes first — so its pending list stays current, and
+the session asks again while the message is still held. An editor that
+does not read the field may keep showing the dialog until someone
+answers it.
+
+When a session closes and its process stays up, the messages still held
+for it are settled `expired`, and so are the accepted ones still waiting
+in its queue. A held message is re-judged whenever the session's
+approval mode or settings change.
 
 ## 7. Compatibility
 
@@ -323,12 +377,6 @@ that look like the envelope are defanged inside `content`.
   renamed itself, are both still to come.
 - **Same-name reporting.** `qwen sessions ps` and `list_agents` do not
   flag records that still collide.
-- **Inbound messages to ACP-driven sessions.** A session a program
-  drives over ACP — daemon-spawned or not — registers and can send, but
-  answers `refused` to anything sent to it: a hold is a question put to
-  a person, and nobody is watching a hold list on its behalf. Where a
-  held message should surface for those sessions — its client, or the
-  daemon's own API — is still open.
 - **Sessions behind one inbox are one sender to every peer.** A process
   hosting several sessions sends with one `from` address, so a
   receiver's per-sender budget and duplicate window (§6) are shared by

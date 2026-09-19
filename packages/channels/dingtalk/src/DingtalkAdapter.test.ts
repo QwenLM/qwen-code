@@ -578,6 +578,7 @@ describe('turn-scoped output modes', () => {
   it.each([
     ['shell', 'failed', '## ❌ Shell · Worker\n\nTask output'],
     ['workflow', 'stopped', '## ⏹️ Workflow · Worker\n\nTask output'],
+    ['peer', 'completed', '## ✅ Peer message · Worker\n\nTask output'],
     ['agent', 'completed', '✅ Background task completed'],
     ['agent', 'failed', '❌ Background task failed'],
     ['agent', 'stopped', '⏹️ Background task stopped'],

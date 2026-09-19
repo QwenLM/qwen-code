@@ -111,13 +111,17 @@ export type HoldCause =
   | 'policy-unreadable';
 
 /**
- * Cap on parked messages.
+ * Cap on parked messages, per addressed session.
  *
  * A hold buffer is reachable by anything that can write to the socket, so
  * it needs a ceiling or a chatty peer becomes a memory leak in a session
  * whose user stepped away. Once full it turns arrivals away rather than
  * making room: what is already parked is the user's to decide, and an
  * arrival must not be able to destroy it.
+ *
+ * Counted per session so a process hosting several cannot have one
+ * session's backlog turn away every message for the others. Such a host
+ * holds at most this many times its session count.
  */
 export const MAX_HELD_MESSAGES = 50;
 
@@ -287,20 +291,32 @@ export interface HeldMessage {
   controller?: PeerControllerIdentity;
 }
 
+/**
+ * The settings readers below all take the session a frame is addressed
+ * to — its `toSessionId`, or undefined for a frame that names none.
+ *
+ * A process holding one session has one set of settings and ignores the
+ * argument. A process hosting several (see `ownsSessionId`) can hold
+ * sessions from different workspaces, each with its own review policy,
+ * hold lifetime and approval mode, and a message is judged by the rules
+ * of the session it is for. Such a process only ever sees pinned frames
+ * here: an unpinned one is answered as misaddressed before it reaches
+ * the gate.
+ */
 export interface InboundGateOptions {
   /**
    * Current approval mode, or null when it cannot be determined — which
    * is treated as unknown, not as permissive.
    */
-  getApprovalMode: () => ApprovalMode | null;
+  getApprovalMode: (sessionId?: string) => ApprovalMode | null;
   /** Explicit user setting, if any. */
-  getPolicySetting: () => InboundPolicy | undefined;
+  getPolicySetting: (sessionId?: string) => InboundPolicy | undefined;
   /**
    * Which scope the explicit setting came from, when the host can tell.
    * Read only to word a hold cause; absent or throwing means the cause is
    * worded without a scope.
    */
-  getPolicyScope?: () => PolicyScope | undefined;
+  getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
   /** Whether a controller grant still exists. Absent means valid. */
   isControllerValid?: (id: string) => boolean;
   /**
@@ -360,9 +376,10 @@ export interface InboundGateOptions {
    * How long a message may sit parked before it expires, in
    * milliseconds, or null to keep it until the session ends. Read on
    * every reschedule rather than captured once, so changing the setting
-   * takes effect on messages already waiting.
+   * takes effect on messages already waiting — and read per message, for
+   * the session each is addressed to.
    */
-  getHeldExpiryMs?: () => number | null;
+  getHeldExpiryMs?: (sessionId?: string) => number | null;
   /** Called whenever the held set changes, for UI. */
   onHeldChange?: (held: readonly HeldMessage[]) => void;
 }
@@ -503,12 +520,12 @@ export class InboundGate {
    * expire. Exposed so `/peers` can tell the user how long a message has
    * left rather than making them guess.
    */
-  getHeldExpiryMs(): number | null {
+  getHeldExpiryMs(sessionId?: string): number | null {
     if (this.options.getHeldExpiryMs === undefined) {
       return DEFAULT_HELD_EXPIRY_MS;
     }
     try {
-      return this.options.getHeldExpiryMs();
+      return this.options.getHeldExpiryMs(sessionId);
     } catch (error) {
       debugLogger.debug(
         `held-expiry getter threw; falling back to the default: ${
@@ -520,13 +537,29 @@ export class InboundGate {
   }
 
   /**
+   * When `entry` will expire, as a wall-clock epoch in milliseconds, or
+   * null when holds do not expire for its session.
+   *
+   * Judged the way expiry itself is: against the lifetime configured now
+   * for the session the message is addressed to, from the entry's age —
+   * so what a host tells a person about the deadline is what happens.
+   */
+  heldExpiresAt(entry: HeldMessage): number | null {
+    const expiryMs = this.getHeldExpiryMs(entry.frame.toSessionId);
+    if (expiryMs === null) return null;
+    // Whole milliseconds: the age can come from the monotonic clock,
+    // which is fractional, and this goes on the wire as an epoch.
+    return Math.round(Date.now() + Math.max(0, expiryMs - this.ageOf(entry)));
+  }
+
+  /**
    * Resolve the policy for a frame, and explain it.
    *
    * Exposed for tests and for the UI, which shows the cause next to a
    * held message.
    */
   resolvePolicy(
-    frame?: Pick<PeerUserFrame, 'fromMode'>,
+    frame?: Pick<PeerUserFrame, 'fromMode' | 'toSessionId'>,
     origin?: PeerOrigin,
   ): PolicyDecision {
     // The setting is read from user configuration, so it can be missing,
@@ -534,14 +567,17 @@ export class InboundGate {
     // those are "the user asked for accept".
     let explicit: InboundPolicy | undefined;
     try {
-      const configured = this.options.getPolicySetting();
+      const configured = this.options.getPolicySetting(frame?.toSessionId);
       if (configured !== undefined && !isInboundPolicy(configured)) {
         debugLogger.debug(
           `unrecognized crossSessionInbound value (failing closed): ${String(
             configured,
           )}`,
         );
-        return this.hold('policy-unreadable', this.policyScope());
+        return this.hold(
+          'policy-unreadable',
+          this.policyScope(frame?.toSessionId),
+        );
       }
       explicit = configured;
     } catch (error) {
@@ -553,7 +589,10 @@ export class InboundGate {
       return { policy: 'hold', cause: 'policy-unreadable' };
     }
     if (explicit === 'hold') {
-      return this.hold('explicit-setting', this.policyScope());
+      return this.hold(
+        'explicit-setting',
+        this.policyScope(frame?.toSessionId),
+      );
     }
     if (explicit !== undefined) {
       return { policy: explicit };
@@ -575,7 +614,7 @@ export class InboundGate {
 
     let mode: ApprovalMode | null;
     try {
-      mode = this.options.getApprovalMode();
+      mode = this.options.getApprovalMode(frame?.toSessionId);
     } catch (error) {
       debugLogger.debug(
         `approval-mode getter threw (failing closed): ${
@@ -613,9 +652,9 @@ export class InboundGate {
   }
 
   /** The scope is decoration on a cause; a broken getter must not change the verdict. */
-  private policyScope(): PolicyScope | undefined {
+  private policyScope(sessionId?: string): PolicyScope | undefined {
     try {
-      return this.options.getPolicyScope?.();
+      return this.options.getPolicyScope?.(sessionId);
     } catch (error) {
       debugLogger.debug(
         `policy-scope getter threw (ignored): ${
@@ -752,7 +791,12 @@ export class InboundGate {
       return 'accept';
     }
 
-    if (this.held.length >= MAX_HELD_MESSAGES) {
+    const heldKey = heldSessionKey(frame);
+    let heldForSession = 0;
+    for (const entry of this.held) {
+      if (heldSessionKey(entry.frame) === heldKey) heldForSession += 1;
+    }
+    if (heldForSession >= MAX_HELD_MESSAGES) {
       // The newcomer is turned away rather than a parked message evicted.
       // Evicting made an arrival destroy someone else's message: a flood
       // walked the user's real backlog out one entry at a time, and each
@@ -870,7 +914,19 @@ export class InboundGate {
     const release: HeldMessage[] = [];
     let dropped = 0;
 
+    let misaddressed = 0;
     for (const entry of this.held) {
+      // First, before any policy: a message for a session that is no
+      // longer here has nobody left to decide it, and judging it by the
+      // policy of a session that does not exist would report a refusal
+      // nobody made.
+      if (!this.pinStillValid(entry.frame)) {
+        misaddressed += 1;
+        this.forgetAdmittedBody(entry.frame, originOf(entry));
+        this.recordSettled(entry.frame.msgId, 'misaddressed');
+        void this.report(entry.frame, 'misaddressed');
+        continue;
+      }
       const decision = this.resolvePolicy(entry.frame, originOf(entry));
       const { policy } = decision;
       if (policy === 'accept') {
@@ -889,7 +945,6 @@ export class InboundGate {
     }
 
     let released = 0;
-    let misaddressed = 0;
     for (const entry of release) {
       if (!this.pinStillValid(entry.frame)) {
         misaddressed += 1;
@@ -927,13 +982,48 @@ export class InboundGate {
     this.held.push(...stillHeld);
     this.rescheduleExpiry();
 
-    if (release.length > 0 || dropped > 0) {
+    if (release.length > 0 || dropped > 0 || misaddressed > 0) {
       debugLogger.debug(
         `reevaluate (${reason}): released ${released}, dropped ${dropped}, misaddressed ${misaddressed}, ${this.held.length} still held`,
       );
       this.notifyHeldChange();
     }
     return released;
+  }
+
+  /**
+   * Settle as expired the parked messages `isFor` picks, for a host whose
+   * session is going away while the process stays up.
+   *
+   * Nobody is left to decide them, so they end the way a message does
+   * when its session exits: `expired`. Left parked they would keep taking
+   * the session's hold slots, keep their senders waiting on `held`, and
+   * later be judged by whatever the host answers for a session it no
+   * longer holds. Returns how many were settled.
+   */
+  expireHeldWhere(isFor: (frame: PeerUserFrame) => boolean): number {
+    const settling: HeldMessage[] = [];
+    const survivors: HeldMessage[] = [];
+    for (const entry of this.held) {
+      let matches = false;
+      try {
+        matches = isFor(entry.frame);
+      } catch {
+        matches = false;
+      }
+      (matches ? settling : survivors).push(entry);
+    }
+    if (settling.length === 0) return 0;
+    this.held.length = 0;
+    this.held.push(...survivors);
+    for (const entry of settling) {
+      this.forgetAdmittedBody(entry.frame, originOf(entry));
+      this.recordSettled(entry.frame.msgId, 'expired');
+      void this.report(entry.frame, 'expired');
+    }
+    this.notifyHeldChange();
+    this.rescheduleExpiry();
+    return settling.length;
   }
 
   /**
@@ -1138,12 +1228,15 @@ export class InboundGate {
    * actually happens.
    */
   private expireOverdue(): void {
-    const expiryMs = this.getHeldExpiryMs();
-    if (expiryMs === null || this.held.length === 0) return;
+    if (this.held.length === 0) return;
     const survivors: HeldMessage[] = [];
     const expired: HeldMessage[] = [];
     for (const entry of this.held) {
-      (this.ageOf(entry) >= expiryMs ? expired : survivors).push(entry);
+      const expiryMs = this.getHeldExpiryMs(entry.frame.toSessionId);
+      (expiryMs !== null && this.ageOf(entry) >= expiryMs
+        ? expired
+        : survivors
+      ).push(entry);
     }
     if (expired.length === 0) return;
 
@@ -1151,7 +1244,7 @@ export class InboundGate {
     this.held.push(...survivors);
     for (const entry of expired) {
       debugLogger.debug(
-        `held peer message ${entry.frame.msgId} expired after ${expiryMs} ms`,
+        `held peer message ${entry.frame.msgId} expired after ${this.ageOf(entry)} ms`,
       );
       this.forgetAdmittedBody(entry.frame, originOf(entry));
       this.recordSettled(entry.frame.msgId, 'expired');
@@ -1179,14 +1272,17 @@ export class InboundGate {
       this.expiryTimer = null;
     }
     if (this.shuttingDown) return;
-    const expiryMs = this.getHeldExpiryMs();
-    if (expiryMs === null) return;
-    let oldestAge: number | null = null;
+    // The soonest deadline across entries, each against its own session's
+    // lifetime: in a process hosting several sessions, the oldest message
+    // is not necessarily the next to expire.
+    let remaining: number | null = null;
     for (const entry of this.held) {
-      const age = this.ageOf(entry);
-      if (oldestAge === null || age > oldestAge) oldestAge = age;
+      const expiryMs = this.getHeldExpiryMs(entry.frame.toSessionId);
+      if (expiryMs === null) continue;
+      const left = expiryMs - this.ageOf(entry);
+      if (remaining === null || left < remaining) remaining = left;
     }
-    if (oldestAge === null) return;
+    if (remaining === null) return;
 
     // Scanned rather than read from `held[0]`: a failed release re-parks
     // an entry keeping its original timestamp, so the buffer is not
@@ -1196,7 +1292,7 @@ export class InboundGate {
     // inside the same tick as the change that armed it would recurse.
     // Never above setTimeout's 32-bit ceiling either, where Node clamps
     // to 1 ms and the callback re-arms the same oversized delay.
-    const delay = Math.min(MAX_TIMEOUT_MS, Math.max(1, expiryMs - oldestAge));
+    const delay = Math.min(MAX_TIMEOUT_MS, Math.max(1, remaining));
     this.expiryTimer = setTimeout(() => {
       this.expiryTimer = null;
       this.expireOverdue();
@@ -1250,6 +1346,15 @@ function withCause(entry: HeldMessage, decision: PolicyDecision): HeldMessage {
  * The scope, when known, names who set the policy: a user who never
  * touched the key should not read "your setting".
  */
+/**
+ * The session a held message counts against for the hold cap. Session ids
+ * are compared case-insensitively, so respelling one does not buy a
+ * second allowance.
+ */
+function heldSessionKey(frame: PeerUserFrame): string {
+  return frame.toSessionId?.toLowerCase() ?? '';
+}
+
 export function describeHoldCause(
   cause: HoldCause,
   scope?: PolicyScope,

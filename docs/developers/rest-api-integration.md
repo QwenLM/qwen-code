@@ -333,6 +333,9 @@ blocks until someone answers or you cancel — **by default there is no timeout*
 (`--permission-response-timeout-ms` defaults to `0` = wait indefinitely), so an
 unanswered request keeps holding a slot in the session's prompt queue until you
 cancel or close the session. Arm your own deadline if the flow needs one.
+Requests that carry their own deadline are the exception: a held cross-session
+message's review request sets `_meta.expiresAt` and ends at that moment even at
+the default, and any other agent request may do the same.
 
 The mode is the child's own Qwen setting `tools.approvalMode`, resolved from the
 daemon host's and the `--workspace` directory's settings; the daemon pins

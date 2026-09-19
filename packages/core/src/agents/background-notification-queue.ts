@@ -39,7 +39,9 @@ export type BackgroundNotificationKind =
   | 'shell'
   | 'monitor'
   | 'workflow'
-  | 'cron';
+  | 'cron'
+  /** A cross-session message this session's gate accepted. */
+  | 'peer';
 
 /** The slice of a queued notification the admission rule looks at. */
 export interface AdmissibleNotification {
@@ -127,6 +129,11 @@ function droppedNoun(
   interim: boolean,
   count: number,
 ): string {
+  if (kind === 'peer') {
+    return count === 1
+      ? 'message from another session'
+      : 'messages from other sessions';
+  }
   const singular =
     kind === 'agent'
       ? 'agent result'
@@ -149,6 +156,7 @@ const GROUP_ORDER = {
   shell: [false],
   monitor: [false, true],
   cron: [false],
+  peer: [false],
 } as const satisfies Record<BackgroundNotificationKind, readonly boolean[]>;
 
 /** At most this many task ids are named per group before eliding the rest. */

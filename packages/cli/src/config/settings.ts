@@ -662,9 +662,34 @@ export class LoadedSettings {
   corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
+  private readonly changeListeners = new Set<() => void>();
 
   get merged(): Settings {
     return this._merged;
+  }
+
+  /**
+   * Be told after the merged settings are recomputed: a value written, a
+   * scope reloaded from disk, a failed reload rolled back. The merged
+   * value may be unchanged; a listener that cares compares. Listeners must
+   * not throw; one that does is ignored. Returns the unsubscribe function.
+   */
+  onChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  private remerge(): void {
+    this._merged = this.computeMergedSettings();
+    for (const listener of this.changeListeners) {
+      try {
+        listener();
+      } catch {
+        // A listener is a bystander; the settings already changed.
+      }
+    }
   }
 
   private computeMergedSettings(): Settings {
@@ -718,7 +743,7 @@ export class LoadedSettings {
     }
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
-    this._merged = this.computeMergedSettings();
+    this.remerge();
     if (!opts.throwOnWriteFailure) {
       saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
     }
@@ -744,7 +769,7 @@ export class LoadedSettings {
       setNestedPropertySafe(settingsFile.originalSettings, write.key, value);
       scopes.add(write.scope);
     }
-    this._merged = this.computeMergedSettings();
+    this.remerge();
     const scopeList = Array.from(scopes);
     for (let i = 0; i < scopeList.length; i++) {
       const scope = scopeList[i]!;
@@ -764,7 +789,7 @@ export class LoadedSettings {
   }
 
   recomputeMerged(): void {
-    this._merged = this.computeMergedSettings();
+    this.remerge();
   }
 
   reloadScopeFromDisk(scope: SettingScope): boolean {
@@ -773,7 +798,7 @@ export class LoadedSettings {
       file.settings = {};
       file.originalSettings = {};
       file.rawJson = undefined;
-      this._merged = this.computeMergedSettings();
+      this.remerge();
       return true;
     }
     let reloaded = false;
@@ -782,7 +807,7 @@ export class LoadedSettings {
         file.settings = {};
         file.originalSettings = {};
         file.rawJson = undefined;
-        this._merged = this.computeMergedSettings();
+        this.remerge();
         return true;
       }
 
@@ -807,7 +832,7 @@ export class LoadedSettings {
         `reloadScopeFromDisk(${scope}): ${getErrorMessage(err)}`,
       );
     }
-    this._merged = this.computeMergedSettings();
+    this.remerge();
     return reloaded;
   }
 
@@ -829,7 +854,7 @@ export class LoadedSettings {
       snapshot.file.originalSettings = snapshot.originalSettings;
       snapshot.file.rawJson = snapshot.rawJson;
     }
-    this._merged = this.computeMergedSettings();
+    this.remerge();
     return false;
   }
 

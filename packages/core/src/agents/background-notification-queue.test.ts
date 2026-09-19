@@ -313,6 +313,17 @@ describe('DroppedNotificationTally', () => {
     );
   });
 
+  it('names dropped cross-session messages as messages, not tasks', () => {
+    const tally = new DroppedNotificationTally();
+    tally.record({ kind: 'peer', taskId: 'msg_1' });
+    tally.record({ kind: 'peer', taskId: 'msg_2' });
+
+    expect(tally.take()?.displayText).toBe(
+      'Dropped 2 background notifications (queue full): 2 messages from ' +
+        'other sessions (msg_1, msg_2).',
+    );
+  });
+
   it('resets after each take', () => {
     const tally = new DroppedNotificationTally();
     tally.record(shell('bg_1'));

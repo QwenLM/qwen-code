@@ -1298,7 +1298,8 @@ export interface DaemonSessionIssueInfo {
 export interface DaemonBackgroundTurn {
   turnId: string;
   taskId: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /** `peer`: a cross-session message the session accepted; `taskId` is its message id. */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   sourceTurnId?: string;
   label?: string;
@@ -1319,7 +1320,8 @@ export function parseDaemonBackgroundTurn(
     (record['kind'] !== 'agent' &&
       record['kind'] !== 'monitor' &&
       record['kind'] !== 'shell' &&
-      record['kind'] !== 'workflow') ||
+      record['kind'] !== 'workflow' &&
+      record['kind'] !== 'peer') ||
     typeof record['startedAt'] !== 'number' ||
     !Number.isFinite(record['startedAt']) ||
     record['startedAt'] < 0 ||
@@ -1539,6 +1541,12 @@ export interface DaemonPendingPermissionInteraction {
     content?: unknown;
     locations?: unknown;
     input?: unknown;
+    /**
+     * Present when the request asks about a held cross-session message:
+     * its id, sender, why it was held and when the hold expires. Vote
+     * `peer_deliver` to deliver it to the session, `peer_drop` to drop it.
+     */
+    peerMessage?: Record<string, unknown>;
   };
   options: DaemonPendingInteractionOption[];
 }
