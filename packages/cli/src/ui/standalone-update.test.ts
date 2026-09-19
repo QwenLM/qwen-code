@@ -418,10 +418,24 @@ describe('standalone-update', () => {
       ).toBe(false);
     }
 
-    async function serveArchive(options: { badChecksum?: boolean } = {}) {
+    async function serveArchive(
+      options: { badChecksum?: boolean; reportedVersion?: string } = {},
+    ) {
       const fixture = path.join(tempDir, 'fixture');
       fs.mkdirSync(path.join(fixture, 'qwen-code'), { recursive: true });
       fs.writeFileSync(path.join(fixture, 'qwen-code', 'manifest.json'), '{}');
+      if (options.reportedVersion) {
+        const root = path.join(fixture, 'qwen-code');
+        fs.mkdirSync(path.join(root, 'node', 'bin'), { recursive: true });
+        fs.mkdirSync(path.join(root, 'lib'));
+        fs.writeFileSync(path.join(root, 'lib', 'cli.js'), '');
+        fs.writeFileSync(
+          path.join(root, 'node', 'bin', 'node'),
+          `#!/bin/sh\nprintf '%s\\n' '${options.reportedVersion}'\n`,
+          { mode: 0o755 },
+        );
+      }
+
       const archivePath = path.join(tempDir, 'release.tar.gz');
       await tar.c({ gzip: true, cwd: fixture, file: archivePath }, [
         'qwen-code',
@@ -440,6 +454,20 @@ describe('standalone-update', () => {
         return new Response('', { status: 404 });
       });
     }
+
+    it.skipIf(process.platform === 'win32')(
+      'preserves the installation when a verified archive reports the wrong version',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        await serveArchive({ reportedVersion: '9.9.9' });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).rejects.toThrow(
+          'Smoke test failed: expected version 1.2.3, got 9.9.9',
+        );
+        expectInstallationPreserved();
+      },
+    );
 
     it.each([baseUrl, `${baseUrl}/`, `  ${baseUrl}///  `])(
       'downloads and verifies every resource from the configured root %s',
