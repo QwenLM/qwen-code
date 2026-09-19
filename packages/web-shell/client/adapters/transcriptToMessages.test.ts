@@ -535,6 +535,298 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('projects a compression result as a structured system row', () => {
+    const result = {
+      originalTokenCount: 263195,
+      newTokenCount: 99799,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('compression', 'assistant', 'Context compressed.', 1, false, {
+        meta: {
+          source: 'slash_command',
+          contextCompression: { phase: 'done', ...result },
+        },
+      }),
+    ]);
+
+    // The daemon's own English sentence is ignored in favour of the payload,
+    // which SystemMessage renders in this UI's language.
+    expect(messages).toEqual([
+      {
+        id: 'compression',
+        role: 'system',
+        content: 'Context compressed.',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'done', ...result },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('shows the compression row while it streams, on the id the result reuses', () => {
+    // The daemon streams one block: the progress frame creates it and the
+    // result merges into the same id, so the row is replaced in place.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('compression', 'assistant', 'Compressing context...', 1, true, {
+        meta: {
+          source: 'slash_command',
+          contextCompression: { phase: 'progress' },
+        },
+      }),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression',
+        role: 'system',
+        content: 'Compressing context...',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'progress' },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('hides a compression row whose turn ended without a result', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compressing context...',
+        1,
+        false,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompression: { phase: 'progress' },
+          },
+        },
+      ),
+      textBlock('assistant-1', 'assistant', 'Normal reply', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Normal reply',
+        isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
+  it('keeps a terminal no-op row after the turn ends', () => {
+    // /compress-fast with nothing to strip merges a terminal no-op payload into
+    // the progress block. Unlike a stray progress row it must survive, or the
+    // user never learns that nothing needed compressing.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compressing context (fast)...No compression needed.',
+        1,
+        false,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompression: { phase: 'noop' },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression',
+        role: 'system',
+        content: 'Compressing context (fast)...No compression needed.',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'noop' },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('splits a folded compression block into a notice row and a result row', () => {
+    // The reducer folds this turn's frames into one block and spreads `_meta`
+    // key by key, so the notice keeps its own key while the result overwrites
+    // the shared one. Both rows come out of that single block.
+    const result = {
+      originalTokenCount: 263195,
+      newTokenCount: 99799,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compression instructions were truncated to 2000 characters.\nCompressing context...\nContext compressed (263195 -> ~99799).',
+        1,
+        true,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompressionNotice: {
+              phase: 'notice',
+              instructionsLimit: 2000,
+            },
+            contextCompression: { phase: 'done', ...result },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression-notice',
+        role: 'system',
+        content:
+          'Compression instructions were truncated to 2000 characters.\nCompressing context...\nContext compressed (263195 -> ~99799).',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'notice', instructionsLimit: 2000 },
+        timestamp: 1,
+      },
+      {
+        id: 'compression',
+        role: 'system',
+        content:
+          'Compression instructions were truncated to 2000 characters.\nCompressing context...\nContext compressed (263195 -> ~99799).',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'done', ...result },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('shows a notice-only block when the compression never reported', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'compression',
+        'assistant',
+        'Compression instructions were truncated to 2000 characters.\n',
+        1,
+        false,
+        {
+          meta: {
+            source: 'slash_command',
+            contextCompressionNotice: {
+              phase: 'notice',
+              instructionsLimit: 2000,
+            },
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'compression-notice',
+        role: 'system',
+        content:
+          'Compression instructions were truncated to 2000 characters.\n',
+        variant: 'info',
+        source: 'context_compression',
+        data: { phase: 'notice', instructionsLimit: 2000 },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it.each<[string, unknown, unknown]>([
+    [
+      'the notice parses and the result does not',
+      { phase: 'notice', instructionsLimit: 2000 },
+      { phase: 'done', originalTokenCount: 'many' },
+    ],
+    [
+      'the notice does not parse and the result does',
+      { phase: 'later' },
+      { phase: 'done', originalTokenCount: 263195, newTokenCount: 99799 },
+    ],
+  ])(
+    'falls back to the block text when %s',
+    (_label, contextCompressionNotice, contextCompression) => {
+      // Rendering only the half that parses would drop the other half's
+      // sentence; the block's own text carries both.
+      const messages = transcriptBlocksToDaemonMessages([
+        textBlock(
+          'compression',
+          'assistant',
+          'Compression instructions were truncated to 2000 characters.\nContext compressed (263195 -> 99799).',
+          1,
+          false,
+          {
+            meta: {
+              source: 'slash_command',
+              contextCompressionNotice,
+              contextCompression,
+            },
+          },
+        ),
+      ]);
+
+      expect(messages).toEqual([
+        {
+          id: 'compression',
+          role: 'assistant',
+          content:
+            'Compression instructions were truncated to 2000 characters.\nContext compressed (263195 -> 99799).',
+          isStreaming: false,
+          timestamp: 1,
+        },
+      ]);
+    },
+  );
+
+  it.each([
+    ['an unreadable count', { phase: 'done', originalTokenCount: 'many' }],
+    ['an unknown phase', { phase: 'later' }],
+  ])(
+    'keeps %s as plain slash-command text (older daemons ship no payload)',
+    (_label, contextCompression) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        textBlock('compression', 'assistant', 'Context compressed.', 1, false, {
+          meta: { source: 'slash_command', contextCompression },
+        }),
+      ]);
+
+      expect(messages).toEqual([
+        {
+          id: 'compression',
+          role: 'assistant',
+          content: 'Context compressed.',
+          isStreaming: false,
+          timestamp: 1,
+        },
+      ]);
+    },
+  );
+
+  it('keeps a slash-command block without any compression payload untouched', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('command', 'assistant', 'Plain command output.', 1),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'command',
+        role: 'assistant',
+        content: 'Plain command output.',
+        isStreaming: false,
+        timestamp: 1,
+      },
+    ]);
+  });
+
   it.each([
     ['completed', 'completed'],
     ['failed', 'failed'],
@@ -5517,4 +5809,30 @@ it('does not let old execution output consume or relabel a newer result for the 
     ),
   ).toBe(false);
   expect(after[0]).toMatchObject({ data: { backgroundTask: firstTask } });
+});
+
+describe('transcript message prompt ids', () => {
+  it('carries the daemon-stamped prompt id onto the messages it built', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'hello', 1000, false, {
+        promptId: 'prompt-1',
+      }),
+      textBlock('assistant-2', 'assistant', 'hi', 1100),
+      textBlock('user-3', 'user', 'again', 2000, false, {
+        promptId: 'prompt-2',
+      }),
+      textBlock('assistant-4', 'assistant', 'sure', 2100, false, {
+        promptId: 'prompt-2',
+      }),
+    ]);
+    const promptIdOf = (id: string) =>
+      messages.find((message) => message.id === id)?.promptId;
+
+    // A replayed turn stamps the prompt's own block; a live turn may stamp the
+    // answer instead. Both carry the same value.
+    expect(promptIdOf('user-1')).toBe('prompt-1');
+    expect(promptIdOf('assistant-4')).toBe('prompt-2');
+    // A block without a stamp must not have one invented for it.
+    expect(promptIdOf('assistant-2')).toBeUndefined();
+  });
 });

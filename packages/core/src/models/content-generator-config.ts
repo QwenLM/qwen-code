@@ -230,9 +230,13 @@ function buildInheritedAgentContentGeneratorConfig(
       `Model '${modelId}' is no longer configured at the selected endpoint`,
     );
   }
-  if (resolvedModel?.imageOnly || resolvedModel?.voiceOnly) {
+  if (
+    resolvedModel?.imageOnly ||
+    resolvedModel?.voiceOnly ||
+    resolvedModel?.realtimeOnly
+  ) {
     throw new Error(
-      `${resolvedModel.imageOnly ? 'Image' : 'Voice'}-only model '${resolvedModel.id}' cannot be used for content generation`,
+      `${resolvedModel.imageOnly ? 'Image' : resolvedModel.voiceOnly ? 'Voice' : 'Realtime'}-only model '${resolvedModel.id}' cannot be used for content generation`,
     );
   }
 

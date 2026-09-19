@@ -578,26 +578,52 @@ describe('tool group summary logic', () => {
     expect((content as HTMLElement | null)?.style.display).toBe('');
   });
 
-  it('renders fallbackText for a compacted MCP App without mounting the iframe', () => {
-    const container = renderToolLine(
-      makeTool({
-        toolName: 'mcp__demo__show_dashboard',
-        rawOutput: {
-          type: 'mcp_app',
-          serverName: 'demo',
-          resourceUri: 'ui://demo/dashboard',
-          html: '',
-          toolResult: {},
-          toolArguments: {},
-          fallbackText: 'Dashboard ready',
-        },
-      }),
-    );
+  it.each([
+    { scenario: 'compacted', fallbackText: 'Dashboard ready' },
+    {
+      scenario: 'failed to load',
+      fallbackText:
+        "Warning: MCP App 'ui://demo/dashboard' from 'demo' could not be displayed: resource read timed out (limit: 10000 ms)\n\nDashboard ready",
+    },
+  ])(
+    'renders a $scenario MCP App fallback without an iframe',
+    ({ fallbackText }) => {
+      const container = renderToolGroup(
+        [
+          makeTool({
+            toolName: 'mcp__demo__show_dashboard',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: 'Dashboard ready' },
+              },
+            ],
+            rawOutput: {
+              type: 'mcp_app',
+              serverName: 'demo',
+              resourceUri: 'ui://demo/dashboard',
+              html: '',
+              toolResult: {},
+              toolArguments: {},
+              fallbackText,
+            },
+          }),
+        ],
+        {},
+        undefined,
+        false,
+        undefined,
+        undefined,
+        'en',
+        undefined,
+        'http://localhost:5173',
+      );
 
-    expect(container.textContent).toContain('Dashboard ready');
-    expect(container.querySelector('iframe')).toBeNull();
-    expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
-  });
+      expect(container.textContent).toContain(fallbackText);
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+    },
+  );
 
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
