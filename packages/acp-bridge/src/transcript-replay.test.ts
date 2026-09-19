@@ -396,7 +396,7 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
-  it('emits legacy goalTerminal metadata for a terminal goal_state', () => {
+  it('emits one achieved card for a terminal goal_state, with no terminal twin', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       goalStateRecord('goal-complete', 'complete', {
@@ -406,14 +406,14 @@ describe('createTranscriptReplayMachine', () => {
     );
 
     expect(projected[0]?._meta).toMatchObject({
-      goalStatus: { kind: 'achieved', condition: GOAL.objective },
-      goalTerminal: {
+      goalStatus: {
         kind: 'achieved',
         condition: GOAL.objective,
         iterations: GOAL.turnCount,
         durationMs: GOAL.activeTimeMs,
       },
     });
+    expect(projected[0]?._meta).not.toHaveProperty('goalTerminal');
   });
 
   it('carries a recorded compression payload back through replay', () => {
