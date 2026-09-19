@@ -789,10 +789,11 @@ globalThis.fetch = async (url) => {
   );
   assert.equal(fs.existsSync(path.join(cacheDir, 'SHASUMS256.txt')), false);
 
-  // A target the repo pins nothing for must still produce a runtime:
-  // linux-arm64 has no pinned package upstream, and failing the build there
-  // would trade a missing Web Terminal for no app at all (#11872). Dropping the
-  // pins reproduces that for this fixture's target.
+  // A target the repo pins nothing for must still produce a runtime: the root
+  // package.json does not pin @lydell/node-pty-linux-arm64 (upstream publishes
+  // it), and failing the build there would trade a missing Web Terminal for no
+  // app at all (#11872). Dropping the pins reproduces that for this fixture's
+  // target.
   fs.writeFileSync(
     path.join(sourceRoot, 'package.json'),
     JSON.stringify({ version: '0.0.0-test' }),
