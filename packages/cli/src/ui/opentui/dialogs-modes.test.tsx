@@ -9,6 +9,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  ApprovalMode,
   BUILT_IN_OUTPUT_STYLES,
   type Config,
   type OutputStyleDefinition,
@@ -81,6 +82,7 @@ vi.mock('../commands/output-style-utils.js', async (importOriginal) => ({
 }));
 
 import {
+  OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
   OpenTuiOutputStyleDialog,
 } from './dialogs-modes.js';
@@ -143,6 +145,72 @@ async function pressEsc(): Promise<boolean> {
   });
   return consumed;
 }
+
+describe('OpenTuiApprovalModeDialog', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+  });
+
+  it('applies the effective mode after saving a shadowed user choice', () => {
+    const setApprovalMode = vi.fn();
+    const config = {
+      getApprovalMode: () => ApprovalMode.YOLO,
+      isTrustedFolder: () => true,
+      setApprovalMode,
+    } as unknown as Config;
+    const settings = {
+      merged: { tools: { approvalMode: ApprovalMode.DEFAULT } },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const onApprovalModeChanged = vi.fn();
+
+    render(
+      <OpenTuiApprovalModeDialog
+        config={config}
+        settings={settings}
+        onClose={vi.fn()}
+        onApprovalModeChanged={onApprovalModeChanged}
+      />,
+    );
+    press('return');
+
+    expect(setApprovalMode.mock.calls).toEqual([[ApprovalMode.DEFAULT]]);
+    expect(onApprovalModeChanged).toHaveBeenCalledWith(ApprovalMode.DEFAULT);
+  });
+
+  it('does not persist a privileged mode in an untrusted folder', () => {
+    const setApprovalMode = vi.fn();
+    const setValue = vi.fn();
+    const config = {
+      getApprovalMode: () => ApprovalMode.YOLO,
+      isTrustedFolder: () => false,
+      setApprovalMode,
+    } as unknown as Config;
+    const settings = {
+      merged: { tools: {} },
+      setValue,
+    } as unknown as LoadedSettings;
+
+    render(
+      <OpenTuiApprovalModeDialog
+        config={config}
+        settings={settings}
+        onClose={vi.fn()}
+        onApprovalModeChanged={vi.fn()}
+      />,
+    );
+    press('return');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      ),
+    ).not.toBeNull();
+  });
+});
 
 describe('OpenTuiOutputStyleDialog', () => {
   beforeEach(() => {

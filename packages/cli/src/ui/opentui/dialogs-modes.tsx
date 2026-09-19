@@ -20,8 +20,10 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import {
+  APPROVAL_MODES,
+  ApprovalMode,
+} from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
 import {
@@ -137,25 +139,45 @@ export function OpenTuiApprovalModeDialog(props: {
   const [sel, setSel] = useState(
     Math.max(0, modes.indexOf(current as ApprovalMode)),
   );
+  const [error, setError] = useState<string | null>(null);
   useEsc(onClose);
   const pick = () => {
     const mode = modes[sel];
-    if (mode) {
-      try {
-        // ink defaults the persist scope to User (its scope picker) — an
-        // untrusted workspace never receives writes; the runtime applies the
-        // merged setting (useApprovalModeCommand parity).
-        settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
-        config?.setApprovalMode?.(settings.merged.tools?.approvalMode ?? mode);
-        onApprovalModeChanged(mode);
-      } catch {
-        /* trust gate */
+    if (!mode) {
+      onClose();
+      return;
+    }
+    try {
+      // Do not persist a privileged mode that this workspace cannot use;
+      // User scope would make it active in other trusted workspaces.
+      if (
+        config?.isTrustedFolder() === false &&
+        mode !== ApprovalMode.DEFAULT &&
+        mode !== ApprovalMode.PLAN
+      ) {
+        throw new Error(
+          'Cannot enable privileged approval modes in an untrusted folder.',
+        );
       }
+      settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
+      const effectiveMode = settings.merged.tools?.approvalMode ?? mode;
+      config?.setApprovalMode?.(effectiveMode);
+      onApprovalModeChanged(effectiveMode);
+    } catch (e) {
+      // Keep the dialog open and show the refusal: an empty catch here made a
+      // gate rejection indistinguishable from an accepted choice.
+      setError((e as Error).message);
+      return;
     }
     onClose();
   };
   return (
     <Shell title="Approval Mode">
+      {error && (
+        <box marginTop={1}>
+          <text fg={C.red}>{error}</text>
+        </box>
+      )}
       <RadioList
         items={modes.map((m) => ({
           key: m,

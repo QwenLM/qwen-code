@@ -1912,6 +1912,9 @@ export default {
   'Memory files': 'Fichiers mémoire',
   Skills: 'Compétences',
   Messages: 'Messages',
+  'Startup context': 'Contexte de démarrage',
+  Unattributed: 'Non attribué',
+  'Cached prefix': 'Préfixe en cache',
   'Run /context detail for per-item breakdown.':
     'Exécutez /context detail pour une répartition par élément.',
   'body loaded': 'corps chargé',

@@ -653,7 +653,13 @@ export interface ServeContextCategoryBreakdown {
   mcpTools: number;
   memoryFiles: number;
   skills: number;
+  /** Startup prelude outside the skill listing. Absent from older servers. */
+  startupContext?: number;
   messages: number;
+  /** Provider total not accounted for by any category. Absent from older servers. */
+  unattributed?: number;
+  /** Cached prefix tokens; an annotation that overlaps categories. Absent from older servers. */
+  cachedTokens?: number;
   freeSpace: number;
   autocompactBuffer: number;
 }
