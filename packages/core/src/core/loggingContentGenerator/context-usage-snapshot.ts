@@ -18,7 +18,7 @@ import type { Config } from '../../config/config.js';
 import { getCustomSystemPrompt } from '../prompts.js';
 import { computeThresholds } from '../../services/chatCompressionService.js';
 import {
-  estimateContentTokens,
+  estimateContextContentTokens,
   estimateContextTextTokens,
 } from '../../services/tokenEstimation.js';
 import { buildSkillLlmContent } from '../../tools/skill-utils.js';
@@ -274,7 +274,7 @@ export function createContextUsageSnapshot(
       mcp_tools_tokens: tools.mcpTools,
       memory_files_tokens: memory.memoryTokens,
       skills_tokens: tools.skillTool + attributedSkills.skillBodyTokens,
-      messages_tokens: estimateContentTokens(attributedSkills.contents),
+      messages_tokens: estimateContextContentTokens(attributedSkills.contents),
     },
     compaction_reserve_tokens: contextWindowSize - thresholds.auto,
     estimated: true,

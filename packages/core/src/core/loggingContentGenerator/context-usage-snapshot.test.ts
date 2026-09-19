@@ -14,7 +14,7 @@ import type {
 import type { Config } from '../../config/config.js';
 import { computeThresholds } from '../../services/chatCompressionService.js';
 import {
-  estimateContentTokens,
+  estimateContextContentTokens,
   estimateContextTextTokens,
 } from '../../services/tokenEstimation.js';
 import type { SkillConfig } from '../../skills/types.js';
@@ -73,6 +73,19 @@ function skillConfig(): SkillConfig {
 }
 
 describe('createContextUsageSnapshot', () => {
+  it('uses CJK-aware message accounting', () => {
+    const snapshot = createContextUsageSnapshot(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: '中文' }] }],
+      },
+      createConfig(),
+      100_000,
+    );
+
+    expect(snapshot?.breakdown.messages_tokens).toBe(3);
+  });
+
   it('attributes exact memory, tools, and the first loaded Skill body', () => {
     const skill = skillConfig();
     const skillOutput = buildSkillLlmContent(
@@ -167,7 +180,7 @@ describe('createContextUsageSnapshot', () => {
         skills_tokens:
           estimateContextTextTokens(JSON.stringify(skillDeclaration)) +
           estimateContextTextTokens(skillOutput),
-        messages_tokens: estimateContentTokens([
+        messages_tokens: estimateContextContentTokens([
           contents[0]!,
           {
             role: 'user',
@@ -247,7 +260,7 @@ describe('createContextUsageSnapshot', () => {
       estimateContextTextTokens(skillOutput),
     );
     expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens([
+      estimateContextContentTokens([
         {
           role: 'user',
           parts: [
@@ -299,7 +312,7 @@ describe('createContextUsageSnapshot', () => {
       estimateContextTextTokens(loadedOutput),
     );
     expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens([
+      estimateContextContentTokens([
         {
           role: 'user',
           parts: [
@@ -354,7 +367,7 @@ describe('createContextUsageSnapshot', () => {
       estimateContextTextTokens(loadedOutput),
     );
     expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens([
+      estimateContextContentTokens([
         {
           role: 'user',
           parts: [
@@ -402,7 +415,7 @@ describe('createContextUsageSnapshot', () => {
 
     expect(snapshot?.breakdown.skills_tokens).toBe(0);
     expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens(request.contents as Content[]),
+      estimateContextContentTokens(request.contents as Content[]),
     );
   });
 
@@ -441,7 +454,7 @@ describe('createContextUsageSnapshot', () => {
     expect(snapshot?.breakdown.memory_files_tokens).toBe(0);
     expect(snapshot?.breakdown.skills_tokens).toBe(0);
     expect(snapshot?.breakdown.messages_tokens).toBe(
-      estimateContentTokens(request.contents as Content[]),
+      estimateContextContentTokens(request.contents as Content[]),
     );
     expect(listSkills).not.toHaveBeenCalled();
   });
