@@ -401,11 +401,15 @@ history. Queued/dropped frames are not presented as sent frames.
 These are **sensitive recordings of real screen/camera content, task prompts and,
 for audio/visual Monitors, microphone audio**. Connection credentials are omitted;
 visible or spoken secrets inside media are not redacted. Directories/files are
-owner-only. Debug startup and new Monitor creation keep only the ten most
-recently created Monitor directories; this is not a ten-request or disk-size
-limit. An evicted Monitor keeps running but stops recording and logs skipped
-requests. Disk/permission failures or exceeding the 32 MiB pending-write budget
-disable that recorder and log an incomplete recording without stopping the call.
+owner-only on POSIX; on Windows the mode bits are synthetic, so privacy relies
+on the per-user temporary directory's ACLs and the store does not verify them.
+Debug startup and new Monitor creation keep only the ten most recently created
+Monitor directories; this is not a ten-request or disk-size limit. On POSIX
+that cleanup deletes only current-user-owned directories carrying this
+feature's marker; on Windows, where ownership is not exposed, it covers any
+directory beneath the managed root carrying the marker. An evicted Monitor
+keeps running but stops recording and logs skipped requests. Disk/permission
+failures or exceeding the 32 MiB pending-write budget disable that recorder and log an incomplete recording without stopping the call.
 Long-running debug Monitors can consume significant disk space; disable debug
 after diagnosis and do not share recordings without reviewing their contents.
 

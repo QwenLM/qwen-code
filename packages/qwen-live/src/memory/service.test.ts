@@ -129,6 +129,7 @@ describe('persistMemoryPreferences', () => {
       retrieve: { useVector: false },
     });
     expect(resolved.updater.model).toBe('custom-memory-model');
+    // Windows has no POSIX permission bits to assert.
     if (process.platform !== 'win32') {
       expect(statSync(configPath).mode & 0o777).toBe(0o600);
     }
@@ -177,6 +178,7 @@ describe('persistMemoryPreferences', () => {
     });
     expect(saved.memory.observer).not.toHaveProperty('model');
     expect(resolved.observer.model).toBe('custom-memory-model');
+    // Windows has no POSIX permission bits to assert.
     if (process.platform !== 'win32') {
       expect(statSync(configPath).mode & 0o777).toBe(0o600);
     }

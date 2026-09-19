@@ -118,6 +118,86 @@ describe('Live discovery file', () => {
     await expect(fs.readdir(target)).resolves.toEqual([]);
   });
 
+  it('rejects a discovery directory that is not exactly mode 0700', async () => {
+    if (process.platform === 'win32') return;
+    const runtime = await temporaryRuntime();
+    const published = record('daemon_instance_nonce_modes_001');
+    await writeLiveDiscoveryFile(runtime, published);
+    const discoveryDirectory = path.dirname(getLiveDiscoveryPath(runtime));
+
+    // 0o500 is still owner-only: only the 'exact-0700' strictness rejects it,
+    // while 0o755 is rejected by both mode-checking levels.
+    try {
+      for (const mode of [0o500, 0o755]) {
+        await fs.chmod(discoveryDirectory, mode);
+        await expect(
+          writeLiveDiscoveryFile(runtime, published),
+        ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
+        await expect(
+          removeLiveDiscoveryFile(runtime, published),
+        ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
+      }
+    } finally {
+      // Restore owner-writable so the afterEach rm does not EACCES when an
+      // assertion fails on the first iteration.
+      await fs.chmod(discoveryDirectory, 0o700);
+    }
+  });
+
+  it('rejects a foreign-owned runtime base and lock directory', async () => {
+    if (process.platform === 'win32') return;
+    const getuid = process.getuid;
+    if (!getuid) return;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      process,
+      'getuid',
+    );
+    Object.defineProperty(process, 'getuid', {
+      configurable: true,
+      value: () => getuid() + 1,
+    });
+    try {
+      const base = await temporaryRuntime();
+      await expect(
+        writeLiveDiscoveryFile(base, record('daemon_instance_nonce_owned_001')),
+      ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
+
+      const locked = await temporaryRuntime();
+      const lockPath = path.join(
+        path.dirname(getLiveDiscoveryPath(locked)),
+        '.daemon.lock',
+      );
+      await fs.mkdir(path.dirname(lockPath), { recursive: true, mode: 0o700 });
+      await fs.mkdir(lockPath, { mode: 0o700 });
+      await expect(
+        writeLiveDiscoveryFile(
+          locked,
+          record('daemon_instance_nonce_owned_002'),
+        ),
+      ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(process, 'getuid', originalDescriptor);
+      } else {
+        Reflect.deleteProperty(process, 'getuid');
+      }
+    }
+  });
+
+  it('publishes below a runtime base that is not mode 0700', async () => {
+    if (process.platform === 'win32') return;
+    const runtime = await temporaryRuntime();
+    await fs.chmod(runtime, 0o755);
+    const expected = record('daemon_instance_nonce_relaxed_01');
+
+    await expect(writeLiveDiscoveryFile(runtime, expected)).resolves.toBe(
+      getLiveDiscoveryPath(runtime),
+    );
+    expect(
+      JSON.parse(await fs.readFile(getLiveDiscoveryPath(runtime), 'utf8')),
+    ).toEqual(expected);
+  });
+
   it('rejects an unsafe discovery lock shape without replacing it', async () => {
     const runtime = await temporaryRuntime();
     const discoveryDirectory = path.dirname(getLiveDiscoveryPath(runtime));
