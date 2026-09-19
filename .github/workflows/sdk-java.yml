@@ -18,7 +18,9 @@ on:
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/run-managed-hosted-runtime-e2e.ts'
+      - 'scripts/run-managed-runtime-worker-env-e2e.ts'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -38,7 +40,9 @@ on:
       - 'docs/developers/sdk-java.md'
       - 'docs/design/java-daemon-sdk-alpha.md'
       - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/run-managed-hosted-runtime-e2e.ts'
+      - 'scripts/run-managed-runtime-worker-env-e2e.ts'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
@@ -111,6 +115,7 @@ jobs:
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
             packages/sdk-java/runtime-broker/pom.xml
+            packages/sdk-java/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Set up Maven (self-hosted)'
@@ -173,6 +178,37 @@ jobs:
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests package'
+
+  managed-agent-server:
+    name: 'Managed Agent Spring Server / Java 21'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 20
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/sdk-java/runtime-broker/pom.xml
+            packages/sdk-java/managed-agent-server/pom.xml
+
+      - name: 'Install sibling Java libraries'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+
+      - name: 'Test and package Managed Agent server'
+        working-directory: 'packages/sdk-java/managed-agent-server'
+        run: |-
+          mvn --batch-mode --no-transfer-progress test
+          mvn --batch-mode --no-transfer-progress checkstyle:check
+          mvn --batch-mode --no-transfer-progress -DskipTests package
 
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'

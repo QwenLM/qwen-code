@@ -1,0 +1,58 @@
+spring:
+  application:
+    name: qwen-managed-agent-server
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://127.0.0.1:3306/qwen_managed_agent}
+    username: ${SPRING_DATASOURCE_USERNAME:qwen}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${QWEN_MANAGED_AGENT_DB_MAX_POOL_SIZE:20}
+  flyway:
+    enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+qwen:
+  managed-agent:
+    harness:
+      enabled: ${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}
+      base-url: ${QWEN_MANAGED_AGENT_HARNESS_BASE_URL:http://127.0.0.1:4170}
+      token: ${QWEN_MANAGED_AGENT_HARNESS_TOKEN:}
+      capability-digest: ${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST:}
+      approval-mode: ${QWEN_MANAGED_AGENT_APPROVAL_MODE:yolo}
+      connect-timeout: 5s
+      request-timeout: 30s
+      heartbeat-interval: 30s
+    dispatch:
+      scan-delay: 1s
+      lease-duration: 60s
+      lease-renew-interval: 20s
+    events:
+      poll-interval: 200ms
+      heartbeat-interval: 15s
+      stream-timeout: 30m
+    runtime-broker:
+      enabled: ${QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED:false}
+      host: ${QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST:127.0.0.1}
+      port: ${QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT:4190}
+      token: ${QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN:}
+      provisioner: ${QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER:local-process}
+      workspace-id: ${QWEN_MANAGED_AGENT_WORKSPACE_ID:}
+      workspace-generation: ${QWEN_MANAGED_AGENT_WORKSPACE_GENERATION:1}
+      workspace-cwd: ${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}
+      isolation-class: ${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}
+      state-directory: ${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY:}
+      node-executable: ${QWEN_MANAGED_AGENT_NODE_EXECUTABLE:}
+      worker-entry: ${QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY:}
+      cli-entry: ${QWEN_MANAGED_AGENT_CLI_ENTRY:}
+      static-endpoint: ${QWEN_MANAGED_AGENT_STATIC_RUNTIME_ENDPOINT:}
+      static-token: ${QWEN_MANAGED_AGENT_STATIC_RUNTIME_TOKEN:}
