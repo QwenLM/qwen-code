@@ -95,8 +95,8 @@ describe('runtime shell policy admission', () => {
     ).toBeDefined();
   });
 
-  it('rejects the programmatic legacy bwrap entry without a new policy', () => {
-    expect(() =>
+  it('preserves whole-CLI bwrap when the new policy is absent', () => {
+    expect(
       admit(
         {
           ...params,
@@ -105,7 +105,7 @@ describe('runtime shell policy admission', () => {
         },
         root,
       ),
-    ).toThrow('tools.executionSandbox');
+    ).toBeUndefined();
   });
 
   it.each([
