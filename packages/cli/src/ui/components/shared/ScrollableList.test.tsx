@@ -137,6 +137,148 @@ describe('<ScrollableList /> mouse scrolling', () => {
     expect(listRef.current?.getScrollState().scrollTop).toBe(105);
   });
 
+  it('applies a single wheel event before any frame timer fires', async () => {
+    // Pin the PR's headline behavior through the real
+    // stdin → handler → schedule() pipeline, not just at hook level: the
+    // leading flush must move the viewport immediately, with no timer
+    // advanced before the assertion. A regression that re-introduces delay
+    // before the first flush in the mouse path would fail here.
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(0);
+
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+    });
+    await act(async () => {});
+
+    // One SGR wheel tick moves exactly WHEEL_LINES_PER_TICK (3) rows.
+    expect(listRef.current?.getScrollState().scrollTop).toBe(3);
+  });
+
+  it('preserves wheel intent clipped at the top boundary', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(0);
+
+    await act(async () => {
+      stdin.write(wheelUp(5, 5));
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelDown(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(3);
+  });
+
+  it('does not carry clipped wheel intent into a later burst', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(0);
+
+    await act(async () => {
+      stdin.write(wheelUp(5, 5));
+    });
+    await flushScrollFrame();
+
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+    });
+    await act(async () => {});
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(3);
+  });
+
+  it('preserves bottom stickiness after opposing boundary-clipped input', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = ({ count }: { count: number }) => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(count)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper count={200} />));
+    rerender(withKeypress(<Wrapper count={200} />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelUp(5, 5));
+    });
+    await flushScrollFrame();
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    rerender(withKeypress(<Wrapper count={201} />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(196);
+  });
+
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {
     const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
     const Wrapper = () => (
@@ -310,8 +452,8 @@ describe('<ScrollableList /> mouse scrolling', () => {
     await act(async () => {});
     expect(lastFrame()).toContain('item-0');
 
-    // Wheel down (queues a flush), then immediately click the top of the
-    // scrollbar — all before the frame timer fires.
+    // The leading wheel applies immediately; the second queues a trailing
+    // flush. Click the top of the scrollbar before that timer fires.
     await act(async () => {
       stdin.write(wheelDown(5, 5));
       stdin.write(wheelDown(5, 5));
@@ -368,6 +510,41 @@ const CTRL_END = `${ESC}[1;5F`;
 
 describe('<ScrollableList /> keyboard scroll', () => {
   const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+
+  it('drops stale clipped wheel-up intent before a later burst', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+
+    await act(async () => stdin.write(wheelUp(5, 5)));
+    await flushScrollFrame();
+
+    await act(async () => {
+      stdin.write(wheelUp(5, 5));
+      stdin.write(PAGE_DOWN);
+      stdin.write(PAGE_DOWN);
+      stdin.write(wheelDown(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(10);
+  });
 
   it('Shift+Up scrolls up by 1 line', async () => {
     const Wrapper = () => (
