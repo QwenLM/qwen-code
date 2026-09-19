@@ -168,6 +168,19 @@ describe('standalone installer glibc preflight', () => {
     }
   });
 
+  itOnUnix('rejects glibc 2.27 before any release download', () => {
+    const result = runInstaller({ glibcVersion: '2.27' });
+    try {
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toContain(
+        'requires glibc 2.28 or newer; this system has glibc 2.27',
+      );
+      expect(existsSync(result.curlMarker), result.stderr).toBe(false);
+    } finally {
+      cleanup(result);
+    }
+  });
+
   itOnUnix(
     'identifies the official runtime requirement for base-url mirrors',
     () => {
