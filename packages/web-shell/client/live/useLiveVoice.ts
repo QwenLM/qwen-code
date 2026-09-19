@@ -79,7 +79,9 @@ export function useLiveVoice(): UseLiveVoiceResult {
     // Host each interval would stack another identical liveStatus request.
     if (requestRef.current) return await requestRef.current;
     const generation = pollGenerationRef.current;
-    const request = (async () => {
+    // Not an IIFE: a self-referencing one fails `tsc` definite assignment
+    // (TS2454), since the `finally` below names `request` mid-initializer.
+    const run = async (): Promise<void> => {
       setLoading(true);
       try {
         const next = await workspace.client.liveStatus();
@@ -102,7 +104,8 @@ export function useLiveVoice(): UseLiveVoiceResult {
           requestRef.current = undefined;
         }
       }
-    })();
+    };
+    const request = run();
     requestRef.current = request;
     return await request;
   }, [supported, workspace.client]);
