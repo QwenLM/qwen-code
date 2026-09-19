@@ -1,5 +1,7 @@
 # Web Shell Composer Add Menu
 
+[English](web-shell-composer-add-menu.md) | [简体中文](web-shell-composer-add-menu.zh-CN.md)
+
 ## Problem
 
 The composer can already do a lot of "add something to this message" work, but almost all of it has no visible entry point. Files must be dragged in or pasted. Referencing a workspace file requires knowing to type `@`. Invoking a skill requires knowing to type `/`. A user who does not know a capability exists has no way to discover it.
@@ -17,14 +19,14 @@ The `+` is an **entry point, not a capability**. It surfaces what already exists
 ### Positioning
 
 - **Front-end only.** No new backend capability, no daemon route changes, no message-structure changes.
-- **Additive.** Existing toolbar controls (model, approval mode, voice, workspace, git branch, context usage, width) keep their current position and behavior.
+- **Additive.** Existing toolbar controls (model, approval mode, voice, workspace, git branch, context usage, width) keep their current position and behavior. The one later exception is Plan: when the host also lists `plan`, its entry lives in this menu and the permanent Plan switch leaves the toolbar. See "Plan mode" below.
 - **Off by default, via the toolbar item list.** Web Shell already lets the host declare which built-in toolbar controls to render. `addMenu` joins that list as an opt-in identifier and is absent from the default list, so existing embedders see no change.
-- The standalone host appends `addMenu` to the context-sensitive defaults so empty-state Git controls are preserved. Split-view panes opt in through their pane list and omit only the width control because pane sizing owns their width.
-- **One group only: "Add to message".** An earlier draft also carried a "this task's context" group (context usage, session recap, Goal, shell mode). It was removed as unrelated to what `+` means. Management surfaces (MCP servers, tools, agents, settings) stay out deliberately — they already have sidebar entry points, and repeating them turns a discoverability fix into navigation redundancy.
+- The standalone host appends `addMenu`, alongside the `plan` it already listed, to the context-sensitive defaults so empty-state Git controls are preserved. Split-view panes opt in through their pane list, which omits the width control because pane sizing owns their width, and carries the workspace chip only when one is shown.
+- **"Add to message", plus one mode row.** An earlier draft also carried a "this task's context" group (context usage, session recap, Goal, shell mode). It was removed as unrelated to what `+` means, and it stays removed. Plan mode was admitted later as a single row below a separator, which widens `+` from "add to this message" to "add to this message, or choose how it is handled". The reasons are specific to Plan: it is chosen rarely, yet its switch was the heaviest control on the toolbar and the only switch in the row; it must not return to the permission menu, because planning and execution permission are independent (see [DAC Chat Plan toggle](../dac-plan-toggle.md)); and chat composers such as Codex already put this kind of per-task mode behind `+`, so that is where people look for it. The rejected group's items each have another home (the context ring, slash commands); Plan had none that was quiet. Management surfaces (MCP servers, tools, agents, settings) stay out deliberately — they already have sidebar entry points, and repeating them turns a discoverability fix into navigation redundancy.
 
 ### Menu contents
 
-One group, five items, all of which expand into submenus.
+The "Add to message" group has five items, all of which expand into submenus.
 
 | Item             | Description | Behavior                                                                            |
 | ---------------- | ----------- | ----------------------------------------------------------------------------------- |
@@ -36,14 +38,29 @@ One group, five items, all of which expand into submenus.
 
 **Why one file entry, not two.** Two adjacent top-level entries that both start with "pick a local file" are hard to distinguish. One "Add file" submenu keeps the main menu compact while making the destination explicit before the native picker opens.
 
-All five top-level rows are one line. The submenu contents provide the needed detail.
+All five "Add to message" rows are one line. The submenu contents provide the needed detail.
 Below the small-screen breakpoint, menus narrow and secondary descriptions hide so adjacent submenus fit without horizontal clipping.
+
+### Plan mode
+
+When the host lists `plan` as well as `addMenu` and supplies a Plan toggle, the menu ends with a separator and one more row.
+
+| Item      | Description                       | Behavior                                                                 |
+| --------- | --------------------------------- | ------------------------------------------------------------------------ |
+| Plan mode | Plan first, run after you approve | Checkbox row, not a submenu; checked while Plan is on; toggles Plan once |
+
+- It is the last row, and the only one that is not a submenu, the only one with a leading icon, and the only one with a second line. The description hides below the small-screen breakpoint like the other secondary descriptions.
+- Choosing it closes the menu, toggles Plan exactly once, and returns focus to the composer input, like the insert rows.
+- While mode controls are busy (a mode change or a plan-approval handoff) the row is disabled and states the reason, "Switching mode", in the place the other rows show "Unavailable".
+- It does not depend on the workspace, so it still shows under the empty-state row when no add action is available.
+- The trigger keeps its "Add to message" accessible name, so the row is not discoverable from the trigger alone. Plan stays reachable through `/plan`, and the toolbar chip reports its state; the toolbar side is specified in [DAC Chat Plan toggle](../dac-plan-toggle.md).
+- A host that lists `addMenu` without `plan`, or passes no toggle, gets no Plan row and the menu is exactly the five items above.
 
 ### Layout and interaction
 
 - The trigger is an icon-only button, first built-in control in the toolbar row, after the host's toolbar-start slot.
 - **`+` visibility is decided by the host toolbar item list alone.** When `addMenu` is in the list, `+` is present; when not, it is absent. It does not disappear because the five inner capabilities are all unavailable in the current workspace — that would make the entry point flicker across workspace switches and defeat discoverability precisely when it is needed most. If the host has opted in but every inner capability is unavailable, `+` opens to an empty-state row explaining that no add actions are available here.
-- All top-level items are one line. Roughly six rows total for five items plus a separator.
+- All "Add to message" items are one line. Roughly six rows total for five items plus a separator, and two more (a separator and the two-line Plan row) when the host enables the Plan entry.
 - Submenus open as a **separate flyout to the right of the row on hover**, not as in-place expansion. Expanding in place makes the panel tall and hides the whole picture.
 - Long lists inside a submenu scroll rather than growing past the viewport.
 - **The menu must never lie.** An item either works when clicked or is not shown, or is shown disabled with a stated reason. Silent no-ops are the primary failure mode this design guards against.
@@ -79,19 +96,19 @@ These are facts about the current system that shape the design, and each one rul
 
 ## Touch
 
-`+` shows the same five items on touch and desktop. Attachment and reference insertion reuse their existing lanes; skill prepend targets CodeMirror on desktop and the native textarea on touch.
+`+` shows the same items on touch and desktop. Attachment and reference insertion reuse their existing lanes; skill prepend targets CodeMirror on desktop and the native textarea on touch.
 
 **Unverified:** right-side flyouts depend on hover, and touch has none. The menu primitive is expected to fall back to click/focus for non-mouse pointers, but that needs a real-device check. If it fails, touch keeps the single item that does not need a submenu and this section is rewritten.
 
 ## Non-goals
 
 - Backend changes, new capabilities, message-structure changes.
-- The "this task's context" group.
+- The "this task's context" group (context usage, session recap, Goal, shell mode). Plan mode is the one later exception, for the reasons under Positioning.
 - An "all commands" entry. Typing `/` already covers it, and dropping this row also removes the draft-state problem that came with it.
 - Management pages.
 - MCP resource-level references.
 - **Subagent targeting.** There is no way to deterministically route a message to a named subagent: no agent kind exists among referenceable objects, agent selection is a model-side tool argument, the session request carries no related field, and no backend path maps user text to an agent. The only available form is natural language begging the model to comply, which guarantees nothing and violates the never-lie rule.
-- A host-facing API for registering custom `+` items. Five fixed items this round, gated by the existing toolbar item list mechanism.
+- A host-facing API for registering custom `+` items. Five fixed add items plus the Plan row, gated by the existing toolbar item list mechanism.
 - Restructuring the existing touch-only actions surface, or restructuring `ChatEditor`.
 
 ## Risks
@@ -106,6 +123,8 @@ These are facts about the current system that shape the design, and each one rul
 File separately; do not fold into this change.
 
 - The `@` panel already offers MCP **resource** drill-down, which the Web Shell backend ignores. Users believe they referenced a resource; they did not.
+- Choosing a row that moves state elsewhere in the composer, as the Plan row does, is not announced to a screen reader: the menu closes, focus goes to the input, and the chip appears in the toolbar. The switch this row replaced reported its own state because it was focused. Announcing correctly needs to distinguish a change the user asked for here from one that arrives with a session or from `/plan`, which the composer cannot tell from props alone; a live region driven from props alone announces a session switch as if the user had caused it.
+- The never-lie rule has a gap around Plan, inherited from the control the Plan row replaced. A split pane does not fold write-blocked state into the composer's disabled prop, so while a pane is loading its transcript, or its connection is in error, choosing Plan mode is a silent no-op rather than a disabled row with a reason. The main composer does fold that state in, which disables this menu's trigger and so protects the row — but not the toolbar chip, which stays enabled and silently does nothing while that session is write-blocked. Closing either half means giving the composer the reason the host would decline for, which it is not told today.
 - Extension names containing spaces or non-ASCII characters are escaped on write by the client but never unescaped by the backend matcher, so such references can fail silently.
 - The file-upload design document claims inserted `@` references are consumed by an existing resolver. That describes the TUI path; the daemon path does not do it.
 - Two different touch-detection helpers exist with different semantics, one of which is a re-implementation-and-widening of the other.
@@ -114,7 +133,7 @@ File separately; do not fold into this change.
 
 Behavior-level, not tied to an implementation shape:
 
-1. When `addMenu` is not in the host's toolbar item list, `+` never appears. When it is present, `+` sits at the front of the toolbar and no other control moves.
+1. When `addMenu` is not in the host's toolbar item list, `+` never appears. When it is present, `+` sits at the front of the toolbar and no other control moves, except that the Plan switch gives way to the menu row and the toolbar chip when `plan` is also listed.
 2. Add file lands on the message as an attachment when the user chooses "Attach to message", and lands on disk plus inserts a reference when the user chooses "Upload to workspace". The three reference submenus insert the correct reference form. Skills prepends the invocation to the very front of the input.
 3. File referencing finds a target anywhere in the workspace from a partial name.
 4. The MCP submenu inserts a server-level reference for every server, including ones that expose resources, using the same syntax the `@` panel uses for servers without resources; it intentionally does not enter resource drill-down.
@@ -124,3 +143,4 @@ Behavior-level, not tied to an implementation shape:
 8. Touch and desktop show the same set, subject to the real-device submenu check.
 9. A long submenu scrolls instead of overflowing the viewport.
 10. Pointer interaction is covered; keyboard navigation is unsupported and has no feature-specific implementation.
+11. With `plan` listed and a toggle supplied, Plan mode is the last row, shows a check while Plan is on, toggles once per choice, returns focus to the composer, and is disabled with the reason "Switching mode" while mode controls are busy. Without `plan` or without a toggle the row is absent. It remains under the empty-state row.

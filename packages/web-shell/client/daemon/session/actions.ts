@@ -154,6 +154,11 @@ class AttachmentUploadError extends Error {
 const DEFAULT_RESTORE_SERVER_TIMEOUT_MS = 60_000;
 const RESTORE_REQUEST_HEADROOM_MS = 10_000;
 const RESTORE_WATCHDOG_HEADROOM_MS = 15_000;
+// Covers one default capability preflight + create (2 x 30s), plus 15s headroom.
+// Concurrent capability refreshes can extend the chain beyond this action limit.
+// Keep in sync with DEFAULT_FETCH_TIMEOUT_MS in sdk-typescript's DaemonClient.ts;
+// actions.test.ts pins both the SDK request deadline and this watchdog boundary.
+const CREATE_WATCHDOG_TIMEOUT_MS = 75_000;
 const ATTACH_WATCHDOG_TIMEOUT_MS = 30_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -258,7 +263,15 @@ export interface CreateDaemonSessionActionsArgs {
     owner: DaemonSessionClient,
     promptId: string,
   ) => void;
-  onPromptRemoved?: (owner: DaemonSessionClient, promptId: string) => void;
+  onPromptRemoved?: (
+    owner: DaemonSessionClient,
+    promptId: string,
+    // Present only when the removal bypassed the session object (the
+    // stale-session branch routes to `session.client.removePendingPrompt` and
+    // hands over the foreign owner session id, since `session` there is the
+    // *current* session, not the prompt's owner).
+    sessionId?: string,
+  ) => void;
 }
 
 export function getWorkspaceModelsAfterSessionClear(
@@ -327,6 +340,9 @@ export function getConnectionAfterSessionClear(
   const next = { ...current };
   if (!clearedSessionId || current.sessionId === clearedSessionId) {
     delete next.sessionId;
+    delete next.runtimeStopped;
+    delete next.runtimeStopPersistenceUnconfirmed;
+    delete next.capacityRecovery;
     delete next.clientId;
     delete next.displayName;
     delete next.titleSource;
@@ -2063,6 +2079,7 @@ export function createDaemonSessionActions({
 
     async createSession(options?: {
       workspaceCwd?: string;
+      getCurrentWorkspaceCwd?: () => string | undefined;
       sessionContext?: DaemonProductSessionContext;
       modelServiceId?: string;
       approvalMode?: DaemonApprovalMode;
@@ -2101,6 +2118,14 @@ export function createDaemonSessionActions({
       try {
         manualSessionClearRef.current = false;
         const currentConnection = getConnection();
+        const connectionSessionIdAtStart = currentConnection.sessionId;
+        const getWorkspaceSelectionKey = () => {
+          const cwd = options?.getCurrentWorkspaceCwd?.();
+          return sessionContextKey(
+            cwd === undefined ? undefined : { kind: 'workspace', cwd },
+          );
+        };
+        const workspaceSelectionAtStart = getWorkspaceSelectionKey();
         targetSessionContext = resolveActionSessionContext(
           options?.sessionContext,
           options?.workspaceCwd,
@@ -2184,6 +2209,7 @@ export function createDaemonSessionActions({
                 ),
             ),
             'Create session timed out',
+            CREATE_WATCHDOG_TIMEOUT_MS,
           );
           persistStableClientId(nextSession.clientId, nextSession.sessionId);
           return nextSession;
@@ -2214,8 +2240,13 @@ export function createDaemonSessionActions({
             : await withActionTimeout(
                 trackedCreate,
                 'Create session timed out',
+                CREATE_WATCHDOG_TIMEOUT_MS,
               );
-        if (manualSessionClearRef.current) {
+        const userMovedAway =
+          (getConnection().sessionId !== connectionSessionIdAtStart ||
+            getWorkspaceSelectionKey() !== workspaceSelectionAtStart) &&
+          getConnection().sessionId !== nextSession.sessionId;
+        if (manualSessionClearRef.current || userMovedAway) {
           try {
             await withActionTimeout(
               nextSession.detach(),
@@ -2888,10 +2919,14 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) return { removed: false };
       if (opts?.sessionId && session.sessionId !== opts.sessionId) {
-        return await session.client.removePendingPrompt(
+        const result = await session.client.removePendingPrompt(
           opts.sessionId,
           promptId,
         );
+        if (result.removed) {
+          onPromptRemoved?.(session, promptId, opts.sessionId);
+        }
+        return result;
       }
       const result = await session.removePendingPrompt(promptId);
       if (result.removed) onPromptRemoved?.(session, promptId);

@@ -347,29 +347,35 @@ export class ModelRegistry {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return [];
 
-    return Array.from(models.values()).map((model) => ({
-      id: model.id,
-      label: model.name,
-      description: model.description,
-      capabilities: model.capabilities,
-      authType: model.authType,
-      isVision: model.capabilities?.vision ?? false,
-      contextWindowSize:
-        model.generationConfig.contextWindowSize ?? tokenLimit(model.id),
-      // `modalities` is auto-filled in `resolveModelConfig`, so it is
-      // always defined on `ResolvedModelConfig` — no fallback needed here.
-      modalities: model.generationConfig.modalities,
-      baseUrl: model.baseUrl,
-      ...(model.registryBaseUrl !== undefined
-        ? { registryBaseUrl: model.registryBaseUrl }
-        : {}),
-      envKey: model.envKey,
-      fastOnly: model.fastOnly,
-      voiceOnly: model.voiceOnly,
-      visionOnly: model.visionOnly,
-      supportsImageGeneration: model.supportsImageGeneration,
-      imageOnly: model.imageOnly,
-    }));
+    // A realtimeOnly route speaks a speech-to-speech protocol, not chat, and
+    // is picked only through the Live Voice setup. Dropping it at the source
+    // keeps it out of every selector built from this list; `getModel` still
+    // resolves it so naming it as a chat model fails with a clear error.
+    return Array.from(models.values())
+      .filter((model) => !model.realtimeOnly)
+      .map((model) => ({
+        id: model.id,
+        label: model.name,
+        description: model.description,
+        capabilities: model.capabilities,
+        authType: model.authType,
+        isVision: model.capabilities?.vision ?? false,
+        contextWindowSize:
+          model.generationConfig.contextWindowSize ?? tokenLimit(model.id),
+        // `modalities` is auto-filled in `resolveModelConfig`, so it is
+        // always defined on `ResolvedModelConfig` — no fallback needed here.
+        modalities: model.generationConfig.modalities,
+        baseUrl: model.baseUrl,
+        ...(model.registryBaseUrl !== undefined
+          ? { registryBaseUrl: model.registryBaseUrl }
+          : {}),
+        envKey: model.envKey,
+        fastOnly: model.fastOnly,
+        voiceOnly: model.voiceOnly,
+        visionOnly: model.visionOnly,
+        supportsImageGeneration: model.supportsImageGeneration,
+        imageOnly: model.imageOnly,
+      }));
   }
 
   /**
@@ -429,7 +435,7 @@ export class ModelRegistry {
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
     return Array.from(models.values()).find(
-      (model) => !model.imageOnly && !model.voiceOnly,
+      (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
     );
   }
 
@@ -479,6 +485,7 @@ export class ModelRegistry {
       config.voiceOnly,
       config.visionOnly,
       config.imageOnly,
+      config.realtimeOnly,
     ].filter(Boolean).length;
     if (selectorOnlyCount > 1) {
       debugLogger.warn(

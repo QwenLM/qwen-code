@@ -1396,7 +1396,8 @@ export function worktreeResidueOf(report: PlanReport): WorktreeResidue {
 
 /**
  * What every code-reading agent of a worktree-mode review needs to know about
- * the tree it is standing in: it is shared, and shared with agents that write.
+ * the tree it is standing in: where it is, that it is shared, and that it is
+ * shared with agents that write.
  *
  * The isolation half of #9207 removes the source — a verifier's probes now run
  * in its own scratch tree — and this is the reader half, because "no agent
@@ -1406,6 +1407,13 @@ export function worktreeResidueOf(report: PlanReport): WorktreeResidue {
  * Critical against them, and recovered only by improvising evidence from
  * `git show HEAD:` — a fallback no brief mentioned. It is one sentence here so
  * the next auditor does not have to invent it.
+ *
+ * The location half is #11895. `working_dir` only resolves relative paths
+ * against the worktree. The brief's only absolute path used to be the diff
+ * under the main checkout, so agents extrapolated `<repoRoot>/packages/...`
+ * and read `origin/main` instead of the PR head. The worktree's absolute path
+ * is printed next to the diff's, with the rule that source files live under
+ * the worktree and the main checkout is a different tree.
  *
  * `residue` is that check made concrete: the paths the tree carried when this
  * launch was built. Named, not counted — a reader can only act on "distrust
@@ -1421,6 +1429,37 @@ function worktreeEvidenceBlock(
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return [];
   const parts: string[] = [];
+  // Resolved against the process cwd, like every other use of `worktreePath`
+  // here: the report stores it repo-relative and review commands run from the
+  // project root. `working_dir` does not rewrite an absolute path, so the
+  // brief has to name this one or agents will keep inventing it from the
+  // diff's directory.
+  const wtAbs = inertPath(resolve(wt));
+  const repoRoot = inertPath(resolve('.'));
+  // The diff path is named only for agents that already read it. Agent 7's
+  // evidence is the commands it ran; handing it the diff would be requiring
+  // a thing its job does not involve, and coverage would then report it
+  // "blind" for not opening a file it was never asked to open.
+  const diffPath =
+    opts.rule !== false &&
+    typeof report.diffPathAbsolute === 'string' &&
+    report.diffPathAbsolute
+      ? inertPath(report.diffPathAbsolute)
+      : undefined;
+  parts.push(
+    '',
+    `**The PR worktree's absolute path is \`${wtAbs}\`.** \`working_dir\` only ` +
+      'resolves relative paths against it. ' +
+      (diffPath === undefined
+        ? ''
+        : `The diff at \`${diffPath}\` is an artifact in the main checkout; ` +
+          'it is not a cue that source files live next to it. ') +
+      `**Source files live under \`${wtAbs}\`.** Never \`read_file\` ` +
+      `\`${repoRoot}/packages/...\` — that is a different tree (the main ` +
+      'checkout, typically `origin/main`), not the PR head. A relative ' +
+      "`packages/...` path is the PR's code; the same path under the main " +
+      'checkout is not.',
+  );
   // The RULE is for agents that review code. The residue paragraph below is for
   // everyone: Agent 7 does not read the tree, it BUILDS it, and residue that
   // predates the round reaches its compile and its test run — where a
