@@ -22,7 +22,6 @@ export const PUBLISHED_PACKAGES = [
   '@qwen-code/channel-telegram',
   '@qwen-code/channel-wecom',
   '@qwen-code/channel-weixin',
-  '@qwen-code/web-shell',
 ];
 
 // Deliberately a copy of `scripts/lib/release-helpers.js`, not an import:
