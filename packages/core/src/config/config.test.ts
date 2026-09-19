@@ -9135,6 +9135,30 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toBe('');
   });
 
+  it('keeps memory attribution paired with its text snapshot', () => {
+    const config = new Config(baseParams);
+    const sources = [
+      {
+        filePath: '/extensions/alpha/QWEN.md',
+        content: 'alpha body\n',
+        extensionName: 'alpha',
+      },
+    ];
+
+    config.setUserMemory('loaded memory', sources);
+    sources[0]!.content = 'mutated later';
+    expect(config.getUserMemorySources()).toEqual([
+      {
+        filePath: '/extensions/alpha/QWEN.md',
+        content: 'alpha body\n',
+        extensionName: 'alpha',
+      },
+    ]);
+
+    config.setUserMemory('SDK replacement');
+    expect(config.getUserMemorySources()).toBeUndefined();
+  });
+
   it('Config constructor should enable runtime sleep prevention by default', () => {
     const config = new Config(baseParams);
 
@@ -9148,6 +9172,40 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
+  });
+
+  it('refreshes rule roots from enabled extensions without context files', async () => {
+    const config = new Config({ ...baseParams, overrideExtensions: undefined });
+    const extension: Extension = {
+      id: 'a'.repeat(64),
+      name: 'suite',
+      version: '1.0.0',
+      isActive: true,
+      path: '/extensions/suite',
+      config: { name: 'suite', version: '1.0.0' },
+      contextFiles: [],
+    };
+    vi.spyOn(
+      config.getExtensionManager(),
+      'getLoadedExtensions',
+    ).mockReturnValue([extension]);
+    await config.refreshHierarchicalMemory();
+    expect(vi.mocked(loadServerHierarchicalMemory).mock.lastCall?.[7]).toEqual(
+      expect.objectContaining({
+        extensionRoots: ['/extensions/suite'],
+        extensionContextFiles: [
+          { extensionName: 'suite', filePaths: extension.contextFiles },
+        ],
+      }),
+    );
+    extension.isActive = false;
+    await config.refreshHierarchicalMemory();
+    expect(vi.mocked(loadServerHierarchicalMemory).mock.lastCall?.[7]).toEqual(
+      expect.objectContaining({
+        extensionRoots: [],
+        extensionContextFiles: [],
+      }),
+    );
   });
 
   it('refreshHierarchicalMemory should build the managed auto-memory prompt when present', async () => {
@@ -9599,6 +9657,34 @@ describe('Server Config (config.ts)', () => {
     );
     expect(config.getWarnings()).toContainEqual(
       expect.stringContaining('more than 15%'),
+    );
+  });
+
+  it('names the largest confirmed extension contributors in a memory warning', async () => {
+    const config = new Config({
+      ...baseParams,
+      generationConfig: { contextWindowSize: 1000 },
+    });
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+      memoryContent: 'a'.repeat(800),
+      memorySources: [
+        { content: 'a'.repeat(500), extensionName: 'alpha\u001b[31m' },
+        { content: 'b'.repeat(200), extensionName: 'beta' },
+        { content: 'c'.repeat(100) },
+      ],
+      fileCount: 3,
+      contextFilePaths: [],
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getWarnings()).toContainEqual(
+      expect.stringContaining(
+        'Largest extension contributors: alpha (~125 tokens), beta (~50 tokens).',
+      ),
     );
   });
 

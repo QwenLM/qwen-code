@@ -311,7 +311,10 @@ import {
   SessionWriterUnavailableError,
 } from '../services/session-writer-lease.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
+import {
+  loadServerHierarchicalMemory,
+  type MemoryContentSource,
+} from '../memory/memoryDiscovery.js';
 import { ConditionalRulesRegistry } from './rulesDiscovery.js';
 import {
   createDebugLogger,
@@ -339,6 +342,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
@@ -2696,6 +2700,7 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  private userMemorySources: readonly MemoryContentSource[] | undefined;
   /**
    * The cross-session-stable prefix of the main-session system prompt —
    * the stable → context layers `LlmClient.getMainSessionSystemInstruction()`
@@ -3127,6 +3132,7 @@ export class Config {
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
+    this.userMemorySources = undefined;
     this.memoryFileCount =
       params.memoryFileCount ?? params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
@@ -4717,6 +4723,7 @@ export class Config {
     }
     const {
       memoryContent,
+      memorySources,
       fileCount,
       contextFilePaths,
       conditionalRules,
@@ -4731,6 +4738,13 @@ export class Config {
       this.contextRuleExcludes,
       {
         explicitOnly: this.getBareMode(),
+        extensionRoots: this.getActiveExtensions().map(
+          (extension) => extension.path,
+        ),
+        extensionContextFiles: this.getActiveExtensions().map((extension) => ({
+          extensionName: extension.name,
+          filePaths: extension.contextFiles,
+        })),
         loadReason,
         onInstructionsLoaded: createInstructionsLoadedCallback(
           () => this.hookSystem,
@@ -4846,7 +4860,7 @@ export class Config {
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      this.setUserMemory(memoryContent);
+      this.setUserMemory(memoryContent, memorySources);
       this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
         getAutoMemoryRoot(this.getProjectRoot()),
         managedAutoMemoryIndex,
@@ -4862,7 +4876,7 @@ export class Config {
           : undefined,
       );
     } else {
-      this.setUserMemory(memoryContent);
+      this.setUserMemory(memoryContent, memorySources);
       this.autoMemoryPrompt = '';
     }
     this.setMemoryFileCount(fileCount);
@@ -4904,13 +4918,36 @@ export class Config {
       return undefined;
     }
 
+    const extensionContributors = new Map<string, number>();
+    for (const source of this.userMemorySources ?? []) {
+      if (!source.extensionName) continue;
+      const name = stripAnsiAndControl(source.extensionName)
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!name) continue;
+      extensionContributors.set(
+        name,
+        (extensionContributors.get(name) ?? 0) + source.content.length,
+      );
+    }
+    const largestExtensions = [...extensionContributors]
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 3)
+      .map(
+        ([name, characters]) =>
+          `${name} (~${Math.ceil(characters / CHARS_PER_TOKEN).toLocaleString()} tokens)`,
+      );
+
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ` +
       `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
       `model's ${contextWindowSize.toLocaleString()} token context window. ` +
       `Consider trimming long always-loaded context or moving details into ` +
-      `on-demand files.`
+      `on-demand files.` +
+      (largestExtensions.length > 0
+        ? ` Largest extension contributors: ${largestExtensions.join(', ')}.`
+        : '')
     );
   }
 
@@ -7881,6 +7918,10 @@ export class Config {
     return this.userMemory;
   }
 
+  getUserMemorySources(): readonly MemoryContentSource[] | undefined {
+    return this.userMemorySources;
+  }
+
   getStaticSystemPrefix(): string | undefined {
     return this.staticSystemPrefix;
   }
@@ -7925,8 +7966,14 @@ export class Config {
     this.outputLanguageFilePath = filePath;
   }
 
-  setUserMemory(newUserMemory: string): void {
+  setUserMemory(
+    newUserMemory: string,
+    sources?: readonly MemoryContentSource[],
+  ): void {
     this.userMemory = newUserMemory;
+    this.userMemorySources = sources
+      ? Object.freeze(sources.map((source) => Object.freeze({ ...source })))
+      : undefined;
   }
 
   getMemoryFileCount(): number {

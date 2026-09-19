@@ -12,6 +12,7 @@ export default {
   arena: 'Agent Arena',
   skills: 'Skills',
   memory: 'Memory',
+  rules: 'Context Rules',
   headless: 'Headless Mode',
   'structured-output': 'Structured Output',
   'dual-output': 'Dual Output',

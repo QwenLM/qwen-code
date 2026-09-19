@@ -282,8 +282,8 @@ export class ConditionalRulesRegistry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Load rules from both global (`~/.qwen/rules/`) and project-level
- * (`.qwen/rules/`) directories.
+ * Load global (`~/.qwen/rules/`), project (`.qwen/rules/`), and enabled
+ * extension (`rules/`) rules. Extension rules must declare paths.
  *
  * Baseline rules (no `paths:`) are returned in `content` for immediate
  * injection into the system prompt. Conditional rules (with `paths:`) are
@@ -292,11 +292,13 @@ export class ConditionalRulesRegistry {
  * @param projectRoot - Absolute path to the project root (git root or CWD).
  * @param folderTrust - Whether the project folder is trusted.
  * @param excludes - Glob patterns to skip (matched against absolute paths).
+ * @param extensionRoots - Effective roots of enabled extensions.
  */
 export async function loadRules(
   projectRoot: string,
   folderTrust: boolean,
   excludes: string[] = [],
+  extensionRoots: string[] = [],
 ): Promise<LoadRulesResponse> {
   logger.debug(`Loading rules for project: ${projectRoot}`);
 
@@ -320,6 +322,23 @@ export async function loadRules(
       logger.debug(
         'Project rules dir same as global — skipping to avoid duplicates',
       );
+    }
+  }
+
+  if (folderTrust) {
+    for (const root of [
+      ...new Set(extensionRoots.map((p) => path.resolve(p))),
+    ].sort()) {
+      const rules = await loadRulesFromDir(path.join(root, 'rules'), excludes);
+      for (const rule of rules) {
+        if (rule.paths) {
+          allRules.push(rule);
+        } else {
+          logger.warn(
+            `Skipping extension rule without paths: ${rule.filePath}`,
+          );
+        }
+      }
     }
   }
 

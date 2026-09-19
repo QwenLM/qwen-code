@@ -11,6 +11,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   getBuiltInOutputStyle,
   getCoreSystemPrompt,
+  estimateContextTextTokens,
   resolveInteractionMode,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -18,6 +19,7 @@ import {
   collectContextData,
   formatContextUsageText,
 } from './contextCommand.js';
+import type { HistoryItemContextUsage } from '../types.js';
 
 // uiTelemetryService is consumed inside collectContextData via the
 // re-export from core; mock it here so the function returns deterministic
@@ -493,6 +495,90 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(2);
     expect(data.memoryFiles[0].path).toBe('QWEN.md');
     expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+  });
+
+  it('groups confirmed extension sources without losing imported or rule content', async () => {
+    const firstBody =
+      'alpha instructions\n--- End of Context from: first.md ---\n' +
+      'imported instructions that still belong to alpha';
+    const secondBody = 'another alpha context file';
+    const rulesBody = '--- Rule from: global.md ---\nalways-on rule';
+    const sources = [
+      {
+        filePath: '/extensions/alpha/first.md',
+        content: `${firstBody}\n`,
+        extensionName: 'alpha',
+      },
+      {
+        filePath: '/extensions/alpha/second.md',
+        content: `${secondBody}\n`,
+        extensionName: 'alpha',
+      },
+      { content: rulesBody },
+    ];
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          `--- Context from: first.md ---\n${firstBody}\n` +
+            '--- End of Context from: first.md ---\n\n' +
+            `--- Context from: second.md ---\n${secondBody}\n` +
+            `--- End of Context from: second.md ---\n\n${rulesBody}`,
+        ),
+      getUserMemorySources: vi.fn().mockReturnValue(sources),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const extensionTokens = sources
+      .slice(0, 2)
+      .reduce(
+        (sum, source) => sum + estimateContextTextTokens(source.content),
+        0,
+      );
+
+    expect(data.memoryFiles).toEqual([
+      { path: 'Extension: alpha', tokens: extensionTokens },
+      { path: t('memory'), tokens: estimateContextTextTokens(rulesBody) },
+    ]);
+    expect(data.breakdown.memoryFiles).toBe(
+      extensionTokens + estimateContextTextTokens(rulesBody),
+    );
+  });
+
+  it('groups extension rows after scaling without changing their subtotal', async () => {
+    const makeConfig = (extensionName?: string) =>
+      ({
+        ...makeMockConfig(),
+        getUserMemory: vi.fn().mockReturnValue('unchanged provider memory'),
+        getUserMemorySources: vi.fn().mockReturnValue([
+          { content: `${'甲'.repeat(4000)}\n`, extensionName },
+          { content: `${'乙'.repeat(4000)}\n`, extensionName },
+        ]),
+        getLlmClient: vi.fn().mockReturnValue({
+          isInitialized: vi.fn().mockReturnValue(true),
+          getChat: vi.fn().mockReturnValue({
+            getLastPromptTokenCount: vi.fn().mockReturnValue(1000),
+            getLastCachedContentTokenCount: vi.fn().mockReturnValue(0),
+            isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+          }),
+        }),
+      }) as unknown as Config;
+
+    const ungrouped = await collectContextData(makeConfig(), true);
+    const grouped = await collectContextData(makeConfig('alpha'), true);
+    const detailTotal = (data: HistoryItemContextUsage) =>
+      data.memoryFiles.reduce((sum, row) => sum + row.tokens, 0);
+
+    expect(ungrouped.memoryFiles).toHaveLength(2);
+    expect(grouped.memoryFiles).toEqual([
+      { path: 'Extension: alpha', tokens: detailTotal(ungrouped) },
+    ]);
+    expect(detailTotal(grouped)).toBe(detailTotal(ungrouped));
+    expect(grouped.breakdown.memoryFiles).toBe(ungrouped.breakdown.memoryFiles);
+    expect(grouped.breakdown.memoryFiles).toBeLessThan(
+      estimateContextTextTokens(`${'甲'.repeat(8000)}\n`),
+    );
   });
 
   it('excludes disabled skills from the detail breakdown', async () => {

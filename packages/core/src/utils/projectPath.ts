@@ -70,12 +70,7 @@ export async function resolveSymlinkAwareRelativePaths(
     pathModule,
   );
 
-  // If original path is outside project root, return empty
-  if (originalRelative === null) {
-    return [];
-  }
-
-  const results = [originalRelative];
+  const results = originalRelative === null ? [] : [originalRelative];
 
   // Try to resolve symlinks
   try {
@@ -84,7 +79,7 @@ export async function resolveSymlinkAwareRelativePaths(
       : pathModule.resolve(projectRoot, filePath);
     const realFilePath = await realpath(absolutePath);
 
-    if (realFilePath !== absolutePath) {
+    if (originalRelative === null || realFilePath !== absolutePath) {
       // Resolve projectRoot too — on macOS, os.tmpdir() returns /tmp/...
       // but realpath resolves it to /private/tmp/..., so both sides must
       // use the same canonical prefix for path.relative to work.

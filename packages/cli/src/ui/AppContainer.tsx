@@ -2333,6 +2333,7 @@ export const AppContainer = (props: AppContainerProps) => {
     try {
       const {
         memoryContent,
+        memorySources,
         fileCount,
         contextFilePaths,
         conditionalRules,
@@ -2348,6 +2349,16 @@ export const AppContainer = (props: AppContainerProps) => {
         settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
         config.getContextRuleExcludes(),
         {
+          explicitOnly: config.getBareMode(),
+          extensionRoots: config
+            .getActiveExtensions()
+            .map((extension) => extension.path),
+          extensionContextFiles: config
+            .getActiveExtensions()
+            .map((extension) => ({
+              extensionName: extension.name,
+              filePaths: extension.contextFiles,
+            })),
           loadReason: 'refresh',
           onInstructionsLoaded: createInstructionsLoadedCallback(() =>
             config.getHookSystem(),
@@ -2355,7 +2366,7 @@ export const AppContainer = (props: AppContainerProps) => {
         },
       );
 
-      config.setUserMemory(memoryContent);
+      config.setUserMemory(memoryContent, memorySources);
       config.setMemoryFileCount(fileCount);
       config.setContextFilePaths(contextFilePaths);
       config.setConditionalRulesRegistry(

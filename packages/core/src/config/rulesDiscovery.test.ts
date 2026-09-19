@@ -176,6 +176,114 @@ Body.
   // ─────────────────────────────────────────────────────────────────────────
 
   describe('loadRules', () => {
+    it('loads extension rules only on matching workspace paths, once', async () => {
+      const extensionRoot = path.join(testRootDir, 'extension');
+      const rulePath = await createTestFile(
+        path.join(extensionRoot, 'rules', 'nested', 'frontend.md'),
+        '---\npaths: ["src/**/*.tsx"]\n---\nExtension frontend guidance.',
+      );
+      const result = await loadRules(projectRoot, true, [], [extensionRoot]);
+      expect(result.content).toBe('');
+      expect(result.ruleCount).toBe(0);
+      expect(result.conditionalRules.map((rule) => rule.filePath)).toEqual([
+        rulePath,
+      ]);
+      const registry = new ConditionalRulesRegistry(
+        result.conditionalRules,
+        projectRoot,
+      );
+      expect(
+        await registry.matchAndConsume(path.join(projectRoot, 'README.md')),
+      ).toBeUndefined();
+      expect(
+        await registry.matchAndConsume(
+          path.join(projectRoot, 'src', 'App.tsx'),
+        ),
+      ).toContain('Extension frontend guidance.');
+      expect(
+        await registry.matchAndConsume(
+          path.join(projectRoot, 'src', 'Other.tsx'),
+        ),
+      ).toBeUndefined();
+    });
+
+    it('does not load extension rules in an untrusted workspace', async () => {
+      const extensionRoot = path.join(testRootDir, 'extension');
+      await createTestFile(
+        path.join(extensionRoot, 'rules', 'frontend.md'),
+        '---\npaths: ["src/**"]\n---\nExtension guidance.',
+      );
+      expect(await loadRules(projectRoot, false, [], [extensionRoot])).toEqual({
+        content: '',
+        ruleCount: 0,
+        conditionalRules: [],
+      });
+    });
+
+    it('skips unconditional extension rules and applies exclusions', async () => {
+      const extensionRoot = path.join(testRootDir, 'extension');
+      for (const [name, content] of Object.entries({
+        'baseline.md': 'Must not become resident.',
+        'empty-paths.md': '---\npaths: []\n---\nMust not become resident.',
+        'invalid-paths.md': '---\npaths: 42\n---\nMust not become resident.',
+        'excluded.md': '---\npaths: ["src/**"]\n---\nExcluded guidance.',
+      })) {
+        await createTestFile(path.join(extensionRoot, 'rules', name), content);
+      }
+      expect(
+        await loadRules(projectRoot, true, ['**/excluded.md'], [extensionRoot]),
+      ).toEqual({
+        content: '',
+        ruleCount: 0,
+        conditionalRules: [],
+      });
+    });
+
+    it('orders extension roots and deduplicates equivalent paths', async () => {
+      const firstRoot = path.join(testRootDir, 'a-extension');
+      const lastRoot = path.join(testRootDir, 'z-extension');
+      const firstRule = await createTestFile(
+        path.join(firstRoot, 'rules', 'a.md'),
+        '---\npaths: ["src/**"]\n---\nFirst.',
+      );
+      const lastRule = await createTestFile(
+        path.join(lastRoot, 'rules', 'a.md'),
+        '---\npaths: ["src/**"]\n---\nLast.',
+      );
+      const result = await loadRules(
+        projectRoot,
+        true,
+        [],
+        [lastRoot, firstRoot, path.join(firstRoot, 'child', '..')],
+      );
+      expect(result.conditionalRules.map((rule) => rule.filePath)).toEqual([
+        firstRule,
+        lastRule,
+      ]);
+    });
+
+    it('preserves parser recovery without making malformed extension rules resident', async () => {
+      const extensionRoot = path.join(testRootDir, 'extension');
+      await createTestFile(
+        path.join(extensionRoot, 'rules', 'recoverable.md'),
+        '---\npaths: [\n---\nRecovered guidance.',
+      );
+      const result = await loadRules(projectRoot, true, [], [extensionRoot]);
+      expect(result.content).toBe('');
+      expect(result.ruleCount).toBe(0);
+      expect(result.conditionalRules).toHaveLength(1);
+      expect(result.conditionalRules[0].paths).toEqual(['[']);
+      const registry = new ConditionalRulesRegistry(
+        result.conditionalRules,
+        projectRoot,
+      );
+      expect(
+        await registry.matchAndConsume(
+          path.join(projectRoot, 'src', 'App.tsx'),
+        ),
+      ).toBeUndefined();
+    });
+
     it('returns empty when no rules directory exists', async () => {
       const result = await loadRules(projectRoot, true);
       expect(result).toEqual({

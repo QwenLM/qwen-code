@@ -82,6 +82,14 @@ describe('directoryCommand', () => {
       getWorkingDir: () => '/test/dir',
       shouldLoadMemoryFromIncludeDirectories: () => false,
       isSafeMode: () => false,
+      getBareMode: () => false,
+      getActiveExtensions: () => [
+        {
+          name: 'test-extension',
+          path: '/extensions/test',
+          contextFiles: ['/extensions/test/QWEN.md'],
+        },
+      ],
       getDebugMode: () => false,
       getFileService: () => ({}),
       getExtensionContextFilePaths: () => [],
@@ -252,6 +260,13 @@ describe('directoryCommand', () => {
     it('refreshes context file paths when reloading memory from include directories', async () => {
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: 'reloaded memory',
+        memorySources: [
+          {
+            filePath: '/extensions/test/QWEN.md',
+            content: 'reloaded memory\n',
+            extensionName: 'test-extension',
+          },
+        ],
         fileCount: 2,
         contextFilePaths: ['a/QWEN.md', '~/.qwen/QWEN.md'],
         ruleCount: 0,
@@ -281,8 +296,24 @@ describe('directoryCommand', () => {
         true,
         'tree',
         expect.anything(),
+        {
+          explicitOnly: false,
+          extensionRoots: ['/extensions/test'],
+          extensionContextFiles: [
+            {
+              extensionName: 'test-extension',
+              filePaths: ['/extensions/test/QWEN.md'],
+            },
+          ],
+        },
       );
-      expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
+      expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory', [
+        {
+          filePath: '/extensions/test/QWEN.md',
+          content: 'reloaded memory\n',
+          extensionName: 'test-extension',
+        },
+      ]);
       expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([
         'a/QWEN.md',
         '~/.qwen/QWEN.md',

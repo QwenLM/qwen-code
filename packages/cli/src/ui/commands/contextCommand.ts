@@ -29,7 +29,9 @@ import {
   isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
   formatContextFileDisplayPath,
+  stripAnsiAndControl,
   type CompactionThresholds,
+  type MemoryContentSource,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
@@ -91,6 +93,51 @@ function parseMemoryFiles(
   }
 
   return results;
+}
+
+type AttributedMemoryDetail = ContextMemoryDetail & {
+  extensionName?: string;
+};
+
+function memorySourceDetails(
+  sources: readonly MemoryContentSource[],
+  workingDir: string,
+): AttributedMemoryDetail[] {
+  return sources.map((source) => ({
+    path: source.filePath
+      ? formatContextFileDisplayPath(source.filePath, workingDir)
+      : t('memory'),
+    tokens: estimateContextTextTokens(source.content),
+    extensionName: source.extensionName,
+  }));
+}
+
+function groupExtensionMemoryDetails(
+  details: readonly AttributedMemoryDetail[],
+): ContextMemoryDetail[] {
+  const result: ContextMemoryDetail[] = [];
+  const extensionRows = new Map<string, ContextMemoryDetail>();
+  for (const detail of details) {
+    const extensionName = detail.extensionName
+      ? stripAnsiAndControl(detail.extensionName).replace(/\s+/g, ' ').trim()
+      : '';
+    if (!extensionName) {
+      result.push({ path: detail.path, tokens: detail.tokens });
+      continue;
+    }
+    const existing = extensionRows.get(extensionName);
+    if (existing) {
+      existing.tokens += detail.tokens;
+    } else {
+      const row = {
+        path: `Extension: ${extensionName}`,
+        tokens: detail.tokens,
+      };
+      extensionRows.set(extensionName, row);
+      result.push(row);
+    }
+  }
+  return result;
 }
 
 export async function collectContextData(
@@ -168,7 +215,10 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent, config.getWorkingDir());
+  const memorySources = config.getUserMemorySources?.();
+  const memoryFiles: AttributedMemoryDetail[] = memorySources
+    ? memorySourceDetails(memorySources, config.getWorkingDir())
+    : parseMemoryFiles(memoryContent, config.getWorkingDir());
   const autoMemoryPrompt = config.getAutoMemoryPrompt();
   if (autoMemoryPrompt) {
     memoryFiles.push({
@@ -282,7 +332,7 @@ export async function collectContextData(
     );
     detailBuiltinTools = builtinTools;
     detailMcpTools = mcpTools;
-    detailMemoryFiles = memoryFiles;
+    detailMemoryFiles = groupExtensionMemoryDetails(memoryFiles);
     detailSkills = skills;
   } else {
     totalTokens = apiTotalTokens;
@@ -331,7 +381,7 @@ export async function collectContextData(
 
     detailBuiltinTools = scaleDetail(builtinTools);
     detailMcpTools = scaleDetail(mcpTools);
-    detailMemoryFiles = scaleDetail(memoryFiles);
+    detailMemoryFiles = groupExtensionMemoryDetails(scaleDetail(memoryFiles));
     detailSkills =
       overheadScale < 1
         ? skills.map((item) => ({

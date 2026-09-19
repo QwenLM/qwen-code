@@ -2,6 +2,48 @@
 
 This guide will walk you through creating your first Qwen Code extension. You'll learn how to set up a new extension, add a custom tool via an MCP server, create a custom command, and provide context to the model with a `QWEN.md` file.
 
+## Keep scenario instructions out of resident context
+
+An enabled extension's context file is included in each request. Cached input
+is still input; whether and how much it costs depends on the provider. Keep
+always-needed facts in this file and move scenario instructions to
+[path-based rules](../features/rules.md) or [skills](../features/skills.md).
+This migration is explicit: installing a newer Qwen Code does not rewrite your
+extension's context file.
+
+For example, instead of putting frontend guidance in `QWEN.md` for every task:
+
+```markdown
+This extension provides the Acme project conventions.
+For frontend components, use the shared UI components and check accessibility.
+```
+
+Keep only the first sentence in `QWEN.md`, and add `rules/frontend.md` at the
+extension root:
+
+```markdown
+---
+paths:
+  - 'src/**/*.tsx'
+---
+
+Use the shared UI components and check accessibility.
+```
+
+No manifest option is needed. The extension must be enabled and the workspace
+trusted. Patterns match workspace paths, not extension paths. Extension rules
+without nonempty `paths:` are skipped, so they cannot accidentally recreate an
+always-on context block. A procedure that should be selected by the user or
+model rather than a file path belongs in a skill; skills also support path
+conditions.
+
+To compare the migration, start fresh sessions with the same configuration:
+first perform an unrelated task, then access a matching frontend file. The
+guidance should be absent from the initial resident prompt and arrive when the
+matching operation occurs. It can remain in history thereafter; measure the
+whole task, including cache usage and additional requests, before claiming a
+token or cost saving.
+
 ## Prerequisites
 
 Before you start, make sure you have the Qwen Code installed and a basic understanding of Node.js and TypeScript.

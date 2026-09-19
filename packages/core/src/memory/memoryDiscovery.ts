@@ -32,6 +32,20 @@ interface MemoryFileContent {
   content: string | null;
 }
 
+export interface MemoryContentSource {
+  /** Absolute top-level source path. Omitted for assembled rule blocks. */
+  readonly filePath?: string;
+  /** Exact text used for detail estimation, including the wrapper-side newline. */
+  readonly content: string;
+  /** Set only when one enabled extension uniquely declares this source. */
+  readonly extensionName?: string;
+}
+
+export interface ExtensionContextFiles {
+  extensionName: string;
+  filePaths: readonly string[];
+}
+
 export interface InstructionsLoadedNotification {
   filePath: string;
   memoryType: InstructionMemoryType;
@@ -407,6 +421,8 @@ function concatenateInstructions(
 
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
+  /** Trusted source snapshot paired with memoryContent for reporting. */
+  memorySources?: MemoryContentSource[];
   fileCount: number;
   /**
    * Display paths of the loaded context (memory) files: CWD-relative when
@@ -429,10 +445,34 @@ export interface LoadServerHierarchicalMemoryResponse {
 
 export interface LoadServerHierarchicalMemoryOptions {
   explicitOnly?: boolean;
+  extensionRoots?: string[];
+  extensionContextFiles?: readonly ExtensionContextFiles[];
   loadReason?: Exclude<InstructionLoadReason, 'include'>;
   onInstructionsLoaded?: (
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>;
+}
+
+async function getExtensionOwners(
+  extensions: readonly ExtensionContextFiles[],
+): Promise<Map<string, string | undefined>> {
+  const owners = new Map<string, string | undefined>();
+  for (const extension of extensions) {
+    for (const filePath of extension.filePaths) {
+      let identity: string;
+      try {
+        identity = await fs.realpath(filePath);
+      } catch {
+        continue;
+      }
+      if (!owners.has(identity)) {
+        owners.set(identity, extension.extensionName);
+      } else if (owners.get(identity) !== extension.extensionName) {
+        owners.set(identity, undefined);
+      }
+    }
+  }
+  return owners;
 }
 
 function createMemoryTypeClassifier(
@@ -562,6 +602,7 @@ export async function loadServerHierarchicalMemory(
   const dedupedFilePaths = await dedupeByCanonicalIdentity(filePaths);
 
   let combinedInstructions = '';
+  let memorySources: MemoryContentSource[] = [];
   let fileCount = 0;
   let contextFilePaths: string[] = [];
 
@@ -582,6 +623,22 @@ export async function loadServerHierarchicalMemory(
     combinedInstructions = concatenateInstructions(
       contentsWithPaths,
       currentWorkingDirectory,
+    );
+    const extensionOwners = await getExtensionOwners(
+      options.extensionContextFiles ?? [],
+    );
+    memorySources = await Promise.all(
+      contentsWithPaths.filter(hasAttachedContent).map(async (item) => {
+        const content = `${(item.content as string).trim()}\n`;
+        const filePath = path.resolve(item.filePath);
+        let extensionName: string | undefined;
+        try {
+          extensionName = extensionOwners.get(await fs.realpath(item.filePath));
+        } catch {
+          // Unresolvable identities remain deliberately unattributed.
+        }
+        return { filePath, content, extensionName };
+      }),
     );
 
     // Only count files that match configured memory filenames (e.g., QWEN.md),
@@ -621,11 +678,17 @@ export async function loadServerHierarchicalMemory(
     conditionalRules,
   } = options.explicitOnly
     ? { content: '', ruleCount: 0, conditionalRules: [] }
-    : await loadRules(effectiveRoot, folderTrust, contextRuleExcludes);
+    : await loadRules(
+        effectiveRoot,
+        folderTrust,
+        contextRuleExcludes,
+        options.extensionRoots,
+      );
 
   // Baseline rules go into the system prompt
   let memoryContent = combinedInstructions;
   if (rulesContent) {
+    memorySources.push({ content: rulesContent });
     memoryContent = memoryContent
       ? `${memoryContent}\n\n${rulesContent}`
       : rulesContent;
@@ -637,6 +700,7 @@ export async function loadServerHierarchicalMemory(
 
   return {
     memoryContent,
+    memorySources,
     fileCount,
     contextFilePaths,
     ruleCount,

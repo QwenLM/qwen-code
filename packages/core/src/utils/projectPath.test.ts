@@ -34,6 +34,33 @@ describe('resolveProjectRelativePath', () => {
 });
 
 describe('resolveSymlinkAwareRelativePaths', () => {
+  it.each([
+    ['/tmp/project/src/foo.ts', '/private/tmp/project'],
+    ['/private/tmp/project/src/foo.ts', '/tmp/project'],
+  ])('resolves aliases for file %s and root %s', async (file, root) => {
+    const realpath = vi
+      .fn()
+      .mockResolvedValueOnce('/private/tmp/project/src/foo.ts')
+      .mockResolvedValueOnce('/private/tmp/project');
+    expect(
+      await resolveSymlinkAwareRelativePaths(file, root, realpath),
+    ).toEqual(['src/foo.ts']);
+  });
+
+  it('rejects paths outside the canonical project root', async () => {
+    const realpath = vi
+      .fn()
+      .mockResolvedValueOnce('/private/tmp/other/foo.ts')
+      .mockResolvedValueOnce('/private/tmp/project');
+    expect(
+      await resolveSymlinkAwareRelativePaths(
+        '/tmp/other/foo.ts',
+        '/private/tmp/project',
+        realpath,
+      ),
+    ).toEqual([]);
+  });
+
   it('returns the original relative path when realpath is not provided', async () => {
     const result = await resolveSymlinkAwareRelativePaths(
       '/project/src/foo.ts',

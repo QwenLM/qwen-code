@@ -243,6 +243,7 @@ export const directoryCommand: SlashCommand = {
               } else if (config.shouldLoadMemoryFromIncludeDirectories()) {
                 const {
                   memoryContent,
+                  memorySources,
                   fileCount,
                   contextFilePaths,
                   conditionalRules,
@@ -256,8 +257,20 @@ export const directoryCommand: SlashCommand = {
                   context.services.settings.merged.context?.importFormat ||
                     'tree',
                   config.getContextRuleExcludes(),
+                  {
+                    explicitOnly: config.getBareMode(),
+                    extensionRoots: config
+                      .getActiveExtensions()
+                      .map((extension) => extension.path),
+                    extensionContextFiles: config
+                      .getActiveExtensions()
+                      .map((extension) => ({
+                        extensionName: extension.name,
+                        filePaths: extension.contextFiles,
+                      })),
+                  },
                 );
-                config.setUserMemory(memoryContent);
+                config.setUserMemory(memoryContent, memorySources);
                 config.setMemoryFileCount(fileCount);
                 config.setContextFilePaths(contextFilePaths);
                 config.setConditionalRulesRegistry(

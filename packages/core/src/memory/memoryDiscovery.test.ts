@@ -133,6 +133,59 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it.each([
+    [true, false, 1],
+    [false, false, 0],
+    [true, true, 0],
+  ])(
+    'loads extension rules with trust=%s and explicitOnly=%s',
+    async (trusted, explicitOnly, count) => {
+      const extensionRoot = path.join(testRootDir, 'extension');
+      const rulePath = await createTestFile(
+        path.join(extensionRoot, 'rules', 'frontend.md'),
+        '---\npaths: ["src/**"]\n---\nExtension guidance.',
+      );
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        trusted,
+        'tree',
+        [],
+        { explicitOnly, extensionRoots: [extensionRoot] },
+      );
+      expect(result.memoryContent).not.toContain('Extension guidance.');
+      expect(result.conditionalRules.map((rule) => rule.filePath)).toEqual(
+        count ? [rulePath] : [],
+      );
+      expect(result.memorySources).toEqual([]);
+    },
+  );
+
+  it('records baseline rules as unowned assembled memory', async () => {
+    await createEmptyDir(path.join(projectRoot, '.git'));
+    await createTestFile(
+      path.join(projectRoot, QWEN_DIR, 'rules', 'general.md'),
+      'Always write tests.',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+    );
+
+    expect(result.memoryContent).toContain('Always write tests.');
+    expect(result.memorySources).toEqual([
+      {
+        content: expect.stringContaining('Always write tests.'),
+      },
+    ]);
+  });
+
   it('should return empty memory and count if no context files are found', async () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
@@ -142,7 +195,7 @@ describe('loadServerHierarchicalMemory', () => {
       DEFAULT_FOLDER_TRUST,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: '',
       fileCount: 0,
       contextFilePaths: [],
@@ -181,7 +234,7 @@ describe('loadServerHierarchicalMemory', () => {
       { explicitOnly: true },
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: '',
       fileCount: 0,
       contextFilePaths: [],
@@ -221,7 +274,7 @@ describe('loadServerHierarchicalMemory', () => {
       { explicitOnly: true },
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, explicitContextFile)} ---\nexplicit context\n--- End of Context from: ${path.relative(cwd, explicitContextFile)} ---`,
       fileCount: 1,
       contextFilePaths: [path.relative(cwd, explicitContextFile)],
@@ -245,7 +298,7 @@ describe('loadServerHierarchicalMemory', () => {
       DEFAULT_FOLDER_TRUST,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---`,
       fileCount: 1,
       contextFilePaths: [
@@ -274,7 +327,7 @@ describe('loadServerHierarchicalMemory', () => {
       DEFAULT_FOLDER_TRUST,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, customContextFile)} ---\ncustom context content\n--- End of Context from: ${path.relative(cwd, customContextFile)} ---`,
       fileCount: 1,
       contextFilePaths: [
@@ -307,7 +360,7 @@ describe('loadServerHierarchicalMemory', () => {
       DEFAULT_FOLDER_TRUST,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, projectContextFile)} ---\nproject context content\n--- End of Context from: ${path.relative(cwd, projectContextFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdContextFile)} ---\ncwd context content\n--- End of Context from: ${path.relative(cwd, cwdContextFile)} ---`,
       fileCount: 2,
       contextFilePaths: [
@@ -339,7 +392,7 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     // Only upward traversal is performed, subdirectory files are not loaded
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${customFilename} ---\nCWD custom memory\n--- End of Context from: ${customFilename} ---`,
       fileCount: 1,
       contextFilePaths: [customFilename],
@@ -367,7 +420,7 @@ describe('loadServerHierarchicalMemory', () => {
       DEFAULT_FOLDER_TRUST,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, srcMemoryFile)} ---\nSrc directory memory\n--- End of Context from: ${path.relative(cwd, srcMemoryFile)} ---`,
       fileCount: 2,
       contextFilePaths: [
@@ -399,7 +452,7 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     // Subdirectory files are not loaded, only CWD and upward
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${DEFAULT_CONTEXT_FILENAME} ---\nCWD memory\n--- End of Context from: ${DEFAULT_CONTEXT_FILENAME} ---`,
       fileCount: 1,
       contextFilePaths: [DEFAULT_CONTEXT_FILENAME],
@@ -440,7 +493,7 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     // Subdirectory files are not loaded, only global and upward from CWD
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---\n\n--- Context from: ${path.relative(cwd, rootMemoryFile)} ---\nProject parent memory\n--- End of Context from: ${path.relative(cwd, rootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootMemoryFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdMemoryFile)} ---\nCWD memory\n--- End of Context from: ${path.relative(cwd, cwdMemoryFile)} ---`,
       fileCount: 4,
       contextFilePaths: [
@@ -469,7 +522,7 @@ describe('loadServerHierarchicalMemory', () => {
       DEFAULT_FOLDER_TRUST,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, extensionFilePath)} ---\nExtension memory content\n--- End of Context from: ${path.relative(cwd, extensionFilePath)} ---`,
       fileCount: 1,
       contextFilePaths: [path.relative(cwd, extensionFilePath)],
@@ -477,6 +530,54 @@ describe('loadServerHierarchicalMemory', () => {
       conditionalRules: [],
       projectRoot: expect.any(String),
     });
+  });
+
+  it('attributes canonical extension files only when ownership is unique', async () => {
+    const extensionFilePath = await createTestFile(
+      path.join(testRootDir, 'extensions/ext1/QWEN.md'),
+      'Extension memory content',
+    );
+    const aliasPath = path.join(testRootDir, 'extension-alias.md');
+    await fsPromises.symlink(extensionFilePath, aliasPath);
+
+    const uniquelyOwned = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [aliasPath],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        extensionContextFiles: [
+          { extensionName: 'alpha', filePaths: [extensionFilePath] },
+        ],
+      },
+    );
+    expect(uniquelyOwned.memorySources).toEqual([
+      {
+        filePath: path.resolve(aliasPath),
+        content: 'Extension memory content\n',
+        extensionName: 'alpha',
+      },
+    ]);
+
+    const ambiguouslyOwned = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [aliasPath],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        extensionContextFiles: [
+          { extensionName: 'alpha', filePaths: [extensionFilePath] },
+          { extensionName: 'beta', filePaths: [aliasPath] },
+        ],
+      },
+    );
+    expect(ambiguouslyOwned.memorySources?.[0]?.extensionName).toBeUndefined();
   });
 
   it('announces extension context files with custom basenames', async () => {
@@ -838,7 +939,7 @@ describe('loadServerHierarchicalMemory', () => {
     );
     const notifications: InstructionsLoadedNotification[] = [];
 
-    await loadServerHierarchicalMemory(
+    const result = await loadServerHierarchicalMemory(
       cwd,
       [],
       new FileDiscoveryService(projectRoot),
@@ -847,6 +948,9 @@ describe('loadServerHierarchicalMemory', () => {
       'tree',
       [],
       {
+        extensionContextFiles: [
+          { extensionName: 'ext1', filePaths: [extensionFile] },
+        ],
         onInstructionsLoaded: (notification) => {
           notifications.push(notification);
         },
@@ -864,6 +968,58 @@ describe('loadServerHierarchicalMemory', () => {
         }),
       ]),
     );
+    expect(result.memorySources).toEqual([
+      expect.objectContaining({
+        filePath: extensionFile,
+        extensionName: 'ext1',
+        content: expect.stringContaining('extension included content'),
+      }),
+    ]);
+  });
+
+  it('attributes repeated imported content to each top-level extension source', async () => {
+    const extensionsDir = path.join(testRootDir, 'extensions');
+    await createTestFile(
+      path.join(extensionsDir, 'shared.md'),
+      'shared imported guidance',
+    );
+    const alphaFile = await createTestFile(
+      path.join(extensionsDir, 'alpha.md'),
+      'alpha context @./shared.md',
+    );
+    const betaFile = await createTestFile(
+      path.join(extensionsDir, 'beta.md'),
+      'beta context @./shared.md',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [alphaFile, betaFile],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        extensionContextFiles: [
+          { extensionName: 'alpha', filePaths: [alphaFile] },
+          { extensionName: 'beta', filePaths: [betaFile] },
+        ],
+      },
+    );
+
+    expect(result.memorySources).toEqual([
+      expect.objectContaining({
+        filePath: alphaFile,
+        extensionName: 'alpha',
+        content: expect.stringContaining('shared imported guidance'),
+      }),
+      expect.objectContaining({
+        filePath: betaFile,
+        extensionName: 'beta',
+        content: expect.stringContaining('shared imported guidance'),
+      }),
+    ]);
   });
 
   it('still loads memory when instruction load notification fails', async () => {
@@ -913,7 +1069,7 @@ describe('loadServerHierarchicalMemory', () => {
       DEFAULT_FOLDER_TRUST,
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       memoryContent: `--- Context from: ${path.relative(cwd, includedFile)} ---\nincluded directory memory\n--- End of Context from: ${path.relative(cwd, includedFile)} ---`,
       fileCount: 1,
       contextFilePaths: [path.relative(cwd, includedFile)],

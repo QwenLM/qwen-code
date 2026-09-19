@@ -7783,6 +7783,13 @@ describe('AppContainer State Management', () => {
     it('performMemoryRefresh anchors on config.getWorkingDir() and updates contextFilePaths', async () => {
       mockLoadHierarchicalMemory.mockResolvedValue({
         memoryContent: 'content',
+        memorySources: [
+          {
+            filePath: '/extensions/suite/QWEN.md',
+            content: 'content\n',
+            extensionName: 'suite',
+          },
+        ],
         fileCount: 1,
         contextFilePaths: ['/custom/QWEN.md'],
         conditionalRules: [],
@@ -7800,10 +7807,23 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'getContextRuleExcludes').mockReturnValue([
         'exclude-rule',
       ]);
+      vi.spyOn(mockConfig, 'getBareMode').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'suite',
+          name: 'suite',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/suite',
+          config: { name: 'suite', version: '1.0.0' },
+          contextFiles: ['/extensions/suite/QWEN.md'],
+        },
+      ]);
       const setContextFilePathsSpy = vi.spyOn(
         mockConfig,
         'setContextFilePaths',
       );
+      const setUserMemorySpy = vi.spyOn(mockConfig, 'setUserMemory');
 
       render(
         <AppContainer
@@ -7834,8 +7854,24 @@ describe('AppContainer State Management', () => {
         true,
         expect.anything(),
         ['exclude-rule'],
-        expect.anything(),
+        expect.objectContaining({
+          explicitOnly: false,
+          extensionRoots: ['/extensions/suite'],
+          extensionContextFiles: [
+            {
+              extensionName: 'suite',
+              filePaths: ['/extensions/suite/QWEN.md'],
+            },
+          ],
+        }),
       );
+      expect(setUserMemorySpy).toHaveBeenCalledWith('content', [
+        {
+          filePath: '/extensions/suite/QWEN.md',
+          content: 'content\n',
+          extensionName: 'suite',
+        },
+      ]);
       expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);
     });
   });
