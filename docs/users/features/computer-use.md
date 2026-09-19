@@ -86,6 +86,37 @@ Screenshots additionally require Screen Recording permission. macOS may
 attribute the grant to the terminal or IDE that launched Qwen Code. Windows and
 Linux use their platform accessibility and input facilities.
 
+## Use the computer in front of you from a remote session
+
+When Qwen Code runs on a headless machine (a dev box, a server), the skill can
+still drive the desktop you are sitting at: that computer lends its own
+`node_repl` to one remote session. It works on macOS today.
+
+Set it up once on your computer:
+
+```bash
+npx -y @qwen-code/node-repl-mcp@latest desktop-relay install
+```
+
+This installs `node_repl` and the SDK under `~/.qwen/desktop-relay` and registers
+a launchd socket on `127.0.0.1:47821`. Nothing runs in the background; launchd
+starts a short-lived process only when something connects.
+
+- **From the Web Shell.** The remote daemon must run with
+  `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`, and the Web Shell must be a secure page
+  (https, or `http://localhost` through an SSH tunnel). In a session, choose
+  **Use this computer** in the sidebar footer, then **Connect this computer**.
+- **From a terminal over SSH.** Add a `RemoteForward` from a socket on the remote
+  machine to `127.0.0.1:47821`, then register the forwarded socket as the remote
+  `node-repl` server. See the
+  [`@qwen-code/node-repl-mcp` README](https://github.com/QwenLM/qwen-code/tree/main/packages/node-repl#desktop-relay)
+  for the exact lines.
+
+A dialog on your computer asks you to allow every connection. An allowed session
+can run code on your computer with your permissions and see and control its
+screen, just like local Computer Use, until you disconnect it or it ends. macOS
+asks to allow `node` under Accessibility and Screen Recording the first time.
+
 ## Troubleshooting
 
 - If `node_repl` is still unavailable after automatic setup, restart Qwen Code

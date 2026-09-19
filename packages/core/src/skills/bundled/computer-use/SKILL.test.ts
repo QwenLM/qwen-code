@@ -36,12 +36,15 @@ describe('bundled computer-use skill', () => {
   it('routes one entrypoint by the connected driver platform', () => {
     const { config, body } = loadComputerUseSkill();
     expect(config.name).toBe('computer-use');
+    expect(body).toContain('`desktop-node-repl` MCP server');
     expect(body).toContain('ComputerUse.create()');
     expect(body).toContain('await computer.getPlatform()');
+    expect(body).toContain('mcp__desktop_node_repl__node_repl');
     expect(body).toContain('references/macos.md');
     expect(body).toContain('references/windows-linux.md');
     expect(body).not.toContain('references/linux.md');
-    expect(body).toContain('Read exactly one resource with `read_file`');
+    expect(body).toContain('read exactly one resource with `read_file`');
+    expect(body).not.toContain("import('node:fs/promises')");
     expect(body).toContain('Skill base directory');
     expect(body).toContain('not the CLI or Node host operating system');
     expect(body).not.toContain('process.platform');
