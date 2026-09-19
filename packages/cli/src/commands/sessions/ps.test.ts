@@ -45,6 +45,24 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
 }));
 
+// `managed-rows.ts` takes the liveness helpers from the deep core module, not
+// the package root, so the barrel mock above no longer intercepts them; the
+// same fakes have to be registered under the specifier it really imports.
+vi.mock('@qwen-code/qwen-code-core/utils/process-liveness.js', () => ({
+  isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
+  readProcStartToken: (...args: unknown[]) =>
+    currentProcStart(...(args as [number])),
+  readPidNamespaceId: () => pidNamespaceId(),
+  readLocalBootId: () => localBootId(),
+  isSameProcess: (pid: number, procStart?: string | null) => {
+    if (!isPidAlive(pid)) return false;
+    if (procStart == null) return true;
+    const current = currentProcStart(pid);
+    if (current === null) return true;
+    return current === procStart;
+  },
+}));
+
 vi.mock('../../agent-view/supervisor-store.js', () => ({
   listAgentViewSessionSnapshots: (...args: unknown[]) =>
     listAgentViewSessionSnapshots(...args),
