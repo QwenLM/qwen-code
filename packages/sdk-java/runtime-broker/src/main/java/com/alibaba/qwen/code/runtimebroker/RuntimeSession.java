@@ -7,7 +7,7 @@ public final class RuntimeSession {
     private final String turnKind;
     private final RuntimeScope scope;
 
-    RuntimeSession(String harnessSessionId, String runtimeSessionId,
+    public RuntimeSession(String harnessSessionId, String runtimeSessionId,
             String turnKind, RuntimeScope scope) {
         this.harnessSessionId = BrokerValues.requireId(harnessSessionId,
                 "harnessSessionId");

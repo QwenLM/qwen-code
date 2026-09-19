@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -206,6 +207,21 @@ class RuntimeBrokerHttpServerTest {
                 RuntimeSession session, Map<String, Object> reference) {
             executions.incrementAndGet();
             return execution;
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> status(RuntimeLease lease,
+                RuntimeSession session, Map<String, Object> reference,
+                long afterSequence) {
+            Map<String, Object> status = new LinkedHashMap<>();
+            status.put("state", executions.get() == 0
+                    ? "prepared" : "executing");
+            status.put("cancelRequested", false);
+            status.put("lastSeq", 0);
+            status.put("firstAvailableSeq", 1);
+            status.put("progressGap", false);
+            status.put("progress", List.of());
+            return CompletableFuture.completedFuture(status);
         }
 
         @Override

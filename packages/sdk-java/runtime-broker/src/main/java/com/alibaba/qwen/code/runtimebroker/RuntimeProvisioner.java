@@ -8,6 +8,11 @@ import java.util.concurrent.CompletionStage;
 public interface RuntimeProvisioner extends AutoCloseable {
     CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request);
 
+    default CompletionStage<RuntimeLease> provision(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        return provision(request);
+    }
+
     default CompletionStage<Void> drain(RuntimeProvisionRequest request,
             RuntimeLease lease) {
         return CompletableFuture.completedFuture(null);
@@ -20,6 +25,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
 
     default CompletionStage<Boolean> health(RuntimeLease lease) {
         return CompletableFuture.completedFuture(true);
+    }
+
+    default CompletionStage<Boolean> health(RuntimeProvisionRequest request,
+            RuntimeLease lease) {
+        return health(lease);
     }
 
     @Override

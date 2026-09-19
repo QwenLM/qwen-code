@@ -13,6 +13,10 @@ public interface RuntimeTransport {
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
 
+    CompletionStage<Map<String, Object>> status(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence);
+
     CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
 

@@ -205,6 +205,14 @@ public final class RuntimeBrokerFixtureMain {
             }
 
             @Override
+            public CompletionStage<Map<String, Object>> status(
+                    RuntimeLease lease, RuntimeSession session,
+                    Map<String, Object> reference, long afterSequence) {
+                return observe("status", delegate.status(lease, session,
+                        reference, afterSequence));
+            }
+
+            @Override
             public CompletionStage<Map<String, Object>> cancel(
                     RuntimeLease lease, RuntimeSession session,
                     Map<String, Object> reference) {

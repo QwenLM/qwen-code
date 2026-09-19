@@ -74,6 +74,21 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Map<String, Object>> status(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        if (afterSequence < 0) {
+            throw new IllegalArgumentException(
+                    "afterSequence must be non-negative");
+        }
+        Map<String, Object> body = baseRequest(session, 2);
+        body.put("reference", reference);
+        body.put("afterSeq", afterSequence);
+        return post(lease, "/internal/managed-runtime/v2/status", body)
+                .thenApply(response -> result(response, "status"));
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference) {
         Map<String, Object> body = baseRequest(session, 2);

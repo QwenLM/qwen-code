@@ -46,17 +46,23 @@ class HttpRuntimeTransportTest {
             assertEquals("success", transport.execute(lease, session,
                     reference()).toCompletableFuture()
                     .get(2, TimeUnit.SECONDS).get("executionStatus"));
+            assertEquals("executing", transport.status(lease, session,
+                    reference(), 3).toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS).get("state"));
             assertEquals("settled", transport.cancel(lease, session,
                     reference()).toCompletableFuture()
                     .get(2, TimeUnit.SECONDS).get("state"));
             assertTrue(transport.release(lease, session).toCompletableFuture()
                     .get(2, TimeUnit.SECONDS));
 
-            assertEquals(5, requests.size());
+            assertEquals(6, requests.size());
             assertEquals("/internal/managed-runtime/v1/prepare",
                     requests.get(0).path);
             assertEquals("/internal/managed-runtime/v2/manifest",
                     requests.get(1).path);
+            assertEquals("/internal/managed-runtime/v2/status",
+                    requests.get(3).path);
+            assertEquals(3, requests.get(3).body.get("afterSeq"));
             assertEquals("Bearer runtime-token",
                     requests.get(0).authorization);
             assertEquals("lease-1", requests.get(0).leaseId);
@@ -97,6 +103,8 @@ class HttpRuntimeTransportTest {
             response.put("protocolVersion", 2);
             if (path.endsWith("/execute")) {
                 response.put("result", executionResult("success"));
+            } else if (path.endsWith("/status")) {
+                response.put("result", executingStatus());
             } else if (path.endsWith("/cancel")) {
                 response.put("result", cancelledStatus());
             } else {
@@ -143,6 +151,17 @@ class HttpRuntimeTransportTest {
         status.put("progressGap", false);
         status.put("progress", List.of());
         status.put("result", executionResult("cancelled"));
+        return status;
+    }
+
+    private static Map<String, Object> executingStatus() {
+        Map<String, Object> status = new LinkedHashMap<>();
+        status.put("state", "executing");
+        status.put("cancelRequested", false);
+        status.put("lastSeq", 3);
+        status.put("firstAvailableSeq", 1);
+        status.put("progressGap", false);
+        status.put("progress", List.of());
         return status;
     }
 
