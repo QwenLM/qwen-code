@@ -17,7 +17,6 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
@@ -1730,14 +1729,14 @@ const SETTINGS_SCHEMA = {
       },
       goalCheckpointTimeoutSeconds: {
         type: 'integer',
-        label: 'Goal Checkpoint Timeout (seconds)',
+        label: 'Goal Checkpoint Timeout (seconds, deprecated)',
         category: 'Model',
         requiresRestart: false,
         default: undefined as number | undefined,
         minimum: 1,
-        maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        maximum: 900,
         description:
-          'Ceiling on one Goal evidence-checkpoint model call, in seconds. A long Goal periodically compresses its evidence into checkpoint claims with a side model call; when a call makes its one corrective retry, both requests share this ceiling (docs/users/features/goals.md lists which failures earn one). A check on an overflowing window after a stalled checkpoint sends its evidence in batches, one call per batch, each under its own ceiling. A check that does not finish in time is abandoned as inconclusive; it counts toward the checkpoint stall limit only when the evidence window has overflowed, while a non-overflowing check preserves the streak and retries on a later turn. Unset uses the built-in default of 180. Must be an integer between 1 and 900; other values are rejected at startup. The calls are streamed, so the per-request transport timeout (model.generationConfig.timeout, default 120 s) bounds only connect and first response, and values above 900 are rejected because past the default stream lifetime guard that guard, not this setting, ends the check. The 900 ceiling is fixed: raising QWEN_STREAM_MAX_LIFETIME_MS does not lift it.',
+          'Deprecated. Goals no longer run evidence-checkpoint model calls, because the verifier reads the transcript directly, so this value is ignored. The key is still accepted so that existing settings files keep loading without an unknown-key warning.',
         showInDialog: false,
       },
       maxToolCalls: {
@@ -4092,7 +4091,8 @@ const SETTINGS_SCHEMA = {
             category: 'Experimental',
             requiresRestart: false,
             default: 'qwen3.5-omni-plus-realtime' as string,
-            description: 'Upstream Realtime model used for Live Voice.',
+            description:
+              'Realtime model used for Live Voice: a modelId or provider:modelId. When it names a modelProviders entry with realtimeOnly: true, that entry supplies the endpoint (derived from baseUrl) and the key (envKey); otherwise endpoint and apiKey below are used.',
             showInDialog: false,
           },
           endpoint: {
