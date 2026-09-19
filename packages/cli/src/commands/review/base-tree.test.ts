@@ -29,6 +29,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runBaseTree, type BaseTreeReport } from './base-tree.js';
 import { baseWorktreePath } from './lib/paths.js';
+import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
+import { runEpochMs } from './lib/prompt-record.js';
 import type { BuildTestReport } from './build-test.js';
 
 const okBuild = {
@@ -42,6 +44,13 @@ const failedBuild = {
   note: 'TS2307',
   build: [{ command: 'npm run build', exitCode: 2 }],
 } as unknown as BuildTestReport;
+
+// Skipped on win32 for the same reason as the sibling suites: `mountRootFor`
+// refuses every absolute Windows path (a drive letter is a colon), so
+// containment is unavailable there by design and this gate never speaks. The
+// assertion would fail for that reason and nothing else — first inside the
+// merge queue, where that lane actually runs.
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
 describe('runBaseTree', () => {
   let repo: string;
@@ -61,13 +70,19 @@ describe('runBaseTree', () => {
     return p;
   };
 
+  // Captured ONCE per test, the way `fetch-pr` captures it once per run: the
+  // reuse marker is fenced on the plan's epoch, so a helper that re-captured on
+  // every call would simulate a new run each time and the fast path — the
+  // concurrent-shard guard the reuse test below pins — could never speak.
+  let planPath = '';
   const run = (
     over: { plan?: Record<string, unknown>; worktree?: string } = {},
     build: (w: string) => BuildTestReport = () => okBuild,
   ): BaseTreeReport => {
     const { plan: planOver, ...rest } = over;
+    if (planOver !== undefined || !planPath) planPath = writePlan(planOver);
     return runBaseTree({
-      plan: writePlan(planOver),
+      plan: planPath,
       worktree,
       timeout: 60,
       install: false,
@@ -77,6 +92,7 @@ describe('runBaseTree', () => {
   };
 
   beforeEach(() => {
+    planPath = '';
     repo = mkdtempSync(join(tmpdir(), 'qwen-base-tree-'));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
@@ -95,6 +111,105 @@ describe('runBaseTree', () => {
   });
 
   afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  itWhereContainmentExists(
+    'does not REUSE a base tree whose tracked files were rewritten in the mount',
+    () => {
+      // `rev-parse HEAD` does not move when working files change, and this tree
+      // is a direct child of the directory the sandbox mounts read-write — so
+      // the reviewed PR's own build, which runs before the verifier shards get
+      // here, can overwrite the base checkout's tracked sources with a plain
+      // copy while every pointer and ref condition still passes. Reused, the
+      // A/B compares the PR against a copy of itself: a test the PR breaks
+      // fails identically on both sides, `test-delta` files the regression as
+      // pre-existing, and a real finding against the PR is suppressed.
+      const tree = baseWorktreePath(worktree);
+      const firstBuilds: string[] = [];
+      expect(
+        run({}, (w) => {
+          firstBuilds.push(w);
+          return okBuild;
+        }).available,
+      ).toBe(true);
+      writeFileSync(join(tree, 'a.txt'), 'after\n');
+
+      // Untracked output is what the pipeline's own build leaves here, and it
+      // must not disable reuse: that reintroduces the concurrent-shard clobber
+      // the fast path exists to prevent.
+      mkdirSync(join(tree, 'dist'), { recursive: true });
+      writeFileSync(join(tree, 'dist', 'cli.js'), 'built');
+
+      const rebuilds: string[] = [];
+      const second = run({}, (w) => {
+        rebuilds.push(w);
+        return okBuild;
+      });
+      expect(rebuilds).toEqual([tree]);
+      expect(second.note).not.toContain('reusing it');
+    },
+  );
+
+  itWhereContainmentExists(
+    'does not REUSE a base tree an EARLIER RUN built, whose untracked plants the dirt check cannot see',
+    () => {
+      // `cleanStale` releases the review worktree and its branch but never
+      // `-base`, so this tree stands into the next round with a whole
+      // containerized build/test phase in between — and inside the mount the
+      // reviewed code writes where it likes. What it can drop there is
+      // untracked executable content, `dist/cli.js` and `node_modules/.bin/`
+      // being exactly what a host-side A/B measurement runs, and
+      // `--untracked-files=no` cannot see it: a blanket untracked refusal
+      // would disable every correctly-built tree's reuse and bring back the
+      // concurrent-shard clobber the fast path exists to prevent. So the
+      // marker carries the run that built it, and a stamp from another run is
+      // not a tree this run may certify.
+      const tree = baseWorktreePath(worktree);
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      mkdirSync(join(tree, 'dist'), { recursive: true });
+      writeFileSync(
+        join(tree, 'dist', 'cli.js'),
+        'planted by the reviewed build',
+      );
+
+      // The next run captures its own plan, and the plan's mtime IS the epoch.
+      const later = new Date(Date.now() + 60_000);
+      utimesSync(planPath, later, later);
+
+      const second = run({}, build);
+      expect(second.note).not.toContain('reusing it');
+      expect(builds).toEqual([tree, tree]);
+      // The plant went with the tree it was standing in.
+      expect(existsSync(join(tree, 'dist', 'cli.js'))).toBe(false);
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses to build through a rewritten review-worktree gitfile',
+    () => {
+      // `worktree add` resolves the repository through the REVIEW worktree's own
+      // gitfile, which lives in the directory the sandbox mounts read-write and
+      // which the build/test phase already ran the PR's code against. It checks
+      // files out, so it runs whatever that pointer leads to, on the host.
+      plantAdminEntry(
+        join(repo, '.qwen', 'tmp', '.evil-git'),
+        adminEntryOf(worktree),
+        worktree,
+        join(repo, '.git'),
+      );
+
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(JSON.stringify(r)).toContain('review temp dir');
+      // The tree was never created, which is what says the spawn never ran —
+      // the note alone reads the same whichever side of it the gate fires on.
+      expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+    },
+  );
 
   it('creates a sibling worktree holding the BASE commit, not the head', () => {
     const r = run();
@@ -140,8 +255,13 @@ describe('runBaseTree', () => {
     expect(second.path).toBe(first.path);
     expect(second.note).toContain('reusing');
     expect(builds).toHaveLength(1); // one install+build, not two
-    // A marker for a DIFFERENT sha (rebase between runs) does not shortcut.
-    writeFileSync(join(first.path!, '.qwen-review-base-ok'), 'f'.repeat(40));
+    // A marker for a DIFFERENT sha (rebase between runs) does not shortcut —
+    // stamped with this run's epoch, so the sha arm is what answers and not the
+    // epoch fence standing in front of it.
+    writeFileSync(
+      join(first.path!, '.qwen-review-base-ok'),
+      `${'f'.repeat(40)}\n${runEpochMs(planPath)}\n`,
+    );
     expect(run({}, build).note).not.toContain('reusing');
   });
 

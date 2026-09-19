@@ -10,7 +10,11 @@ import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
-import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
+import {
+  findGitRoot,
+  NO_EXEC_CONFIG,
+  readFirstLineNoFollow,
+} from './gitUtils.js';
 import { isUnverifiableIdentityError, openNoFollow } from './no-follow-open.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
@@ -1132,8 +1136,12 @@ async function mapWithConcurrency<T, R>(
 async function runGit(args: string[], cwd: string): Promise<string | null> {
   // `core.quotepath=false` keeps non-ASCII filenames as UTF-8 in git's output
   // instead of octal-escaping them (`\346\226\207.txt`), which would otherwise
-  // end up as literal keys in `perFileStats`.
-  const fullArgs = ['-c', 'core.quotepath=false', ...args];
+  // end up as literal keys in `perFileStats`. The guard rides along here because
+  // every git call in this file goes through this one helper: the `status`,
+  // `ls-files`, `diff` and `diff-tree` ones refresh the index, which is what
+  // runs a planted `core.fsmonitor` helper, and a call site added later inherits
+  // the guard instead of having to remember it.
+  const fullArgs = ['-c', 'core.quotepath=false', ...NO_EXEC_CONFIG, ...args];
   try {
     const { stdout } = await execFileAsync('git', fullArgs, {
       cwd,
@@ -1443,6 +1451,8 @@ export interface GitLogEntry {
   refs: string;
   /** Parent SHAs (length > 1 ⇒ merge commit). */
   parents: string[];
+  /** Committer timestamp in seconds; the key `--date-order` walks by. */
+  commitDate: number;
 }
 
 export interface GitLogResult {
@@ -1474,12 +1484,13 @@ export interface GitCommitDetail {
   hiddenCount: number;
 }
 
-const LOG_FORMAT = '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P';
+const LOG_FORMAT = '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P%x00%ct';
+const LOG_FIELDS = 9;
 const LOG_DETAIL_FORMAT =
   '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P%x00%b';
 
 function parseLogFields(parts: string[]): GitLogEntry | null {
-  if (parts.length !== 8) return null;
+  if (parts.length !== LOG_FIELDS) return null;
   return {
     sha: parts[0],
     shortSha: parts[1],
@@ -1489,18 +1500,56 @@ function parseLogFields(parts: string[]): GitLogEntry | null {
     subject: parts[5],
     refs: parts[6],
     parents: parts[7] ? parts[7].split(' ').filter(Boolean) : [],
+    commitDate: parseInt(parts[8], 10) || 0,
   };
+}
+
+export interface GitLogOptions {
+  limit?: number;
+  skip?: number;
+  range?: string;
+  /** Walk HEAD plus every local branch, remote branch, and tag. */
+  all?: boolean;
+  /**
+   * Keep only commits whose message, author, or hash matches. Message and
+   * author matching is a case-insensitive fixed-string search; a hex query
+   * of at least four characters also resolves as a commit hash prefix.
+   */
+  search?: string;
+}
+
+const LOG_ALL_REVISIONS = ['HEAD', '--branches', '--tags', '--remotes'];
+
+function isSafeLogRange(range: string): boolean {
+  return (
+    !range.startsWith('-') &&
+    !range.startsWith('..') &&
+    /^[A-Za-z0-9_./~^-]+$/.test(range)
+  );
+}
+
+function parseLogRecords(stdout: string): GitLogEntry[] {
+  const fields = stdout.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  const entries: GitLogEntry[] = [];
+  for (let i = 0; i + LOG_FIELDS <= fields.length; i += LOG_FIELDS) {
+    const entry = parseLogFields(fields.slice(i, i + LOG_FIELDS));
+    if (entry) entries.push(entry);
+  }
+  return entries;
 }
 
 /**
  * Fetch a page of commit log entries (newest first).
  *
- * Returns `null` when not inside a git repo or when git fails. An empty
- * repo (no commits) returns `{ entries: [], hasMore: false }`.
+ * The walk is `--date-order`, so a parent never precedes one of its children
+ * and a lane graph can be laid out from `parents` alone. Returns `null` when
+ * not inside a git repo or when git fails. An empty repo (no commits)
+ * returns `{ entries: [], hasMore: false }`.
  */
 export async function fetchGitLog(
   cwd: string,
-  options?: { limit?: number; skip?: number; range?: string },
+  options?: GitLogOptions,
 ): Promise<GitLogResult | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
@@ -1510,6 +1559,15 @@ export async function fetchGitLog(
     MAX_LOG_LIMIT,
   );
   const skip = Math.max(options?.skip ?? 0, 0);
+  const revisions = options?.all
+    ? LOG_ALL_REVISIONS
+    : options?.range && isSafeLogRange(options.range)
+      ? [options.range]
+      : [];
+  const search = options?.search?.trim();
+  if (search) {
+    return searchGitLog(gitRoot, revisions, search, limit, skip);
+  }
 
   const stdout = await runGit(
     [
@@ -1517,15 +1575,12 @@ export async function fetchGitLog(
       'log',
       '-z',
       `--format=${LOG_FORMAT}`,
+      '--date-order',
       '-n',
       String(limit + 1),
       ...(skip > 0 ? ['--skip', String(skip)] : []),
-      ...(options?.range &&
-      !options.range.startsWith('-') &&
-      !options.range.startsWith('..') &&
-      /^[A-Za-z0-9_./~^-]+$/.test(options.range)
-        ? [options.range, '--']
-        : []),
+      ...revisions,
+      '--',
     ],
     gitRoot,
   );
@@ -1537,18 +1592,87 @@ export async function fetchGitLog(
     return head === null ? { entries: [], hasMore: false } : null;
   }
 
-  const fields = stdout.split('\0');
-  if (fields.at(-1) === '') fields.pop();
-  const recordCount = Math.floor(fields.length / 8);
-  const hasMore = recordCount > limit;
-  const pageCount = hasMore ? limit : recordCount;
+  const entries = parseLogRecords(stdout);
+  return { entries: entries.slice(0, limit), hasMore: entries.length > limit };
+}
 
-  const entries: GitLogEntry[] = [];
-  for (let i = 0; i < pageCount; i++) {
-    const entry = parseLogFields(fields.slice(i * 8, i * 8 + 8));
-    if (entry) entries.push(entry);
+/**
+ * git ANDs `--grep` with `--author`, so the message and author matches are
+ * two walks whose union is paged here. Each walk is capped at the page window
+ * and the union is re-ordered by commit date, ties keeping each walk's own
+ * order, so a page boundary can shift by an entry where the walks interleave;
+ * callers de-duplicate by sha.
+ */
+async function searchGitLog(
+  gitRoot: string,
+  revisions: string[],
+  query: string,
+  limit: number,
+  skip: number,
+): Promise<GitLogResult> {
+  const window = String(skip + limit + 1);
+  const walk = (filter: string) =>
+    runGit(
+      [
+        '--no-optional-locks',
+        'log',
+        '-z',
+        `--format=${LOG_FORMAT}`,
+        '--date-order',
+        '-i',
+        '--fixed-strings',
+        filter,
+        '-n',
+        window,
+        ...revisions,
+        '--',
+      ],
+      gitRoot,
+    );
+  const runs = [walk(`--grep=${query}`), walk(`--author=${query}`)];
+  if (/^[0-9a-f]{4,40}$/i.test(query)) {
+    runs.push(
+      runGit(
+        [
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          '--end-of-options',
+          `${query}^{commit}`,
+        ],
+        gitRoot,
+      ).then((sha) =>
+        sha
+          ? runGit(
+              [
+                '--no-optional-locks',
+                'log',
+                '-z',
+                `--format=${LOG_FORMAT}`,
+                '--no-walk',
+                sha.trim(),
+                '--',
+              ],
+              gitRoot,
+            )
+          : null,
+      ),
+    );
   }
-  return { entries, hasMore };
+  const bySha = new Map<string, { entry: GitLogEntry; rank: number }>();
+  for (const stdout of await Promise.all(runs)) {
+    for (const entry of parseLogRecords(stdout ?? '')) {
+      if (!bySha.has(entry.sha))
+        bySha.set(entry.sha, { entry, rank: bySha.size });
+    }
+  }
+  const entries = [...bySha.values()]
+    .sort((a, b) => b.entry.commitDate - a.entry.commitDate || a.rank - b.rank)
+    .map((item) => item.entry);
+  return {
+    entries: entries.slice(skip, skip + limit),
+    hasMore: entries.length > skip + limit,
+  };
 }
 
 /**

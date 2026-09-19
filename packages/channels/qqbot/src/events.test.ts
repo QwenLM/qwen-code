@@ -77,13 +77,6 @@ vi.mock('@qwen-code/channel-base', () => ({
       mockHandleInbound(env);
       return Promise.resolve();
     }
-    // QQChannel reads this to decide `isSlash` from the payload after the
-    // configured prefix. Mirrors the real accessor, which reads the same
-    // config key.
-    protected configuredMessagePrefix(): string | undefined {
-      const value = this.config['messagePrefix'];
-      return typeof value === 'string' && value ? value : undefined;
-    }
     protected onSessionDied(_sessionId: string): void {
       // no-op in mock
     }
@@ -120,38 +113,10 @@ vi.mock('@qwen-code/channel-base', () => ({
     const cp = Array.from(str);
     return cp.length > max ? cp.slice(0, max).join('') : str;
   },
-  // QQChannel decides `isSlash` from the payload *after* the configured
-  // prefix, so it imports the real helper. This mirrors the shared
-  // implementation rather than stubbing it away: a fake that answered
-  // `undefined` for every prefixed text would make `isSlash` read the
-  // raw content and quietly invert the behaviour under test.
-  stripMessagePrefix: (text: string, prefix: string | undefined) => {
-    if (!prefix) return text;
-    let candidate = text.trim();
-    while (
-      !candidate.startsWith(prefix) &&
-      (candidate.startsWith('@') || candidate.startsWith('<@'))
-    ) {
-      const mention = candidate.match(/^(?:@[^@\s]+|<@[^>]{1,64}>)\s+/u)?.[0];
-      if (!mention) return undefined;
-      candidate = candidate.slice(mention.length);
-    }
-    if (!candidate.startsWith(prefix)) return undefined;
-    const suffix = candidate.slice(prefix.length);
-    if (!/^\s+\S[\s\S]*$/u.test(suffix)) return undefined;
-    return suffix.trim();
-  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
-// The real filter, not the bare-factory mock above: this file needs to
-// run a produced envelope through the base's actual prefix rewrite.
-// Reached by path rather than through the package: the barrel does not
-// re-export it, and the package alias resolves to the barrel.
 type Envelope = import('@qwen-code/channel-base').Envelope;
-const { applyMessagePrefix } = (await vi.importActual(
-  '../../base/src/message-prefix.js',
-)) as { applyMessagePrefix: (e: Envelope, p?: string) => boolean };
 import type {
   QQMessageEvent,
   QQGroupMessageEvent,
@@ -326,7 +291,6 @@ describe('handleC2C', () => {
     expect(env['senderId']).toBe('user-openid-1');
     expect(env['chatId']).toBe('user-openid-1');
     expect(env['text']).toBe('[atMention=true] [Alice]: 你好，帮我查一下天气');
-    expect(env['displayText']).toBe('你好，帮我查一下天气');
   });
 
   it('斜杠命令不包装 atMention', async () => {
@@ -380,33 +344,15 @@ describe('handleC2C', () => {
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
-  it('keeps the sender wrapper on a prefixed C2C message', async () => {
-    // `isSlash` reads the payload after the prefix. Deciding it from the
-    // raw content instead would classify `/review hello` as a command and
-    // drop the `[atMention=true] [sender]:` wrapper.
-    const ch = makeChannel({ messagePrefix: '/review' });
+  it('runs a C2C slash command without the wrapper', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    pvt['handleC2C'](makeC2CEvent({ content: '/review hello' }));
+    pvt['handleC2C'](makeC2CEvent({ content: '/status' }));
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(env.text).toBe('[atMention=true] [Alice]: /review hello');
-    expect(env.alreadyPrefixed).toBe(true);
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
-    expect(env.text).toBe('[atMention=true] [Alice]: hello');
-  });
-
-  it('runs a prefixed C2C slash command without the wrapper', async () => {
-    const ch = makeChannel({ messagePrefix: '/review' });
-    const pvt = ch as unknown as QQChannelRaw;
-    pvt['handleC2C'](makeC2CEvent({ content: '/review /status' }));
-    await vi.advanceTimersByTimeAsync(600);
-
-    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(env.text).toBe('/review /status');
-    expect(env.alreadyPrefixed).toBeUndefined();
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
     expect(env.text).toBe('/status');
+    expect(env.alreadyPrefixed).toBeUndefined();
   });
 
   it('drops bot C2C messages', async () => {
@@ -480,7 +426,6 @@ describe('handleGroup', () => {
     expect(env['text']).toBe(
       '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: 你好',
     );
-    expect(env['displayText']).toBe('你好');
   });
 
   it('可见文本只移除机器人 mention', async () => {
@@ -498,7 +443,7 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env['displayText']).toBe('ask <@OPENID_ALICE> now');
+    expect(env['text']).toContain(']: ask <@OPENID_ALICE> now');
   });
 
   it('allowMention=false 时清理 <@OPENID> 标签', async () => {
@@ -589,30 +534,16 @@ describe('handleGroup', () => {
     expect(env['text']).toBe('/status');
   });
 
-  it('keeps the sender wrapper when the prefix filter rewrites the body', async () => {
-    // The three fields have to agree or the base filter cannot find the
-    // user segment inside `text` and falls back to replacing the whole
-    // message with the stripped payload -- losing the
-    // `[atMention=…] [sender]:` wrapper and the OPENID suffix, with
-    // `alreadyPrefixed` stopping the base from re-attributing it.
-    //
-    // A member mentioned before the bot is the natural ordering that
-    // exposed it: the bot's token sat between the two, so `displayText`
-    // was not a substring of `text`.
-    //
-    // The bot OPENID is well-formed so it reaches the prompt as a suffix,
-    // and the sender nick repeats the body: `text` no longer ends with
-    // `displayText` and the body occurs twice, so only the adapter-supplied
-    // `displayTextOffset` can locate the segment.
-    const ch = makeChannel({ messagePrefix: '/review' });
+  it('keeps the sender wrapper and member mentions when the body repeats the name', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroup'](
       makeGroupEvent({
-        content: '<@OPENID_OTHER> <@OPENID_BOT> /review hello',
+        content: '<@OPENID_OTHER> <@OPENID_BOT> please review hello',
         author: {
           member_openid: 'ABCDEF0123456789ABCDEF0123456789',
           user_openid: 'ABCDEF0123456789ABCDEF0123456789',
-          username: '<@OPENID_OTHER>  /review hello',
+          username: '<@OPENID_OTHER>  please review hello',
         },
         mentions: [
           { member_openid: 'other-openid', is_you: false },
@@ -623,12 +554,11 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(env.displayTextOffset).toBeGreaterThan(0);
-    expect(env.displayText).toBe('<@OPENID_OTHER>  /review hello');
-    expect(env.text.split(env.displayText!)).toHaveLength(3);
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
+    expect(env.text.split('<@OPENID_OTHER>  please review hello')).toHaveLength(
+      3,
+    );
     expect(env.text).toContain('[atMention=');
-    expect(env.text).toContain('[<@OPENID_OTHER>  /review hello(');
+    expect(env.text).toContain('[<@OPENID_OTHER>  please review hello(');
     expect(env.text).toContain(
       '机器人 OPENID: 0123456789ABCDEF0123456789ABCDEF',
     );
@@ -639,15 +569,12 @@ describe('handleGroup', () => {
     ).toBe(true);
   });
 
-  it('keeps a mention the user typed after the prefix', async () => {
-    // Matching runs on the display text, where only the bot's own token is
-    // removed, so another member's `<@...>` in the payload survives into
-    // the dispatched prompt exactly as it does with no prefix configured.
-    const ch = makeChannel({ messagePrefix: '/review' });
+  it('keeps a member mention in the message body', async () => {
+    const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroup'](
       makeGroupEvent({
-        content: '<@OPENID_BOT> /review ask <@OPENID_OTHER> about the deploy',
+        content: '<@OPENID_BOT> ask <@OPENID_OTHER> about the deploy',
         mentions: [
           { member_openid: '0123456789ABCDEF0123456789ABCDEF', is_you: true },
           { member_openid: 'other-openid', is_you: false },
@@ -657,9 +584,7 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
 
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
-    expect(applyMessagePrefix(env, '/review')).toBe(true);
     expect(env.text).toContain('ask <@OPENID_OTHER> about the deploy');
-    expect(env.text).not.toContain('/review');
   });
 
   it('其他成员 mention 后的斜杠命令仍被识别', async () => {
@@ -677,7 +602,6 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toBe('/schedule list');
-    expect(env['displayText']).toBe('<@OPENID_ALICE> /schedule list');
   });
 
   it('重复消息不触发', async () => {
@@ -1244,7 +1168,7 @@ describe('handleGroupAll', () => {
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['isGroup']).toBe(true);
     expect(env['text']).toContain('[atMention=false]');
-    expect(env['displayText']).toBe('hello world');
+    expect(env['text']).toContain(']: hello world');
   });
 
   it('policy=keyword 时只有匹配关键词才触发', async () => {

@@ -851,6 +851,23 @@ describe('standalone release packaging', () => {
     ]);
   });
 
+  it('stages the locked node-pty packages declared in the root manifest', async () => {
+    const { readNodePtyPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+
+    // The list tracks the root package.json optionalDependencies, so a newly
+    // pinned platform package (e.g. linux-arm64) is staged automatically.
+    expect(readNodePtyPackageSpecs()).toEqual([
+      '@lydell/node-pty@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-darwin-x64@1.2.0-beta.10',
+      '@lydell/node-pty-linux-x64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-arm64@1.2.0-beta.10',
+      '@lydell/node-pty-win32-x64@1.2.0-beta.10',
+    ]);
+  });
+
   it('maps every release target to its clipboard native package', async () => {
     const { TARGET_CLIPBOARD_PACKAGE } = await import(
       standalonePackageScriptUrl
@@ -1847,6 +1864,11 @@ describe('standalone release packaging', () => {
         existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
       ).toBe(true);
       expect(
+        existsSync(
+          path.join(extractDir, 'qwen-code', 'lib', 'execution-worker.js'),
+        ),
+      ).toBe(true);
+      expect(
         existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
       ).toBe(true);
       const shim = readScript(
@@ -1912,6 +1934,16 @@ describe('standalone release packaging', () => {
             'qwen-code',
             'lib',
             'export-transcript-document.js',
+          ),
+        ),
+      ).toBe(false);
+      expect(
+        existsSync(
+          path.join(
+            extractDir,
+            'qwen-code',
+            'lib',
+            'export-transcript-document.css',
           ),
         ),
       ).toBe(false);
@@ -2141,6 +2173,42 @@ describe('standalone release packaging', () => {
       expect(
         existsSync(path.join(clipboardScope, 'clipboard-darwin-arm64')),
       ).toBe(false);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('does not package node-pty debug symbols', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeNodePtyModules(tmpDir);
+      const archive = packageFakeStandalone(tmpDir, {}, { nativeModulesDir });
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      // win-x64 is the target that ships PDBs, but the prebuild directory is
+      // the only thing that varies per target and the filter keys off the file
+      // name, so staging them under linux-x64's layout pins the same line
+      // without a Windows host.
+      const prebuildDir = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@lydell',
+        'node-pty-linux-x64',
+        'prebuilds',
+        'linux-x64',
+      );
+      expect(existsSync(path.join(prebuildDir, 'pty.node'))).toBe(true);
+      expect(existsSync(path.join(prebuildDir, 'pty.pdb'))).toBe(false);
+      expect(existsSync(path.join(prebuildDir, 'conpty.pdb'))).toBe(false);
     } finally {
       restoreMinimalDist(createdDist);
       rmSync(tmpDir, { recursive: true, force: true });
@@ -2664,6 +2732,20 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('hosted entrypoint');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
+    // The archives ship the node-pty wrapper plus the target prebuild, and the
+    // guide has to say so instead of sending PTY users to an npm install; the
+    // linux-arm64 gap it does not cover must stay named. Bare 'linux-arm64'
+    // also occurs in the release-artifact list, so pin the sentence itself:
+    // the prebuild package is published and the gap is a missing pin (#11898).
+    expect(guide).toContain('@lydell/node-pty');
+    const flattenedGuide = guide.replace(/\s+/g, ' ');
+    expect(flattenedGuide).toContain(
+      '`linux-arm64` is the exception: `@lydell/node-pty-linux-arm64` is published, but this repo does not pin it',
+    );
+    expect(flattenedGuide).not.toContain('package is published yet');
+    expect(guide).not.toContain(
+      'do not currently install every npm optional native module',
+    );
   });
 
   it('provides standalone uninstall scripts that clean install-owned files only', () => {
@@ -4608,13 +4690,19 @@ function ensureMinimalDist({
     recursive: true,
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
+  writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
+    writeFileSync(path.join(distPath, 'execution-worker.js'), '');
   }
   if (includeNpmPackageArtifacts) {
     writeFileSync(
       path.join(distPath, 'export-transcript-document.js'),
       'window.QwenExportRenderer = true;\n',
+    );
+    writeFileSync(
+      path.join(distPath, 'export-transcript-document.css'),
+      'body{color:red}\n',
     );
     writeFileSync(
       path.join(distPath, 'postinstall.js'),
@@ -4984,6 +5072,47 @@ function createFakeClipboardModules(tmpDir, nativePackages) {
     );
     writeFileSync(path.join(packageDir, `${binaryName}.node`), 'native\n');
   }
+
+  return modulesDir;
+}
+
+// The clipboard packages are mandatory for --native-modules-dir, and the
+// node-pty prebuild comes from the same directory, so both live here. The
+// .pdb files model the win-x64 prebuild package's payload.
+function createFakeNodePtyModules(tmpDir) {
+  const modulesDir = createFakeClipboardModules(tmpDir, [
+    '@teddyzhu/clipboard-linux-x64-gnu',
+  ]);
+  const wrapperDir = path.join(modulesDir, '@lydell', 'node-pty');
+  const prebuildDir = path.join(
+    modulesDir,
+    '@lydell',
+    'node-pty-linux-x64',
+    'prebuilds',
+    'linux-x64',
+  );
+
+  mkdirSync(path.join(wrapperDir, 'lib'), { recursive: true });
+  writeFileSync(
+    path.join(wrapperDir, 'package.json'),
+    JSON.stringify({ name: '@lydell/node-pty', version: '1.2.0-beta.10' }),
+  );
+  writeFileSync(
+    path.join(wrapperDir, 'lib', 'index.js'),
+    'module.exports = {};\n',
+  );
+
+  mkdirSync(prebuildDir, { recursive: true });
+  writeFileSync(
+    path.join(modulesDir, '@lydell', 'node-pty-linux-x64', 'package.json'),
+    JSON.stringify({
+      name: '@lydell/node-pty-linux-x64',
+      version: '1.2.0-beta.10',
+    }),
+  );
+  writeFileSync(path.join(prebuildDir, 'pty.node'), 'native\n');
+  writeFileSync(path.join(prebuildDir, 'pty.pdb'), 'debug symbols\n');
+  writeFileSync(path.join(prebuildDir, 'conpty.pdb'), 'debug symbols\n');
 
   return modulesDir;
 }

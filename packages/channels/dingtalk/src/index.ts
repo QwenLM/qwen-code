@@ -9,6 +9,7 @@ export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
   displayName: 'DingTalk',
   requiredConfigFields: ['clientId', 'clientSecret'],
+  supportsOutputMode: true,
   management: {
     fields: [
       {
@@ -24,13 +25,6 @@ export const plugin: ChannelPlugin = {
         kind: 'secret',
         required: true,
         envResolvable: true,
-      },
-      {
-        key: 'aggregateBackgroundAgentResponses',
-        label: 'Aggregate Background Agent Responses',
-        kind: 'boolean',
-        description:
-          'Buffer each background Agent turn and send one labeled result instead of labeled segments',
       },
       {
         key: 'interactiveCards',

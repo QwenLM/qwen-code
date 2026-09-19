@@ -44,6 +44,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { Content } from '@google/genai';
+import type { SubagentExecutorSpec } from '../subagents/types.js';
 import type {
   AgentCompletionStats,
   BackgroundActivity,
@@ -133,8 +134,10 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
-  /** Whether the original launch used temporary worktree isolation. */
-  isolation?: 'worktree';
+  /** Container launches use this legacy field so older readers refuse resume. */
+  isolation?: 'worktree' | 'container';
+  executionBackend?: 'container';
+  workspaceIsolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
@@ -149,6 +152,8 @@ export interface AgentMeta {
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
+  /** External launch provenance; transcript replay cannot restore its session. */
+  executor?: SubagentExecutorSpec['kind'];
   /** UI hint preserved for resumed task rows. */
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */

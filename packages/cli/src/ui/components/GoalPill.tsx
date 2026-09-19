@@ -98,13 +98,14 @@ function presentation(snapshot: GoalSnapshotV2): {
   if (!goal || goal.status === 'complete') return null;
 
   if (goal.status === 'active') {
-    return snapshot.activity === 'verifying'
-      ? {
-          icon: ICON.CIRCLE_EMPTY,
-          label: 'checking',
-          color: theme.text.secondary,
-        }
-      : { icon: ICON.BULLSEYE, label: 'active', color: theme.text.accent };
+    if (snapshot.activity === 'verifying') {
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        label: 'checking',
+        color: theme.text.secondary,
+      };
+    }
+    return { icon: ICON.BULLSEYE, label: 'active', color: theme.text.accent };
   }
   switch (goal.status) {
     case 'paused':

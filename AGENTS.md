@@ -62,11 +62,14 @@ npm run bundle     # Bundle dist/ into a single dist/cli.js via esbuild
 ### Development
 
 ```bash
-npm run dev        # Run CLI directly from TypeScript source (no build needed)
+npm run dev        # Run CLI from TypeScript source
 ```
 
 Runs the CLI via `tsx` with `DEV=true`. Changes to `packages/core` or
-`packages/cli` are reflected immediately without rebuilding.
+`packages/cli` are reflected immediately without rebuilding. Browser Use reuses
+its built runtime, like other compiled workspace dependencies. After editing
+Browser Use, run `npm run build --workspace=@qwen-code/browser-use` to rebuild
+and stage its runtime for dev. Normal `npm install` prepares it automatically.
 
 ### Unit Testing
 
@@ -90,12 +93,15 @@ npm run build
 **pnpm worktree bootstrap (opt-in):** an additional Git worktree can install
 dependencies with `node scripts/setup-worktree.js`, which runs the pinned
 pnpm with `--frozen-lockfile` (warm store ≈ 99 MiB on copy-on-write
-filesystems such as APFS, btrfs, and XFS with reflink; without reflink it is
-≈ 1.2 GiB). npm remains the authoritative path for build, CI, packaging, and
-release; the pnpm layout is install-only for now. When dependencies change,
-regenerate the pnpm lockfile with
-`corepack pnpm install --lockfile-only --no-frozen-lockfile` and commit both
-lockfiles together.
+filesystems such as APFS, btrfs, and XFS with reflink; without reflink, as on
+ext4, it is ≈ 1.2 GiB, close to a plain npm install). The bootstrap skips the
+`prepare` build, so run `npm run build` before package tests. npm remains the
+authoritative path for build, CI, packaging, and release; the pnpm layout is
+install-only for now. When dependencies change, update `package-lock.json`
+with npm first, then regenerate the pnpm lockfile from it with
+`corepack pnpm import` and commit both lockfiles together;
+`npm run check:lockfile` fails when pnpm resolves a version npm has not
+locked.
 
 **Run individual test files** (always preferred):
 
@@ -163,6 +169,7 @@ npm run preflight  # Full check: clean → install → format → lint → build
   2-space indent, 80-char width
 - **Linting**: No `any` types, consistent type imports, no relative imports
   between packages
+- **Core imports in cli**: production code in `packages/cli/src` imports core values from the module that defines them (`@qwen-code/qwen-code-core/utils/debugLogger.js`), not the package root, which evaluates all of core in every test that reaches the file. Type-only imports are exempt. Files that predate the rule are allowlisted in `eslint.legacy-core-barrel-imports.mjs`; drop an entry when you move its file off the root, never add one.
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
 - **File naming**: `PascalCase.tsx` for React components, `kebab-case.ts` for

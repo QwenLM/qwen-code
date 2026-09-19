@@ -12,10 +12,11 @@
 
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  Config,
-  ShellExecutionResult,
-  ShellOutputEvent,
+import {
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+  type Config,
+  type ShellExecutionResult,
+  type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import { executeUserShell } from './shell-mode.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
@@ -148,7 +149,7 @@ describe('executeUserShell', () => {
       .filter((event) => event.type.startsWith('tool-'))
       .map((event) => (event as { id?: string }).id);
 
-  it('streams throttled deltas and lands a tail-deduped result', async () => {
+  it('streams throttled snapshots and lands the whole output', async () => {
     const { events, done, emitOutput, resolveResult } = setup();
     emitOutput('hello ');
     vi.advanceTimersByTime(1001);
@@ -169,7 +170,7 @@ describe('executeUserShell', () => {
       {
         type: 'tool-output',
         id: expect.any(String),
-        delta: 'hello world\n',
+        output: 'hello world\n',
       },
     ]);
     expect(new Set(cardIds(events)).size).toBe(1);
@@ -183,7 +184,7 @@ describe('executeUserShell', () => {
     expect(events[4]).toEqual({
       type: 'tool-result',
       id: expect.any(String),
-      display: '',
+      display: 'hello world',
     });
     expect(events[5]).toEqual({
       type: 'tool-end',
@@ -196,6 +197,46 @@ describe('executeUserShell', () => {
       'echo hello',
       'hello world',
     );
+  });
+
+  it('compacts an over-long card display but hands the model the whole output', async () => {
+    // ink's split: the UI history row is compacted, addShellCommandToLlmHistory
+    // keeps the verbatim text. Un-compacted, a long command would also pin the
+    // whole output in the transcript for the rest of the session.
+    const long = `${'a'.repeat(1000)}${'z'.repeat(40_000)}`;
+    const { events, done, resolveResult } = setup();
+    resolveResult(makeResult({ output: long, rawOutput: Buffer.from(long) }));
+    await done;
+    const result = events[events.length - 2];
+    expect(result?.type).toBe('tool-result');
+    if (result?.type !== 'tool-result') throw new Error('no result event');
+    expect(result.display.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(result.display.startsWith('a'.repeat(1000))).toBe(true);
+    expect(result.display.endsWith('zzzz')).toBe(true);
+    expect(addHistoryMock).toHaveBeenLastCalledWith(
+      llmClient,
+      'echo hello',
+      long,
+    );
+  });
+
+  it('compacts a streamed snapshot beyond what the card may retain', async () => {
+    const long = 'b'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS + 5000);
+    const { events, done, emitOutput, resolveResult } = setup();
+    emitOutput('x');
+    vi.advanceTimersByTime(1001);
+    emitOutput(long);
+    const snapshot = events.find((event) => event.type === 'tool-output');
+    expect(snapshot?.type).toBe('tool-output');
+    if (snapshot?.type !== 'tool-output') throw new Error('no snapshot');
+    expect(snapshot.output.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(snapshot.output.startsWith('x')).toBe(true);
+    resolveResult(makeResult());
+    await done;
   });
 
   it('lands the full output on the card when nothing was streamed', async () => {
@@ -246,7 +287,7 @@ describe('executeUserShell', () => {
     );
   });
 
-  it('starts the status prefix on its own row when the card was streamed', async () => {
+  it('keeps one copy of the output when the card was already streamed', async () => {
     const { events, done, emitOutput, resolveResult } = setup();
     emitOutput('boom ');
     vi.advanceTimersByTime(1001);
@@ -260,14 +301,15 @@ describe('executeUserShell', () => {
     );
     await done;
     expect(events.filter((event) => event.type === 'tool-output')).toEqual([
-      { type: 'tool-output', id: expect.any(String), delta: 'boom one\n' },
+      { type: 'tool-output', id: expect.any(String), output: 'boom one\n' },
     ]);
-    // The streamed head is already on the card; the empty tail must not glue
-    // the exit-code prefix onto its last line.
+    // The result replaces the streamed snapshot, so the card reads as one
+    // status line over one copy of the output rather than the two glued
+    // together.
     expect(events[events.length - 2]).toEqual({
       type: 'tool-result',
       id: expect.any(String),
-      display: '\nCommand exited with code 1.\n',
+      display: 'Command exited with code 1.\nboom one',
     });
     expect(addHistoryMock).toHaveBeenCalledWith(
       llmClient,
@@ -430,7 +472,7 @@ describe('executeUserShell', () => {
     expect(addHistoryMock).toHaveBeenCalledWith(llmClient, 'echo hello', 'hi');
   });
 
-  it('does not stream pty output as deltas', async () => {
+  it('does not stream pty output to the running card', async () => {
     const { events, done, emitOutput, resolveResult, executeArgs } =
       setup(true);
     expect(executeArgs[4]).toBe(true);

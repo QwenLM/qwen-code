@@ -74,7 +74,7 @@ function RadioList({
       {items.map((it, i) => (
         <box key={it.key} flexDirection="row">
           <text fg={i === selected ? C.accent : C.dim}>
-            {i === selected ? '● ' : '○ '}
+            {i === selected ? '› ' : '  '}
           </text>
           <text
             fg={i === selected ? C.text : C.dim}
@@ -302,7 +302,7 @@ export function OpenTuiOutputStyleDialog(props: {
   // The catalog is re-read on every open and skips a file it cannot parse, so
   // the active style can be absent from it (edited into an invalid state,
   // renamed, grown past the size cap, a dangling dotfiles symlink) while the
-  // session still runs it. Listing the live definition keeps the `●` marker
+  // session still runs it. Listing the live definition keeps the `›` marker
   // truthful; falling back to index 0 would mark `default` as active and one
   // Enter would persist it over the user's setting.
   const catalog =

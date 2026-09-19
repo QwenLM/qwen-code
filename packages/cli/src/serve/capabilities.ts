@@ -69,6 +69,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -215,6 +216,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // operation after the activation operation commits.
   extension_activation_explicit_refresh: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
+  // `GET /brand` — the Web Shell's product name and logo, resolved from the
+  // operator settings scopes. Unconditional because the route is registered
+  // unconditionally. Advertised so a host can preflight rather than issue the
+  // request and swallow a 404 from a daemon too old to have it.
+  web_shell_brand: { since: 'v1' },
   workspace_settings: { since: 'v1' },
   // `GET /workspace/permissions` is always available when this tag is
   // advertised. `POST /workspace/permissions` updates the active ACP
@@ -391,6 +397,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   native_directory_picker: { since: 'v1' },
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
+  workspace_runtime_stop: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -503,6 +510,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. `/live/status` remains the dynamic readiness surface for the Host,
   // permissions, self-checks, and provider reachability.
   realtime_voice: { since: 'v1' },
+  // The Web Shell page may itself be the Live Voice audio endpoint over WS
+  // `/live/web`, on any platform. Separate from `realtime_voice` so clients
+  // that only know the native Host never offer its macOS install flow here.
+  realtime_voice_web: { since: 'v1' },
   web_terminal: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
@@ -559,6 +570,7 @@ export interface AdvertiseFeatureToggles {
   workspaceRuntimeRemovalAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
+  workspaceRuntimeStopAvailable?: boolean;
   localPathOpenAvailable?: boolean;
   localTerminalOpenAvailable?: boolean;
   /**
@@ -567,6 +579,7 @@ export interface AdvertiseFeatureToggles {
    */
   acpHttpEnabled?: boolean;
   realtimeVoiceEnabled?: boolean;
+  realtimeVoiceWebEnabled?: boolean;
   workspaceTrustHotReloadAvailable?: boolean;
   standaloneSessionsAvailable?: boolean;
 }
@@ -651,6 +664,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
+    'session_sources',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
   ],
@@ -707,6 +724,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'native_directory_picker',
     (toggles) => toggles.nativeDirectoryPickerAvailable === true,
+  ],
+  [
+    'workspace_runtime_stop',
+    (toggles) => toggles.workspaceRuntimeStopAvailable === true,
   ],
   [
     'workspace_runtime',
@@ -767,6 +788,12 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'realtime_voice',
     (toggles) =>
       toggles.acpHttpEnabled === true && toggles.realtimeVoiceEnabled === true,
+  ],
+  [
+    'realtime_voice_web',
+    (toggles) =>
+      toggles.acpHttpEnabled === true &&
+      toggles.realtimeVoiceWebEnabled === true,
   ],
   ['web_terminal', (toggles) => toggles.acpHttpEnabled === true],
 ]);

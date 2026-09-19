@@ -840,40 +840,54 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks[3]).not.toHaveProperty('usage');
   });
 
-  it('deduplicates legacy sub-agent usage repeated after its execution summary', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        { type: 'user.text.delta', text: 'question' },
-        { type: 'assistant.text.delta', text: 'delegating' },
-        {
-          type: 'tool.update',
-          toolCallId: 'sub-1',
-          status: 'completed',
-          sourceRecordIds: ['subagent-result'],
-          rawOutput: {
-            executionSummary: {
+  it.each([
+    [undefined, true],
+    [undefined, false],
+    ['sub-1', true],
+    ['sub-1', false],
+  ] as const)(
+    'deduplicates persisted sub-agent usage (parent=%s, retain=%s)',
+    (parentToolCallId, retainSubagentBlocks) => {
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1, retainSubagentBlocks }),
+        [
+          { type: 'user.text.delta', text: 'question' },
+          { type: 'assistant.text.delta', text: 'delegating' },
+          {
+            type: 'tool.update',
+            toolCallId: 'sub-1',
+            status: 'completed',
+            sourceRecordIds: ['subagent-result'],
+            rawOutput: {
+              executionSummary: {
+                inputTokens: 5000,
+                outputTokens: 800,
+                cachedTokens: 4500,
+              },
+            },
+          },
+          {
+            type: 'assistant.usage',
+            ...(parentToolCallId ? { parentToolCallId } : {}),
+            usage: {
               inputTokens: 5000,
               outputTokens: 800,
               cachedTokens: 4500,
             },
+            sourceRecordIds: ['subagent-result'],
           },
-        },
-        {
-          type: 'assistant.usage',
-          usage: {
-            inputTokens: 5000,
-            outputTokens: 800,
-            cachedTokens: 4500,
-          },
-          sourceRecordIds: ['subagent-result'],
-        },
-      ],
-      { now: 2 },
-    );
+        ],
+        { now: 2 },
+      );
 
-    expect(state.blocks[1]).not.toHaveProperty('usage');
-  });
+      expect(state.blocks[1]).not.toHaveProperty('usage');
+      expect(state.blocks[2]).toHaveProperty('rawOutput.executionSummary', {
+        inputTokens: 5000,
+        outputTokens: 800,
+        cachedTokens: 4500,
+      });
+    },
+  );
 
   it('keeps sub-agent usage in the parent turn total by default', () => {
     const state = reduceDaemonTranscriptEvents(
@@ -1022,13 +1036,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
       id: 23,
       v: 1,
       type: 'session_closed',
-      data: { reason: 'idle timeout' },
+      data: { reason: 'idle_timeout' },
     });
 
     expect(events).toMatchObject([
       {
         type: 'status',
-        text: 'Session closed: idle timeout',
+        text: 'Session closed after idle timeout',
       },
     ]);
   });
@@ -8520,6 +8534,76 @@ describe('R7 review batch — markdown escape + details sanitization', () => {
 });
 
 describe('cross-client event recognition (prompt_cancelled / replay_complete)', () => {
+  it('merges authoritative cancellation timing without changing the previous snapshot', () => {
+    const [provisional] = normalizeDaemonEvent({
+      v: 1,
+      type: 'prompt_cancelled',
+      promptId: 'p1',
+      data: {},
+    });
+    expect(provisional).toMatchObject({
+      type: 'prompt.cancelled',
+      promptId: 'p1',
+    });
+    const before = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      provisional,
+    ]);
+    const timing = normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_complete',
+      promptId: 'p1',
+      data: {
+        stopReason: 'cancelled',
+        promptCancelled: { elapsedMs: 10999, cancelledAt: 12000 },
+      },
+    });
+    let after = reduceDaemonTranscriptEvents(before, timing);
+    after = reduceDaemonTranscriptEvents(after, [provisional, ...timing]);
+    expect(before.blocks).toHaveLength(1);
+    expect(before.blocks[0]).not.toHaveProperty('elapsedMs');
+    expect(after.blocks).toEqual([
+      expect.objectContaining({
+        id: before.blocks[0].id,
+        kind: 'prompt_cancelled',
+        promptId: 'p1',
+        elapsedMs: 10999,
+        serverTimestamp: 12000,
+      }),
+    ]);
+    const enriched = reduceDaemonTranscriptEvents(after, [
+      { type: 'prompt.cancelled', promptId: 'p1', elapsedMs: 11000 },
+    ]);
+    expect(enriched.blocks[0]).toMatchObject({
+      serverTimestamp: 12000,
+      elapsedMs: 11000,
+    });
+    expect(after.blocks[0]).toMatchObject({ elapsedMs: 10999 });
+    after = reduceDaemonTranscriptEvents(after, [
+      { ...timing[0], promptId: 'p2' },
+    ]);
+    expect(after.blocks).toHaveLength(2);
+  });
+
+  it.each([
+    { elapsedMs: -1, cancelledAt: 12000 },
+    { elapsedMs: NaN, cancelledAt: 12000 },
+    { elapsedMs: 1000, cancelledAt: Infinity },
+    { elapsedMs: '1000', cancelledAt: 12000 },
+    undefined,
+  ])(
+    'ignores malformed or legacy cancellation timing %j',
+    (promptCancelled) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'p1',
+          data: { stopReason: 'cancelled', promptCancelled },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes prompt_cancelled to prompt.cancelled (not debug)', () => {
     const events = normalizeDaemonEvent({
       id: 1,
@@ -8536,6 +8620,34 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
     ]);
     // No reason for a plain user cancel.
     expect(events[0]).not.toHaveProperty('reason');
+  });
+
+  it('uses the persisted cancellation identity when replayed during another prompt', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      promptId: 'current-prompt',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            promptCancelled: {
+              promptId: 'cancelled-prompt',
+              cancelledAt: 1000,
+              elapsedMs: 0,
+            },
+          },
+        },
+      },
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'prompt.cancelled',
+        promptId: 'cancelled-prompt',
+        elapsedMs: 0,
+      }),
+    ]);
   });
 
   it('forwards the prompt_cancelled reason (C3 forward_failed)', () => {
@@ -9289,73 +9401,85 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(state.blocks[1]).not.toHaveProperty('content');
   });
 
-  it('preserves accumulated subagent usage when completed rawOutput has lower totals', () => {
-    let state = createDaemonTranscriptState({
-      now: 1,
-      retainSubagentBlocks: false,
-    });
+  it.each([
+    { inputTokens: 1000, outputTokens: 200, cachedTokens: 100 },
+    { outputTokens: 200 },
+  ])(
+    'preserves accumulated usage after a lower or partial persisted aggregate: %j',
+    (summary) => {
+      let state = createDaemonTranscriptState({
+        now: 1,
+        retainSubagentBlocks: false,
+      });
 
-    state = reduceDaemonTranscriptEvents(state, [
-      {
-        type: 'tool.update',
-        toolCallId: 'agent-task-B',
-        toolName: 'agent',
-        status: 'running',
-        rawOutput: { type: 'task_execution', status: 'running' },
-      },
-      {
-        type: 'assistant.usage',
-        usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
-        parentToolCallId: 'agent-task-B',
-      },
-    ] as DaemonUiEvent[]);
-
-    expect(state.blocks[0]).toMatchObject({
-      kind: 'tool',
-      rawOutput: {
-        executionSummary: {
-          inputTokens: 5000,
-          outputTokens: 800,
-          cachedTokens: 200,
-          totalTokens: 5800,
+      state = reduceDaemonTranscriptEvents(state, [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-B',
+          toolName: 'agent',
+          status: 'running',
+          rawOutput: { type: 'task_execution', status: 'running' },
         },
-      },
-    });
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
+          parentToolCallId: 'agent-task-B',
+        },
+      ] as DaemonUiEvent[]);
 
-    state = reduceDaemonTranscriptEvents(state, [
-      {
-        type: 'tool.update',
-        toolCallId: 'agent-task-B',
-        toolName: 'agent',
+      expect(state.blocks[0]).toMatchObject({
+        kind: 'tool',
+        rawOutput: {
+          executionSummary: {
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 200,
+            totalTokens: 5800,
+          },
+        },
+      });
+
+      state = reduceDaemonTranscriptEvents(state, [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-B',
+          toolName: 'agent',
+          status: 'completed',
+          sourceRecordIds: ['result-B'],
+          rawOutput: {
+            type: 'task_execution',
+            status: 'completed',
+            executionSummary: summary,
+          },
+        },
+        {
+          type: 'assistant.usage',
+          parentToolCallId: 'agent-task-B',
+          sourceRecordIds: ['result-B'],
+          usage: {
+            inputTokens: summary.inputTokens ?? 0,
+            outputTokens: summary.outputTokens,
+            cachedTokens: summary.cachedTokens ?? 0,
+          },
+        },
+      ] as DaemonUiEvent[]);
+
+      expect(state.blocks[0]).toMatchObject({
+        kind: 'tool',
         status: 'completed',
         rawOutput: {
           type: 'task_execution',
           status: 'completed',
           executionSummary: {
-            inputTokens: 0,
-            outputTokens: 0,
-            cachedTokens: 0,
-            totalTokens: 0,
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 200,
+            totalTokens: 5800,
           },
         },
-      },
-    ] as DaemonUiEvent[]);
-
-    expect(state.blocks[0]).toMatchObject({
-      kind: 'tool',
-      status: 'completed',
-      rawOutput: {
-        type: 'task_execution',
-        status: 'completed',
-        executionSummary: {
-          inputTokens: 5000,
-          outputTokens: 800,
-          cachedTokens: 200,
-          totalTokens: 5800,
-        },
-      },
-    });
-  });
+      });
+    },
+  );
 
   it('keeps merged subagent totals consistent without mutating the event', () => {
     let state = createDaemonTranscriptState({
@@ -10345,4 +10469,260 @@ describe('subagent session readiness', () => {
       expect(state.blocks[0]).not.toHaveProperty('subagentSessionReady');
     },
   );
+});
+
+describe('background completion status', () => {
+  it('does not start a model stream for a completed task waiting in the queue', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      id: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Explore completed' },
+          _meta: {
+            source: 'background_task_completed',
+            backgroundTask: {
+              taskId: 'task-1',
+              kind: 'agent',
+              status: 'completed',
+            },
+          },
+        },
+      },
+    });
+    expect(events).toMatchObject([
+      {
+        type: 'status',
+        source: 'background_task_completed',
+        data: { taskId: 'task-1' },
+      },
+    ]);
+    expect(events.some((event) => event.type === 'assistant.text.delta')).toBe(
+      false,
+    );
+  });
+});
+
+it('retains automatic execution provenance on a tool-first replay', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: { backgroundTurn },
+      },
+    },
+  });
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    events,
+  );
+  expect(state.blocks[0]).toMatchObject({
+    kind: 'tool',
+    promptId: 'auto-1',
+    backgroundTurn,
+  });
+});
+
+it('ignores malformed background provenance without coercing untrusted kind values', () => {
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: {
+          backgroundTurn: {
+            turnId: 'auto-1',
+            taskId: 'task-1',
+            kind: Object.create(null),
+            startedAt: 100,
+          },
+        },
+      },
+    },
+  });
+  expect(events).not.toHaveLength(0);
+  for (const event of events)
+    expect(event).not.toHaveProperty('backgroundTurn');
+});
+
+it('retains background execution identity on permission-first updates', () => {
+  const backgroundTurn = {
+    turnId: 'auto-1',
+    taskId: 'task-1',
+    kind: 'agent' as const,
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'permission_request',
+    promptId: 'auto-1',
+    data: {
+      requestId: 'permission-1',
+      backgroundTurn,
+      request: {
+        toolCall: { toolCallId: 'tool-1', title: 'Read file' },
+        options: [],
+      },
+    },
+  });
+  expect(events[0]).toMatchObject({ backgroundTurn });
+});
+
+it('ignores background execution descriptors with a negative start time', () => {
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read',
+        status: 'pending',
+        _meta: {
+          backgroundTurn: {
+            turnId: 'auto-1',
+            taskId: 'task-1',
+            kind: 'agent',
+            startedAt: -1,
+          },
+        },
+      },
+    },
+  });
+  expect(events[0]).not.toHaveProperty('backgroundTurn');
+});
+
+it('projects an automatic start as lifecycle status without assistant text', () => {
+  const backgroundTurn = {
+    turnId: 'auto',
+    taskId: 'task',
+    kind: 'agent',
+    startedAt: 100,
+  };
+  const events = normalizeDaemonEvent({
+    v: 1,
+    id: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Worker label' },
+        _meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn,
+          qwenDiscreteMessage: true,
+        },
+      },
+    },
+  });
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({
+    type: 'status',
+    source: 'background_notification_turn_started',
+    backgroundTurn,
+  });
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState(),
+    events,
+  );
+  expect(state.blocks[0]).toMatchObject({ kind: 'status', backgroundTurn });
+  expect(state.activeAssistantBlockId).toBeUndefined();
+});
+
+it.each(['background_task_completed', 'background_notification_turn_started'])(
+  'keeps text after %s in a separate block',
+  (source) => {
+    const chunk = (text: string, id: number, meta?: Record<string, unknown>) =>
+      normalizeDaemonEvent({
+        v: 1,
+        id,
+        type: 'session_update',
+        promptId: 'prompt-1',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            ...(meta ? { _meta: meta } : {}),
+          },
+        },
+      });
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      ...chunk('A', 1),
+      ...chunk('marker', 2, { source }),
+      ...chunk('B', 3),
+    ]);
+    expect(
+      state.blocks.map((block) => [
+        block.kind,
+        'text' in block ? block.text : undefined,
+      ]),
+    ).toEqual([
+      ['assistant', 'A'],
+      ['status', 'marker'],
+      ['assistant', 'B'],
+    ]);
+  },
+);
+
+it('retains the same background text execution ID for live and replay events', () => {
+  const backgroundTurn = {
+    turnId: 'automatic',
+    taskId: 'task',
+    kind: 'agent',
+    startedAt: 100,
+  };
+  const event = {
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Result' },
+        _meta: { backgroundTurn },
+      },
+    },
+  } as const;
+  for (const promptId of [backgroundTurn.turnId, undefined]) {
+    const events = normalizeDaemonEvent({
+      ...event,
+      ...(promptId ? { promptId } : {}),
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(events[0]).toMatchObject({
+      promptId: backgroundTurn.turnId,
+      backgroundTurn,
+    });
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'Result',
+      promptId: backgroundTurn.turnId,
+    });
+  }
+  expect(
+    normalizeDaemonEvent({ ...event, promptId: 'explicit' })[0],
+  ).toMatchObject({ promptId: 'explicit' });
 });

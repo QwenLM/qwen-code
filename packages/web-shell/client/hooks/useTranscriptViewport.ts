@@ -185,7 +185,7 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
   );
 
   const load = useCallback(
-    async (direction: 'older' | 'newer') => {
+    async (direction: 'older' | 'newer', beforeAdmit?: () => void) => {
       if (loading || boundaryLoading.current || selecting.current || !range)
         return;
       boundaryLoading.current = true;
@@ -203,7 +203,13 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
         let rangeId = range.id;
         const edge = range[direction];
         if (edge.kind === 'cached') rangeId = edge.rangeId;
-        else await store.loadViewportBoundary(range.id, direction, request);
+        else
+          await store.loadViewportBoundary(
+            range.id,
+            direction,
+            request,
+            beforeAdmit,
+          );
         if (!request.isCurrent()) throw new Error('History view changed');
         const admitted = store
           .getViewportSnapshot()
@@ -261,12 +267,12 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
       !!liveBoundary.beforeRecordId &&
       (store.hasLiveOverlap(range.id) ||
         liveBoundary.beforeRecordId === view?.liveBoundary),
-    retry: () => {
+    retry: (beforeAdmit?: () => void) => {
       const action = retryAction.current;
       if (action)
         void ('ordinal' in action
           ? selectOrdinal(action.ordinal)
-          : load(action.direction));
+          : load(action.direction, beforeAdmit));
     },
     pin,
     load,

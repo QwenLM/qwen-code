@@ -9,8 +9,10 @@ import express from 'express';
 import type { Application, NextFunction, Request, Response } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import { isLoopbackAddress } from './loopback-binds.js';
-import { isDocumentNavigation } from './web-shell-preauth.js';
+import {
+  isDocumentNavigation,
+  WEB_SHELL_PWA_ASSETS,
+} from './web-shell-preauth.js';
 export { resolveWebShellDir } from './web-shell-resolver.js';
 
 /**
@@ -20,7 +22,9 @@ export { resolveWebShellDir } from './web-shell-resolver.js';
  * UI loads same-origin module scripts plus the inline performance.measure
  * patch baked into `index.html`, runs shiki/mermaid (eval + wasm + blob
  * workers), pulls katex fonts/images as `data:`, and streams SSE
- * (`connect-src 'self'`). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
+ * (`connect-src 'self'` plus the validated `?daemon=` origin from
+ * `remoteDaemonConnectOrigins`; the client asks before connecting to an origin
+ * it has not used). `frame-ancestors 'none'` + `X-Frame-Options: DENY`
  * still block clickjacking. Tightening `script-src` (drop `'unsafe-inline'`
  * via a hash, externalise the inline patch) is a follow-up, not a blocker for
  * a loopback-default local tool.
@@ -31,61 +35,13 @@ const WEB_SHELL_CSP_DIRECTIVES = [
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self' data:",
   "img-src 'self' data: blob:",
-  "connect-src 'self'",
+  "media-src 'self' data:",
   "worker-src 'self' blob:",
   // base-uri does NOT fall back to default-src; lock it so an injected <base>
   // (the SPA renders AI-generated markdown) cannot repoint relative URLs to an
   // attacker origin.
   "base-uri 'none'",
 ];
-
-/**
- * Loopback origins the Web Shell may frame for the MCP App sandbox, pinned to
- * the request's Host port. Wildcard ports would let a compromised shell embed
- * any loopback listener.
- */
-export function loopbackSandboxOrigins(
-  hostHeader: string | undefined,
-): string[] {
-  const port = portFromHostHeader(hostHeader);
-  const suffix = port ? `:${port}` : '';
-  // CSP host-sources reject bracketed IPv6 (`http://[::1]:<port>`). The
-  // sandbox iframe aliases `[::1]` to `localhost`, so these hosts are enough.
-  const hosts = ['localhost', '127.0.0.1'];
-  try {
-    const requestHostname = new URL(`http://${hostHeader}`).hostname;
-    if (
-      isLoopbackAddress(requestHostname) &&
-      !requestHostname.includes(':') &&
-      !hosts.includes(requestHostname)
-    ) {
-      hosts.push(requestHostname);
-    }
-  } catch {
-    // Ignore malformed Host headers; the fixed loopback aliases remain safe.
-  }
-  return (['http', 'https'] as const).flatMap((scheme) =>
-    hosts.map((host) => `${scheme}://${host}${suffix}`),
-  );
-}
-
-export function portFromHostHeader(
-  hostHeader: string | undefined,
-): string | undefined {
-  if (!hostHeader) return undefined;
-  if (hostHeader.startsWith('[')) {
-    const end = hostHeader.indexOf(']');
-    if (end === -1) return undefined;
-    const rest = hostHeader.slice(end + 1);
-    return rest.startsWith(':') && /^\d+$/u.test(rest.slice(1))
-      ? rest.slice(1)
-      : undefined;
-  }
-  const colon = hostHeader.lastIndexOf(':');
-  if (colon === -1) return undefined;
-  const port = hostHeader.slice(colon + 1);
-  return /^\d+$/u.test(port) ? port : undefined;
-}
 
 export function buildWebShellPermissionsPolicy(): string {
   return [
@@ -107,13 +63,68 @@ export function buildWebShellPermissionsPolicy(): string {
  */
 export function buildWebShellCsp(
   frameAncestors: readonly string[] = [],
-  frameSrcOrigins: readonly string[] = loopbackSandboxOrigins(undefined),
+  connectOrigins: readonly string[] = [],
 ): string {
   const fa = frameAncestors.length
     ? `frame-ancestors ${frameAncestors.join(' ')}`
     : "frame-ancestors 'none'";
-  const frameSrc = `frame-src ${frameSrcOrigins.join(' ')}`;
-  return [...WEB_SHELL_CSP_DIRECTIVES, frameSrc, fa].join('; ');
+  // PDF attachments use blob URLs; live previews pin their own child source.
+  const frameSrc = 'frame-src http: https: blob:';
+  const connectSrc = `connect-src 'self' ${connectOrigins.join(' ')}`.trim();
+  return [...WEB_SHELL_CSP_DIRECTIVES, connectSrc, frameSrc, fa].join('; ');
+}
+
+/**
+ * The `?daemon=` value read with the client's parser instead of `req.query`.
+ *
+ * Hardening against a configuration dependency, not a fix for a live defect.
+ * Express 5 defaults `query parser` to `'simple'` (Node's `querystring`) and
+ * nothing in this repo ever sets it, so `req.query['daemon']` never saw the
+ * bracket folding `qs` produces and the previous read agreed with the client on
+ * every shape a browser can send. Under `'extended'` it did not: `qs` folds
+ * `?daemon[]=x` into `{ daemon: ['x'] }`, a key the client's
+ * `URLSearchParams.get('daemon')` never reports, so taking `raw[0]` granted
+ * `connect-src` for an origin the client never parsed — and for
+ * `?daemon[]=A&daemon=B` it granted A while the client connected to B, leaving
+ * the client's own target CSP-blocked. Measured over 38 query strings against
+ * real sockets: 18 divergences under `extended`, 0 under `simple`, 0 after this
+ * change under either. Reading the raw query with the client's own parser drops
+ * the dependency on that setting altogether.
+ */
+export function requestedDaemonParam(originalUrl: string): string | null {
+  const queryStart = originalUrl.indexOf('?');
+  return new URLSearchParams(
+    queryStart === -1 ? '' : originalUrl.slice(queryStart + 1),
+  ).get('daemon');
+}
+
+export function remoteDaemonConnectOrigins(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+      url.username ||
+      url.password ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      !/^[a-z0-9._\-[\]:]+$/iu.test(url.hostname)
+    ) {
+      return [];
+    }
+    // A bracketed IPv6 host is not a valid CSP host-source (CSP3 host-part
+    // excludes '[', ']' and ':'), so emitting it produces a directive the
+    // browser drops. The client gate rejects a remote bracketed target for
+    // the same reason; when the page itself is served from that origin,
+    // 'self' already covers the connection.
+    if (url.hostname.startsWith('[')) return [];
+    const websocket = new URL(url.origin);
+    websocket.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return [url.origin, websocket.origin];
+  } catch {
+    return [];
+  }
 }
 
 /** Default (no-framing) Web Shell CSP. */
@@ -141,8 +152,10 @@ function createSendIndex(
 ): (req: Request, res: Response) => void {
   const indexPath = path.join(webShellDir, 'index.html');
   return (req: Request, res: Response): void => {
-    const sandboxOrigins = loopbackSandboxOrigins(req.get('host'));
-    const csp = buildWebShellCsp(frameAncestors, sandboxOrigins);
+    const csp = buildWebShellCsp(
+      frameAncestors,
+      remoteDaemonConnectOrigins(requestedDaemonParam(req.originalUrl)),
+    );
     res
       .status(200)
       .set('Content-Security-Policy', csp)
@@ -175,10 +188,9 @@ function createSendIndex(
       { cacheControl: false, dotfiles: 'allow' },
       (err) => {
         if (!err) return;
-        // Only 5xx path in the serve app that would otherwise emit nothing —
-        // log it so an operator can see why the shell stopped loading
-        // (EACCES/ESTALE on a network mount, a perms change, a partial
-        // deploy).
+        // Log filesystem failures so an operator can see why the shell stopped
+        // loading (EACCES/ESTALE on a network mount, a permissions change, or
+        // a partial deploy).
         writeStderrLine(
           `qwen serve: Web Shell index send failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -206,6 +218,8 @@ function createSendIndex(
  *  - `GET /` — the HTML shell, always (so `curl /` shows the UI too).
  *  - `GET /session/:id` document navigations — the HTML shell, so a browser
  *    refresh can load before the front-end adds its bearer header.
+ *  - `GET /manifest.webmanifest` and `GET /sw.js` — public PWA metadata and
+ *    the origin-scoped worker, revalidated on every request.
  *
  * `GET /mcp-app-sandbox` is a separate pre-auth route mounted by
  * `mountMcpAppSandbox` (the iframe proxy, not the shell HTML).
@@ -225,8 +239,18 @@ export function mountWebShellAssets(
     '/assets',
     express.static(path.join(webShellDir, 'assets'), {
       index: false,
-      immutable: true,
-      maxAge: '1y',
+      maxAge: 0,
+      setHeaders(res, filePath) {
+        const fileName = path.basename(filePath);
+        // Vite content hashes are the only safe basis for immutable caching.
+        // Future unhashed assets therefore revalidate by default instead of
+        // silently inheriting a one-year lifetime.
+        const contentAddressed = /-[a-zA-Z0-9_-]{8,}\.[^.]+$/u.test(fileName);
+        res.setHeader(
+          'Cache-Control',
+          contentAddressed ? 'public, max-age=31536000, immutable' : 'no-cache',
+        );
+      },
     }),
   );
   // A request still under /assets here is a missing chunk (e.g. a stale hashed
@@ -250,6 +274,43 @@ export function mountWebShellAssets(
     if (!isDocumentNavigation(req)) return next();
     sendIndex(req, res);
   });
+  // Process-global public PWA files carry no daemon credentials or workspace data.
+  for (const {
+    route,
+    contentType,
+    serviceWorkerAllowed,
+  } of WEB_SHELL_PWA_ASSETS) {
+    app.get(route, (_req: Request, res: Response) => {
+      res
+        .set('Content-Type', contentType)
+        .set('Cache-Control', 'no-cache')
+        .set('X-Content-Type-Options', 'nosniff');
+      if (serviceWorkerAllowed) res.set('Service-Worker-Allowed', '/');
+      res.sendFile(
+        path.join(webShellDir, route.slice(1)),
+        { cacheControl: false, dotfiles: 'allow' },
+        (err) => {
+          if (!err) return;
+          if (res.headersSent) {
+            res.end();
+            return;
+          }
+          const status = 'status' in err && err.status === 404 ? 404 : 500;
+          if (status === 500) {
+            writeStderrLine(
+              `qwen serve: Web Shell asset send failed (${route}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          res
+            .status(status)
+            .type('text/plain')
+            .send(
+              status === 404 ? 'Not found' : 'Failed to load Web Shell asset',
+            );
+        },
+      );
+    });
+  }
 }
 
 /**

@@ -68,6 +68,7 @@ function isDirectRun() {
 function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
+    path.join(distDir, 'execution-worker.js'),
     path.join(distDir, 'vendor'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
     // The Web Shell ships with the published package ("Web Shell out of the
@@ -78,7 +79,10 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
+    path.join(distDir, 'web-shell', 'manifest.webmanifest'),
+    path.join(distDir, 'web-shell', 'sw.js'),
     path.join(distDir, 'export-transcript-document.js'),
+    path.join(distDir, 'export-transcript-document.css'),
   ];
 
   if (!fs.existsSync(distDir)) {
@@ -300,6 +304,19 @@ function writeDistPackageJson(rootDir, distDir) {
         `packages/core declares ${declared ?? 'none'})`,
     );
   }
+  // The six `@lydell/node-pty*` platform pins ship in the tarball's
+  // optionalDependencies and decide which bundled ConPTY `conpty.dll` /
+  // `OpenConsole.exe` real Windows users get. Derive them from
+  // packages/core/package.json — the single source conpty-host.ts verifies its
+  // release path against (and its pin tripwire asserts) — instead of a third
+  // hardcoded table, so a bump of the native backend in one manifest cannot
+  // silently ship an unverified pin here. Mirrors the sharp / audio-capture
+  // derivations above.
+  const nodePtyPins = Object.fromEntries(
+    Object.entries(coreManifest.optionalDependencies ?? {}).filter(([name]) =>
+      name.startsWith('@lydell/node-pty'),
+    ),
+  );
 
   const distPackageJson = {
     name: rootPackageJson.name,
@@ -315,11 +332,13 @@ function writeDistPackageJson(rootDir, distDir) {
     files: [
       'cli-entry.js',
       'cli.js',
+      'execution-worker.js',
       // Worker thread entry loaded by FzfWorkerHandle at runtime via
       // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
+      'codeModeHost.js',
       'chunks',
       'vendor',
       '*.sb',
@@ -330,6 +349,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'bundled',
       'web-shell',
       'export-transcript-document.js',
+      'export-transcript-document.css',
       // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
       // web-tree-sitter wasm, native render library) are intentionally NOT
       // published in the npm package — a multi-megabyte tree dominated by the
@@ -346,12 +366,7 @@ function writeDistPackageJson(rootDir, distDir) {
     dependencies: {},
     optionalDependencies: {
       '@qwen-code/audio-capture': rootPackageJson.version,
-      '@lydell/node-pty': '1.2.0-beta.10',
-      '@lydell/node-pty-darwin-arm64': '1.2.0-beta.10',
-      '@lydell/node-pty-darwin-x64': '1.2.0-beta.10',
-      '@lydell/node-pty-linux-x64': '1.2.0-beta.10',
-      '@lydell/node-pty-win32-arm64': '1.2.0-beta.10',
-      '@lydell/node-pty-win32-x64': '1.2.0-beta.10',
+      ...nodePtyPins,
       '@teddyzhu/clipboard': '0.0.5',
       '@teddyzhu/clipboard-darwin-arm64': '0.0.5',
       '@teddyzhu/clipboard-darwin-x64': '0.0.5',

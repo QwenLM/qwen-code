@@ -33,7 +33,9 @@ fn def() -> &'static ToolDef {
             .into(),
         input_schema: serde_json::json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "running_only": { "type": "boolean", "description": "Skip installed-app scanning when refreshing a bound app's process identity." }
+            },
             "additionalProperties": false
         }),
         read_only: true,
@@ -49,10 +51,20 @@ impl Tool for ListAppsTool {
         def()
     }
 
-    async fn invoke(&self, _args: Value) -> ToolResult {
-        let apps = tokio::task::spawn_blocking(crate::apps::list_all_apps)
-            .await
-            .unwrap_or_default();
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let running_only = args
+            .get("running_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let apps = tokio::task::spawn_blocking(move || {
+            if running_only {
+                crate::apps::list_running_apps()
+            } else {
+                crate::apps::list_all_apps()
+            }
+        })
+        .await
+        .unwrap_or_default();
         let text = crate::apps::format_app_list(&apps);
         // Single flat array. Each entry is the unified shape — existing
         // fields (`pid`, `name`, `bundle_id`, `running`, `active`) are

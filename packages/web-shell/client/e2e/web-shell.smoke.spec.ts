@@ -593,7 +593,10 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
     ).length;
   const providersBeforeClear = qualifiedProviderRequestCount();
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'New task', exact: true })
+    .first()
+    .click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');
   await expect(modelButton).toContainText('qwen3.8-max · Medium');
   expect(qualifiedProviderRequestCount()).toBe(providersBeforeClear);
@@ -1719,7 +1722,7 @@ for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
     await gotoSession(page, scenario, daemon);
     const surface = page.locator('[data-web-shell-composer-surface]');
     const initialHeight = await composerHeight(page);
-    expect(initialHeight).toBe(140);
+    expect(initialHeight).toBe(116);
 
     await replaceComposerText(
       page,

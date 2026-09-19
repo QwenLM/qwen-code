@@ -50,13 +50,7 @@ import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '../ui/empty';
+import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from '../ui/empty';
 import {
   Field,
   FieldContent,
@@ -78,10 +72,17 @@ import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 
+import {
+  isItemExcluded,
+  isSettingExcluded,
+  type WebShellSettingsOptions,
+} from '../../settings';
+
 type ChatWidthMode = '1000' | 'wide';
 
 interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
+  presentation?: WebShellSettingsOptions;
   onLanguageChange: (language: WebShellLanguage, scope: Scope) => void;
   onSubDialog: (settingKey: string, scope: Scope) => void;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -109,6 +110,8 @@ export interface SettingsMessageSettingsState {
 }
 
 const SUB_DIALOG_KEYS = new Set([
+  'advisorModel',
+  'imageModel',
   'fastModel',
   'visionModel',
   'voiceModel',
@@ -191,6 +194,10 @@ function formatValue(
 ): string {
   const effective = resolveValue(setting, scope);
   if (effective === undefined || effective === null) return '';
+  if (setting.key === 'advisorModel' && effective === '')
+    return t('model.useMain');
+  if (setting.key === 'imageModel' && effective === '')
+    return t('model.disabled');
   if (setting.key === THEME_SETTING_KEY) {
     const theme = themeSettingToWebShellTheme(effective, WebShellThemeId.Dark);
     return t(`theme.${theme}`);
@@ -209,7 +216,7 @@ function formatValue(
       ? formatSettingOption(setting, opt.value, opt.label, t)
       : String(effective);
   }
-  const s = String(effective);
+  const s = String(effective).replaceAll('\0', ' · ');
   return s.length > 24 ? `${s.slice(0, 21)}…` : s;
 }
 
@@ -253,7 +260,8 @@ type SettingsPageItem =
   | { type: 'setting'; setting: DaemonSettingDescriptor }
   | { type: 'local'; localKey: 'chatWidth' | 'browserNotifications' }
   | { type: 'local-control' }
-  | { type: 'live' };
+  | { type: 'live' }
+  | { type: 'model-management' };
 
 interface SettingsPageCategory {
   id: string;
@@ -416,6 +424,7 @@ export function nextSettingIdx(
 
 export function SettingsMessage({
   settingsState,
+  presentation,
   onLanguageChange,
   onSubDialog,
   onThemeChange,
@@ -507,8 +516,46 @@ export function SettingsMessage({
         items: [{ type: 'local-control' }],
       });
     }
-    return groups;
-  }, [liveSetup, settings, t, hasNotifications]);
+    if (modelManagement && !showInitialLoading) {
+      const model = groups.find((group) => group.id === 'Model');
+      if (model) model.items.push({ type: 'model-management' });
+      else
+        groups.push({
+          id: 'Model',
+          label: formatSettingCategory('Model', t),
+          items: [{ type: 'model-management' }],
+        });
+    }
+    return groups
+      .map((group) => ({
+        ...group,
+        items: group.items.filter((item) => {
+          if (item.type === 'setting') {
+            return !isSettingExcluded(item.setting.key, presentation);
+          }
+          const id =
+            item.type === 'local'
+              ? item.localKey === 'chatWidth'
+                ? 'builtin:chat-width'
+                : 'builtin:browser-notifications'
+              : item.type === 'live'
+                ? 'builtin:live-setup'
+                : item.type === 'local-control'
+                  ? 'builtin:local-control'
+                  : 'builtin:model-management';
+          return !isItemExcluded(id, presentation);
+        }),
+      }))
+      .filter((group) => group.items.length > 0);
+  }, [
+    liveSetup,
+    settings,
+    t,
+    hasNotifications,
+    modelManagement,
+    presentation,
+    showInitialLoading,
+  ]);
 
   useEffect(() => {
     if (categories.length === 0) return;
@@ -542,11 +589,12 @@ export function SettingsMessage({
   }, [error, settings, status, t]);
 
   const handleSetValue = useCallback(
-    (key: string, value: unknown) => {
+    (key: string, value: unknown, onSaved?: () => void) => {
       if (!restartPending) setMessage(null);
       setBusyKey(key);
       setValue(scope, key, value)
         .then(async (result) => {
+          onSaved?.();
           try {
             await reload();
           } catch {
@@ -568,10 +616,10 @@ export function SettingsMessage({
     categories.find((category) => category.id === activeCategory) ??
     categories[0];
 
-  // The model-management block is surfaced inside the "Model" category, detected
-  // by the raw category of its dialog settings (fastModel etc.).
-  const isModelCategory = activeGroup?.items.some(
-    (item) => item.type === 'setting' && item.setting.category === 'Model',
+  const activeRows =
+    activeGroup?.items.filter((item) => item.type !== 'model-management') ?? [];
+  const showModelManagement = activeGroup?.items.some(
+    (item) => item.type === 'model-management',
   );
 
   const renderSelect = (
@@ -617,8 +665,11 @@ export function SettingsMessage({
         themeSettingToWebShellTheme(value) ?? selectedTheme,
         (next) => {
           const theme = next as WebShellTheme;
-          onThemeChange(theme);
-          handleSetValue(THEME_SETTING_KEY, webShellThemeToSettingValue(theme));
+          handleSetValue(
+            THEME_SETTING_KEY,
+            webShellThemeToSettingValue(theme),
+            scope === 'user' ? () => onThemeChange(theme) : undefined,
+          );
         },
         WEB_SHELL_THEMES.map((theme) => ({
           value: theme,
@@ -692,7 +743,11 @@ export function SettingsMessage({
       <SettingInput
         name={setting.key}
         label={formatSettingLabel(setting, t)}
-        type={setting.type === 'number' ? 'number' : 'text'}
+        type={
+          setting.type === 'number' || setting.type === 'integer'
+            ? 'number'
+            : 'text'
+        }
         value={value}
         disabled={disabled}
         onCommit={(next) => handleSetValue(setting.key, next)}
@@ -777,7 +832,12 @@ export function SettingsMessage({
                   {category.label}
                 </span>
                 <span className="text-xs tabular-nums text-muted-foreground">
-                  {category.items.length}
+                  {Math.max(
+                    1,
+                    category.items.filter(
+                      (item) => item.type !== 'model-management',
+                    ).length,
+                  )}
                 </span>
               </Button>
             ))}
@@ -791,196 +851,200 @@ export function SettingsMessage({
                     <Settings2Icon />
                   </EmptyMedia>
                   <EmptyTitle>{t('settings.empty')}</EmptyTitle>
-                  <EmptyDescription>{t('settings.empty')}</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             )}
             {activeGroup && (
               <div className="mx-auto w-full max-w-5xl">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <CategoryIcon category={activeGroup.id} />
-                      {activeGroup.label}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="-mb-(--card-spacing) p-0">
-                    <FieldGroup className="gap-0">
-                      {activeGroup.items.map((item, index) => {
-                        const separator = index > 0 && (
-                          <Separator className="mx-5 w-auto max-md:mx-4" />
-                        );
-                        if (
-                          item.type === 'local' &&
-                          item.localKey === 'browserNotifications' &&
-                          notifications
-                        ) {
-                          const unavailable =
-                            notifications.permission === 'unavailable';
-                          const status = unavailable
-                            ? 'unavailable'
-                            : notifications.pending
-                              ? 'requesting'
-                              : notifications.permission === 'denied'
-                                ? 'denied'
-                                : notifications.error
-                                  ? 'error'
-                                  : notifications.enabled
-                                    ? notifications.permission === 'granted'
-                                      ? 'enabled'
-                                      : 'waiting'
-                                    : 'disabled';
+                {activeRows.length > 0 && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        <CategoryIcon category={activeGroup.id} />
+                        {activeGroup.label}
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="-mb-(--card-spacing) p-0">
+                      <FieldGroup className="gap-0">
+                        {activeRows.map((item, index) => {
+                          const separator = index > 0 && (
+                            <Separator className="mx-5 w-auto max-md:mx-4" />
+                          );
+                          if (
+                            item.type === 'local' &&
+                            item.localKey === 'browserNotifications' &&
+                            notifications
+                          ) {
+                            const unavailable =
+                              notifications.permission === 'unavailable';
+                            const status = unavailable
+                              ? 'unavailable'
+                              : notifications.pending
+                                ? 'requesting'
+                                : notifications.permission === 'denied'
+                                  ? 'denied'
+                                  : notifications.error
+                                    ? 'error'
+                                    : notifications.enabled
+                                      ? notifications.permission === 'granted'
+                                        ? 'enabled'
+                                        : 'waiting'
+                                      : 'disabled';
+                            return (
+                              <div key={item.localKey}>
+                                {separator}
+                                <SettingsRow
+                                  title={t('browserNotifications.label')}
+                                  description={[
+                                    t('browserNotifications.description'),
+                                    t(`browserNotifications.${status}`),
+                                    ...(!notifications.persistent
+                                      ? [t('browserNotifications.temporary')]
+                                      : []),
+                                  ].join(' ')}
+                                  control={
+                                    <div className="flex items-center gap-2">
+                                      {notifications.enabled &&
+                                        notifications.permission ===
+                                          'default' && (
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            disabled={notifications.pending}
+                                            onClick={() =>
+                                              void notifications.setEnabled(
+                                                true,
+                                              )
+                                            }
+                                          >
+                                            {t('browserNotifications.allow')}
+                                          </Button>
+                                        )}
+                                      <Switch
+                                        aria-label={t(
+                                          'browserNotifications.label',
+                                        )}
+                                        checked={notifications.enabled}
+                                        disabled={
+                                          notifications.pending ||
+                                          (unavailable &&
+                                            !notifications.enabled)
+                                        }
+                                        onCheckedChange={(enabled) =>
+                                          void notifications.setEnabled(enabled)
+                                        }
+                                      />
+                                    </div>
+                                  }
+                                />
+                              </div>
+                            );
+                          }
+                          if (item.type === 'local') {
+                            return (
+                              <div key={item.localKey}>
+                                {separator}
+                                <SettingsRow
+                                  title={t('settings.label.ui.chatWidth')}
+                                  description={t(
+                                    'settings.description.ui.chatWidth',
+                                  )}
+                                  control={renderSelect(
+                                    chatWidthMode,
+                                    (next) =>
+                                      onChatWidthModeChange(
+                                        next as ChatWidthMode,
+                                      ),
+                                    [
+                                      {
+                                        value: '1000',
+                                        label: t(
+                                          'settings.option.ui.chatWidth.1000',
+                                        ),
+                                      },
+                                      {
+                                        value: 'wide',
+                                        label: t(
+                                          'settings.option.ui.chatWidth.wide',
+                                        ),
+                                      },
+                                    ],
+                                    t('settings.label.ui.chatWidth'),
+                                    false,
+                                  )}
+                                />
+                              </div>
+                            );
+                          }
+                          if (item.type === 'live') {
+                            return liveSetup ? (
+                              <div key="live-voice-setup">
+                                {separator}
+                                <LiveVoiceSettingsCard setup={liveSetup} />
+                              </div>
+                            ) : null;
+                          }
+                          if (item.type === 'local-control') {
+                            return (
+                              <div key="local-control">
+                                {separator}
+                                <LocalControlSettingsCard />
+                              </div>
+                            );
+                          }
+
+                          const setting = item.setting;
+                          const description = formatSettingDescription(
+                            setting,
+                            t,
+                          );
+                          const hintKey = scopeHintKey(setting, scope);
+                          const hasScopeValue = scopeHasValue(setting, scope);
+                          const scopeHint = hintKey
+                            ? t(hintKey, {
+                                scope: t(
+                                  scope === 'workspace'
+                                    ? 'settings.scope.user'
+                                    : 'settings.scope.workspace',
+                                ),
+                              })
+                            : undefined;
                           return (
-                            <div key={item.localKey}>
+                            <div key={setting.key}>
                               {separator}
                               <SettingsRow
-                                title={t('browserNotifications.label')}
-                                description={[
-                                  t('browserNotifications.description'),
-                                  t(`browserNotifications.${status}`),
-                                  ...(!notifications.persistent
-                                    ? [t('browserNotifications.temporary')]
-                                    : []),
-                                ].join(' ')}
+                                title={formatSettingLabel(setting, t)}
+                                description={
+                                  [description, scopeHint]
+                                    .filter(Boolean)
+                                    .join(' · ') || undefined
+                                }
+                                metadata={
+                                  hasScopeValue ? (
+                                    <Badge variant="secondary">
+                                      {scope === 'workspace'
+                                        ? t('settings.scope.workspace')
+                                        : t('settings.scope.user')}
+                                    </Badge>
+                                  ) : undefined
+                                }
                                 control={
-                                  <div className="flex items-center gap-2">
-                                    {notifications.enabled &&
-                                      notifications.permission ===
-                                        'default' && (
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          disabled={notifications.pending}
-                                          onClick={() =>
-                                            void notifications.setEnabled(true)
-                                          }
-                                        >
-                                          {t('browserNotifications.allow')}
-                                        </Button>
-                                      )}
-                                    <Switch
-                                      aria-label={t(
-                                        'browserNotifications.label',
-                                      )}
-                                      checked={notifications.enabled}
-                                      disabled={
-                                        notifications.pending ||
-                                        (unavailable && !notifications.enabled)
-                                      }
-                                      onCheckedChange={(enabled) =>
-                                        void notifications.setEnabled(enabled)
-                                      }
-                                    />
-                                  </div>
+                                  busyKey === setting.key ? (
+                                    <Spinner />
+                                  ) : (
+                                    renderSettingControl(setting)
+                                  )
                                 }
                               />
                             </div>
                           );
-                        }
-                        if (item.type === 'local') {
-                          return (
-                            <div key={item.localKey}>
-                              {separator}
-                              <SettingsRow
-                                title={t('settings.label.ui.chatWidth')}
-                                description={t(
-                                  'settings.description.ui.chatWidth',
-                                )}
-                                control={renderSelect(
-                                  chatWidthMode,
-                                  (next) =>
-                                    onChatWidthModeChange(
-                                      next as ChatWidthMode,
-                                    ),
-                                  [
-                                    {
-                                      value: '1000',
-                                      label: t(
-                                        'settings.option.ui.chatWidth.1000',
-                                      ),
-                                    },
-                                    {
-                                      value: 'wide',
-                                      label: t(
-                                        'settings.option.ui.chatWidth.wide',
-                                      ),
-                                    },
-                                  ],
-                                  t('settings.label.ui.chatWidth'),
-                                  false,
-                                )}
-                              />
-                            </div>
-                          );
-                        }
-                        if (item.type === 'live') {
-                          return liveSetup ? (
-                            <div key="live-voice-setup">
-                              {separator}
-                              <LiveVoiceSettingsCard setup={liveSetup} />
-                            </div>
-                          ) : null;
-                        }
-                        if (item.type === 'local-control') {
-                          return (
-                            <div key="local-control">
-                              {separator}
-                              <LocalControlSettingsCard />
-                            </div>
-                          );
-                        }
-
-                        const setting = item.setting;
-                        const description = formatSettingDescription(
-                          setting,
-                          t,
-                        );
-                        const hintKey = scopeHintKey(setting, scope);
-                        const hasScopeValue = scopeHasValue(setting, scope);
-                        const scopeHint = hintKey
-                          ? t(hintKey, {
-                              scope: t(
-                                scope === 'workspace'
-                                  ? 'settings.scope.user'
-                                  : 'settings.scope.workspace',
-                              ),
-                            })
-                          : undefined;
-                        return (
-                          <div key={setting.key}>
-                            {separator}
-                            <SettingsRow
-                              title={formatSettingLabel(setting, t)}
-                              description={
-                                [description, scopeHint]
-                                  .filter(Boolean)
-                                  .join(' · ') || undefined
-                              }
-                              metadata={
-                                hasScopeValue ? (
-                                  <Badge variant="secondary">
-                                    {scope === 'workspace'
-                                      ? t('settings.scope.workspace')
-                                      : t('settings.scope.user')}
-                                  </Badge>
-                                ) : undefined
-                              }
-                              control={
-                                busyKey === setting.key ? (
-                                  <Spinner />
-                                ) : (
-                                  renderSettingControl(setting)
-                                )
-                              }
-                            />
-                          </div>
-                        );
-                      })}
-                    </FieldGroup>
-                  </CardContent>
-                </Card>
-                {isModelCategory && modelManagement && (
-                  <div className="mt-4">
+                        })}
+                      </FieldGroup>
+                    </CardContent>
+                  </Card>
+                )}
+                {showModelManagement && modelManagement && (
+                  <div className={activeRows.length > 0 ? 'mt-4' : undefined}>
                     <ModelManagementSection {...modelManagement} />
                   </div>
                 )}
