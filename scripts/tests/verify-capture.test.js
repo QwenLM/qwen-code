@@ -5,7 +5,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -193,6 +199,200 @@ describe('verify-capture helper', () => {
       // ...and the two attributes must not collapse onto the same rendering.
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
+
+  // font-weight="bold" rasterises as a no-op where the matched family has no
+  // bold face, so on a font-less host the stroke is the only thing keeping
+  // bold visible. The test above cannot see a dropped stroke where CI runs:
+  // a bold face resolves and satisfies it through font-weight alone
+  // (measured: the stroke-less mutant passes 23/23 on a font-equipped host).
+  // Point fontconfig at an empty font list so the host's fonts cannot mask a
+  // missing stroke; with no fonts librsvg draws .notdef boxes, so this pins
+  // the stroke mechanism, not legibility.
+  // Decoded pixels are compared, not PNG bytes — see the black-on-black test.
+  it('keeps bold visible on a host with no fonts at all', async () => {
+    let plain;
+    let bold;
+    withDir((dir) => {
+      const fontsDir = path.join(dir, 'fonts');
+      mkdirSync(fontsDir);
+      const conf = path.join(dir, 'fonts.conf');
+      writeFileSync(
+        conf,
+        '<?xml version="1.0"?>\n' +
+          '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n' +
+          `<fontconfig><dir>${fontsDir}</dir><cachedir>${fontsDir}</cachedir></fontconfig>\n`,
+      );
+      const env = { ...process.env, FONTCONFIG_FILE: conf };
+      const render = (name, input) => {
+        const out = path.join(dir, `${name}.png`);
+        const res = run(['--out', out, '--cols', '30'], { input, env });
+        expect(res.status).toBe(0);
+        expect(isPng(out)).toBe(true);
+        return readFileSync(out);
+      };
+      plain = render('plain', 'FAIL PASS\n');
+      bold = render('bold', `${ESC}[1mFAIL PASS${ESC}[0m\n`);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const [p, b] = await Promise.all([
+      sharp(plain).raw().toBuffer({ resolveWithObject: true }),
+      sharp(bold).raw().toBuffer({ resolveWithObject: true }),
+    ]);
+    expect(
+      b.data.equals(p.data),
+      'bold was dropped: the stroke is gone and no host bold face remains',
+    ).toBe(false);
+  });
+
+  // The stroke must follow the glyph's OWN fill: the other bold arms feed
+  // \x1b[1m (default grey), where a stroke drifted to a constant grey is
+  // invisible because fill and stroke coincide. ANSI[1] is #cd3131, so a
+  // same-colour stroke caps green/blue at 0x31 at any blend with the
+  // #1e1e1e canvas, while a constant #d4d4d4 stroke paints an uncovered ring
+  // whose green/blue reaches ~0x8a (measured with and without host fonts).
+  // A channel ceiling, not a red-pixel count: a count passes with the stroke
+  // deleted entirely. The ceiling is DERIVED from the palette the helper
+  // ships — a retune of ANSI[1] moves the bound with it, and the slack above
+  // it absorbs a brighter input red (ANSI[9] is #f14c4c) — and only the rows
+  // the red glyph occupies are scanned, so a future title or legend (the
+  // helper's second emitter is blue #9cdcfe) cannot false-red the guard.
+  it('strokes a bold coloured glyph in its own fill, not a constant', async () => {
+    let png;
+    withDir((dir) => {
+      const out = path.join(dir, 'bold-colour.png');
+      const res = run(['--out', out, '--cols', '30'], {
+        input: `${ESC}[1;31mFAIL PASS${ESC}[0m\n`,
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      png = readFileSync(out);
+    });
+    const src = readFileSync(HELPER, 'utf8');
+    const palette = src.match(/const ANSI = \[([\s\S]*?)\]/);
+    expect(palette, 'ANSI palette not found in the helper').not.toBeNull();
+    const ansi = [...palette[1].matchAll(/#(?:[0-9a-f]{2}){3}/gi)].map(
+      (m) => m[0],
+    );
+    expect(ansi.length, 'ANSI palette changed shape').toBe(16);
+    // Slack stays well under the ~0x8a a drifted ring measures; it exists to
+    // absorb antialiasing noise and a brighter palette, not the defect.
+    const ceiling =
+      Math.max(
+        parseInt(ansi[1].slice(3, 5), 16),
+        parseInt(ansi[1].slice(5, 7), 16),
+      ) + 0x30;
+    const sharp = createRequire(import.meta.url)('sharp');
+    const { data, info } = await sharp(png)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    // Scan only the rows the red glyph occupies: bounding the whole canvas
+    // would red this test on a light-coloured label that has nothing to do
+    // with the stroke.
+    let maxGB = 0;
+    let redRows = 0;
+    for (let y = 0; y < info.height; y += 1) {
+      let hasRed = false;
+      for (let x = 0; x < info.width; x += 1) {
+        const i = (y * info.width + x) * info.channels;
+        if (data[i] - Math.max(data[i + 1], data[i + 2]) > 0x20) {
+          hasRed = true;
+          break;
+        }
+      }
+      if (!hasRed) continue;
+      redRows += 1;
+      for (let x = 0; x < info.width; x += 1) {
+        const i = (y * info.width + x) * info.channels;
+        maxGB = Math.max(maxGB, data[i + 1], data[i + 2]);
+      }
+    }
+    expect(redRows, 'no red glyph rendered to measure').toBeGreaterThan(0);
+    expect(
+      maxGB,
+      `green/blue reached 0x${maxGB.toString(16)} in the bold red glyph's ` +
+        `rows (ceiling 0x${ceiling.toString(16)}): a grey halo was painted ` +
+        'around it — the stroke drifted from the fill colour',
+    ).toBeLessThanOrEqual(ceiling);
+  });
+
+  // The title and a bold body cell are the renderer's two bold emitters; when
+  // each carried its own attribute string the title kept a bare
+  // font-weight="bold" — a no-op where no bold face resolves — while the body
+  // cells gained the stroke, so the caption rendered LIGHTER than the cells
+  // it heads in the A/B evidence images this helper exists to publish. Pin
+  // the recipe's CONTENT: the stroke is the mechanism (no pixel test sees it
+  // on a host with fonts), and any spelling of a bold weight is counted so a
+  // new label cannot dodge it with font-weight="700". Comments are stripped
+  // first, in both // and /* */ shapes, because the prose above the recipe
+  // carries the font-weight literal — and nothing here names the helper's
+  // identifier, so a rename or a prose reflow stays green while a dropped
+  // stroke or a hand-rolled bold label goes red.
+  it('emits the title and bold body cells through one bold helper', () => {
+    const src = readFileSync(HELPER, 'utf8');
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    expect(code.match(/stroke="\$\{colour\}"/g)?.length ?? 0).toBe(1);
+    expect(code.match(/paint-order="stroke"/g)?.length ?? 0).toBe(1);
+    expect(
+      code.match(/font-weight\s*=\s*["']?(?:bold|[6-9]00)/gi)?.length ?? 0,
+    ).toBe(1);
+  });
+
+  // The recipe pins the mechanism; this pins the effect it exists for: the
+  // title must not render LIGHTER than the bold cells it heads. Only a pixel
+  // comparison sees a title whose stroke was dropped or made conditional
+  // while the body kept its own, and it is host-relative, so it holds with
+  // and without fonts (measured title/body ink: 605/605 with fonts,
+  // 1062/882 without; a stroke-less title falls to 478/605 and 414/882).
+  it('renders the title band no lighter than the body band', async () => {
+    let png;
+    withDir((dir) => {
+      const out = path.join(dir, 'title-weight.png');
+      const res = run(['--out', out, '--cols', '30', '--title', 'FAIL PASS'], {
+        input: `${ESC}[1mFAIL PASS${ESC}[0m\n`,
+      });
+      expect(res.status).toBe(0);
+      expect(isPng(out)).toBe(true);
+      png = readFileSync(out);
+    });
+    const sharp = createRequire(import.meta.url)('sharp');
+    const { data, info } = await sharp(png)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    // Band by the renderer's own geometry: the title occupies the first
+    // CELL_H strip below PAD, the body line the next. Ink = any pixel off the
+    // #1e1e1e canvas — the title fill (#9cdcfe) is hardcoded separately from
+    // the body's (#d4d4d4), so counting a shared colour cannot work.
+    const PAD = 12;
+    const CELL_H = 18;
+    const ink = (top) => {
+      let n = 0;
+      for (let y = top; y < top + CELL_H; y += 1) {
+        for (let x = 0; x < info.width; x += 1) {
+          const i = (y * info.width + x) * info.channels;
+          if (
+            data[i] !== 0x1e ||
+            data[i + 1] !== 0x1e ||
+            data[i + 2] !== 0x1e
+          ) {
+            n += 1;
+          }
+        }
+      }
+      return n;
+    };
+    const titleInk = ink(PAD);
+    const bodyInk = ink(PAD + CELL_H);
+    // The 10% slack absorbs host rasterisation noise; the defect measures 21%
+    // (fonts) and 53% (no fonts) below parity, so the slack cannot hide it.
+    expect(
+      titleInk,
+      `title band ink ${titleInk} vs body band ink ${bodyInk}: the caption ` +
+        'rendered lighter than the bold cells it heads — its stroke was ' +
+        'dropped or made conditional',
+    ).toBeGreaterThanOrEqual(bodyInk * 0.9);
+  });
 
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
   // which the bounds guard maps to FG_DEFAULT (#d4d4d4). Decode pixels and
