@@ -17,7 +17,11 @@ vi.mock('./supervisor-runner.js', () => ({
 const stdout: string[] = [];
 let stderr: string[] = [];
 const ignoreBrokenPipe = vi.fn();
-const writeStdoutLineSafe = vi.fn((line: string) => stdout.push(line));
+// Keep the recorder's return type `void` like the real helper, otherwise
+// every mockImplementation below has to hand back a number.
+const writeStdoutLineSafe = vi.fn((line: string) => {
+  stdout.push(line);
+});
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLineSafe: (line: string) => writeStdoutLineSafe(line),
   ignoreBrokenPipe: () => ignoreBrokenPipe(),
@@ -39,7 +43,6 @@ beforeEach(() => {
   ignoreBrokenPipe.mockReset();
   writeStdoutLineSafe.mockReset().mockImplementation((line: string) => {
     stdout.push(line);
-    return undefined;
   });
   dispatch.mockReset().mockResolvedValue({ sessionId: 'sess-abc' });
   ensureAgentViewSupervisor
