@@ -89,6 +89,13 @@ describe('normalizeSessionData', () => {
         },
         config,
       );
+      expect(
+        collected.messages.map((message) => message.message?.role),
+      ).toEqual(
+        order === 'thought-last'
+          ? ['user', 'assistant', 'thinking', 'user', 'assistant', 'thinking']
+          : ['user', 'thinking', 'assistant', 'user', 'thinking', 'assistant'],
+      );
       const normalized = normalizeSessionData(collected, records, config);
 
       const thinkingMessages = normalized.messages.filter(
