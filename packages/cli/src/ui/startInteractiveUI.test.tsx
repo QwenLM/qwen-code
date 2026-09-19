@@ -150,7 +150,11 @@ type TestConfig = Config & {
   updateSessionRegistryIpcPath: ReturnType<typeof vi.fn>;
 };
 
-function makeConfig(): TestConfig {
+// The config's effective answer, which the real one derives from the setting
+// (on unless someone turned it off) narrowed by the session-level
+// suppressions, `--bare` and `--safe-mode`. On unless a case says otherwise:
+// the settings argument these suites pass is what the gate defers to.
+function makeConfig(crossSessionMessagingEnabled = true): TestConfig {
   const trackSessionRegistration = vi.fn((registration: Promise<unknown>) => {
     void registration.catch(() => undefined);
   });
@@ -161,6 +165,7 @@ function makeConfig(): TestConfig {
     getChatRecordingService: () => undefined,
     isTelemetryInitializationDeferred: () => false,
     getApprovalMode: () => 'default',
+    isCrossSessionMessagingEnabled: () => crossSessionMessagingEnabled,
     trackSessionRegistration,
     whenSessionRegistered: vi.fn().mockResolvedValue(true),
     updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
@@ -286,7 +291,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     // nothing about the two callbacks, so either could be dropped without
     // a test noticing.
     const reassertSessionRegistryRecord = vi.fn().mockResolvedValue(undefined);
-    const config = Object.assign(makeConfig(), {
+    const config = Object.assign(makeConfig(true), {
       reassertSessionRegistryRecord,
     });
 
@@ -316,7 +321,7 @@ describe('startInteractiveUI cross-session messaging', () => {
         },
       }) as unknown as LoadedSettings;
 
-    await start(makeConfig(), settingsWith('1m'));
+    await start(makeConfig(true), settingsWith('1m'));
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const minute = peerMessagingStart.mock.calls[0]?.[0] as {
       getHeldExpiryMs: () => number | null;
@@ -328,7 +333,7 @@ describe('startInteractiveUI cross-session messaging', () => {
       close: vi.fn().mockResolvedValue(undefined),
     });
 
-    await start(makeConfig(), settingsWith('never'));
+    await start(makeConfig(true), settingsWith('never'));
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const never = peerMessagingStart.mock.calls[0]?.[0] as {
       getHeldExpiryMs: () => number | null;
@@ -355,7 +360,7 @@ describe('startInteractiveUI cross-session messaging', () => {
       }),
     } as unknown as LoadedSettings;
 
-    await start(makeConfig(), settings);
+    await start(makeConfig(true), settings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const options = peerMessagingStart.mock.calls[0]?.[0] as {
       getPolicyScope: () => string | undefined;
@@ -368,7 +373,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     // fewer parameters is assignable — and every record would then
     // advertise an address with no token: peers resolve it, fail to
     // authenticate, and every send is dropped while still reporting 'sent'.
-    const config = makeConfig();
+    const config = makeConfig(true);
 
     await start(config, enabledSettings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
@@ -395,7 +400,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     // are admitted. Asserting a single call cannot tell the two wirings
     // apart — only a second call after the id moves can.
     let sessionId = 'session-before-clear';
-    const config = Object.assign(makeConfig(), {
+    const config = Object.assign(makeConfig(true), {
       getSessionId: () => sessionId,
       reassertSessionRegistryRecord: vi.fn().mockResolvedValue(undefined),
     });
@@ -442,7 +447,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     // record, and a patch against a record that does not exist yet is
     // dropped silently. Binding before registration is queued would
     // therefore leave the session unreachable with no error anywhere.
-    const config = makeConfig();
+    const config = makeConfig(true);
     let trackedFirst = false;
     config.whenSessionRegistered.mockImplementation(async () => {
       trackedFirst = config.trackSessionRegistration.mock.calls.length > 0;
@@ -456,7 +461,7 @@ describe('startInteractiveUI cross-session messaging', () => {
   });
 
   it('skips the inbox when the session never registered', async () => {
-    const config = makeConfig();
+    const config = makeConfig(true);
     config.whenSessionRegistered.mockResolvedValue(false);
 
     await start(config, enabledSettings);
@@ -478,7 +483,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     lastPeerInboxFailure.value = failure;
     peerMessagingStart.mockResolvedValue(null);
 
-    await start(makeConfig(), enabledSettings);
+    await start(makeConfig(true), enabledSettings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
     const appTree = inkRender.mock.calls[0]?.[0] as ReactElement;
     const mounted = renderDom(appTree);
@@ -573,7 +578,7 @@ describe('startInteractiveUI cross-session messaging', () => {
   it('closes the inbox from exit cleanup', async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     peerMessagingStart.mockResolvedValue({ close });
-    const config = makeConfig();
+    const config = makeConfig(true);
 
     await start(config, enabledSettings);
     await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
@@ -587,7 +592,7 @@ describe('startInteractiveUI cross-session messaging', () => {
 
   it('does not start an inbox after exit cleanup begins', async () => {
     let finishRegistration!: (registered: boolean) => void;
-    const config = makeConfig();
+    const config = makeConfig(true);
     config.whenSessionRegistered.mockImplementation(
       () =>
         new Promise<boolean>((resolve) => {
@@ -606,6 +611,15 @@ describe('startInteractiveUI cross-session messaging', () => {
     finishRegistration(true);
     await cleanup;
 
+    expect(peerMessagingStart).not.toHaveBeenCalled();
+  });
+
+  it('does not bind when effective runtime policy disables the setting', async () => {
+    const config = makeConfig(false);
+
+    await start(config, enabledSettings);
+
+    expect(config.whenSessionRegistered).not.toHaveBeenCalled();
     expect(peerMessagingStart).not.toHaveBeenCalled();
   });
 });

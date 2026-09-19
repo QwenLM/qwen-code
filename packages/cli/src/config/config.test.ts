@@ -1717,6 +1717,30 @@ describe('loadCliConfig', () => {
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
 
+  it('gates cross-session messaging from effective runtime settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // An unset key is on, so the off case has to say `false` explicitly.
+    const unset = await loadCliConfig({}, argv);
+    const enabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: true } },
+      argv,
+    );
+    const disabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: false } },
+      argv,
+    );
+    const safeMode = await loadCliConfig(
+      { agents: { crossSessionMessaging: true } },
+      { ...argv, safeMode: true },
+    );
+
+    expect(unset.isCrossSessionMessagingEnabled()).toBe(true);
+    expect(enabled.isCrossSessionMessagingEnabled()).toBe(true);
+    expect(disabled.isCrossSessionMessagingEnabled()).toBe(false);
+    expect(safeMode.isCrossSessionMessagingEnabled()).toBe(false);
+  });
+
   it('passes agents.maxParallelAgentsByModel from settings to core config', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

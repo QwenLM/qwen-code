@@ -473,7 +473,14 @@ export async function startInteractiveUI(
   // registry record, and `patchSessionRecord` no-ops when there is no record
   // yet, so binding any earlier would publish the socket path into nothing.
   // Not awaited — startup must never block on binding a socket.
-  if (!isCrossSessionMessagingEnabled(settings.merged)) {
+  // Two ways to be off: the setting says so — read where every other reader
+  // reads it — or the session was started with it suppressed, which only the
+  // config knows: `--bare` and `--safe-mode` turn messaging off whatever
+  // settings say.
+  if (
+    !isCrossSessionMessagingEnabled(settings.merged) ||
+    !config.isCrossSessionMessagingEnabled()
+  ) {
     publishPeerMessaging(null);
   } else {
     let exiting = false;

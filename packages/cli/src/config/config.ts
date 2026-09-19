@@ -63,6 +63,7 @@ import {
 import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
+import { isCrossSessionMessagingEnabled } from '../peerMessaging/enabled.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
 import { getSettingsSchema } from './settingsSchema.js';
@@ -2310,6 +2311,12 @@ export async function loadCliConfig(
         : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
+    // The effective gate: the setting's own answer — on unless a scope turned
+    // it off, read in the one place that answers it — narrowed by the two
+    // session-level suppressions. Peer inbox binding and `/peers` both read
+    // this, so they cannot disagree about what "on" means.
+    crossSessionMessagingEnabled:
+      !bareMode && !safeMode && isCrossSessionMessagingEnabled(settings),
     question,
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
