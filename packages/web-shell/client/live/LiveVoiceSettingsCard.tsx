@@ -78,8 +78,15 @@ export function LiveVoiceSettingsCard({
   // A `realtimeOnly` route reads its key from an environment variable; the
   // daemon refuses to store one for it, so there is nothing to type here.
   const keyFromRoute = status?.keySource === 'route';
+  // While the model does not resolve, the daemon refuses `apiKey: replace`
+  // as well; the modelError alert carries the remediation on its own. The
+  // remove-key action stays: clearing a stored key keeps working there.
+  const keyEditable = !keyFromRoute && !status?.modelError;
   const modelChoices = status ? liveModelOptions(status) : undefined;
   const savedVoice = status?.voice ?? '';
+  // Absent on daemons that predate selectable voices; an update there is
+  // refused with empty_live_setup_update, so the control stays read-only.
+  const voiceSelectable = status?.voice !== undefined;
   const [voice, setVoice] = useState(savedVoice);
   useEffect(() => {
     setVoice(savedVoice);
@@ -228,7 +235,7 @@ export function LiveVoiceSettingsCard({
                 { env: status?.keyEnv ?? '' },
               )}
             </p>
-          ) : (
+          ) : keyEditable ? (
             <div className="flex gap-2">
               <Input
                 id="live-realtime-key"
@@ -256,7 +263,7 @@ export function LiveVoiceSettingsCard({
                 {setup.mutating ? <Spinner /> : t('settings.liveSetup.save')}
               </Button>
             </div>
-          )}
+          ) : null}
         </div>
 
         <div className="space-y-2">
@@ -289,11 +296,15 @@ export function LiveVoiceSettingsCard({
             <p className="text-xs text-destructive" role="alert">
               {status.modelError}
             </p>
-          ) : !status?.models?.length ? (
+          ) : null}
+          {status && !status.models?.length ? (
             <p className="text-xs text-muted-foreground">
               {t('settings.liveSetup.modelHint')}
             </p>
           ) : null}
+          <p className="text-xs text-muted-foreground">
+            {t('settings.liveSetup.appliesNextCall')}
+          </p>
         </div>
 
         <div className="space-y-2">
@@ -305,27 +316,32 @@ export function LiveVoiceSettingsCard({
               id="live-realtime-voice"
               autoComplete="off"
               value={voice}
-              disabled={setup.mutating || !status}
+              disabled={setup.mutating || !voiceSelectable}
               onChange={(event) => setVoice(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') void saveVoice();
               }}
             />
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              data-live-voice-save
-              disabled={
-                !voice.trim() || voice.trim() === savedVoice || setup.mutating
-              }
-              onClick={() => void saveVoice()}
-            >
-              {t('settings.liveSetup.save')}
-            </Button>
+            {voiceSelectable ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-live-voice-save
+                disabled={
+                  !voice.trim() || voice.trim() === savedVoice || setup.mutating
+                }
+                onClick={() => void saveVoice()}
+              >
+                {t('settings.liveSetup.save')}
+              </Button>
+            ) : null}
           </div>
           <p className="text-xs text-muted-foreground">
             {t('settings.liveSetup.voiceHint')}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.liveSetup.appliesNextCall')}
           </p>
         </div>
 

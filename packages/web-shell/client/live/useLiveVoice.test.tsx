@@ -292,4 +292,59 @@ describe('useLiveVoice', () => {
     expect(container.textContent).toBe('speaking|false');
     act(() => root.unmount());
   });
+
+  it('keeps the mutation error when a push lands before the mutation settles', async () => {
+    mocks.liveStatus.mockResolvedValue({
+      v: 1,
+      available: true,
+      state: 'idle',
+      shortcut: 'Command+Q',
+    });
+    let rejectStart: ((error: Error) => void) | undefined;
+    mocks.workspace.client.startLive.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectStart = reject;
+      }),
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let live: UseLiveVoiceResult | undefined;
+
+    function Harness() {
+      live = useLiveVoice();
+      return <span>{live.status?.message ?? 'no-message'}</span>;
+    }
+
+    await act(async () => {
+      root.render(<Harness />);
+      await Promise.resolve();
+    });
+
+    let startPromise: Promise<void> | undefined;
+    act(() => {
+      startPromise = live?.start('new');
+    });
+
+    // The daemon pushes the new Host state over the socket before the
+    // mutation's HTTP response finishes; the push must not discard the
+    // mutation's own outcome.
+    act(() => {
+      browserHostMock.onStatus?.({
+        v: 1,
+        available: true,
+        state: 'listening',
+        shortcut: '',
+      });
+    });
+    expect(container.textContent).toBe('no-message');
+
+    await act(async () => {
+      rejectStart?.(new Error('provider validation failed'));
+      await startPromise;
+    });
+
+    expect(container.textContent).toBe('provider validation failed');
+    act(() => root.unmount());
+  });
 });

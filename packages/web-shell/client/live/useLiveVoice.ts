@@ -55,6 +55,10 @@ export function useLiveVoice(): UseLiveVoiceResult {
   const [mutating, setMutating] = useState(false);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
+  // Polls and pushes share a validity counter of their own: a push must
+  // retire an older in-flight poll without invalidating a mutation, whose
+  // identity is generationRef/mutationRef.
+  const pollGenerationRef = useRef(0);
   const contextRef = useRef({ client: workspace.client, supported });
   const requestRef = useRef<
     { generation: number; promise: Promise<void> } | undefined
@@ -70,8 +74,9 @@ export function useLiveVoice(): UseLiveVoiceResult {
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!supported) return;
-    const generation = generationRef.current;
-    if (mutationRef.current === generation) return;
+    // A mutation in flight delivers its own status; polling now would race it.
+    if (mutationRef.current !== undefined) return;
+    const generation = pollGenerationRef.current;
     if (requestRef.current?.generation === generation) {
       return await requestRef.current.promise;
     }
@@ -79,11 +84,11 @@ export function useLiveVoice(): UseLiveVoiceResult {
       setLoading(true);
       try {
         const next = await workspace.client.liveStatus();
-        if (mountedRef.current && generationRef.current === generation) {
+        if (mountedRef.current && pollGenerationRef.current === generation) {
           setStatus(next);
         }
       } catch (error) {
-        if (mountedRef.current && generationRef.current === generation) {
+        if (mountedRef.current && pollGenerationRef.current === generation) {
           setStatus(
             unavailableStatus(
               error instanceof Error ? error.message : String(error),
@@ -91,7 +96,7 @@ export function useLiveVoice(): UseLiveVoiceResult {
           );
         }
       } finally {
-        if (mountedRef.current && generationRef.current === generation) {
+        if (mountedRef.current && pollGenerationRef.current === generation) {
           setLoading(false);
         }
         if (requestRef.current?.generation === generation) {
@@ -110,6 +115,7 @@ export function useLiveVoice(): UseLiveVoiceResult {
     ) {
       contextRef.current = { client: workspace.client, supported };
       generationRef.current += 1;
+      pollGenerationRef.current += 1;
       mutationRef.current = undefined;
     }
     setStatus(undefined);
@@ -134,11 +140,12 @@ export function useLiveVoice(): UseLiveVoiceResult {
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveStatus>): Promise<void> => {
-      const generation = generationRef.current;
-      if (mutationRef.current === generation) return;
+      if (mutationRef.current !== undefined) return;
       generationRef.current += 1;
       const mutationGeneration = generationRef.current;
       mutationRef.current = mutationGeneration;
+      // A poll answered now predates the mutation's own outcome.
+      pollGenerationRef.current += 1;
       setLoading(false);
       setMutating(true);
       try {
@@ -188,9 +195,12 @@ export function useLiveVoice(): UseLiveVoiceResult {
   const pushStatus = useCallback((next: DaemonLiveStatus) => {
     if (!mountedRef.current) return;
     // A poll already in flight was answered before this push, so it is older
-    // however late it lands. Bumping the generation makes it a no-op instead
-    // of letting it overwrite the fresher status for up to a poll interval.
-    generationRef.current += 1;
+    // however late it lands. Bumping the poll generation makes it a no-op
+    // instead of letting it overwrite the fresher status for up to a poll
+    // interval. The mutation identity is untouched: the daemon pushes
+    // host.state before the mutation's HTTP response finishes, and the push
+    // must not discard that mutation's own result or error.
+    pollGenerationRef.current += 1;
     setLoading(false);
     setStatus(next);
   }, []);

@@ -542,7 +542,8 @@ const EN: Messages = {
     'Add a model with realtimeOnly: true under modelProviders to choose it here.',
   'settings.liveSetup.voice': 'Voice',
   'settings.liveSetup.voiceHint':
-    'A voice name of the selected model. It is checked with the provider before it is saved.',
+    'A voice name of the selected model. It is checked with the provider when Live Voice is on.',
+  'settings.liveSetup.appliesNextCall': 'Applies to the next call.',
   'settings.liveSetup.configured': 'Configured',
   'settings.liveSetup.notConfigured': 'Required',
   'settings.liveSetup.save': 'Save',
@@ -4500,7 +4501,8 @@ const ZH: Messages = {
     '在 modelProviders 下添加带 realtimeOnly: true 的模型后，即可在此选择。',
   'settings.liveSetup.voice': '音色',
   'settings.liveSetup.voiceHint':
-    '所选模型的音色名称。保存前会先向 provider 校验。',
+    '所选模型的音色名称。开启 Live Voice 时保存前会先向 provider 校验。',
+  'settings.liveSetup.appliesNextCall': '将在下一次通话生效。',
   'settings.liveSetup.configured': '已配置',
   'settings.liveSetup.notConfigured': '必填',
   'settings.liveSetup.save': '保存',

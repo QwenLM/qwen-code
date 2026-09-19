@@ -18,4 +18,23 @@ describe('web-shell i18n catalog', () => {
       expect(t(key)).not.toBe(key);
     }
   });
+
+  // The daemon validates a saved voice only while Live Voice is on; the copy
+  // must not promise an unconditional check, in either locale.
+  it('states the provider-validation condition on the voice hint', () => {
+    expect(getTranslator('en')('settings.liveSetup.voiceHint')).toContain(
+      'when Live Voice is on',
+    );
+    expect(getTranslator('zh-CN')('settings.liveSetup.voiceHint')).toContain(
+      '开启 Live Voice 时',
+    );
+  });
+
+  it('carries the next-call hint in both locales', () => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      expect(
+        getTranslator(language)('settings.liveSetup.appliesNextCall'),
+      ).not.toBe('settings.liveSetup.appliesNextCall');
+    }
+  });
 });

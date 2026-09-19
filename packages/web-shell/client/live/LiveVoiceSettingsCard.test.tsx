@@ -6,10 +6,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonLiveSetupStatus } from '@qwen-code/sdk';
 import { LiveVoiceSettingsCard } from './LiveVoiceSettingsCard';
 import type { UseLiveVoiceSetupResult } from './useLiveVoiceSetup';
+import { I18nProvider } from '../i18n';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
+
+// Radix Select opens on pointer events jsdom does not fully implement
+// (mirrors the sidebar and SessionOverviewPanel test setups).
+if (!globalThis.PointerEvent) {
+  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
+}
+if (!Element.prototype.hasPointerCapture) {
+  Element.prototype.hasPointerCapture = () => false;
+}
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
@@ -47,13 +57,32 @@ function setupResult(
   };
 }
 
-function mount(setup: UseLiveVoiceSetupResult): HTMLElement {
+function mount(
+  setup: UseLiveVoiceSetupResult,
+  options?: { i18n?: boolean },
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<LiveVoiceSettingsCard setup={setup} />));
+  const card = <LiveVoiceSettingsCard setup={setup} />;
+  act(() =>
+    root.render(
+      options?.i18n ? <I18nProvider language="en">{card}</I18nProvider> : card,
+    ),
+  );
   mounted.push({ root, container });
   return container;
+}
+
+function click(element: HTMLElement): void {
+  element.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+  );
+  element.dispatchEvent(
+    new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+  );
+  element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
 afterEach(() => {
@@ -150,6 +179,21 @@ describe('LiveVoiceSettingsCard', () => {
       );
     });
 
+    it('names the route key variable in the rendered sentence', () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyEnv: 'DASHSCOPE_API_KEY',
+          keyConfigured: true,
+          enabled: false,
+        }),
+        { i18n: true },
+      );
+      expect(
+        container.querySelector('[data-live-key-route]')?.textContent,
+      ).toContain('DASHSCOPE_API_KEY');
+    });
+
     it('says the variable is unset rather than just "not configured"', () => {
       const container = mount(
         setupResult({
@@ -171,6 +215,29 @@ describe('LiveVoiceSettingsCard', () => {
         expect(container.querySelector('[data-live-key-route]')).toBeNull();
       },
     );
+
+    it('hides the key input while the configured model does not resolve', () => {
+      const container = mount(
+        setupResult({
+          keySource: 'settings',
+          keyConfigured: false,
+          model: 'omni-realtime',
+          models: [
+            { id: 'omni-realtime', provider: 'openai' },
+            { id: 'omni-realtime', provider: 'dashscope-intl' },
+          ],
+          modelError:
+            "experimental.liveVoice.model 'omni-realtime' matches more than one realtimeOnly route; qualify it as provider:modelId.",
+        }),
+      );
+
+      // applyUpdate refuses `apiKey: replace` with invalid_live_model here;
+      // the modelError alert carries the remediation on its own.
+      expect(container.querySelector('#live-realtime-key')).toBeNull();
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'matches more than one realtimeOnly route',
+      );
+    });
 
     it('saves a changed voice and nothing else', () => {
       const setup = setupResult({ voice: 'Tina' });
@@ -208,6 +275,25 @@ describe('LiveVoiceSettingsCard', () => {
       expect(input.value).toBe('Tina');
     });
 
+    it('offers no voice control when the daemon predates selectable voices', () => {
+      const container = mount(setupResult({}));
+      const input = container.querySelector<HTMLInputElement>(
+        '#live-realtime-voice',
+      );
+      // `voice` is absent on daemons predating #12173; an update there is
+      // refused with empty_live_setup_update, so the control must not invite
+      // one.
+      expect(input?.disabled).toBe(true);
+      expect(container.querySelector('[data-live-voice-save]')).toBeNull();
+    });
+
+    it('notes that model and voice changes apply to the next call', () => {
+      const container = mount(setupResult({ enabled: true, voice: 'Tina' }));
+      expect(container.textContent).toContain(
+        'settings.liveSetup.appliesNextCall',
+      );
+    });
+
     it('offers a picker once there is more than one model to pick from', () => {
       const single = mount(
         setupResult({
@@ -234,9 +320,62 @@ describe('LiveVoiceSettingsCard', () => {
       expect(picker?.textContent).toContain('Omni Realtime');
     });
 
+    it('saves the qualified model picked from the picker', async () => {
+      const setup = setupResult({
+        model: 'omni-realtime',
+        models: [
+          { id: 'omni-realtime', provider: 'openai' },
+          { id: 'omni-realtime', provider: 'dashscope-intl' },
+        ],
+        modelError:
+          "experimental.liveVoice.model 'omni-realtime' matches more than one realtimeOnly route; qualify it as provider:modelId.",
+      });
+      const container = mount(setup);
+      const trigger = container.querySelector<HTMLElement>('[role="combobox"]');
+      if (!trigger) throw new Error('model picker was not rendered');
+
+      await act(async () => {
+        click(trigger);
+        await Promise.resolve();
+      });
+      const option = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((candidate) => candidate.textContent?.includes('dashscope-intl'));
+      if (!option) throw new Error('qualified option was not rendered');
+      await act(async () => {
+        click(option);
+        await Promise.resolve();
+      });
+
+      expect(setup.update).toHaveBeenCalledWith({
+        model: 'dashscope-intl:omni-realtime',
+      });
+    });
+
     it('explains how to get a picker when no realtime route exists', () => {
       const container = mount(setupResult({ models: [] }));
       expect(container.textContent).toContain('settings.liveSetup.modelHint');
+    });
+
+    it('shows the model hint next to the resolution error', () => {
+      const container = mount(
+        setupResult({
+          models: [],
+          modelError:
+            "experimental.liveVoice.model 'openai:gpt-realtime' names no realtimeOnly route under modelProviders.openai.",
+        }),
+      );
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'names no realtimeOnly route',
+      );
+      expect(container.textContent).toContain('settings.liveSetup.modelHint');
+    });
+
+    it('shows no model hint before the status has loaded', () => {
+      const container = mount({ ...setupResult({}), status: undefined });
+      expect(container.textContent).not.toContain(
+        'settings.liveSetup.modelHint',
+      );
     });
 
     it('shows why the configured model does not resolve', () => {
