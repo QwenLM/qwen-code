@@ -655,6 +655,84 @@ describe('ToolConfirmationMessage', () => {
         expect(lastFrame()).not.toContain(alwaysAllowText);
       });
     });
+
+    describe('unguarded entrances', () => {
+      const infoDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'info',
+        title: 'Confirm Web Fetch',
+        prompt: 'https://example.com',
+        urls: ['https://example.com'],
+        onConfirm,
+      });
+
+      const planDetails = (
+        onConfirm: ToolCallConfirmationDetails['onConfirm'] = vi.fn(),
+      ): ToolCallConfirmationDetails => ({
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Plan\n- Step 1',
+        onConfirm,
+      });
+
+      const renderWith = (
+        trusted: boolean,
+        details: ToolCallConfirmationDetails,
+        compactMode = false,
+      ) => {
+        const config = {
+          isTrustedFolder: () => trusted,
+          getIdeMode: () => false,
+        } as unknown as Config;
+        return renderWithProviders(
+          <ToolConfirmationMessage
+            confirmationDetails={details}
+            config={config}
+            availableTerminalHeight={30}
+            contentWidth={80}
+            compactMode={compactMode}
+          />,
+        );
+      };
+
+      it('compactMode offers "Allow always" only in a trusted folder', () => {
+        expect(renderWith(true, infoDetails(), true).lastFrame()).toContain(
+          'Allow always',
+        );
+        const untrusted = renderWith(false, infoDetails(), true).lastFrame();
+        expect(untrusted).toContain('Yes, allow once');
+        expect(untrusted).not.toContain('Allow always');
+      });
+
+      it('plan exit offers auto-accept only in a trusted folder', () => {
+        expect(renderWith(true, planDetails()).lastFrame()).toContain(
+          'Yes, and auto-accept edits',
+        );
+        const untrusted = renderWith(false, planDetails()).lastFrame();
+        // Both remaining exits must survive: the gate admits DEFAULT and PLAN.
+        expect(untrusted).toContain('Yes, and manually approve edits');
+        expect(untrusted).toContain('restore previous mode');
+        expect(untrusted).not.toContain('Yes, and auto-accept edits');
+      });
+
+      it('subscribes to the promise onConfirm returns instead of letting it float', async () => {
+        // A floating rejection reaches the process-level handler (llm.tsx) and
+        // shows a "file a bug report" banner over a correctly-refused action,
+        // so the call site must consume what onConfirm returns. Asserted via a
+        // thenable: `Promise.resolve(x).catch(...)` subscribes through `then`,
+        // a bare `onConfirm(outcome)` statement never does.
+        const then = vi.fn();
+        const thenable = { then } as unknown as Promise<void>;
+        const onConfirm = vi.fn(() => thenable);
+        const { stdin } = renderWith(true, infoDetails(onConfirm));
+
+        stdin.write('\r');
+
+        await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+        expect(then).toHaveBeenCalled();
+      });
+    });
   });
 
   describe('external editor option', () => {

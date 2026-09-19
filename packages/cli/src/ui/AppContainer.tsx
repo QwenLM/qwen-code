@@ -1715,7 +1715,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     openApprovalModeDialog,
     handleApprovalModeSelect,
-  } = useApprovalModeCommand(settings, config);
+  } = useApprovalModeCommand(settings, config, historyManager.addItem);
 
   const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
     useEffortCommand(settings, config, historyManager.addItem);
