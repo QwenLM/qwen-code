@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import chalk from 'chalk';
 import { render } from 'ink-testing-library';
 import type { DOMElement } from 'ink';
 import stringWidth from 'string-width';
@@ -29,6 +30,7 @@ const mockUseBoxMetrics = vi.hoisted(() =>
     hasMeasured: true,
   })),
 );
+const mockShouldRenderSoftwareCursor = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('ink', async (importOriginal) => {
   const actual = await importOriginal<typeof import('ink')>();
@@ -38,6 +40,15 @@ vi.mock('ink', async (importOriginal) => {
     useCursor: () => ({
       setCursorPosition: mockSetCursorPosition,
     }),
+  };
+});
+
+vi.mock('../utils/software-cursor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/software-cursor.js')>();
+  return {
+    ...actual,
+    shouldRenderSoftwareCursor: mockShouldRenderSoftwareCursor,
   };
 });
 
@@ -108,6 +119,7 @@ describe('BaseTextInput', () => {
       left: 0,
       hasMeasured: true,
     });
+    mockShouldRenderSoftwareCursor.mockReturnValue(true);
   });
 
   it('does not type the render-mode shortcut into the buffer', () => {
@@ -265,6 +277,16 @@ describe('getAbsolutePosition', () => {
 });
 
 describe('defaultRenderLine', () => {
+  const originalChalkLevel = chalk.level;
+
+  beforeEach(() => {
+    chalk.level = 3;
+  });
+
+  afterEach(() => {
+    chalk.level = originalChalkLevel;
+  });
+
   it('renders the software cursor on the current character', () => {
     const { lastFrame } = render(
       <>
@@ -273,6 +295,7 @@ describe('defaultRenderLine', () => {
           isOnCursorLine: true,
           cursorCol: 2,
           showCursor: true,
+          drawSoftwareCursor: true,
           visualLineIndex: 0,
           absoluteVisualIndex: 0,
           buffer: createBuffer(),
@@ -292,6 +315,7 @@ describe('defaultRenderLine', () => {
           isOnCursorLine: true,
           cursorCol: 5,
           showCursor: true,
+          drawSoftwareCursor: true,
           visualLineIndex: 0,
           absoluteVisualIndex: 0,
           buffer: createBuffer(),
@@ -301,5 +325,102 @@ describe('defaultRenderLine', () => {
     );
 
     expect(lastFrame()).toContain(`hello${renderSoftwareCursor(' ')}`);
+  });
+
+  it('renders plain text when the software cursor is suppressed mid-line', () => {
+    const { lastFrame } = render(
+      <>
+        {defaultRenderLine({
+          lineText: 'hello',
+          isOnCursorLine: true,
+          cursorCol: 2,
+          showCursor: true,
+          drawSoftwareCursor: false,
+          visualLineIndex: 0,
+          absoluteVisualIndex: 0,
+          buffer: createBuffer(),
+          scrollVisualRow: 0,
+        })}
+      </>,
+    );
+
+    expect(lastFrame()).toContain('hello');
+    expect(lastFrame()).not.toContain(renderSoftwareCursor('l'));
+  });
+
+  it('keeps a plain trailing cell when the software cursor is suppressed at end of line', () => {
+    const { lastFrame } = render(
+      <>
+        {defaultRenderLine({
+          lineText: 'hello',
+          isOnCursorLine: true,
+          cursorCol: 5,
+          showCursor: true,
+          drawSoftwareCursor: false,
+          visualLineIndex: 0,
+          absoluteVisualIndex: 0,
+          buffer: createBuffer(),
+          scrollVisualRow: 0,
+        })}
+      </>,
+    );
+
+    expect(lastFrame()).toContain(`hello \u200B`);
+    expect(lastFrame()).not.toContain(renderSoftwareCursor(' '));
+  });
+});
+
+describe('BaseTextInput software cursor suppression', () => {
+  const originalChalkLevel = chalk.level;
+
+  beforeEach(() => {
+    chalk.level = 3;
+    vi.clearAllMocks();
+    mockUseBoxMetrics.mockReturnValue({
+      width: 0,
+      height: 0,
+      top: 0,
+      left: 0,
+      hasMeasured: true,
+    });
+  });
+
+  afterEach(() => {
+    chalk.level = originalChalkLevel;
+  });
+
+  it('drops the software cursor styling when the native cursor is positioned', () => {
+    mockShouldRenderSoftwareCursor.mockReturnValue(false);
+    const buffer = createBuffer();
+    buffer.text = 'hello';
+    buffer.viewportVisualLines = ['hello'];
+    buffer.visualCursor = [0, 5];
+
+    const { lastFrame, rerender } = render(
+      <BaseTextInput buffer={buffer} onSubmit={vi.fn()} />,
+    );
+    // Re-render so the box ref (attached after the first commit) resolves a
+    // physical cursor position, the state the production input reaches via
+    // useBoxMetrics.
+    rerender(<BaseTextInput buffer={buffer} onSubmit={vi.fn()} />);
+
+    expect(lastFrame()).toContain('hello');
+    expect(lastFrame()).not.toContain(renderSoftwareCursor(' '));
+    expect(mockShouldRenderSoftwareCursor).toHaveBeenCalledWith(true);
+  });
+
+  it('renders a plain placeholder when the software cursor is suppressed', () => {
+    mockShouldRenderSoftwareCursor.mockReturnValue(false);
+
+    const { lastFrame } = render(
+      <BaseTextInput
+        buffer={createBuffer()}
+        onSubmit={vi.fn()}
+        placeholder="Type here"
+      />,
+    );
+
+    expect(lastFrame()).toContain('Type here');
+    expect(lastFrame()).not.toContain(renderSoftwareCursor('T'));
   });
 });
