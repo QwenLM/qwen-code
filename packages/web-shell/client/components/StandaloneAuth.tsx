@@ -17,10 +17,9 @@ import {
   completeRemoteConnectionAdd,
   isRemoteConnectionAddActive,
   leaveRemoteConnectionAdd,
-  rememberRemoteConnection,
 } from '../config/remote-connections';
 import {
-  getRemoteWorkspaceAddStep,
+  isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
 import type { WebShellLanguage } from '../i18n';
@@ -175,14 +174,13 @@ export function StandaloneAuth({
     daemonOrigin: string,
     token?: string,
     options?: {
-      continueRemoteWorkspaceAdd?: boolean;
-      continueRemoteConnectionAdd?: boolean;
+      continueFlow?: 'workspace' | 'connection';
     },
   ) => boolean | void;
   children: (token: string | undefined) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
-  const remoteWorkspaceAddActive = getRemoteWorkspaceAddStep() === 'browse';
+  const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
   const remoteConnectionAddActive = isRemoteConnectionAddActive();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
@@ -265,7 +263,6 @@ export function StandaloneAuth({
         if (response.ok) {
           persistDaemonToken(candidate, baseUrl);
           confirmDaemonTarget(baseUrl);
-          rememberRemoteConnection(baseUrl);
           if (
             remoteConnectionAddActive &&
             completeRemoteConnectionAdd(baseUrl)
@@ -398,11 +395,11 @@ export function StandaloneAuth({
                   token.trim() || getDaemonToken(normalizedAddress);
                 const switched = remoteWorkspaceAddActive
                   ? onChangeTarget(normalizedAddress, candidate, {
-                      continueRemoteWorkspaceAdd: true,
+                      continueFlow: 'workspace',
                     })
                   : remoteConnectionAddActive
                     ? onChangeTarget(normalizedAddress, candidate, {
-                        continueRemoteConnectionAdd: true,
+                        continueFlow: 'connection',
                       })
                     : onChangeTarget(normalizedAddress, candidate);
                 if (switched === false) {
