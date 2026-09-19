@@ -452,7 +452,10 @@ function mayContinueWithTemplateLiteral(
       return true;
     case 'lexical_declaration':
     case 'variable_declaration': {
-      const declarator = node.lastNamedChild;
+      let declarator = node.lastNamedChild;
+      while (declarator?.type === 'comment') {
+        declarator = declarator.previousNamedSibling;
+      }
       return (
         declarator?.type === 'variable_declarator' &&
         declarator.childForFieldName('value') !== null

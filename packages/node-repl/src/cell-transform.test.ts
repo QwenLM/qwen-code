@@ -193,6 +193,11 @@ describe('prepareNodeReplCell', () => {
 
     for (const code of [
       'const t = html\n`<p>`',
+      'const t = html /* comment */\n`<p>`',
+      'const t = html // comment\n`<p>`',
+      'var t = html /* comment */\n`<p>`',
+      'const a = 1, t = html /* comment */\n`<p>`',
+      'export const t = html /* comment */\n`<p>`',
       'make()\n`<p>`',
       'tag /* comment */\n`<p>`',
       'if (true) tag\n`<p>`',
