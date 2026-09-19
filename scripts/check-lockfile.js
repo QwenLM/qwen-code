@@ -165,8 +165,14 @@ if (pinEntry.exact) {
         candidate === `${outer}@${pinned}` ||
         candidate.startsWith(`${outer}@${pinned}(`),
     );
+    if (key === undefined) {
+      parityErrors.push(
+        `pnpm-lock.yaml has no snapshot for ${outer}@${pinned}; regenerate it`,
+      );
+      continue;
+    }
     for (const inner of pinnedNames) {
-      if (outer === inner || key === undefined) {
+      if (outer === inner) {
         continue;
       }
       const version = snapshots[key]?.dependencies?.[inner];

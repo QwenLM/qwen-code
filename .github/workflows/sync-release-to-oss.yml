@@ -60,7 +60,11 @@ jobs:
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          if [ -f pnpm-lock.yaml ]; then
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          else
+            npm ci --no-audit --progress=false
+          fi
 
       - name: 'Download Release Assets from GitHub'
         env:

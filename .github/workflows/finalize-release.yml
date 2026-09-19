@@ -69,7 +69,11 @@ jobs:
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
+          if [ -f pnpm-lock.yaml ]; then
+            corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only
+          else
+            npm ci --ignore-scripts --no-audit --progress=false
+          fi
           # Replay the root postinstall (patch-package) and commit-info
           # generation; dependency and workspace lifecycle scripts remain
           # disabled.

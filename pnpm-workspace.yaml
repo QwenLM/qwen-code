@@ -38,6 +38,10 @@ nodeLinker: 'hoisted'
 packageImportMethod: 'clone-or-copy'
 linkWorkspacePackages: true
 verifyDepsBeforeRun: false
+fetchRetries: 5
+fetchRetryMintimeout: 20000
+fetchRetryMaxtimeout: 120000
+fetchTimeout: 300000
 
 overrides:
   typescript: '5.8.3'

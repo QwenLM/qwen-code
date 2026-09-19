@@ -203,6 +203,27 @@ describe('check-lockfile Playwright parity', () => {
     }
   });
 
+  it('rejects a missing snapshot for a pinned package', () => {
+    try {
+      perturbPnpmSnapshot(
+        TEST_SNAPSHOT,
+        TEST_SNAPSHOT.replace(
+          `  '@playwright/test@${PINNED}':`,
+          `  '@playwright/test-missing@${PINNED}':`,
+        ),
+      );
+
+      const { status, out } = runCheck();
+
+      expect(parityLines(out)).toContain(
+        `pnpm-lock.yaml has no snapshot for @playwright/test@${PINNED}`,
+      );
+      expect(status).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
   it('tolerates a peer suffix on the pinned revision', () => {
     try {
       // pnpm appends the peers it resolved to a version; the revision is the

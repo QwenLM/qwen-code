@@ -1350,6 +1350,10 @@ jobs:
         if: "steps.pr.outputs.decision == 'run'"
         run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
 
+      - name: 'Bootstrap pnpm'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: 'runuser -u node -- corepack pnpm --version'
+
       - name: 'Install and build PR app'
         id: 'prepare'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2452,9 +2456,9 @@ jobs:
               # the registry name as npmjs, so
               # `https://registry.npmjs.org.evil.com/pkg.tgz` would pass —
               # and the tarball's own postinstall never appears in the diff.
-              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/' | head -1 || true)"
+              hit="$(grep -E '^\+' "$diff_file" | grep -E '"resolved"[[:space:]]*:[[:space:]]*"http|(tarball|repo):[[:space:]]*[^[:alnum:]]?https?://' | grep -Ev '"resolved"[[:space:]]*:[[:space:]]*"https://registry\.npmjs\.org/|(tarball|repo):[[:space:]]*[^[:alnum:]]?https://registry\.npmjs\.org/' | head -1 || true)"
               [ -n "$hit" ] && add_reason 'a dependency resolves outside registry.npmjs.org'
-              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml)$' "$diff_file" | head -1 || true)"
+              hit="$(grep -E '^\+\+\+ b/(.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$|^rename to (.*/)?(\.npmrc|\.yarnrc(\.yml)?|bunfig\.toml|pnpm-workspace\.yaml|\.pnpmfile\.mjs)$' "$diff_file" | head -1 || true)"
               [ -n "$hit" ] && add_reason 'the diff modifies package-manager configuration'
               hit="$(grep -E '^\+' "$diff_file" | grep -Ev '"(integrity|resolved)"' | awk '{ for (i = 1; i <= NF; i++) if (length($i) >= 600) { print; exit } }' || true)"
               [ -n "$hit" ] && add_reason 'the diff adds long opaque single-line content'

@@ -154,6 +154,17 @@ describe('package scripts', () => {
     });
   });
 
+  it('preserves the registry retry policy under pnpm', () => {
+    const workspace = parse(readWorkflow('pnpm-workspace.yaml'));
+
+    expect(workspace).toMatchObject({
+      fetchRetries: 5,
+      fetchRetryMintimeout: 20000,
+      fetchRetryMaxtimeout: 120000,
+      fetchTimeout: 300000,
+    });
+  });
+
   it('checks the pnpm lockfile for integrity and Playwright parity', () => {
     const result = spawnSync(
       process.execPath,
