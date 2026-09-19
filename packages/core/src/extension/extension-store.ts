@@ -1806,9 +1806,10 @@ export class ExtensionStore {
   }
 
   /** Whether retrying this rollback can still leave a loadable artifact: the
-   *  destination already carries exactly the backup's top-level entries, so
-   *  the owed restore is effectively complete. An unreadable side or an empty
-   *  artifact answers "no" - existence is not integrity. */
+   *  destination already carries the backup's top-level entries, so the owed
+   *  restore is effectively complete and any extra path is the disclosed
+   *  residue a later prune clears. An unreadable side or an empty artifact
+   *  answers "no" - existence is not integrity. */
   private async canRetryRollback(
     journal: ExtensionTransactionJournal,
   ): Promise<boolean> {
@@ -1817,7 +1818,7 @@ export class ExtensionStore {
       this.topLevelEntries(journal.destinationDirectory),
     ]);
     if (!backup || !destination) return false;
-    if (backup.size === 0 || destination.size !== backup.size) return false;
+    if (backup.size === 0) return false;
     for (const [name, kind] of backup) {
       if (destination.get(name) !== kind) return false;
     }

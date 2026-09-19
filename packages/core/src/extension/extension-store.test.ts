@@ -4954,6 +4954,23 @@ describe('ExtensionStore', () => {
         absorbs: false,
       },
       {
+        label: 'a restore the prune could not finish taking away',
+        id: 'e7',
+        operation: 'update',
+        // The update added a file; the restore put every old entry back and
+        // only the prune of this extra one is held. The tree is loadable.
+        destinationFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+          version: 'one',
+          'added.md': 'two, still standing',
+        },
+        backupFiles: {
+          [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}',
+          version: 'one',
+        },
+        absorbs: true,
+      },
+      {
         label: 'a marked journal whose entry changed kind inside the window',
         id: 'e6',
         operation: 'update',
@@ -5038,7 +5055,8 @@ describe('ExtensionStore', () => {
           .catch((error: unknown) => error);
         vi.restoreAllMocks();
         if (state.absorbs) {
-          expect(read).toBeDefined();
+          // A thrown error is defined too - assert the resolved snapshot.
+          expect(read).toMatchObject({ generation: expect.any(Number) });
         } else {
           expect(read).toBeInstanceOf(ExtensionDirectoryLockedError);
         }

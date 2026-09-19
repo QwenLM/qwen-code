@@ -85,7 +85,7 @@ renaming an extension directory that contains a nested subdirectory:
 Confirmed against the live machine: a throwaway directory created under the real
 `~/.qwen/extensions` could not be renamed while other Qwen Code sessions were
 running, and the probe was removed afterwards. The last two rows are what make
-the fix possible: these handles block directory rename and directory removal, not
+the fix possible: these handles block directory rename, not directory removal,
 deletion or copying, so a swap can avoid the lock without any cross-process
 protocol.
 
@@ -216,8 +216,9 @@ leave different states:
 
 - **A rollback** is absorbed - marked `rollbackBlocked` and kept, so the operation
   proceeds and a later recovery retries it - only when retrying can still produce
-  a loadable artifact: the destination already carries exactly the backup's
-  top-level entries, so the owed restore is effectively complete. Existence is
+  a loadable artifact: the destination already carries the backup's top-level
+  entries, so the owed restore is effectively complete - extra paths it
+  carries are the disclosed residue a later prune clears. Existence is
   not integrity, and neither is one surviving filename: a manifest standing in a
   half-wiped tree is not an artifact, while a plugin.json root or a link
   install's metadata-only root is one even though neither carries the manifest
@@ -251,13 +252,15 @@ touching the tree, with the held-handle text on Windows and an
 unresolved-transaction error elsewhere. A deadline further out than the delay
 is a clock that moved, not a live window, so it reads as due and the retry
 resumes on its own - the destination heals instead of being wedged. A mutation
-of the very destination a window waits on does not wait: the guard gives it one
-owed-step retry immediately, and refuses with the diagnosis that attempt just
-produced if it failed again. A failure that is not a lock error stops the
-caller from either step - rethrown unmarked from the rollback, rethrown after
-the marker from the cleanup - and so does a marker that cannot be written,
-because an unmarked journal must never be absorbed and a retry never repeats a
-restore from a half-deleted backup.
+of the very destination a window waits on does not wait while a retry could
+still leave a loadable artifact: the guard gives it one owed-step retry
+immediately, and refuses with the diagnosis that attempt just produced if it
+failed again; where no retry could, the mutation is refused from the window
+check like any read, until the deadline passes. A failure that is not a lock
+error stops the caller from either step - rethrown unmarked from the rollback,
+rethrown after the marker from the cleanup - and so does a marker that cannot
+be written, because an unmarked journal must never be absorbed and a retry
+never repeats a restore from a half-deleted backup.
 
 **B - actionable failure text.** Alongside the existing store errors:
 
@@ -381,8 +384,10 @@ Rejected:
   missing while the journal is marked and retried. Nothing reconciles the tree on
   disk with the generation the snapshot committed, so a read in that window serves
   what the directory holds - possibly new bytes where a same-named file was
-  overwritten halfway - not the committed old version. A destination that
-  differs from its backup at the top level, or has no backup to match,
+  overwritten halfway, possibly no file at all for a moment, because the copy
+  unlinks each destination before writing its replacement - not the committed
+  old version. A destination that lacks an entry its backup carries, or
+  carries one under a different kind, or has no backup to match,
   is refused rather than served - marked first,
   so the refusal itself keeps a window;
   exposing an unresolved transaction on the read path is left to a follow-up.
@@ -404,17 +409,18 @@ once the generation moves; a destination's stacked transactions replayed newest
 first; a second transaction for one destination refused, and refused with the
 locked-directory message naming the directory the user can act on when the holder
 is what blocked the first one; a journal whose marker could not be written
-refusing every later operation with its raw errno, backup and tree left intact,
-while another extension's commit still goes through; a committed journal awaiting
+refusing every later operation with its raw errno, backup and tree left intact;
+a committed journal awaiting
 cleanup not refusing the next commit; a rollback whose retry could not produce a
 loadable artifact - a crashed install with no backup, or a destination wiped to
 nothing - stopping the caller, marked first so even the refusal keeps its window
 and no later read re-attempts the doomed restore, with the extension not
 reported as installed, each platform with its own honest error class; the retry
 gate comparing the destination's top level against the backup's, so an
-unconverted plugin.json root and a link install's metadata-only root are absorbed
-with a window while a half-wiped uninstall whose manifest survived and an entry
-whose kind the restore did not finish are refused; a settled rollback whose
+unconverted plugin.json root, a link install's metadata-only root, and a
+restore the prune could not finish taking away are absorbed with a window
+while a half-wiped uninstall whose manifest survived and an entry whose kind
+the restore did not finish are refused; a settled rollback whose
 backup removal was held retried only once its window expired, re-marking while
 the holder keeps it, and leaving no journal and no re-copied backup once
 released; a cleanup that failed for another reason marked before it reached the
@@ -425,7 +431,8 @@ actionable text; the `.partial` pre-clean and the backup publish naming the
 extension directory rather than an internal path; a blocked rollback deferred by a
 retry window that then resumes on its own, heals completely once the holder
 releases, reads a deadline further out than the delay as a moved clock, and lets
-a mutation of the blocked destination force its owed retry instead of waiting;
+a mutation whose owed retry could still leave a loadable artifact force that
+retry instead of waiting, leaving another extension's commit untouched;
 and a backup removal the holder released
 absorbed inside the teardown; the shared allowance bounding the
 retries one swap spends on held entries, and one recovery pass spending a single
