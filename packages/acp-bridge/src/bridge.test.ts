@@ -28,6 +28,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   InvalidClientIdError,
   BridgeChannelQuarantinedError,
   InvalidPermissionOptionError,
@@ -480,8 +481,12 @@ describe('createAcpSessionBridge', () => {
     // branch/fork/rewind admission and queue callbacks had no test — the
     // existing busy-guard table only ever produced the busy state with an
     // in-flight prompt. An admitted background notification turn is a
-    // different way to reach the same guard: removing any one of the
-    // backgroundTurn disjuncts must turn these red.
+    // different way to reach the same guard. The pins are per-arm: rewind's
+    // admission disjunct is pinned individually, while branch and fork each
+    // have an admission + queue-callback pair throwing the same error type,
+    // so a single-disjunct mutation is masked and only the observable
+    // rejection is pinned. The side-task term (`session-control-plane.ts`
+    // :10816) is a concurrent-release decision and is not pinned here.
     const admittedBackgroundTurn = {
       turnId: 'notification-1',
       taskId: 'Explore-1',
@@ -495,26 +500,50 @@ describe('createAcpSessionBridge', () => {
     it.each([
       {
         operation: 'branch',
+        method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
         invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
           bridge.branchSession(sessionId, {}),
         errorType: BranchWhilePromptActiveError,
       },
       {
         operation: 'rewind',
+        method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
         invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
           bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
         errorType: SessionBusyError,
       },
       {
         operation: 'fork',
+        method: SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
         invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
           bridge.launchSessionForkAgent(sessionId, 'review this'),
         errorType: SessionBusyError,
       },
+      {
+        operation: 'cd',
+        method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.changeSessionCwd(sessionId, { path: WS_B }),
+        errorType: CdWhilePromptActiveError,
+      },
     ])(
       'rejects $operation while an admitted background turn is running',
-      async ({ invoke, errorType }) => {
-        const handle = makeChannel({});
+      async ({ invoke, errorType, method }) => {
+        // R1-3: the error class alone cannot distinguish a synchronous
+        // admission rejection from a post-dispatch refusal — a child-side
+        // busy answer is mapped into SessionBusyError too. Each arm wires an
+        // ext-method impl that throws for the operation's own method, so a
+        // change that moves the busy check after the child dispatch fails
+        // twice over: the call is recorded on the fake agent and the
+        // operation rejects with the impl's error instead of the guard's.
+        const handle = makeChannel({
+          extMethodImpl: (calledMethod) => {
+            if (calledMethod === method) {
+              throw new Error('mutation must not reach a busy session');
+            }
+            return {};
+          },
+        });
         const bridge = makeBridge({
           channelFactory: async () => handle.channel,
         });
@@ -533,9 +562,54 @@ describe('createAcpSessionBridge', () => {
         await expect(invoke(bridge, session.sessionId)).rejects.toBeInstanceOf(
           errorType,
         );
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({ method }),
+        );
         await bridge.shutdown();
       },
     );
+
+    // R1-1: the cd guard and the reaper's `entryHasLocalWork` term are the
+    // two R1-17 sites the branch/fork/rewind rows above cannot reach. The
+    // retention half is only observable with no event subscriber attached:
+    // the auto-close candidate check returns early on `subscriberCount > 0`,
+    // one line before `entryHasLocalWork` runs, so a subscribed session
+    // would pass for the wrong reason and stay green under the mutation.
+    it('retains a detached session whose only work is an admitted background turn', async () => {
+      let conditionalCloseCalls = 0;
+      const handle = makeChannel({
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            conditionalCloseCalls++;
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        handle.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'background_notification',
+          ...admittedBackgroundTurn,
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        bridge.getSessionSummary(session.sessionId).backgroundTurn,
+      ).toMatchObject({ turnId: admittedBackgroundTurn.turnId });
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(conditionalCloseCalls).toBe(0);
+      expect(bridge.sessionCount).toBe(1);
+
+      await bridge.shutdown();
+    });
 
     it('negotiates the capability and counts accepted prompts locally', async () => {
       const prompt = deferred<PromptResponse>();
