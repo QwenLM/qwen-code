@@ -31,7 +31,12 @@ import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { boundImageBuffer, ImageViewError } from '../utils/image-view.js';
+import { clampInlineMediaPart } from '../core/inlineMediaLimit.js';
+import {
+  boundImageBuffer,
+  IMAGE_MAX_SOURCE_BYTES,
+  ImageViewError,
+} from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   getAllMCPServerStatuses,
@@ -1319,33 +1324,37 @@ async function boundInlineImageParts(
       boundedParts.push(part);
       continue;
     }
+    const sourceLimitedPart = clampInlineMediaPart(
+      part,
+      IMAGE_MAX_SOURCE_BYTES,
+    );
+    if (sourceLimitedPart !== part) {
+      boundedParts.push(sourceLimitedPart);
+      continue;
+    }
+    let boundedPart = part;
     try {
       const view = await boundImageBuffer(
         Buffer.from(inline.data, 'base64'),
         inline.mimeType,
         signal,
       );
-      boundedParts.push(
-        view
-          ? {
-              inlineData: {
-                ...inline,
-                data: view.bytes.toString('base64'),
-                mimeType: view.mimeType,
-              },
-            }
-          : part,
-      );
-    } catch (error) {
-      if (error instanceof ImageViewError) {
-        debugLogger.debug(
-          `Forwarding MCP image unbounded: ${getErrorMessage(error)}`,
-        );
-        boundedParts.push(part);
-        continue;
+      if (view) {
+        boundedPart = {
+          inlineData: {
+            ...inline,
+            data: view.bytes.toString('base64'),
+            mimeType: view.mimeType,
+          },
+        };
       }
-      throw error;
+    } catch (error) {
+      if (!(error instanceof ImageViewError)) {
+        throw error;
+      }
+      debugLogger.debug(`Unable to bound MCP image: ${getErrorMessage(error)}`);
     }
+    boundedParts.push(clampInlineMediaPart(boundedPart));
   }
   return boundedParts;
 }
