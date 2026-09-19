@@ -17,7 +17,6 @@ import type {
 import {
   ApprovalMode,
   DEFAULT_MAX_SUBAGENT_DEPTH,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
   GOAL_MAX_ACTIVE_MINUTES_CAP,
   GOAL_MAX_TURNS_CAP,
   DEFAULT_WEB_SEARCH_MAX_PER_SESSION,
@@ -1735,9 +1734,9 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as number | undefined,
         minimum: 1,
-        maximum: GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
+        maximum: 900,
         description:
-          'Deprecated. Goals no longer run evidence-checkpoint model calls, because the verifier reads the transcript directly, so this value has no effect. It is still accepted and validated as an integer between 1 and 900 so that existing settings files keep loading.',
+          'Deprecated. Goals no longer run evidence-checkpoint model calls, because the verifier reads the transcript directly, so this value is ignored. The key is still accepted so that existing settings files keep loading without an unknown-key warning.',
         showInDialog: false,
       },
       maxToolCalls: {
@@ -4103,7 +4102,8 @@ const SETTINGS_SCHEMA = {
             category: 'Experimental',
             requiresRestart: false,
             default: 'qwen3.5-omni-plus-realtime' as string,
-            description: 'Upstream Realtime model used for Live Voice.',
+            description:
+              'Realtime model used for Live Voice: a modelId or provider:modelId. When it names a modelProviders entry with realtimeOnly: true, that entry supplies the endpoint (derived from baseUrl) and the key (envKey); otherwise endpoint and apiKey below are used.',
             showInDialog: false,
           },
           endpoint: {
