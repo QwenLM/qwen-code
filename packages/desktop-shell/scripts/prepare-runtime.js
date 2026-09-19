@@ -216,55 +216,115 @@ function copyValidCachedArchive(
 // import('@lydell/node-pty')` (packages/core/src/utils/getPty.ts), so Node
 // walks up from lib/cli-entry.js and lib/node_modules is the first candidate.
 // Without it every Web Terminal spawn collapses to "PTY not available"
-// (#11872). scripts/create-standalone-package.js::copyNodePtyAddon stages the
-// same two packages for the standalone archives.
+// (#11872).
+//
+// The two packages are installed for the TARGET rather than read from the
+// host's node_modules: npm skips optionalDependencies whose os/cpu do not
+// match the machine doing the install, and the release matrix cross-builds —
+// the x86_64-apple-darwin leg runs on an arm64 macos-15 runner, where
+// `@lydell/node-pty-darwin-x64` (os darwin, cpu x64) is never installed, so a
+// host read shipped the Intel Desktop build without its addon.
+// scripts/build-standalone-release.js::stageNativeModules installs the same
+// pinned specs into a throwaway prefix for the standalone archives.
 function stageNodePty(desktopTarget) {
   const prebuildPackage = NODE_PTY_PREBUILD_PACKAGE.get(desktopTarget);
   const packageNames = ['@lydell/node-pty', prebuildPackage];
-  // sourceRoot, not repoRoot: the release job installs dependencies in a
-  // separate checkout (QWEN_CODE_ROOT) and only builds the shell here.
-  const modulesSrc = path.join(sourceRoot, 'node_modules');
-  const packageSources = packageNames.map((packageName) =>
-    path.join(modulesSrc, packageName),
-  );
-  const prebuildDir = path.join(
-    packageSources[1],
-    'prebuilds',
-    prebuildPackage.slice('@lydell/node-pty-'.length),
-  );
-  const ready =
-    packageSources.every((packageSource) =>
-      fs.existsSync(path.join(packageSource, 'package.json')),
-    ) &&
-    fs.existsSync(prebuildDir) &&
-    fs.readdirSync(prebuildDir).some((entry) => entry.endsWith('.node'));
-  if (!ready) {
-    // Degrade instead of failing the build: the app still runs and only the
-    // Web Terminal loses PTY support. linux-arm64 has no pinned prebuild yet,
-    // so a local build for it lands here.
+  const specs = nodePtyPackageSpecs(packageNames);
+  if (!specs) {
+    // Degrade only where the repo pins nothing: linux-arm64 has no pinned
+    // prebuild upstream yet, and failing there would trade a missing Web
+    // Terminal for no app at all. The release job still refuses to publish
+    // such a runtime — smoke-runtime.js's PTY round-trip hard-fails.
     console.warn(
-      `[desktop] node-pty packages for ${desktopTarget} are missing from ` +
-        `${modulesSrc}; bundling without PTY support ` +
-        '(web terminal will report "PTY not available").',
+      `[desktop] ${prebuildPackage} is not pinned in ` +
+        `${path.join(sourceRoot, 'package.json')}; bundling ${desktopTarget} ` +
+        'without PTY support (web terminal will report "PTY not available").',
     );
     return;
   }
-  const modulesDest = path.join(libDir, 'node_modules');
-  for (let index = 0; index < packageNames.length; index += 1) {
-    fs.cpSync(
-      packageSources[index],
-      path.join(modulesDest, packageNames[index]),
-      {
-        recursive: true,
-        dereference: true,
-        verbatimSymlinks: false,
-        // The win32-x64 prebuild ships .pdb debug symbols beside its addon
-        // that nothing reads at runtime; the standalone packager drops them
-        // too.
-        filter: (source) => !source.endsWith('.pdb'),
-      },
+  const installDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'qwen-desktop-node-pty-'),
+  );
+  try {
+    // cwd is the empty prefix directory so npm resolves no package.json of its
+    // own, and --force is what lets npm fetch a prebuild whose os/cpu do not
+    // match this machine.
+    execFileSync(
+      process.execPath,
+      [
+        npm,
+        'install',
+        '--prefix',
+        installDir,
+        '--package-lock=false',
+        '--no-save',
+        '--ignore-scripts',
+        '--force',
+        '--no-audit',
+        '--no-fund',
+        ...specs,
+      ],
+      { cwd: installDir, stdio: 'inherit' },
     );
+    const modulesSrc = path.join(installDir, 'node_modules');
+    const addonDir = path.join(
+      modulesSrc,
+      prebuildPackage,
+      'prebuilds',
+      desktopTarget,
+    );
+    if (!fs.readdirSync(addonDir).some((entry) => entry.endsWith('.node'))) {
+      throw new Error(
+        `${prebuildPackage} carries no addon under prebuilds/${desktopTarget}`,
+      );
+    }
+    const modulesDest = path.join(libDir, 'node_modules');
+    for (const packageName of packageNames) {
+      fs.cpSync(
+        path.join(modulesSrc, packageName),
+        path.join(modulesDest, packageName),
+        {
+          recursive: true,
+          dereference: true,
+          verbatimSymlinks: false,
+          // The win32-x64 prebuild ships .pdb debug symbols beside its addon
+          // that nothing reads at runtime; the standalone packager drops them
+          // too.
+          filter: (source) => !source.endsWith('.pdb'),
+        },
+      );
+    }
+  } finally {
+    fs.rmSync(installDir, { recursive: true, force: true });
   }
+}
+
+// The exact pinned versions of these packages, read from the checkout the
+// release job installed (QWEN_CODE_ROOT) so the runtime carries what
+// package-lock.json was built against. Returns null when the repo pins none of
+// them, which is how an unsupported target degrades instead of inventing a
+// version the lockfile never tested.
+function nodePtyPackageSpecs(packageNames) {
+  const rootPackage = JSON.parse(
+    fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'),
+  );
+  const packageLock = JSON.parse(
+    fs.readFileSync(path.join(sourceRoot, 'package-lock.json'), 'utf8'),
+  );
+  const pinned = rootPackage.optionalDependencies ?? {};
+  const specs = [];
+  for (const packageName of packageNames) {
+    if (!pinned[packageName]) return null;
+    const version =
+      packageLock.packages?.[`node_modules/${packageName}`]?.version;
+    if (!version) {
+      throw new Error(
+        `node-pty package version is not locked for ${packageName}`,
+      );
+    }
+    specs.push(`${packageName}@${version}`);
+  }
+  return specs;
 }
 
 function desktopTarget() {

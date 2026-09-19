@@ -122,11 +122,19 @@ function finish(error) {
 
 function verifyPtySupport() {
   const marker = crypto.randomBytes(8).toString('hex');
-  const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
+  const isWindows = process.platform === 'win32';
+  const shell = isWindows ? 'cmd.exe' : '/bin/sh';
   const command = `echo ${marker}`;
+  // cmd.exe's command switch is /C, and node-pty's argsToCommandLine re-quotes
+  // array elements that contain spaces, so cmd.exe takes a single joined
+  // string: the shape shellExecutionService.ts builds from
+  // getShellConfiguration()'s ['/d', '/s', '/c'] (shell-utils.ts).
+  const args = isWindows
+    ? ['/d', '/s', '/c', command].join(' ')
+    : ['-c', command];
   const script = `
 const pty = await import('@lydell/node-pty');
-const child = pty.spawn(${JSON.stringify(shell)}, ['-c', ${JSON.stringify(command)}], {
+const child = pty.spawn(${JSON.stringify(shell)}, ${JSON.stringify(args)}, {
   name: 'xterm-color',
   cols: 80,
   rows: 24,
