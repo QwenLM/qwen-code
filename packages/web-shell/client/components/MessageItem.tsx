@@ -14,6 +14,7 @@ import type {
 } from '../adapters/types';
 import { CompactModeContext } from '../WebShellContexts';
 import type {
+  WebShellAssistantFeedbackRating,
   WebShellAssistantTurnFooterRenderInfo,
   WebShellSource,
 } from '../customization';
@@ -75,6 +76,16 @@ interface MessageItemProps {
   branchRecordId?: string;
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
+  /** Turn id marks are keyed by; unset hides the marks for this message. */
+  assistantFeedbackTurnId?: string;
+  /** Admitted prompt id of the turn; unset hides the marks for this message. */
+  assistantFeedbackPromptId?: string;
+  assistantFeedbackRating?: WebShellAssistantFeedbackRating;
+  onAssistantFeedbackRate?: (
+    promptId: string,
+    turnId: string,
+    rating: WebShellAssistantFeedbackRating | null,
+  ) => void;
   isLocateFlashing?: boolean;
   assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
   turnSources?: readonly WebShellSource[];
@@ -102,6 +113,10 @@ export const MessageItem = memo(function MessageItem({
   branchRecordId,
   showAssistantActions = false,
   showAssistantBranch = false,
+  assistantFeedbackTurnId,
+  assistantFeedbackPromptId,
+  assistantFeedbackRating,
+  onAssistantFeedbackRate,
   isLocateFlashing = false,
   assistantTurnFooterInfo,
   turnSources,
@@ -142,6 +157,22 @@ export const MessageItem = memo(function MessageItem({
         ? () => onBranchSession(branchRecordId)
         : undefined,
     [onBranchSession, branchRecordId],
+  );
+  const boundFeedbackRate = useMemo(
+    () =>
+      onAssistantFeedbackRate && assistantFeedbackPromptId
+        ? (rating: WebShellAssistantFeedbackRating | null) =>
+            onAssistantFeedbackRate(
+              assistantFeedbackPromptId,
+              assistantFeedbackTurnId ?? '',
+              rating,
+            )
+        : undefined,
+    [
+      onAssistantFeedbackRate,
+      assistantFeedbackPromptId,
+      assistantFeedbackTurnId,
+    ],
   );
   const compactMode = useContext(CompactModeContext);
   const questionTool =
@@ -187,6 +218,9 @@ export const MessageItem = memo(function MessageItem({
             onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
+            showAssistantFeedback={assistantFeedbackPromptId !== undefined}
+            assistantFeedbackRating={assistantFeedbackRating}
+            onAssistantFeedbackRate={boundFeedbackRate}
             isLocateFlashing={isLocateFlashing}
             customFooterInfo={assistantTurnFooterInfo}
             turnSources={turnSources}
@@ -431,6 +465,14 @@ function areMessageItemPropsEqual(
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
+  if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
+    return false;
+  if (prev.assistantFeedbackPromptId !== next.assistantFeedbackPromptId)
+    return false;
+  if (prev.assistantFeedbackRating !== next.assistantFeedbackRating)
+    return false;
+  if (prev.onAssistantFeedbackRate !== next.onAssistantFeedbackRate)
+    return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   if (prev.generateContent !== next.generateContent) return false;
   if (

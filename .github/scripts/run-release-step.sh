@@ -197,6 +197,7 @@ case "${step}" in
       publish_package "packages/channels/${channel}" "${publish_marker}" "${channel}"
       echo "::endgroup::"
     done
+
     if [[ "${IS_DRY_RUN}" != "true" ]] && [[ ! -s "${publish_marker}" ]]; then
       echo "::warning::Every channel package was already published; nothing shipped"
     fi

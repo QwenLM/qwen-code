@@ -539,9 +539,9 @@ export class ModelsConfig {
           `Model '${modelId}' not found for authType '${authType}'`,
         );
       }
-      if (model.imageOnly || model.voiceOnly) {
+      if (model.imageOnly || model.voiceOnly || model.realtimeOnly) {
         throw new Error(
-          `${model.imageOnly ? 'Image' : 'Voice'}-only model '${modelId}' cannot be used as the primary model`,
+          `${model.imageOnly ? 'Image' : model.voiceOnly ? 'Voice' : 'Realtime'}-only model '${modelId}' cannot be used as the primary model`,
         );
       }
 
@@ -1098,9 +1098,9 @@ export class ModelsConfig {
         `Model '${modelId}' is no longer configured for authType '${authType}'. Select an available model.`,
       );
     }
-    if (resolved?.imageOnly || resolved?.voiceOnly) {
+    if (resolved?.imageOnly || resolved?.voiceOnly || resolved?.realtimeOnly) {
       throw new Error(
-        `${resolved.imageOnly ? 'Image' : 'Voice'}-only model '${modelId}' cannot be used as the primary model`,
+        `${resolved.imageOnly ? 'Image' : resolved.voiceOnly ? 'Voice' : 'Realtime'}-only model '${modelId}' cannot be used as the primary model`,
       );
     }
 

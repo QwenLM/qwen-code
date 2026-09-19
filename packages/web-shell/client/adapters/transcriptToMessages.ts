@@ -32,6 +32,7 @@ import {
   projectTerminalBackgroundAgentTool,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
+import { parseContextCompressionMeta } from '../utils/contextCompression.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -679,6 +680,61 @@ export function transcriptBlocksToDaemonMessages(
           });
           break;
         }
+        const noticePayload = meta?.['contextCompressionNotice'];
+        const notice = parseContextCompressionMeta(noticePayload);
+        const compressionPayload = meta?.['contextCompression'];
+        const compression = parseContextCompressionMeta(compressionPayload);
+        // A payload this client cannot read means it and the daemon disagree on
+        // the schema. Take the ordinary path then and let the block's own text
+        // through: rendering only the half that still parses would drop the
+        // other half's sentence, and `content` carries both.
+        const unreadable =
+          (noticePayload !== undefined && notice === undefined) ||
+          (compressionPayload !== undefined && compression === undefined);
+        if ((notice || compression) && !unreadable) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          // The invocation note keeps its own `_meta` key, so folding the turn
+          // into one block cannot overwrite it; it renders as the row ahead of
+          // the compression it belongs to.
+          if (notice) {
+            messages.push({
+              id: `${block.id}-notice`,
+              role: 'system',
+              content: textBlock.text,
+              variant: 'info',
+              source: 'context_compression',
+              data: noticePayload,
+              timestamp: blockTime,
+            });
+          }
+          if (!compression) break;
+          // One block carries the whole compression: the progress frame creates
+          // it and the result merges into the same id, flipping `phase` to
+          // 'done', so the row is replaced in place rather than doubled. A block
+          // that stopped streaming without a result is a failed or cancelled
+          // run — its turn reports that itself, and a stale "compressing" row
+          // would only contradict it.
+          if (
+            compression.phase === 'progress' &&
+            textBlock.streaming !== true
+          ) {
+            break;
+          }
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'context_compression',
+            // The raw payload, not the parsed view: SystemMessage falls back to
+            // `content` when it meets a payload this client cannot read.
+            data: compressionPayload,
+            timestamp: blockTime,
+          });
+          break;
+        }
         if (!textBlock.text && !textBlock.usage) break;
 
         const parentSubAgent = textBlock.parentToolCallId
@@ -1213,8 +1269,39 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   synchronizeToolGroupSourceIdentity(messages);
+  attachTurnPromptIds(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
+}
+
+/**
+ * Copies the daemon-stamped per-turn `promptId` from contributing blocks onto
+ * the messages built from them.
+ *
+ * A block id is only an ordinal within one projection, so it cannot identify a
+ * turn across a reload; `promptId` can. It is attached regardless of
+ * `includeSourceIdentity`, which governs the tool-group record identity that
+ * host source references use, not turn identity.
+ */
+function attachTurnPromptIds(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const promptIdByBlockId = new Map<string, string>();
+  for (const block of blocks) {
+    if (block.promptId) promptIdByBlockId.set(block.id, block.promptId);
+  }
+  if (promptIdByBlockId.size === 0) return;
+  for (const message of messages) {
+    if (message.promptId) continue;
+    for (const id of [message.id, ...(message.sourceBlockIds ?? [])]) {
+      const promptId = promptIdByBlockId.get(id);
+      if (promptId) {
+        message.promptId = promptId;
+        break;
+      }
+    }
+  }
 }
 
 function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {
