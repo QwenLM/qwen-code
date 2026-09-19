@@ -1,5 +1,7 @@
 # Collapsible tool call details
 
+[中文版](collapsible-tool-call-details.zh-CN.md)
+
 ## Problem
 
 Code mode `exec` calls can place large results directly in the transcript. The
@@ -15,12 +17,16 @@ time, and an expansion hint. Arguments, results, images, and notices remain in
 the history item and are only hidden by the renderer.
 
 In Virtualized History with mouse tracking enabled, clicking the collapsed row
-expands that tool group. Scheduler-backed groups keep this state by `batchId`
-when their live pending row becomes committed history; adapter-built groups
-without a batch id keep it for their mounted lifetime. In append-only terminal
-mode, the row points to `Ctrl+O`, which already opens full transcript detail.
-Approval prompts, user-initiated shell calls, and focused interactive shells
-stay expanded because collapsing them would hide required interaction.
+expands that tool group. Clicking the first row of a completed expanded group
+collapses it again; clicks in result content, link clicks, multi-click text
+selection, drag selection, and context-menu interactions do not toggle the
+group. A live group may be expanded but cannot be collapsed until it completes.
+Scheduler-backed groups keep this state by `batchId` when their live pending row
+becomes committed history; adapter-built groups without a batch id keep it for
+their mounted lifetime. In append-only terminal mode, the row points to
+`Ctrl+O`, which already opens full transcript detail. Approval prompts,
+user-initiated shell calls, and focused interactive shells stay expanded because
+collapsing them would hide required interaction.
 
 The setting is runtime-only UI state: it does not change tool execution,
 recording, model context, or serialized history.
@@ -30,6 +36,10 @@ recording, model context, or serialized history.
 - Verify the setting is schema-registered, visible in `/settings`, and does not
   require restart.
 - Verify a collapsed tool group omits its description and result.
-- Verify a complete click expands one group and a drag does not.
+- Verify one complete click expands a group and another click on its first row
+  collapses it.
+- Verify result-body clicks, link clicks, multi-click selection, drag selection,
+  and context-menu interactions do not toggle a group.
+- Verify a pending group can expand but cannot collapse until it completes.
 - Verify approval prompts and focused/user-initiated shells remain expanded.
 - Verify `Ctrl+O` still forces full detail.

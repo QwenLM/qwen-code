@@ -126,6 +126,10 @@ import {
   type ThoughtExpandedValue,
 } from './contexts/ThoughtExpandedContext.js';
 import {
+  useToolDetailsExpanded,
+  type ToolDetailsExpandedValue,
+} from './contexts/ToolDetailsExpandedContext.js';
+import {
   type HistoryItem,
   type HistoryItemWithoutId,
   MessageType,
@@ -166,11 +170,13 @@ let capturedUIState: UIState;
 let capturedUIActions: UIActions;
 let capturedRenderMode: RenderMode;
 let capturedThoughtExpanded: ThoughtExpandedValue;
+let capturedToolDetailsExpanded: ToolDetailsExpandedValue;
 function TestContextConsumer() {
   capturedUIState = useContext(UIStateContext)!;
   capturedUIActions = useContext(UIActionsContext)!;
   capturedRenderMode = useRenderMode().renderMode;
   capturedThoughtExpanded = useThoughtExpanded();
+  capturedToolDetailsExpanded = useToolDetailsExpanded();
   return <Box ref={capturedUIState.mainControlsRef} />;
 }
 
@@ -440,6 +446,7 @@ describe('AppContainer State Management', () => {
     capturedUIActions = null!;
     capturedRenderMode = 'render';
     capturedThoughtExpanded = null!;
+    capturedToolDetailsExpanded = null!;
     mockClearPendingState = vi.fn();
 
     // **Provide a default return value for EVERY mocked hook.**
@@ -6760,6 +6767,30 @@ describe('AppContainer State Management', () => {
         /setThoughtExpanded\(\s*\(prev\)\s*=>\s*!prev/,
       );
     });
+  });
+
+  it('provides tool batch toggling through the shared set helper', () => {
+    render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+
+    expect(capturedToolDetailsExpanded.expandedBatchIds).toEqual(new Set());
+    act(() => {
+      capturedToolDetailsExpanded.toggleBatch('tool-batch-1');
+    });
+    expect(capturedToolDetailsExpanded.expandedBatchIds).toEqual(
+      new Set(['tool-batch-1']),
+    );
+
+    act(() => {
+      capturedToolDetailsExpanded.toggleBatch('tool-batch-1');
+    });
+    expect(capturedToolDetailsExpanded.expandedBatchIds).toEqual(new Set());
   });
 
   describe('Model Dialog Integration', () => {

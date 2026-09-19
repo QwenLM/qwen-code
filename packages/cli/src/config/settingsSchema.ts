@@ -1277,7 +1277,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; click a summary in Virtualized History or press Ctrl+O to expand its details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.',
+          'Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; in Virtualized History, click the summary to expand it and the first row of the expanded group to collapse it again, or press Ctrl+O for full details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.',
         showInDialog: true,
       },
       showToolCallArgs: {
