@@ -107,6 +107,21 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Cause:** When `ui.mouseTracking` is enabled (the default), Qwen Code captures all mouse events via SGR mouse tracking to power in-app text selection, click-to-position, row hover, history-item toggling, and viewport scrolling. The terminal forwards every mouse event to the app instead of handling it natively. Qwen Code supplies its own replacements while tracking is on: a single click opens an http(s) OSC 8 hyperlink, and right-click on a link or text selection opens an in-app context menu.
   - **Solution:** If you prefer the terminal's native handling, set `"ui.mouseTracking": false` in your `settings.json`. This turns off all in-app mouse interaction, including the in-app link open and context menu. In Virtualized History (`ui.useTerminalBuffer: true`, the default), the wheel will no longer scroll the transcript — use `Shift+↑/↓`, `PgUp/PgDn`, or `Ctrl+Home/End` instead. To also restore native terminal scrollback, set `"ui.useTerminalBuffer": false`. Requires restart.
 
+- **Screen flickers or tears in a web-based terminal (for example Alibaba Cloud Workbench)**
+  - **Issue:** When running Qwen Code inside a browser-based terminal (for example Alibaba Cloud Workbench), the TUI output flickers or tears continuously.
+  - **Cause:** With the default `ui.useTerminalBuffer: true` (Virtualized History), Qwen Code renders the conversation in an app-owned viewport using full-screen ANSI repaints. High-latency web terminals often cannot apply those repaints fast enough, which shows up as flicker or tearing. Such terminals typically report `TERM=xterm` on a TTY without `COLORTERM` or `TERM_PROGRAM`, so Qwen Code cannot distinguish them from ordinary terminals automatically yet.
+  - **Solution:** Set `"ui.useTerminalBuffer": false` in your `settings.json` and restart. This switches rendering back to append-only output and the terminal's native scrollback buffer, which web terminals handle well. Optionally also set `"ui.mouseTracking": false` to restore native right-click menus and clickable links.
+    - Example:
+    - Example:
+      ```json
+      {
+        "ui": {
+          "useTerminalBuffer": false
+        }
+      }
+      ```
+    - **Note:** `ui.renderMode` only controls the Markdown display mode and does not affect flicker. While `ui.useTerminalBuffer` is off, the in-app viewport scroll keys (`Shift+↑/↓`, `PgUp`/`PgDn`, `Ctrl+Home/End`) do not apply — use the terminal's own scrollback instead.
+
 ## IDE Companion not connecting
 
 - Ensure VS Code has a single workspace folder open.
