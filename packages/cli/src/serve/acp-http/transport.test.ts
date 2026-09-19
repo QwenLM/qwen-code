@@ -8929,6 +8929,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         ],
         availableSkills: [],
         workflowsEnabled: true,
+        workflowToolFeatures: {
+          sourceRef: true,
+          agentStepId: true,
+          workflowStepId: true,
+          runSavedArgs: true,
+          runScript: true,
+          nameOnly: false,
+          retryHistorical: true,
+        },
         savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
       });
       const connId = await initialize();
@@ -9006,6 +9015,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           availableCommands: [{ name: 'init', description: 'Initialize' }],
         },
       });
+      // The flags advertise capabilities this gate denies; a host gating on
+      // them must not read them here. (toMatchObject ignores extra keys, so
+      // this needs its own assertion.)
+      expect(
+        (byId.get(60)!.result as Record<string, unknown>)[
+          'workflowToolFeatures'
+        ],
+      ).toBeUndefined();
       expect(byId.get(61)).toMatchObject({
         result: { cancelled: false, reason: 'disabled' },
       });

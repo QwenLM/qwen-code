@@ -70,6 +70,7 @@ import {
   findActiveExtensionWorkflowByPathCanonical,
   getActiveExtensionWorkflows,
   isSymlinkedRoot,
+  isWorkflowRunId,
   parseExtensionWorkflowName,
   resolveSavedWorkflowScript,
   type ResolvedSavedWorkflow,
@@ -1882,7 +1883,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
     // Accept only the generated id shape.
     if (
       params.resumeFromRunId !== undefined &&
-      !/^wf_[0-9a-f]+$/.test(params.resumeFromRunId)
+      !isWorkflowRunId(params.resumeFromRunId)
     ) {
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }

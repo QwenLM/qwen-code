@@ -11369,6 +11369,15 @@ describe('createServeApp', () => {
           ],
           availableSkills: [],
           workflowsEnabled: true,
+          workflowToolFeatures: {
+            sourceRef: true,
+            agentStepId: true,
+            workflowStepId: true,
+            runSavedArgs: true,
+            runScript: true,
+            nameOnly: false,
+            retryHistorical: true,
+          },
           savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
         }),
         cancelSessionTaskImpl: async () => ({ cancelled: true }),
@@ -11420,6 +11429,10 @@ describe('createServeApp', () => {
         workflowsEnabled: false,
         savedWorkflows: [],
       });
+      // The feature flags advertise capabilities this gate denies, so they
+      // are redacted with the rest — a host gating on `retryHistorical` must
+      // not read `true` here.
+      expect(commandsRes.body.workflowToolFeatures).toBeUndefined();
       expect(commandsRes.body.availableCommands).toEqual([
         expect.objectContaining({ name: 'init' }),
       ]);

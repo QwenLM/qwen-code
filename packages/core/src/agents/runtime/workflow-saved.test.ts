@@ -21,6 +21,7 @@ import {
   findActiveExtensionWorkflowByPath,
   findActiveExtensionWorkflowByPathCanonical,
   getWorkflowScriptRoots,
+  isWorkflowRunId,
   listSavedWorkflows,
   parseExtensionWorkflowName,
   persistInlineWorkflowScript,
@@ -1006,5 +1007,24 @@ describe('workflow-saved — extension tier', () => {
     await expect(
       resolveSavedWorkflowScript('Not-Valid', config),
     ).rejects.toThrow(/Invalid workflow name/);
+  });
+});
+
+describe('isWorkflowRunId', () => {
+  it('accepts the generated wf_<hex> shape and nothing that could leave its directory', () => {
+    expect(isWorkflowRunId('wf_0123abcdef456789')).toBe(true);
+    for (const value of [
+      '',
+      'wf_',
+      'wf_ABCD',
+      'wf_zz',
+      '../wf_1234',
+      'wf_1234/../x',
+      'wf_1234\0',
+      ' wf_1234',
+      'run_1234',
+    ]) {
+      expect(isWorkflowRunId(value)).toBe(false);
+    }
   });
 });
