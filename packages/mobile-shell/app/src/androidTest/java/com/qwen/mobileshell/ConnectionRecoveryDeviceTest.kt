@@ -164,6 +164,21 @@ class ConnectionRecoveryDeviceTest {
         assertNull(ConnectionRecovery.fromBundle(snapshot.toBundle().apply { putString("context", "unknown") }))
     }
 
+    @Test fun fixtureSurvivesAnIdleBrowserPreconnect() {
+        Fixture().use { fixture ->
+            val address = InetAddress.getByName("127.0.0.1")
+            val port = java.net.URI(fixture.origin).port
+            Socket(address, port).use {
+                Socket(address, port).use { request ->
+                    request.soTimeout = 10_000
+                    request.getOutputStream().write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".toByteArray())
+                    assertTrue(request.getInputStream().bufferedReader().readText().contains("window.recoveryReady=true"))
+                }
+            }
+            assertNull(fixture.failure.get())
+        }
+    }
+
     private fun withFixture(body: (Fixture, ConnectionProfile) -> Unit) {
         val supported = WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) && WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)
         if (InstrumentationRegistry.getArguments().getString("requireProfileIsolation") == "true") assertTrue(supported)
@@ -171,7 +186,10 @@ class ConnectionRecoveryDeviceTest {
         Fixture().use { fixture ->
             val profile = ConnectionProfile.create("Recovery ${UUID.randomUUID()}", fixture.origin, "synthetic-recovery-${UUID.randomUUID()}")
             store.vault.upsert(store.vault.load(), profile)
-            try { body(fixture, profile) } finally { cleanProfile(profile) }
+            try {
+                body(fixture, profile)
+                assertNull("Loopback fixture failed", fixture.failure.get())
+            } finally { cleanProfile(profile) }
         }
     }
 
@@ -271,18 +289,24 @@ class ConnectionRecoveryDeviceTest {
                     server.accept().use { socket ->
                         activeSocket = socket
                         socket.soTimeout = 3000
-                        val reader = socket.getInputStream().bufferedReader()
-                        reader.readLine()
-                        while (!reader.readLine().isNullOrEmpty()) { }
-                        val body = """<!doctype html><body>Recovery fixture<script>
-                            window.recoveryToken=new URLSearchParams(location.hash.slice(1)).get('token');
-                            history.replaceState({},'',location.pathname+location.search);
-                            window.recoveryReady=true;
-                            </script></body>""".toByteArray()
-                        socket.getOutputStream().apply {
-                            write("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray())
-                            write(body)
-                            flush()
+                        try {
+                            val reader = socket.getInputStream().bufferedReader()
+                            if (reader.readLine() == null) return@use
+                            while (!reader.readLine().isNullOrEmpty()) { }
+                            val body = """<!doctype html><body>Recovery fixture<script>
+                                window.recoveryToken=new URLSearchParams(location.hash.slice(1)).get('token');
+                                history.replaceState({},'',location.pathname+location.search);
+                                window.recoveryReady=true;
+                                </script></body>""".toByteArray()
+                            socket.getOutputStream().apply {
+                                write("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray())
+                                write(body)
+                                flush()
+                            }
+                        } catch (_: java.net.SocketTimeoutException) {
+                            // Chromium may preconnect without sending an HTTP request.
+                        } catch (_: java.net.SocketException) {
+                            // Activity/renderer teardown may cancel a connection mid-response.
                         }
                     }
                     activeSocket = null
