@@ -355,8 +355,15 @@ function snapshotAssignments(
   // Joined without newlines: this text is injected between the user's
   // statements, so any newline here would shift every subsequent line number in
   // reported stack traces (and the shift would grow with the binding count).
-  // Each assignment already ends in ';'.
-  return assignments.length > 0 ? assignments.join('') : '';
+  // Each assignment already ends in ';', and the leading ';' terminates the
+  // statement this text is injected after: the injection point is a top-level
+  // statement's `endIndex`, so a cell whose last statement omits its semicolon
+  // would otherwise glue the snapshot identifier onto the user's final token
+  // (`f()__qwen_repl_..._snapshot['x'] = ...`), which `vm.SourceTextModule`
+  // rejects as a syntax error for the whole cell. It equally separates this
+  // commit from a declarator marker injected at the same offset. A ';' is an
+  // empty statement wherever the previous statement was already terminated.
+  return assignments.length > 0 ? `;${assignments.join('')}` : '';
 }
 
 function snapshotDeclarator(
@@ -424,6 +431,76 @@ function isSourceItem(node: Parser.SyntaxNode): boolean {
   return node.type !== 'comment' && node.type !== 'hash_bang_line';
 }
 
+function lastSignificantLeaf(
+  node: Parser.SyntaxNode,
+): Parser.SyntaxNode | null {
+  if (node.type === 'comment') return null;
+  for (let child = node.lastChild; child; child = child.previousSibling) {
+    const leaf = lastSignificantLeaf(child);
+    if (leaf) return leaf;
+  }
+  return node;
+}
+
+function mayContinueWithTemplateLiteral(
+  node: Parser.SyntaxNode | null,
+): boolean {
+  if (!node) return false;
+  switch (node.type) {
+    case 'expression_statement':
+    case 'throw_statement':
+      return true;
+    case 'lexical_declaration':
+    case 'variable_declaration': {
+      let declarator = node.lastNamedChild;
+      while (declarator?.type === 'comment') {
+        declarator = declarator.previousNamedSibling;
+      }
+      return (
+        declarator?.type === 'variable_declarator' &&
+        declarator.childForFieldName('value') !== null
+      );
+    }
+    case 'export_statement': {
+      const declaration = node.childForFieldName('declaration');
+      return declaration
+        ? mayContinueWithTemplateLiteral(declaration)
+        : node.childForFieldName('value') !== null;
+    }
+    case 'if_statement':
+      return mayContinueWithTemplateLiteral(
+        node.childForFieldName('alternative') ??
+          node.childForFieldName('consequence'),
+      );
+    case 'else_clause':
+      return mayContinueWithTemplateLiteral(node.lastNamedChild);
+    case 'while_statement':
+    case 'for_statement':
+    case 'for_in_statement':
+    case 'with_statement':
+    case 'labeled_statement':
+      return mayContinueWithTemplateLiteral(node.childForFieldName('body'));
+    default:
+      return false;
+  }
+}
+
+// tree-sitter can split a V8 tagged template into two source items. Reject only
+// statement forms whose final expression can absorb the template; declarations
+// and blocks that are already unambiguously separate keep their usual behavior.
+function hasAmbiguousTemplateBoundary(
+  source: string,
+  item: Parser.SyntaxNode,
+  nextItem: Parser.SyntaxNode | undefined,
+): boolean {
+  return (
+    nextItem !== undefined &&
+    source[nextItem.startIndex] === '`' &&
+    lastSignificantLeaf(item)?.type !== ';' &&
+    mayContinueWithTemplateLiteral(item)
+  );
+}
+
 function cancellationGuardEdits(root: Parser.SyntaxNode): Edit[] {
   const edits: Edit[] = [];
   const pending = [root];
@@ -486,6 +563,19 @@ export async function prepareNodeReplCell(
   try {
     if (tree.rootNode.hasError) {
       throw new Error('JavaScript syntax could not be parsed safely');
+    }
+    // `carriedVarEdits` can reparse an expression-bodied loop as a block and
+    // hide an original tagged-template boundary. Preserve original item indexes;
+    // the later check still rejects only a boundary that receives a commit.
+    const originalSourceItems =
+      tree.rootNode.namedChildren.filter(isSourceItem);
+    const ambiguousOriginalSourceItemIndexes = new Set<number>();
+    for (const [index, item] of originalSourceItems.entries()) {
+      if (
+        hasAmbiguousTemplateBoundary(code, item, originalSourceItems[index + 1])
+      ) {
+        ambiguousOriginalSourceItemIndexes.add(index);
+      }
     }
     const carriedNames = new Set(
       options.previousBindings.map(({ name }) => name),
@@ -651,7 +741,7 @@ export async function prepareNodeReplCell(
     let generatedCommitChars = 0;
     let commitCounter = 0;
 
-    for (const item of sourceItems) {
+    for (const [itemIndex, item] of sourceItems.entries()) {
       const declaration = topLevelVariableDeclaration(item);
       if (declaration) {
         const completedBindings = new Map(activeBindings);
@@ -714,6 +804,11 @@ export async function prepareNodeReplCell(
       generatedCommitChars += commit.length;
 
       if (commit) {
+        if (ambiguousOriginalSourceItemIndexes.has(itemIndex)) {
+          throw new Error(
+            'JavaScript cell cannot be transformed safely: a template literal after an unterminated statement may be a tagged template. Add `;` to make the statements separate, or keep the tag and template on the same line.',
+          );
+        }
         edits.push({
           start: item.endIndex,
           end: item.endIndex,
