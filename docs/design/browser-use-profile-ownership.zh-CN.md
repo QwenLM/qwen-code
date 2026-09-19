@@ -58,12 +58,14 @@ Native Host 继续只转发消息。这些标识用于区分兼容的实例，�
   重启原 profile 后可以恢复使用。
 - 扩展重连和 worker 重启后身份不变，不同 profile 的身份不同，且使用前已持久保存。
   存储失败时不能发布临时身份。
-- 停止并重启 transport 可以重新选择，且所有旧连接均被关闭。第二个 runtime 仍报告
-  `BROWSER_USE_BUSY`。
+- 停止并重启 transport 可以重新选择，且所有旧连接均被关闭。本设计落地时，第二个 runtime
+  会以 `BROWSER_USE_BUSY` 被拒绝；下文的并发会话设计以共享接入取代该行为，并移除了这一错误。
 
 ## 并发 session 后续工作
 
 由 [#11609](https://github.com/QwenLM/qwen-code/issues/11609) 跟进。
+
+[并发会话设计](browser-use-concurrent-sessions.zh-CN.md)（已实现，验证进行中）定义共享 Native Host 拓扑与会话归属边界。
 
 Profile 身份与 Browser Use session 身份是两个概念。未来多个 session 可以共享
 一个 profile，并分别拥有不同的标签页。这需要实现共享连接路由，以及按 session

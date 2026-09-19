@@ -22,11 +22,24 @@ README) and load the built `dist/extension` directory through
 `chrome://extensions` (Developer mode → Load unpacked). Then stop. Do not run
 the Native Host installer to bypass this check.
 
-Installing the Chrome extension opts into this automatic local setup. Its
-Native Host files persist after Qwen exits. The user can inspect or remove
-them with `node <skill-base>/runtime/scripts/native-host-setup.js status` or
-`uninstall`. Removing the Chrome extension also prevents automatic registration
-on a later Browser Use initialization.
+Installing the Chrome extension opts into this automatic local setup. The
+first use installs the shared Host; later sessions reuse an installed Host of
+the same protocol instead of replacing it. A Host installed by a newer Qwen
+Code is never downgraded: if setup reports one, tell the user to update Qwen
+Code and stop. The Host files persist after Qwen exits. The user can inspect or
+remove them with `node <skill-base>/runtime/scripts/native-host-setup.js status`
+or `uninstall`; `install` explicitly switches the Host to this Qwen Code's copy
+from the next time Chrome starts it. Removing the Chrome extension also
+prevents automatic registration on a later Browser Use initialization.
+
+Multiple Qwen sessions can use the same profile, each controlling its own tabs.
+A tab held by another session reports `TAB_OWNERSHIP_CONFLICT`. Use another tab
+or wait for that session to release it. The setup below binds the runtime to
+the default profile through `browserAgent.browsers.get('chrome')`. Only when the
+user names a specific Chrome profile, call `browserAgent.browsers.list()` before
+that line and pass the returned ID to `browserAgent.browsers.get(id)` instead.
+The runtime stays bound to the first profile it connects to; to switch profiles,
+call `node_repl_reset` and run the setup again.
 
 If `node_repl` is unavailable, configure it with:
 

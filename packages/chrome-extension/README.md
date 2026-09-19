@@ -11,7 +11,7 @@ It provides:
 - **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
   WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
   drive the real browser when an external CDP MCP adapter is configured.
-- **Browser Use bridge** — connects to the local `com.qwen.browser` Native
+- **Browser Use bridge** — connects to the local `com.qwen.browser_use` Native
   Messaging host, lists open HTTP(S) tabs, and forwards Playwright CDP traffic
   for tabs claimed by Browser Use.
 - **Readiness warning** — the framed Web Shell stays usable for chat while a
@@ -53,18 +53,23 @@ welcome screen for the chat UI automatically.
 Browser Use ships with Qwen Code as a built-in skill and SDK runtime, using
 Qwen's standard Node REPL. No separate Qwen extension installation is needed.
 On macOS and Linux, its first initialization checks that this Chrome extension
-is installed before automatically registering the local Native Messaging host.
-Installing the extension opts into that local setup. If the extension is not
-found, Browser Use prompts you to install it without writing Native Host files.
-It does not require `qwen serve`, does not expose
-a Chrome debugging port, and supports one active Browser Use session in this
-release.
+is installed before automatically registering the shared Native Messaging
+host. Installing the extension opts into that local setup. If the extension is
+not found, Browser Use prompts you to install it without writing Native Host
+files. Later sessions reuse an installed Host of the same protocol, and a Host
+installed by a newer Qwen Code is never downgraded. Run
+`node <skill-base>/runtime/scripts/native-host-setup.js status` to inspect the
+installation, `install` to switch it to this Qwen Code's Host from the next
+Host start, or `uninstall` to remove files owned by Browser Use. `<skill-base>`
+is the base directory shown when loading the Browser Use skill. Uninstall the
+Chrome extension as well to prevent automatic registration on a later use.
 
-The Native Host launcher and browser registrations remain after Qwen exits.
-Run `node <skill-base>/runtime/scripts/native-host-setup.js status` to inspect
-them, or use `uninstall` to remove files owned by Browser Use. `<skill-base>` is
-the Browser Use skill's base directory shown when loading the skill. Uninstall
-the Chrome extension as well to prevent automatic registration on a later use.
+The Chrome-launched Host serves multiple independent Qwen sessions per profile.
+Each session controls its own tabs and groups; claiming another session's tab
+returns `TAB_OWNERSHIP_CONFLICT`. A CLI exit leaves other sessions and the Host
+running. Host files persist in the user's installation directory independently
+of individual CLI checkouts. Updating the launcher takes effect on the next
+Host start. Browser Use does not require `qwen serve` or a Chrome debugging port.
 
 Installing the Chrome extension authorizes Browser Use to list and claim open
 top-level HTTP(S) tabs. Its declared `history` permission supports explicit,

@@ -2,6 +2,10 @@
 
 [English](browser-use.md) | [简体中文](browser-use.zh-CN.md)
 
+本文描述原有的单会话架构。[并发会话设计](browser-use-concurrent-sessions.zh-CN.md)
+更新了其中的 socket 归属、Native Host 安装和会话生命周期决策。该实现正在验证中，
+剩余验收缺口见链接文档。
+
 ## 目标
 
 Browser Use 为模型提供结构化 API，使其能够从 Qwen Code 控制用户现有的 Chrome。

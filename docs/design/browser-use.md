@@ -2,6 +2,12 @@
 
 [English](browser-use.md) | [简体中文](browser-use.zh-CN.md)
 
+This document describes the original single-session architecture. The
+[concurrent-session design](browser-use-concurrent-sessions.md) supersedes its
+socket ownership, Native Host installation and session lifecycle decisions.
+That implementation is under validation; its remaining acceptance gaps are
+recorded in the linked design.
+
 ## Goal
 
 Browser Use gives models a structured API for controlling the user's existing

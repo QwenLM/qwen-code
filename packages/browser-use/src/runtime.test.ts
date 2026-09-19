@@ -8,10 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const installer = vi.hoisted(() => ({
   extensionInstalled: vi.fn(async () => true),
-  install: vi.fn(async () => ({
-    launcherPath: '/tmp/qwen-home/.qwen/browser-use/native-host.sh',
+  ensure: vi.fn(async () => ({
+    launcherPath: '/tmp/qwen-home/.qwen/browser-use/host.sh',
     manifestPaths: [] as string[],
     installedPaths: [] as string[],
+    ready: true,
     skippedForeignPaths: [] as string[],
   })),
   home: vi.fn(() => '/tmp/qwen-home'),
@@ -19,7 +20,8 @@ const installer = vi.hoisted(() => ({
 
 vi.mock('./native-host-installer.js', () => ({
   isChromeExtensionInstalled: installer.extensionInstalled,
-  installChromeNativeHost: installer.install,
+  ensureChromeNativeHost: installer.ensure,
+  describeChromeProfiles: vi.fn(async () => new Map()),
   nativeHostInstallHome: installer.home,
 }));
 
@@ -27,6 +29,7 @@ import { createBrowserBackend } from './runtime.js';
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.stubEnv('QWEN_BROWSER_USE_DISCOVERY_DIR', '');
 });
 
 afterEach(() => {
@@ -37,7 +40,35 @@ afterEach(() => {
 });
 
 describe('createBrowserBackend', () => {
-  it('checks extension installation before registering the Native Host', async () => {
+  it('sets up the Host when managed endpoint overrides contain only whitespace', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', ' \t ');
+    vi.stubEnv('QWEN_BROWSER_USE_DISCOVERY_DIR', ' \t ');
+    await createBrowserBackend();
+    expect(installer.ensure).toHaveBeenCalledOnce();
+  });
+  it('reports a Chrome without any profile root instead of timing out later', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    installer.ensure.mockResolvedValue({
+      ...(await installer.ensure()),
+      ready: false,
+    });
+    await expect(createBrowserBackend()).rejects.toThrow(
+      /could not register its Native Host.*Start Chrome once/,
+    );
+  });
+
+  it('surfaces a refused downgrade of a newer installed Host', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    installer.ensure.mockRejectedValueOnce(
+      new Error('The installed Browser Use Native Host speaks protocol 4'),
+    );
+    await expect(createBrowserBackend()).rejects.toThrow(/protocol 4/);
+  });
+
+  it('checks extension installation before setting up the Native Host', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
     vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
     const stderr = vi
@@ -54,8 +85,8 @@ describe('createBrowserBackend', () => {
     });
     expect(
       installer.extensionInstalled.mock.invocationCallOrder[0],
-    ).toBeLessThan(installer.install.mock.invocationCallOrder[0]!);
-    expect(installer.install).toHaveBeenCalledWith({
+    ).toBeLessThan(installer.ensure.mock.invocationCallOrder[0]!);
+    expect(installer.ensure).toHaveBeenCalledWith({
       homeDir: '/tmp/qwen-home',
       nativeHostPath: expect.stringMatching(/native-host\.js$/),
     });
@@ -71,17 +102,17 @@ describe('createBrowserBackend', () => {
 
     await vi.advanceTimersByTimeAsync(10_999);
 
-    expect(installer.install).not.toHaveBeenCalled();
+    expect(installer.ensure).not.toHaveBeenCalled();
     expect(installer.extensionInstalled).toHaveBeenCalledTimes(11);
     installer.extensionInstalled.mockResolvedValue(true);
     await vi.advanceTimersByTimeAsync(1);
     await pending;
 
-    expect(installer.install).toHaveBeenCalledTimes(1);
+    expect(installer.ensure).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('reports an undetected extension after 30 seconds without registering', async () => {
+  it('reports an undetected extension after 30 seconds without setting up the Host', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
     vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
     installer.extensionInstalled.mockResolvedValue(false);
@@ -89,7 +120,7 @@ describe('createBrowserBackend', () => {
 
     await vi.advanceTimersByTimeAsync(29_999);
     expect(installer.extensionInstalled).toHaveBeenCalledTimes(30);
-    expect(installer.install).not.toHaveBeenCalled();
+    expect(installer.ensure).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(await pending).toMatchObject({
@@ -101,7 +132,7 @@ describe('createBrowserBackend', () => {
     });
 
     expect(installer.extensionInstalled).toHaveBeenCalledTimes(31);
-    expect(installer.install).not.toHaveBeenCalled();
+    expect(installer.ensure).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -116,11 +147,11 @@ describe('createBrowserBackend', () => {
     await vi.advanceTimersByTimeAsync(1);
     await pending;
 
-    expect(installer.install).toHaveBeenCalledTimes(1);
+    expect(installer.ensure).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('propagates a read failure while retrying without registering', async () => {
+  it('propagates a read failure while retrying without setting up the Host', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
     installer.extensionInstalled
@@ -130,11 +161,11 @@ describe('createBrowserBackend', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(await pending).toEqual(new Error('read failed'));
 
-    expect(installer.install).not.toHaveBeenCalled();
+    expect(installer.ensure).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('does not register when extension detection fails', async () => {
+  it('does not set up the Host when extension detection fails', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
     installer.extensionInstalled.mockRejectedValueOnce(
@@ -142,18 +173,16 @@ describe('createBrowserBackend', () => {
     );
 
     await expect(createBrowserBackend()).rejects.toThrow('read failed');
-    expect(installer.install).not.toHaveBeenCalled();
+    expect(installer.ensure).not.toHaveBeenCalled();
   });
 
   it('warns about a skipped foreign manifest without aborting', async () => {
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
     const foreign =
-      '/tmp/qwen-home/.config/google-chrome/NativeMessagingHosts/com.qwen.browser.json';
-    installer.install.mockResolvedValue({
-      launcherPath: '/tmp/qwen-home/.qwen/browser-use/native-host.sh',
-      manifestPaths: [foreign],
-      installedPaths: ['/tmp/qwen-home/.qwen/browser-use/native-host.sh'],
+      '/tmp/qwen-home/.config/google-chrome/NativeMessagingHosts/com.qwen.browser_use.json';
+    installer.ensure.mockResolvedValue({
+      ...(await installer.ensure()),
       skippedForeignPaths: [foreign],
     });
     const stderr = vi
@@ -169,13 +198,38 @@ describe('createBrowserBackend', () => {
     );
   });
 
-  it('does not install when a managed socket is configured', async () => {
-    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
-    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '/tmp/managed.sock');
-
-    await createBrowserBackend();
-
-    expect(installer.extensionInstalled).not.toHaveBeenCalled();
-    expect(installer.install).not.toHaveBeenCalled();
+  it('identifies a foreign manifest when it prevents installation from being ready', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+    const foreign = '/tmp/other-owned/com.qwen.browser_use.json';
+    installer.ensure.mockResolvedValue({
+      ...(await installer.ensure()),
+      ready: false,
+      skippedForeignPaths: [foreign],
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    await expect(createBrowserBackend()).rejects.toThrow(
+      new RegExp('Another program owns ' + foreign + '; remove or move it'),
+    );
+    expect(stderr.mock.calls[0]![0]).toContain(foreign);
   });
+
+  it.each([
+    ['QWEN_BROWSER_USE_SOCKET_PATH', '/tmp/managed.sock'],
+    ['QWEN_BROWSER_USE_DISCOVERY_DIR', '/tmp/managed-discovery'],
+  ])(
+    'does not install when a managed %s is configured',
+    async (name, value) => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+      vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', '');
+      vi.stubEnv(name, value);
+
+      await createBrowserBackend();
+
+      expect(installer.extensionInstalled).not.toHaveBeenCalled();
+      expect(installer.ensure).not.toHaveBeenCalled();
+    },
+  );
 });
