@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { execFile } from 'child_process';
 import { renderHook, act } from '@testing-library/react';
 import type React from 'react';
 import { useVim } from './vim.js';
@@ -2681,6 +2682,20 @@ describe('useVim hook', () => {
       press(result, 'd$');
       expect(buffer.lines).toEqual(['hello']);
       expect(buffer.cursor).toEqual([0, 5]);
+    });
+
+    it('leaves the yank register and clipboard alone when d$ deletes nothing', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 5]);
+      press(result, 'd$');
+      expect(buffer.lines).toEqual(['hello']);
+      const clipboardWrites = vi.mocked(execFile).mock.calls.length;
+      expect(clipboardWrites).toBeGreaterThan(0);
+
+      // The cursor sits one past the shortened line, so this second d$ spans
+      // nothing and must not re-enter the yank path.
+      press(result, 'd$');
+      expect(buffer.lines).toEqual(['hello']);
+      expect(vi.mocked(execFile).mock.calls).toHaveLength(clipboardWrites);
     });
 
     it('changes to end of line with c$ and enters INSERT', () => {

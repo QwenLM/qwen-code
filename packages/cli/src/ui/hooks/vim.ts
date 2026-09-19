@@ -509,8 +509,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         updateMode('INSERT');
         return true;
       }
-      const remaining =
-        cpLen(cpSlice(line, 0, startCol)) + cpLen(cpSlice(line, endCol));
+      // Both bounds are code-point columns, so the new length is arithmetic.
+      const remaining = startCol + cpLen(line) - endCol;
       if (remaining > 0 && startCol >= remaining) {
         buffer.vimMoveLeft(1);
       }
@@ -1353,8 +1353,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         null;
       const count = getCurrentCount();
       const cmdType = LINE_MOTION_COMMANDS[motion][operator];
-      executeCommand(cmdType, count);
+      // The end-of-line commands yank before deciding the motion is empty, so
+      // an empty range must not reach them or it overwrites the register.
       if (spans) {
+        executeCommand(cmdType, count);
         dispatch({
           type: 'SET_LAST_COMMAND',
           command: { type: cmdType, count },
