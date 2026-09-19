@@ -1036,13 +1036,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
       id: 23,
       v: 1,
       type: 'session_closed',
-      data: { reason: 'idle timeout' },
+      data: { reason: 'idle_timeout' },
     });
 
     expect(events).toMatchObject([
       {
         type: 'status',
-        text: 'Session closed: idle timeout',
+        text: 'Session closed after idle timeout',
       },
     ]);
   });
