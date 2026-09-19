@@ -217,9 +217,6 @@ describe('AddMenu', () => {
     overrides: Partial<NonNullable<AddMenuProps['plan']>> = {},
   ): NonNullable<AddMenuProps['plan']> => ({
     checked: false,
-    disabledReason: 'Switching mode',
-    label: 'Plan mode',
-    description: 'Plan first, run after you approve',
     onToggle: vi.fn(),
     ...overrides,
   });

@@ -1611,12 +1611,11 @@
   color: var(--chat-editor-accent-color);
 }
 
-/* Spelled out twice rather than as `.toolBtn.planChip:hover`: each half ties
-   the generic toolbar hover above on specificity and wins by coming later,
-   which the shorter selector would not. The disabled half keeps the tint from
-   dropping under the pointer during the request the click itself starts. */
-.toolBtn.planChip:not(:disabled):hover,
-.toolBtn.planChip:disabled:hover {
+/* Not the shorter `.toolBtn.planChip:hover`: this ties the generic toolbar
+   hover above on specificity and wins by coming later, which the shorter
+   selector would not. The chip is never natively disabled, so the tint does
+   not drop under the pointer during the request the click itself starts. */
+.toolBtn.planChip:not(:disabled):hover {
   background: color-mix(
     in srgb,
     var(--chat-editor-accent-color) 20%,
@@ -1632,7 +1631,7 @@
 /* No dimming: like every other .toolBtn, including the permission button
    beside it, the chip keeps its appearance while mode controls are busy. That
    state is brief, and dimming one control of the pair would flicker. */
-.planChip:disabled {
+.planChip[aria-disabled='true'] {
   cursor: default;
 }
 
@@ -1659,7 +1658,7 @@
   height: 12px;
 }
 
-/* None of the reveals is limited to an enabled chip: it is disabled for the
+/* None of the reveals is limited to an enabled chip: it is inert for the
    length of the request its own click starts, and swapping back under the
    pointer would read as the click having been refused. */
 .planChip:focus-visible .planChipIcon > :not(.planChipClose) {
