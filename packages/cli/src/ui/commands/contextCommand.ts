@@ -602,30 +602,33 @@ export async function collectContextData(
     // overshoot is absorbed by the `messages` cap below.
     const scale = rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
 
-    displaySystemPrompt = Math.round(systemPromptTokens * scale);
-    const scaledAllTools = Math.round(allToolsTokens * scale);
-    displayMemoryFiles = Math.round(memoryFilesTokens * scale);
-    displayStartupContext = Math.round(startupContextTokens * scale);
-    const scaledMcpTotal = Math.round(mcpToolsTotalTokens * scale);
-    const scaledSkillDefinition = Math.round(skillToolDefinitionTokens * scale);
     // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
     // the MCP schemas together exceed the declared tool list, that excess would
     // be charged to the overhead and taken straight back out of `messages`.
     // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
     // to the Skill definition `skills` carries, so the three rows still account
-    // for exactly `scaledAllTools` plus the listing and the loaded bodies.
+    // for exactly `allToolsTokens` plus the listing and the loaded bodies.
     const clampDeficit = Math.max(
       0,
-      scaledSkillDefinition + scaledMcpTotal - scaledAllTools,
+      skillToolDefinitionTokens + mcpToolsTotalTokens - allToolsTokens,
     );
-    displayMcpTools = Math.max(0, scaledMcpTotal - clampDeficit);
-    displaySkills =
-      Math.round(skillsTokens * scale) -
-      Math.max(0, clampDeficit - scaledMcpTotal);
-    displayBuiltinTools = Math.max(
+    const clampedMcpTools = Math.max(0, mcpToolsTotalTokens - clampDeficit);
+    const clampedSkills =
+      skillsTokens - Math.max(0, clampDeficit - mcpToolsTotalTokens);
+    const clampedBuiltinTools = Math.max(
       0,
-      scaledAllTools - scaledSkillDefinition - displayMcpTools,
+      allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
     );
+    // The clamped categories partition `rawOverhead` before scaling. Flooring
+    // each share keeps their sum at or below `totalTokens`; independently
+    // rounding them can overshoot the total by a token with no negative row
+    // available to absorb the excess.
+    displaySystemPrompt = Math.floor(systemPromptTokens * scale);
+    displayBuiltinTools = Math.floor(clampedBuiltinTools * scale);
+    displayMcpTools = Math.floor(clampedMcpTools * scale);
+    displayMemoryFiles = Math.floor(memoryFilesTokens * scale);
+    displaySkills = Math.floor(clampedSkills * scale);
+    displayStartupContext = Math.floor(startupContextTokens * scale);
 
     const attributedOverhead =
       displaySystemPrompt +

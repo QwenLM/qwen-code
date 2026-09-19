@@ -661,6 +661,21 @@ describe('collectContextData (contextCommand)', () => {
       expect(Math.max(...rowFigures)).toBeLessThanOrEqual(data.totalTokens);
     });
 
+    it('keeps scaled-row rounding inside the total', async () => {
+      const data = await collectContextData(
+        makeChatConfig({
+          total: 138,
+          estimated: true,
+          history: [prelude, ...conversation],
+        }),
+        false,
+      );
+
+      // Independent Math.round calls produced 136 + 2 + 1 = 139 here. The
+      // scaled categories must leave their rounding remainder to `messages`.
+      expect(sumRows(data.breakdown)).toBe(138);
+    });
+
     it('never derives messages from the cached count', async () => {
       const data = await collectContextData(
         makeChatConfig({
