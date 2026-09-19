@@ -12,23 +12,16 @@ import {
   readWorktreeSession,
   readWorktreeSessionStrict,
   writeWorktreeSession,
+  createWorktreeSession,
   clearWorktreeSession,
+  clearWorktreeSessionDurable,
   restoreWorktreeContext,
+  getSessionRuntimeLiveness,
   isSessionRuntimeActive,
   type WorktreeSession,
 } from './worktreeSessionService.js';
 import { Storage } from '../config/storage.js';
 import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
-
-const fsMocks = vi.hoisted(() => ({
-  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
-}));
-
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  fsMocks.readFile.mockImplementation(actual.readFile);
-  return { ...actual, readFile: fsMocks.readFile };
-});
 
 const sample: WorktreeSession = {
   slug: 'my-feature',
@@ -43,7 +36,6 @@ let tmpDir: string;
 let filePath: string;
 
 beforeEach(async () => {
-  fsMocks.readFile.mockClear();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wt-session-test-'));
   filePath = path.join(tmpDir, 'test.worktree.json');
 });
@@ -61,19 +53,6 @@ describe('readWorktreeSession', () => {
     await expect(
       readWorktreeSession(filePath, { signal: controller.signal }),
     ).rejects.toBe(reason);
-  });
-
-  it('passes the caller signal to the file read', async () => {
-    await fs.writeFile(filePath, JSON.stringify(sample), 'utf-8');
-    const controller = new AbortController();
-
-    await expect(
-      readWorktreeSession(filePath, { signal: controller.signal }),
-    ).resolves.toEqual(sample);
-    expect(fsMocks.readFile).toHaveBeenLastCalledWith(filePath, {
-      encoding: 'utf-8',
-      signal: controller.signal,
-    });
   });
 
   it('returns null when file does not exist', async () => {
@@ -111,6 +90,23 @@ describe('readWorktreeSession', () => {
     );
     expect(await readWorktreeSession(filePath)).toBeNull();
   });
+
+  it('rejects an oversized sidecar without reading it into memory', async () => {
+    await fs.writeFile(filePath, 'x'.repeat(64 * 1024 + 1), 'utf8');
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a sidecar symlink',
+    async () => {
+      const target = path.join(tmpDir, 'target.json');
+      await fs.writeFile(target, JSON.stringify(sample), 'utf8');
+      await fs.symlink(target, filePath);
+
+      expect(await readWorktreeSession(filePath)).toBeNull();
+      expect(await fs.readFile(target, 'utf8')).toBe(JSON.stringify(sample));
+    },
+  );
 });
 
 describe('readWorktreeSessionStrict', () => {
@@ -369,6 +365,81 @@ describe('writeWorktreeSession', () => {
   });
 });
 
+describe('createWorktreeSession', () => {
+  it('does not publish an empty or partial sidecar', async () => {
+    const probe = await fs.open(path.join(tmpDir, 'probe'), 'w');
+    const prototype = Object.getPrototypeOf(probe) as Pick<
+      typeof probe,
+      'stat' | 'writeFile' | 'sync'
+    >;
+    const originalStat = prototype.stat;
+    const originalWriteFile = prototype.writeFile;
+    const originalSync = prototype.sync;
+    await probe.close();
+
+    const sizes: Array<number | 'absent'> = [];
+    const samplePath = async (): Promise<void> => {
+      try {
+        sizes.push((await fs.lstat(filePath)).size);
+      } catch {
+        sizes.push('absent');
+      }
+    };
+    const statSpy = vi
+      .spyOn(prototype, 'stat')
+      .mockImplementation(async function (this: typeof prototype) {
+        await samplePath();
+        const result = await originalStat.call(this);
+        await samplePath();
+        return result;
+      });
+    const writeSpy = vi
+      .spyOn(prototype, 'writeFile')
+      .mockImplementation(async function (
+        this: typeof prototype,
+        ...args: Parameters<typeof originalWriteFile>
+      ) {
+        await samplePath();
+        await originalWriteFile.apply(this, args);
+        await samplePath();
+      });
+    const syncSpy = vi
+      .spyOn(prototype, 'sync')
+      .mockImplementation(async function (this: typeof prototype) {
+        await samplePath();
+        await originalSync.call(this);
+        await samplePath();
+      });
+    try {
+      await createWorktreeSession(filePath, sample);
+    } finally {
+      statSpy.mockRestore();
+      writeSpy.mockRestore();
+      syncSpy.mockRestore();
+    }
+
+    const fullSize = Buffer.byteLength(`${JSON.stringify(sample, null, 2)}\n`);
+    expect(sizes.length).toBeGreaterThan(0);
+    expect(
+      sizes.filter((size) => size !== 'absent' && size !== fullSize),
+    ).toEqual([]);
+  });
+
+  it('exclusively creates a durable sidecar', async () => {
+    await createWorktreeSession(filePath, sample);
+    expect(await readWorktreeSession(filePath)).toEqual(sample);
+
+    await expect(createWorktreeSession(filePath, sample)).rejects.toMatchObject(
+      { code: 'EEXIST' },
+    );
+    expect(
+      (await fs.readdir(tmpDir)).filter((name) =>
+        name.startsWith('test.worktree.json.'),
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe('clearWorktreeSession', () => {
   it('deletes the file', async () => {
     await writeWorktreeSession(filePath, sample);
@@ -378,6 +449,19 @@ describe('clearWorktreeSession', () => {
 
   it('is a no-op when file does not exist', async () => {
     await expect(clearWorktreeSession(filePath)).resolves.not.toThrow();
+  });
+});
+
+describe('clearWorktreeSessionDurable', () => {
+  it('deletes the sidecar idempotently', async () => {
+    await createWorktreeSession(filePath, sample);
+    await clearWorktreeSessionDurable(filePath);
+    await expect(clearWorktreeSessionDurable(filePath)).resolves.not.toThrow();
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('is idempotent when the parent directory is absent', async () => {
+    await expect(clearWorktreeSessionDurable(filePath)).resolves.not.toThrow();
   });
 });
 
@@ -416,6 +500,59 @@ describe('isSessionRuntimeActive', () => {
     await expect(
       isSessionRuntimeActive('owner-session', [repoRoot, worktreePath]),
     ).resolves.toBe(true);
+  });
+
+  it('distinguishes missing evidence from confirmed inactivity', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    await fs.mkdir(repoRoot, { recursive: true });
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+
+    await expect(
+      getSessionRuntimeLiveness('owner-session', repoRoot),
+    ).resolves.toBe('unknown');
+    await expect(
+      isSessionRuntimeActive('owner-session', repoRoot),
+    ).resolves.toBe(true);
+
+    await writeRuntimeStatus(
+      new Storage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: 2147483647,
+      },
+    );
+    await expect(
+      getSessionRuntimeLiveness('owner-session', repoRoot),
+    ).resolves.toBe('inactive');
+  });
+
+  it('treats EPERM from the local pid probe as active', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    await fs.mkdir(repoRoot, { recursive: true });
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    await writeRuntimeStatus(
+      new Storage(repoRoot).getRuntimeStatusPath('owner-session'),
+      {
+        sessionId: 'owner-session',
+        workDir: repoRoot,
+        pid: process.pid,
+      },
+    );
+    const error = Object.assign(new Error('operation not permitted'), {
+      code: 'EPERM',
+    });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw error;
+    });
+
+    try {
+      await expect(
+        getSessionRuntimeLiveness('owner-session', repoRoot),
+      ).resolves.toBe('active');
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 
   it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {
@@ -464,13 +601,100 @@ describe('restoreWorktreeContext', () => {
       worktreePath: liveWorktree,
     };
     await writeWorktreeSession(filePath, live);
-    const result = await restoreWorktreeContext(filePath);
+    await fs.writeFile(
+      path.join(liveWorktree, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
 
     expect(result.session).toEqual(live);
     expect(result.contextMessage).toContain(`"${live.slug}"`);
     expect(result.contextMessage).toContain(live.worktreePath);
     expect(result.contextMessage).toContain(live.worktreeBranch);
     // Sidecar should remain on disk so subsequent reads still see it.
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('rejects and preserves a sidecar when the marker has another owner', async () => {
+    const liveCwd = path.join(tmpDir, 'repo');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'reowned');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'reowned',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
+    await fs.writeFile(
+      path.join(liveWorktree, '.qwen-session'),
+      'new-owner',
+      'utf8',
+    );
+
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'old-owner',
+    );
+
+    expect(result).toEqual({ contextMessage: null, session: null });
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('preserves a live sidecar whose marker is missing', async () => {
+    const liveCwd = path.join(tmpDir, 'repo-missing');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'missing');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'missing',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
+
+    const onWarn = vi.fn();
+    const result = await restoreWorktreeContext(
+      filePath,
+      onWarn,
+      'session-owner',
+    );
+
+    expect(result).toEqual({ contextMessage: null, session: null });
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+    expect(onWarn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('preserving sidecar'),
+      }),
+    );
+  });
+
+  it('rejects and preserves a sidecar when the marker is invalid', async () => {
+    const liveCwd = path.join(tmpDir, 'repo-invalid');
+    const liveWorktree = path.join(liveCwd, '.qwen', 'worktrees', 'invalid');
+    await fs.mkdir(liveWorktree, { recursive: true });
+    const live: WorktreeSession = {
+      ...sample,
+      slug: 'invalid',
+      originalCwd: liveCwd,
+      worktreePath: liveWorktree,
+    };
+    await writeWorktreeSession(filePath, live);
+    await fs.mkdir(path.join(liveWorktree, '.qwen-session'));
+
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
+
+    expect(result).toEqual({ contextMessage: null, session: null });
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 

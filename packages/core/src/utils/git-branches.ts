@@ -68,32 +68,24 @@ export interface GitBranchesResult {
   detached: boolean;
 }
 
-// Repository-shifting variables that a daemon process may inherit from its
-// launch environment.  Clearing them prevents a trusted workspace request
-// from operating on a completely different repository despite the resolved
-// `cwd`.
 const GIT_ENV_VARS_TO_CLEAR = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_COMMON_DIR',
-  'GIT_INDEX_FILE',
-  'GIT_CONFIG_GLOBAL',
-  'GIT_CONFIG_SYSTEM',
-  'GIT_CONFIG_NOSYSTEM',
-  // Repository selectors that an inherited daemon environment could use to
-  // redirect a trusted-workspace git/gh invocation to a different repository
-  // or object database despite the resolved cwd.
   'GH_REPO',
-  'GIT_CONFIG_COUNT',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'SSH_ASKPASS',
+  'XDG_CONFIG_HOME',
+  'PREFIX',
+  'EDITOR',
+  'VISUAL',
+  'PAGER',
 ];
 
-// Command-scope config injection uses numbered GIT_CONFIG_KEY_<n> /
-// GIT_CONFIG_VALUE_<n> pairs (an inherited `url.<base>.insteadOf` can retarget
-// a clone/push). The index count is unbounded, so strip them by prefix.
-const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
+const NORMALIZED_GIT_ENV_VARS_TO_CLEAR = new Set(
+  GIT_ENV_VARS_TO_CLEAR.map((key) => key.toLowerCase()),
+);
+const REMOTE_GIT_TRANSPORT_KEYS = new Set(
+  ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS'].map((key) =>
+    key.toLowerCase(),
+  ),
+);
 
 // Transport names git ships helpers for: `ext` is deny-by-default but
 // re-enableable from config files, `fd` is allowed by default and needs no
@@ -106,11 +98,14 @@ export function gitEnv(
   base?: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> {
   const env = { ...(base ?? process.env) };
-  for (const key of GIT_ENV_VARS_TO_CLEAR) {
-    delete env[key];
-  }
   for (const key of Object.keys(env)) {
-    if (GIT_ENV_PREFIXES_TO_CLEAR.some((prefix) => key.startsWith(prefix))) {
+    const normalizedKey = key.toLowerCase();
+    if (
+      // Survives the scrub so the normalization below can see it.
+      normalizedKey !== 'git_allow_protocol' &&
+      (NORMALIZED_GIT_ENV_VARS_TO_CLEAR.has(normalizedKey) ||
+        normalizedKey.startsWith('git_'))
+    ) {
       delete env[key];
     }
   }
@@ -134,6 +129,17 @@ export function gitEnv(
   return env;
 }
 
+export function gitRemoteEnv(
+  base?: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const source = base ?? process.env;
+  const env = gitEnv(source);
+  for (const [key, value] of Object.entries(source)) {
+    if (REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase())) env[key] = value;
+  }
+  return env;
+}
+
 export function runGit(
   cwd: string,
   args: string[],
@@ -143,7 +149,9 @@ export function runGit(
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
-    env: gitEnv(env),
+    env: ['push', 'pull', 'fetch'].includes(args[0] ?? '')
+      ? gitRemoteEnv(env)
+      : gitEnv(env),
   }).then(({ stdout }) => stdout);
 }
 

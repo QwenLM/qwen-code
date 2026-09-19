@@ -5,16 +5,37 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { Request, Response } from 'express';
+import { WORKTREE_SESSION_FILE } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import { gitEnv } from '@qwen-code/qwen-code-core/utils/git-branches.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
+import { parseCallerSuppliedSessionId } from '../config/session-id.js';
+import type { SendBridgeError } from './server/error-response.js';
+import { createWorkspaceRuntimeSessionService } from './workspace-runtime-storage.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
+
+const execFileAsync = promisify(execFile);
+
+function isGitProbeInfrastructureError(error: unknown): boolean {
+  const failure = error as { code?: unknown; killed?: unknown };
+  return (
+    failure.killed === true ||
+    (typeof failure.code === 'string' &&
+      ['ENOENT', 'EACCES', 'EAGAIN', 'ENOMEM', 'ETIMEDOUT'].includes(
+        failure.code,
+      ))
+  );
+}
 
 export interface WorkspaceRouteContext {
   readonly runtime: WorkspaceRuntime;
@@ -399,4 +420,280 @@ export function resolveContainedCwdOrFail(
     // Path doesn't exist or can't be resolved.
   }
   return null;
+}
+
+async function resolveGitCommonDir(cwd: string): Promise<string | null> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      'git',
+      ['rev-parse', '--git-common-dir'],
+      {
+        cwd,
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: gitEnv(),
+      },
+    ));
+  } catch (error) {
+    if (isGitProbeInfrastructureError(error)) throw error;
+    return null;
+  }
+  return fsPromises
+    .realpath(path.resolve(cwd, stdout.trim()))
+    .catch(() => null);
+}
+
+async function resolveAbsoluteGitDir(cwd: string): Promise<string | null> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      'git',
+      ['rev-parse', '--absolute-git-dir'],
+      {
+        cwd,
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: gitEnv(),
+      },
+    ));
+  } catch (error) {
+    if (isGitProbeInfrastructureError(error)) throw error;
+    return null;
+  }
+  return fsPromises.realpath(stdout.trim()).catch(() => null);
+}
+
+async function readBoundedRegularFile(
+  filePath: string,
+  maxBytes: number,
+): Promise<string | null> {
+  const pathStat = await fsPromises.lstat(filePath);
+  if (!pathStat.isFile() || pathStat.nlink !== 1 || pathStat.size > maxBytes) {
+    return null;
+  }
+  const handle = await fsPromises.open(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const openedStat = await handle.stat();
+    if (
+      !openedStat.isFile() ||
+      openedStat.nlink !== 1 ||
+      openedStat.dev !== pathStat.dev ||
+      openedStat.ino !== pathStat.ino ||
+      openedStat.size > maxBytes
+    ) {
+      return null;
+    }
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > maxBytes) return null;
+    const finalStat = await fsPromises.lstat(filePath);
+    if (
+      !finalStat.isFile() ||
+      finalStat.nlink !== 1 ||
+      finalStat.dev !== openedStat.dev ||
+      finalStat.ino !== openedStat.ino
+    ) {
+      return null;
+    }
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+async function markerIsOwnedBy(
+  markerPath: string,
+  sessionId: string,
+): Promise<boolean> {
+  try {
+    return (
+      (await readBoundedRegularFile(markerPath, 256))?.trim() === sessionId
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function isManagedWorktreePath(cwd: string): Promise<boolean> {
+  const commonDir = await resolveGitCommonDir(cwd);
+  if (commonDir === null) return false;
+  return isWithinRoot(
+    cwd,
+    path.join(path.dirname(commonDir), '.qwen', 'worktrees'),
+  );
+}
+
+export async function resolveSessionManagedGitCwd(
+  req: Request,
+  runtime: WorkspaceRuntime,
+): Promise<string | null> {
+  const rawCwd = req.query['cwd'];
+  if (rawCwd === undefined) return runtime.workspaceCwd;
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) return null;
+
+  let requested: string;
+  let workspace: string;
+  try {
+    requested = await fsPromises.realpath(path.resolve(rawCwd));
+    workspace = await fsPromises.realpath(runtime.workspaceCwd);
+  } catch {
+    return null;
+  }
+
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: workspace,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: gitEnv(),
+    }));
+  } catch (error) {
+    if (isGitProbeInfrastructureError(error)) throw error;
+    const stderr = (error as { stderr?: unknown }).stderr;
+    if (
+      typeof stderr === 'string' &&
+      /not a git repository/i.test(stderr) &&
+      isWithinRoot(requested, workspace) &&
+      !(await isManagedWorktreePath(requested))
+    ) {
+      return requested;
+    }
+    return null;
+  }
+  const repoTop = await fsPromises.realpath(stdout.trim()).catch(() => null);
+  if (repoTop === null) return null;
+  const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
+  if (
+    isWithinRoot(requested, workspace) &&
+    !isWithinRoot(requested, managedRoot) &&
+    !(await isManagedWorktreePath(requested))
+  ) {
+    return requested;
+  }
+  if (!isWithinRoot(requested, managedRoot)) return null;
+  const [workspaceCommonDir, requestedCommonDir] = await Promise.all([
+    resolveGitCommonDir(workspace),
+    resolveGitCommonDir(requested),
+  ]);
+  if (
+    workspaceCommonDir === null ||
+    requestedCommonDir === null ||
+    requestedCommonDir !== workspaceCommonDir
+  ) {
+    return null;
+  }
+
+  const parsedSessionId = parseCallerSuppliedSessionId(req.query['sessionId']);
+  if (parsedSessionId.kind !== 'valid') return null;
+  const sessionId = parsedSessionId.sessionId;
+  try {
+    let snapshot: ReturnType<typeof runtime.bridge.getSessionExecutionSnapshot>;
+    try {
+      snapshot = runtime.bridge.getSessionExecutionSnapshot(sessionId);
+    } catch {
+      return null;
+    }
+    if (
+      (await fsPromises.realpath(snapshot.workspaceCwd)) !== workspace ||
+      !snapshot.worktree
+    ) {
+      return null;
+    }
+    const worktreeRoot = await fsPromises.realpath(snapshot.worktree.path);
+    if (
+      path.dirname(worktreeRoot) !== managedRoot ||
+      !isWithinRoot(requested, worktreeRoot)
+    ) {
+      return null;
+    }
+    const sidecarPath =
+      createWorkspaceRuntimeSessionService(runtime).getWorktreeSessionPath(
+        sessionId,
+      );
+    const sidecarRaw = await readBoundedRegularFile(sidecarPath, 64 * 1024);
+    if (sidecarRaw === null) return null;
+    let sidecar: unknown;
+    try {
+      sidecar = JSON.parse(sidecarRaw);
+    } catch {
+      return null;
+    }
+    if (
+      !sidecar ||
+      typeof sidecar !== 'object' ||
+      Array.isArray(sidecar) ||
+      typeof (sidecar as Record<string, unknown>)['worktreePath'] !==
+        'string' ||
+      (await fsPromises.realpath(
+        (sidecar as { worktreePath: string }).worktreePath,
+      )) !== worktreeRoot
+    ) {
+      return null;
+    }
+    const markerPath = path.join(worktreeRoot, WORKTREE_SESSION_FILE);
+    if (!(await markerIsOwnedBy(markerPath, sessionId))) {
+      return null;
+    }
+    const requestedGitDir = await resolveAbsoluteGitDir(requested);
+    if (requestedGitDir === null) return null;
+    const metadataRoot = await fsPromises.realpath(
+      path.join(workspaceCommonDir, 'worktrees'),
+    );
+    if (path.dirname(requestedGitDir) !== metadataRoot) return null;
+    const backpointer = await readBoundedRegularFile(
+      path.join(requestedGitDir, 'gitdir'),
+      4096,
+    );
+    if (backpointer === null) return null;
+    const actualGitFile = await fsPromises.realpath(
+      path.resolve(requestedGitDir, backpointer.trim()),
+    );
+    const expectedGitFile = await fsPromises.realpath(
+      path.join(worktreeRoot, '.git'),
+    );
+    if (actualGitFile !== expectedGitFile) return null;
+    return requested;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (
+      code === 'ENOENT' ||
+      code === 'EACCES' ||
+      code === 'EPERM' ||
+      code === 'ELOOP' ||
+      code === 'ENOTDIR'
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function resolveSessionManagedGitCwdForRoute(
+  req: Request,
+  res: Response,
+  runtime: WorkspaceRuntime,
+  route: string,
+  sendBridgeError: SendBridgeError,
+): Promise<string | undefined> {
+  let cwd: string | null;
+  try {
+    cwd = await resolveSessionManagedGitCwd(req, runtime);
+    runtime.generationGuard?.assertOpen();
+  } catch (error) {
+    sendBridgeError(res, error, { route });
+    return undefined;
+  }
+  if (cwd === null) {
+    res.status(400).json({
+      error: 'invalid_cwd',
+      message: 'The supplied cwd is invalid or outside the workspace',
+    });
+    return undefined;
+  }
+  return cwd;
 }

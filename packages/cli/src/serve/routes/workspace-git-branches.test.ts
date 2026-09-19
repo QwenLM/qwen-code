@@ -266,6 +266,22 @@ afterEach(() => {
 });
 
 describe('workspace Git branch routes against a real repo (R10 #2)', () => {
+  it('redacts the main checkout path from a linked-worktree Git error', async () => {
+    const dir = makeRepo();
+    const mainBranch = git(dir, 'branch', '--show-current').trim();
+    const worktree = path.join(dir, '.qwen', 'worktrees', 'linked');
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    git(dir, 'worktree', 'add', '-q', '-b', 'linked', worktree);
+
+    const response = await request(appWithWorkspace(worktree))
+      .post('/workspace/git/checkout')
+      .send({ ref: mainBranch });
+
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(JSON.stringify(response.body)).toContain('<workspace>');
+  });
+
   it('rejects a commit --all when write-tree cannot snapshot the index', async () => {
     const dir = makeRepo();
     fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');

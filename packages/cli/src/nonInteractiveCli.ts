@@ -1358,7 +1358,11 @@ export async function runNonInteractive(
           const sessionPath = config
             .getSessionService()
             .getWorktreeSessionPath(sessionId);
-          const restored = await restoreWorktreeContext(sessionPath);
+          const restored = await restoreWorktreeContext(
+            sessionPath,
+            (error) => debugLogger.warn('worktree restore warning:', error),
+            sessionId,
+          );
           if (restored.contextMessage) {
             initialPartList = withReminder(
               initialPartList,

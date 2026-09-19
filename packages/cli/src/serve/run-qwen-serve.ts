@@ -85,6 +85,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 // Named subpath: the core barrel pulls shell/glob/chokidar into the serve
 // pre-listen static closure.
 import {
@@ -194,6 +195,7 @@ import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { recoverBranchWorktreePreparations } from './branch-worktree-preparation.js';
 import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
@@ -3271,6 +3273,36 @@ export async function runQwenServe(
   }
 }
 
+function bridgeHasLiveSessionWithin(
+  bridge: AcpSessionBridge,
+  workspaceCwd: string,
+  worktreePath: string,
+): boolean {
+  return bridge.listWorkspaceSessions(workspaceCwd).some((session) => {
+    try {
+      return isWithinRoot(
+        path.resolve(
+          bridge.getSessionExecutionSnapshot(session.sessionId).effectiveCwd,
+        ),
+        path.resolve(worktreePath),
+      );
+    } catch {
+      return true;
+    }
+  });
+}
+
+async function createBranchRecoverySessionService(
+  runtime: WorkspaceRuntime,
+): Promise<SessionService> {
+  const { SessionService } = await import(
+    '@qwen-code/qwen-code-core/services/sessionService.js'
+  );
+  return new SessionService(runtime.workspaceCwd, {
+    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+  });
+}
+
 let brokenPipeGuardInstalled = false;
 
 /**
@@ -6027,6 +6059,23 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
+    if (trustedWorkspace) {
+      await recoverBranchWorktreePreparations({
+        workspaceCwd: boundWorkspace,
+        sessionService: await createBranchRecoverySessionService(
+          workspaceRuntimes[0],
+        ),
+        assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
+        isWorktreeOccupied: (worktreePath) =>
+          bridgeHasLiveSessionWithin(bridge, boundWorkspace, worktreePath),
+        warn: (message, fields) => daemonLog.warn(message, fields),
+      }).catch((error: unknown) => {
+        daemonLog.warn('branch worktree recovery sweep failed', {
+          workspace: boundWorkspace,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
 
     const createRuntimeEnvMetadata = (
       workspace: string,
@@ -7393,6 +7442,21 @@ async function runQwenServeImpl(
             validationAttempt: (buildOptions?.validationAttempt ?? 0) + 1,
           });
         }
+      }
+      if (wsRuntime.primary && wsRuntime.trusted) {
+        await recoverBranchWorktreePreparations({
+          workspaceCwd: cwd,
+          sessionService: await createBranchRecoverySessionService(wsRuntime),
+          assertGenerationOpen: () => generationGuard.assertOpen(),
+          isWorktreeOccupied: (worktreePath) =>
+            bridgeHasLiveSessionWithin(wsBridge, cwd, worktreePath),
+          warn: (message, fields) => daemonLog.warn(message, fields),
+        }).catch((error: unknown) => {
+          daemonLog.warn('branch worktree recovery sweep failed', {
+            workspace: cwd,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
       return wsRuntime;
     };
