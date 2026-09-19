@@ -46,6 +46,6 @@ Worker 检查版本、创建父目录，并在 bwrap 内调用现有原子写入
 
 拆分分支必须通过构建、类型检查和打包。单测覆盖字面量 argv、精确/快照化环境、stdin EOF 与提前关闭、PTY 要求和 spawn 后不重放、状态解析、二进制 worker 分帧、版本检查以及客户端结果处理。现有 Shell 服务测试继续包含在回归中。
 
-独立验证器必须在使用原生 PTY 的真实 Linux 上通过全部 36 项。它检查 namespace 标识、文件系统/网络隔离、字面量 argv 与引导环境、取消、超时、后台提升、继承 stdio 的结算、父进程死亡、worker 写入及完成证据伪造。负向对照使用成功的宿主访问检查越界写入与网络拒绝判定条件。缺少前置条件即失败；mock 和数字 PID 不能单独证明约束成立。执行前后产物哈希、源输入清单和记录的工作树脏状态标识被测候选。检查打包结果必须包含两个 worker；CLI 版本 smoke 仅验证打包，不代表公开沙箱启用。
+独立验证器必须在使用原生 PTY 的真实 Linux 上通过全部 36 项。它检查 namespace 标识、文件系统/网络隔离、字面量 argv 与引导环境、取消、超时、bwrap 后台提升、共享 Shell 对继承 stdio 的结算、父进程死亡、worker 写入及完成证据伪造。将继承 stdio 的探针放在 PID namespace 之外，可以直接验证共享 Shell 契约，而不依赖某个 bwrap 版本是否允许后台后代在 payload 退出后存活。负向对照使用成功的宿主访问检查越界写入与网络拒绝判定条件。缺少前置条件即失败；mock 和数字 PID 不能单独证明约束成立。执行前后产物哈希、源输入清单和记录的工作树脏状态标识被测候选。检查打包结果必须包含两个 worker；CLI 版本 smoke 仅验证打包，不代表公开沙箱启用。
 
 运行 `node scripts/sandbox-prototype/build.mjs /absolute/empty/install`，再用不会改写已哈希安装清单的命令安装锁定版本原生 PTY 依赖：`npm install --prefix /absolute/empty/install --no-save --package-lock=false @lydell/node-pty@1.2.0-beta.10`。随后执行该安装目录的 `verify.mjs`。使用可丢弃且互不重叠的安装、状态、工作区与临时根目录。在 PR 独立测试报告中记录本次结果；总 PR 的结果不能替代拆分分支的验证。

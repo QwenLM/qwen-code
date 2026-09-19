@@ -479,11 +479,13 @@ async function verify() {
       );
     }
     await check(
-      'pipes: promoted settlement waits for inherited stdio to close',
+      'pipes: shared promotion waits for inherited stdio to close',
       async () => {
         const gate = path.join(workspace, 'promoted-drain-gate');
         const exiting = path.join(workspace, 'promoted-parent-exiting');
+        const controller = new AbortController();
         let settle;
+        let settleCount = 0;
         let settledEarly = false;
         const settled = new Promise((resolve) => {
           settle = resolve;
@@ -498,12 +500,34 @@ async function verify() {
             clearInterval(timer);
             cp.spawn('/bin/sleep',['2'],{stdio:'inherit',detached:true}).unref();
             fs.writeFileSync(${JSON.stringify(exiting)},'exiting');
+            process.exit(0);
           },25);
         `);
-        const task = await start(command, false, {
-          postPromote: { onSettle: (value) => settle(value) },
-        });
-        task.controller.abort({
+        const task = await service.executeLaunch(
+          {
+            executable: '/bin/bash',
+            args: ['-c', command],
+            cwd: workspace,
+            env: cleanEnv,
+          },
+          () => {},
+          controller.signal,
+          false,
+          {},
+          {
+            streamStdout: true,
+            postPromote: {
+              onSettle: (value) => {
+                settleCount++;
+                settle(value);
+              },
+            },
+          },
+        );
+        remember(task.pid);
+        const parentStart = identity(task.pid);
+        assert.ok(parentStart);
+        controller.abort({
           kind: 'background',
           shellId: 'prototype-drain',
         });
@@ -511,14 +535,17 @@ async function verify() {
         assert.equal(promoted.promoted, true);
         writeFileSync(gate, 'continue');
         await waitForFile(exiting, 'promoted parent exit');
+        await until(
+          () => identity(task.pid) !== parentStart,
+          'promoted parent reaped',
+        );
         await delay(100);
         assert.equal(settledEarly, false);
         const final = await bounded(settled, 'inherited stdio settlement');
         assert.equal(final.exitCode, 0);
-        assert.deepEqual(await task.settled, {
-          state: 'confirmed',
-          exitCode: 0,
-        });
+        assert.equal(final.signal, null);
+        assert.equal(final.error, undefined);
+        assert.equal(settleCount, 1);
       },
     );
     for (const pty of [false, true]) {
