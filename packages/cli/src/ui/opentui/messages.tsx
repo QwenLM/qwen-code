@@ -106,7 +106,7 @@ export function hiddenLinesLabel(hiddenCount: number): string {
 }
 
 /** Physical rows a logical row occupies when soft-wrapped to `cols` columns. */
-function physicalRowCount(row: string, cols: number): number {
+export function physicalRowCount(row: string, cols: number): number {
   return Math.max(1, Math.ceil(getCachedStringWidth(row) / cols));
 }
 

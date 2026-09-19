@@ -56,6 +56,7 @@ import { decodePasteBytes, type PasteEvent } from '@opentui/core';
 import { C } from './theme.js';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import {
+  DEFAULT_MAX_ITEMS_TO_SHOW,
   DialogFrame,
   DialogSelect,
   FooterHint,
@@ -68,8 +69,11 @@ import {
   headWindowPhysical,
   hiddenLinesLabel,
   hiddenTailLinesLabel,
+  pendingCardMaxRows,
+  physicalRowCount,
   tailWindow,
   tailWindowPhysical,
+  toolCardText,
 } from './messages.js';
 import {
   cpLen,
@@ -141,6 +145,22 @@ function customFieldWindow(
  * hidden-rows label reports.
  */
 const EXPANDED_BODY_RESERVE_ROWS = 20;
+
+/**
+ * Rows the expanded exec body does not own and that do not vary per
+ * confirmation. Above the confirmation the transcript keeps its place —
+ * banner (6), startup notices (~3), and the prompt echo with its turn margin
+ * (2). Around the body: the inline confirmation's padding (2), the body and
+ * question boxes' bottom margins (2), and the waiting row with its margin
+ * below the confirmation (2). Everything else is measured at the call site
+ * because it varies per confirmation and wraps: the question row, the outcome
+ * rows, the hidden-lines label row, any warning rows, and the pending tool
+ * card, which paints the same command above the confirmation for as long as
+ * the call awaits approval. Budgeting the exec tail window without those rows
+ * let ctrl-s push the question and the outcome list off an 80-row viewport
+ * while Enter still committed the highlighted outcome (R7-1).
+ */
+const EXPANDED_DIALOG_CHROME_ROWS = 17;
 
 interface OutcomeOption {
   label: string;
@@ -347,6 +367,124 @@ function DiffBody({ fileDiff }: { fileDiff: string }) {
 }
 
 /**
+ * Exec confirmation body: the command in accent, windowed with TextBody's
+ * two-stage shape (duplicated rather than shared so the command keeps its
+ * accent styling). An uncapped command — a long heredoc — painted the
+ * question row and outcome list off the viewport. The collapsed window keeps
+ * the command's HEAD, where the irreversible part of an install script sits
+ * (`curl … | sh`, `rm -rf`, the heredoc body); ctrl-s expands to the tail,
+ * so the head is what the user sees first and the tail is one keystroke away.
+ */
+function ExecBody({
+  details,
+  prompt,
+}: {
+  details: ToolExecuteConfirmationDetails;
+  prompt: ConfirmationPrompt;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { width, height } = useTerminalDimensions();
+  const rows = useMemo(
+    () => sanitizeTerminalText(details.command).split('\n'),
+    [details.command],
+  );
+  // The inline confirmation's margin and padding (4 columns) plus the body
+  // box's own margin and padding leave the body width - 6 columns; the
+  // window helpers subtract their own 2, so the call sites pass width - 4
+  // and the wrap measurement lands on the painted width exactly.
+  const window = useMemo(
+    () => headWindowPhysical(rows, width - 4, MAX_BODY_ROWS),
+    [rows, width],
+  );
+  // Every variable row around the body is charged at its painted (wrapped)
+  // height, on the width it really gets: warnings wrap at the body's
+  // width - 6 columns, the question paints one box up at width - 4, outcome
+  // labels at width - 9 (the select list's selector and number columns take
+  // 5), and the pending card above the confirmation paints its capped
+  // description plus its hidden-tail row (the awaiting marker is inline on
+  // the card row). A logical count undercharges each of these, and this
+  // budget is exact-fit — an uncharged row pushes the approval surface off
+  // the viewport.
+  const bodyCols = Math.max(width - 6, 10);
+  const questionCols = Math.max(width - 4, 10);
+  const labelCols = Math.max(width - 9, 10);
+  const warningRows = (details.warnings ?? []).reduce(
+    (sum, warning) =>
+      sum + physicalRowCount(sanitizeTerminalText(`⚠ ${warning}`), bodyCols),
+    0,
+  );
+  const questionRows = physicalRowCount(
+    sanitizeTerminalText(prompt.question),
+    questionCols,
+  );
+  const outcomeRows = prompt.options
+    .slice(0, DEFAULT_MAX_ITEMS_TO_SHOW)
+    .reduce(
+      (sum, option) => sum + physicalRowCount(option.label, labelCols),
+      0,
+    );
+  const cardRows =
+    pendingCardMaxRows(
+      height,
+      getCachedStringWidth(toolCardText(details.command)),
+      Math.max(width - 4, 1),
+    ) + 1;
+  const expandedWindow = useMemo(
+    () =>
+      tailWindowPhysical(
+        rows,
+        width - 4,
+        Math.max(
+          height -
+            EXPANDED_DIALOG_CHROME_ROWS -
+            cardRows -
+            questionRows -
+            outcomeRows -
+            1 -
+            warningRows,
+          1,
+        ),
+      ),
+    [rows, width, height, cardRows, questionRows, outcomeRows, warningRows],
+  );
+  // TextBody's honesty guard: the ctrl-s promise is "show more lines", so
+  // offer and honor it only when the expanded tail window actually reveals
+  // rows the collapsed head window hides.
+  const canExpand =
+    window.hiddenRows > 0 && expandedWindow.hiddenRows < window.hiddenRows;
+
+  useKeyboard((key) => {
+    if (key.ctrl && toOriginalKey(key).name === 's' && canExpand) {
+      setExpanded(true);
+    }
+  });
+
+  return (
+    <box flexDirection="column">
+      {(expanded ? expandedWindow.visible : window.visible).map((row, i) => (
+        <text key={`${i}`} fg={C.accent} attributes={1}>
+          {row}
+        </text>
+      ))}
+      {expanded && expandedWindow.hiddenRows > 0 ? (
+        <text fg={C.dim}>{hiddenLinesLabel(expandedWindow.hiddenRows)}</text>
+      ) : null}
+      {!expanded && window.hiddenRows > 0 ? (
+        <text fg={C.dim}>{hiddenTailLinesLabel(window.hiddenRows)}</text>
+      ) : null}
+      {!expanded && canExpand ? (
+        <text fg={C.dim}>Press ctrl-s to show more lines</text>
+      ) : null}
+      {details.warnings?.map((warning, i) => (
+        <text key={`${i}`} fg={C.yellow}>
+          {sanitizeTerminalText(`⚠ ${warning}`)}
+        </text>
+      ))}
+    </box>
+  );
+}
+
+/**
  * Plain, sanitized text body. Long bodies keep their head (ink MaxSizedBox
  * overflowDirection 'bottom' parity) with a hidden-tail indicator plus the
  * ink ShowMoreLines hint; ctrl-s expands the full text. The cap counts
@@ -432,8 +570,10 @@ function TextBody({ text }: { text: string }) {
 /** The type-specific body of a tool confirmation. */
 function ConfirmationBody({
   details,
+  prompt,
 }: {
   details: ToolCallConfirmationDetails;
+  prompt: ConfirmationPrompt;
 }) {
   switch (details.type) {
     case 'edit':
@@ -451,18 +591,7 @@ function ConfirmationBody({
         </box>
       );
     case 'exec':
-      return (
-        <box flexDirection="column">
-          <text fg={C.accent} attributes={1}>
-            {sanitizeTerminalText(details.command)}
-          </text>
-          {details.warnings?.map((warning, i) => (
-            <text key={`${i}`} fg={C.yellow}>
-              {sanitizeTerminalText(`⚠ ${warning}`)}
-            </text>
-          ))}
-        </box>
-      );
+      return <ExecBody details={details} prompt={prompt} />;
     case 'mcp':
       return (
         <box flexDirection="column">
@@ -634,7 +763,7 @@ export function OpenTuiToolConfirmation(props: OpenTuiToolConfirmationProps) {
         paddingLeft={1}
         marginBottom={1}
       >
-        <ConfirmationBody details={details} />
+        <ConfirmationBody details={details} prompt={prompt} />
       </box>
       <box marginBottom={1}>
         <text fg={C.text}>{sanitizeTerminalText(prompt.question)}</text>
