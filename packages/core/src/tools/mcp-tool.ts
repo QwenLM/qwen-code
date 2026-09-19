@@ -1314,10 +1314,19 @@ function transformImageAudioBlock(
 }
 
 /**
+ * Recovery advice for media dropped from a tool result. The shared default
+ * points the user at an `@file` path, which cannot exist for bytes that live
+ * only inside an MCP response.
+ */
+const MCP_MEDIA_REMEDY =
+  'Ask the user to have the tool return a smaller or lower-resolution payload.';
+
+/**
  * Shrink oversized inline images to the same visual budget `read_file`
  * applies, so a full-resolution screenshot from a browser automation server
  * does not enter the conversation verbatim. Images that already fit, and any
- * the renderer cannot handle, are forwarded unchanged.
+ * the renderer cannot handle, are forwarded unchanged; media too large to send
+ * inline at all becomes a text placeholder instead.
  *
  * `subject` names the server and tool the bytes came from. It is the only way
  * to tell configured MCP servers apart in a bounding failure, since these bytes
@@ -1328,21 +1337,28 @@ async function boundInlineImageParts(
   signal: AbortSignal,
   subject: string,
 ): Promise<Part[]> {
+  const clampToInlineLimit = (part: Part) =>
+    clampInlineMediaPart(part, undefined, { remedy: MCP_MEDIA_REMEDY });
   const boundedParts: Part[] = [];
   for (const part of parts) {
     const inline = part.inlineData;
     // Gate on the shared predicate the vision bridge and
     // `getMcpErrorImageContent` already use, so this bound cannot drift from
     // the definition of "image" (and keeps excluding MCP audio blocks, which
-    // carry the identical `inlineData` shape). The `typeof` checks add no
-    // policy; they only narrow the optional fields for TypeScript.
+    // carry the identical `inlineData` shape). An untyped embedded resource
+    // blob is attempted as well: MCP makes a resource's mime optional and
+    // `transformResourceBlock` defaults it to `application/octet-stream`, so an
+    // image can arrive unlabelled — the renderer sniffs the real format, and a
+    // genuine non-image falls through the `decode_failed` fail-open below. The
+    // `typeof` checks add no policy; they only narrow the optional fields for
+    // TypeScript.
     if (
-      !isImagePart(part) ||
       !inline ||
       typeof inline.mimeType !== 'string' ||
-      typeof inline.data !== 'string'
+      typeof inline.data !== 'string' ||
+      !(isImagePart(part) || inline.mimeType === 'application/octet-stream')
     ) {
-      boundedParts.push(part);
+      boundedParts.push(clampToInlineLimit(part));
       continue;
     }
     const { mimeType, data } = inline;
@@ -1377,6 +1393,19 @@ async function boundInlineImageParts(
             mimeType: view.mimeType,
           },
         };
+        // The envelope text part precedes its media part and still announces
+        // the server's original mime.
+        const envelope = boundedParts.at(-1);
+        const stated = `mime-type: ${mimeType}]`;
+        if (
+          typeof envelope?.text === 'string' &&
+          envelope.text.endsWith(stated)
+        ) {
+          const prefix = envelope.text.slice(0, -stated.length);
+          boundedParts[boundedParts.length - 1] = {
+            text: `${prefix}mime-type: ${view.mimeType}]`,
+          };
+        }
       }
     } catch (error) {
       if (!(error instanceof ImageViewError)) {
@@ -1392,7 +1421,7 @@ async function boundInlineImageParts(
         debugLogger.debug(message);
       }
     }
-    boundedParts.push(clampInlineMediaPart(boundedPart));
+    boundedParts.push(clampToInlineLimit(boundedPart));
   }
   return boundedParts;
 }

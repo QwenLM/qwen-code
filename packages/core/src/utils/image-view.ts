@@ -312,6 +312,28 @@ async function renderImageView(
 }
 
 /**
+ * Render the whole (oriented) frame under the shared visual budget. Both the
+ * file and the in-memory entry point below use it, so `read_file` and an MCP
+ * tool result cannot drift apart on overview geometry.
+ */
+async function renderFullFrameView(
+  label: string,
+  prepared: PreparedImage,
+  signal: AbortSignal,
+): Promise<ImageView> {
+  const { width: sourceWidth, height: sourceHeight } = orientedSize(
+    prepared.metadata,
+  );
+  return renderImageView(
+    label,
+    prepared,
+    { left: 0, top: 0, width: sourceWidth, height: sourceHeight },
+    boundedSize(sourceWidth, sourceHeight, 1),
+    signal,
+  );
+}
+
+/**
  * Bound an in-memory image (an MCP tool result, say) to the same visual budget
  * `read_file` applies. Returns null when the image already fits, so small
  * images keep their original bytes, format and alpha channel.
@@ -322,19 +344,10 @@ export async function boundImageBuffer(
   signal: AbortSignal,
 ): Promise<ImageView | null> {
   const prepared = await prepareImageBuffer(bytes, label, signal);
-  const { width: sourceWidth, height: sourceHeight } = orientedSize(
-    prepared.metadata,
-  );
-  if (fitsVisualBudget({ width: sourceWidth, height: sourceHeight })) {
+  if (fitsVisualBudget(orientedSize(prepared.metadata))) {
     return null;
   }
-  return renderImageView(
-    label,
-    prepared,
-    { left: 0, top: 0, width: sourceWidth, height: sourceHeight },
-    boundedSize(sourceWidth, sourceHeight, 1),
-    signal,
-  );
+  return renderFullFrameView(label, prepared, signal);
 }
 
 export async function renderImageOverview(
@@ -342,17 +355,7 @@ export async function renderImageOverview(
   signal: AbortSignal,
 ): Promise<ImageView> {
   const prepared = await prepareImage(filePath, signal);
-  const { width: sourceWidth, height: sourceHeight } = orientedSize(
-    prepared.metadata,
-  );
-  const outputSize = boundedSize(sourceWidth, sourceHeight, 1);
-  return renderImageView(
-    filePath,
-    prepared,
-    { left: 0, top: 0, width: sourceWidth, height: sourceHeight },
-    outputSize,
-    signal,
-  );
+  return renderFullFrameView(filePath, prepared, signal);
 }
 
 export async function renderNormalizedImageCrop(

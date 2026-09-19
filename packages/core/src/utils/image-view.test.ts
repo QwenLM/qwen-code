@@ -145,6 +145,28 @@ describe('image views', () => {
     expect(view!.bytes.length).toBeLessThan(bytes.length);
   });
 
+  it('bounds a buffer with the geometry read_file applies', async () => {
+    const bytes = await sharp({
+      create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
+    })
+      .png()
+      .toBuffer();
+    const filePath = path.join(root, 'overview.png');
+    await fs.writeFile(filePath, bytes);
+
+    const overview = await renderImageOverview(filePath, signal);
+    const bounded = await boundImageBuffer(bytes, 'image/png', signal);
+
+    expect(bounded).not.toBe(null);
+    expect({
+      outputWidth: bounded!.outputWidth,
+      outputHeight: bounded!.outputHeight,
+    }).toEqual({
+      outputWidth: overview.outputWidth,
+      outputHeight: overview.outputHeight,
+    });
+  });
+
   it('reports unsupported_image for a format the renderer cannot bound', async () => {
     const bytes = await sharp({
       create: { width: 3840, height: 2160, channels: 3, background: '#804020' },
