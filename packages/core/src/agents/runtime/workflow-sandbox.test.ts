@@ -142,6 +142,25 @@ return x;`;
     const src = `\n\n  export const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
     expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
   });
+
+  // Issue #12217: model-authored scripts commonly start with a header
+  // comment that the user did not strip by hand. The regex must allow
+  // leading line and block comments without re-introducing the T33 risk
+  // (no `/m`, no inner-of-template-literal false match).
+  it('strips export const meta preceded by a single-line comment (#12217)', () => {
+    const src = `// note\nexport const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
+    expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
+  });
+
+  it('strips export const meta preceded by a block comment (#12217)', () => {
+    const src = `/* note */\nexport const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
+    expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
+  });
+
+  it('strips export const meta preceded by multiple comments (#12217)', () => {
+    const src = `// first\n// second\n/* third */\nexport const meta = { name: 'x' }\nphase("plan")`;
+    expect(stripExportMeta(src).trim()).toBe('phase("plan")');
+  });
 });
 
 describe('extractAndStripMeta', () => {

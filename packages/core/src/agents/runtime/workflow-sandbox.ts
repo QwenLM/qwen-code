@@ -50,11 +50,15 @@ function findMetaBlockBounds(source: string): {
   afterMeta: number;
 } | null {
   // T33 (PR #4732 R4): anchor at file start (no `/m` flag). Per the design
-  // doc, `export const meta = {...}` must be the script's FIRST statement.
-  // With `/m`, the regex matched every line-start occurrence — including
-  // inside template literals — and the brace-walker then ripped content
-  // out of the string body, silently corrupting the script.
-  const re = /^\s*export\s+const\s+meta\s*=\s*\{/;
+  // doc, `export const meta = {...}` must be the script's first statement
+  // once comments are skipped. With `/m`, the regex matched every
+  // line-start occurrence — including inside template literals — and the
+  // brace-walker then ripped content out of the string body, silently
+  // corrupting the script. Leading line and block comments are tolerated,
+  // because model-authored scripts commonly start with an explanatory
+  // header that the user did not strip by hand (issue #12217).
+  const re =
+    /^\s*(?:\/\/[^\n]*\s*|\/\*[\s\S]*?\*\/\s*)*export\s+const\s+meta\s*=\s*\{/;
   const match = re.exec(source);
   if (!match) return null;
   const exportIdx = match.index;
