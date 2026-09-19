@@ -3968,6 +3968,18 @@ export interface DaemonLiveSetupStatus {
   keySource?: 'route' | 'settings';
   /** The environment variable a `route` key is read from. Never its value. */
   keyEnv?: string;
+  /**
+   * Why the resolved route cannot produce a credential (rejected `baseUrl`,
+   * missing `envKey`). Absent when the credential resolves, when the only
+   * problem is the unset `keyEnv` variable, and on older daemons.
+   */
+  keyError?: string;
+  /**
+   * Whether a clear-text `liveVoice.apiKey` is stored (never its value), so
+   * `clear` can be offered even when the selected model cannot use the key.
+   * Absent on older daemons.
+   */
+  storedKey?: boolean;
   /** Why `model` cannot be resolved; absent when it resolves. */
   modelError?: string;
   /** Absent on daemons that predate selectable Live Voice models. */

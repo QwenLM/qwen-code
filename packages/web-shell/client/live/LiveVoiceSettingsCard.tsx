@@ -78,15 +78,20 @@ export function LiveVoiceSettingsCard({
   // A `realtimeOnly` route reads its key from an environment variable; the
   // daemon refuses to store one for it, so there is nothing to type here.
   const keyFromRoute = status?.keySource === 'route';
+  // Until the first status arrives the key's source is unknown, so the
+  // input stays hidden rather than invite a write the daemon may refuse.
   // While the model does not resolve, the daemon refuses `apiKey: replace`
-  // as well; the modelError alert carries the remediation on its own. The
-  // remove-key action stays: clearing a stored key keeps working there.
-  const keyEditable = !keyFromRoute && !status?.modelError;
+  // as well; the modelError alert carries the remediation on its own.
+  const keyEditable =
+    status !== undefined && !keyFromRoute && !status.modelError;
   const modelChoices = status ? liveModelOptions(status) : undefined;
   const savedVoice = status?.voice ?? '';
   // Absent on daemons that predate selectable voices; an update there is
   // refused with empty_live_setup_update, so the control stays read-only.
   const voiceSelectable = status?.voice !== undefined;
+  // Every voice change is refused with invalid_live_model while the model
+  // does not resolve; the model picker is the only in-UI recovery.
+  const voiceEditable = voiceSelectable && status?.modelError === undefined;
   const [voice, setVoice] = useState(savedVoice);
   useEffect(() => {
     setVoice(savedVoice);
@@ -213,7 +218,9 @@ export function LiveVoiceSettingsCard({
                     : 'settings.liveSetup.notConfigured',
                 )}
               </Badge>
-              {status?.keyConfigured && !enabled && !keyFromRoute ? (
+              {!enabled &&
+              (status?.storedKey === true ||
+                (status?.keyConfigured === true && !keyFromRoute)) ? (
                 <Button
                   type="button"
                   size="xs"
@@ -227,14 +234,24 @@ export function LiveVoiceSettingsCard({
             </div>
           </div>
           {keyFromRoute ? (
-            <p className="text-xs text-muted-foreground" data-live-key-route>
-              {t(
-                status?.keyConfigured
-                  ? 'settings.liveSetup.keyFromEnv'
-                  : 'settings.liveSetup.keyFromEnvMissing',
-                { env: status?.keyEnv ?? '' },
-              )}
-            </p>
+            status?.keyError ? (
+              <p
+                className="text-xs text-destructive"
+                role="alert"
+                data-live-key-error
+              >
+                {status.keyError}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground" data-live-key-route>
+                {t(
+                  status?.keyConfigured
+                    ? 'settings.liveSetup.keyFromEnv'
+                    : 'settings.liveSetup.keyFromEnvMissing',
+                  { env: status?.keyEnv ?? '' },
+                )}
+              </p>
+            )
           ) : keyEditable ? (
             <div className="flex gap-2">
               <Input
@@ -297,7 +314,9 @@ export function LiveVoiceSettingsCard({
               {status.modelError}
             </p>
           ) : null}
-          {status && !status.models?.length ? (
+          {status &&
+          status.models !== undefined &&
+          status.models.length === 0 ? (
             <p className="text-xs text-muted-foreground">
               {t('settings.liveSetup.modelHint')}
             </p>
@@ -316,13 +335,13 @@ export function LiveVoiceSettingsCard({
               id="live-realtime-voice"
               autoComplete="off"
               value={voice}
-              disabled={setup.mutating || !voiceSelectable}
+              disabled={setup.mutating || !voiceEditable}
               onChange={(event) => setVoice(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') void saveVoice();
               }}
             />
-            {voiceSelectable ? (
+            {voiceEditable ? (
               <Button
                 type="button"
                 size="sm"

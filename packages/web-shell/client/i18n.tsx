@@ -601,7 +601,7 @@ const EN: Messages = {
     `The selected model reads its key from ${v?.env ?? ''}, which is not set in the daemon's environment.`,
   'settings.liveSetup.model': 'Realtime model',
   'settings.liveSetup.modelHint':
-    'Add a model with realtimeOnly: true under modelProviders to choose it here.',
+    'Add a model with realtimeOnly: true under modelProviders in your user settings (~/.qwen/settings.json) to choose it here.',
   'settings.liveSetup.voice': 'Voice',
   'settings.liveSetup.voiceHint':
     'A voice name of the selected model. It is checked with the provider when Live Voice is on.',
@@ -4639,7 +4639,7 @@ const ZH: Messages = {
     `所选模型从 ${v?.env ?? ''} 读取 key，但 daemon 的环境里没有设置它。`,
   'settings.liveSetup.model': 'Realtime 模型',
   'settings.liveSetup.modelHint':
-    '在 modelProviders 下添加带 realtimeOnly: true 的模型后，即可在此选择。',
+    '在用户设置（~/.qwen/settings.json）的 modelProviders 下添加带 realtimeOnly: true 的模型后，即可在此选择。',
   'settings.liveSetup.voice': '音色',
   'settings.liveSetup.voiceHint':
     '所选模型的音色名称。开启 Live Voice 时保存前会先向 provider 校验。',

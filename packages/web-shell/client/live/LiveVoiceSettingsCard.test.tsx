@@ -74,6 +74,12 @@ function mount(
   return container;
 }
 
+function removeKeyButton(container: HTMLElement): HTMLElement | undefined {
+  return Array.from(container.querySelectorAll('button')).find((button) =>
+    button.textContent?.includes('settings.liveSetup.removeKey'),
+  );
+}
+
 function click(element: HTMLElement): void {
   element.dispatchEvent(
     new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
@@ -158,6 +164,33 @@ describe('LiveVoiceSettingsCard', () => {
     }
 
     it('names the variable instead of asking for a key the route would ignore', () => {
+      const setup = setupResult({
+        keySource: 'route',
+        keyEnv: 'DASHSCOPE_API_KEY',
+        keyConfigured: true,
+        storedKey: true,
+        enabled: false,
+      });
+      const container = mount(setup);
+
+      // The daemon refuses `apiKey: replace` for a route; offering the field
+      // would only produce that error.
+      expect(container.querySelector('#live-realtime-key')).toBeNull();
+      expect(
+        container.querySelector('[data-live-key-route]')?.textContent,
+      ).toBe('settings.liveSetup.keyFromEnv');
+      // A stored key stays revocable: the daemon accepts `clear` for a route.
+      const remove = removeKeyButton(container);
+      expect(remove).toBeDefined();
+      act(() => {
+        remove?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(setup.update).toHaveBeenCalledWith({
+        apiKey: { operation: 'clear' },
+      });
+    });
+
+    it('offers no key removal for a route when nothing is stored', () => {
       const container = mount(
         setupResult({
           keySource: 'route',
@@ -166,17 +199,61 @@ describe('LiveVoiceSettingsCard', () => {
           enabled: false,
         }),
       );
+      // The key lives in the environment; there is nothing to remove.
+      expect(removeKeyButton(container)).toBeUndefined();
+    });
 
-      // The daemon refuses `apiKey: replace` for a route; offering the field
-      // would only produce that error.
+    it('keeps a stored key revocable while the model does not resolve', () => {
+      const setup = setupResult({
+        enabled: false,
+        keySource: 'settings',
+        keyConfigured: false,
+        storedKey: true,
+        model: 'omni-realtime',
+        models: [
+          { id: 'omni-realtime', provider: 'openai' },
+          { id: 'omni-realtime', provider: 'dashscope-intl' },
+        ],
+        modelError:
+          "experimental.liveVoice.model 'omni-realtime' matches more than one realtimeOnly route; qualify it as provider:modelId.",
+      });
+      const container = mount(setup);
+
+      // keyConfigured is false here, yet the stored key exists and the
+      // daemon accepts `clear` — hiding Remove would strand it.
+      const remove = removeKeyButton(container);
+      expect(remove).toBeDefined();
+      act(() => {
+        remove?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(setup.update).toHaveBeenCalledWith({
+        apiKey: { operation: 'clear' },
+      });
+    });
+
+    it('withholds the key input until the first status arrives', () => {
+      const container = mount({ ...setupResult({}), status: undefined });
+      // The key's source is unknown during the initial load; rendering the
+      // input would invite a write the daemon may refuse (route models).
       expect(container.querySelector('#live-realtime-key')).toBeNull();
-      expect(
-        container.querySelector('[data-live-key-route]')?.textContent,
-      ).toBe('settings.liveSetup.keyFromEnv');
-      // Nor a way to "remove" a key that lives in the environment.
-      expect(container.textContent).not.toContain(
-        'settings.liveSetup.removeKey',
+    });
+
+    it('reports why a route cannot produce a credential instead of blaming the environment', () => {
+      const container = mount(
+        setupResult({
+          keySource: 'route',
+          keyConfigured: false,
+          keyError:
+            "Live Voice model 'omni-realtime' must declare baseUrl and envKey in modelProviders.",
+        }),
       );
+      expect(container.querySelector('[data-live-key-route]')).toBeNull();
+      expect(container.textContent).not.toContain(
+        'settings.liveSetup.keyFromEnvMissing',
+      );
+      expect(
+        container.querySelector('[data-live-key-error]')?.textContent,
+      ).toContain('must declare baseUrl and envKey');
     });
 
     it('names the route key variable in the rendered sentence', () => {
@@ -273,6 +350,24 @@ describe('LiveVoiceSettingsCard', () => {
           .dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
       expect(input.value).toBe('Tina');
+    });
+
+    it('makes the voice control read-only while the model does not resolve', () => {
+      const container = mount(
+        setupResult({
+          voice: 'Tina',
+          models: [],
+          modelError:
+            "experimental.liveVoice.model 'openai:gpt-realtime' names no realtimeOnly route under modelProviders.openai.",
+        }),
+      );
+      const input = container.querySelector<HTMLInputElement>(
+        '#live-realtime-voice',
+      );
+      // Every voice change is refused invalid_live_model here; offering the
+      // control would only discard what the user typed.
+      expect(input?.disabled).toBe(true);
+      expect(container.querySelector('[data-live-voice-save]')).toBeNull();
     });
 
     it('offers no voice control when the daemon predates selectable voices', () => {
@@ -373,6 +468,15 @@ describe('LiveVoiceSettingsCard', () => {
 
     it('shows no model hint before the status has loaded', () => {
       const container = mount({ ...setupResult({}), status: undefined });
+      expect(container.textContent).not.toContain(
+        'settings.liveSetup.modelHint',
+      );
+    });
+
+    it('shows no model hint on a daemon that predates the route list', () => {
+      // `models` absent means "older daemon": no configuration change can
+      // produce a picker there, so the instruction would be a dead end.
+      const container = mount(setupResult({}));
       expect(container.textContent).not.toContain(
         'settings.liveSetup.modelHint',
       );

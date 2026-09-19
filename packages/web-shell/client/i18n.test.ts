@@ -31,10 +31,24 @@ describe('web-shell i18n catalog', () => {
   });
 
   it('carries the next-call hint in both locales', () => {
-    for (const language of ['en', 'zh-CN'] as const) {
-      expect(
-        getTranslator(language)('settings.liveSetup.appliesNextCall'),
-      ).not.toBe('settings.liveSetup.appliesNextCall');
-    }
+    // Content assertions, not just presence: a missing zh-CN entry falls
+    // back to the EN copy, which a not-the-key check cannot catch.
+    expect(getTranslator('en')('settings.liveSetup.appliesNextCall')).toContain(
+      'next call',
+    );
+    expect(
+      getTranslator('zh-CN')('settings.liveSetup.appliesNextCall'),
+    ).toContain('下一次通话');
+  });
+
+  // Routes load from user scope only (a repository must not redirect
+  // microphone audio), so the hint must name user settings, in both locales.
+  it('names the user settings scope in the model hint', () => {
+    expect(getTranslator('en')('settings.liveSetup.modelHint')).toContain(
+      'user settings',
+    );
+    expect(getTranslator('zh-CN')('settings.liveSetup.modelHint')).toContain(
+      '用户设置',
+    );
   });
 });

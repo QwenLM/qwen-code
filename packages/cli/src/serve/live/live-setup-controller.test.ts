@@ -19,6 +19,7 @@ import {
 function createHarness(
   options: {
     initiallyEnabled?: boolean;
+    apiKey?: string;
     modelProviders?: Record<string, unknown[]>;
     env?: Record<string, string | undefined>;
   } = {},
@@ -29,6 +30,7 @@ function createHarness(
       liveVoice: {
         enabled: initiallyEnabled,
         shortcut: 'Command+E',
+        ...(options.apiKey ? { apiKey: options.apiKey } : {}),
       },
     },
     ...(options.modelProviders
@@ -260,7 +262,56 @@ describe('LiveSetupController', () => {
         modelProviders: { openai: [route] },
         env: {},
       });
-      expect((await harness.controller.getStatus()).keyConfigured).toBe(false);
+      const status = await harness.controller.getStatus();
+      expect(status.keyConfigured).toBe(false);
+      // An unset variable is the one cause the card explains on its own
+      // ("not set"), so it is not also reported as a route defect.
+      expect(status.keyError).toBeUndefined();
+      expect(status.storedKey).toBe(false);
+    });
+
+    it('reports why a route without envKey cannot produce a credential', async () => {
+      const harness = createHarness({
+        modelProviders: { openai: [{ id: route.id, realtimeOnly: true }] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      const status = await harness.controller.getStatus();
+      expect(status.keyConfigured).toBe(false);
+      // No variable to blame: the route itself is incomplete.
+      expect(status.keyEnv).toBeUndefined();
+      expect(status.keyError).toMatch(/must declare baseUrl and envKey/);
+    });
+
+    it('keeps a stored key reported and revocable while the model is ambiguous', async () => {
+      const harness = createHarness({
+        apiKey: 'stored-clear-text',
+        modelProviders: { openai: [route], 'dashscope-intl': [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      const status = await harness.controller.getStatus();
+      expect(status.modelError).toMatch(/more than one realtimeOnly route/);
+      expect(status.keyConfigured).toBe(false);
+      expect(status.storedKey).toBe(true);
+      expect(JSON.stringify(status)).not.toContain('stored-clear-text');
+
+      // The unusable model refuses `replace`, but `clear` must keep working.
+      await harness.controller.update({ apiKey: { operation: 'clear' } });
+      expect((await harness.controller.getStatus()).storedKey).toBe(false);
+    });
+
+    it('reports a stored key alongside a route key, still revocable', async () => {
+      const harness = createHarness({
+        apiKey: 'stored-clear-text',
+        modelProviders: { openai: [route] },
+        env: { DASHSCOPE_API_KEY: 'env-secret' },
+      });
+      const status = await harness.controller.getStatus();
+      expect(status.keySource).toBe('route');
+      expect(status.keyConfigured).toBe(true);
+      expect(status.storedKey).toBe(true);
+
+      await harness.controller.update({ apiKey: { operation: 'clear' } });
+      expect((await harness.controller.getStatus()).storedKey).toBe(false);
     });
 
     it('enables through a route without any liveVoice.apiKey', async () => {
@@ -374,6 +425,13 @@ describe('LiveSetupController', () => {
       ).rejects.toMatchObject({ code: 'invalid_live_model', status: 400 });
       expect(harness.validateCredential).not.toHaveBeenCalled();
       expect(harness.persistSettings).not.toHaveBeenCalled();
+
+      // The status names the real cause; blaming the environment variable
+      // (which is set) would send the user to the wrong fix.
+      const status = await harness.controller.getStatus();
+      expect(status.keyConfigured).toBe(false);
+      expect(status.keyError).toMatch(/supported secure DashScope/);
+      expect(JSON.stringify(status)).not.toContain('env-secret');
     });
   });
 

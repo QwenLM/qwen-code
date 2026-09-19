@@ -313,13 +313,19 @@ describe('useLiveVoice', () => {
 
     function Harness() {
       live = useLiveVoice();
-      return <span>{live.status?.message ?? 'no-message'}</span>;
+      return (
+        <span>
+          {live.status?.state ?? 'pending'}|
+          {live.status?.message ?? 'no-message'}
+        </span>
+      );
     }
 
     await act(async () => {
       root.render(<Harness />);
       await Promise.resolve();
     });
+    expect(container.textContent).toBe('idle|no-message');
 
     let startPromise: Promise<void> | undefined;
     act(() => {
@@ -337,14 +343,114 @@ describe('useLiveVoice', () => {
         shortcut: '',
       });
     });
-    expect(container.textContent).toBe('no-message');
+    expect(container.textContent).toBe('listening|no-message');
 
     await act(async () => {
       rejectStart?.(new Error('provider validation failed'));
       await startPromise;
     });
 
-    expect(container.textContent).toBe('provider validation failed');
+    expect(container.textContent).toBe('error|provider validation failed');
     act(() => root.unmount());
+  });
+
+  it('does not start a status poll while a mutation is in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.liveStatus.mockResolvedValue({
+        v: 1,
+        available: true,
+        state: 'idle',
+        shortcut: 'Command+Q',
+      });
+      let resolveStart: ((value: unknown) => void) | undefined;
+      mocks.workspace.client.startLive.mockReturnValue(
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        }),
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      let live: UseLiveVoiceResult | undefined;
+
+      function Harness() {
+        live = useLiveVoice();
+        return <span>{live.status?.state ?? 'pending'}</span>;
+      }
+
+      await act(async () => {
+        root.render(<Harness />);
+        await Promise.resolve();
+      });
+      expect(container.textContent).toBe('idle');
+
+      let startPromise: Promise<void> | undefined;
+      act(() => {
+        startPromise = live?.start('new');
+      });
+
+      // The 1 s poll interval fires while the mutation is still pending;
+      // polling now would race the mutation's own delivered status.
+      await act(async () => {
+        vi.advanceTimersByTime(1_100);
+      });
+
+      // The mutation settles only after that: its outcome must stand.
+      await act(async () => {
+        resolveStart?.({
+          v: 1,
+          available: true,
+          state: 'listening',
+          shortcut: 'Command+Q',
+        });
+        await startPromise;
+      });
+
+      expect(container.textContent).toBe('listening');
+      expect(mocks.liveStatus).toHaveBeenCalledTimes(1);
+      act(() => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not stack duplicate polls while pushes keep arriving', async () => {
+    vi.useFakeTimers();
+    try {
+      // A slow daemon: the poll never settles within the test.
+      mocks.liveStatus.mockReturnValue(new Promise(() => {}));
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      function Harness() {
+        const live = useLiveVoice();
+        return <span>{live.status?.state ?? 'pending'}</span>;
+      }
+      act(() => root.render(<Harness />));
+
+      // Each push bumps the poll generation to retire stale answers; the
+      // interval must not turn that into a new request while one is in
+      // flight (a Host call pushes several times per second).
+      for (let i = 0; i < 2; i++) {
+        act(() => {
+          browserHostMock.onStatus?.({
+            v: 1,
+            available: true,
+            state: 'speaking',
+            shortcut: '',
+          });
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(1_100);
+        });
+      }
+
+      expect(mocks.liveStatus).toHaveBeenCalledTimes(1);
+      act(() => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -60,9 +60,7 @@ export function useLiveVoice(): UseLiveVoiceResult {
   // identity is generationRef/mutationRef.
   const pollGenerationRef = useRef(0);
   const contextRef = useRef({ client: workspace.client, supported });
-  const requestRef = useRef<
-    { generation: number; promise: Promise<void> } | undefined
-  >(undefined);
+  const requestRef = useRef<Promise<void> | undefined>(undefined);
   const mutationRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -76,10 +74,11 @@ export function useLiveVoice(): UseLiveVoiceResult {
     if (!supported) return;
     // A mutation in flight delivers its own status; polling now would race it.
     if (mutationRef.current !== undefined) return;
+    // Dedupe on the in-flight request itself. The poll generation cannot key
+    // this: every push bumps it (to retire stale answers), so under a chatty
+    // Host each interval would stack another identical liveStatus request.
+    if (requestRef.current) return await requestRef.current;
     const generation = pollGenerationRef.current;
-    if (requestRef.current?.generation === generation) {
-      return await requestRef.current.promise;
-    }
     const request = (async () => {
       setLoading(true);
       try {
@@ -99,12 +98,12 @@ export function useLiveVoice(): UseLiveVoiceResult {
         if (mountedRef.current && pollGenerationRef.current === generation) {
           setLoading(false);
         }
-        if (requestRef.current?.generation === generation) {
+        if (requestRef.current === request) {
           requestRef.current = undefined;
         }
       }
     })();
-    requestRef.current = { generation, promise: request };
+    requestRef.current = request;
     return await request;
   }, [supported, workspace.client]);
 
@@ -117,6 +116,9 @@ export function useLiveVoice(): UseLiveVoiceResult {
       generationRef.current += 1;
       pollGenerationRef.current += 1;
       mutationRef.current = undefined;
+      // A request still pending on the replaced client must not absorb the
+      // first refresh against the new one.
+      requestRef.current = undefined;
     }
     setStatus(undefined);
     setLoading(false);
