@@ -189,9 +189,11 @@ vi.mock('../utils/markdownUtilities.js', async (importOriginal) => {
   };
 });
 
+const mockLogMessage = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+
 vi.mock('./useLogger.js', () => ({
   useLogger: vi.fn().mockReturnValue({
-    logMessage: vi.fn().mockResolvedValue(undefined),
+    logMessage: mockLogMessage,
   }),
 }));
 
@@ -13200,6 +13202,34 @@ describe('useLlmStream', () => {
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
         expect(mockSendMessageStream).not.toHaveBeenCalled(); // No LLM call made
       });
+    });
+
+    it('keeps slash command dispatch idle before the command action runs', async () => {
+      let releaseLog!: () => void;
+      mockLogMessage.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseLog = resolve;
+          }),
+      );
+      mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+      const hook = renderTestHook([], undefined, undefined, undefined, {
+        logMessage: mockLogMessage,
+      } as unknown as Logger);
+
+      let submitPromise!: Promise<void>;
+      await act(async () => {
+        submitPromise = hook.result.current.submitQuery('/cd D:/Games');
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(mockLogMessage).toHaveBeenCalled());
+      expect(hook.result.current.streamingState).toBe(StreamingState.Idle);
+
+      await act(async () => {
+        releaseLog();
+        await submitPromise;
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
 
     it('should call Gemini with prompt content when slash command returns a `submit_prompt` action', async () => {
