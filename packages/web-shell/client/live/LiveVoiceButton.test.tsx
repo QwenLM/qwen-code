@@ -400,6 +400,70 @@ describe('mobile Live voice entry', () => {
     expect(onSupportedChange).toHaveBeenCalledWith(true);
     expect(mocks.result.refresh).toHaveBeenCalledOnce();
   });
+  it('reports capability arrival and removal on the same mounted root', () => {
+    mocks.result.supported = false;
+    const onSupportedChange = vi.fn();
+    mount({ onSupportedChange });
+    expect(onSupportedChange).toHaveBeenLastCalledWith(false);
+    for (const supported of [true, false]) {
+      mocks.result.supported = supported;
+      act(() =>
+        mounted
+          .at(-1)!
+          .root.render(
+            <LiveVoiceButton onSupportedChange={onSupportedChange} />,
+          ),
+      );
+      expect(onSupportedChange).toHaveBeenLastCalledWith(supported);
+    }
+    expect(onSupportedChange).toHaveBeenCalledTimes(3);
+  });
+
+  it('forwards controlled trigger opening and closing through the parent', () => {
+    const onOpenChange = vi.fn();
+    const container = mount({ open: false, onOpenChange });
+    click(container.querySelector('button')!);
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    expect(document.querySelector('[data-web-shell-live-dialog]')).toBeNull();
+    act(() =>
+      mounted
+        .at(-1)!
+        .root.render(<LiveVoiceButton open onOpenChange={onOpenChange} />),
+    );
+    expect(
+      document.querySelector('[data-web-shell-live-dialog]'),
+    ).not.toBeNull();
+    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+    click(
+      document.querySelector(
+        '[data-web-shell-live-dialog] [data-slot="dialog-close"]',
+      )!,
+    );
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('returns focus to the supplied mobile entry when the hidden-trigger dialog closes', async () => {
+    const fallback = document.createElement('button');
+    document.body.append(fallback);
+    const onRequestFocusFallback = () => fallback.focus();
+    mount({ hideInactiveTrigger: true, open: true, onRequestFocusFallback });
+    await act(async () => {
+      mounted
+        .at(-1)!
+        .root.render(
+          <LiveVoiceButton
+            hideInactiveTrigger
+            open={false}
+            onRequestFocusFallback={onRequestFocusFallback}
+          />,
+        );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    expect(document.activeElement).toBe(fallback);
+  });
+
   it('keeps the toolbar trigger available during an active call', () => {
     mocks.result.status = {
       ...mocks.result.status!,

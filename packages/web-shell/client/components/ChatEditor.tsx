@@ -90,6 +90,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   FolderClosedIcon,
+  HistoryIcon,
   KeyboardIcon,
   Maximize2Icon,
   LoaderCircleIcon,
@@ -1947,13 +1948,11 @@ export const ChatEditor = memo(
     const isMobile = Boolean(core.mobileComposer);
     const [mobileFocused, setMobileFocused] = useState(false);
     const [expandedEditor, setExpandedEditor] = useState(false);
-    const expandedTextareaRef = useRef<HTMLTextAreaElement>(null);
     const expandedSelectionRef = useRef<[number, number]>([0, 0]);
     const [liveVoiceOpen, setLiveVoiceOpen] = useState(false);
     const [liveVoiceSupported, setLiveVoiceSupported] = useState(false);
     useEffect(() => {
       setExpandedEditor(false);
-      setMobileFocused(false);
     }, [sessionId, atWorkspaceCwd, disabled]);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
@@ -2606,6 +2605,7 @@ export const ChatEditor = memo(
           ref={containerRef}
           className={styles.container}
           data-web-shell-composer-surface
+          tabIndex={-1}
           data-at-panel-open={hasAtMenu || undefined}
           data-upload-drag-active={uploadDragActive || undefined}
           data-image-drag-active={
@@ -2621,9 +2621,14 @@ export const ChatEditor = memo(
           // script consumes it today, kept as-is to stay faithful to the
           // restored original.
           data-dac-glow
-          onClick={() => {
+          onClick={(event) => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
+            if (
+              event.target instanceof Element &&
+              event.target.closest('[data-web-shell-mobile-editing-actions]')
+            )
+              return;
             core.focus();
           }}
         >
@@ -2658,6 +2663,10 @@ export const ChatEditor = memo(
                   ref={searchInputRef}
                   className={styles.searchInput}
                   data-web-shell-composer-history-search
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="search"
                   value={searchQuery}
                   onChange={handleSearchInput}
                   onCompositionEnd={handleSearchCompositionEnd}
@@ -2987,6 +2996,7 @@ export const ChatEditor = memo(
               />
             )}
             {isMobile &&
+              !mobileVoiceActive &&
               (workspaceSelectVisible ||
                 workspaceIndicatorVisible ||
                 gitBranchVisible) && (
@@ -2994,10 +3004,10 @@ export const ChatEditor = memo(
                   {workspaceControls}
                 </div>
               )}
-            {core.mobileComposer && (
+            {core.mobileComposer && !mobileVoiceActive && (
               <div
                 className={styles.mobileEditingActions}
-                onClick={(event) => event.stopPropagation()}
+                data-web-shell-mobile-editing-actions
               >
                 <button
                   type="button"
@@ -3021,13 +3031,31 @@ export const ChatEditor = memo(
                 >
                   <ArrowDownIcon />
                 </button>
-                {core.shellMode && (
+                {!showAddMenuAction && (
                   <button
                     type="button"
                     className={styles.toolBtn}
-                    onClick={() => core.setShellMode(false)}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.history')}
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={core.searchState.openHistorySearch}
                   >
-                    {t('quickActions.exitShellMode')}
+                    <HistoryIcon />
+                  </button>
+                )}
+                {(core.shellMode || !showAddMenuAction) && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={core.toggleShellMode}
+                  >
+                    {t(
+                      core.shellMode
+                        ? 'quickActions.exitShellMode'
+                        : 'quickActions.shellMode',
+                    )}
                   </button>
                 )}
                 <span className={styles.mobileEditingSpacer} />
@@ -3119,7 +3147,8 @@ export const ChatEditor = memo(
                   </div>
                 )}
                 <div className={styles.toolbarLeft}>
-                  {(showAddMenuAction || (isMobile && showCommandAction)) && (
+                  {(showAddMenuAction ||
+                    (isMobile && showCommandAction && !core.shellMode)) && (
                     <AddMenu
                       key={JSON.stringify([
                         sessionId,
@@ -3132,8 +3161,12 @@ export const ChatEditor = memo(
                         isMobile
                           ? {
                               commands,
+                              categoryOrder: slashCommandCategoryOrder,
                               onHistory: core.searchState.openHistorySearch,
-                              onToggleShell: core.toggleShellMode,
+                              onToggleShell: () => {
+                                core.toggleShellMode();
+                                core.focus();
+                              },
                               shellMode: core.shellMode,
                               onLiveVoice:
                                 liveVoiceSupported && showToolbarAction('voice')
@@ -3475,8 +3508,7 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
-                {!isMobile &&
-                  showToolbarAction('contextUsage') &&
+                {showToolbarAction('contextUsage') &&
                   (contextUsageAlwaysVisible ||
                     (contextWindow > 0 && tokenCount > 0)) && (
                     <ContextUsagePopover
@@ -3560,6 +3592,13 @@ export const ChatEditor = memo(
                       open={liveVoiceOpen}
                       onOpenChange={setLiveVoiceOpen}
                       onSupportedChange={setLiveVoiceSupported}
+                      onRequestFocusFallback={() => {
+                        containerRef.current
+                          ?.querySelector<HTMLButtonElement>(
+                            '[data-testid="composer-add-menu-trigger"]',
+                          )
+                          ?.focus();
+                      }}
                     />
                     <VoiceButton
                       disabled={disabled}
@@ -3582,7 +3621,7 @@ export const ChatEditor = memo(
                     className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
                     disabled={composerPreparing || !onCancel}
                     data-web-shell-composer-stop
-                    aria-label={t('stream.cancel')}
+                    aria-label={t('composerMobile.stop')}
                     onClick={(event) => {
                       event.stopPropagation();
                       onCancel?.();
@@ -3624,11 +3663,15 @@ export const ChatEditor = memo(
                       : showCancelButton
                         ? cancelArmed && !isMobile
                           ? t('stream.cancelArmed')
-                          : t('stream.cancel')
+                          : t(
+                              isMobile
+                                ? 'composerMobile.stop'
+                                : 'stream.cancel',
+                            )
                         : t('editor.send')
                   }
                   title={
-                    isRunning && cancelArmed
+                    isRunning && cancelArmed && !isMobile
                       ? t('stream.cancelArmed')
                       : undefined
                   }
@@ -3652,7 +3695,9 @@ export const ChatEditor = memo(
                   aria-live="polite"
                   className={styles.srOnly}
                 >
-                  {isRunning && cancelArmed ? t('stream.cancelArmed') : ''}
+                  {isRunning && cancelArmed && !isMobile
+                    ? t('stream.cancelArmed')
+                    : ''}
                 </span>
               </div>
             </div>
@@ -3842,14 +3887,17 @@ export const ChatEditor = memo(
               data-web-shell-expanded-editor
               onOpenAutoFocus={(event) => {
                 event.preventDefault();
-                expandedTextareaRef.current?.focus();
-                expandedTextareaRef.current?.setSelectionRange(
+                core.mobileComposer?.expandedTextareaRef.current?.focus();
+                core.mobileComposer?.expandedTextareaRef.current?.setSelectionRange(
                   ...expandedSelectionRef.current,
                 );
               }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
-                if (!disabled) {
+                if (disabled) {
+                  if (document.activeElement === document.body)
+                    containerRef.current?.focus();
+                } else {
                   const textarea = core.mobileComposer?.textareaRef.current;
                   textarea?.focus();
                   textarea?.setSelectionRange(...expandedSelectionRef.current);
@@ -3863,7 +3911,9 @@ export const ChatEditor = memo(
                   className="size-11"
                   aria-label={t('composerMobile.hideKeyboard')}
                   onPointerDown={(event) => event.preventDefault()}
-                  onClick={() => expandedTextareaRef.current?.blur()}
+                  onClick={() =>
+                    core.mobileComposer?.expandedTextareaRef.current?.blur()
+                  }
                 >
                   <KeyboardIcon />
                 </Button>
@@ -3876,7 +3926,7 @@ export const ChatEditor = memo(
                 </Button>
               </div>
               <textarea
-                ref={expandedTextareaRef}
+                ref={core.mobileComposer.expandedTextareaRef}
                 value={core.mobileComposer.value}
                 onChange={core.mobileComposer.onChange}
                 onPasteCapture={core.imageTransferHandlers.onPasteCapture}
@@ -3895,9 +3945,24 @@ export const ChatEditor = memo(
                   ];
                 }}
                 className={styles.mobileExpandedTextarea}
-                aria-label={t('composerMobile.expand')}
+                aria-label={core.mobileComposer.placeholder}
+                placeholder={core.mobileComposer.placeholder}
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
                 enterKeyHint="enter"
               />
+              {core.pastedImages.length + core.pastedFiles.length > 0 && (
+                <div
+                  role="status"
+                  className="text-sm text-muted-foreground"
+                  data-web-shell-expanded-attachments
+                >
+                  {t('composerMobile.attachments', {
+                    count: core.pastedImages.length + core.pastedFiles.length,
+                  })}
+                </div>
+              )}
               {isRunning && (
                 <Button
                   variant="outline"
@@ -3905,7 +3970,7 @@ export const ChatEditor = memo(
                   disabled={composerPreparing || !onCancel}
                   onClick={onCancel}
                 >
-                  {t('stream.cancel')}
+                  {t('composerMobile.stop')}
                 </Button>
               )}
             </DialogContent>

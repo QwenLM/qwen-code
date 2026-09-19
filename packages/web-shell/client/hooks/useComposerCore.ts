@@ -1348,6 +1348,7 @@ function handleMultilineHistoryBoundary(
  */
 export interface MobileComposerBackend {
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  expandedTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   value: string;
   onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onBlur: () => void;
@@ -1514,6 +1515,7 @@ export function useComposerCore(
   // mirrored into a ref so submit/getText read synchronously.
   const isTouchComposer = useIsTouchComposer();
   const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const expandedTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const mobileMaxHeightRef = useRef<number | null>(null);
   const [mobileText, setMobileTextState] = useState(() =>
     isTouchComposer ? (loadComposerDraft(composerDraftStorageKey) ?? '') : '',
@@ -4054,7 +4056,7 @@ export function useComposerCore(
 
   const focus = useCallback(() => {
     if (isTouchComposer) {
-      mobileTextareaRef.current?.focus();
+      (expandedTextareaRef.current ?? mobileTextareaRef.current)?.focus();
       return;
     }
     viewRef.current?.focus();
@@ -4063,13 +4065,13 @@ export function useComposerCore(
   const insertText = useCallback(
     (text: string, options?: WebShellComposerTextOptions) => {
       if (isTouchComposer) {
+        const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
         if (text) {
           if (options?.mode === 'replace') {
             setMobileText(text);
           } else {
             // No slash/at menus on the textarea backend: '/' and '@' are
             // inserted literally and interpreted from the submitted text.
-            const el = mobileTextareaRef.current;
             const current = mobileTextRef.current;
             const start = el ? el.selectionStart : current.length;
             const end = el ? el.selectionEnd : current.length;
@@ -4079,7 +4081,7 @@ export function useComposerCore(
             // value changes; put it back after React re-renders, matching
             // the CodeMirror path's explicit selection anchor.
             const restoreCaret = () => {
-              mobileTextareaRef.current?.setSelectionRange(caret, caret);
+              el?.setSelectionRange(caret, caret);
             };
             if (typeof requestAnimationFrame === 'function') {
               requestAnimationFrame(restoreCaret);
@@ -4088,7 +4090,7 @@ export function useComposerCore(
             }
           }
         }
-        mobileTextareaRef.current?.focus();
+        el?.focus();
         return;
       }
       const view = viewRef.current;
@@ -4563,11 +4565,9 @@ export function useComposerCore(
         ? shellHistoryActionsRef.current
         : historyActionsRef.current;
       history.resetSearch();
-      if (keepFocus) {
-        viewRef.current?.focus();
-      }
+      if (keepFocus) focus();
     },
-    [replaceEditorText],
+    [focus, replaceEditorText],
   );
 
   useEffect(() => {
@@ -4827,6 +4827,7 @@ export function useComposerCore(
     mobileComposer: isTouchComposer
       ? {
           textareaRef: mobileTextareaRef,
+          expandedTextareaRef,
           value: mobileText,
           onChange: handleMobileChange,
           onBlur: () => saveCurrentDraftRef.current(),

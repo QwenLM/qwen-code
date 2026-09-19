@@ -949,7 +949,11 @@ describe('mobile AddMenu', () => {
       const click = vi
         .spyOn(input, 'click')
         .mockImplementation(() => undefined);
+      input.accept = 'video/*';
+      input.multiple = label === 'Take photo';
+      input.setAttribute('capture', 'user');
       await tap(label);
+      expect(input.multiple).toBe(label !== 'Take photo');
       expect(click).toHaveBeenCalledOnce();
       expect(input.accept).toBe(accept);
       expect(input.getAttribute('capture')).toBe(capture);
@@ -964,6 +968,137 @@ describe('mobile AddMenu', () => {
       expect(props.onAddFiles).toHaveBeenCalledWith([file], destination);
     },
   );
+  it('waits for the mobile skills catalog before announcing an empty result', async () => {
+    const props = mobileProps({
+      skills: [],
+      skillsLoaded: false,
+      onSkillsOpenChange: vi.fn(),
+    });
+    renderWith(props);
+    await openMenu();
+    await tap('Skills');
+    expect(portalRoot!.querySelector('[role="status"]')).toBeNull();
+    rerenderWith({ ...props, skillsLoading: true });
+    expect(portalRoot!.querySelector('[role="status"]')!.textContent).toContain(
+      'Loading',
+    );
+    rerenderWith({ ...props, skillsLoaded: true });
+    expect(portalRoot!.querySelector('[role="status"]')!.textContent).toContain(
+      'No results',
+    );
+  });
+
+  it.each([false, true])(
+    'does not insert slash commands in shell mode (commandsOnly=%s)',
+    async (commandsOnly) => {
+      const props = mobileProps({ commandsOnly });
+      props.mobileActions!.shellMode = true;
+      renderWith(props);
+      await openMenu();
+      const drawer = portalRoot!.querySelector(
+        '[data-web-shell-mobile-add-menu]',
+      )!;
+      expect(
+        [...drawer.querySelectorAll('button')].some(
+          (b) =>
+            b.textContent === 'All commands' ||
+            b.textContent?.includes('/goal'),
+        ),
+      ).toBe(false);
+      expect(props.onPrependSkill).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves command metadata, ordering, slash normalization and description search', async () => {
+    const props = mobileProps();
+    props.mobileActions!.commands = [
+      { name: 'later', description: 'Secondary choice', completionPriority: 5 },
+      {
+        name: 'goal',
+        description: 'Plan an objective',
+        completionLabel: 'Goal shortcut',
+        completionSection: 'Host actions',
+        completionPriority: -1,
+        argumentHint: '<objective>',
+      },
+    ];
+    renderWith(props);
+    await openMenu();
+    await tap('All commands');
+    const rows = () =>
+      [
+        ...portalRoot!.querySelectorAll(
+          '[data-web-shell-mobile-add-menu] button',
+        ),
+      ].filter(
+        (b) =>
+          b.textContent?.includes('Goal shortcut') ||
+          b.textContent?.includes('Secondary choice'),
+      );
+    expect(rows()[0]!.textContent).toContain('Goal shortcut');
+    expect(rows()[0]!.textContent).toContain('<objective>');
+    const search = portalRoot!.querySelector<HTMLInputElement>(
+      '[aria-label="Search commands"]',
+    )!;
+    for (const query of ['  /goal  ', 'objective']) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, query);
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]!.textContent).toContain('Goal shortcut');
+    }
+    await act(async () => (rows()[0] as HTMLButtonElement).click());
+    await settle();
+    expect(props.onPrependSkill).toHaveBeenCalledExactlyOnceWith('/goal');
+  });
+
+  it('inserts a mobile reference only after the drawer releases focus', async () => {
+    const props = mobileProps({
+      getWorkspaceActions: () => ({
+        globWorkspace: vi.fn().mockResolvedValue({ matches: ['src/main.ts'] }),
+      }),
+    });
+    props.onInsertReference.mockImplementation(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
+    });
+    renderWith(props);
+    await openMenu();
+    await tap('Reference file');
+    await typeIntoSearch('composer-add-menu-reference-file-search', 'main');
+    await act(async () =>
+      menuItem('composer-add-menu-reference-file-item')!.click(),
+    );
+    await settle();
+    expect(props.onInsertReference).toHaveBeenCalledOnce();
+    expect(props.onInsertReference.mock.calls[0]![0].serialized).toContain(
+      'src/main.ts',
+    );
+  });
+
+  it.each([false, true])(
+    'closes before toggling shell from shellMode=%s',
+    async (shellMode) => {
+      const props = mobileProps();
+      props.mobileActions!.shellMode = shellMode;
+      const onToggle = vi.fn(() => {
+        expect(
+          portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+        ).toBeNull();
+      });
+      props.mobileActions!.onToggleShell = onToggle;
+      renderWith(props);
+      await openMenu();
+      await tap(shellMode ? 'Exit Shell' : 'Shell mode');
+      expect(onToggle).toHaveBeenCalledOnce();
+    },
+  );
+
   it('prefixes a selected command through the insertion lane and closes', async () => {
     const props = mobileProps();
     renderWith(props);
@@ -989,6 +1124,11 @@ describe('mobile AddMenu', () => {
         description: 'Plan first',
         onToggle,
       },
+    });
+    props.mobileActions!.onHistory = vi.fn(() => {
+      expect(
+        portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+      ).toBeNull();
     });
     renderWith(props);
     await openMenu();

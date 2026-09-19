@@ -144,7 +144,7 @@ Behavior-level, not tied to an implementation shape:
 5. Selecting a skill with an empty draft yields the invocation followed by a space. Selecting a skill with a non-empty draft yields the invocation, a space, then the previous draft — with any reference chips intact.
 6. No insert loses already-typed text or already-inserted references.
 7. When an individual capability is unavailable, its item is hidden or disabled with a reason; `+` itself remains visible whenever `addMenu` is in the host's toolbar item list. If every inner item is unavailable, `+` opens to an empty-state row and does not silently vanish.
-8. Touch and desktop show the same set, subject to the real-device submenu check.
+8. Desktop keeps the set described here. Touch uses the pages and additional editing actions defined in [Mobile composer actions](mobile-composer-actions.md); verify both surfaces against their respective designs.
 9. A long submenu scrolls instead of overflowing the viewport.
 10. Pointer interaction is covered; keyboard navigation is unsupported and has no feature-specific implementation.
 11. With `plan` listed and a toggle supplied, Plan mode is the last row, shows a check while Plan is on, toggles once per choice, returns focus to the composer, and is disabled with the reason "Switching mode" while mode controls are busy. Without `plan` or without a toggle the row is absent. It remains under the empty-state row.

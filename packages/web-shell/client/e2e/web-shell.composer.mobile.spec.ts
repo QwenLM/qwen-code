@@ -63,7 +63,7 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   );
 });
 
-test('keeps voice controls reachable on an extra-narrow touch viewport', async ({
+test('keeps voice controls reachable on an extra-narrow touch viewport @smoke', async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 240, height: 700 });
@@ -101,6 +101,10 @@ test('keeps voice controls reachable on an extra-narrow touch viewport', async (
   await expect(add).toBeHidden();
   await expect(send).toBeVisible();
   await expect(activeToolbar.locator('button:visible')).toHaveCount(2);
+  await expect(
+    page.locator('[data-web-shell-mobile-editing-actions]'),
+  ).toBeHidden();
+  await expect(page.locator('[data-web-shell-git-branch]')).toBeHidden();
 });
 
 test('keeps a persisted wide sidebar inside the mobile drawer and exposes close', async ({
@@ -302,7 +306,7 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
 });
 
 for (const width of [390, 240]) {
-  test(`history arrows restore the draft without submitting at ${width}px`, async ({
+  test(`history arrows restore the draft without submitting at ${width}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
@@ -372,7 +376,7 @@ test('history arrows leave the draft intact when history is empty', async ({
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile editing preserves draft, selection and keyboard dismissal', async ({
+test('mobile editing preserves draft, selection and keyboard dismissal @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -413,7 +417,7 @@ test('mobile editing preserves draft, selection and keyboard dismissal', async (
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('expanded mobile editing retains attachment paste and selection exemptions', async ({
+test('expanded mobile editing retains attachment paste and selection exemptions @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -440,6 +444,9 @@ test('expanded mobile editing retains attachment paste and selection exemptions'
     page.locator('[data-web-shell-composer-attachments]'),
   ).toHaveCount(0);
   expect(await pasteLongText(false)).toBe(true);
+  await expect(
+    page.locator('[data-web-shell-expanded-attachments]'),
+  ).toContainText('Attached files/images: 1');
   await expanded.evaluate((element) => {
     const clipboard = new DataTransfer();
     const canvas = document.createElement('canvas');
@@ -457,6 +464,9 @@ test('expanded mobile editing retains attachment paste and selection exemptions'
       }),
     );
   });
+  await expect(
+    page.locator('[data-web-shell-expanded-attachments]'),
+  ).toContainText('Attached files/images: 2');
   await page.getByRole('button', { name: 'Done', exact: true }).tap();
   const attachments = page.locator('[data-web-shell-composer-attachments]');
   await expect(attachments).toContainText('pasted line');
@@ -467,7 +477,7 @@ test('expanded mobile editing retains attachment paste and selection exemptions'
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile drawer inserts commands without replacing or submitting the draft', async ({
+test('mobile drawer inserts commands without replacing or submitting the draft @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -496,7 +506,7 @@ test('mobile drawer inserts commands without replacing or submitting the draft',
   await expect(textarea).toHaveValue('/goal keep my instructions');
 });
 
-test('mobile stop remains reachable with a queued draft', async ({
+test('mobile stop remains reachable with a queued draft @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
@@ -584,3 +594,73 @@ function expectPromptBodyToContainText(
     ),
   ).toBe(true);
 }
+
+test('mobile history search restores results and draft focus @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 240, height: 700 });
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'qwen-web-shell-history',
+      JSON.stringify(['older saved input', 'newer saved input']),
+    ),
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('working draft');
+  const open = async () => {
+    await page.getByRole('button', { name: 'Add to message' }).tap();
+    await page
+      .getByRole('button', { name: 'Input history', exact: true })
+      .tap();
+  };
+  await open();
+  const search = page.locator('[data-web-shell-composer-history-search]');
+  await expect(search).toBeFocused();
+  expect((await search.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  await expect(search).toHaveCSS('font-size', '16px');
+  await search.fill('older');
+  await page.getByRole('button', { name: /older saved input/ }).tap();
+  await expect(textarea).toHaveValue('older saved input');
+  await expect(textarea).toBeFocused();
+  await textarea.fill('another draft');
+  await open();
+  await page
+    .locator('[data-web-shell-composer-surface]')
+    .getByRole('button', { name: 'close', exact: true })
+    .tap();
+  await expect(textarea).toHaveValue('another draft');
+  await expect(textarea).toBeFocused();
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile Shell entry closes the drawer and returns editor focus @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('keep draft');
+  await page.getByRole('button', { name: 'Add to message', exact: true }).tap();
+  await page.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await expect(textarea).toBeFocused();
+  await expect(textarea).toHaveValue('keep draft');
+  await expect(
+    page.getByRole('button', { name: 'Exit Shell', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Add to message', exact: true }).tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await expect(
+    drawer.getByRole('button', { name: 'All commands', exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    drawer.getByRole('button', { name: 'Skills', exact: true }),
+  ).toHaveCount(0);
+  await drawer.getByRole('button', { name: 'Exit Shell', exact: true }).tap();
+  await expect(textarea).toBeFocused();
+  await expect(textarea).toHaveValue('keep draft');
+  expect(daemon.promptRequests()).toHaveLength(0);
+});

@@ -3,7 +3,11 @@ import type { ChangeEvent } from 'react';
 import { ArrowLeftIcon, PlusIcon, SlashIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import type { CommandInfo } from '../../adapters/types';
-import type { SkillInfo } from '../../completions/slashCompletion';
+import {
+  getSlashCommandCompletionResult,
+  type SkillInfo,
+} from '../../completions/slashCompletion';
+import type { CommandDisplayCategoryOrder } from '../../utils/commandDisplay';
 import type {
   WebShellAtProvider,
   WebShellComposerTag,
@@ -68,6 +72,7 @@ export interface AddMenuProps {
   plan?: AddMenuPlanControl;
   mobileActions?: {
     commands: readonly CommandInfo[];
+    categoryOrder?: CommandDisplayCategoryOrder;
     onHistory: () => void;
     onToggleShell: () => void;
     shellMode: boolean;
@@ -85,6 +90,14 @@ export interface AddMenuPlanControl {
   description: string;
   onToggle: () => void;
 }
+
+type MobilePage =
+  | 'root'
+  | 'files'
+  | 'extensions'
+  | 'mcp'
+  | 'skills'
+  | 'commands';
 
 const ADD_MENU_SEARCH_DEBOUNCE_MS = 150;
 
@@ -196,6 +209,10 @@ function SearchableProviderSubmenu({
           value={query}
           placeholder={placeholder}
           aria-label={placeholder}
+          autoCapitalize={mobile ? 'off' : undefined}
+          autoCorrect={mobile ? 'off' : undefined}
+          spellCheck={mobile ? false : undefined}
+          enterKeyHint={mobile ? 'search' : undefined}
           data-testid={`${testIdPrefix}-search`}
           onChange={(event) => setQuery(event.target.value)}
           className={
@@ -225,14 +242,18 @@ function SearchableProviderSubmenu({
           {items.map((item) => {
             const content = (
               <span className="flex min-w-0 flex-col">
-                <span className="truncate">{item.label}</span>
+                <span
+                  className={mobile ? '[overflow-wrap:anywhere]' : 'truncate'}
+                >
+                  {item.label}
+                </span>
                 {(provider.id === EXTENSIONS_PROVIDER_ID
                   ? item.detail
                   : item.description) && provider.id !== FILE_PROVIDER_ID ? (
                   <span
                     className={
                       mobile
-                        ? 'truncate text-xs text-muted-foreground'
+                        ? '[overflow-wrap:anywhere] text-xs text-muted-foreground'
                         : 'hidden truncate text-xs text-muted-foreground sm:block'
                     }
                   >
@@ -291,9 +312,9 @@ export function AddMenu({
   mobileActions,
   commandsOnly = false,
 }: AddMenuProps) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [open, setOpen] = useState(false);
-  const [page, setPage] = useState('root');
+  const [page, setPage] = useState<MobilePage>('root');
   const [commandQuery, setCommandQuery] = useState('');
   const [referenceSearchAutoFocus, setReferenceSearchAutoFocus] =
     useState(false);
@@ -459,13 +480,39 @@ export function AddMenu({
     setOpen(false);
   };
 
-  const matchingCommands =
-    mobileActions?.commands.filter((command) =>
-      `${command.name} ${command.description}`
-        .toLowerCase()
-        .includes(commandQuery.toLowerCase()),
-    ) ?? [];
-  const pageLabels: Record<string, string> = {
+  const matchingCommands = useMemo(() => {
+    if (!mobileActions || mobileActions.shellMode) return [];
+    const query = commandQuery.trim().replace(/^\/+/, '');
+    const commands = [...mobileActions.commands];
+    const text = `/${query}`;
+    const result = getSlashCommandCompletionResult(
+      text,
+      text.length,
+      commands,
+      [...skills],
+      language,
+      t,
+      mobileActions.categoryOrder,
+      true,
+    );
+    if (result?.items.length || !query) return result?.items ?? [];
+    const descriptionMatches = commands.filter((command) =>
+      command.description.toLowerCase().includes(query.toLowerCase()),
+    );
+    return (
+      getSlashCommandCompletionResult(
+        '/',
+        1,
+        descriptionMatches,
+        [...skills],
+        language,
+        t,
+        mobileActions.categoryOrder,
+        true,
+      )?.items ?? []
+    );
+  }, [commandQuery, mobileActions, skills, language, t]);
+  const pageLabels: Record<MobilePage, string> = {
     root: t('composerAdd.trigger'),
     files: t('composerAdd.referenceFile.label'),
     extensions: t('composerAdd.extensions.label'),
@@ -581,7 +628,10 @@ export function AddMenu({
                       ['files', availability.referenceFile],
                       ['extensions', availability.extensions],
                       ['mcp', availability.mcp],
-                      ['skills', availability.skills],
+                      [
+                        'skills',
+                        availability.skills && !mobileActions.shellMode,
+                      ],
                     ] as const
                   )
                     .filter(([, available]) => available)
@@ -600,15 +650,16 @@ export function AddMenu({
                       </Button>
                     ))}
                   <div className="my-1 border-t" />
-                  {mobileActions.commands.length > 0 && (
-                    <Button
-                      variant="ghost"
-                      className={mobileRowClass}
-                      onClick={() => setPage('commands')}
-                    >
-                      {t('composerMobile.commands')}
-                    </Button>
-                  )}
+                  {!mobileActions.shellMode &&
+                    mobileActions.commands.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        className={mobileRowClass}
+                        onClick={() => setPage('commands')}
+                      >
+                        {t('composerMobile.commands')}
+                      </Button>
+                    )}
                   <Button
                     variant="ghost"
                     className={mobileRowClass}
@@ -677,14 +728,21 @@ export function AddMenu({
                       ? t('composerAdd.referenceFile.searchPlaceholder')
                       : undefined
                   }
+                  emptyMessage={
+                    page === 'extensions'
+                      ? t('composerAdd.extensions.empty')
+                      : page === 'mcp'
+                        ? t('composerAdd.mcp.empty')
+                        : undefined
+                  }
                   testIdPrefix={`composer-add-menu-${page === 'files' ? 'reference-file' : page}`}
                 />
               )}
-              {page === 'skills' && (
+              {page === 'skills' && !mobileActions.shellMode && (
                 <>
                   {(skillsLoading ||
                     skillsLoadError ||
-                    skills.length === 0) && (
+                    (skillsLoaded && skills.length === 0)) && (
                     <div role="status" className="p-3 text-muted-foreground">
                       {t(
                         skillsLoading
@@ -714,9 +772,13 @@ export function AddMenu({
                 </>
               )}
               {page === 'commands' && (
-                <>
+                <div className="flex min-h-0 flex-col">
                   <input
-                    className="mb-2 h-11 w-full rounded-md border bg-background px-3 text-base"
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    enterKeyHint="search"
+                    className="sticky top-0 z-10 shrink-0 mb-2 h-11 w-full rounded-md border bg-background px-3 text-base"
                     value={commandQuery}
                     aria-label={t('composerMobile.searchCommands')}
                     placeholder={t('composerMobile.searchCommands')}
@@ -729,22 +791,30 @@ export function AddMenu({
                   )}
                   {matchingCommands.map((command) => (
                     <Button
-                      key={command.name}
+                      key={command.id}
                       variant="ghost"
                       className={mobileRowClass}
-                      onClick={() =>
-                        prependSkill(`/${command.name.replace(/^\/+/, '')}`)
-                      }
+                      onClick={() => prependSkill(command.apply.trimEnd())}
                     >
                       <span className="flex min-w-0 flex-col">
-                        <span>/{command.name.replace(/^\/+/, '')}</span>
+                        <span>{command.label}</span>
+                        {command.argumentHint && (
+                          <span className="text-xs text-muted-foreground">
+                            {command.argumentHint}
+                          </span>
+                        )}
+                        {command.section && (
+                          <span className="text-xs text-muted-foreground">
+                            {command.section}
+                          </span>
+                        )}
                         <span className="text-xs text-muted-foreground">
-                          {command.description}
+                          {command.detail}
                         </span>
                       </span>
                     </Button>
                   ))}
-                </>
+                </div>
               )}
             </div>
           </DrawerContent>

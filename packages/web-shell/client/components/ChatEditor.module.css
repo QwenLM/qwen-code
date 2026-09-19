@@ -2702,6 +2702,7 @@
   --chat-editor-max-height: min(480px, 60dvh);
 }
 
+.editorShell[data-web-shell-mobile-composer] .uploadRowAction,
 .editorShell[data-web-shell-mobile-composer] .toolBtn,
 .editorShell[data-web-shell-mobile-composer] .sendBtn,
 .editorShell[data-web-shell-mobile-composer] .toolbarRight button,
@@ -2790,6 +2791,15 @@
   font: inherit;
   font-size: 16px;
   line-height: 1.5;
+}
+
+.editorShell[data-web-shell-mobile-composer] .uploadRowPreview {
+  min-height: 44px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .searchInput {
+  min-height: 44px;
+  font-size: 16px;
 }
 
 .editorShell[data-web-shell-mobile-composer] .searchResult {

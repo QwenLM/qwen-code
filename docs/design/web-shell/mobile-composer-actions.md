@@ -19,15 +19,17 @@ override; narrow desktop windows keep desktop editing.
 ### Toolbar and editing
 
 Remove the legacy touch action grid and simulated Tab/Esc/left/right keys. Keep add,
-model, approval, dictation, and send controls. Hide the width toggle and the
-duplicate context control on touch. Put workspace selection and Git controls
+model, approval, dictation, and send controls. Hide the width toggle on touch;
+retain the context-usage control when enabled by the host. Put workspace
+selection and Git controls
 in a separate context row so starting a task in a particular workspace or
 branch remains possible. Preserve host-provided toolbar slots.
 
 Use 44px touch targets and wrap controls on very narrow viewports rather than
 clip them. Keep Plan as an active-state chip. While a turn runs, stop remains
 available alongside send when there is a draft; stopping never clears that
-draft. Voice capture retains its existing reduced toolbar.
+draft. Voice capture retains its existing reduced toolbar and hides the context and
+editing rows.
 
 Add a small editing row with previous/next input history on the left, expand,
 and, while the textarea is focused, hide keyboard. The history arrows call the
@@ -69,7 +71,9 @@ the shared paste handler, LiveVoiceButton, and English/Chinese strings.
 Reuse the existing Dialog and Drawer primitives and
 Web Shell portal root. No new dependency or public customization API is needed.
 The add control remains host opt-in. A host that explicitly enables a command
-button retains a reachable command picker on mobile.
+button retains a reachable command picker on mobile outside Shell mode.
+Hosts without Add retain Shell and history-search buttons in the editing row;
+this fallback does not enable file ingestion or references.
 
 The history search must have a visible close action and remain touch usable.
 File selection must stay in a user gesture, and deferred insertions must run
@@ -77,6 +81,16 @@ after the drawer releases focus. Expanded editing must preserve attachment
 and reference state in the shared composer, including IME input. Image/file
 paste uses the existing ingestion lane; long-text paste uses the active
 editor's selection when deciding whether to fold it into an attachment.
+All imperative text insertion and focus target the expanded textarea while it
+is mounted. The dialog retains the input placeholder and mobile text settings,
+shows the shared attachment/image count, and returns focus without stealing it
+from a newly opened approval dialog. Closing idle Live voice returns to Add.
+
+The command page uses shared completion labels, sections, priority, hints and
+subcommand results (up to 50 matches), normalizes a leading slash and surrounding
+whitespace, and retains description search as a fallback. Search stays visible
+while scrolling. Commands and skills are unavailable in Shell mode. Skills only
+announce an empty catalog after loading has completed.
 
 ## Validation and acceptance
 

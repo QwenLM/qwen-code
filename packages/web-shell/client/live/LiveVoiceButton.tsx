@@ -123,11 +123,13 @@ export function LiveVoiceButton({
   open,
   onOpenChange,
   onSupportedChange,
+  onRequestFocusFallback,
 }: {
   hideInactiveTrigger?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   onSupportedChange?: (supported: boolean) => void;
+  onRequestFocusFallback?: () => void;
 } = {}): React.JSX.Element | null {
   const { t } = useI18n();
   const {
@@ -208,7 +210,16 @@ export function LiveVoiceButton({
       {/* Wider than the default dialog, with a wrapping footer: three footer
           buttons do not fit 384px and used to push the requirement states
           outside the dialog. */}
-      <DialogContent data-web-shell-live-dialog className="sm:max-w-md">
+      <DialogContent
+        data-web-shell-live-dialog
+        className="sm:max-w-md"
+        onCloseAutoFocus={(event) => {
+          if (hideInactiveTrigger && !active && onRequestFocusFallback) {
+            event.preventDefault();
+            onRequestFocusFallback();
+          }
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{t('live.title')}</DialogTitle>
           <DialogDescription>

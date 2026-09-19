@@ -1,7 +1,10 @@
 .picker {
   width: 380px;
   max-width: calc(100vw - 16px);
-  max-height: 480px;
+  max-height: min(
+    480px,
+    var(--radix-popover-content-available-height, calc(100dvh - 16px))
+  );
   display: flex;
   flex-direction: column;
   padding: 0;
