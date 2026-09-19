@@ -61,9 +61,14 @@
 }
 
 .container:focus-within .content,
-.container:has([aria-expanded='true']) .content,
 .container[data-at-panel-open] .content {
   border-color: var(--chat-editor-accent-color);
+}
+
+@supports (selector(:has(*))) {
+  .container:has([aria-expanded='true']) .content {
+    border-color: var(--chat-editor-accent-color);
+  }
 }
 
 .container[data-image-drag-active] .content {
@@ -894,6 +899,15 @@
   white-space: normal;
 }
 
+@supports (height: 100dvh) {
+  .tagTooltip {
+    max-height: min(
+      calc(100dvh - 16px),
+      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
+    );
+  }
+}
+
 .tagLabel,
 .tagValue {
   color: var(--chat-editor-text-primary);
@@ -1585,6 +1599,126 @@
   cursor: default;
 }
 
+/* Shown only while Plan is on: the state has to stay visible even though the
+   entry itself is tucked into the add menu. */
+.planChip {
+  flex: 0 0 auto;
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color) 12%,
+    transparent
+  );
+  color: var(--chat-editor-accent-color);
+}
+
+/* Spelled out twice rather than as `.toolBtn.planChip:hover`: each half ties
+   the generic toolbar hover above on specificity and wins by coming later,
+   which the shorter selector would not. The disabled half keeps the tint from
+   dropping under the pointer during the request the click itself starts. */
+.toolBtn.planChip:not(:disabled):hover,
+.toolBtn.planChip:disabled:hover {
+  background: color-mix(
+    in srgb,
+    var(--chat-editor-accent-color) 20%,
+    transparent
+  );
+  color: var(--chat-editor-accent-color);
+}
+
+.planChip .toolBtnText {
+  color: inherit;
+}
+
+/* No dimming: like every other .toolBtn, including the permission button
+   beside it, the chip keeps its appearance while mode controls are busy. That
+   state is brief, and dimming one control of the pair would flicker. */
+.planChip:disabled {
+  cursor: default;
+}
+
+/* At rest the chip shows the Plan icon and no close mark. The mark shares the
+   icon slot and takes it over on hover or keyboard focus, so revealing it
+   never changes how wide the chip is. */
+.planChipIcon {
+  position: relative;
+}
+
+.planChipIcon > .planChipClose {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+}
+
+.planChipIcon > .planChipClose svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* None of the reveals is limited to an enabled chip: it is disabled for the
+   length of the request its own click starts, and swapping back under the
+   pointer would read as the click having been refused. */
+.planChip:focus-visible .planChipIcon > :not(.planChipClose) {
+  opacity: 0;
+}
+
+.planChip:focus-visible .planChipClose {
+  opacity: 1;
+}
+
+/* Only where the pointer really hovers. A touch browser keeps :hover on the
+   last thing tapped, which would leave the mark stuck on a chip whose tap did
+   nothing. */
+@media (hover: hover) {
+  .planChip:hover .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip:hover .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Without hover only keyboard focus would ever reveal the mark, so it stays
+   shown — but only beside the label. A chip too narrow for its label keeps the Plan icon
+   instead: a bare × would name nothing, and a pressed button that a tap
+   releases needs no mark to work. Keyed on the primary pointer, so a
+   touchscreen laptop driven by a mouse still gets the quiet chip. */
+@media (hover: none) {
+  .planChip[data-labelled] .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip[data-labelled] .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Forced colours repaint a masked background away, which would leave a chip
+   without its label blank at rest. Painting the mask with a system colour
+   keeps the icon. Every mode icon has the same gap; this covers only the one
+   this chip depends on. */
+@media (forced-colors: active) {
+  .planChipIcon > span:not(.planChipClose) {
+    forced-color-adjust: none;
+    background: ButtonText;
+  }
+}
+
+.addMenuPlanIcon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+}
+
 .workspaceSelectTrigger {
   min-width: 0;
   max-width: 176px;
@@ -1798,9 +1932,11 @@
   border-top: 1px solid var(--border);
 }
 
-@container (min-width: 521px) {
-  .contextUsagePercentage {
-    display: inline;
+@supports (container-type: inline-size) {
+  @container (min-width: 521px) {
+    .contextUsagePercentage {
+      display: inline;
+    }
   }
 }
 
@@ -2256,6 +2392,111 @@
   gap: 6px;
   padding: 4px 0 0;
   flex-wrap: wrap;
+}
+
+/* Two classes so this wins over `.fileChip`'s fixed width, which is declared
+   later in this file: a text card sizes to its own content. */
+.fileChip.fileChipText {
+  width: auto;
+  min-width: min(264px, 100%);
+  max-width: min(100%, 360px);
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fileChipIcon {
+  display: flex;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fileChipBody {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+}
+
+.fileChipTitle {
+  overflow: hidden;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipTitle:disabled {
+  cursor: default;
+}
+
+.fileChipTitle:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+.fileChipTitle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  /* The row is nowrap, so at the narrowest panes let the size drop to its own
+     line rather than escaping the card. */
+  flex-wrap: wrap;
+}
+
+.fileChipExpand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fileChipExpand:not(:disabled):hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
+.fileChipExpand:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipExpand:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .fileChip {

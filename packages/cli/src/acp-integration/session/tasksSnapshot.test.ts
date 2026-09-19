@@ -549,10 +549,34 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
-  it('preserves source attribution in historical task snapshots', () => {
+  it('preserves independent correlation records in historical task snapshots', () => {
     const source = workflowSnapshot({
       toolUseId: 'exact-tool-call',
       sourceRef: { id: 'flow', revision: 'rev-1' },
+      workflowCalls: [
+        {
+          id: 'call-1',
+          stepId: 'outer',
+          workflowName: 'ext:check',
+          status: 'completed',
+          startedAt: 500,
+          endedAt: 900,
+        },
+      ],
+      workflowCallsTruncated: true,
+      dispatches: [
+        {
+          id: 'dispatch-1',
+          phaseVisitId: null,
+          label: 'check',
+          prompt: 'check',
+          status: 'cached',
+          stepId: 'inner',
+          workflowCallId: 'call-1',
+          dependsOn: [],
+          queuedAt: 600,
+        },
+      ],
     });
     const snapshot = buildSessionTasksStatus(
       'session-1',
@@ -566,8 +590,15 @@ describe('buildSessionTasksStatus workflow graph', () => {
       id: source.runId,
       toolUseId: 'exact-tool-call',
       sourceRef: { id: 'flow', revision: 'rev-1' },
+      workflowCalls: [{ id: 'call-1', stepId: 'outer', status: 'completed' }],
+      workflowCallsTruncated: true,
+      dispatches: [
+        { stepId: 'inner', workflowCallId: 'call-1', status: 'cached' },
+      ],
     });
     expect(entry?.sourceRef).not.toBe(source.sourceRef);
+    expect(entry?.workflowCalls?.[0]).not.toBe(source.workflowCalls?.[0]);
+    expect(entry?.dispatches[0]).not.toBe(source.dispatches?.[0]);
   });
 
   it('omits workflow tasks unless the caller opts in', () => {

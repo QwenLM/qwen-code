@@ -22,8 +22,14 @@ function git(args: string[], cwd?: string): string {
   return execFileSync(
     'git',
     [
+      // The literal '/dev/null', never os.devNull: Git for Windows
+      // special-cases the POSIX spelling in its compat layer, while
+      // os.devNull's win32 value ('\\.\nul') is rejected as
+      // "fatal: unable to access '\\.\nul': Invalid argument" — both for
+      // this argv config and for GIT_CONFIG_GLOBAL below. Same reason as
+      // core/src/extension/extension-git-client.ts.
       '-c',
-      `core.hooksPath=${os.devNull}`,
+      'core.hooksPath=/dev/null',
       '-c',
       'commit.gpgSign=false',
       '-c',
@@ -35,8 +41,8 @@ function git(args: string[], cwd?: string): string {
       encoding: 'utf8',
       env: {
         ...gitEnv(),
-        GIT_CONFIG_GLOBAL: os.devNull,
-        GIT_CONFIG_SYSTEM: os.devNull,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_TEMPLATE_DIR: '',
       },

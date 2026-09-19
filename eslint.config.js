@@ -59,6 +59,11 @@ export default tseslint.config(
       'node_modules/*',
       'packages/**/dist/**',
       'packages/web-templates/src/generated/**',
+      // Generated UTS #39 confusables table (6.5k-entry literal): the
+      // type-aware rules OOM the eslint heap on it, and generated data
+      // has no idiom to enforce. Regenerate via
+      // packages/web-shell/scripts/generate-confusables.mjs.
+      'packages/web-shell/client/utils/unicodeConfusables.ts',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
@@ -71,6 +76,7 @@ export default tseslint.config(
       '.qwen/**',
       'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
       'packages/desktop-shell/runtime/**',
+      'packages/core/src/skills/bundled/browser-use/runtime/**',
       'packages/desktop-shell/src-tauri/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS

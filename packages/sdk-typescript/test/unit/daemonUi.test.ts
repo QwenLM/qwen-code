@@ -840,40 +840,54 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks[3]).not.toHaveProperty('usage');
   });
 
-  it('deduplicates legacy sub-agent usage repeated after its execution summary', () => {
-    const state = reduceDaemonTranscriptEvents(
-      createDaemonTranscriptState({ now: 1 }),
-      [
-        { type: 'user.text.delta', text: 'question' },
-        { type: 'assistant.text.delta', text: 'delegating' },
-        {
-          type: 'tool.update',
-          toolCallId: 'sub-1',
-          status: 'completed',
-          sourceRecordIds: ['subagent-result'],
-          rawOutput: {
-            executionSummary: {
+  it.each([
+    [undefined, true],
+    [undefined, false],
+    ['sub-1', true],
+    ['sub-1', false],
+  ] as const)(
+    'deduplicates persisted sub-agent usage (parent=%s, retain=%s)',
+    (parentToolCallId, retainSubagentBlocks) => {
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState({ now: 1, retainSubagentBlocks }),
+        [
+          { type: 'user.text.delta', text: 'question' },
+          { type: 'assistant.text.delta', text: 'delegating' },
+          {
+            type: 'tool.update',
+            toolCallId: 'sub-1',
+            status: 'completed',
+            sourceRecordIds: ['subagent-result'],
+            rawOutput: {
+              executionSummary: {
+                inputTokens: 5000,
+                outputTokens: 800,
+                cachedTokens: 4500,
+              },
+            },
+          },
+          {
+            type: 'assistant.usage',
+            ...(parentToolCallId ? { parentToolCallId } : {}),
+            usage: {
               inputTokens: 5000,
               outputTokens: 800,
               cachedTokens: 4500,
             },
+            sourceRecordIds: ['subagent-result'],
           },
-        },
-        {
-          type: 'assistant.usage',
-          usage: {
-            inputTokens: 5000,
-            outputTokens: 800,
-            cachedTokens: 4500,
-          },
-          sourceRecordIds: ['subagent-result'],
-        },
-      ],
-      { now: 2 },
-    );
+        ],
+        { now: 2 },
+      );
 
-    expect(state.blocks[1]).not.toHaveProperty('usage');
-  });
+      expect(state.blocks[1]).not.toHaveProperty('usage');
+      expect(state.blocks[2]).toHaveProperty('rawOutput.executionSummary', {
+        inputTokens: 5000,
+        outputTokens: 800,
+        cachedTokens: 4500,
+      });
+    },
+  );
 
   it('keeps sub-agent usage in the parent turn total by default', () => {
     const state = reduceDaemonTranscriptEvents(
@@ -1022,13 +1036,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
       id: 23,
       v: 1,
       type: 'session_closed',
-      data: { reason: 'idle timeout' },
+      data: { reason: 'idle_timeout' },
     });
 
     expect(events).toMatchObject([
       {
         type: 'status',
-        text: 'Session closed: idle timeout',
+        text: 'Session closed after idle timeout',
       },
     ]);
   });
@@ -9387,73 +9401,85 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(state.blocks[1]).not.toHaveProperty('content');
   });
 
-  it('preserves accumulated subagent usage when completed rawOutput has lower totals', () => {
-    let state = createDaemonTranscriptState({
-      now: 1,
-      retainSubagentBlocks: false,
-    });
+  it.each([
+    { inputTokens: 1000, outputTokens: 200, cachedTokens: 100 },
+    { outputTokens: 200 },
+  ])(
+    'preserves accumulated usage after a lower or partial persisted aggregate: %j',
+    (summary) => {
+      let state = createDaemonTranscriptState({
+        now: 1,
+        retainSubagentBlocks: false,
+      });
 
-    state = reduceDaemonTranscriptEvents(state, [
-      {
-        type: 'tool.update',
-        toolCallId: 'agent-task-B',
-        toolName: 'agent',
-        status: 'running',
-        rawOutput: { type: 'task_execution', status: 'running' },
-      },
-      {
-        type: 'assistant.usage',
-        usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
-        parentToolCallId: 'agent-task-B',
-      },
-    ] as DaemonUiEvent[]);
-
-    expect(state.blocks[0]).toMatchObject({
-      kind: 'tool',
-      rawOutput: {
-        executionSummary: {
-          inputTokens: 5000,
-          outputTokens: 800,
-          cachedTokens: 200,
-          totalTokens: 5800,
+      state = reduceDaemonTranscriptEvents(state, [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-B',
+          toolName: 'agent',
+          status: 'running',
+          rawOutput: { type: 'task_execution', status: 'running' },
         },
-      },
-    });
+        {
+          type: 'assistant.usage',
+          usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
+          parentToolCallId: 'agent-task-B',
+        },
+      ] as DaemonUiEvent[]);
 
-    state = reduceDaemonTranscriptEvents(state, [
-      {
-        type: 'tool.update',
-        toolCallId: 'agent-task-B',
-        toolName: 'agent',
+      expect(state.blocks[0]).toMatchObject({
+        kind: 'tool',
+        rawOutput: {
+          executionSummary: {
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 200,
+            totalTokens: 5800,
+          },
+        },
+      });
+
+      state = reduceDaemonTranscriptEvents(state, [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-B',
+          toolName: 'agent',
+          status: 'completed',
+          sourceRecordIds: ['result-B'],
+          rawOutput: {
+            type: 'task_execution',
+            status: 'completed',
+            executionSummary: summary,
+          },
+        },
+        {
+          type: 'assistant.usage',
+          parentToolCallId: 'agent-task-B',
+          sourceRecordIds: ['result-B'],
+          usage: {
+            inputTokens: summary.inputTokens ?? 0,
+            outputTokens: summary.outputTokens,
+            cachedTokens: summary.cachedTokens ?? 0,
+          },
+        },
+      ] as DaemonUiEvent[]);
+
+      expect(state.blocks[0]).toMatchObject({
+        kind: 'tool',
         status: 'completed',
         rawOutput: {
           type: 'task_execution',
           status: 'completed',
           executionSummary: {
-            inputTokens: 0,
-            outputTokens: 0,
-            cachedTokens: 0,
-            totalTokens: 0,
+            inputTokens: 5000,
+            outputTokens: 800,
+            cachedTokens: 200,
+            totalTokens: 5800,
           },
         },
-      },
-    ] as DaemonUiEvent[]);
-
-    expect(state.blocks[0]).toMatchObject({
-      kind: 'tool',
-      status: 'completed',
-      rawOutput: {
-        type: 'task_execution',
-        status: 'completed',
-        executionSummary: {
-          inputTokens: 5000,
-          outputTokens: 800,
-          cachedTokens: 200,
-          totalTokens: 5800,
-        },
-      },
-    });
-  });
+      });
+    },
+  );
 
   it('keeps merged subagent totals consistent without mutating the event', () => {
     let state = createDaemonTranscriptState({

@@ -5,9 +5,17 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
-import { logWorkflowRun } from '../../telemetry/loggers.js';
-import { WorkflowRunEvent } from '../../telemetry/types.js';
+import {
+  logWorkflowRun,
+  logWorkflowSizeWarning,
+} from '../../telemetry/loggers.js';
+import {
+  WorkflowRunEvent,
+  WorkflowSizeWarningEvent,
+} from '../../telemetry/types.js';
 import {
   createAbortController,
   createChildAbortController,
@@ -20,7 +28,16 @@ import {
   type WorkflowRunRegistry,
   type WorkflowTask,
 } from '../workflow-run-registry.js';
-import { writeWorkflowSnapshot } from '../workflow-snapshot.js';
+import {
+  readWorkflowSnapshot,
+  writeWorkflowSnapshot,
+  type WorkflowSnapshot,
+} from '../workflow-snapshot.js';
+import {
+  checkpointFromTask,
+  removeWorkflowCheckpoint,
+  writeWorkflowCheckpoint,
+} from '../workflow-checkpoint.js';
 import {
   readWorkflowSourceRef,
   type WorkflowSourceRef,
@@ -35,6 +52,15 @@ import {
   type WorkflowRunOutcome,
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
+import {
+  describeWorkflowDeterminismViolations,
+  scanWorkflowScriptShape,
+} from './workflow-script-shape.js';
+import {
+  evaluateWorkflowSize,
+  resolveWorkflowSizeCaps,
+  resolveWorkflowSizeGuidelineSetting,
+} from './workflow-size.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import {
@@ -46,6 +72,7 @@ import {
 import {
   compileWorkflowScript,
   describeWorkflowCompileError,
+  type WorkflowMeta,
 } from './workflow-sandbox.js';
 import {
   resolveReviewWorkflowLimits,
@@ -77,6 +104,39 @@ export interface WorkflowRunnerOptions {
    * author (a saved workflow), where "fix the script" would be wrong advice.
    */
   authoringHint?: string;
+  /**
+   * Refuse `workflow({ scriptPath })` inside the script. Set for a call the
+   * model made in a name-only session (`tools.workflowNameOnly`); a run the
+   * host starts itself is not the model's and is left unrestricted.
+   */
+  restrictNestedScriptPaths?: boolean;
+}
+
+/**
+ * The name a name-only session may resume this run by: the run's workflow
+ * name, but only when that name resolves now to the script this run executes.
+ * A name recorded from a path in a subdirectory, one a same-named project
+ * workflow shadows, or one a retry carried over to an inline copy would send a
+ * resume to a different script, or to none.
+ */
+async function resolveResumeName(
+  config: Config,
+  workflowName: string | undefined,
+  scriptPath: string | undefined,
+): Promise<string | undefined> {
+  if (!workflowName || !scriptPath) return undefined;
+  const canonical = (file: string): Promise<string> =>
+    fs.realpath(file).catch(() => path.resolve(file));
+  try {
+    const resolved = await resolveSavedWorkflowScript(workflowName, config);
+    const [byName, ran] = await Promise.all([
+      canonical(resolved.scriptPath),
+      canonical(scriptPath),
+    ]);
+    return byName === ran ? workflowName : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export type WorkflowRunSettlement =
@@ -129,8 +189,14 @@ export class WorkflowRunHandle {
   }
 }
 
+const WORKFLOW_SCRIPT_SYNTAX_HINT =
+  'Workflow scripts must be plain JavaScript — the usual causes are ' +
+  'TypeScript syntax (type annotations, interfaces, generics) and ' +
+  'broken string quoting or escaping. Metadata must use literal values.';
+
 /**
- * The script never compiled, so no run was created.
+ * The script was refused before a run was created: it did not compile, or it
+ * calls something a resumable workflow cannot replay.
  *
  * Distinct from `WorkflowExecutionError` on purpose: that one describes a run
  * that existed and failed, and callers report it as such. This one means there
@@ -139,12 +205,20 @@ export class WorkflowRunHandle {
  * than that it failed.
  */
 export class WorkflowScriptNotLaunchedError extends Error {
-  constructor(readonly detail: string) {
+  /**
+   * @param detail What is wrong with the script.
+   * @param hint The usual causes, appended after `detail`. Defaults to the
+   *   syntax causes of a compile failure; a refusal with a cause of its own
+   *   passes an empty hint, so the reader is not sent looking for TypeScript
+   *   syntax that is not there.
+   */
+  constructor(
+    readonly detail: string,
+    hint: string = WORKFLOW_SCRIPT_SYNTAX_HINT,
+  ) {
     super(
-      `Workflow script is invalid and was not launched:\n${detail}\n\n` +
-        `Workflow scripts must be plain JavaScript — the usual causes are ` +
-        `TypeScript syntax (type annotations, interfaces, generics) and ` +
-        `broken string quoting or escaping. Metadata must use literal values.`,
+      `Workflow script is invalid and was not launched:\n${detail}` +
+        (hint ? `\n\n${hint}` : ''),
     );
     this.name = 'WorkflowScriptNotLaunchedError';
   }
@@ -191,6 +265,12 @@ export class WorkflowRunner {
     const config = options.config;
     const runInBackground = options.runInBackground === true;
     const budget = WorkflowBudgetImpl.fromConfig(config);
+    // Read once per run: a guideline the user changes mid-run applies from the
+    // next run, the same way the tool description does.
+    const sizeCaps = resolveWorkflowSizeCaps(
+      config.getWorkflowSizeGuideline?.() ??
+        resolveWorkflowSizeGuidelineSetting(undefined),
+    );
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const registry = config.getWorkflowRunRegistry?.();
@@ -219,6 +299,13 @@ export class WorkflowRunner {
     };
     const storage = config.storage;
     const previousEntry = registry?.get(runId);
+    // The run as it was before this start: the registry entry while the
+    // process still has one, else its snapshot (the registry does not outlive
+    // the process). Read once, for the sourceRef guard below and for putting
+    // back the inline script copy a resume that fails to start overwrote.
+    let previousRun:
+      | Pick<WorkflowSnapshot, 'sourceRef' | 'script'>
+      | undefined = previousEntry;
     let journalPath = storage
       ? storage.getWorkflowRunJournalPath(runId)
       : undefined;
@@ -233,6 +320,7 @@ export class WorkflowRunner {
     let callerWasAbortedBeforeStart: boolean;
     let orchestrator: WorkflowOrchestrator;
     let reviewLimits: ReviewWorkflowLimits | undefined;
+    let scriptMeta: WorkflowMeta | null = null;
     try {
       const loaded = options.loadScript
         ? await options.loadScript()
@@ -257,7 +345,7 @@ export class WorkflowRunner {
         registry?.get(runId)?.workflowName;
 
       try {
-        compileWorkflowScript(script);
+        scriptMeta = compileWorkflowScript(script).meta;
       } catch (error) {
         throw new WorkflowScriptNotLaunchedError(
           describeWorkflowCompileError(
@@ -266,10 +354,37 @@ export class WorkflowRunner {
           ),
         );
       }
+      // A script that reads a clock or a random source cannot be replayed on
+      // resume. Refused here, before any agent spends a token, rather than on
+      // whichever call reaches the sandbox guard first.
+      const determinismViolations =
+        scanWorkflowScriptShape(script).determinismViolations;
+      if (determinismViolations.length > 0) {
+        throw new WorkflowScriptNotLaunchedError(
+          describeWorkflowDeterminismViolations(determinismViolations),
+          '',
+        );
+      }
 
-      resumeReplay = options.resumeFromRunId
-        ? await journal?.load()
-        : undefined;
+      if (options.resumeFromRunId) {
+        // A resume replays a journal. With none to replay it would dispatch
+        // every agent again under the old run id while reading as a
+        // continuation, so it is refused before anything is spent or written.
+        // Without storage there is no journal to have lost, and a resume
+        // there has always been a live run under the old id.
+        const loaded = await journal?.load();
+        if (loaded?.kind === 'missing') {
+          throw new Error(
+            `No journal found for workflow run ${options.resumeFromRunId}, so there is nothing to resume. To run the workflow from the start, call Workflow again without resumeFromRunId.`,
+          );
+        }
+        if (loaded?.kind === 'unreadable') {
+          throw new Error(
+            `Could not read the journal for workflow run ${options.resumeFromRunId}: ${loaded.reason}`,
+          );
+        }
+        resumeReplay = loaded?.replay;
+      }
       sourceRef = readWorkflowSourceRef(options.sourceRef);
       if (resumeReplay?.sourceError) throw new Error(resumeReplay.sourceError);
       if (options.resumeFromRunId) {
@@ -284,7 +399,14 @@ export class WorkflowRunner {
             'Workflow sourceRef must match the original journal. Start a new run to use a different source.',
           );
         }
-        if (previousEntry?.sourceRef && !original) {
+        // After a restart the run's snapshot is what still says it carried a
+        // reference. Without it this guard could not fire, and the resumed
+        // run would settle without the reference and overwrite the snapshot
+        // that held it.
+        if (!previousRun) {
+          previousRun = await readWorkflowSnapshot(config, runId);
+        }
+        if (previousRun?.sourceRef && !original) {
           throw new Error(
             'Workflow source metadata is missing from its journal.',
           );
@@ -305,6 +427,16 @@ export class WorkflowRunner {
       if (journal && !(await journal.ensureExists())) {
         journalPath = undefined;
       }
+      // Queued before anything else so the journal of a run that launched is
+      // never empty: a later resume can then tell a run interrupted before its
+      // first result from one whose journal is gone. Not awaited, so a slow
+      // disk does not hold the launch: appends are serialized, so it still
+      // lands before the `source` record below and every dispatch's lines, and
+      // a start that fails from here on reaches `journal.remove()`, which waits
+      // for it before deleting.
+      if (journal && journalPath && !options.resumeFromRunId) {
+        void journal.markLaunched();
+      }
       if (sourceRef) {
         if (!journal || !journalPath) {
           throw new Error(
@@ -318,7 +450,9 @@ export class WorkflowRunner {
       // Persisted only once the run is certain to start: a script that never
       // compiled, and a start the registry cancelled out from under us, leave
       // no file behind. A resume of an inline script overwrites the copy from
-      // the original run, which is the file the model was told to edit.
+      // the original run, which is the file the model was told to edit; a
+      // resume that then fails to start puts the original back (see the
+      // catch below).
       if (options.script !== undefined && scriptPath === undefined) {
         const persisted = await persistInlineWorkflowScript(
           config,
@@ -328,6 +462,10 @@ export class WorkflowRunner {
         scriptPath = persisted ?? undefined;
         persistedInlineScript = persisted !== null;
       }
+      const resumeName =
+        config.isWorkflowNameOnly?.() === true
+          ? await resolveResumeName(config, workflowName, scriptPath)
+          : undefined;
       assertStartNotCancelled();
       const dispatch =
         options.dispatch ??
@@ -373,6 +511,7 @@ export class WorkflowRunner {
           ...(options.authoringHint && !workflowName
             ? { authoringHint: options.authoringHint }
             : {}),
+          ...(resumeName ? { resumeName } : {}),
           args: options.args,
           ...(options.resumeFromRunId
             ? {
@@ -394,8 +533,8 @@ export class WorkflowRunner {
       if (persistedInlineScript && options.resumeFromRunId === undefined) {
         await deleteInlineWorkflowScript(config, runId);
       }
-      if (persistedInlineScript && options.resumeFromRunId && previousEntry) {
-        await persistInlineWorkflowScript(config, runId, previousEntry.script);
+      if (persistedInlineScript && options.resumeFromRunId && previousRun) {
+        await persistInlineWorkflowScript(config, runId, previousRun.script);
       }
       if (options.resumeFromRunId === undefined) {
         await journal?.remove();
@@ -403,6 +542,18 @@ export class WorkflowRunner {
       releasePersistenceActivity();
       throw error;
     }
+    // Lets a later process find this run if this one exits before it
+    // settles. Not awaited: nothing about starting depends on it, and the
+    // settlement below waits for it before removing it.
+    const checkpointWrite = entry
+      ? writeWorkflowCheckpoint(
+          config,
+          checkpointFromTask(entry, {
+            sessionId: config.getSessionId?.() ?? '',
+            meta: scriptMeta,
+          }),
+        )
+      : undefined;
     const emitUpdate = (): void => {
       if (!entry || !options.onUpdate || !isCurrentEntry()) return;
       try {
@@ -411,7 +562,47 @@ export class WorkflowRunner {
         // UI refresh failures must not affect workflow execution.
       }
     };
+    // The large-run flag. Checked whenever the run schedules an agent or
+    // records spend; the registry keeps only the first warning.
+    const maybeWarnSize = (): void => {
+      const current = registry?.get(runId);
+      if (!registry || !current || current.sizeWarning !== undefined) return;
+      let scheduledAgents = 0;
+      let settledAgents = 0;
+      for (const dispatch of current.dispatches) {
+        // A journal replay spends nothing and schedules no agent.
+        if (dispatch.status === 'cached') continue;
+        scheduledAgents++;
+        if (
+          dispatch.status === 'completed' ||
+          dispatch.status === 'failed' ||
+          dispatch.status === 'cancelled'
+        ) {
+          settledAgents++;
+        }
+      }
+      const warning = evaluateWorkflowSize(
+        { scheduledAgents, settledAgents, tokensSpent: current.tokensSpent },
+        sizeCaps,
+      );
+      if (!warning || !registry.onSizeWarning(runId, warning)) return;
+      try {
+        logWorkflowSizeWarning(config, new WorkflowSizeWarningEvent(warning));
+      } catch {
+        // Telemetry must never disturb the run it describes.
+      }
+    };
     const emitter: WorkflowOrchestratorEmitter = {
+      workflowCallUpdated: (call) => {
+        if (!isCurrentEntry()) return;
+        registry?.onWorkflowCallUpdated(runId, call);
+        emitUpdate();
+      },
+      workflowCallsTruncated: () => {
+        if (!isCurrentEntry()) return;
+        registry?.onWorkflowCallsTruncated(runId);
+        emitUpdate();
+      },
       phaseStarted: (title) => {
         if (!isCurrentEntry()) return;
         registry?.onPhaseStarted(runId, title);
@@ -431,6 +622,7 @@ export class WorkflowRunner {
       dispatchQueued: (event) => {
         if (!isCurrentEntry()) return;
         registry?.onDispatchQueued(runId, event);
+        maybeWarnSize();
         emitUpdate();
       },
       dispatchStarted: (dispatchId, startedAt) => {
@@ -458,6 +650,7 @@ export class WorkflowRunner {
       budgetUpdated: (spent, total) => {
         if (!isCurrentEntry()) return;
         registry?.onBudgetUpdated(runId, spent, total);
+        maybeWarnSize();
         emitUpdate();
       },
       resumeRespawn: (line) => {
@@ -492,8 +685,22 @@ export class WorkflowRunner {
             runId,
             emitter,
             budget,
-            resolveSavedWorkflow: (ref) =>
-              resolveSavedWorkflowScript(ref, config),
+            resolveSavedWorkflow: async (ref) => {
+              // A model call in a name-only session runs no script it cannot
+              // name, nested or not. Any other malformed ref falls through to
+              // the resolver's own type error.
+              if (
+                options.restrictNestedScriptPaths === true &&
+                typeof ref === 'object' &&
+                ref !== null &&
+                'scriptPath' in ref
+              ) {
+                throw new Error(
+                  "workflow({scriptPath}): this session restricts workflows to named workflows (tools.workflowNameOnly) — nest with workflow('<name>') instead.",
+                );
+              }
+              return resolveSavedWorkflowScript(ref, config);
+            },
             journal,
             resumeReplay,
             scheduler,
@@ -600,6 +807,13 @@ export class WorkflowRunner {
             } catch {
               // Telemetry must not affect workflow execution.
             }
+          }
+          // The run settled, so nothing is left for a later process to
+          // claim — even when the snapshot write failed, since a claim would
+          // then call a run interrupted that was not.
+          if (checkpointWrite) {
+            await checkpointWrite;
+            await removeWorkflowCheckpoint(config, runId);
           }
           releasePersistenceActivity();
           registry?.releaseHandle(runId, handle);

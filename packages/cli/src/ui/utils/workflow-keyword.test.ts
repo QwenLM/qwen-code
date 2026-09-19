@@ -27,6 +27,10 @@ interface StubOptions {
   recordedSurface?: WorkflowAuthoringSurface;
   /** What a live re-derivation would say now. */
   skillEnabledNow?: boolean;
+  /** The session's name-only lock, which only the config holds. */
+  nameOnlyNow?: boolean;
+  /** Make reading the tool registry throw. */
+  registryThrows?: boolean;
 }
 
 function stubConfig(options: StubOptions = {}): Config {
@@ -35,21 +39,28 @@ function stubConfig(options: StubOptions = {}): Config {
     deferred = [],
     recordedSurface,
     skillEnabledNow = true,
+    nameOnlyNow = false,
+    registryThrows = false,
   } = options;
+  const registry = {
+    getAllToolNames: () => toolNames,
+    isPermissionDeferred: (name: string) => deferred.includes(name),
+    isDeferredToolRevealed: () => false,
+    getTool: (name: string) =>
+      name === ToolNames.WORKFLOW && recordedSurface
+        ? { authoringSurface: recordedSurface }
+        : undefined,
+  };
   return {
+    isWorkflowNameOnly: () => nameOnlyNow,
     getSkillManager: () => ({}),
     getDisabledSkillLevels: () => new Set(),
     isSkillEnabled: () => skillEnabledNow,
     getVisibleTools: () => new Set<string>(),
-    getToolRegistry: () => ({
-      getAllToolNames: () => toolNames,
-      isPermissionDeferred: (name: string) => deferred.includes(name),
-      isDeferredToolRevealed: () => false,
-      getTool: (name: string) =>
-        name === ToolNames.WORKFLOW && recordedSurface
-          ? { authoringSurface: recordedSurface }
-          : undefined,
-    }),
+    getToolRegistry: () => {
+      if (registryThrows) throw new Error('registry unavailable');
+      return registry;
+    },
   } as unknown as Config;
 }
 
@@ -215,6 +226,31 @@ describe('buildWorkflowKeywordPrefix', () => {
         expect(prefix).toContain('<system-reminder>');
         expect(prefix).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
       }
+    },
+  );
+
+  // In a name-only session the model cannot run a script it writes, so the
+  // reminder must not tell it to author one, whatever shape the description
+  // has and even when reading the registry fails.
+  it.each([
+    [
+      'with the tool recorded',
+      { recordedSurface: 'pointer', nameOnlyNow: true },
+    ],
+    ['before the tool exists', { nameOnlyNow: true }],
+    ['when the registry throws', { nameOnlyNow: true, registryThrows: true }],
+  ] as const)(
+    'steers toward a named workflow in a name-only session, %s',
+    (_case, options) => {
+      const prefix = buildWorkflowKeywordPrefix(
+        stubConfig(options),
+        'run a workflow',
+      );
+      expect(prefix).toContain(
+        'This session runs named workflows only: if a saved or extension workflow fits this request, run it with the Workflow tool as { name, args }, and do not write a workflow script.',
+      );
+      expect(prefix).not.toContain('author a script');
+      expect(prefix).not.toContain(WORKFLOW_AUTHORING_SKILL_NAME);
     },
   );
 

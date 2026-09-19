@@ -15,7 +15,9 @@
 
 import {
   isWorkflowSourceRef,
+  MAX_WORKFLOW_CALL_TRACES,
   type WorkflowSourceRef,
+  type WorkflowCallTrace,
 } from './workflow-correlation.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -34,15 +36,28 @@ import {
   type WorkflowTask,
   type WorkflowTerminalStatus,
 } from './workflow-run-registry.js';
+import {
+  isWorkflowSizeWarning,
+  type WorkflowSizeWarning,
+} from './runtime/workflow-size.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
 /** Cap on snapshots retained on disk; oldest are pruned on write. */
 export const MAX_RETAINED_SNAPSHOTS = 30;
 
+/**
+ * Characters of serialized `args` a snapshot keeps. A run launched with more
+ * records `argsOmitted` instead: the value cannot be carried into a retry,
+ * and saying so beats a retry that silently runs without it.
+ */
+export const MAX_SNAPSHOT_ARGS_CHARS = 256 * 1024;
+
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
   sourceRef?: WorkflowSourceRef;
+  workflowCalls?: WorkflowCallTrace[];
+  workflowCallsTruncated?: boolean;
   runId: string;
   /** Tool call that launched the run. Absent on legacy snapshots. */
   toolUseId?: string;
@@ -54,6 +69,14 @@ export interface WorkflowSnapshot {
   sourceRunId?: string;
   /** How this run was started from sourceRunId. */
   startMode?: WorkflowRunStartMode;
+  /**
+   * The `args` the run was launched with, so a run can be retried after the
+   * process that ran it is gone. Absent when the run had none, when they were
+   * too large to keep (then `argsOmitted`), and on older snapshots.
+   */
+  args?: unknown;
+  /** The run had `args` this snapshot could not keep. */
+  argsOmitted?: true;
   meta: WorkflowMeta | null;
   status: WorkflowTerminalStatus;
   script: string;
@@ -67,6 +90,8 @@ export interface WorkflowSnapshot {
   agentsCompleted: number;
   /** Absent on snapshots written before resume respawns were counted. */
   agentsRespawned?: number;
+  /** Absent when the run never crossed a size threshold, and on older snapshots. */
+  sizeWarning?: WorkflowSizeWarning;
   tokensSpent: number;
   tokenBudgetTotal: number | null;
   /** `perPhaseTokens` flattened to `[phaseOrNull, tokens]` pairs. */
@@ -88,11 +113,16 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   return {
     runId: task.runId,
     ...(task.sourceRef ? { sourceRef: { ...task.sourceRef } } : {}),
+    ...(task.workflowCalls
+      ? { workflowCalls: task.workflowCalls.map((call) => ({ ...call })) }
+      : {}),
+    ...(task.workflowCallsTruncated ? { workflowCallsTruncated: true } : {}),
     ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
     description: task.description,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     sourceRunId: task.sourceRunId,
     startMode: task.startMode,
+    ...snapshotArgs(task.args),
     meta: task.meta,
     status: task.status,
     script: task.script ?? '',
@@ -106,6 +136,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     agentsDispatched: task.agentsDispatched,
     agentsCompleted: task.agentsCompleted,
     agentsRespawned: task.agentsRespawned ?? 0,
+    ...(task.sizeWarning ? { sizeWarning: { ...task.sizeWarning } } : {}),
     tokensSpent: task.tokensSpent,
     tokenBudgetTotal: task.tokenBudgetTotal,
     perPhaseTokens: Array.from(task.perPhaseTokens.entries()),
@@ -116,6 +147,27 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     result: safeResult(task.result),
     error: task.error,
   };
+}
+
+/**
+ * `args` as a snapshot keeps them: the value when it serializes within
+ * {@link MAX_SNAPSHOT_ARGS_CHARS}, otherwise only the fact that there were
+ * some.
+ */
+export function snapshotArgs(
+  args: unknown,
+): Pick<WorkflowSnapshot, 'args' | 'argsOmitted'> {
+  if (args === undefined) return {};
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(args);
+  } catch {
+    return { argsOmitted: true };
+  }
+  if (json === undefined || json.length > MAX_SNAPSHOT_ARGS_CHARS) {
+    return { argsOmitted: true };
+  }
+  return { args: JSON.parse(json) as unknown };
 }
 
 /** A non-JSON-serializable result is replaced with a placeholder string. */
@@ -148,18 +200,63 @@ export async function writeWorkflowSnapshot(
     // entry across the fs awaits below — a post-await projection
     // froze the snapshot at an fs-timing-dependent point mid-drain.
     const snapshot = toSnapshot(task);
+    return await persistWorkflowSnapshot(config, snapshot);
+  } catch (e) {
+    debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
+    return false;
+  }
+}
+
+/**
+ * Write an already-projected snapshot and prune, with the same best-effort
+ * contract as {@link writeWorkflowSnapshot}. For a caller that has no live
+ * entry to project: a run whose process exited before it settled.
+ */
+export async function persistWorkflowSnapshot(
+  config: Config,
+  snapshot: WorkflowSnapshot,
+): Promise<boolean> {
+  const storage = config.storage;
+  if (!storage) return false;
+  try {
     const dir = storage.getWorkflowRunsDir();
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(
-      storage.getWorkflowRunSnapshotPath(task.runId),
+      storage.getWorkflowRunSnapshotPath(snapshot.runId),
       JSON.stringify(snapshot, null, 2),
       'utf8',
     );
     await pruneSnapshots(config, dir);
     return true;
   } catch (e) {
-    debugLogger.warn(`writeWorkflowSnapshot failed for ${task.runId}: ${e}`);
+    debugLogger.warn(
+      `persistWorkflowSnapshot failed for ${snapshot.runId}: ${e}`,
+    );
     return false;
+  }
+}
+
+/**
+ * The persisted snapshot of one run, or `undefined` when there is none, it
+ * cannot be read, or it is not a snapshot. For a caller that has a run id and
+ * no registry entry to ask — a resume after a restart — and needs what the run
+ * recorded about itself.
+ */
+export async function readWorkflowSnapshot(
+  config: Config,
+  runId: string,
+): Promise<WorkflowSnapshot | undefined> {
+  const storage = config.storage;
+  if (!storage) return undefined;
+  try {
+    const raw = await fs.readFile(
+      storage.getWorkflowRunSnapshotPath(runId),
+      'utf8',
+    );
+    const parsed: unknown = JSON.parse(raw);
+    return isWorkflowSnapshot(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -248,7 +345,7 @@ function isStringArray(value: unknown): value is string[] {
   );
 }
 
-function isWorkflowMeta(value: unknown): value is WorkflowMeta | null {
+export function isWorkflowMeta(value: unknown): value is WorkflowMeta | null {
   if (value === null) return true;
   if (!isRecord(value)) return false;
   if (
@@ -293,6 +390,8 @@ function isWorkflowDispatch(value: unknown): value is WorkflowDispatchTrace {
     typeof value['label'] === 'string' &&
     typeof value['prompt'] === 'string' &&
     isOptionalString(value['subagentId']) &&
+    isOptionalString(value['stepId']) &&
+    isOptionalString(value['workflowCallId']) &&
     (status === 'queued' ||
       status === 'running' ||
       status === 'completed' ||
@@ -377,9 +476,27 @@ function isWorkflowEvent(value: unknown): value is WorkflowEvent {
   }
 }
 
+function isWorkflowCall(value: unknown): value is WorkflowCallTrace {
+  if (!isRecord(value)) return false;
+  const status = value['status'];
+  return (
+    typeof value['id'] === 'string' &&
+    isOptionalString(value['stepId']) &&
+    isOptionalString(value['workflowName']) &&
+    (status === 'running' ||
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled') &&
+    isFiniteNumber(value['startedAt']) &&
+    (value['endedAt'] === undefined || isFiniteNumber(value['endedAt'])) &&
+    isOptionalString(value['error'])
+  );
+}
+
 function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   if (!isRecord(value)) return false;
   const status = value['status'];
+  const workflowCalls = value['workflowCalls'];
   const phaseVisits = value['phaseVisits'];
   const dispatches = value['dispatches'];
   const events = value['events'];
@@ -387,6 +504,12 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   return (
     (value['sourceRef'] === undefined ||
       isWorkflowSourceRef(value['sourceRef'])) &&
+    (workflowCalls === undefined ||
+      (Array.isArray(workflowCalls) &&
+        workflowCalls.length <= MAX_WORKFLOW_CALL_TRACES &&
+        workflowCalls.every(isWorkflowCall))) &&
+    (value['workflowCallsTruncated'] === undefined ||
+      typeof value['workflowCallsTruncated'] === 'boolean') &&
     typeof value['runId'] === 'string' &&
     value['runId'].length > 0 &&
     isOptionalString(value['toolUseId']) &&
@@ -396,6 +519,7 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     (value['startMode'] === undefined ||
       value['startMode'] === 'retry' ||
       value['startMode'] === 'rerun') &&
+    (value['argsOmitted'] === undefined || value['argsOmitted'] === true) &&
     isWorkflowMeta(value['meta']) &&
     (status === 'completed' || status === 'failed' || status === 'cancelled') &&
     typeof value['script'] === 'string' &&
@@ -412,6 +536,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     isFiniteNumber(value['agentsCompleted']) &&
     (value['agentsRespawned'] === undefined ||
       isFiniteNumber(value['agentsRespawned'])) &&
+    (value['sizeWarning'] === undefined ||
+      isWorkflowSizeWarning(value['sizeWarning'])) &&
     isFiniteNumber(value['tokensSpent']) &&
     (value['tokenBudgetTotal'] === null ||
       isFiniteNumber(value['tokenBudgetTotal'])) &&

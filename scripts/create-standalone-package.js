@@ -73,12 +73,14 @@ const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
+  'execution-worker.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for
   // `qwen serve` so daemon startup gets the same fast path as npm installs.
   'cli-entry.js',
@@ -582,6 +584,12 @@ function copyNodePtyAddon(packageRoot, target, nativeModulesDir) {
     recursive: true,
     dereference: true,
     verbatimSymlinks: false,
+    // The win32-x64 prebuild package ships .pdb debug symbols beside its .node
+    // addons: 10,780,672 B, 86% of its 12,485,696 B prebuild payload and
+    // ~2.05 MiB of the compressed win-x64 archive. Nothing reads them at
+    // runtime (a PDB is only opened by a debugger or crash-dump symbolizer),
+    // so they are dropped at packaging time.
+    filter: (src) => !src.endsWith('.pdb'),
   };
   for (let index = 0; index < packageNames.length; index += 1) {
     fs.cpSync(

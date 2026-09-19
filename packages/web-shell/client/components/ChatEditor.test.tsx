@@ -23,6 +23,7 @@ import type {
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
+import { PASTE_TITLE_MAX_CHARS } from '../utils/largePaste';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -141,6 +142,7 @@ const composerCoreState = vi.hoisted(() => ({
   getText: vi.fn(() => ''),
   setText: vi.fn(),
   insertText: vi.fn(),
+  expandPastedText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
@@ -262,6 +264,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         removeImage: vi.fn(),
         pastedFiles: mockComposerCoreState.pastedFiles,
         removeFile: vi.fn(),
+        expandPastedText: composerCoreState.expandPastedText,
         composerTags: mockComposerCoreState.composerTags,
         removeTopTag: mockComposerCoreState.removeTopTag,
         addTags: composerCoreState.addTags,
@@ -342,6 +345,7 @@ afterEach(() => {
   composerCoreState.getText.mockReset().mockReturnValue('');
   composerCoreState.setText.mockReset();
   composerCoreState.insertText.mockReset();
+  composerCoreState.expandPastedText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
@@ -380,7 +384,7 @@ interface ChatEditorRenderProps
   pastedFiles?: Array<{
     name: string;
     media_type: string;
-    text: string;
+    text?: string;
     size?: number;
   }>;
   gitBranch?: string;
@@ -1171,7 +1175,6 @@ describe('ChatEditor attachment reporting', () => {
         {
           name: 'report.html',
           media_type: 'text/html',
-          text: '<h1>Report</h1>',
         },
       ],
     });
@@ -1190,6 +1193,216 @@ describe('ChatEditor attachment reporting', () => {
     expect(
       attachments?.querySelector('button[aria-label="Remove report.html"]'),
     ).not.toBeNull();
+  });
+
+  it('shows a folded paste with its size and expands it on request', () => {
+    const text = `${'line\n'.repeat(199)}line`;
+    const onAttachmentPreview = vi.fn();
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text,
+          size: 1000,
+        },
+      ],
+      onAttachmentPreview,
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('1000 B');
+    expect(attachments?.textContent).not.toContain('lines');
+
+    // The action leads the second line and the size follows it.
+    const meta = container.querySelector<HTMLElement>(
+      '[class*="fileChipMeta"]',
+    );
+    expect(meta?.firstElementChild?.className).toContain('fileChipExpand');
+    expect(meta?.lastElementChild?.textContent).toBe('1000 B');
+
+    const buttons = Array.from(attachments?.querySelectorAll('button') ?? []);
+    expect(buttons).toHaveLength(3);
+    act(() => {
+      buttons
+        .find((button) => button.className.includes('fileChipTitle'))!
+        .click();
+    });
+    expect(onAttachmentPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'pasted-text.txt', text }),
+    );
+
+    const expand = buttons.find((button) =>
+      button.textContent?.includes('Show inline'),
+    )!;
+    expect(expand).toBeDefined();
+    act(() => {
+      expand.click();
+    });
+    expect(composerCoreState.expandPastedText).toHaveBeenCalledWith(0);
+  });
+
+  it('titles a folded paste with its first line instead of the file name', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'ERROR connection refused\nstack line\n'.repeat(100),
+          size: 4000,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    const title = container.querySelector<HTMLElement>(
+      '[class*="fileChipTitle"]',
+    );
+    expect(title?.textContent?.replace(/…$/, '')).toBe(
+      'ERROR connection refused stack line'.slice(0, PASTE_TITLE_MAX_CHARS),
+    );
+    expect(title?.getAttribute('title')).toBe(title?.textContent);
+    expect(attachments?.textContent).not.toContain('pasted-text.txt');
+  });
+
+  it('fills the title past a one-word first line', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'import\n  { spawn }\n  from child_process;\n'.repeat(50),
+          size: 2000,
+        },
+      ],
+    });
+    const title =
+      container.querySelector<HTMLElement>('[class*="fileChipTitle"]')
+        ?.textContent ?? '';
+    // The one-word first line is not the whole title: it runs into the next.
+    expect(title).toContain('import {');
+    expect(title.length).toBeLessThanOrEqual(PASTE_TITLE_MAX_CHARS + 1);
+  });
+
+  it('clips the title to a single line of bounded length', () => {
+    const firstLine = `head ${'x'.repeat(200)}`;
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: `${firstLine}\n${'tail\n'.repeat(200)}`,
+          size: 4000,
+        },
+      ],
+    });
+    const title = container.querySelector<HTMLElement>(
+      '[class*="fileChipTitle"]',
+    );
+    expect(title?.textContent?.endsWith('…')).toBe(true);
+    expect(title?.textContent).not.toContain('tail');
+    expect(title?.textContent?.length ?? 0).toBeLessThanOrEqual(
+      PASTE_TITLE_MAX_CHARS + 1,
+    );
+  });
+
+  it('falls back to the file name when there is no content to show', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: '\n\n   \n'.repeat(100),
+          size: 1200,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('pasted-text.txt');
+  });
+
+  it('leaves a pasted file without inline text without an expand action', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'photo.png',
+          media_type: 'image/png',
+          size: 2048,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).not.toContain('Show inline');
+    expect(attachments?.textContent).not.toContain('lines');
+  });
+
+  it('shows only the size, with no line count', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'x'.repeat(8000),
+          size: 8000,
+        },
+      ],
+    });
+    const attachments = container.querySelector(
+      '[data-web-shell-composer-attachments]',
+    );
+    expect(attachments?.textContent).toContain('7.8 KB');
+    expect(attachments?.textContent).not.toContain('lines');
+  });
+
+  it('omits the size for a text card that carries none', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: '中文'.repeat(100),
+        },
+      ],
+    });
+    const meta = container.querySelector<HTMLElement>(
+      '[class*="fileChipMeta"]',
+    );
+    expect(meta?.textContent).not.toContain(' B');
+    // The action survives on its own when there is no size to show.
+    expect(meta?.lastElementChild?.textContent).toBe('Show inline');
+  });
+
+  it('expands the card whose action was clicked', () => {
+    const container = renderChatEditor({
+      pastedFiles: [
+        {
+          name: 'pasted-text.txt',
+          media_type: 'text/plain',
+          text: 'first\n'.repeat(200),
+        },
+        {
+          name: 'pasted-text (1).txt',
+          media_type: 'text/plain',
+          text: 'second\n'.repeat(200),
+        },
+      ],
+    });
+    const expandButtons = Array.from(
+      container.querySelectorAll('button'),
+    ).filter((button) => button.textContent?.includes('Show inline'));
+    expect(expandButtons).toHaveLength(2);
+
+    act(() => {
+      expandButtons[1]!.click();
+    });
+
+    expect(composerCoreState.expandPastedText).toHaveBeenCalledWith(1);
   });
 
   it('reports whether the composer has tags or pasted images', () => {
@@ -1248,13 +1461,12 @@ describe('ChatEditor attachment reporting', () => {
     expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });
 
-  it('opens a text attachment preview when its chip is clicked', () => {
+  it('opens the preview when a chip without inline text is clicked', () => {
     const onAttachmentPreview = vi.fn();
     const container = renderChatEditor({
       pastedFiles: [
         {
           name: 'notes.txt',
-          text: 'hello attachment',
           media_type: 'text/plain',
           size: 16,
         },
@@ -1273,7 +1485,6 @@ describe('ChatEditor attachment reporting', () => {
     expect(onAttachmentPreview).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'notes.txt',
-        text: 'hello attachment',
       }),
     );
     expect(container.textContent).not.toContain('16 B');
@@ -1676,7 +1887,270 @@ describe('ChatEditor top composer tag tooltip', () => {
   });
 });
 
-describe('ChatEditor Plan toggle', () => {
+describe('ChatEditor Plan in the add menu', () => {
+  const actions = ['addMenu', 'approvalMode', 'plan', 'model'] as const;
+  const planButton = (container: HTMLElement) =>
+    container.querySelector<HTMLButtonElement>('[data-web-shell-plan-button]');
+
+  async function openPlanMenuItem(container: HTMLDivElement) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector('[data-testid="composer-add-menu-trigger"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    // A missing entry only means something once the menu is known to be open.
+    const menu = portalRoot.querySelector('[role="menu"]');
+    expect(menu).not.toBeNull();
+    const entry = portalRoot.querySelector<HTMLElement>(
+      '[data-testid="composer-add-menu-plan"]',
+    );
+    if (entry) {
+      const rows = menu!.querySelectorAll('[role^="menuitem"]');
+      expect(rows[rows.length - 1]).toBe(entry);
+    }
+    return entry;
+  }
+
+  it('keeps Plan off the toolbar until it is on and enables it from the menu', async () => {
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: actions,
+      onTogglePlan,
+    });
+    expect(planButton(container)).toBeNull();
+    expect(container.querySelector('[data-web-shell-plan-control]')).toBeNull();
+    expect(
+      container.querySelector('[data-toolbar-measure^="plan:"]'),
+    ).toBeNull();
+
+    const item = (await openPlanMenuItem(container))!;
+    expect(item.getAttribute('role')).toBe('menuitemcheckbox');
+    expect(item.getAttribute('aria-checked')).toBe('false');
+    expect(item.textContent).toBe('Plan modePlan first, run after you approve');
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      // The menu runs the choice once it has closed.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).toHaveBeenCalledOnce();
+  });
+
+  it('reports an enabled Plan as a dismissible chip after the permission control', async () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: actions,
+      planMode: true,
+      currentMode: 'yolo',
+      isRunning: true,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const chip = planButton(container)!;
+    expect(
+      container.querySelectorAll('[data-web-shell-plan-button]'),
+    ).toHaveLength(1);
+    expect(chip.hasAttribute('data-web-shell-plan-chip')).toBe(true);
+    // The close mark is what makes the chip dismissible. It sits inside the
+    // icon slot, which it takes over on hover, rather than trailing the label
+    // where revealing it would widen the chip.
+    const iconSlot = chip.querySelector('[class*="planChipIcon"]')!;
+    const closeMarks = chip.querySelectorAll('[class*="planChipClose"]');
+    expect(closeMarks).toHaveLength(1);
+    // The stylesheet reaches both through a child combinator: the Plan icon
+    // first, then the mark stacked over it.
+    expect(Array.from(iconSlot.children)).toEqual([
+      iconSlot.querySelector('[style*="mode-icon-url"]'),
+      closeMarks[0],
+    ]);
+    expect(closeMarks[0]!.getAttribute('aria-hidden')).toBe('true');
+    expect(closeMarks[0]!.querySelector('svg')).not.toBeNull();
+    // The slot the mark fills is the fixed icon box, which is why revealing
+    // it cannot change the width of the chip; and the forced-colours repaint
+    // is written for the icon being a span.
+    expect(iconSlot.className).toContain('toolBtnModeIcon');
+    expect(iconSlot.firstElementChild?.tagName).toBe('SPAN');
+    // Hosts that select the Plan control by this hook still find it.
+    expect(chip.hasAttribute('data-web-shell-plan-control')).toBe(true);
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    expect(chip.getAttribute('aria-label')).toBe('Plan');
+    expect(
+      document.getElementById(chip.getAttribute('aria-describedby')!)
+        ?.textContent,
+    ).toBe(
+      'Planning; execute with Full Access after approval. Click to exit planning.',
+    );
+    const controls = Array.from(
+      container.querySelectorAll('[data-web-shell-toolbar-leading] button'),
+    );
+    expect(controls.indexOf(chip)).toBe(
+      controls.indexOf(
+        container.querySelector('[data-web-shell-mode-button]')!,
+      ) + 1,
+    );
+    expect(
+      (await openPlanMenuItem(container))!.getAttribute('aria-checked'),
+    ).toBe('true');
+
+    // Propagation is what closes a menu the chip was clicked on top of.
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+        .click(),
+    );
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).not.toBeNull();
+    act(() => chip.click());
+    expect(
+      document.querySelector('[data-web-shell-toolbar-popover]'),
+    ).toBeNull();
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).toHaveBeenCalled();
+    // Controlled: the chip stays until the host reports Plan off.
+    expect(planButton(container)).not.toBeNull();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+  });
+
+  it('keeps the chip operable while approval disables input', () => {
+    const onTogglePlan = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: actions,
+      disabled: true,
+      planMode: true,
+      onTogglePlan,
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-add-menu-trigger"]',
+      )!.disabled,
+    ).toBe(true);
+    act(() => planButton(container)!.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it('disables the menu entry and the chip during a plan handoff', async () => {
+    const onTogglePlan = vi.fn();
+    const props = {
+      visibleToolbarActions: actions,
+      planMode: true,
+      modeControlsDisabled: true,
+      onTogglePlan,
+    };
+    const container = renderChatEditor(props);
+    const chip = planButton(container)!;
+    expect(chip.disabled).toBe(true);
+    act(() => chip.click());
+    const item = (await openPlanMenuItem(container))!;
+    expect(item.hasAttribute('data-disabled')).toBe(true);
+    // The add menu never disables a row without saying why.
+    expect(item.textContent).toContain('Switching mode');
+    await act(async () => {
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(onTogglePlan).not.toHaveBeenCalled();
+
+    rerenderChatEditor(container, { ...props, modeControlsDisabled: false });
+    expect(chip.disabled).toBe(false);
+    act(() => chip.click());
+    expect(onTogglePlan).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { width: 0, label: '' },
+    { width: 300, label: 'Plan' },
+  ])(
+    'fits the chip label to available toolbar width $width',
+    ({ width, label }) => {
+      const bounds = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockImplementation(function () {
+          if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+            return { width: 72 } as DOMRect;
+          if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+            return { width: 44 } as DOMRect;
+          if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+            return { width } as DOMRect;
+          return { width: 0 } as DOMRect;
+        });
+      try {
+        const container = renderChatEditor({
+          visibleToolbarActions: actions,
+          planMode: true,
+          onTogglePlan: vi.fn(),
+        });
+        expect(planButton(container)!.textContent).toBe(label);
+        // Where nothing can hover, the close mark replaces the icon only on a
+        // chip that still names itself.
+        expect(planButton(container)!.hasAttribute('data-labelled')).toBe(
+          label !== '',
+        );
+        // The budget is only right if the replicas stand in for the real chip,
+        // and the mark, being stacked over the icon, takes no room in either.
+        expect(
+          container.querySelector(
+            '[data-toolbar-measure^="plan:"] [class*="planChipClose"]',
+          ),
+        ).toBeNull();
+        expect(
+          container.querySelector('[data-toolbar-measure="plan:collapsed"]')
+            ?.textContent,
+        ).toBe('');
+        expect(
+          container.querySelector('[data-toolbar-measure="plan:expanded"]')
+            ?.textContent,
+        ).toBe('Plan');
+      } finally {
+        bounds.mockRestore();
+      }
+    },
+  );
+
+  it('measures the chip when Plan turns on after mount', () => {
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.matches('[data-toolbar-measure="plan:expanded"]'))
+          return { width: 72 } as DOMRect;
+        if (this.matches('[data-toolbar-measure="plan:collapsed"]'))
+          return { width: 44 } as DOMRect;
+        if (this.querySelector(':scope > [data-web-shell-toolbar-leading]'))
+          return { width: 300 } as DOMRect;
+        return { width: 0 } as DOMRect;
+      });
+    try {
+      const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+      const container = renderChatEditor(props);
+      expect(planButton(container)).toBeNull();
+      rerenderChatEditor(container, { ...props, planMode: true });
+      expect(planButton(container)!.textContent).toBe('Plan');
+    } finally {
+      bounds.mockRestore();
+    }
+  });
+
+  it.each([
+    { visibleToolbarActions: ['addMenu'] as const, onTogglePlan: vi.fn() },
+    { visibleToolbarActions: ['addMenu', 'plan'] as const },
+  ])(
+    'requires both the plan action and a toggle handler: %j',
+    async (props) => {
+      const container = renderChatEditor({ ...props, planMode: true });
+      expect(planButton(container)).toBeNull();
+      expect(await openPlanMenuItem(container)).toBeNull();
+    },
+  );
+});
+
+// A host that lists `plan` without `addMenu` has no menu to hold the entry.
+describe('ChatEditor Plan toolbar switch fallback', () => {
   it('associates the Plan switch with its changing accessible description', () => {
     const props = {
       visibleToolbarActions: ['plan'] as const,
@@ -1967,7 +2441,9 @@ describe('ChatEditor toolbar popovers', () => {
     );
     await act(async () => {
       yolo?.click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      // Long enough to catch a focus restore that arrives from the popover's
+      // post-unmount timeout, which is what this asserts does not happen.
+      await new Promise((resolve) => setTimeout(resolve, 50));
     });
 
     expect(onSelectMode).toHaveBeenCalledWith('yolo');

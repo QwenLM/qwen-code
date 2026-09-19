@@ -657,6 +657,43 @@ describe('HookRunner', () => {
   });
 
   describe('executeHooksParallel', () => {
+    it('ends an async hook whose hand-off throws instead of rejecting the batch', async () => {
+      vi.spyOn(
+        hookRunner.getAsyncRegistry(),
+        'canAcceptMore',
+      ).mockImplementation(() => {
+        throw new Error('registry unavailable');
+      });
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo background',
+          async: true,
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const onHookStart = vi.fn();
+      const onHookEnd = vi.fn();
+
+      const results = await hookRunner.executeHooksParallel(
+        hookConfigs,
+        HookEventName.PreToolUse,
+        createMockInput(),
+        onHookStart,
+        onHookEnd,
+      );
+
+      expect(onHookStart).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledTimes(1);
+      expect(onHookEnd).toHaveBeenCalledWith(
+        hookConfigs[0],
+        expect.objectContaining({ success: false }),
+        0,
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].error?.message).toContain('registry unavailable');
+    });
+
     it('should execute multiple hooks in parallel', async () => {
       const mockProcess = createMockProcess(0, 'result');
       mockSpawn.mockImplementation(() => mockProcess);
@@ -2971,6 +3008,69 @@ describe('HookRunner', () => {
       expect(spawnArgs[0]).toBe('powershell');
       expect(spawnArgs[1]).toContain('-Command');
       expect(spawnArgs[2].shell).toBe(false);
+    });
+  });
+
+  describe('outcome of results produced outside the runners', () => {
+    const asyncHook: HookConfig = {
+      type: HookType.Command,
+      command: 'background-job',
+      source: HooksConfigSource.Project,
+      async: true,
+    };
+
+    it('reports an unknown hook type as a non-blocking error', async () => {
+      const result = await hookRunner.executeHook(
+        { type: 'unknown' } as unknown as HookConfig,
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('non_blocking_error');
+    });
+
+    it('reports an async hook refused by the concurrency limit as a non-blocking error', async () => {
+      vi.spyOn(hookRunner['asyncRegistry'], 'canAcceptMore').mockReturnValue(
+        false,
+      );
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.isAsync).toBe(true);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('reports an async hook whose registration loses the race as a non-blocking error', async () => {
+      vi.spyOn(hookRunner['asyncRegistry'], 'register').mockReturnValue(null);
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.isAsync).toBe(true);
+    });
+
+    it('reports an async hook handed to the background as success', async () => {
+      mockSpawn.mockImplementation(() => createMockProcess());
+
+      const result = await hookRunner.executeHook(
+        asyncHook,
+        HookEventName.PostToolUse,
+        createMockInput(),
+      );
+
+      expect(result.outcome).toBe('success');
+      expect(result.isAsync).toBe(true);
+      expect(result.success).toBe(true);
     });
   });
 });

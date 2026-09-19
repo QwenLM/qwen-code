@@ -593,7 +593,10 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
     ).length;
   const providersBeforeClear = qualifiedProviderRequestCount();
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'New task', exact: true })
+    .first()
+    .click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');
   await expect(modelButton).toContainText('qwen3.8-max · Medium');
   expect(qualifiedProviderRequestCount()).toBe(providersBeforeClear);
@@ -1078,7 +1081,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
 
   await gotoSession(page, scenario, daemon);
   await submitLocalCommand(page, '/extensions');
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('tab', { name: 'Archive' }).click();
   const archiveInput = page.getByLabel('Select a .zip or .tar.gz archive.');
   await archiveInput.setInputFiles({
@@ -1087,7 +1090,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
     buffer: Buffer.from('stale-archive'),
   });
   await page.getByRole('button', { name: 'Cancel' }).click();
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('tab', { name: 'Archive' }).click();
   await expect(page.getByText('Selected archive: stale.zip')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
@@ -1205,7 +1208,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
     page.getByRole('heading', { name: 'Add Extension' }),
   ).toHaveCount(0);
   await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(page.getByRole('tab', { name: 'Source' })).toHaveAttribute(
     'aria-selected',
     'true',
