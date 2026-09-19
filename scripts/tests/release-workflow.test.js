@@ -524,6 +524,28 @@ describe('release workflow', () => {
       .filter((name) => name !== 'base')
       .sort();
     expect(published).toEqual(guarded);
+
+    // Non-channel packages are literal calls, so verify those against the
+    // guard too. Resolve their names from package.json to avoid a second map.
+    const publishStep = releaseStepScript.slice(
+      releaseStepScript.indexOf('\n  publish-packages)'),
+      releaseStepScript.indexOf('\n  verify-archives)'),
+    );
+    const literalTargets = [
+      ...publishStep.matchAll(/publish_package '([^']+)'/g),
+    ].map(([, directory]) => directory);
+    expect(literalTargets.length).toBeGreaterThan(1);
+    const guardedNames = new Set(PUBLISHED_PACKAGES);
+    for (const directory of literalTargets) {
+      // `dist` is the root package's bundle output rather than a workspace
+      // directory, and does not exist in a source checkout.
+      const manifest =
+        directory === 'dist' ? 'package.json' : `${directory}/package.json`;
+      const { name } = JSON.parse(readFileSync(manifest, 'utf8'));
+      expect(guardedNames.has(name), `${directory} publishes ${name}`).toBe(
+        true,
+      );
+    }
   });
 
   it('keeps the workflow focused on orchestration', () => {

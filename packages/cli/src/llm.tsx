@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getRelaunchEnvProvenance } from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   AuthType,
@@ -791,7 +792,7 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
-        childEnv: privateAcpChildEnv,
+        childEnv: { ...privateAcpChildEnv, ...getRelaunchEnvProvenance() },
         onUpdateRelaunch,
       });
     }
@@ -1112,6 +1113,10 @@ export async function main() {
       } catch {
         // Best-effort — don't block shutdown
       }
+    });
+
+    registerCleanup(() => config.shutdownExecutionEnvironments(), {
+      first: true,
     });
 
     // Register cleanup for MCP clients as early as possible

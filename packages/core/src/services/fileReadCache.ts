@@ -149,6 +149,7 @@ export type FileReadCheckResult =
 
 export class FileReadCache {
   private readonly byInode = new Map<string, FileReadEntry>();
+  private clearGeneration = 0;
   private static readonly MAX_ENTRIES = 4096;
 
   /** Build the canonical key for a file from its Stats. */
@@ -391,7 +392,17 @@ export class FileReadCache {
 
   /** Drop every entry. Used by tests and on Config shutdown. */
   clear(): void {
+    this.clearGeneration++;
+    this.dropEntries();
+  }
+
+  /** Reclaim local cache memory without invalidating another runtime's reads. */
+  dropEntries(): void {
     this.byInode.clear();
+  }
+
+  getClearGeneration(): number {
+    return this.clearGeneration;
   }
 
   /**
