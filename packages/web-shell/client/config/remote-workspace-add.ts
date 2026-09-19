@@ -110,3 +110,21 @@ export function completeRemoteWorkspaceAdd(): void {
     // The completed add does not depend on cleaning up its return location.
   }
 }
+
+/**
+ * Drops a return location whose flow was abandoned rather than finished.
+ *
+ * The key is only ever written immediately before a navigation that carries
+ * `FLOW_PARAM` (see startRemoteWorkspaceAdd and navigateToDaemon), so booting
+ * without that marker means the hand-over was abandoned — a reload or the
+ * browser's Back button strips the dialog but leaves this key behind, and the
+ * next Cancel in any Add-workspace dialog would consume the stale location and
+ * navigate the whole shell back to it.
+ */
+export function discardAbandonedRemoteWorkspaceAdd(): void {
+  try {
+    window.sessionStorage.removeItem(RETURN_URL_KEY);
+  } catch {
+    // Nothing to discard when storage is unavailable.
+  }
+}

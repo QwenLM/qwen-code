@@ -265,6 +265,7 @@ import { StandaloneContext } from './config/standalone';
 import {
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
+  discardAbandonedRemoteWorkspaceAdd,
   getRemoteWorkspaceAddStep,
   leaveRemoteWorkspaceAdd,
   selectRemoteWorkspaceLocation,
@@ -3657,8 +3658,13 @@ export function App({
     initialRemoteWorkspaceAddStep === 'browse',
   );
   useEffect(() => {
+    // No marker on a standalone boot means the hand-over that wrote the return
+    // location was abandoned (reload or Back), not resumed. Dropping it here
+    // keeps a later Cancel in an unrelated Add-workspace dialog from consuming
+    // the stale location and navigating the shell away.
     if (initialRemoteWorkspaceAddStep) clearRemoteWorkspaceAddStep();
-  }, [initialRemoteWorkspaceAddStep]);
+    else if (standalone) discardAbandonedRemoteWorkspaceAdd();
+  }, [initialRemoteWorkspaceAddStep, standalone]);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);

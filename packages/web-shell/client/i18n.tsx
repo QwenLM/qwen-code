@@ -5588,7 +5588,7 @@ const ZH: Messages = {
   'workspaceHost.source': '目录来源',
   'workspaceHost.thisComputer': '这台计算机',
   'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目录`,
-  'workspaceHost.folderOnThisComputer': '这台电脑上的目录',
+  'workspaceHost.folderOnThisComputer': '这台计算机上的目录',
   'workspaceHost.browseHint': '请从下方选择目录，或输入绝对路径。',
   'workspaceHost.parent': '上一级',
   'workspaceHost.addFolder': '添加此文件夹',

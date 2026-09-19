@@ -25,6 +25,7 @@ vi.mock('./daemon', () => ({
 const {
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
+  discardAbandonedRemoteWorkspaceAdd,
   getRemoteWorkspaceAddStep,
   leaveRemoteWorkspaceAdd,
   selectRemoteWorkspaceLocation,
@@ -127,6 +128,25 @@ describe('remote workspace add navigation', () => {
     expect(window.sessionStorage.getItem('qwen-remote-workspace-return')).toBe(
       null,
     );
+  });
+
+  it('drops a return location an abandoned hand-over left behind', () => {
+    // A reload or the Back button abandons the flow: the marker is gone but the
+    // key survives, and the next Cancel in any Add-workspace dialog — including
+    // a purely local one — would consume that stale location.
+    window.sessionStorage.setItem(
+      'qwen-remote-workspace-return',
+      `${testOrigin}/session/original`,
+    );
+    expect(getRemoteWorkspaceAddStep()).toBeUndefined();
+
+    discardAbandonedRemoteWorkspaceAdd();
+
+    expect(window.sessionStorage.getItem('qwen-remote-workspace-return')).toBe(
+      null,
+    );
+    expect(leaveRemoteWorkspaceAdd()).toBe(false);
+    expect(assign).not.toHaveBeenCalled();
   });
 
   it('removes only the flow marker from the live URL', () => {
