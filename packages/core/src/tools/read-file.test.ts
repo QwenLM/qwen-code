@@ -581,7 +581,7 @@ describe('ReadFileTool', () => {
       );
     });
 
-    it('should handle image file and return appropriate content', async () => {
+    it('returns image content without tool guidance before the registry is available', async () => {
       const imagePath = path.join(tempRootDir, 'image.png');
       await sharp({
         create: {
@@ -602,9 +602,7 @@ describe('ReadFileTool', () => {
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toEqual([
         {
-          text: expect.stringMatching(
-            /Image overview: 20x10; oriented source: 20x10.*tool_search.*zoom_image.*0 to 1000/,
-          ),
+          text: 'Image overview: 20x10; oriented source: 20x10.',
         },
         {
           inlineData: {
