@@ -1070,6 +1070,38 @@ describe('livePromptEvents', () => {
     ]);
   });
 
+  it('observes notes input after delivered steering has been recorded', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = createFakeConfig(sendMessageStream, undefined, undefined, {
+      recordMidTurnUserMessage,
+    });
+    const client = config.getGeminiClient();
+    const chat = client.getChat();
+    const observeSessionNotesInput = vi.fn(() => {
+      expect(recordMidTurnUserMessage).toHaveBeenCalledTimes(2);
+    });
+    config.getChatCompression = () => ({ strategy: 'notes' });
+    chat.observeSessionNotesInput = observeSessionNotesInput;
+    client.getChat = () => chat;
+
+    await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['first', 'second'],
+      }),
+    );
+
+    const [secondPrompt] = sendMessageStream.mock.calls[1] as unknown[];
+    expect(observeSessionNotesInput).toHaveBeenCalledExactlyOnceWith({
+      role: 'user',
+      parts: secondPrompt,
+    });
+  });
+
   it('records nothing when the steering hop is restored (U-32)', async () => {
     const sendMessageStream = oneToolBatchStream({
       callId: 't1',

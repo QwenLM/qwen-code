@@ -202,6 +202,10 @@ function summarizeExecutionAllowlist(
  *   persisted Todo sidecar.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
+  ToolNames.SESSION_NOTES,
+  ToolNames.SESSION_HISTORY,
+  ToolNames.GET_CONTEXT_REMAINING,
+  ToolNames.NEW_CONTEXT,
   ToolNames.AGENT,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
@@ -270,6 +274,10 @@ export function extractParentToolNames(
  * Plan lifecycle tools remain caller-owned for teammates too.
  */
 const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
+  ToolNames.SESSION_NOTES,
+  ToolNames.SESSION_HISTORY,
+  ToolNames.GET_CONTEXT_REMAINING,
+  ToolNames.NEW_CONTEXT,
   ToolNames.AGENT,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,

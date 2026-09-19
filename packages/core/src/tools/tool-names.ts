@@ -18,6 +18,10 @@
  * per-declaration `pathFields?: string[]` annotation on the tool class.)
  */
 export const ToolNames = {
+  SESSION_NOTES: 'session_notes',
+  SESSION_HISTORY: 'session_history',
+  GET_CONTEXT_REMAINING: 'get_context_remaining',
+  NEW_CONTEXT: 'new_context',
   EXEC: 'exec',
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
@@ -96,6 +100,10 @@ export const ToolNames = {
  * with the actual tool display names.
  */
 export const ToolDisplayNames = {
+  SESSION_NOTES: 'SessionNotes',
+  SESSION_HISTORY: 'SessionHistory',
+  GET_CONTEXT_REMAINING: 'GetContextRemaining',
+  NEW_CONTEXT: 'NewContext',
   EXEC: 'Exec',
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',

@@ -165,6 +165,7 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   // Workflow Control - most impactful setting
   'tools.approvalMode',
   'tools.codeModeOnly',
+  'model.chatCompression.strategy',
 
   // Localization - users often set this first
   'general.language',

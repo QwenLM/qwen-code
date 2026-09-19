@@ -517,6 +517,8 @@ describe('Session', () => {
   let mockChatRecordingService: {
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
+    bindNotesInput: ReturnType<typeof vi.fn>;
+    releaseNotesInput: ReturnType<typeof vi.fn>;
     recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
     recordGoalTurnEnd: ReturnType<typeof vi.fn>;
     recordMidTurnUserMessage: ReturnType<typeof vi.fn>;
@@ -881,6 +883,8 @@ describe('Session', () => {
     mockChatRecordingService = {
       recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
+      bindNotesInput: vi.fn(),
+      releaseNotesInput: vi.fn(),
       recordGoalRuntimeMessage: vi.fn(),
       recordGoalTurnEnd: vi.fn().mockResolvedValue(undefined),
       recordMidTurnUserMessage: vi.fn(),
@@ -26767,6 +26771,119 @@ describe('Session', () => {
           mockChatRecordingService.recordSlashCommand,
         ).toHaveBeenCalledWith(
           expect.objectContaining({ rawCommand: '/compress' }),
+        );
+      });
+
+      it('keeps built-in notes compression from invalidating its checkpoint', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          expect(
+            mockChatRecordingService.recordUserMessage,
+          ).not.toHaveBeenCalled();
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: 'New context started.',
+            resolvedCommand: { name: 'compress', kind: CommandKind.BUILT_IN },
+          };
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/compress' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordSlashCommand,
+        ).toHaveBeenCalledWith({
+          phase: 'invocation',
+          rawCommand: '/compress',
+          sentToModel: false,
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('binds a custom compress prompt and attachments to notes observation before sending', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        mockChatRecordingService.recordUserMessage.mockReturnValue(
+          'notes-input',
+        );
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded custom prompt' }],
+          resolvedCommand: { name: 'compress', kind: CommandKind.FILE },
+        });
+        mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+          expect(mockChatRecordingService.bindNotesInput).toHaveBeenCalled();
+          return createEmptyStream();
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: '/compress inspect this' },
+            { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+          ],
+        });
+
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).toHaveBeenCalledOnce();
+        expect(firstSentMessage()).toEqual([
+          { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+          { text: 'Expanded custom prompt' },
+        ]);
+        expect(mockChatRecordingService.bindNotesInput).toHaveBeenCalledWith(
+          'notes-input',
+          {
+            role: 'user',
+            parts: firstSentMessage(),
+          },
+        );
+        expect(mockChatRecordingService.releaseNotesInput).toHaveBeenCalledWith(
+          'notes-input',
+        );
+        expect(mockLlmClient.tryCompressChat).not.toHaveBeenCalled();
+      });
+
+      it('releases a notes observation marker when an expanded command is cancelled before sending', async () => {
+        mockConfig.getChatCompression = vi
+          .fn()
+          .mockReturnValue({ strategy: 'notes' });
+        mockChatRecordingService.recordUserMessage.mockReturnValue(
+          'cancelled-input',
+        );
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async (_input, controller) => {
+          controller.abort();
+          return {
+            type: 'submit_prompt',
+            content: [{ text: 'Expanded prompt' }],
+          };
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/custom' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.releaseNotesInput).toHaveBeenCalledWith(
+          'cancelled-input',
         );
       });
 

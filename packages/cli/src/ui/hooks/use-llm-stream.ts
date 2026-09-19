@@ -2445,11 +2445,13 @@ export const useLlmStream = (
         {
           type: 'info',
           text:
-            `IMPORTANT: This conversation ${reasonClause}. ` +
-            `A compressed context will be sent for future messages (compressed from: ` +
-            `${formatCount(eventValue?.originalTokenCount, eventValue?.originalTokenCountIsEstimated)} to ` +
-            `${formatCount(eventValue?.newTokenCount, eventValue?.newTokenCountIsEstimated)} tokens).` +
-            warningSuffix,
+            eventValue?.strategy === 'notes'
+              ? `Started a new context from local notes (${formatCount(eventValue.originalTokenCount, eventValue.originalTokenCountIsEstimated)} to ${formatCount(eventValue.newTokenCount, eventValue.newTokenCountIsEstimated)} tokens). Earlier evidence remains available in session history.`
+              : `IMPORTANT: This conversation ${reasonClause}. ` +
+                `A compressed context will be sent for future messages (compressed from: ` +
+                `${formatCount(eventValue?.originalTokenCount, eventValue?.originalTokenCountIsEstimated)} to ` +
+                `${formatCount(eventValue?.newTokenCount, eventValue?.newTokenCountIsEstimated)} tokens).` +
+                warningSuffix,
         },
         Date.now(),
       );

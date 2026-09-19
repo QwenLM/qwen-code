@@ -789,7 +789,34 @@
         "chatCompression": {
           "description": "Chat compression settings.",
           "type": "object",
-          "additionalProperties": true
+          "properties": {
+            "strategy": {
+              "description": "Choose summary compression or local notes with history recovery. Restart Qwen Code to apply. Options: summary, notes",
+              "enum": [
+                "summary",
+                "notes"
+              ],
+              "default": "summary"
+            },
+            "imageTokenEstimate": {
+              "type": "number"
+            },
+            "maxRecentFilesToRetain": {
+              "type": "number"
+            },
+            "maxRecentImagesToRetain": {
+              "type": "number"
+            },
+            "enableScreenshotTrigger": {
+              "type": "boolean"
+            },
+            "screenshotTriggerThreshold": {
+              "type": "number"
+            },
+            "imagePayloadThreshold": {
+              "type": "number"
+            }
+          }
         },
         "sessionTokenLimit": {
           "description": "The maximum number of tokens allowed in a session.",

@@ -21,6 +21,7 @@
  */
 
 import { appendFileSync } from 'node:fs';
+import { createUserContent } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import type {
   AgentResultDisplay,
   Config,
@@ -721,6 +722,9 @@ export async function* livePromptEvents(
     const recorder = config.getChatRecordingService?.();
     for (const recording of stashedRecordings) {
       recorder?.recordMidTurnUserMessage(recording.parts, recording.message);
+    }
+    if (config.getChatCompression?.()?.strategy === 'notes') {
+      client.getChat().observeSessionNotesInput(createUserContent(nextPrompt));
     }
     stashedRecordings = [];
     stashedSteeredTexts = undefined;

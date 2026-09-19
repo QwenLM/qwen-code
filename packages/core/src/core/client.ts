@@ -58,6 +58,7 @@ import {
   LlmChat,
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
+  deferNotesInputObservationKey,
 } from './llm-chat.js';
 import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
@@ -84,6 +85,7 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
+import { SESSION_CONTEXT_TOOL_NAMES } from '../services/session-notes-state.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -1626,7 +1628,20 @@ export class LlmClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const base = getMainSessionBaseSystemPrompt(this.config);
+    let base = getMainSessionBaseSystemPrompt(this.config);
+    if (this.config.getChatCompression?.()?.strategy === 'notes') {
+      const declarations = this.config
+        .getToolRegistry()
+        .getFunctionDeclarations();
+      if (
+        SESSION_CONTEXT_TOOL_NAMES.every((name) =>
+          declarations.some((tool) => tool.name === name),
+        )
+      ) {
+        base +=
+          '\n\nMaintain session_notes as a compact working checkpoint during long tasks: goal, current user constraints, decisions, completed work, failed approaches, next steps, and useful session_history references. Use session_history to recover earlier recorded evidence. Before context fills, write fresh notes alone in a tool-only response, then call new_context alone with the returned revision. Do not mix either call with other tools or assistant text. Notes and history are local to this session; new_context keeps the notes and necessary runtime state without generating a summary. These tools remain direct calls in code mode.';
+      }
+    }
     const stableLayers = {
       base,
       // Progressive media understanding contract: WHY deliveries carry
@@ -3650,6 +3665,11 @@ export class LlmClient {
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
     let messageDisplay: MessageDisplayDispatcher | null = null;
+    const notesInputRecorder =
+      this.config.getChatCompression?.()?.strategy === 'notes'
+        ? this.config.getChatRecordingService()
+        : undefined;
+    let notesInputRecordUuid: string | undefined;
     try {
       if (messageType === SendMessageType.Goal) {
         this.config
@@ -3697,6 +3717,15 @@ export class LlmClient {
             recorder?.recordUserMessage(request, goalPermit);
           }
         }
+      }
+
+      if (
+        messageType === SendMessageType.Goal ||
+        messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Cron
+      ) {
+        notesInputRecordUuid =
+          notesInputRecorder?.getSessionNotesState().sourceLeafUuid;
       }
 
       if (
@@ -4234,6 +4263,11 @@ export class LlmClient {
       // client-side snapshot taken here would still cover the send-lock
       // and compression awaits between `turn.run` and that push.
       attachedSnapshotSource = requestToSend;
+      if (this.config.getChatCompression?.()?.strategy === 'notes') {
+        (requestToSend as unknown as Record<PropertyKey, unknown>)[
+          deferNotesInputObservationKey
+        ] = true;
+      }
       pushInitiated = true;
       agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
@@ -4259,6 +4293,11 @@ export class LlmClient {
             // as a no-op thanks to the settledSteerInputs guard.
             settleSteerInput(attachedSteerInput, attachedPushSnapshot());
             steerInputSettled = true;
+            if (this.config.getChatCompression?.()?.strategy === 'notes') {
+              this.getChat().observeSessionNotesInput(
+                createUserContent(request),
+              );
+            }
           }
           if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
@@ -4986,6 +5025,8 @@ export class LlmClient {
         settleSteerInput(attachedSteerInput);
       }
       restoreStrippedRetryEntries();
+      if (notesInputRecordUuid)
+        notesInputRecorder?.releaseNotesInput(notesInputRecordUuid);
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught
       // exception thrown out of the streaming loop still ends the message,

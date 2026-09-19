@@ -110,6 +110,7 @@ const ARTIFACT_RECORD_SUBTYPES = new Set([
 ]);
 
 const KNOWN_RECORD_SUBTYPES = new Set([
+  'session_notes',
   'chat_compression',
   'slash_command',
   'ui_telemetry',

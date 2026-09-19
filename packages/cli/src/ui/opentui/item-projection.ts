@@ -800,6 +800,7 @@ export function projectMemorySaved(
 
 /** Parity of messages/CompressionMessage. */
 export function projectCompression(compression: {
+  strategy?: 'summary' | 'notes';
   isPending?: boolean;
   originalTokenCount?: number | null;
   newTokenCount?: number | null;
@@ -818,6 +819,9 @@ export function projectCompression(compression: {
   const next = compression.newTokenCount ?? 0;
   switch (compression.compressionStatus) {
     case CompressionStatus.COMPRESSED:
+      if (compression.strategy === 'notes') {
+        return `Started a new context from local notes: ${formatTokens(original, compression.originalTokenCountIsEstimated)} to ${formatTokens(next, compression.newTokenCountIsEstimated)} tokens.`;
+      }
       return `Chat history compressed from ${formatTokens(
         original,
         compression.originalTokenCountIsEstimated,

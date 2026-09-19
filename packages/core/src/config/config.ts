@@ -549,6 +549,7 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
+  strategy?: 'summary' | 'notes';
   /**
    * Estimated tokens for a single inline image / document part when
    * apportioning chars across history during compression size estimation.
@@ -11016,6 +11017,46 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
+
+    if (
+      this.chatCompression?.strategy === 'notes' &&
+      this.chatRecordingEnabled &&
+      !options?.forSubAgent
+    ) {
+      const names = [
+        ToolNames.SESSION_NOTES,
+        ToolNames.SESSION_HISTORY,
+        ToolNames.GET_CONTEXT_REMAINING,
+        ToolNames.NEW_CONTEXT,
+      ] as const;
+      try {
+        const statuses = await Promise.all(
+          names.map(
+            (name) =>
+              this.getPermissionManager()?.getToolRegistrationStatus(name) ??
+              'registered',
+          ),
+        );
+        if (statuses.every((status) => status !== 'disabled')) {
+          for (const [index, name] of names.entries()) {
+            const factory = async () => {
+              const { SessionContextTool } = await import(
+                '../tools/session-context.js'
+              );
+              return new SessionContextTool(this, name);
+            };
+            if (statuses[index] === 'deferred')
+              registry.registerPermissionDeferredFactory(name, factory);
+            else registry.registerFactory(name, factory);
+          }
+        }
+      } catch (error) {
+        this.debugLogger.warn(
+          'Could not check permissions for session context tools; using summary compression.',
+          error,
+        );
+      }
+    }
 
     const environment = this.getExecutionEnvironment();
     if (environment) {
