@@ -66,6 +66,7 @@ const finalText = 'managed hosted runtime e2e complete';
 const runtimeFileContent = 'written after cold Runtime readiness';
 const runtimeDelayMs = cancelAfterStart || twoSessions ? 0 : 15_000;
 const harnessToken = 'managed-hosted-harness-token';
+const harnessCapabilityDigest = `sha256:${'a'.repeat(64)}`;
 const brokerToken = 'managed-hosted-broker-token';
 const controlToken = 'managed-hosted-control-token';
 mkdirSync(workspace, { recursive: true });
@@ -491,6 +492,7 @@ try {
           OPENAI_MODEL: 'fake-model',
           QWEN_MODEL: 'fake-model',
           QWEN_SERVER_TOKEN: harnessToken,
+          QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: harnessCapabilityDigest,
           QWEN_RUNTIME_BROKER_URL: brokerProxy.baseUrl,
           QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
         },
@@ -540,6 +542,7 @@ try {
           ...commonEnvironment,
           QWEN_MANAGED_HOSTED_E2E_BASE_URL: harnessUrl,
           QWEN_MANAGED_HOSTED_E2E_TOKEN: harnessToken,
+          QWEN_MANAGED_HOSTED_E2E_CAPABILITY_DIGEST: harnessCapabilityDigest,
           QWEN_MANAGED_HOSTED_E2E_CONTROL_URL: controlUrl,
           QWEN_MANAGED_HOSTED_E2E_CONTROL_TOKEN: controlToken,
           QWEN_MANAGED_HOSTED_E2E_WORKSPACE: workspace,

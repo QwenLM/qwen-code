@@ -15,7 +15,10 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -39,8 +42,8 @@ class ManagedHostedRuntimeE2ETest {
         long expectedDelayMillis = Long.parseLong(requiredEnvironment(
                 "QWEN_MANAGED_HOSTED_E2E_DELAY_MS"));
 
-        try (DaemonClient daemon = newDaemonClient();
-                DaemonSessionClient session = createSession(daemon,
+        try (HostedHarnessClient harness = newHarnessClient();
+                HostedSession session = createSession(harness,
                         workspace)) {
             startWarmup(session.getSessionId());
             long promptStartedAt = System.currentTimeMillis();
@@ -133,8 +136,8 @@ class ManagedHostedRuntimeE2ETest {
         CountDownLatch toolRequested = new CountDownLatch(1);
         AtomicLong firstModelEventAt = new AtomicLong(-1);
 
-        try (DaemonClient daemon = newDaemonClient();
-                DaemonSessionClient session = createSession(daemon,
+        try (HostedHarnessClient harness = newHarnessClient();
+                HostedSession session = createSession(harness,
                         workspace)) {
             startWarmup(session.getSessionId());
             long promptStartedAt = System.currentTimeMillis();
@@ -207,8 +210,8 @@ class ManagedHostedRuntimeE2ETest {
                 "QWEN_MANAGED_HOSTED_E2E_ACTIVE_CANCEL_DELAYED"));
         CountDownLatch toolRequested = new CountDownLatch(1);
 
-        try (DaemonClient daemon = newDaemonClient();
-                DaemonSessionClient session = createSession(daemon,
+        try (HostedHarnessClient harness = newHarnessClient();
+                HostedSession session = createSession(harness,
                         workspace)) {
             startWarmup(session.getSessionId());
             long promptStartedAt = System.currentTimeMillis();
@@ -276,9 +279,9 @@ class ManagedHostedRuntimeE2ETest {
         AtomicInteger alphaTools = new AtomicInteger();
         AtomicInteger betaTools = new AtomicInteger();
 
-        try (DaemonClient daemon = newDaemonClient();
-                DaemonSessionClient alpha = createSession(daemon, workspace);
-                DaemonSessionClient beta = createSession(daemon, workspace)) {
+        try (HostedHarnessClient harness = newHarnessClient();
+                HostedSession alpha = createSession(harness, workspace);
+                HostedSession beta = createSession(harness, workspace)) {
             startWarmup(alpha.getSessionId());
             startWarmup(beta.getSessionId());
             PromptCall alphaCall = alpha.startPrompt(PromptRequest.text(
@@ -342,23 +345,123 @@ class ManagedHostedRuntimeE2ETest {
         }
     }
 
-    private static DaemonClient newDaemonClient() {
-        return DaemonClient.builder()
+    private static HostedHarnessClient newHarnessClient() {
+        return HostedHarnessClient.builder()
                 .baseUri(URI.create(requiredEnvironment(
                         "QWEN_MANAGED_HOSTED_E2E_BASE_URL")))
                 .bearerToken(requiredEnvironment(
                         "QWEN_MANAGED_HOSTED_E2E_TOKEN"))
-                .promptObservationTimeout(Duration.ofMinutes(2))
+                .capabilityDigest(requiredEnvironment(
+                        "QWEN_MANAGED_HOSTED_E2E_CAPABILITY_DIGEST"))
                 .heartbeatInterval(Duration.ZERO)
                 .build();
     }
 
-    private static DaemonSessionClient createSession(DaemonClient daemon,
+    private static HostedSession createSession(HostedHarnessClient harness,
             String workspace) throws Exception {
-        return daemon.createSession(CreateSessionRequest.builder()
-                .workspaceCwd(workspace)
+        HarnessSessionRef session = harness.createSession(
+                CreateHarnessSession.builder()
+                .harnessSessionId(UUID.randomUUID().toString())
                 .approvalMode(DaemonApprovalMode.YOLO)
                 .build());
+        assertEquals(Path.of(workspace).toRealPath(),
+                Path.of(session.getHarnessControlCwd()).toRealPath());
+        return new HostedSession(harness, session);
+    }
+
+    private static final class HostedSession implements AutoCloseable {
+        private final HostedHarnessClient harness;
+        private final HarnessSessionRef session;
+
+        private HostedSession(HostedHarnessClient harness,
+                HarnessSessionRef session) {
+            this.harness = harness;
+            this.session = session;
+        }
+
+        private String getSessionId() {
+            return session.getHarnessSessionId();
+        }
+
+        private PromptCall startPrompt(PromptRequest request,
+                PromptObserver observer) {
+            String promptId = UUID.randomUUID().toString();
+            SubmitHarnessTurn.Builder submit = SubmitHarnessTurn.builder()
+                    .session(session)
+                    .promptId(promptId)
+                    .payloadDigest(SubmitHarnessTurn.computePayloadDigest(
+                            request.getContent()));
+            request.getContent().forEach(submit::addContent);
+            if (request.getDeadlineMillis() != null) {
+                submit.deadline(Duration.ofMillis(
+                        request.getDeadlineMillis()));
+            }
+            PromptReceipt receipt = harness.submitTurn(submit.build());
+            CompletableFuture<PromptTerminal> completion =
+                    CompletableFuture.supplyAsync(
+                            () -> observe(receipt, observer),
+                            ForkJoinPool.commonPool());
+            return new PromptCall(
+                    CompletableFuture.completedFuture(new PromptAcceptance(
+                            receipt.getPromptId(), receipt.getLastEventId(),
+                            receipt.getEventEpoch())),
+                    completion, ForkJoinPool.commonPool(),
+                    new CountDownLatch(0));
+        }
+
+        private PromptTerminal observe(PromptReceipt receipt,
+                PromptObserver observer) {
+            try (HarnessEventStream stream = harness.streamEvents(
+                    StreamHarnessEvents.builder()
+                            .session(session)
+                            .lastEventId(receipt.getLastEventId())
+                            .eventEpoch(receipt.getEventEpoch())
+                            .build())) {
+                for (DaemonEvent event = stream.next(); event != null;
+                        event = stream.next()) {
+                    if (!event.belongsTo(receipt.getPromptId())) {
+                        continue;
+                    }
+                    if ("turn_complete".equals(event.getType())
+                            || "turn_error".equals(event.getType())) {
+                        return PromptTerminal.from(event,
+                                receipt.getPromptId(), getSessionId());
+                    }
+                    dispatch(observer, event, getSessionId());
+                }
+            }
+            throw new DaemonProtocolException(
+                    "Hosted Harness stream ended before terminal");
+        }
+
+        private void cancelActivePrompt() {
+            harness.cancelTurn(session);
+        }
+
+        @Override
+        public void close() {
+            harness.detachSession(session);
+        }
+    }
+
+    private static void dispatch(PromptObserver observer, DaemonEvent event,
+            String sessionId) {
+        if (!"session_update".equals(event.getType())) {
+            observer.onEvent(event);
+            return;
+        }
+        event.requireSessionId(sessionId, "session_update");
+        String kind = event.updateKind();
+        if ("agent_message_chunk".equals(kind)) {
+            String text = event.textChunk();
+            if (text != null) {
+                observer.onText(text, event);
+            }
+        } else if ("tool_call".equals(kind)
+                || "tool_call_update".equals(kind)) {
+            observer.onTool(event.update(), event);
+        }
+        observer.onEvent(event);
     }
 
     private static PromptObserver collectingObserver(StringBuilder text,
