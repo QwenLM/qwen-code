@@ -24,15 +24,9 @@ export * from './goal-persistence.js';
 export * from './goal-legacy-cards.js';
 export {
   isGoalCheckpointBookkeepingRecord,
-  projectGoalStateToLegacy,
-} from './goal-legacy-projection.js';
-export type {
-  LegacyActiveGoal,
-  LegacyGoalProjection,
-  LegacyGoalStatus,
-  LegacyGoalStatusKind,
-  LegacyGoalTerminal,
-} from './goal-legacy-projection.js';
+  projectGoalCard,
+} from './goal-card.js';
+export type { GoalCard, GoalCardKind } from './goal-card.js';
 export * from './goal-evidence.js';
 export * from './goal-tool-result-provenance.js';
 export * from './goal-verifier.js';
