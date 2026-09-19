@@ -143,10 +143,9 @@ Code extension fields include:
   When `hooks` is a string path, use a relative path under the extension root;
   do not use absolute paths or `..` traversal.
   Inline hooks in `qwen-extension.json` receive manifest path hydration, but
-  file-based hooks only substitute `${CLAUDE_PLUGIN_ROOT}` inside command
-  strings. Use `${CLAUDE_PLUGIN_ROOT}` for the extension root in file-based
-  hooks; `${extensionPath}`, `${workspacePath}`, `${/}`, and `${pathSeparator}`
-  are not substituted there.
+  file-based hook commands substitute `${CLAUDE_PLUGIN_ROOT}` and
+  `${extensionPath}` for the extension root, plus `${/}` and `${pathSeparator}`.
+  `${workspacePath}` is not substituted in external hook files.
 - `channels` - map of channel adapters. Each value uses `entry` for the
   compiled JavaScript entry point and optional `displayName`.
   `channels.<type>.entry` must be a path relative to the extension root; do not
@@ -174,9 +173,8 @@ relative-only, especially `channels.<type>.entry`, `contextFileName`, `hooks`
 string paths, and `lspServers` JSON paths. For example:
 `"args": ["${extensionPath}${/}dist${/}server.js"]`.
 
-For external hook files, use `${CLAUDE_PLUGIN_ROOT}` in hook commands because
-that is the only extension-root variable substituted after the hook file is
-loaded. External LSP JSON files support the same path variables as
+External hook commands support `${CLAUDE_PLUGIN_ROOT}` and `${extensionPath}`
+for the extension root. External LSP JSON files support the same path variables as
 `qwen-extension.json`.
 
 Use these resource locations when needed:

@@ -1300,6 +1300,7 @@ export function ExtensionsManagerPage({
   ) : null;
 
   if (selectedExtension) {
+    const isManaged = selectedExtension.extensionSource === 'managed';
     const details = selectedExtension.details;
     const updateState =
       updateStates[selectedExtension.name] ?? selectedExtension.updateState;
@@ -1317,7 +1318,14 @@ export function ExtensionsManagerPage({
     const skills = details?.skills ?? [];
     const agents = details?.agents ?? [];
     const mcpServers = details?.mcpServers ?? [];
-    const contextFiles = details?.contextFiles ?? [];
+    const contextRoot = `${selectedExtension.path.replaceAll('\\', '/').replace(/\/+$/, '')}/`;
+    const contextFiles = (details?.contextFiles ?? []).map((file) => {
+      if (!isManaged) return file;
+      const normalized = file.replaceAll('\\', '/');
+      return normalized.startsWith(contextRoot)
+        ? normalized.slice(contextRoot.length)
+        : normalized.split('/').at(-1)!;
+    });
 
     return (
       <div className="flex w-full flex-col gap-6 pb-8">
@@ -1333,6 +1341,11 @@ export function ExtensionsManagerPage({
                   {extensionTitle(selectedExtension)}
                 </h1>
                 <Badge variant="outline">v{selectedExtension.version}</Badge>
+                {isManaged && (
+                  <Badge variant="outline">
+                    {t('extensions.manage.managed')}
+                  </Badge>
+                )}
                 <Badge
                   variant="secondary"
                   className={
@@ -1345,67 +1358,69 @@ export function ExtensionsManagerPage({
                 </Badge>
               </div>
             </div>
-            <DropdownMenu open={actionsOpen} onOpenChange={setActionsOpen}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  disabled={busy || checking}
-                  aria-label={t('extensions.manage.actions')}
-                >
-                  {busy || checking ? <Spinner /> : <EllipsisVerticalIcon />}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    disabled={busy || checkingName !== null}
-                    onSelect={() => checkUpdates(selectedExtension.name)}
-                  >
-                    {t('extensions.manage.checkUpdates')}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    disabled={
-                      busy || checking || updateState !== UPDATE_AVAILABLE
-                    }
-                    onSelect={() =>
-                      runMutation(
-                        selectedExtension.name,
-                        (clientId) =>
-                          actions.updateExtension(
-                            selectedExtension.name,
-                            clientId,
-                          ),
-                        {
-                          operation: 'update',
-                          startMessage: mutationMessage(
-                            'update',
-                            selectedExtension.name,
-                            t,
-                          ),
-                        },
-                      )
-                    }
-                  >
-                    {t('extensions.manage.update')}
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    variant="destructive"
+            {!isManaged && (
+              <DropdownMenu open={actionsOpen} onOpenChange={setActionsOpen}>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     disabled={busy || checking}
-                    onSelect={(event) => {
-                      event.preventDefault();
-                      setActionsOpen(false);
-                      setUninstallName(selectedExtension.name);
-                    }}
+                    aria-label={t('extensions.manage.actions')}
                   >
-                    {t('extensions.manage.uninstallAction')}
-                  </DropdownMenuItem>
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                    {busy || checking ? <Spinner /> : <EllipsisVerticalIcon />}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem
+                      disabled={busy || checkingName !== null}
+                      onSelect={() => checkUpdates(selectedExtension.name)}
+                    >
+                      {t('extensions.manage.checkUpdates')}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      disabled={
+                        busy || checking || updateState !== UPDATE_AVAILABLE
+                      }
+                      onSelect={() =>
+                        runMutation(
+                          selectedExtension.name,
+                          (clientId) =>
+                            actions.updateExtension(
+                              selectedExtension.name,
+                              clientId,
+                            ),
+                          {
+                            operation: 'update',
+                            startMessage: mutationMessage(
+                              'update',
+                              selectedExtension.name,
+                              t,
+                            ),
+                          },
+                        )
+                      }
+                    >
+                      {t('extensions.manage.update')}
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem
+                      variant="destructive"
+                      disabled={busy || checking}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        setActionsOpen(false);
+                        setUninstallName(selectedExtension.name);
+                      }}
+                    >
+                      {t('extensions.manage.uninstallAction')}
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
 
           {messageOwner === selectedExtension.name && message ? (
@@ -1559,12 +1574,18 @@ export function ExtensionsManagerPage({
                   />
                   <DetailField
                     label={t('extensions.manage.source')}
-                    value={selectedExtension.source ?? '-'}
+                    value={
+                      isManaged
+                        ? t('extensions.manage.managed')
+                        : (selectedExtension.source ?? '-')
+                    }
                   />
-                  <DetailField
-                    label={t('extensions.manage.path')}
-                    value={selectedExtension.path}
-                  />
+                  {!isManaged && (
+                    <DetailField
+                      label={t('extensions.manage.path')}
+                      value={selectedExtension.path}
+                    />
+                  )}
                   <DetailField
                     label={t('extensions.manage.updateStatus')}
                     value={updateLabel(updateState, t)}
@@ -1623,7 +1644,7 @@ export function ExtensionsManagerPage({
         </div>
 
         <AlertDialog
-          open={uninstallName === selectedExtension.name}
+          open={!isManaged && uninstallName === selectedExtension.name}
           onOpenChange={(open) => {
             if (!open) setUninstallName(null);
           }}
@@ -1644,7 +1665,7 @@ export function ExtensionsManagerPage({
               <AlertDialogAction
                 variant="destructive"
                 onClick={() => {
-                  if (!uninstallName) return;
+                  if (!uninstallName || isManaged) return;
                   if (
                     runMutation(
                       uninstallName,

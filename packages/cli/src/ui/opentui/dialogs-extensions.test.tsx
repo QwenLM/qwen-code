@@ -275,6 +275,58 @@ describe('OpenTuiExtensionsDialog management keys (#44)', () => {
     expect(screen.getByText('Uninstall')).toBeTruthy();
   });
 
+  it('keeps managed activation, favorites and scope actions while hiding artifact mutations', async () => {
+    const managed: ExtensionRow = {
+      ...ROWS[0],
+      extensionSource: 'managed',
+      source: 'managed',
+    };
+    const { onDetailAction } = renderDialog({ rows: [managed] });
+    await press('return');
+    expect(screen.getByText('managed')).toBeTruthy();
+    expect(screen.getByText('Disable')).toBeTruthy();
+    expect(screen.getByText('Remove from Favorites')).toBeTruthy();
+    expect(screen.getByText('Change scope')).toBeTruthy();
+    expect(screen.queryByText('Mark for Update')).toBeNull();
+    expect(screen.queryByText('Update Now')).toBeNull();
+    expect(screen.queryByText('Uninstall')).toBeNull();
+    expect(screen.queryByText(managed.meta!)).toBeNull();
+    await press('return');
+    expect(onDetailAction).toHaveBeenCalledWith(managed, 'toggle');
+  });
+
+  it('dismisses a pending uninstall when refresh changes the same row to managed', async () => {
+    const onDetailAction = vi.fn();
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <OpenTuiExtensionsDialog
+        onClose={onClose}
+        rowsByTab={{ [EXTENSIONS_TABS.INSTALLED]: ROWS }}
+        onDetailAction={onDetailAction}
+      />,
+    );
+    await press('return');
+    for (let index = 0; index < 4; index += 1) await press('down');
+    await press('return');
+    expect(screen.getByText(/Are you sure you want to uninstall/)).toBeTruthy();
+    const managed: ExtensionRow = {
+      ...ROWS[0],
+      extensionSource: 'managed',
+      source: 'managed',
+    };
+    rerender(
+      <OpenTuiExtensionsDialog
+        onClose={onClose}
+        rowsByTab={{ [EXTENSIONS_TABS.INSTALLED]: [managed] }}
+        onDetailAction={onDetailAction}
+      />,
+    );
+    expect(screen.queryByText(/Are you sure you want to uninstall/)).toBeNull();
+    expect(screen.queryByText('Uninstall')).toBeNull();
+    await press('y', 'y');
+    expect(onDetailAction).not.toHaveBeenCalledWith(managed, 'uninstall');
+  });
+
   it('detail Enter runs the highlighted action; Esc walks back to list then closes', async () => {
     const { onDetailAction, onClose } = renderDialog();
     await press('return'); // list → detail

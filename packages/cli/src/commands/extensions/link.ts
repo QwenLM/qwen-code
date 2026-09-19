@@ -19,6 +19,7 @@ import { getExtensionManager } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface InstallArgs {
+  managedExtensions?: string;
   path: string;
 }
 
@@ -28,7 +29,7 @@ export async function handleLink(args: InstallArgs) {
       source: args.path,
       type: 'link',
     };
-    const extensionManager = await getExtensionManager();
+    const extensionManager = await getExtensionManager(args.managedExtensions);
 
     const extension = await extensionManager.installExtension(
       installMetadata,
@@ -67,6 +68,7 @@ export const linkCommand: CommandModule = {
       .check((_) => true),
   handler: async (argv) => {
     await handleLink({
+      managedExtensions: argv['managed-extensions'] as string | undefined,
       path: argv['path'] as string,
     });
   },

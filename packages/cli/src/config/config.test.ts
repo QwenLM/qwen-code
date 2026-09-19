@@ -123,6 +123,7 @@ vi.mock('fs', async (importOriginal) => {
   const MOCK_CWD2 = pathMod.resolve(pathMod.sep, 'home', 'user', 'project');
 
   const mockPaths = new Set([
+    pathMod.parse(MOCK_CWD1).root,
     MOCK_CWD1,
     MOCK_CWD2,
     pathMod.resolve(pathMod.sep, 'cli', 'path1'),
@@ -1080,6 +1081,26 @@ describe('parseArguments', () => {
     ];
     const argv = await parseArguments();
     expect(argv.allowedMcpServerNames).toEqual(['server1', 'server2']);
+  });
+
+  it('resolves --managed-extensions before workspace changes and forwards it to Config', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--managed-extensions',
+      '.',
+      '--extensions',
+      'managed',
+    ];
+    const argv = await parseArguments();
+    expect(argv.managedExtensions).toBe(path.resolve('.'));
+    await loadCliConfig({}, argv, os.tmpdir());
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        managedExtensionsDir: path.resolve('.'),
+        overrideExtensions: ['managed'],
+      }),
+    );
   });
 
   it('should support comma-separated values for --extensions', async () => {

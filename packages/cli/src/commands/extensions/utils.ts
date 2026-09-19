@@ -23,9 +23,12 @@ import chalk from 'chalk';
 import stripAnsi from 'strip-ansi';
 import { t, getCurrentLanguage } from '../../i18n/index.js';
 
-export async function getExtensionManager(): Promise<ExtensionManager> {
+export async function getExtensionManager(
+  managedExtensionsDir?: string,
+): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
   const extensionManager = new ExtensionManager({
+    managedExtensionsDir,
     workspaceDir,
     locale: getCurrentLanguage(),
     requestConsent: requestConsentOrFail.bind(
@@ -94,6 +97,9 @@ export function extensionToOutputString(
     output += `\n ${t('Description:')} ${stripAnsi(desc)}`;
   }
   output += `\n ${t('Path:')} ${extension.path}`;
+  if (extension.source === 'managed') {
+    output += `\n ${t('Source:')} managed`;
+  }
   if (extension.installMetadata) {
     output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;
     if (extension.installMetadata.originSource) {

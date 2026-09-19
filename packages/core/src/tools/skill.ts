@@ -124,6 +124,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
   private loadedSkillContents: Set<string> = new Set();
+  private loadedSkillContentByName = new Map<string, string>();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -206,6 +207,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         this.skillManager,
         this.config,
       );
+      const availableByName = new Map(
+        collected.availableSkills.map((skill) => [skill.name, skill]),
+      );
+      for (const name of this.loadedSkillNames) {
+        const skill = availableByName.get(name);
+        if (
+          !skill ||
+          this.loadedSkillContentByName.get(name) !==
+            buildSkillLlmContent(path.dirname(skill.filePath), skill.body)
+        ) {
+          this.loadedSkillNames.delete(name);
+          this.loadedSkillContentByName.delete(name);
+        }
+      }
       this.availableSkills = collected.availableSkills;
       this.pendingConditionalSkillNames =
         collected.pendingConditionalSkillNames;
@@ -342,7 +357,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       params,
       (name: string, content?: string) => {
         this.loadedSkillNames.add(name);
-        if (content !== undefined) this.loadedSkillContents.add(content);
+        if (content !== undefined) {
+          this.loadedSkillContents.add(content);
+          this.loadedSkillContentByName.set(name, content);
+        }
       },
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
@@ -435,6 +453,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       }
       this.loadedSkillContents.add(skill.output);
       this.loadedSkillNames.add(skill.name);
+      this.loadedSkillContentByName.set(skill.name, skill.output);
       if (rearm) restored.set(skill.name, skill.config);
     };
 
@@ -566,6 +585,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
     this.loadedSkillContents.clear();
+    this.loadedSkillContentByName.clear();
   }
 
   /**

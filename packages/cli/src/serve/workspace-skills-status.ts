@@ -56,6 +56,7 @@ export interface WorkspaceSkillsStatusProvider {
 }
 
 export interface WorkspaceSkillsStatusProviderOptions {
+  managedExtensionsDir?: string;
   workspaceTrusted?: boolean;
   /** Read inert on-disk Skill manifests without loading workspace settings. */
   includeUntrustedSkills?: boolean;
@@ -107,6 +108,7 @@ export function createWorkspaceSkillsStatusProvider(
       managers,
       options.workspaceTrusted ?? true,
       options.includeUntrustedSkills ?? false,
+      options.managedExtensionsDir,
     )) as WorkspaceSkillsStatusProvider;
   provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
   return provider;
@@ -117,6 +119,7 @@ async function buildWorkspaceSkillsStatus(
   managers: Map<string, WorkspaceSkillManagers>,
   workspaceTrusted: boolean,
   includeUntrustedSkills: boolean,
+  managedExtensionsDir?: string,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     const settings = loadSettings(workspaceCwd, {
@@ -159,10 +162,11 @@ async function buildWorkspaceSkillsStatus(
             if (error.code === 'ENOENT') return undefined;
             throw error;
           });
-        if (entry) {
-          await fs.readdir(directory);
+        if (entry || managedExtensionsDir) {
+          if (entry) await fs.readdir(directory);
           const extensionStore = new ExtensionStore();
           extensionManager = new ExtensionManager({
+            managedExtensionsDir,
             extensionStore,
             workspaceDir: workspaceCwd,
             isWorkspaceTrusted: workspaceTrusted,

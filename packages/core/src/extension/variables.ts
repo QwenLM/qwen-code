@@ -59,6 +59,18 @@ export function hydrateString(str: string, context: VariableContext): string {
   );
 }
 
+export function hydrateExtensionText(
+  text: string,
+  extensionPath: string,
+): string {
+  return hydrateString(text, {
+    extensionPath,
+    CLAUDE_PLUGIN_ROOT: extensionPath,
+    '/': path.sep,
+    pathSeparator: path.sep,
+  });
+}
+
 export function recursivelyHydrateStrings(
   obj: JsonValue,
   values: VariableContext,
@@ -104,10 +116,7 @@ export function substituteHookVariables(
         if (hookDef.hooks && Array.isArray(hookDef.hooks)) {
           for (const hook of hookDef.hooks) {
             if (hook.type === 'command' && hook.command) {
-              hook.command = hook.command.replace(
-                /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-                basePath,
-              );
+              hook.command = hydrateExtensionText(hook.command, basePath);
             }
           }
         }

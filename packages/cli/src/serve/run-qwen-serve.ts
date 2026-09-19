@@ -111,6 +111,7 @@ import {
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveRemoteServeToken } from './serve-token.js';
 import { printRemoteQuickstart } from './remote-quickstart.js';
+import { resolveManagedExtensionsDir } from '@qwen-code/qwen-code-core/extension/managed-extension-dir.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   allowOriginCors,
@@ -3225,6 +3226,10 @@ export async function runQwenServe(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
 ): Promise<RunHandle> {
+  optsIn = {
+    ...optsIn,
+    managedExtensions: resolveManagedExtensionsDir(optsIn.managedExtensions),
+  };
   let daemonLog: DaemonLogger | undefined;
   let owner: 'startup' | 'handle' | 'signal' = 'startup';
   let restoreScrubbedLoaderEnv: (() => void) | undefined;
@@ -5309,6 +5314,7 @@ async function runQwenServeImpl(
       });
     const workspaceSkillsStatusProvider =
       runtime.createWorkspaceSkillsStatusProvider({
+        managedExtensionsDir: opts.managedExtensions,
         workspaceTrusted: trustedWorkspace,
       });
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
@@ -6472,6 +6478,7 @@ async function runQwenServeImpl(
           }),
         workspaceSkillsStatusProvider:
           runtime.createWorkspaceSkillsStatusProvider({
+            managedExtensionsDir: opts.managedExtensions,
             workspaceTrusted: secondaryTrusted,
           }),
         skillInstallEnv: secondaryEnv.effectiveEnv,
@@ -7174,6 +7181,7 @@ async function runQwenServeImpl(
             }),
           workspaceSkillsStatusProvider:
             runtime.createWorkspaceSkillsStatusProvider({
+              managedExtensionsDir: opts.managedExtensions,
               workspaceTrusted: trusted,
             }),
           skillInstallEnv: wsEnv.effectiveEnv,
@@ -9154,6 +9162,7 @@ async function runQwenServeImpl(
               registry,
               createSupervisor,
               shared: {
+                managedExtensions: opts.managedExtensions,
                 cliEntryPath: workerRuntime.findCliEntryPath(),
                 daemonUrl: workerDaemonUrl,
                 ...(token ? { daemonToken: token } : {}),
