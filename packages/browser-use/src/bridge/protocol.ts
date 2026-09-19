@@ -7,7 +7,7 @@
 import { statSync } from 'node:fs';
 import { posix } from 'node:path';
 
-export const CHROME_BRIDGE_PROTOCOL_VERSION = 1;
+export const CHROME_BRIDGE_PROTOCOL_VERSION = 2;
 export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser';
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
@@ -29,12 +29,9 @@ export function defaultChromeBridgeSocketPath(
   }
   const uid =
     typeof process.getuid === 'function' ? process.getuid() : 'default';
-  // The win32 branch returned above; keep the remaining joins POSIX so the
+  // The win32 branch returned above; keep the remaining join POSIX so the
   // derived path is a pure function of uid and platform on every host.
-  return posix.join(
-    defaultChromeBridgeSocketDirectory(uid),
-    `qwen-browser-use-${uid}.sock`,
-  );
+  return posix.join(defaultChromeBridgeSocketDirectory(uid), 'bridge.sock');
 }
 
 interface DirectoryStat {
@@ -85,6 +82,7 @@ export interface BridgeHello {
   type: 'hello';
   protocolVersion: number;
   extensionId: string;
+  extensionInstanceId: string;
 }
 
 export interface BridgeRequest {
