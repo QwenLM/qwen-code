@@ -21,9 +21,17 @@ export const TEST_MARKER_PREFIX = 'qwen-main-ci-failure-test:';
 export const LEGACY_MARKER_PREFIX = 'qwen-main-ci-failure:';
 export const SIGNATURE_MARKER_PREFIX = 'qwen-main-ci-failure-sig:';
 /** Workflow-scoped bridge marker: the last search marker in both arms, so a
- * search reaches the most recent failure issue of the same workflow even when
- * the per-test and per-commit marker classes are disjoint (#12133). */
+ * search reaches a failure issue of the same workflow (GitHub's relevance
+ * order, not recency) even when the per-test and per-commit marker classes
+ * are disjoint (#12133). */
 export const WORKFLOW_MARKER_PREFIX = 'qwen-main-ci-failure-workflow:';
+/** Derive the opaque, space-free bridge-marker payload from the workflow
+ * name, so the emitted search token is a single colon-bearing term (#12133
+ * fix sketch; R1-6). Every producer site calls this to guarantee an
+ * identical value. */
+export function workflowBridgeMarker(workflowName) {
+  return `${WORKFLOW_MARKER_PREFIX}${testKey(workflowName)}`;
+}
 export const OCCURRENCE_MARKER = '<!-- qwen-main-ci-failure-occurrences -->';
 export const MAX_OCCURRENCES = 10;
 
@@ -161,7 +169,7 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
       ...tests
         .slice(0, MAX_SEARCH_MARKERS - 1)
         .map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
-      `${WORKFLOW_MARKER_PREFIX}${workflowName}`,
+      workflowBridgeMarker(workflowName),
     ],
     title: tests.length
       ? `Main CI failed: ${workflowName} — ${shortenForTitle(tests[0].id)}${extra}`
@@ -227,7 +235,7 @@ function failedJobLines(failedJobs) {
 function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
-    `<!-- ${WORKFLOW_MARKER_PREFIX}${analysis.workflow} -->`,
+    `<!-- ${workflowBridgeMarker(analysis.workflow)} -->`,
     '',
     'A main-branch CI run failed on `main` before any test result was',
     'reported, so this issue is tracked per commit.',
@@ -266,6 +274,81 @@ function cappedTestLines(tests) {
  * a merge that keeps the existing prose (an agent's or a human's notes live
  * there) and only refreshes the machine-owned trailer.
  */
+const RECURRENCE_HEADING_STRIP = /\n*##\s+Recurrences\s*$/;
+
+// The single-valued per-commit header block written by renderPerCommitBody.
+// The merge arm re-renders it from the newest occurrence (R1-2); the optional
+// failed-jobs group matches failedJobLines' two-space-indented bullets.
+const PER_COMMIT_HEADER =
+  /- Workflow: .*\n(?:- Failed jobs:\n(?:  - .*\n)*)?- Run: .*\n- Run ID: .*\n- Commit: .*/;
+
+/**
+ * The standard per-test head: signature + per-test markers, the prose, and
+ * the identified failures. Shared by the create path and by the per-test
+ * merge arm when it adopts a per-commit stub (R1-10), so the two spellings
+ * cannot drift. R1-1: the workflow bridge is deliberately absent here — a
+ * per-test body must never become reachable by the bridge search, or every
+ * later distinct failure of the workflow would be absorbed into this issue
+ * instead of filing its own, inverting the module's own dedupe contract
+ * (#12133: two different failing tests still get separate issues).
+ */
+function renderPerTestHead({ analysis, bodyMarkers, testLines }) {
+  return [
+    `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
+    ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
+    '',
+    `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
+    '',
+    '## Failing tests',
+    '',
+    ...testLines,
+    '',
+    'This issue is labeled for autofix so the existing agent can create a repair PR.',
+    'It is deduped by failing test, so every later commit that hits the same',
+    'failure is appended below instead of opening another issue.',
+  ].join('\n');
+}
+
+/**
+ * renderPerCommitBody never emits a recurrence bullet for its own filing:
+ * a fresh stub records its first run only in the single-valued header
+ * fields. Re-rendering those fields for a newer run (R1-2) would erase that
+ * occurrence entirely, so it is promoted to a bullet first — a no-op when
+ * the head carries no stub header, when the header run already has a
+ * bullet, or when the plan re-records the header run itself (the merge
+ * emits its bullet anyway). The bullet omits the timestamp the stub header
+ * never recorded.
+ */
+function stubHeaderBullet(head, lines, occurrence) {
+  const runId = head.match(/- Run ID: (\S+)/)?.[1];
+  if (!runId || runId === String(occurrence?.runId)) return lines;
+  if (lines.some((line) => line.includes(`[run ${runId}]`))) return lines;
+  const sha = String(head.match(/- Commit: (\S+)/)?.[1] ?? '').slice(0, 12);
+  const runUrl = head.match(/- Run: (\S+)/)?.[1] ?? '';
+  return [...lines, `- \`${sha}\` · [run ${runId}](${runUrl})`];
+}
+
+/**
+ * Rebuild the machine-owned recurrence list for a merge — shared by both
+ * merge arms (R1-9) so the guards cannot drift between the copies again:
+ * matching the `[run <id>]` link text rather than the run URL (`/301` is a
+ * substring of `/3010`, so a URL match would silently delete an unrelated
+ * run's line), and capping the list with a trim note that never re-enters
+ * it. The caller supplies its own final prose; in particular the per-test
+ * arm's "## Also failing" strip must never run on the per-commit arm,
+ * where an adopted per-test body's list would be deleted with nothing
+ * rebuilt in its place.
+ */
+function recurrenceBlock({ lines, occurrence, maxOccurrences }) {
+  const kept = lines.filter(
+    (line) => !line.includes(`[run ${occurrence.runId}]`),
+  );
+  const combined = [occurrenceLine(occurrence), ...kept];
+  const nextLines = combined.slice(0, maxOccurrences);
+  const footer = combined.length > nextLines.length ? ['', TRIMMED_NOTE] : [];
+  return { nextLines, footer };
+}
+
 export function renderIssueBody({
   analysis,
   occurrence,
@@ -283,27 +366,87 @@ export function renderIssueBody({
     // the new per-commit marker must be visible on the issue, or the
     // recurrence is silently lost while the log claims it was recorded
     // (#12133).
+    //
+    // R1-3: the bridge stays single-valued per body. The legacy sha marker
+    // is workflow-agnostic, so one push sha can legitimately fail two watched
+    // workflows and both reporters land on the same issue; the merge records
+    // the occurrence, but a body that already carries a bridge — its own or
+    // a foreign one — never gains this run's bridge. Otherwise one bad
+    // same-sha merge turns the issue into a permanent cross-workflow sink
+    // that every later unidentifiable failure of either workflow resolves
+    // into, and nothing under .github/ ever closes it.
     const perCommitMarker = `${LEGACY_MARKER_PREFIX}${occurrence.sha}`;
-    const workflowMarker = `${WORKFLOW_MARKER_PREFIX}${analysis.workflow}`;
+    const workflowMarker = workflowBridgeMarker(analysis.workflow);
     const { head, lines, tail } = splitOccurrenceBlock(existingBody);
-    // The heading is re-emitted with the refreshed block below, so a body
-    // that already carries one does not accumulate a second heading.
-    const withoutHeading = head.replace(/\n*##\s+Recurrences\s*$/, '');
-    const baseProse = tail ? `${withoutHeading}\n\n${tail}` : withoutHeading;
-    const missingMarkers = [perCommitMarker, workflowMarker].filter(
-      (marker) => !baseProse.includes(`<!-- ${marker} -->`),
-    );
-    const mergedHead = missingMarkers.length
-      ? `${baseProse}\n${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}`
-      : baseProse;
-    const kept = lines.filter(
-      (line) => !line.includes(`[run ${occurrence.runId}]`),
-    );
-    const combined = [occurrenceLine(occurrence), ...kept];
-    const nextLines = combined.slice(0, maxOccurrences);
-    const footer = combined.length > nextLines.length ? ['', TRIMMED_NOTE] : [];
+    const withoutHeading = head.replace(RECURRENCE_HEADING_STRIP, '');
+    // R1-2: re-render the single-valued header fields from the newest
+    // occurrence, so the lane, step, commit, run and run-id lines always
+    // describe the run being recorded — never a stale predecessor. The job
+    // bullets stay in the head prose: splitOccurrenceBlock re-ingests every
+    // `- ` line below the block marker as a recurrence, so they must not
+    // move into it.
+    const headerBlock = [
+      `- Workflow: ${analysis.workflow}`,
+      ...(analysis.failedJobs.length
+        ? ['- Failed jobs:', ...failedJobLines(analysis.failedJobs)]
+        : []),
+      `- Run: ${occurrence.runUrl}`,
+      `- Run ID: ${occurrence.runId}`,
+      `- Commit: ${occurrence.sha}`,
+    ].join('\n');
+    const refreshed = withoutHeading.replace(PER_COMMIT_HEADER, headerBlock);
+    // R1-8: the bridge funnels every unidentifiable failure of a workflow
+    // onto one open issue, and every landing used to add one sha marker to
+    // the head permanently — past GitHub's 65,536-character body limit,
+    // `gh issue edit --body-file` hard-fails and recurrences of a still
+    // broken `main` stop being recorded at all. Keep only the newest
+    // MAX_OCCURRENCES sha markers: the newest, because the consumer searches
+    // the current run's sha first and dropping it would stop same-commit
+    // reruns from deduping; and never the workflow bridge, which is what
+    // keeps this issue reachable by the bridge search at all.
+    const markerLineRe = /^<!-- (qwen-main-ci-failure:\S+) -->$/;
+    const shaMarkers = [
+      ...new Set([
+        ...refreshed
+          .split('\n')
+          .map((line) => line.trim().match(markerLineRe)?.[1])
+          .filter(Boolean),
+        perCommitMarker,
+      ]),
+    ].slice(-MAX_OCCURRENCES);
+    const prose = refreshed
+      .split('\n')
+      .filter((line) => !markerLineRe.test(line.trim()))
+      .join('\n')
+      .replace(/^\n+/, '')
+      .trimEnd();
+    // The bridge is written only by renderPerCommitBody (R1-1) and granted
+    // on merge only to a stub-shaped body that carries no bridge yet — the
+    // pre-marker stubs this rollout has to adopt. A per-test body never
+    // gains one, and a body already bridged (its own or a foreign one) is
+    // left with the bridge it has.
+    const adoptsStubShape =
+      head.includes(`<!-- ${LEGACY_MARKER_PREFIX}`) &&
+      !head.includes(`<!-- ${TEST_MARKER_PREFIX}`);
+    const hasAnyBridge = new RegExp(
+      `<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->`,
+    ).test(prose);
+    const mergedHead = [
+      ...shaMarkers.map((marker) => `<!-- ${marker} -->`),
+      ...(adoptsStubShape && !hasAnyBridge
+        ? [`<!-- ${workflowMarker} -->`]
+        : []),
+      '',
+      prose,
+    ].join('\n');
+    const { nextLines, footer } = recurrenceBlock({
+      lines: stubHeaderBullet(withoutHeading, lines, occurrence),
+      occurrence,
+      maxOccurrences,
+    });
     return [
       mergedHead,
+      ...(tail ? ['', tail] : []),
       '',
       RECURRENCE_HEADING,
       '',
@@ -320,23 +463,8 @@ export function renderIssueBody({
   const testLines = cappedTestLines(analysis.tests);
 
   if (!existingBody.trim()) {
-    const head = [
-      `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
-      ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
-      `<!-- ${WORKFLOW_MARKER_PREFIX}${analysis.workflow} -->`,
-      '',
-      `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
-      '',
-      '## Failing tests',
-      '',
-      ...testLines,
-      '',
-      'This issue is labeled for autofix so the existing agent can create a repair PR.',
-      'It is deduped by failing test, so every later commit that hits the same',
-      'failure is appended below instead of opening another issue.',
-    ].join('\n');
     return [
-      head,
+      renderPerTestHead({ analysis, bodyMarkers, testLines }),
       '',
       RECURRENCE_HEADING,
       '',
@@ -349,8 +477,28 @@ export function renderIssueBody({
   const { head, lines, tail } = splitOccurrenceBlock(existingBody);
   // The heading belongs to the machine block and is re-emitted with it, so kept
   // prose can never end up between the heading and its list.
-  const withoutHeading = head.replace(/\n*##\s+Recurrences\s*$/, '');
-  const prose = tail ? `${withoutHeading}\n\n${tail}` : withoutHeading;
+  const withoutHeading = head.replace(RECURRENCE_HEADING_STRIP, '');
+
+  // R1-10: a bridge match can land a per-test run on a per-commit stub, and
+  // the adopted head would then contradict the issue it now tracks — the
+  // stub's "no test result was reported" prose and identity block sitting
+  // above an identified test, with no "## Failing tests" section at all.
+  // Detect the stub by its machine-written sha marker and the absence of any
+  // per-test marker, not by prose shape: everything the splitter does not
+  // recognize as a bullet is human or agent prose kept verbatim, so a
+  // prose-shaped key would discard handwritten notes. The stub head is
+  // replaced with the standard per-test head and the stub's recorded run is
+  // promoted to a bullet so the adoption loses no history.
+  const adoptsStub =
+    head.includes(`<!-- ${LEGACY_MARKER_PREFIX}`) &&
+    !head.includes(`<!-- ${TEST_MARKER_PREFIX}`);
+  const headProse = adoptsStub
+    ? renderPerTestHead({ analysis, bodyMarkers, testLines })
+    : withoutHeading;
+  const adoptLines = adoptsStub
+    ? stubHeaderBullet(head, lines, occurrence)
+    : lines;
+  const prose = tail ? `${headProse}\n\n${tail}` : headProse;
 
   // The "## Also failing" list is rebuilt from the current failure set below,
   // so strip the previous one first: a test that has since been fixed must
@@ -358,9 +506,10 @@ export function renderIssueBody({
   const strippedProse = prose.replace(ALSO_FAILING_BLOCK, '').trimEnd();
 
   // Record markers for tests that joined the failure set after the issue was
-  // opened, so the next run still matches this issue on either test.
-  const workflowMarker = `${WORKFLOW_MARKER_PREFIX}${analysis.workflow}`;
-  const missingMarkers = [...bodyMarkers, workflowMarker].filter(
+  // opened, so the next run still matches this issue on either test. R1-1:
+  // the bridge is deliberately absent — a per-test body never becomes
+  // reachable by the bridge search.
+  const missingMarkers = bodyMarkers.filter(
     (marker) => !strippedProse.includes(marker),
   );
   const missingTests = testLines.filter(
@@ -373,15 +522,11 @@ export function renderIssueBody({
     ? `${withMarkers}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
     : withMarkers;
 
-  // A re-run of the same run must not add a second line for it. Match the
-  // `[run <id>]` link text, not the run URL: `/301` is a substring of `/3010`,
-  // so a URL match would silently delete an unrelated run's line.
-  const kept = lines.filter(
-    (line) => !line.includes(`[run ${occurrence.runId}]`),
-  );
-  const combined = [occurrenceLine(occurrence), ...kept];
-  const nextLines = combined.slice(0, maxOccurrences);
-  const footer = combined.length > nextLines.length ? ['', TRIMMED_NOTE] : [];
+  const { nextLines, footer } = recurrenceBlock({
+    lines: adoptLines,
+    occurrence,
+    maxOccurrences,
+  });
 
   return [
     withTests,
@@ -460,7 +605,7 @@ export function runCli(argv) {
           ? analysis.searchMarkers
           : [
               `${LEGACY_MARKER_PREFIX}${occurrence.sha}`,
-              `${WORKFLOW_MARKER_PREFIX}${analysis.workflow}`,
+              workflowBridgeMarker(analysis.workflow),
             ],
       })}\n`,
     );
