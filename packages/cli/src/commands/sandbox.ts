@@ -116,6 +116,31 @@ export const sandboxCommand: CommandModule = {
     const writeReportLine = requestedCmd.length
       ? writeStderrLine
       : writeStdoutLine;
+
+    // `SANDBOX` is set inside a confinement, and `loadSandboxConfig` answers
+    // "already sandboxed" by returning no command for it. Reporting from in
+    // there would describe nothing, so say what is actually true instead.
+    // This check sits above the settings load so a confinement report cannot
+    // be out-shouted by a settings failure — inside a sandbox the handler has
+    // nothing to load for (e.g. a container image or an unmapped-uid namespace
+    // whose homedir() does not resolve), and this branch reads only the
+    // environment and argv.
+    if (process.env['SANDBOX']) {
+      writeReportLine(`Already inside a sandbox: ${process.env['SANDBOX']}`);
+      const enforcement = process.env['SANDBOX_ENFORCEMENT'];
+      if (enforcement) {
+        writeReportLine(`Enforcement: ${enforcement}`);
+      }
+      writeReportLine(
+        'Run this from outside the sandbox to inspect a backend.',
+      );
+      if (args.verify || requestedCmd.length) {
+        writeStderrLine('No verification or command was run.');
+        process.exitCode = 1;
+      }
+      return;
+    }
+
     const cwd = process.cwd();
     const bare = isBareMode(args.bare);
     let settings;
@@ -134,25 +159,6 @@ export const sandboxCommand: CommandModule = {
     }
     const effectiveSettings =
       bare || (args.safeMode ?? isSafeModeEnv()) ? {} : settings;
-
-    // `SANDBOX` is set inside a confinement, and `loadSandboxConfig` answers
-    // "already sandboxed" by returning no command for it. Reporting from in
-    // there would describe nothing, so say what is actually true instead.
-    if (process.env['SANDBOX']) {
-      writeReportLine(`Already inside a sandbox: ${process.env['SANDBOX']}`);
-      const enforcement = process.env['SANDBOX_ENFORCEMENT'];
-      if (enforcement) {
-        writeReportLine(`Enforcement: ${enforcement}`);
-      }
-      writeReportLine(
-        'Run this from outside the sandbox to inspect a backend.',
-      );
-      if (args.verify || requestedCmd.length) {
-        writeStderrLine('No verification or command was run.');
-        process.exitCode = 1;
-      }
-      return;
-    }
 
     let sandboxConfig;
     try {

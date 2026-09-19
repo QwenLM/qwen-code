@@ -124,6 +124,29 @@ describe('qwen sandbox', () => {
     },
   );
 
+  // A settings failure must never out-shout the in-confinement report: inside
+  // a working sandbox (SANDBOX set, e.g. a container image or an unmapped-uid
+  // namespace whose homedir() does not resolve) the handler has nothing to
+  // load for, and the one branch written to recognise this state wins.
+  it('keeps the in-confinement report when settings fail to load', async () => {
+    vi.stubEnv('SANDBOX', 'bwrap');
+    loadSettingsMock.mockImplementation(() => {
+      throw new Error(
+        'Could not find the user settings directory: HOME is not set',
+      );
+    });
+
+    await run();
+
+    expect(report()).toContain('Already inside a sandbox: bwrap');
+    const stderr = writeStderrLineMock.mock.calls
+      .map((call) => call[0])
+      .join('\n');
+    expect(stderr).not.toContain('Sandbox unavailable');
+    expect(loadSettingsMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it('forwards explicit sandbox options to the resolver', async () => {
     loadSandboxConfigMock.mockResolvedValue({
       command: 'docker',
