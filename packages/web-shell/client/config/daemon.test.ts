@@ -335,6 +335,37 @@ describe('navigateToDaemon', () => {
     expect(assigned.searchParams.get('context')).toBeNull();
   });
 
+  it('carries the remote workspace continuation only when requested', async () => {
+    const { assign } = setupPage(
+      'http://localhost:5173/app?addRemoteWorkspace=browse',
+    );
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://remote.example:4170');
+    let assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBeNull();
+
+    assign.mockClear();
+    mod.navigateToDaemon('http://remote.example:4170', undefined, {
+      continueRemoteWorkspaceAdd: true,
+    });
+    assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBe('browse');
+  });
+
+  it('carries connection verification only when requested', async () => {
+    const { assign } = setupPage('http://localhost:5173/app');
+    const mod = await import('./daemon');
+
+    mod.navigateToDaemon('http://remote.example:4170', undefined, {
+      continueRemoteConnectionAdd: true,
+    });
+
+    const assigned = new URL(assign.mock.calls[0]![0] as string);
+    expect(assigned.searchParams.get('addRemoteConnection')).toBe('verify');
+    expect(assigned.searchParams.get('addRemoteWorkspace')).toBeNull();
+  });
+
   // The Daemon Status address field is pre-filled with the current target, so
   // this is the form's DEFAULT click — an operator rotating a bearer token must
   // not be rebooted out of the session a plain F5 would have kept.

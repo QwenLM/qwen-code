@@ -200,7 +200,29 @@ Covered immediately:
   before classification (user-role, and EVERY part is a bare envelope), so the
   verdict reads the entry beneath them — while the re-submitted
   `interrupted_prompt.parts` still cover the whole trailing user run the Retry
-  send path strips, notification entries included.
+  send path strips, notification entries included. The trim narrows to the
+  authoritative stamped run whenever the caller supplies
+  `trailingSystemNotifications`.
+- A real prompt whose whole text happens to be a bare envelope — pasted out
+  of a transcript, or forwarded verbatim by a channel/SDK client:
+  `interrupted_prompt`, banner and Retry intact. The record is
+  `provenance: 'real_user'` but the classifier only ever sees `Content`, so
+  the shape rule alone trimmed it and exposed the PREVIOUS turn's model text
+  as the tail: recovery reported `clean` with `canContinue = false`, and the
+  orphaned prompt silently lost its banner and Retry. Both halves of that
+  shape are now closed on the authoritative provenance channel — the
+  prompt-terminal-ledger completion guard in
+  `docs/design/2026-08-19-prompt-terminal-ledger-design.md` step 6 fails
+  closed instead of stamping `completed`, and on the recovery side
+  `buildSessionHistoryFromConversation`
+  (`packages/core/src/services/session-api-history.ts`) also returns
+  `trailingSystemNotifications`: the count of trailing entries whose source
+  record was stamped `provenance: 'system'` + `subtype: 'notification'`,
+  reported even when it is `0`. `session-recovery.ts` forwards that count and
+  `effectiveHistoryEnd` narrows the trim to it, so an entry is only trimmed
+  when its shape matches AND it falls inside the authoritative run. Callers
+  holding only raw `Content[]` pass no count and keep the shape-only fallback
+  exactly as before. Refs #12042 (shape B).
 
 Not covered yet:
 
@@ -221,17 +243,6 @@ Not covered yet:
   automatic turn writes a bare envelope unless the user turned one of them
   on. With at least one reminder part the entry is NOT trimmed and recovers
   as `interrupted_prompt`. Tracked in #12042 (shape A).
-- A real prompt whose whole text happens to be a bare envelope — pasted out
-  of a transcript, or forwarded verbatim by a channel/SDK client. The record
-  is `provenance: 'real_user'`, but the classifier only ever sees `Content`,
-  so the same shape rule trims it and exposes the PREVIOUS turn's model text
-  as the tail: recovery reports `clean` with `canContinue = false`, and the
-  orphaned prompt silently loses its banner and Retry where `main` recovered
-  it as `interrupted_prompt`. The prompt-terminal-ledger half of this shape
-  is closed (the provenance-bound completion guard in
-  `docs/design/2026-08-19-prompt-terminal-ledger-design.md` step 6 fails
-  closed instead of stamping `completed`); the recovery half needs the same
-  authoritative provenance channel. Tracked in #12042 (shape B).
 
 Completeness here does not come from adding a large amount of code at once. It
 comes from consolidating current capabilities into a unified plan so the states
@@ -425,11 +436,12 @@ Core fixtures:
      answered; the envelope shape alone cannot prove provenance.
    - USER-role entry whose whole text is a bare envelope but whose record is
      `provenance: 'real_user'` (a prompt pasted out of a transcript, or one
-     forwarded verbatim by a channel/SDK client): must stay
-     `interrupted_prompt`. This is the required behaviour, not the current
-     one — the shape rule cannot tell it from a system-injected notification,
-     so today the trim removes it and recovery reports `clean`; the ledger
-     side fails closed instead of stamping `completed`. Tracked in #12042.
+     forwarded verbatim by a channel/SDK client): stays `interrupted_prompt`.
+     The shape rule cannot tell it from a system-injected notification, so the
+     projection reports `trailingSystemNotifications` as `0` for it and
+     `effectiveHistoryEnd` refuses to trim it — recovery reads the envelope
+     itself as the tail rather than reporting `clean`; the ledger side fails
+     closed instead of stamping `completed`. Refs #12042.
 
 Entrypoint adapter tests:
 
