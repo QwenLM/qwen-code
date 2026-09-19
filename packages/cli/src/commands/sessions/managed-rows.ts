@@ -38,8 +38,8 @@ import {
   isSameProcess,
   readLocalBootId,
   readPidNamespaceId,
-  type SessionRegistryRecord,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/process-liveness.js';
+import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core/services/session-registry.js';
 import { sanitizeSessionId } from '../../agent-view/protocol.js';
 import type {
   AgentViewSessionSnapshot,

@@ -17,7 +17,7 @@ import type { AgentViewAttachLease } from './attach-lease.js';
 import {
   readPidNamespaceId,
   readProcStartToken,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/process-liveness.js';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
   AgentViewActivityFile,

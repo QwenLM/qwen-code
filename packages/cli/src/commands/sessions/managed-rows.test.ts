@@ -22,7 +22,7 @@ const pidNamespaceId = vi.fn((): number | null => null);
 /** The boot id this machine reports; null models an unreadable boot id. */
 const localBootId = vi.fn((): string | null => 'boot-local');
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core/utils/process-liveness.js', () => ({
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
   readProcStartToken: (...args: unknown[]) =>
     currentProcStart(...(args as [number])),
