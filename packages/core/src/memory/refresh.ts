@@ -144,7 +144,7 @@ async function rebuildWrittenMemoryIndexes(
   ]);
 }
 
-export async function refreshMemoryInstruction(
+export async function refreshMemorySnapshot(
   config: Config,
   options?: Pick<RefreshMemoryAfterWriteOptions, 'logContext'>,
 ): Promise<void> {
@@ -155,7 +155,13 @@ export async function refreshMemoryInstruction(
       `${logPrefix(options)}refreshHierarchicalMemory failed: ${err}`,
     );
   }
+}
 
+export async function refreshMemoryInstruction(
+  config: Config,
+  options?: Pick<RefreshMemoryAfterWriteOptions, 'logContext'>,
+): Promise<void> {
+  await refreshMemorySnapshot(config, options);
   try {
     await config.getLlmClient()?.refreshSystemInstruction();
   } catch (err) {
@@ -184,8 +190,8 @@ export async function refreshMemoryAfterManagedWrite(
     }
 
     await rebuildWrittenMemoryIndexes(candidates, projectRoot, options);
-
-    await refreshMemoryInstruction(config, options);
+    await refreshMemorySnapshot(config, options);
+    config.getLlmClient()?.invalidateManagedAutoMemoryRecall();
     return true;
   } catch (err) {
     debugLogger.warn(

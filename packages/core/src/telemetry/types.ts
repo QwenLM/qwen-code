@@ -1749,6 +1749,7 @@ export type MemoryRecallDiscardReason =
   | 'reset'
   | 'abort'
   | 'shutdown'
+  | 'memory_changed'
   | 'no_relevant_results'
   /** Every document the refined result selected was already delivered by the fast phase. */
   | 'already_delivered';

@@ -7015,7 +7015,7 @@ hello
       );
     });
 
-    it('should track surfaced managed memory paths across user queries', async () => {
+    it('should track surfaced paths until managed memory changes', async () => {
       mockMemoryManager.recall
         .mockResolvedValueOnce({
           prompt: '## Relevant memory\n\nUser prefers terse responses.',
@@ -7077,6 +7077,23 @@ hello
             '/test/project/root/.qwen/memory/user.md',
           ]),
         }),
+      );
+
+      client.invalidateManagedAutoMemoryRecall();
+      const third = client.sendMessageStream(
+        [{ text: 'Use the updated memory' }],
+        new AbortController().signal,
+        'prompt-id-memory-3',
+      );
+      for await (const _ of third) {
+        // consume stream
+      }
+
+      expect(mockMemoryManager.recall).toHaveBeenNthCalledWith(
+        3,
+        '/test/project/root',
+        'Use the updated memory',
+        expect.objectContaining({ excludedFilePaths: new Set() }),
       );
     });
 

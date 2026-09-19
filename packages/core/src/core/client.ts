@@ -1368,6 +1368,12 @@ export class LlmClient {
     this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
   }
 
+  /** @internal */
+  invalidateManagedAutoMemoryRecall(): void {
+    this.cancelPendingMemoryPrefetch('memory_changed');
+    this.surfacedRelevantAutoMemoryPaths.clear();
+  }
+
   private cancelPendingMemoryPrefetch(
     discardReason: MemoryRecallDiscardReason,
   ): void {

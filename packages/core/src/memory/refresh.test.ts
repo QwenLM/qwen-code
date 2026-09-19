@@ -42,6 +42,7 @@ function createConfig(projectRoot: string, managed = true): Config {
     refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
     getLlmClient: vi.fn().mockReturnValue({
       refreshSystemInstruction: vi.fn().mockResolvedValue(undefined),
+      invalidateManagedAutoMemoryRecall: vi.fn(),
     }),
   } as unknown as Config;
 }
@@ -289,7 +290,7 @@ describe('managed memory refresh helper', () => {
     ).toBe(false);
   });
 
-  it('rebuilds touched indexes before refreshing the live instruction', async () => {
+  it('refreshes the memory snapshot without rebinding the live instruction', async () => {
     const config = createConfig(projectRoot);
     const projectFile = path.join(getAutoMemoryRoot(projectRoot), 'project.md');
     const userFile = path.join(getUserAutoMemoryRoot(), 'user.md');
@@ -310,6 +311,9 @@ describe('managed memory refresh helper', () => {
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
       config.getLlmClient().refreshSystemInstruction,
+    ).not.toHaveBeenCalled();
+    expect(
+      config.getLlmClient().invalidateManagedAutoMemoryRecall,
     ).toHaveBeenCalledTimes(1);
     expect(
       vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[0],
@@ -339,6 +343,9 @@ describe('managed memory refresh helper', () => {
     expect(config.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
     expect(
       config.getLlmClient().refreshSystemInstruction,
+    ).not.toHaveBeenCalled();
+    expect(
+      config.getLlmClient().invalidateManagedAutoMemoryRecall,
     ).toHaveBeenCalledTimes(1);
   });
 
