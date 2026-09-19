@@ -1595,14 +1595,6 @@
   flex: 0 0 auto;
 }
 
-.planControl [data-slot='switch'][data-state='checked'] {
-  background: var(--chat-editor-accent-color);
-}
-
-.planControl [data-slot='switch-thumb'][data-state='checked'] {
-  background: #fff;
-}
-
 .planControl[data-disabled] {
   cursor: default;
 }
@@ -1611,12 +1603,8 @@
    entry itself is tucked into the add menu. */
 .planChip {
   flex: 0 0 auto;
-  background: color-mix(
-    in srgb,
-    var(--chat-editor-accent-color) 12%,
-    transparent
-  );
-  color: var(--chat-editor-accent-color);
+  background: var(--subtle-bg-strong);
+  color: var(--chat-editor-text-primary);
 }
 
 /* Spelled out twice rather than as `.toolBtn.planChip:hover`: each half ties
@@ -1627,10 +1615,10 @@
 .toolBtn.planChip:disabled:hover {
   background: color-mix(
     in srgb,
-    var(--chat-editor-accent-color) 20%,
+    var(--chat-editor-text-primary) 12%,
     transparent
   );
-  color: var(--chat-editor-accent-color);
+  color: var(--chat-editor-text-primary);
 }
 
 .planChip .toolBtnText {
