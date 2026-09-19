@@ -23,8 +23,10 @@ import type {
   AtMentionWorkspaceActions,
   BuiltinProviderCache,
 } from '../../hooks/useAtMentionSources';
+import { ModeIcon } from '../ModeIcon';
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -51,6 +53,21 @@ export interface AddMenuProps {
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
   skillsLoaded?: boolean;
+  /**
+   * Plan is chosen rarely, so its entry lives here rather than on the toolbar.
+   * Omitted when the host has not enabled Plan.
+   */
+  plan?: AddMenuPlanControl;
+}
+
+export interface AddMenuPlanControl {
+  checked: boolean;
+  disabled?: boolean;
+  /** Shown while disabled: a row is never disabled without a reason. */
+  disabledReason: string;
+  label: string;
+  description: string;
+  onToggle: () => void;
 }
 
 const ADD_MENU_SEARCH_DEBOUNCE_MS = 150;
@@ -221,6 +238,7 @@ export function AddMenu({
   skillsLoading,
   skillsLoadError,
   skillsLoaded = false,
+  plan,
 }: AddMenuProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -365,6 +383,11 @@ export function AddMenu({
 
   const prependSkill = (invocation: string) => {
     pendingCloseActionRef.current = () => onPrependSkill(invocation);
+    setOpen(false);
+  };
+
+  const togglePlan = (onToggle: () => void) => {
+    pendingCloseActionRef.current = onToggle;
     setOpen(false);
   };
 
@@ -578,6 +601,32 @@ export function AddMenu({
               </DropdownMenuSub>
             </>
           )}
+          {plan ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuCheckboxItem
+                checked={plan.checked}
+                disabled={plan.disabled}
+                data-testid="composer-add-menu-plan"
+                onSelect={() => togglePlan(plan.onToggle)}
+              >
+                <span className={styles.addMenuPlanIcon}>
+                  <ModeIcon mode="plan" />
+                </span>
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate">{plan.label}</span>
+                  <span className="hidden truncate text-xs text-muted-foreground sm:block">
+                    {plan.description}
+                  </span>
+                </span>
+                {plan.disabled ? (
+                  <span className="text-xs text-muted-foreground">
+                    {plan.disabledReason}
+                  </span>
+                ) : null}
+              </DropdownMenuCheckboxItem>
+            </>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
       <input
