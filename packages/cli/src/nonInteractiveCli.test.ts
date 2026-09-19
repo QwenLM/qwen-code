@@ -2404,7 +2404,7 @@ describe('runNonInteractive', () => {
     expect(sendOptions.goalPermit.turnId).not.toBe(occupyingPermit!.turnId);
   });
 
-  it('emits direct Goal v2 state before the legacy partial projection', async () => {
+  it('emits Goal v2 state as the only Goal stream event with partial messages on', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
     await prepareGoalState('active');
@@ -2426,7 +2426,7 @@ describe('runNonInteractive', () => {
       )
       .map(({ event }) => event?.type)
       .filter((type) => type === 'goal_state' || type === 'active_goal');
-    expect(goalEventTypes).toEqual(['goal_state', 'active_goal']);
+    expect(goalEventTypes).toEqual(['goal_state']);
     expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
@@ -9568,46 +9568,6 @@ describe('formatGoalState', () => {
     expect(output).not.toContain('\r');
     expect(output).not.toContain('\u001b');
     expect(output).not.toContain('\u0007');
-  });
-
-  it('names the checkpoint failure below the stop reason', () => {
-    // The stop reason names the kind of checkpoint failure; only this line
-    // says which one it was.
-    expect(
-      formatGoalState(
-        goalSnapshot({
-          status: 'usage_limited',
-          lastReason: 'Checkpoints stalled.',
-          checkpointStalls: 3,
-          lastCheckpointFailure:
-            'Error: Goal checkpoint verifier timed out after 30000ms',
-        }),
-        'status',
-      ),
-    ).toBe(
-      'Goal usage limited: ship the release notes\nReason: Checkpoints stalled.\nCheckpoint: 3/3 stalled · Error: Goal checkpoint verifier timed out after 30000ms',
-    );
-  });
-
-  it('shows checkpoint health under the rule the interactive cards use', () => {
-    expect(
-      formatGoalState(
-        goalSnapshot({ lastCheckpointFailure: 'Error: provider failed' }),
-        'status',
-      ),
-    ).toBe(
-      'Goal active: ship the release notes\nCheckpoint: last check failed · Error: provider failed',
-    );
-    expect(
-      formatGoalState(
-        goalSnapshot({
-          status: 'complete',
-          checkpointStalls: 1,
-          lastCheckpointFailure: 'Error: provider failed',
-        }),
-        'status',
-      ),
-    ).not.toContain('Checkpoint');
   });
 
   it('has no usage to report for a cleared Goal', () => {

@@ -120,6 +120,8 @@ import {
   BridgeChannelQuarantinedError,
   McpAuthenticationInProgressError,
   SessionResetPendingError,
+  WorkspaceDrainingError,
+  WorkspaceRuntimeStopError,
   StandaloneSessionSpawnError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
@@ -193,6 +195,9 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  BridgeRuntimeStopRequest,
+  BridgeRuntimeStopResult,
+  BridgeRuntimeStopSnapshot,
   SessionPrInfo,
   BridgeTurnStatus,
   BridgeSessionCatalogVersion,
@@ -2381,6 +2386,7 @@ export function createSessionControlPlane(
     return undefined;
   };
   const assertFreshSessionsAvailable = (): void => {
+    assertRuntimeNotStopping();
     const blocker = freshSessionBlocker();
     if (blocker) {
       throw new BridgeChannelQuarantinedError(
@@ -3012,6 +3018,7 @@ export function createSessionControlPlane(
     entry: SessionEntry,
     opts: { trigger: string; closeReason: string },
   ): Promise<void> {
+    if (runtimeStop) return;
     entry.activeWorkCloseInFlight = true;
     try {
       if (!(await confirmChildUnheld(entry))) return;
@@ -3550,7 +3557,7 @@ export function createSessionControlPlane(
         `idle threshold ${sessionIdleTimeoutMs}ms)`,
     );
     sessionReaper = setInterval(() => {
-      if (shuttingDown) return;
+      if (shuttingDown || runtimeStop) return;
       const now = Date.now();
       for (const [id, entry] of byId) {
         if (sessionIdleTimeoutMs <= 0) break;
@@ -3796,6 +3803,20 @@ export function createSessionControlPlane(
   // (b) `server.close` rejecting new connections, during which a
   // late-arriving `POST /session` slips a fresh child past cleanup.
   let shuttingDown = false;
+  let runtimeStopToken = randomUUID();
+  let lastRuntimeStop: BridgeRuntimeStopResult | undefined;
+  let runtimeStop:
+    | {
+        channel: ChannelInfo;
+        promise: Promise<BridgeRuntimeStopResult>;
+        completion: Promise<BridgeRuntimeStopResult>;
+      }
+    | undefined;
+
+  function assertRuntimeNotStopping(): void {
+    if (runtimeStop) throw new WorkspaceDrainingError(boundWorkspace ?? '');
+  }
+
   let shutdownPromise: Promise<void> | undefined;
 
   // Tee writeServeDebugLine through the optional onDiagnosticLine callback.
@@ -3875,6 +3896,7 @@ export function createSessionControlPlane(
    * closed on the same id-keyed barrier.
    */
   function assertSessionResetNotPending(sessionId: string): void {
+    assertRuntimeNotStopping();
     if (resetPendingSessions.has(sessionId)) {
       throw new SessionResetPendingError(sessionId);
     }
@@ -4312,10 +4334,18 @@ export function createSessionControlPlane(
       );
       try {
         sessEntry.events.publish({
-          type: 'session_died',
+          type:
+            runtimeStop?.channel === info ? 'session_closed' : 'session_died',
           data: {
             sessionId: sid,
-            reason: 'channel_closed',
+            reason:
+              runtimeStop?.channel === info ? 'client_close' : 'channel_closed',
+            ...(runtimeStop?.channel === info
+              ? {
+                  cause: 'workspace_runtime_stop',
+                  persistenceUnconfirmed: true,
+                }
+              : {}),
             // BX9_P: thread exitCode/signalCode through.
             exitCode: exitInfo?.exitCode ?? null,
             signalCode: exitInfo?.signalCode ?? null,
@@ -4366,6 +4396,7 @@ export function createSessionControlPlane(
     delegateReadTextFileToClient,
     isExternalToolGuardRequired: () => !!opts.externalToolGuard,
     isShuttingDown: () => shuttingDown,
+    isRuntimeStopping: () => runtimeStop !== undefined,
     constructHarnessChannel: constructChannelInfo,
     handleChannelTransportUnavailable: (channel) =>
       handleChannelTransportUnavailable(getChannelInfo(channel)),
@@ -5421,6 +5452,7 @@ export function createSessionControlPlane(
     sessionId: string,
     entry: SessionEntry,
   ): void => {
+    assertRuntimeNotStopping();
     if (byId.get(sessionId) !== entry) {
       throw new SessionNotFoundError(
         sessionId,
@@ -5447,6 +5479,7 @@ export function createSessionControlPlane(
     sessionId: string,
     entry: SessionEntry,
   ): ChannelInfo => {
+    assertRuntimeNotStopping();
     const info = channelInfoForEntry(entry);
     if (byId.get(sessionId) !== entry || !info || info.harness.isDying) {
       throw new SessionNotFoundError(sessionId);
@@ -8388,6 +8421,8 @@ export function createSessionControlPlane(
     context?: BridgeClientRequestContext,
     closeOpts?: CloseSessionOpts,
   ): Promise<void> {
+    if (closeOpts?.cause !== 'workspace_runtime_stop')
+      assertRuntimeNotStopping();
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
     if (entry.closing) {
@@ -8457,6 +8492,15 @@ export function createSessionControlPlane(
             : {}),
         },
       );
+      if (
+        closeOpts?.cause === 'workspace_runtime_stop' &&
+        !agentSessionClosed
+      ) {
+        throw new RequestError(
+          -32603,
+          'Agent did not acknowledge session close',
+        );
+      }
     } catch (error) {
       // A child RequestError is a definitive close refusal: the child kept
       // the session live, so a retry is safe. A transport failure has an
@@ -8523,6 +8567,7 @@ export function createSessionControlPlane(
         data: {
           sessionId,
           reason,
+          ...(closeOpts?.cause ? { cause: closeOpts.cause } : {}),
           // `data.closedBy` is kept for back-compat with existing
           // wire consumers; new code should read envelope-level
           // `originatorClientId` (matches `session_metadata_updated`,
@@ -8574,6 +8619,209 @@ export function createSessionControlPlane(
         await harness.startIdleTimer(ci.harness, `closeSession "${sessionId}"`);
       }
     }
+  }
+
+  function copyRuntimeStop(
+    result: BridgeRuntimeStopResult,
+  ): BridgeRuntimeStopResult {
+    return {
+      ...result,
+      affectedSessionIds: [...result.affectedSessionIds],
+      closedSessionIds: [...result.closedSessionIds],
+      interruptedSessionIds: [...result.interruptedSessionIds],
+      remainingSessionIds: [...result.remainingSessionIds],
+    };
+  }
+
+  function runtimeStopSnapshot(): BridgeRuntimeStopSnapshot {
+    const ci = liveChannelInfo();
+    const blockedReasons: string[] = [];
+    if (
+      shuttingDown ||
+      runtimeStop ||
+      [...harness.values()].some((c) => c.isDying)
+    )
+      blockedReasons.push('stopping');
+    if (!ci) blockedReasons.push('not_live');
+    else if (!ci.channel.registryReleased)
+      blockedReasons.push('release_unavailable');
+    if (
+      harness.starting ||
+      inFlightSpawns.size ||
+      inFlightRestores.size ||
+      abandonedNewSessionSettlements.size ||
+      harness.runtimeOperationReservations ||
+      harness.pendingKeepAliveCount ||
+      inFlightSessionIdReservations.size ||
+      abandonedSessionIdReservations.size ||
+      (ci && (ci.sessionSpawnsInFlight || ci.pendingRestoreIds.size))
+    )
+      blockedReasons.push('session_start_pending');
+    if (
+      ci &&
+      (ci.harness.workspaceControlInFlight ||
+        ci.workspaceMcpDiscoveryInFlight ||
+        ci.workspaceMcpAuthenticationServerNames.size)
+    )
+      blockedReasons.push('workspace_control_pending');
+    if (
+      [...byId.values()].some(
+        (e) =>
+          isClosingOrAuthorizingClose(e) ||
+          resetPendingSessions.has(e.sessionId),
+      )
+    )
+      blockedReasons.push('session_closing');
+    return {
+      ...(ci ? { channelId: ci.id } : {}),
+      runtimeEpoch: harness.epoch,
+      stopToken: runtimeStopToken,
+      blockedReasons,
+      sessions: [...byId.values()].map((entry) => {
+        const summary = toSessionSummary(entry);
+        return {
+          sessionId: entry.sessionId,
+          displayName: summary.displayName,
+          hasActivePrompt: summary.hasActivePrompt,
+          queuedPrompts:
+            entry.pendingPromptList.filter((p) => p.state === 'queued').length +
+            entry.midTurnMessageQueue.length,
+          isWaitingForPermission: summary.isWaitingForPermission === true,
+          isWaitingForUserQuestion: summary.isWaitingForUserQuestion === true,
+          ...(summary.hasRunningBackgroundTasks !== undefined
+            ? { hasRunningBackgroundTasks: summary.hasRunningBackgroundTasks }
+            : {}),
+        };
+      }),
+      ...(lastRuntimeStop
+        ? { lastStop: copyRuntimeStop(lastRuntimeStop) }
+        : {}),
+    };
+  }
+
+  function stopWorkspaceRuntime(
+    request: BridgeRuntimeStopRequest,
+    timeoutMs = 60_000,
+  ): Promise<BridgeRuntimeStopResult> {
+    if (
+      lastRuntimeStop?.stopToken === request.expectedStopToken &&
+      lastRuntimeStop.channelId === request.expectedChannelId &&
+      lastRuntimeStop.runtimeEpoch === request.expectedRuntimeEpoch
+    ) {
+      return (
+        runtimeStop?.promise ??
+        Promise.resolve(copyRuntimeStop(lastRuntimeStop))
+      );
+    }
+    const snapshot = runtimeStopSnapshot();
+    const ids = snapshot.sessions.map((session) => session.sessionId).sort();
+    if (
+      request.confirmInterruptions !== true ||
+      snapshot.stopToken !== request.expectedStopToken ||
+      snapshot.channelId !== request.expectedChannelId ||
+      snapshot.runtimeEpoch !== request.expectedRuntimeEpoch ||
+      JSON.stringify(ids) !==
+        JSON.stringify([...request.expectedSessionIds].sort())
+    ) {
+      throw new WorkspaceRuntimeStopError('workspace_runtime_stop_stale');
+    }
+    if (
+      snapshot.blockedReasons.length ||
+      !Number.isFinite(timeoutMs) ||
+      timeoutMs <= 0
+    ) {
+      throw new WorkspaceRuntimeStopError('workspace_runtime_stop_blocked');
+    }
+    const ci = liveChannelInfo()!;
+    const released = ci.channel.registryReleased!;
+    const receipt: BridgeRuntimeStopResult = {
+      channelId: ci.id,
+      runtimeEpoch: harness.epoch,
+      stopToken: runtimeStopToken,
+      state: 'stopping',
+      stopped: false,
+      released: false,
+      affectedSessionIds: ids,
+      closedSessionIds: [],
+      interruptedSessionIds: [],
+      remainingSessionIds: [...ids],
+    };
+    lastRuntimeStop = receipt;
+    runtimeStopToken = randomUUID();
+    harness.cancelIdleTimer();
+    const deadline = Date.now() + timeoutMs;
+    const operation = {
+      channel: ci,
+      promise: Promise.resolve(receipt),
+      completion: Promise.resolve(receipt),
+    };
+    runtimeStop = operation;
+    void released.then(() => {
+      receipt.released = true;
+    });
+    operation.completion = Promise.resolve().then(async () => {
+      try {
+        for (const sessionId of ids) {
+          const remainingMs = deadline - Date.now();
+          if (remainingMs <= 0) {
+            receipt.state = 'incomplete';
+            receipt.error =
+              'Session close budget exhausted; remaining sessions were not closed.';
+            return copyRuntimeStop(receipt);
+          }
+          receipt.interruptedSessionIds.push(sessionId);
+          try {
+            await closeSessionImpl(sessionId, undefined, {
+              cause: 'workspace_runtime_stop',
+              requireAgentClose: true,
+              agentCloseTimeoutMs: Math.min(initTimeoutMs, remainingMs),
+            });
+            receipt.closedSessionIds.push(sessionId);
+            receipt.remainingSessionIds = receipt.remainingSessionIds.filter(
+              (id) => id !== sessionId,
+            );
+          } catch (error) {
+            receipt.error =
+              error instanceof Error ? error.message : String(error);
+            if (ci.harness.isDying || !harness.has(ci.harness)) {
+              // Root exit/transport failure can precede the owned descendants.
+              receipt.interruptedSessionIds = [...ids];
+              await released;
+              receipt.remainingSessionIds = ids.filter((id) => byId.has(id));
+            }
+            receipt.state = 'incomplete';
+            return copyRuntimeStop(receipt);
+          }
+        }
+        try {
+          await harness.stopChannel(ci.harness);
+        } catch (error) {
+          receipt.state = 'failed';
+          receipt.error =
+            error instanceof Error ? error.message : String(error);
+        }
+        await released;
+        receipt.state = 'stopped';
+        receipt.stopped = true;
+        return copyRuntimeStop(receipt);
+      } finally {
+        if (runtimeStop === operation) runtimeStop = undefined;
+      }
+    });
+    let timer: ReturnType<typeof setTimeout>;
+    operation.promise = Promise.race([
+      operation.completion,
+      new Promise<BridgeRuntimeStopResult>((resolve) => {
+        timer = setTimeout(() => {
+          receipt.state = 'failed';
+          receipt.error ??=
+            'Workspace stop timed out before cleanup completed.';
+          resolve(copyRuntimeStop(receipt));
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    return operation.promise;
   }
 
   startSessionReaper();
@@ -8922,9 +9170,11 @@ export function createSessionControlPlane(
         );
       }
       const starting = harness.starting !== undefined;
-      const stopping = Array.from(channelInfos()).some(
-        (candidate) => candidate.harness.isDying,
-      );
+      const stopping =
+        runtimeStop !== undefined ||
+        Array.from(channelInfos()).some(
+          (candidate) => candidate.harness.isDying,
+        );
       const reservedWork =
         harness.runtimeOperationReservations > 0 ||
         inFlightSpawns.size > 0 ||
@@ -8937,20 +9187,26 @@ export function createSessionControlPlane(
         reservedWork ||
         (info !== undefined && !harness.hasNoChannelWork(info.harness));
       return {
-        state: !runtimeLive
-          ? stopping
-            ? 'stopping'
-            : starting
-              ? 'starting'
-              : 'cold'
-          : activeWork
-            ? 'active'
-            : 'idle',
+        state: runtimeStop
+          ? 'stopping'
+          : !runtimeLive
+            ? stopping
+              ? 'stopping'
+              : starting
+                ? 'starting'
+                : 'cold'
+            : activeWork
+              ? 'active'
+              : 'idle',
         runtimeLive,
         runtimeEpoch: runtimeLive ? harness.epoch : sourceRuntimeEpoch,
         activeWork,
       };
     },
+
+    getRuntimeStopSnapshot: runtimeStopSnapshot,
+    getRuntimeStopCompletion: () => runtimeStop?.completion,
+    stopWorkspaceRuntime,
 
     getIdleChannelCandidate() {
       const info = liveChannelInfo();
@@ -14288,6 +14544,14 @@ export function createSessionControlPlane(
       // orphaned forever (spawn owner's reap bails here, attach's
       // detach does nothing structural).
       if (opts?.requireZeroAttaches && entry.attachCount > 0) {
+        entry.spawnOwnerWantedKill = true;
+        return false;
+      }
+      // Record the intent exactly like the bail above: the stop owns
+      // teardown for now, but if it ends incomplete and this session
+      // survives, the tombstone lets the next detach/settle complete the
+      // deferred reap.
+      if (runtimeStop) {
         entry.spawnOwnerWantedKill = true;
         return false;
       }

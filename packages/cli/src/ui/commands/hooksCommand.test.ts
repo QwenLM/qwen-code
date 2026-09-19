@@ -40,6 +40,7 @@ describe('hooksCommand', () => {
         settings: {
           merged: {},
           reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+          getSystemHooks: vi.fn().mockReturnValue(undefined),
           getUserHooks: vi.fn(),
           getProjectHooks: vi.fn(),
         },
@@ -61,7 +62,13 @@ describe('hooksCommand', () => {
       });
       expect(
         mockContext.services.settings.reloadScopesFromDiskAtomically,
-      ).toHaveBeenCalledWith([SettingScope.User, SettingScope.Workspace]);
+      ).toHaveBeenNthCalledWith(1, [SettingScope.User, SettingScope.Workspace]);
+      expect(
+        mockContext.services.settings.reloadScopesFromDiskAtomically,
+      ).toHaveBeenNthCalledWith(2, [
+        SettingScope.System,
+        SettingScope.SystemDefaults,
+      ]);
       expect(mockConfig.setHooksFromSettings).toHaveBeenCalledTimes(1);
       expect(mockConfig.getHookSystem().reload).toHaveBeenCalledTimes(1);
       expect(mockContext.ui.addItem).not.toHaveBeenCalled();
@@ -96,6 +103,7 @@ describe('hooksCommand', () => {
 
   describe('reload when the menu opens', () => {
     const mergedHooks = { Stop: [] as [] };
+    const systemHooks = { SessionStart: [] };
     const userHooks = { PreToolUse: [] };
     const projectHooks = { PostToolUse: [] };
 
@@ -133,6 +141,7 @@ describe('hooksCommand', () => {
           settings: {
             merged: { hooks: mergedHooks },
             reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+            getSystemHooks: () => systemHooks,
             getUserHooks: () => userHooks,
             getProjectHooks: () => projectHooks,
           },
@@ -151,15 +160,16 @@ describe('hooksCommand', () => {
       const result = await hooksCommand.action!(context, '');
 
       expect(result).toEqual({ type: 'dialog', dialog: 'hooks' });
-      expect(reloadSettings).toHaveBeenCalledWith([
-        SettingScope.User,
-        SettingScope.Workspace,
+      expect(reloadSettings.mock.calls).toEqual([
+        [[SettingScope.User, SettingScope.Workspace]],
+        [[SettingScope.System, SettingScope.SystemDefaults]],
       ]);
       expect(config.getWorkingDir).not.toHaveBeenCalled();
       expect(config.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks,
         userHooks,
         projectHooks,
-        hooks: mergedHooks,
+        hooks: undefined,
       });
       expect(hookSystem.reload).toHaveBeenCalledTimes(1);
       expect(
@@ -176,6 +186,7 @@ describe('hooksCommand', () => {
       await hooksCommand.action!(context, '');
 
       expect(config.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks: undefined,
         userHooks: undefined,
         projectHooks: undefined,
         hooks: undefined,

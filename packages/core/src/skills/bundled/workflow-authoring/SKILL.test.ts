@@ -239,6 +239,8 @@ describe('bundled workflow-authoring skill', () => {
       'inside `parallel()`/`pipeline()` it becomes a position-aligned `null` like any other thunk rejection',
     ],
     ['so null-check a `workflow()` result too'],
+    // The name-only lock reaches nested calls too.
+    ['`workflow({ scriptPath })` throws the same way; nest by name'],
     // isolation: every refusal, and the workaround for the nested one.
     ['when the session is already inside a worktree'],
     ['pass it as `workingDir`'],
@@ -248,7 +250,13 @@ describe('bundled workflow-authoring skill', () => {
     // Labels: the failures list carries nothing else.
     ['Make it unique per dispatch'],
     // The journal: every line type, and what a bare `started` means.
+    ['a `launched` line when the run starts'],
     ['a `started` line when an agent is dispatched'],
+    // Resume: what is refused, and what to do instead.
+    ['journal is no longer on disk has nothing to resume'],
+    ['start it again without `resumeFromRunId`'],
+    ['would run two copies of its agents against one journal'],
+    ['listed as failed with an `interrupted` error'],
     ['Only `result` lines feed the resume cache'],
     ['means the run was interrupted'],
     // budget: where total comes from, what spent() counts, what the gate

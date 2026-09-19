@@ -16,6 +16,68 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'capacityChoice.persistenceUnconfirmed':
+    'Saving the last interrupted turn could not be confirmed.',
+  'capacityChoice.title': 'Choose a workspace to stop',
+  'capacityChoice.description':
+    'No ACP capacity is available. Choose a workspace whose sessions you want to stop, or cancel and keep working.',
+  'capacityChoice.warning':
+    'Stopping interrupts all listed sessions and their tools. Files, workspace registration and saved history remain. Unsaved work may be lost. Closing this dialog after confirmation does not undo the stop.',
+  'capacityChoice.outdated':
+    'The draft, session or daemon has changed. Cancel and try the original operation again.',
+  'capacityChoice.inProgress':
+    'The selected stop is still being resolved. Refresh its status before continuing.',
+  'capacityChoice.failedUnreleased':
+    'The stop failed. This workspace remains unavailable until its old processes are confirmed stopped. Capacity is still reserved. Refresh to check cleanup.',
+  'capacityChoice.failedUnknownCleanup':
+    'The stop failed. Cleanup could not be confirmed. Refresh its status before continuing.',
+  'capacityChoice.workspaces': 'Workspace to stop',
+  'capacityChoice.requester':
+    'This workspace owns the operation you are trying to continue.',
+  'capacityChoice.running': 'Running',
+  'capacityChoice.waiting': 'Waiting for your response',
+  'capacityChoice.background': 'Background work running',
+  'capacityChoice.backgroundUnknown': 'Background work status unknown',
+  'capacityChoice.none':
+    'No workspace can currently be stopped here. Review the reasons above, stop the independent work, or cancel.',
+  'capacityChoice.refresh': 'Refresh status',
+  'capacityChoice.continue': 'Continue original operation',
+  'capacityChoice.confirm': 'Stop these sessions and continue',
+  'capacityChoice.stopped':
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  'capacityChoice.resume': 'Resume conversation',
+  'capacityChoice.blocked.stopping': 'Stopping',
+  'capacityChoice.blocked.not_live': 'No live ACP',
+  'capacityChoice.blocked.release_unavailable':
+    'Owned process release cannot be observed',
+  'capacityChoice.blocked.session_start_pending':
+    'Session startup or restore in progress',
+  'capacityChoice.blocked.workspace_control_pending':
+    'Workspace management or MCP work in progress',
+  'capacityChoice.blocked.session_closing':
+    'Session close or reset in progress',
+  'capacityChoice.blocked.runtime_unavailable':
+    'Workspace unavailable or untrusted',
+  'capacityChoice.blocked.special_runtime': 'Special-purpose workspace',
+  'capacityChoice.blocked.unsupported': 'Runtime stop is not supported',
+  'capacityChoice.blocked.activity_unknown': 'Activity could not be observed',
+  'capacityChoice.blocked.pendingSessionStarts': 'Session startup pending',
+  'capacityChoice.blocked.acpConnections': 'An ACP client is connected',
+  'capacityChoice.blocked.memoryTasks': 'Memory task running',
+  'capacityChoice.blocked.channelWorkers': 'Channel worker running',
+  'capacityChoice.blocked.voiceSessions': 'Voice session active',
+  'capacityChoice.blocked.management_pending': 'Workspace management pending',
+  'capacityChoice.blocked.scheduler_pending':
+    'Scheduled session restore in progress',
+  'capacityChoice.blocked.enabled_scheduled_tasks':
+    'Disable enabled scheduled tasks first',
+  'capacityChoice.blocked.scheduled_tasks_unknown':
+    'Scheduled tasks could not be read',
+  'capacityChoice.capacity': (v) => `ACP capacity: ${v?.used} / ${v?.limit}`,
+  'capacityChoice.sessions': (v) => `${v?.count} loaded session(s)`,
+  'capacityChoice.queued': (v) => `${v?.count} queued`,
+  'capacityChoice.outcome': (v) =>
+    `${v?.closed} session(s) closed; ${v?.remaining} remaining.`,
   'footnotes.note': (v) => `Footnote ${v?.number ?? ''}`,
   'footnotes.references': (v) => `View ${v?.count ?? ''} references`,
   'footnotes.preview': 'Reference preview',
@@ -51,6 +113,7 @@ const EN: Messages = {
   'branchPicker.action.newBranch': 'New Branch…',
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
+  'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
   'branchPicker.invalidBranchName':
     'Invalid branch name — avoid spaces, ~, ^, :, ? * and leading -',
@@ -87,6 +150,36 @@ const EN: Messages = {
     `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'}`,
   'branchPicker.hint.changesUntracked': (v) =>
     `${v?.count ?? 0} ${v?.count === 1 ? 'change' : 'changes'} (${v?.untracked ?? 0} untracked)`,
+  'branchPicker.action.manageRemotes': 'Manage Remotes…',
+  'branchPicker.remotes.title': 'Remotes',
+  'branchPicker.remotes.back': 'Back to branches',
+  'branchPicker.remotes.loading': 'Loading remotes…',
+  'branchPicker.remotes.empty': 'No remotes configured',
+  'branchPicker.remotes.noMatches': 'No remotes match the search',
+  'branchPicker.remotes.namePlaceholder': 'Remote name',
+  'branchPicker.remotes.urlPlaceholder': 'Remote URL',
+  'branchPicker.remotes.add': 'Add',
+  'branchPicker.remotes.remove': (v) => `Remove ${v?.name ?? ''}`,
+  'branchPicker.remotes.removeConfirm': 'Confirm',
+  'branchPicker.remotes.removeConfirmFor': (v) =>
+    `Confirm removing ${v?.name ?? ''}${v?.extras ? ` (${v.extras})` : ''}`,
+  'branchPicker.remotes.invisibleName': '(invisible name)',
+  'branchPicker.remotes.hiddenChars': '(hidden characters)',
+  'branchPicker.remotes.lookalikeName': '(lookalike name)',
+  'branchPicker.remotes.searchPlaceholder': 'Search remotes',
+  'branchPicker.remotes.urlTooltipFetch': (v) => `fetch: ${v?.url ?? ''}`,
+  'branchPicker.remotes.urlTooltipPush': (v) => `push: ${v?.url ?? ''}`,
+  'branchPicker.remotes.promisor': 'partial clone',
+  'branchPicker.remotes.partialClone': (v) => `partial clone (${v?.filter})`,
+  'branchPicker.remotes.customRefspec': 'custom refspec',
+  'branchPicker.remotes.extraUrls': (v) =>
+    `+${v?.count ?? 0} ${v?.count === 1 ? 'URL' : 'URLs'}`,
+  'branchPicker.remotes.otherSettings': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'other setting' : 'other settings'}`,
+  'branchPicker.remotes.added': (v) => `Added remote ${v?.name ?? ''}`,
+  'branchPicker.remotes.removed': (v) => `Removed remote ${v?.name ?? ''}`,
+  'branchPicker.remotes.invalidInput':
+    'Enter a remote name and URL (no leading -)',
   'gitCommit.title': 'Commit',
   'gitCommit.messagePlaceholder': 'Commit message (⌘/Ctrl+Enter to commit)',
   'gitCommit.generating': 'Generating commit message…',
@@ -161,6 +254,9 @@ const EN: Messages = {
   'gitLog.detailError': 'Failed to load commit details',
   'gitLog.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitLog.copySha': (v) => `Copy commit ${v?.sha ?? ''}`,
+  'gitLog.allBranches': 'All branches',
+  'gitLog.search': 'Search message, author, or hash',
+  'gitLog.noMatches': 'No commits match',
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -462,6 +558,30 @@ const EN: Messages = {
   'live.noFallback':
     'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
+  'live.browser.connect': 'Talk in this browser',
+  'live.browser.connecting': 'Connecting microphone…',
+  'live.browser.requirement.host': 'This browser tab',
+  'live.browser.requirement.runtime': 'Live runtime',
+  'live.browser.takeOver': 'Take over in this tab',
+  'live.browser.disconnect': 'Release microphone',
+  'live.browser.setupDescription':
+    'Use this browser tab as the microphone and speaker for Live Voice.',
+  'live.browser.readyDescription':
+    'This tab is the microphone and speaker for Live Voice.',
+  'live.browser.otherTabDescription':
+    'Another Web Shell tab is the microphone and speaker for Live Voice.',
+  'live.browser.headphonesHint':
+    'Headphones give the best result: they keep the reply out of the microphone.',
+  'live.browser.closed.occupied':
+    'Another Live Voice endpoint is already connected.',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host took over Live Voice from this tab.',
+  'live.browser.closed.supersededTab':
+    'Another Web Shell tab took over Live Voice.',
+  'live.browser.closed.refused':
+    'Live Voice is turned off, or this workspace is not trusted.',
+  'live.browser.closed.microphone': 'The microphone could not be opened.',
+  'live.browser.closed.lost': 'The Live Voice connection was lost.',
   'settings.liveShortcut.capture': 'Press shortcut',
   'settings.liveShortcut.clear': 'Clear',
   'settings.liveShortcut.off': 'Off',
@@ -469,6 +589,8 @@ const EN: Messages = {
   'settings.liveSetup.experimental': 'Experimental',
   'settings.liveSetup.description':
     'Talk to Qwen from anywhere on this Mac with Realtime voice, Appshot, and task handoff.',
+  'settings.liveSetup.browserDescription':
+    'Talk to Qwen with Realtime voice and task handoff, using this browser as the microphone and speaker.',
   'settings.liveSetup.enable': 'Enable Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
@@ -584,6 +706,8 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.dissatisfied': 'Not satisfied',
+  'assistant.satisfied': 'Satisfied',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -1198,6 +1322,7 @@ const EN: Messages = {
     `${v?.count ?? 0} file(s) could not be read.`,
   'editor.imagesTooLarge': (v) =>
     `${v?.count ?? 0} file(s) exceeded the attachment size limit.`,
+  'editor.pastedTextShowInEditor': 'Show inline',
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
   'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
@@ -2041,6 +2166,7 @@ const EN: Messages = {
   'auth.step.group': 'Type',
   'auth.step.provider': 'Provider',
   'auth.step.protocol': 'Protocol',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': 'Model IDs',
@@ -2051,6 +2177,8 @@ const EN: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API format',
   'auth.protocol.gemini': 'Gemini-compatible',
   'auth.protocol.geminiDesc': 'Google Gemini API format',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key cannot be empty.',
   'auth.baseUrlInvalid': 'Base URL must start with http:// or https://.',
   'auth.baseUrlPrompt': 'Enter the API endpoint for this protocol.',
@@ -2472,10 +2600,6 @@ const EN: Messages = {
   'goal.judge': 'Judge',
   'goal.label': 'Goal',
   'goal.lastCheck': 'Last check',
-  'goal.checkpoint': 'Checkpoint',
-  'goal.checkpointStalled': (v) =>
-    `${v?.count ?? 0}/${v?.limit ?? 0} checks stalled`,
-  'goal.checkpointFailed': 'last evidence checkpoint failed',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
   'goal.statusActive': '/goal active',
@@ -2688,10 +2812,11 @@ const EN: Messages = {
     'Use this provider for conversation. The current model is retained when it is included in the configuration.',
   'auth.purpose.image': 'Image generation',
   'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.realtime': 'Live Voice',
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
-    'Use OpenAI protocol with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
+    'Use OpenAI Chat Completions with qwen3-asr-flash, qwen3-asr-flash-realtime, fun-asr-realtime, or paraformer-realtime. Adding this model keeps your conversation model.',
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -2894,6 +3019,11 @@ const EN: Messages = {
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
     'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+  'contextCompression.result': (v) =>
+    `Context compressed ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `Compression instructions were truncated to ${v?.max ?? ''} characters.`,
+  'contextCompression.noop': 'No compression needed.',
   'contextUsage.retry': 'Retry',
   'contextUsage.loadError': 'Failed to load context usage.',
   'contextUsage.previousReading':
@@ -3839,6 +3969,59 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'capacityChoice.persistenceUnconfirmed':
+    '无法确认最后一轮被中断内容是否已保存。',
+  'capacityChoice.title': '选择要停止的工作区',
+  'capacityChoice.description':
+    '当前没有可用的 ACP 容量。选择一个工作区停止其会话，或取消并继续现有工作。',
+  'capacityChoice.warning':
+    '停止将中断列出的所有会话及其工具。文件、工作区注册和已保存历史会保留，未保存工作可能丢失。确认后关闭此弹窗不会撤销停止。',
+  'capacityChoice.outdated':
+    '草稿、会话或 daemon 已变化，请取消后重新执行原操作。',
+  'capacityChoice.inProgress': '所选停止仍在处理，请刷新状态后再继续。',
+  'capacityChoice.failedUnreleased':
+    '停止失败。确认旧进程全部退出前，此工作区暂不可用，容量仍被占用。可刷新查看清理结果。',
+  'capacityChoice.failedUnknownCleanup':
+    '停止失败，清理结果尚未确认。请刷新状态后再继续。',
+  'capacityChoice.workspaces': '要停止的工作区',
+  'capacityChoice.requester': '此工作区属于正在尝试继续的原操作。',
+  'capacityChoice.running': '运行中',
+  'capacityChoice.waiting': '等待你的回复',
+  'capacityChoice.background': '后台工作运行中',
+  'capacityChoice.backgroundUnknown': '后台工作状态未知',
+  'capacityChoice.none':
+    '当前没有可在此停止的工作区。请查看上述原因，先结束独立工作，或取消。',
+  'capacityChoice.refresh': '刷新状态',
+  'capacityChoice.continue': '继续原操作',
+  'capacityChoice.confirm': '停止这些会话并继续',
+  'capacityChoice.stopped':
+    '此工作区已停止，以释放 ACP 容量。需要时可主动恢复此会话。',
+  'capacityChoice.resume': '恢复会话',
+  'capacityChoice.blocked.stopping': '正在停止',
+  'capacityChoice.blocked.not_live': '没有运行中的 ACP',
+  'capacityChoice.blocked.release_unavailable': '无法确认自有进程释放',
+  'capacityChoice.blocked.session_start_pending': '正在启动或恢复会话',
+  'capacityChoice.blocked.workspace_control_pending':
+    '工作区管理或 MCP 操作进行中',
+  'capacityChoice.blocked.session_closing': '会话正在关闭或重置',
+  'capacityChoice.blocked.runtime_unavailable': '工作区不可用或不可信',
+  'capacityChoice.blocked.special_runtime': '特殊用途工作区',
+  'capacityChoice.blocked.unsupported': '不支持停止此运行时',
+  'capacityChoice.blocked.activity_unknown': '无法确认活动状态',
+  'capacityChoice.blocked.pendingSessionStarts': '等待会话启动',
+  'capacityChoice.blocked.acpConnections': '有 ACP 客户端连接',
+  'capacityChoice.blocked.memoryTasks': '记忆任务运行中',
+  'capacityChoice.blocked.channelWorkers': '渠道 worker 运行中',
+  'capacityChoice.blocked.voiceSessions': '语音会话活跃',
+  'capacityChoice.blocked.management_pending': '工作区管理操作待完成',
+  'capacityChoice.blocked.scheduler_pending': '正在恢复定时任务会话',
+  'capacityChoice.blocked.enabled_scheduled_tasks': '请先禁用已启用的定时任务',
+  'capacityChoice.blocked.scheduled_tasks_unknown': '无法读取定时任务',
+  'capacityChoice.capacity': (v) => `ACP 容量：${v?.used} / ${v?.limit}`,
+  'capacityChoice.sessions': (v) => `${v?.count} 个已加载会话`,
+  'capacityChoice.queued': (v) => `${v?.count} 个排队请求`,
+  'capacityChoice.outcome': (v) =>
+    `已关闭 ${v?.closed} 个会话，剩余 ${v?.remaining} 个。`,
   'footnotes.note': (v) => `脚注 ${v?.number ?? ''}`,
   'footnotes.references': (v) => `查看 ${v?.count ?? ''} 条引用`,
   'footnotes.preview': '引用预览',
@@ -3873,6 +4056,7 @@ const ZH: Messages = {
   'branchPicker.action.newBranch': '新建分支…',
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
+  'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
   'branchPicker.invalidBranchName':
     '无效的分支名称 — 避免空格、~、^、:、? * 以及以 - 开头',
@@ -3907,6 +4091,34 @@ const ZH: Messages = {
   'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
   'branchPicker.hint.changesUntracked': (v) =>
     `${v?.count ?? 0} 处更改（${v?.untracked ?? 0} 未跟踪）`,
+  'branchPicker.action.manageRemotes': '管理远程仓库…',
+  'branchPicker.remotes.title': '远程仓库',
+  'branchPicker.remotes.back': '返回分支列表',
+  'branchPicker.remotes.loading': '加载远程仓库中…',
+  'branchPicker.remotes.empty': '未配置远程仓库',
+  'branchPicker.remotes.noMatches': '没有匹配的远程仓库',
+  'branchPicker.remotes.namePlaceholder': '名称',
+  'branchPicker.remotes.urlPlaceholder': 'URL',
+  'branchPicker.remotes.add': '添加',
+  'branchPicker.remotes.remove': (v) => `移除 ${v?.name ?? ''}`,
+  'branchPicker.remotes.removeConfirm': '确认',
+  'branchPicker.remotes.removeConfirmFor': (v) =>
+    `确认移除 ${v?.name ?? ''}${v?.extras ? `（${v.extras}）` : ''}`,
+  'branchPicker.remotes.invisibleName': '（不可见名称）',
+  'branchPicker.remotes.hiddenChars': '（隐藏字符）',
+  'branchPicker.remotes.lookalikeName': '（易混名称）',
+  'branchPicker.remotes.searchPlaceholder': '搜索远程仓库',
+  'branchPicker.remotes.urlTooltipFetch': (v) => `拉取: ${v?.url ?? ''}`,
+  'branchPicker.remotes.urlTooltipPush': (v) => `推送: ${v?.url ?? ''}`,
+  'branchPicker.remotes.promisor': '部分克隆',
+  'branchPicker.remotes.partialClone': (v) => `部分克隆（${v?.filter}）`,
+  'branchPicker.remotes.customRefspec': '自定义 refspec',
+  'branchPicker.remotes.extraUrls': (v) => `+${v?.count ?? 0} 个 URL`,
+  'branchPicker.remotes.otherSettings': (v) => `其他 ${v?.count ?? 0} 项设置`,
+  'branchPicker.remotes.added': (v) => `已添加远程仓库 ${v?.name ?? ''}`,
+  'branchPicker.remotes.removed': (v) => `已移除远程仓库 ${v?.name ?? ''}`,
+  'branchPicker.remotes.invalidInput':
+    '请输入远程仓库名称和 URL（不能以 - 开头）',
   'gitCommit.title': '提交',
   'gitCommit.messagePlaceholder': '提交信息（⌘/Ctrl+Enter 提交）',
   'gitCommit.generating': '正在生成提交信息…',
@@ -3977,6 +4189,9 @@ const ZH: Messages = {
   'gitLog.detailError': '加载提交详情失败',
   'gitLog.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
   'gitLog.copySha': (v) => `复制提交 ${v?.sha ?? ''}`,
+  'gitLog.allBranches': '全部分支',
+  'gitLog.search': '搜索提交信息、作者或哈希',
+  'gitLog.noMatches': '没有匹配的提交',
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',
@@ -4347,6 +4562,27 @@ const ZH: Messages = {
   'live.noFallback':
     '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
+  'live.browser.connect': '在此浏览器中通话',
+  'live.browser.connecting': '正在连接麦克风…',
+  'live.browser.requirement.host': '此浏览器标签页',
+  'live.browser.requirement.runtime': 'Live 运行时',
+  'live.browser.takeOver': '在此标签页接管',
+  'live.browser.disconnect': '释放麦克风',
+  'live.browser.setupDescription':
+    '将此浏览器标签页用作实时语音的麦克风和扬声器。',
+  'live.browser.readyDescription': '此标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.otherTabDescription':
+    '另一个 Web Shell 标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.headphonesHint':
+    '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
+  'live.browser.closed.occupied': '已有其他实时语音端连接。',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host 已从此标签页接管实时语音。',
+  'live.browser.closed.supersededTab':
+    '另一个 Web Shell 标签页已接管实时语音。',
+  'live.browser.closed.refused': '实时语音未开启，或此工作区不受信任。',
+  'live.browser.closed.microphone': '无法打开麦克风。',
+  'live.browser.closed.lost': '实时语音连接已断开。',
   'settings.liveShortcut.capture': '请按下快捷键',
   'settings.liveShortcut.clear': '清除',
   'settings.liveShortcut.off': '关闭',
@@ -4354,6 +4590,8 @@ const ZH: Messages = {
   'settings.liveSetup.experimental': '实验性',
   'settings.liveSetup.description':
     '在这台 Mac 的任意界面通过 Realtime 语音、Appshot 和任务交接与 Qwen 对话。',
+  'settings.liveSetup.browserDescription':
+    '通过 Realtime 语音和任务交接与 Qwen 对话，由此浏览器充当麦克风和扬声器。',
   'settings.liveSetup.enable': '启用 Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
@@ -4468,6 +4706,8 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.dissatisfied': '不满意',
+  'assistant.satisfied': '满意',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
@@ -5030,6 +5270,7 @@ const ZH: Messages = {
   'editor.imagesSkipped': (v) => `已跳过 ${v?.count ?? 0} 个不可读取的文件。`,
   'editor.imagesReadFailed': (v) => `${v?.count ?? 0} 个文件读取失败。`,
   'editor.imagesTooLarge': (v) => `${v?.count ?? 0} 个文件超过附件大小限制。`,
+  'editor.pastedTextShowInEditor': '显示到输入框',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
@@ -5800,6 +6041,7 @@ const ZH: Messages = {
   'auth.step.group': '类型',
   'auth.step.provider': '供应商',
   'auth.step.protocol': '协议',
+  'auth.step.api': 'API',
   'auth.step.baseUrl': 'Base URL',
   'auth.step.apiKey': 'API Key',
   'auth.step.models': '模型 ID',
@@ -5810,6 +6052,8 @@ const ZH: Messages = {
   'auth.protocol.anthropicDesc': 'Anthropic Messages API 格式',
   'auth.protocol.gemini': 'Gemini 兼容',
   'auth.protocol.geminiDesc': 'Google Gemini API 格式',
+  'auth.api.chatCompletions': 'Chat Completions',
+  'auth.api.responses': 'Responses',
   'auth.apiKeyRequired': 'API key 不能为空。',
   'auth.baseUrlInvalid': 'Base URL 必须以 http:// 或 https:// 开头。',
   'auth.baseUrlPrompt': '输入此协议的 API endpoint。',
@@ -6197,10 +6441,6 @@ const ZH: Messages = {
   'goal.judge': '判断',
   'goal.label': '目标',
   'goal.lastCheck': '上次检查',
-  'goal.checkpoint': '检查点',
-  'goal.checkpointStalled': (v) =>
-    `连续 ${v?.count ?? 0}/${v?.limit ?? 0} 次检查停滞`,
-  'goal.checkpointFailed': '最近一次证据检查点失败',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
   'goal.statusActive': '/goal 运行中',
@@ -6399,10 +6639,11 @@ const ZH: Messages = {
     '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
   'auth.purpose.image': '生图',
   'auth.purpose.voice': '语音转写',
+  'auth.purpose.realtime': '实时语音',
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
-    '请选择 OpenAI 协议，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
+    '请选择 OpenAI Chat Completions API，使用 qwen3-asr-flash、qwen3-asr-flash-realtime、fun-asr-realtime 或 paraformer-realtime 等受支持的转写模型。添加后保留当前对话模型。',
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
@@ -6592,6 +6833,11 @@ const ZH: Messages = {
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
     '会话连接正常、空闲、可写、没有活动目标且支持内置压缩命令时可用。',
+  'contextCompression.result': (v) =>
+    `上下文已压缩 ${v?.from ?? ''} → ${v?.to ?? ''}`,
+  'contextCompression.instructionsTruncated': (v) =>
+    `压缩指令已截断为 ${v?.max ?? ''} 个字符。`,
+  'contextCompression.noop': '无需压缩。',
   'contextUsage.retry': '重试',
   'contextUsage.loadError': '上下文使用情况加载失败。',
   'contextUsage.previousReading': '刷新失败，当前显示先前读数。',

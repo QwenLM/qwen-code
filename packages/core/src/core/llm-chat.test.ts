@@ -5409,6 +5409,71 @@ describe('LlmChat', async () => {
   });
 
   describe('auto-compression integration', () => {
+    it('keeps compressed history and token counts consistent if worker invalidation fails', async () => {
+      chat.setLastPromptTokenCount(1000);
+      mockConfig.getExecutionEnvironment = () =>
+        ({
+          invalidateReadCache: vi
+            .fn()
+            .mockRejectedValue(new Error('executor closed')),
+        }) as unknown as ReturnType<Config['getExecutionEnvironment']>;
+      const newHistory = [{ role: 'user', parts: [{ text: 'summary' }] }];
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory,
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      expect(
+        (await chat.tryCompress('failed-invalidation', true)).compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getHistory()).toEqual(newHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(200);
+    });
+
+    it('clears the execution environment cache before finishing compression', async () => {
+      let completeInvalidation!: () => void;
+      const invalidateReadCache = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completeInvalidation = resolve;
+          }),
+      );
+      mockConfig.getExecutionEnvironment = () =>
+        ({ invalidateReadCache }) as unknown as ReturnType<
+          Config['getExecutionEnvironment']
+        >;
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      let finished = false;
+      const compression = chat
+        .tryCompress('container-compression', true)
+        .then(() => {
+          finished = true;
+        });
+      await vi.waitFor(() =>
+        expect(invalidateReadCache).toHaveBeenCalledOnce(),
+      );
+      expect(finished).toBe(false);
+      completeInvalidation();
+      await compression;
+      expect(finished).toBe(true);
+    });
+
     function makeStreamResponse(
       text = 'ok',
       usageMetadata?: GenerateContentResponse['usageMetadata'],
@@ -21946,6 +22011,35 @@ describe('LlmChat', async () => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);
     };
 
+    async function recordTokenUsage(
+      targetChat: LlmChat,
+      usageMetadata: NonNullable<GenerateContentResponse['usageMetadata']>,
+      model = 'test-model',
+    ): Promise<void> {
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        streamResponse({
+          candidates: [
+            {
+              content: { parts: [{ text: 'ok' }] },
+              finishReason: 'STOP',
+            },
+          ],
+          usageMetadata,
+        } as unknown as GenerateContentResponse),
+      );
+
+      const stream = await targetChat.sendMessageStream(
+        model,
+        { message: 'record usage' },
+        `prompt-usage-${usageMetadata.promptTokenCount}`,
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+    }
+
     it('invalidates API-reported counts when the model route changes', () => {
       // Count reported by the pre-switch route (authoritative, not estimated).
       chat.setLastPromptTokenCount(691_000, false);
@@ -22180,42 +22274,64 @@ describe('LlmChat', async () => {
       ).not.toHaveBeenCalledWith(42);
     });
 
-    it('mirrors cached content alongside a route-stamped prompt count', async () => {
-      // The cached-content mirror's only non-zero production write lives
-      // inside the prompt-count guard; deleting it must not leave the suite
-      // green. Consumed without a route switch, a cached-content response
-      // must reach the /context cached-tokens line (#9454).
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: { parts: [{ text: 'cached' }] },
-                finishReason: 'STOP',
-              },
-            ],
-            usageMetadata: {
-              promptTokenCount: 100,
-              totalTokenCount: 100,
-              cachedContentTokenCount: 42,
-            },
-          } as unknown as GenerateContentResponse;
-        })(),
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'cached-happy' },
-        'prompt-cached-happy',
-      );
-      for await (const _ of stream) {
-        /* consume */
-      }
+    it('stores, clears, and retains cached content per route', async () => {
+      await recordTokenUsage(chat, {
+        promptTokenCount: 100,
+        totalTokenCount: 100,
+        cachedContentTokenCount: 42,
+      });
 
       expect(chat.getLastPromptTokenCount()).toBe(100);
+      expect(chat.getLastCachedContentTokenCount()).toBe(42);
       expect(
         uiTelemetryService.setLastCachedContentTokenCount,
       ).toHaveBeenCalledWith(42);
+
+      switchRoute('other-model@route');
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+      switchRoute('gemini-pro@test0001');
+      expect(chat.getLastCachedContentTokenCount()).toBe(42);
+
+      await recordTokenUsage(chat, {
+        promptTokenCount: 120,
+        totalTokenCount: 120,
+      });
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+    });
+
+    it('clears cached content when non-API writers replace the prompt count', async () => {
+      await recordTokenUsage(chat, {
+        promptTokenCount: 65_267,
+        totalTokenCount: 65_267,
+        cachedContentTokenCount: 64_653,
+      });
+
+      chat.setLastPromptTokenCount(10_000, true);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+
+      await recordTokenUsage(chat, {
+        promptTokenCount: 65_267,
+        totalTokenCount: 65_267,
+        cachedContentTokenCount: 64_653,
+      });
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'question' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'reasoning '.repeat(100), thought: true },
+            { text: 'answer' },
+          ],
+        },
+      ]);
+
+      const result = chat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+      expect(
+        uiTelemetryService.setLastCachedContentTokenCount,
+      ).toHaveBeenLastCalledWith(0);
     });
 
     it('restores the request route key when a failed hard-rescue rolls counts back', async () => {
@@ -22360,8 +22476,18 @@ describe('LlmChat', async () => {
         } as unknown as ConstructorParameters<typeof LlmChat>[3],
         uiTelemetryService,
       );
-      // Authoritative count pair recorded by an earlier override-route turn.
-      rescueChat.seedResumeTokenCounts(170_000, 8_000, false);
+      await recordTokenUsage(
+        rescueChat,
+        {
+          promptTokenCount: 170_000,
+          totalTokenCount: 178_000,
+          candidatesTokenCount: 8_000,
+          cachedContentTokenCount: 42_000,
+        },
+        'override-model',
+      );
+      expect(rescueChat.getLastCachedContentTokenCount()).toBe(42_000);
+      vi.mocked(mockContentGenerator.generateContentStream).mockClear();
       vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
         model ? `${model}@route` : 'active@route',
       );
@@ -22397,6 +22523,7 @@ describe('LlmChat', async () => {
       );
       expect(rescueChat.getLastPromptTokenCount()).toBe(170_000);
       expect(rescueChat.getLastOutputTokenCount()).toBe(8_000);
+      expect(rescueChat.getLastCachedContentTokenCount()).toBe(42_000);
     });
 
     it('re-adopts the request route after the compression service flips the slots (#9506)', async () => {
