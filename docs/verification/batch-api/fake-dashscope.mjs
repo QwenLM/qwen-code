@@ -25,6 +25,7 @@ let fileSeq = 0;
 let batchSeq = 0;
 const files = new Map(); // id -> {content, purpose, name}
 const batches = new Map(); // id -> job
+const TERMINAL = new Set(['completed', 'failed', 'expired', 'cancelled']);
 
 const now = () => Math.floor(Date.now() / 1000);
 const log = (entry) =>
@@ -90,6 +91,9 @@ function completionBody(kind, id) {
 
 /** Advance a job's status for the current scenario and return it. */
 function pollJob(job) {
+  // A settled job is immutable: its output/error file ids are minted once
+  // and stay stable across polls, as on the real provider.
+  if (TERMINAL.has(job.status)) return job;
   const elapsed = now() - job.created_at;
   if (SCENARIO === 'stuck') {
     job.status = 'in_progress';
@@ -121,10 +125,43 @@ function pollJob(job) {
   job.in_progress_at ??= job.created_at + 1;
   job.completed_at = now();
   const lines = job.lines.map((line, i) => {
+    const customId = JSON.parse(line).custom_id ?? String(i);
+    // The reply is keyed off the request body, like the real provider: a
+    // line whose assistant turn carries tool_calls without a following
+    // matching tool message is rejected, and the tools scenario returns
+    // tool_calls only while the conversation has no tool result yet.
+    const messages = JSON.parse(line).body?.messages ?? [];
+    const dangling = messages.some(
+      (m, idx) =>
+        m.role === 'assistant' &&
+        Array.isArray(m.tool_calls) &&
+        m.tool_calls.some(
+          (tc) =>
+            !messages.some(
+              (n, j) =>
+                j > idx && n.role === 'tool' && n.tool_call_id === tc.id,
+            ),
+        ),
+    );
+    if (SCENARIO === 'tools' && dangling) {
+      return JSON.stringify({
+        custom_id: customId,
+        response: {
+          status_code: 400,
+          body: {
+            error: {
+              message:
+                'fake: assistant tool_calls not followed by a matching tool message',
+            },
+          },
+        },
+      });
+    }
+    const hasToolResult = messages.some((m) => m.role === 'tool');
     const kind =
-      SCENARIO === 'tools' && job.seq === 1 && i === 0 ? 'tool_call' : 'text';
+      SCENARIO === 'tools' && !hasToolResult && i === 0 ? 'tool_call' : 'text';
     return JSON.stringify({
-      custom_id: JSON.parse(line).custom_id ?? String(i),
+      custom_id: customId,
       response: {
         status_code: 200,
         body: completionBody(kind, `${job.id}-${i}`),
@@ -179,7 +216,12 @@ const server = http.createServer((req, res) => {
     }
     m = p.match(/^\/files\/([^/]+)$/);
     if (m && req.method === 'DELETE') {
-      files.delete(m[1]);
+      // Map.delete's boolean decides the response: the real provider 404s on
+      // an unknown id, and a {deleted:true} for everything would count
+      // attempts, not deletions.
+      if (!files.delete(m[1])) {
+        return send(res, 404, { error: { message: 'no such file' } });
+      }
       log({ event: 'file_deleted', id: m[1] });
       return send(res, 200, { id: m[1], object: 'file', deleted: true });
     }
@@ -219,6 +261,13 @@ const server = http.createServer((req, res) => {
     if (m && req.method === 'POST') {
       const job = batches.get(m[1]);
       if (!job) return send(res, 404, { error: { message: 'no such batch' } });
+      // The real provider refuses to cancel a settled job; the CLI's
+      // rejected-cancel path must be exercisable against the fake.
+      if (TERMINAL.has(job.status)) {
+        return send(res, 409, {
+          error: { message: `fake: batch ${job.id} is already ${job.status}` },
+        });
+      }
       job.status = 'cancelled';
       job.completed_at = now();
       log({ event: 'batch_cancelled', id: job.id });

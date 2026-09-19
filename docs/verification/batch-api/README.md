@@ -66,6 +66,9 @@ P_OUT=4 CACHE_RATIO=0.2 node docs/verification/batch-api/02-cache.mjs
 
 同一分支里 `qwen batch submit/status/fetch/cancel` 已经实现（`packages/cli/src/commands/batch.ts`），
 `00` 的管线验证也可以直接用它做：把 `out/00-plumbing.jsonl` 喂给 `qwen batch submit`，再 `status` / `fetch`。
+注意命令与脚本读的是不同的环境变量：命令走 CLI 的凭证解析，需要
+`OPENAI_API_KEY` + `OPENAI_BASE_URL` + `OPENAI_MODEL`（或 `QWEN_MODEL`）三者齐备
+（见 `docs/users/configuration/auth.md`），上面准备块里的 `DASHSCOPE_API_KEY` 它并不读。
 记得 body 里显式写 `enable_thinking: false`，否则新模型默认开 thinking。
 
 ## `--batch`（置换 v1）的验收
@@ -73,23 +76,26 @@ P_OUT=4 CACHE_RATIO=0.2 node docs/verification/batch-api/02-cache.mjs
 `qwen -p "..." --batch` 已实现：主循环每一跳走 Batch API，side-call / 压缩 / 子 agent 仍是实时。
 它的验收就是 01：如果 01 通，跑一次带工具调用的 `qwen -p "列出当前目录文件并总结" --batch`，
 应看到 stderr 打出 `[batch] submitted batch_xxx`，等待后正常完成一轮工具调用。
-TUI 下 `--batch` 会被 `.check()` 拒绝；QWEN_OAUTH 下会在第一次请求时报错。
+TUI 下 `--batch` 会被 `.check()` 拒绝；QWEN_OAUTH 或非 DashScope 端点在启动时被门禁直接拒绝
+（不发出任何请求）；`pipeline.ts` 里 `runBatch` 的抛错是 core 侧的兜底。
 
 ## 本地回归（不花钱、不联网）
 
 `fake-dashscope.mjs` 是一个假的百炼兼容服务（`/files`、`/batches`、`/batches/:id/cancel`、
 `/files/:id/content`、`/chat/completions`），按场景推进 batch 状态并记录每条请求；
-`regression.sh` 驱动**真实 CLI 进程**跑完 happy / tools / failed / stuck 四个场景，
+`regression.sh` 驱动**真实 CLI 进程**跑完 happy / tools / failed / stuck / unpollable 五个场景，
 断言退出码、stdout 与请求序列（`fake-dashscope.mjs` 支持 `SLOW_SECONDS`，但本脚本没有启动
 slow 场景，`pollJob` 的 slow 分支未被覆盖）：
 
 ```sh
-bash docs/verification/batch-api/regression.sh   # 约 5 分钟，26 条断言
+bash docs/verification/batch-api/regression.sh   # 约 10–15 分钟（受 tsx 冷启动影响），断言数以脚本末尾的 === N passed === 汇总为准
 ```
 
-覆盖：submit 只创建一个 batch（不被内存重启重复提交）、四个子命令退出码为 0 且不掉进主流程、
-鉴权门禁、`--batch` 对 `-i` 的拒绝、`--batch` 两跳工具调用端到端、失败时透出服务端原因且不重试、
-未 settle 时拒绝 fetch、SIGINT 触发服务端 cancel。
+覆盖：submit 只创建一个 batch（不被内存重启重复提交）、四个子命令退出码、已结算作业的 cancel
+被拒绝（与真实提供方一致）、鉴权门禁、`--batch` 对 `-i` 的拒绝、`--batch` 两跳工具调用端到端、
+失败时透出服务端原因且不重试、未 settle 时拒绝 fetch、SIGINT 触发服务端 cancel、
+只有主循环走 batch（side-call 保持实时）、以及不可轮询的作业被放弃时输入文件保留、
+错误信息指向 `qwen batch fetch`（R8/R9）。
 
 它证明的是 qwen-code 这一侧的进程行为，**不能**替代上面三个线上探针——百炼是否接受这些请求、
 工具调用能否穿过 batch body、batch 内是否命中缓存，只有真打接口才知道。

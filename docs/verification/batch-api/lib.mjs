@@ -57,12 +57,24 @@ export async function submit(oa, jsonlPath, { window = '24h', metadata } = {}) {
     file: fs.createReadStream(jsonlPath),
     purpose: 'batch',
   });
-  const batch = await oa.batches.create({
-    input_file_id: file.id,
-    endpoint: '/v1/chat/completions',
-    completion_window: window,
-    ...(metadata ? { metadata } : {}),
-  });
+  let batch;
+  try {
+    batch = await oa.batches.create({
+      input_file_id: file.id,
+      endpoint: '/v1/chat/completions',
+      completion_window: window,
+      ...(metadata ? { metadata } : {}),
+    });
+  } catch (error) {
+    // The upload is already a billable object; a failed create must not
+    // orphan it on the account with no id recorded anywhere.
+    console.warn(
+      ts(),
+      `batches.create failed; deleting orphaned input file ${file.id}`,
+    );
+    await oa.files.delete(file.id).catch(() => {});
+    throw error;
+  }
   console.log(ts(), `submitted ${batch.id} (input ${file.id})`);
   return batch;
 }

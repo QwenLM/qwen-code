@@ -19,30 +19,59 @@ import {
   submit,
   sleep,
   ts,
+  cleanup,
+  download,
   OUT,
   MODEL,
 } from './lib.mjs';
 
 const argv = process.argv.slice(2);
-const flag = (name) => {
-  const i = argv.indexOf(`--${name}`);
-  if (i === -1) return undefined;
-  const v = argv[i + 1];
-  return v === undefined || v.startsWith('--') ? true : v;
+// Strict argv: a value-less `--lines` must fail loudly, not silently probe
+// with 1 line (Number(true) === 1), and a typo must not run with defaults.
+const fail = (msg) => {
+  console.error(`error: ${msg}`);
+  process.exit(2);
 };
-const HOURS = Number(flag('hours') ?? 24);
-const INTERVAL = Number(flag('interval') ?? 3600) * 1000;
-const LINES = Number(flag('lines') ?? 1);
+const BOOLEAN_FLAGS = new Set(['once', 'summarize']);
+const NUMERIC_FLAGS = new Set(['hours', 'interval', 'lines']);
+const args = {};
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (!a.startsWith('--')) fail(`unexpected argument ${JSON.stringify(a)}`);
+  const name = a.slice(2);
+  if (BOOLEAN_FLAGS.has(name)) {
+    args[name] = true;
+    continue;
+  }
+  if (NUMERIC_FLAGS.has(name)) {
+    const v = argv[(i += 1)];
+    if (v === undefined || v.startsWith('--') || !Number.isFinite(Number(v))) {
+      fail(`--${name} needs a number, got ${JSON.stringify(v)}`);
+    }
+    args[name] = Number(v);
+    continue;
+  }
+  fail(`unknown option --${name}`);
+}
+const HOURS = args.hours ?? 24;
+const INTERVAL = (args.interval ?? 3600) * 1000;
+const LINES = args.lines ?? 1;
 const POLL = 60_000;
+const SETTLED = new Set(['completed', 'failed', 'expired', 'cancelled']);
 
 const LOG = path.join(OUT, '03-queue-timing.jsonl');
 const PENDING = path.join(OUT, '03-pending.json');
 const readPending = () =>
   fs.existsSync(PENDING) ? JSON.parse(fs.readFileSync(PENDING, 'utf8')) : [];
-const writePending = (p) =>
-  fs.writeFileSync(PENDING, JSON.stringify(p, null, 2));
+// Write via a temp file + rename so a concurrent reader never sees a torn
+// file (the README documents up to three parallel invocations).
+const writePending = (p) => {
+  const tmp = `${PENDING}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(p, null, 2));
+  fs.renameSync(tmp, PENDING);
+};
 
-if (flag('summarize')) {
+if (args.summarize) {
   summarize();
   process.exit(0);
 }
@@ -64,15 +93,32 @@ async function submitOne() {
   writePending(p);
 }
 
+// Consecutive failed polls; the --once loop gives up (leaving ids pending)
+// when the endpoint is persistently unreachable rather than dying or
+// spinning forever.
+let pollErrorStreak = 0;
+const MAX_POLL_ERROR_STREAK = 10;
+
 async function drain() {
   const pending = readPending();
-  const still = [];
+  const settled = new Set();
   for (const p of pending) {
-    const b = await oa.batches.retrieve(p.id);
-    if (!['completed', 'failed', 'expired', 'cancelled'].includes(b.status)) {
-      still.push(p);
+    let b;
+    try {
+      b = await oa.batches.retrieve(p.id);
+    } catch (error) {
+      pollErrorStreak += 1;
+      console.warn(
+        ts(),
+        'poll failed, keeping pending',
+        p.id,
+        error?.message ?? String(error),
+      );
       continue;
     }
+    pollErrorStreak = 0;
+    if (!SETTLED.has(b.status)) continue;
+    settled.add(p.id);
     const rec = {
       ...p,
       status: b.status,
@@ -91,6 +137,19 @@ async function drain() {
         ? rec.completed_at - rec.in_progress_at
         : null;
     rec.total_s = rec.completed_at ? rec.completed_at - rec.created_at : null;
+    // Read the failure reason before cleanup deletes the error file, or an
+    // unattended run leaves no recoverable explanation for a failed batch.
+    if (b.status !== 'completed' || b.error_file_id) {
+      try {
+        const [errLine] = await download(oa, b.error_file_id);
+        rec.error =
+          errLine?.error?.message ??
+          errLine?.response?.body?.error?.message ??
+          undefined;
+      } catch {
+        // Best effort: the status itself is still recorded.
+      }
+    }
     fs.appendFileSync(LOG, JSON.stringify(rec) + '\n');
     console.log(
       ts(),
@@ -99,17 +158,32 @@ async function drain() {
       b.status,
       `queue=${rec.queue_s}s run=${rec.run_s}s total=${rec.total_s}s`,
     );
-    // Result content is irrelevant here; free the files.
-    for (const id of [b.input_file_id, b.output_file_id, b.error_file_id])
-      if (id) oa.files.delete(id).catch(() => {});
+    // Result content is irrelevant here; free the files. Awaited: the
+    // --once branch exits right after drain, and fire-and-forget deletes
+    // never reach the server (lib cleanup stays non-fatal per file).
+    await cleanup(oa, b);
   }
-  writePending(still);
-  return still.length;
+  if (settled.size > 0) {
+    // Re-read right before writing and drop only the ids this pass settled,
+    // so ids a concurrent invocation submitted after our snapshot survive.
+    const current = readPending();
+    writePending(current.filter((p) => !settled.has(p.id)));
+  }
+  return readPending().length;
 }
 
-if (flag('once')) {
+if (args.once) {
   await submitOne();
-  while ((await drain()) > 0) await sleep(POLL);
+  while ((await drain()) > 0) {
+    if (pollErrorStreak > MAX_POLL_ERROR_STREAK) {
+      console.warn(
+        ts(),
+        `polling failed ${pollErrorStreak} times in a row; leaving the ids pending for a later run`,
+      );
+      break;
+    }
+    await sleep(POLL);
+  }
   summarize();
   process.exit(0);
 }
@@ -119,7 +193,12 @@ let nextSubmit = 0;
 for (;;) {
   const now = Date.now();
   if (now < end && now >= nextSubmit) {
-    await submitOne();
+    try {
+      await submitOne();
+    } catch (error) {
+      // One failed submission must not end the day-long sampling run.
+      console.warn(ts(), 'submit failed', error?.message ?? String(error));
+    }
     nextSubmit = now + INTERVAL;
   }
   const left = await drain();
@@ -130,11 +209,16 @@ summarize();
 
 function summarize() {
   if (!fs.existsSync(LOG)) return console.log('no records yet');
+  // Dedupe by batch id: a crash between the LOG append and the pending
+  // rewrite re-appends a settled batch on the rerun, and the percentiles
+  // must not count it twice.
+  const seen = new Set();
   const rows = fs
     .readFileSync(LOG, 'utf8')
     .split('\n')
     .filter(Boolean)
-    .map((l) => JSON.parse(l));
+    .map((l) => JSON.parse(l))
+    .filter((r) => !seen.has(r.id) && seen.add(r.id));
   const groups = {};
   for (const r of rows) (groups[`${r.model}/${r.lines}-line`] ??= []).push(r);
   const q = (xs, p) => {
@@ -145,10 +229,17 @@ function summarize() {
   };
   const out = {};
   for (const [k, rs] of Object.entries(groups)) {
-    const pick = (f) => rs.map((r) => r[f]).filter((x) => x !== null);
+    // Durations are computed over completed batches only: a failed/expired
+    // one contributes a timeout-length duration, not a queue measurement.
+    const done = rs.filter((r) => r.status === 'completed');
+    const failed = rs.filter((r) => r.status !== 'completed');
+    const pick = (f) => done.map((r) => r[f]).filter((x) => x !== null);
     out[k] = {
       n: rs.length,
-      completed: rs.filter((r) => r.status === 'completed').length,
+      completed: done.length,
+      not_completed: Object.fromEntries(
+        failed.map((r) => [r.id, r.error ?? r.status]),
+      ),
       queue_s: {
         p50: q(pick('queue_s'), 0.5),
         p90: q(pick('queue_s'), 0.9),

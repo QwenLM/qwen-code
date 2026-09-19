@@ -6,10 +6,13 @@ Code exposes it in two ways: a `qwen batch` command for pushing many
 independent requests through it, and an experimental `--batch` flag that sends
 a headless run's own turns through it.
 
-Both need an OpenAI-compatible API key on a DashScope endpoint. Qwen OAuth has
-no `/batches` route, and no other provider (Gemini, Vertex, Anthropic, the
-Responses API) has a Batch API at all — both paths refuse those rather than
-quietly running at full price.
+Both need an OpenAI-compatible API key on a DashScope endpoint: set
+`OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` (or `QWEN_MODEL`) —
+see [Authentication](../configuration/auth.md). Both paths refuse to run
+unless all three resolve the `openai` auth type. Qwen OAuth has no `/batches`
+route, and no other provider (Gemini, Vertex, Anthropic, the Responses API)
+has a Batch API at all — both paths refuse those rather than quietly running
+at full price.
 
 ## When batch is the right tool
 
@@ -65,6 +68,11 @@ or a bare chat-completions body, which gets wrapped with the line index as
 Set `enable_thinking: false` explicitly unless you want thinking tokens —
 newer models default it on, and thinking tokens can eat the 50% discount.
 
+Provider limits: a file must be homogeneous — one model and one thinking
+configuration for every line (a per-line `model` overrides the default, so a
+mixed file is rejected server-side only after upload) — and at most 6 MB per
+line, 500 MB / 50 000 lines per file.
+
 `--window` sets the completion window (default `24h`, maximum `14d`). A longer
 window does not make the job slower; it is the deadline, not the schedule.
 
@@ -86,16 +94,22 @@ qwen batch fetch batch_abc123 --out ./results --delete
 # ./results/batch_abc123.output.jsonl
 ```
 
-Refuses until the job has settled. Writes `<id>.output.jsonl` and, if any
-request failed, `<id>.error.jsonl`. `--delete` removes the remote input,
-output and error files afterwards — do it once you have the results, or they
-accumulate in your account.
+Refuses until the job has settled. Writes `<id>.output.jsonl` and, when the
+provider produced a separate error file, `<id>.error.jsonl`. A request can
+also fail _inside_ the output file, as a line whose `response.status_code` is
+not 200 — the reason is in that line's `.error` or `.response.body.error`.
+`--delete` removes the remote input, output and error files afterwards — do
+it once you have the results, or they accumulate in your account.
 
 Output lines carry the `custom_id` you supplied, so map results back to inputs
-yourself:
+yourself — and filter out the failed lines first, or they enter the dataset
+as empty answers (`// ""` also covers a successful turn that ended on
+`tool_calls`, whose `message.content` is `null`):
 
 ```bash
-jq -r '.custom_id + "\t" + .response.body.choices[0].message.content' \
+jq -r 'select(.response.status_code == 200) | .custom_id + "\t" + (.response.body.choices[0].message.content // "")' \
+  results/batch_abc123.output.jsonl
+jq -r 'select(.response.status_code != 200) | .custom_id' \
   results/batch_abc123.output.jsonl
 ```
 
@@ -133,9 +147,12 @@ files it uploaded.
 
 ### Multi-turn
 
-Tool calls work, and so do multi-turn runs: a turn that comes back with
-`tool_calls` runs the tools locally and submits the next turn as a **new**
-batch job carrying the full `assistant` + `tool` history.
+The client side is built for tool calls and multi-turn runs: a turn that
+comes back with `tool_calls` runs the tools locally and submits the next turn
+as a **new** batch job carrying the full `assistant` + `tool` history. What
+is **not yet verified against the live API** is whether the provider accepts
+`tools`/`tool_calls` in a batch body at all — see the probe in
+[Limits](#limits); treat multi-turn `--batch` as blocked on that result.
 
 What the Batch API does not have is server-side conversation state. Every job
 is one stateless request with the complete `messages` array, so an N-turn run

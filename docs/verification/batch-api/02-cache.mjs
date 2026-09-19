@@ -1,8 +1,15 @@
 // Test 2 — does context cache hit inside a batch? Answers plan §6 question 2
-// and settles the §2 cost math. Three arms share one ~4k-token system prompt:
+// and settles the §2 cost math. Three arms share one ~4k-token system prompt
+// plus a distinct 3-char arm tag (so one arm's cache hit can only be produced
+// by that arm's own traffic — the vendor's cache scoping is undocumented):
 //   a) batch, implicit cache          b) batch, explicit cache_control
 //   c) realtime control (proves the prefix caches at all)
 //   node docs/verification/batch-api/02-cache.mjs
+// The wait blocks for the whole completion window; both batch ids are
+// persisted to out/02-pending.json right after submission and a rerun
+// resumes them, so an interrupted run loses nothing.
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   client,
   line,
@@ -14,6 +21,8 @@ import {
   cleanup,
   usageOf,
   cachedOf,
+  ts,
+  OUT,
   MODEL,
 } from './lib.mjs';
 
@@ -32,6 +41,12 @@ const para =
 const longSystem = Array.from({ length: 60 }, (_, i) => `[${i}] ${para}`).join(
   '\n',
 );
+// Same length per arm, so the cost comparison stays apples-to-apples.
+const ARM_SYSTEM = {
+  implicit: `[a] ${longSystem}`,
+  explicit: `[b] ${longSystem}`,
+  control: `[c] ${longSystem}`,
+};
 
 const questions = Array.from(
   { length: N },
@@ -49,7 +64,7 @@ const implicitLines = questions.map((q, i) =>
   line(`a${i}`, {
     ...common,
     messages: [
-      { role: 'system', content: longSystem },
+      { role: 'system', content: ARM_SYSTEM.implicit },
       { role: 'user', content: q },
     ],
   }),
@@ -63,7 +78,7 @@ const explicitLines = questions.map((q, i) =>
         content: [
           {
             type: 'text',
-            text: longSystem,
+            text: ARM_SYSTEM.explicit,
             cache_control: { type: 'ephemeral' },
           },
         ],
@@ -74,21 +89,45 @@ const explicitLines = questions.map((q, i) =>
 );
 
 // Submit both batch arms first, run the realtime control while they queue.
-const [subA, subB] = await Promise.all([
-  submit(oa, writeJsonl('02-cache-implicit.jsonl', implicitLines)),
-  submit(oa, writeJsonl('02-cache-explicit.jsonl', explicitLines)),
-]);
+// The ids go to disk immediately: everything after this point (the control
+// loop included) can fail without losing the paid jobs' only handle.
+const PENDING = path.join(OUT, '02-pending.json');
+let subA, subB;
+if (fs.existsSync(PENDING)) {
+  const saved = JSON.parse(fs.readFileSync(PENDING, 'utf8'));
+  subA = { id: saved.A };
+  subB = { id: saved.B };
+  console.log(ts(), `resuming pending batch ids ${saved.A} ${saved.B}`);
+} else {
+  [subA, subB] = await Promise.all([
+    submit(oa, writeJsonl('02-cache-implicit.jsonl', implicitLines)),
+    submit(oa, writeJsonl('02-cache-explicit.jsonl', explicitLines)),
+  ]);
+  fs.writeFileSync(PENDING, JSON.stringify({ A: subA.id, B: subB.id }));
+}
 
+// The control is a convenience baseline, not a gate worth losing the paid
+// arms over: a failed control request is counted, not fatal.
 const realtime = [];
+const realtimeFailures = [];
 for (const [i, q] of questions.entries()) {
-  const r = await oa.chat.completions.create({
-    ...common,
-    messages: [
-      { role: 'system', content: longSystem },
-      { role: 'user', content: q },
-    ],
-  });
-  realtime.push({ custom_id: `c${i}`, response: { body: r } });
+  try {
+    const r = await oa.chat.completions.create({
+      ...common,
+      messages: [
+        { role: 'system', content: ARM_SYSTEM.control },
+        { role: 'user', content: q },
+      ],
+    });
+    realtime.push({ custom_id: `c${i}`, response: { body: r } });
+  } catch (error) {
+    realtimeFailures.push(`c${i}: ${error?.message ?? String(error)}`);
+    console.warn(
+      ts(),
+      `realtime control c${i} failed:`,
+      error?.message ?? error,
+    );
+  }
 }
 
 const [batchA, batchB] = await Promise.all([
@@ -124,25 +163,45 @@ function summarize(rows, multiplier) {
     completion_tokens: completion,
     hit_rate: prompt ? +(cached / prompt).toFixed(3) : 0,
     relative_cost: +cost.toFixed(1),
+    cost_per_line: per.length ? +(cost / per.length).toFixed(3) : null,
     per,
   };
 }
 
+// A failed request line comes back inside the OUTPUT file as
+// response.status_code !== 200 (a zero-token row that must not be summed as
+// a success), not only in the error file.
+const failedLines = (rows) =>
+  rows.filter((r) => r?.response?.status_code !== 200).length;
+
 const a = summarize(A.ok, BATCH);
 const b = summarize(B.ok, BATCH);
 const c = summarize(realtime, 1);
+const aFailed = failedLines(A.ok) + A.err.length;
+const bFailed = failedLines(B.ok) + B.err.length;
+const cFailed = realtimeFailures.length;
+// The headline ratio is the probe's pass criterion, so publish it only when
+// the comparison is complete on both sides: an arm that lost requests looks
+// proportionally cheaper on a raw total (a fully rejected arm reads as a
+// perfect 0), and the control side must be all-N to keep the units equal.
+const complete = (s, failed) => s.lines === N && failed === 0;
+const ratio = (arm, failed) =>
+  complete(arm, failed) && complete(c, cFailed)
+    ? +(arm.cost_per_line / c.cost_per_line).toFixed(2)
+    : null;
 const verdict = {
   model: MODEL,
   assumptions: { P_OUT, CACHE_RATIO: CACHE, BATCH_RATIO: BATCH },
   control_realtime_caches: c.lines_with_cache_hit > 1,
   batch_implicit_caches: a.lines_with_cache_hit > 1,
   batch_explicit_caches: b.lines_with_cache_hit > 1,
-  // Ratio < 1 means that arm is cheaper than realtime+cache.
+  // Ratio < 1 means that arm is cheaper than realtime+cache; null when
+  // either side is incomplete — never a number computed over missing lines.
   cost_vs_realtime: {
-    batch_implicit: +(a.relative_cost / c.relative_cost).toFixed(2),
-    batch_explicit: +(b.relative_cost / c.relative_cost).toFixed(2),
+    batch_implicit: ratio(a, aFailed),
+    batch_explicit: ratio(b, bFailed),
   },
-  errors: { implicit: A.err.length, explicit: B.err.length },
+  errors: { implicit: aFailed, explicit: bFailed, realtime: cFailed },
   arms: {
     batch_implicit: { ...a, per: undefined },
     batch_explicit: { ...b, per: undefined },
@@ -153,7 +212,8 @@ save('02-cache.result.json', {
   verdict,
   arms: { a, b, c },
   batches: { A: batchA, B: batchB },
-  errors: { A: A.err, B: B.err },
+  errors: { A: A.err, B: B.err, realtime: realtimeFailures },
 });
 await Promise.all([cleanup(oa, batchA), cleanup(oa, batchB)]);
+fs.rmSync(PENDING, { force: true });
 console.log(JSON.stringify(verdict, null, 2));

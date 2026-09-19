@@ -232,20 +232,22 @@ telemetry 打 `execution_mode=batch` 标签，否则 batch 会话的数据会污
 
 ### 8.2 最关键的一条：开关必须在请求上，不能在生成器上
 
-`config.ts:3693` 和 `:3718-3719` 证实 `BaseLlmClient` 与主循环**共用同一个 `ContentGenerator` 实例**。
-仓库里挂在它上面的 side-call 有 17 种 purpose：
-`session-title / tool-use-summary / permission_classifier_stage1&2 / goal-verifier / next-speaker /
-chat-compression / prompt-suggestion / recap / session-recap / auto-memory-recall / auto-memory-forget-selection /
-subagent-generator / vision-bridge / web-fetch / arena-approach-summary / p`。
+`Config` 的 `getBaseLlmClient()` 与主循环**共用同一个 `ContentGenerator` 实例**。
+仓库里挂在它上面的 side-call 有 21 种 purpose（写作本文时；枚举是活的，接手时重新点算，
+不要抄本文的数字），例如 `session-title / tool-use-summary / permission_classifier_stage1&2 /
+goal-verifier / next-speaker / chat-compression / prompt-suggestion / session-recap /
+auto-memory-recall / auto-memory-forget-selection / subagent-generator / vision-bridge / web-fetch /
+arena-approach-summary / acp-rewrite / project-summary` 等。
 
-如果在 `createContentGenerator` 层换成 batch 生成器，这 17 种调用会**静默**全部变成小时级：
+如果在 `createContentGenerator` 层换成 batch 生成器，这些 side-call 会**静默**全部变成小时级：
 UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度。
 
 所以：
 
 - 开关放在 `GenerateContentParameters.config` 上（例如 `executionMode: 'batch'`），
   **只有主循环那一次 `generateContent` 设置它**；side-call 一行不改就天然留在实时通道。
-- 管线里只有一处分支：`pipeline.ts:475` 处 `if (executionMode === 'batch') return this.executeBatch(...)`。
+- 管线里只有一处分支：`ContentGenerationPipeline.execute` 里按 `request.executionMode` 分流
+  （行号会漂，按符号找；本文最初引用的 `pipeline.ts:475` 等坐标均已漂移，勿再引用）。
   其余 converter / provider / 错误处理原样复用。
 
 ### 8.3 四层圈住影响面
@@ -254,7 +256,7 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 | ---- | -------------------------------------------------------------------------------- | ---------------------------------- |
 | 入口 | 只在 headless（`qwen -p ... --batch`）接受该 flag；交互式 TUI 直接拒绝并给出原因 | TUI 代码路径零改动                 |
 | 门禁 | provider 必须是 DashScope 官方 host + API key，否则启动即 fail-fast              | 第三方端点、OAuth 用户完全不受影响 |
-| 请求 | 8.2 的请求级开关；子 agent、压缩、side-call 一律实时                             | 17 种 side-call 与现状比特级一致   |
+| 请求 | 8.2 的请求级开关；子 agent、压缩、side-call 一律实时                             | 全部 side-call 与现状比特级一致    |
 | 默认 | flag 默认关闭、标记 experimental；telemetry 打标签                               | 关掉 = 代码不可达，回滚就是删 flag |
 
 测试面：现有 `pipeline.test.ts` 不动；新增一个小文件 mock `client.files` / `client.batches`，
@@ -281,9 +283,11 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 
 ```sh
 export DASHSCOPE_API_KEY=sk-...
-node docs/verification/batch-api/00-plumbing.mjs      # 免费模型，验管线；必须 PASS 才继续
-node docs/verification/batch-api/01-tools.mjs         # §6 问题 1
-node docs/verification/batch-api/02-cache.mjs         # §6 问题 2
+# 00/01/02 都会阻塞等满整个完成窗口（waitFor 到终态才返回，结果只在最后的 save() 落盘），
+# 和 03 一样用 nohup 跑；02 会把两个 batch id 立刻写进 out/02-pending.json，中断后重跑即续。
+nohup node docs/verification/batch-api/00-plumbing.mjs > docs/verification/batch-api/out/00.log 2>&1 &
+nohup node docs/verification/batch-api/01-tools.mjs    > docs/verification/batch-api/out/01.log 2>&1 &
+nohup node docs/verification/batch-api/02-cache.mjs    > docs/verification/batch-api/out/02.log 2>&1 &
 nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
   > docs/verification/batch-api/out/03.log 2>&1 &     # §6 问题 3，明天再看
 ```
@@ -292,6 +296,9 @@ nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
 贴到 PR #11874 的评论里。`FAIL` 时连同 result 文件里的 `errors` / `raw`（含百炼报错原文）一起贴。
 
 ### 9.3 结果怎么用
+
+> 注：表里的「接下来开什么」是探测前的计划；形态 A 与置换 v1 都已在本 PR 落地
+> （§9.1/§9.4），所以现在要开的不是实施 issue，而是验收结论。
 
 | 01 工具直通 | 02 batch 内缓存 | 方向                                    | 接下来开什么                                         |
 | ----------- | --------------- | --------------------------------------- | ---------------------------------------------------- |
@@ -303,20 +310,25 @@ nohup node docs/verification/batch-api/03-queue-timing.mjs --hours 24 \
 
 ### 9.4 置换——v1 已实现，对照清单
 
-v1 落地了第 1、2、4、5（入口门禁 + OAuth 拒绝）、6（自动成立：side-call 不带 `executionMode`）、10 条；
-第 3（`batch_id` 持久化 / resume）、7（显式 `enable_thinking`）、8（计量）、9 的删文件（已做）之外的部分**留到 01 验收通过后**。
+v1 落地了第 1、2、5（入口门禁 + OAuth 拒绝）、6 的前半（自动成立：side-call 不带 `executionMode`；
+后半的 256K 压缩阈值未做）、10 条；第 4 条落地为「重试整体禁止」（放弃的错误按类型不再重试，
+见 `batch.ts` 的 `BatchNotRetryableError`），比「重试前先 cancel」更强，但「提示已完成部分仍计费」
+只在 `qwen batch cancel` 的 help 里，核心路径没有单独提示。
+第 3（`batch_id` 持久化 / resume）、7（显式 `enable_thinking`）、8（计量）**留到 01 验收通过后**。
 进程中途挂掉时 batch id 已打到 stderr，用 `qwen batch fetch <id>` 手动收。
 
 原始清单（保留作对照）：
 
 1. **请求级开关**：`GenerateContentParameters.config` 加 `executionMode?: 'batch'`，
    只由主循环那一次 `generateContent` 设置。原因见 §8.2——`BaseLlmClient` 与主循环共用
-   `ContentGenerator`（`config.ts:3693`、`:3718-3719`），生成器级置换会把 17 种 side-call 拖进 24h。
-2. **管线分支**：`openaiContentGenerator/pipeline.ts:475`（非流式）一处
-   `if (executionMode === 'batch') return this.executeBatch(...)`；流式 `:519` 走同一函数后一次性 yield 一个 chunk。
-   `executeBatch` = 单行 JSONL → `client.files.create({purpose:'batch'})` → `client.batches.create`
-   → 轮询 `batches.retrieve` → `files.content(output_file_id)` → 取第一行 `response.body`。
-   `client` 就是 `provider.buildClient()` 返回的 `openai` 实例（`provider/default.ts:77-92`），`files` / `batches` 已在上面。
+   `ContentGenerator`（按符号找：`Config.getBaseLlmClient` / `Config.getContentGenerator`；
+   本文最初引用的 `config.ts:3693` 等行号已漂移，勿再引用），生成器级置换会把全部 side-call 拖进 24h。
+2. **管线分支**：`ContentGenerationPipeline.execute` 里按 `request.executionMode === 'batch'`
+   分流（非流式与流式各一处），批式分支落到 `openaiContentGenerator/batch.ts` 的
+   `runBatchCompletion`：单行 JSONL → 上传 input 文件（手写的 multipart fetch，原因见该文件注释）
+   → `client.batches.create` → 轮询 `batches.retrieve` → `files.content(output_file_id)`
+   → 取第一行 `response.body`。`client` 就是 `provider/default.ts` 的 `buildClient()`
+   返回的 `openai` 实例，`files` / `batches` 已在上面。
 3. **持久化**：`batches.create` 成功后**立刻**把 `batch_id` 写进 session，再开始轮询；
    `core/session-recovery.ts` 加一种 recovery kind（pending batch），resume 时先 `batches.retrieve` 再决定续等或重发；
    启动时 `batches.list` 对账回收孤儿。
@@ -346,7 +358,7 @@ v1 落地了第 1、2、4、5（入口门禁 + OAuth 拒绝）、6（自动成�
 - 不做同名工具——模型通过 shell 调 `qwen batch` 即可。
 - 不自动生成 JSONL、不按 `custom_id` 回写工作区——agent 用 `custom_id` 自己映射。
 - 不显式发 `enable_thinking`——由写 body 的一方决定（9.4 第 7 条仍适用，README 里提醒）。
-- 未在本机跑 vitest / tsc（仓库约定），由 CI 验证；也未对线上接口跑过。
+- 未对线上接口跑过（没有 key）；本地 vitest / tsc 已通过，CI 仍会复验。
 
 ### 9.6 已知但未验证的假设
 
@@ -360,4 +372,5 @@ v1 落地了第 1、2、4、5（入口门禁 + OAuth 拒绝）、6（自动成�
 - PR 有活动时**不要 force-push**，追加 commit。
 - PR body 英文在前，`<details><summary>中文说明</summary>` 折叠完整中文；先读 `.github/pull_request_template.md`。
 - PR 只开不合，由维护者审阅合并。
-- 不在本地跑 build / typecheck / vitest；需要度量的交给 CI 或写 `docs/verification/<topic>/README.md` 交接。
+- 声明完成前必须本地跑 build / typecheck / 相关单测（AGENTS.md「Development Guidelines」第 3 条；
+  单测优先跑改动文件的单个测试文件）。本节曾经误写成「不在本地跑」，那不是仓库约定，作废。
