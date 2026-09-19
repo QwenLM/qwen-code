@@ -16,6 +16,38 @@ export { WebShellTranscript } from './components/WebShellTranscript';
 export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 export * from './daemon-react-sdk';
 export type { WebShellBrowserNotificationsOptions } from './browser-turn-notifications';
+export {
+  JavaManagedAgentClient,
+  JavaManagedAgentHttpError,
+  type JavaAgentCommandAdmission,
+  type JavaAgentEnvironment,
+  type JavaAgentEvent,
+  type JavaAgentSession,
+  type JavaAgentTranscript,
+  type JavaAgentTurn,
+  type JavaManagedAgentClientOptions,
+} from './components/managed/java-managed-agent-client';
+export {
+  createJavaManagedAgentProvider,
+  type JavaManagedAgentProviderOptions,
+} from './components/managed/java-managed-agent-provider';
+export {
+  ManagedAgentWebShell,
+  type ManagedAgentWebShellProps,
+} from './ManagedAgentWebShell';
+export {
+  createDaemonManagedAgentProvider,
+  type ManagedAgentCommandOptions,
+  type ManagedAgentProvider,
+  type ManagedAgentRequestOptions,
+  type ManagedAgentRuntimeState,
+  type ManagedAgentSessionEvent,
+  type ManagedAgentSessionEventType,
+  type ManagedAgentSessionPhase,
+  type ManagedAgentSessionSummary,
+  type ManagedAgentSessionTranscript,
+  type ManagedAgentTurnAdmission,
+} from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Connect browser notifications with optional branding and an initial preference (off by default). */

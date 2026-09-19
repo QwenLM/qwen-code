@@ -166,6 +166,7 @@ import {
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import {
   managedSelectionFromUrl,
   saveManagedSelection,
@@ -1078,6 +1079,8 @@ export interface WebShellProps {
   }) => void;
   /** Called after a new session is created. Session setup waits up to 30 seconds. */
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
+  /** Explicit Managed Agent backend. Omit to keep the daemon provider unchanged. */
+  managedAgentProvider?: ManagedAgentProvider;
   /** Visual theme for the embedded shell. */
   theme?: WebShellTheme;
   /** Called when `/theme` changes the web-shell theme. */
@@ -2904,6 +2907,7 @@ export function App({
   onSessionIdChange,
   onSessionInfoChange,
   onSessionCreated,
+  managedAgentProvider,
   theme: providedTheme,
   onThemeChange,
   language: providedLanguage,
@@ -17103,10 +17107,17 @@ export function App({
                     closeMobileDrawer();
                     openPanel('channels');
                   }}
-                  onOpenManagedSessions={workspace.capabilities?.features?.includes('managed_sessions') ? () => {
-                    closeMobileDrawer();
-                    openPanel('managed');
-                  } : undefined}
+                  onOpenManagedSessions={
+                    managedAgentProvider ||
+                    workspace.capabilities?.features?.includes(
+                      'managed_sessions',
+                    )
+                      ? () => {
+                          closeMobileDrawer();
+                          openPanel('managed');
+                        }
+                      : undefined
+                  }
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -17705,10 +17716,13 @@ export function App({
                       />
                     ) : activePanel === 'managed' ? (
                       <ManagedSessionsPage
-                        key={workspace.baseUrl}
+                        key={
+                          managedAgentProvider?.storageKey ?? workspace.baseUrl
+                        }
                         sessionId={managedSessionId}
                         onSelectSession={setManagedSessionId}
                         workspaceCwd={lockedWorkspaceCwd}
+                        managedAgentProvider={managedAgentProvider}
                       />
                     ) : activePanel === 'agents' ? (
                       <AgentsManagerPage
