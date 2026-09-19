@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator } from '@playwright/test';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -8,10 +8,47 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
+const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
+const EDITOR_PREFERRED_WIDTH = 420;
+
+async function expectEditorInsideBubble(bubble: Locator, width: number) {
+  await expect
+    .poll(
+      () =>
+        bubble.evaluate((element) => {
+          const bubbleRect = element.getBoundingClientRect();
+          return Math.max(
+            -bubbleRect.left,
+            bubbleRect.right - window.innerWidth,
+            ...Array.from(element.querySelectorAll('textarea, button')).flatMap(
+              (control) => {
+                const rect = control.getBoundingClientRect();
+                return [
+                  bubbleRect.left - rect.left,
+                  rect.right - bubbleRect.right,
+                ];
+              },
+            ),
+          );
+        }),
+      { message: `px of editor/viewport overflow at ${width}px viewport` },
+    )
+    .toBeLessThanOrEqual(1);
+}
+
 test('message editor stays inside its bubble while resizing @smoke', async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 850 });
+  // Pin the sidebar to its default width: the 800px step only exercises the
+  // shrink-to-fit clamp while the sidebar leaves the bubble narrower than
+  // the editor's preferred width.
+  await page.addInitScript(
+    ([key, value]) => {
+      window.localStorage.setItem(key, value);
+    },
+    [SIDEBAR_WIDTH_STORAGE_KEY, '260'] as const,
+  );
   const original =
     'Where is this view saved, and is it automatically cleaned up?';
   const scenario = createWebShellDaemonScenario({
@@ -38,31 +75,25 @@ test('message editor stays inside its bubble while resizing @smoke', async ({
   await editor.fill('Updated question');
 
   for (const width of [800, 390, 1440]) {
-    await page.setViewportSize({ width, height: 850 });
-    await expect(editor).toHaveValue('Updated question');
-    await expect
-      .poll(() =>
-        bubble.evaluate((element) => {
-          const bubbleRect = element.getBoundingClientRect();
-          return Math.max(
-            -bubbleRect.left,
-            bubbleRect.right - window.innerWidth,
-            ...Array.from(element.querySelectorAll('textarea, button')).flatMap(
-              (control) => {
-                const rect = control.getBoundingClientRect();
-                return [
-                  bubbleRect.left - rect.left,
-                  rect.right - bubbleRect.right,
-                ];
-              },
-            ),
-          );
-        }),
-      )
-      .toBeLessThanOrEqual(1);
-    await expect(
-      bubble.getByRole('button', { name: 'Send', exact: true }),
-    ).toBeEnabled();
+    await test.step(`viewport ${width}px`, async () => {
+      await page.setViewportSize({ width, height: 850 });
+      await expect(editor).toHaveValue('Updated question');
+      await expectEditorInsideBubble(bubble, width);
+      if (width === 800) {
+        // Witnesses that the clamp actually engages at this width; a layout
+        // change that stops exercising it fails loudly here instead of
+        // leaving the overflow poll above vacuous.
+        await expect
+          .poll(() => editor.evaluate((el) => el.getBoundingClientRect().width))
+          .toBeLessThan(EDITOR_PREFERRED_WIDTH);
+      }
+      if (width === 1440) {
+        await expect(editor).toHaveCSS('width', `${EDITOR_PREFERRED_WIDTH}px`);
+      }
+      await expect(
+        bubble.getByRole('button', { name: 'Send', exact: true }),
+      ).toBeEnabled();
+    });
   }
 
   await bubble.getByRole('button', { name: 'cancel', exact: true }).click();
