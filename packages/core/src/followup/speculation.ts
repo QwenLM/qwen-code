@@ -19,7 +19,7 @@ import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { LlmClient } from '../core/client.js';
 import type { ToolArtifact } from '../tools/tools.js';
-import { StreamEventType } from '../core/llm-chat.js';
+import { ModelStreamAttemptState } from '../core/model-stream-attempt-state.js';
 import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
@@ -277,10 +277,19 @@ async function runSpeculativeLoop(
       );
 
       const modelParts: Part[] = [];
+      const attemptState = new ModelStreamAttemptState();
       for await (const event of stream) {
         if (state.abortController?.signal.aborted) break;
-        if (event.type !== StreamEventType.CHUNK) continue;
-        const response = event.value;
+        const transition = attemptState.accept(event);
+        if (transition.type === 'attempt_reset') {
+          const preservedTextParts = transition.preserveText
+            ? modelParts.filter((part) => part.text !== undefined)
+            : [];
+          modelParts.splice(0, modelParts.length, ...preservedTextParts);
+          continue;
+        }
+        if (transition.type !== 'chunk') continue;
+        const response = transition.response;
         const parts = response.candidates?.[0]?.content?.parts ?? [];
         for (const part of parts) {
           // Skip thought/reasoning parts — only capture visible text + function calls
