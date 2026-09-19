@@ -339,6 +339,8 @@ function writeDistPackageJson(rootDir, distDir) {
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
       'codeModeHost.js',
+      'sandboxBwrapRelay.js',
+      'sandboxFileWorker.js',
       'chunks',
       'vendor',
       '*.sb',
