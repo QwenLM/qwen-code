@@ -94,6 +94,14 @@ export interface DaemonStandaloneConnectionState {
 
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
+  runtimeStopped?: boolean;
+  runtimeStopPersistenceUnconfirmed?: boolean;
+  capacityRecovery?: {
+    error: unknown;
+    sessionId: string;
+    sessionContext?: DaemonProductSessionContext;
+    mode: 'load' | 'resume';
+  };
   sessionId?: string;
   /**
    * Daemon-confirmed client identity bound to this session (the value sent as
@@ -257,6 +265,31 @@ export interface DaemonSessionProviderProps {
 }
 
 export type DaemonPromptStatus = 'idle' | 'waiting' | 'streaming';
+
+export type DaemonPromptSettlementOutcome =
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export interface DaemonPromptSettledEvent {
+  sessionId: string;
+  promptId: string;
+  outcome: DaemonPromptSettlementOutcome;
+  /** Daemon terminal reason. Present for completed and cancelled turns. */
+  stopReason?: string;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
+export type DaemonPromptSettledListener = (
+  event: DaemonPromptSettledEvent,
+) => void;
+
+export type DaemonPromptSettlementSubscribe = (
+  listener: DaemonPromptSettledListener,
+) => () => void;
 
 export type DaemonNoticeSeverity = 'info' | 'warning' | 'error';
 

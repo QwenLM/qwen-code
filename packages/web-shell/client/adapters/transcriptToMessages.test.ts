@@ -14,7 +14,10 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { extractTodosFromToolCall } from '../utils/todos.js';
 import { groupParallelAgents } from './parallelAgentGrouping.js';
-import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
+import {
+  assistantBlockRendersAsSystemNotice,
+  transcriptBlocksToDaemonMessages,
+} from './transcriptToMessages.js';
 
 function textBlock(
   id: string,
@@ -5850,4 +5853,111 @@ it('does not let old execution output consume or relabel a newer result for the 
     ),
   ).toBe(false);
   expect(after[0]).toMatchObject({ data: { backgroundTask: firstTask } });
+});
+
+describe('transcript message prompt ids', () => {
+  it('carries the daemon-stamped prompt id onto the messages it built', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', 'hello', 1000, false, {
+        promptId: 'prompt-1',
+      }),
+      textBlock('assistant-2', 'assistant', 'hi', 1100),
+      textBlock('user-3', 'user', 'again', 2000, false, {
+        promptId: 'prompt-2',
+      }),
+      textBlock('assistant-4', 'assistant', 'sure', 2100, false, {
+        promptId: 'prompt-2',
+      }),
+    ]);
+    const promptIdOf = (id: string) =>
+      messages.find((message) => message.id === id)?.promptId;
+
+    // A replayed turn stamps the prompt's own block; a live turn may stamp the
+    // answer instead. Both carry the same value.
+    expect(promptIdOf('user-1')).toBe('prompt-1');
+    expect(promptIdOf('assistant-4')).toBe('prompt-2');
+    // A block without a stamp must not have one invented for it.
+    expect(promptIdOf('assistant-2')).toBeUndefined();
+  });
+});
+
+describe('assistantBlockRendersAsSystemNotice', () => {
+  // The predicate the settlement guard and the turn-notification scanner
+  // consult instead of each keeping a `meta.source` list, so a notice source
+  // added to the renderer reaches both without editing either. The compression
+  // rows are the case a list cannot express: their `meta.source` stays
+  // `slash_command` and the renderer decides from the payload keys (#12141).
+  const cases: Array<[string, Partial<DaemonTextTranscriptBlock>, boolean]> = [
+    [
+      'a background notification',
+      { meta: { source: 'background_notification' } },
+      true,
+    ],
+    [
+      'a vision bridge notice',
+      { meta: { source: 'vision_bridge_notice' } },
+      true,
+    ],
+    [
+      'a compression result',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompression: {
+            phase: 'done',
+            originalTokenCount: 2123,
+            newTokenCount: 58,
+          },
+        },
+      },
+      true,
+    ],
+    [
+      'a compression invocation note',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompressionNotice: {
+            phase: 'notice',
+            instructionsLimit: 2000,
+          },
+        },
+      },
+      true,
+    ],
+    // An unreadable payload means this client and the daemon disagree on the
+    // schema, and the renderer lets the block's own text through as an answer.
+    [
+      'a compression payload this client cannot read',
+      {
+        meta: {
+          source: 'slash_command',
+          contextCompression: { phase: 'done' },
+        },
+      },
+      false,
+    ],
+    ['a plain answer', {}, false],
+    [
+      'another slash command answer',
+      { meta: { source: 'slash_command' } },
+      false,
+    ],
+  ];
+
+  for (const [label, overrides, expected] of cases) {
+    it(`reports ${label}`, () => {
+      expect(
+        assistantBlockRendersAsSystemNotice(
+          textBlock('b-1', 'assistant', 'text', 1, false, overrides),
+        ),
+      ).toBe(expected);
+    });
+  }
+
+  it('reports a block of another kind as no notice', () => {
+    expect(
+      assistantBlockRendersAsSystemNotice(textBlock('u-1', 'user', 'hi', 1)),
+    ).toBe(false);
+  });
 });
