@@ -147,6 +147,7 @@ function createMockConfig(
           completedToolCallIds?: readonly string[],
         ) => void;
         getCompletedToolCallIds?: () => readonly string[] | undefined;
+        reconcileImagePayloads?: (h: unknown[]) => void;
       };
     } | null;
     clearContextOnIdle?: {
@@ -165,6 +166,7 @@ function createMockConfig(
             getHistoryShallow: () => [],
             getHistory: () => [],
             setHistory: vi.fn(),
+            reconcileImagePayloads: vi.fn(),
           }),
         }
       : overrides.llmClient;
@@ -1342,9 +1344,11 @@ describe('MemoryPressureMonitor', () => {
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
 
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      (
+        monitor as unknown as {
+          executeStep(step: 'compact_history'): void;
+        }
+      ).executeStep('compact_history');
 
       // compact_history error is caught and logged without propagating,
       // so subsequent cleanup steps (like trigger_gc) can still run.
@@ -1360,15 +1364,18 @@ describe('MemoryPressureMonitor', () => {
         { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 0 },
       );
 
-      setMemUsage(11 * 1024 * 1024 * 1024); // 11/16 = 0.6875 >= 0.65: hard pressure
-      monitor.performCheck();
-      await drainCleanupMeasurement();
+      (
+        monitor as unknown as {
+          executeStep(step: 'compact_history'): void;
+        }
+      ).executeStep('compact_history');
 
       expect(setHistory).not.toHaveBeenCalled();
     });
 
     it('compacts history and clears fileReadCache when meta is non-null', async () => {
       const setHistory = vi.fn();
+      const reconcileImagePayloads = vi.fn();
       const clearCache = vi.fn();
       // Build history with 7 read_file tool results (keep=5, so 2 get cleared)
       const toolHistory: Content[] = [];
@@ -1430,6 +1437,7 @@ describe('MemoryPressureMonitor', () => {
               getCompletedToolCallIds: () => ['call_1', 'goal-end'],
               getHistoryShallow: () => toolHistory,
               setHistory,
+              reconcileImagePayloads,
             }),
           },
           fileReadCache: {
@@ -1449,6 +1457,9 @@ describe('MemoryPressureMonitor', () => {
       await drainCleanupMeasurement();
 
       expect(setHistory).toHaveBeenCalled();
+      expect(reconcileImagePayloads).toHaveBeenCalledWith(
+        setHistory.mock.calls[0][0],
+      );
       expect(clearCache).toHaveBeenCalled();
       const compacted = setHistory.mock.calls[0][0] as Content[];
       expect(setHistory.mock.calls[0][1]).toEqual(['call_1', 'goal-end']);

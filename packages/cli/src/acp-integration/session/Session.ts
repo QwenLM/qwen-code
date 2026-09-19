@@ -15859,6 +15859,9 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
+    originalParts = this.#getCurrentChat().resolveImageReferences(
+      originalParts,
+    ) as Part[];
     const parts = await this.#applyVoiceBridgeIfNeeded(
       originalParts,
       abortSignal,

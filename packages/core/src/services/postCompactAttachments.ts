@@ -21,6 +21,7 @@ import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
+import { imagePartToStoredPayload } from './image-payload-references.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -443,13 +444,16 @@ export function buildImageRestorationBlock(
     '',
   ];
   for (const img of images) {
+    const imageId = imagePartToStoredPayload(img.part).id;
     if (img.sourceToolName) {
       const argsStr = JSON.stringify(img.sourceToolArgs ?? {});
       lines.push(
-        `- turn ${img.turnIndex}: ${img.sourceToolName} args=${argsStr}`,
+        `- Image #${imageId}, turn ${img.turnIndex}: ${img.sourceToolName} args=${argsStr}`,
       );
     } else {
-      lines.push(`- turn ${img.turnIndex}: user-provided image`);
+      lines.push(
+        `- Image #${imageId}, turn ${img.turnIndex}: user-provided image`,
+      );
     }
   }
 

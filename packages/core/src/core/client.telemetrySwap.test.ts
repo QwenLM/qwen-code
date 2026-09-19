@@ -103,6 +103,9 @@ function makeEnv() {
   const fakeChat = {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
+    getHistory: vi.fn().mockReturnValue([]),
+    rememberImagePayloads: vi.fn(),
+    reconcileImagePayloads: vi.fn(),
     setCompletedToolCallIds: vi.fn(),
   } as unknown as LlmChat;
   const startChat = vi

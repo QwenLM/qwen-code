@@ -93,6 +93,7 @@ describe('Session.pendingWorktreeNotice', () => {
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
+      resolveImageReferences: vi.fn((parts: unknown[]) => parts),
     } as unknown as LlmChat;
 
     const mockLlmClient = {
