@@ -590,8 +590,8 @@ a release-notes callout and a `--verify` case per denied syscall class.
    § Verified compatibility impacts with field data behind it — not just the
    mechanism list, but how often real workflows hit each row.
    `QWEN_SANDBOX=false` is the documented escape hatch.
-3. CI: add `test:integration:sandbox:bwrap` and
-   `test:integration:sandbox:landlock` lanes; keep `sandbox:none` lanes
+3. CI: retain the `test:integration:sandbox:bwrap` follow-up lane and add
+   `test:integration:sandbox:landlock`; keep `sandbox:none` lanes
    (the unconfined path remains supported), but it stops being the only
    exercised Linux configuration.
 
@@ -725,9 +725,9 @@ The delivered P0 unit coverage and planned integration work are listed separatel
 - `packages/cli/src/commands/sandbox.test.ts`: inspection output, final positional plus `--` command ordering, execution failure, and failed verification predicates including missing loopback.
 - `packages/cli/src/commands/sandbox-command-runtime.test.ts`: real handler/runner with mocked processes verifies markers, display removal, inherited stdio/argv/exit status, proxy normalization/startup/readiness/failure/cleanup, and diagnostic-only inspection. These tests do not establish Linux mount enforcement.
 
-**P0 — integration follow-up, not delivered in this PR**
+**P0 — integration follow-up**
 
-The proposed `test:integration:sandbox:bwrap` script and Ubuntu workflow installation of `bubblewrap` are absent from this PR. A follow-up should run fake-LLM-server tests inside the real confinement (workspace writes and connectivity to the fake server). The dated manual Linux observations in § Evidence do not substitute for that CI lane; local mocked tests do not add new Linux enforcement evidence.
+PR #11614 deferred the real Linux lane. The [bwrap integration follow-up](2026-09-16-bwrap-integration-ci.md) adds `test:integration:sandbox:bwrap` and a dedicated Ubuntu workflow installing `bubblewrap`. It exercises the built CLI, filesystem and network boundaries, linked-worktree commits, a fake-model tool round trip, process cleanup, and cross-boundary writer-lease recovery. The suite uses real bwrap and fails when its prerequisites are unavailable. Writer-lease coverage is service-level integration, not a full ACP/daemon handoff test. The dated observations in § Evidence remain historical; hosted CI results and local Linux runs must be reported separately.
 
 **P1 — unit**
 
