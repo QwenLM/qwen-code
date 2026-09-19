@@ -2462,9 +2462,15 @@ describe('PermissionManager', () => {
       ['bash', '# noop ; rm -rf /tmp/x', 'deny'],
       // Leading whitespace must not turn the line into one comment-only
       // segment: Bash executes nothing for either spelling, but collapsing it
-      // leaves no text for an explicit `Bash(...)` rule to match.
+      // leaves no text for an explicit `Bash(...)` rule to match. The guard is
+      // about the line, not about the `#` the scan stopped at, so a second
+      // word-start `#` inside the comment must not collapse either: testing
+      // `command.slice(0, i).trim() !== ''` instead of the line keeps only the
+      // whitespace-led spelling and lets `# noop # ; rm -rf /tmp/x` through.
       ['bash', ' # noop ; rm -rf /tmp/x', 'deny'],
       ['bash', '\t# noop ; rm -rf /tmp/x', 'deny'],
+      ['bash', '# noop # ; rm -rf /tmp/x', 'deny'],
+      ['bash', ' # a # b ; rm -rf /tmp/x', 'deny'],
       ['bash', "echo 'a # b' ; rm -rf /tmp/x", 'deny'],
       ['bash', 'echo "a # b" ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi > /tmp/o # c ; rm -rf /tmp/x', 'deny'],
@@ -2484,6 +2490,26 @@ describe('PermissionManager', () => {
       ['bash', 'echo `whoami` # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo $HOME # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo a\\ b # c ; rm -rf /tmp/x', 'deny'],
+      // Same standard for the remaining single-deletion survivors: the six
+      // characters of the bail literal not yet pinned above — `&`, `<`, `(`,
+      // `)`, `{`, `}` — and the two quote cross-checks, `&& !inDouble` and
+      // `&& !inSingle`. Each row makes its target disjunct
+      // the FIRST guard the scan meets and, so that deleting that one disjunct
+      // really changes the verdict, carries no OTHER bail character ahead of
+      // its `#` either. That is why the `(` and `{` probes are unbalanced
+      // fragments: any closing counterpart would keep the mutated scan
+      // bailing and leave the row green.
+      ['bash', 'echo hi && rm -rf /tmp/x # c', 'deny'],
+      ['bash', 'sort < /etc/passwd # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo (a # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo {a # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a} # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo x) # c ; rm -rf /tmp/x', 'deny'],
+      // Mixed quote kinds ahead of the `#`, and the `;` deliberately after it:
+      // the intact scan returns at the `#`, while a scan missing either
+      // cross-check latches a quote, never sees the `#`, and bails at the `;`.
+      ['bash', `echo "don't" # c ; rm -rf /tmp/x`, 'allow'],
+      ['bash', `echo 'a"b' # c ; rm -rf /tmp/x`, 'allow'],
       // Characterization rows for #11815's measured table: these reach `allow`
       // only because the unterminated quote masks the in-comment separator, so
       // they are expected to go red when #11765 changes the splitter.

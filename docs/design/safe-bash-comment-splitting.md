@@ -31,13 +31,33 @@ Applying Bash comment rules globally is unsafe because Qwen Code can execute thr
 
 The wrapper keeps the original command as one segment only when all of these are true:
 
-- the tool is `run_shell_command`, so the scanned string is literally the text the shell will execute;
+- the tool is `run_shell_command`: the fast path needs one property, not string
+  equality — a `#` it recognises must still begin a comment in the text the
+  shell executes. Equality is unachievable, because execution rewrites the text
+  after this decision: `ShellTool.execute()` splices attribution trailers into a
+  quoted `git commit -m` / `gh pr create --body` argument, and `cmd`/PowerShell
+  prepends an `applyUtf8Prefix()` encoding prefix. The property survives the
+  trailer splice because both rewriters trim a trailing unquoted comment first,
+  so the splice lands ahead of the `#`; `monitor` fails it outright, because its
+  scanned string is a reconstruction rather than an invocation;
 - the active shell is `bash`;
-- the command is one physical line: `splitCommands` already separates LF and
-  CRLF before its fragments reach this path, while the fast path's own
-  `command.includes('\r')` guard also rejects a remaining lone CR;
-- a `#` outside quotes starts after a space or tab and has non-whitespace code before it — a segment whose only content before that `#` is whitespace is entirely a comment, so it can no longer match any `Bash(...)` rule and collapsing it would silently drop an explicit user rule;
-- the code before that `#` contains no shell operator, escape, expansion, substitution, grouping, or redirection syntax.
+- the command is one physical line. This guard is load-bearing, not unreachable:
+  `splitCommands` separates only _unquoted_ LF and CRLF, so a fragment can still
+  contain one — `splitCommands("git status # don't\nrm -rf /tmp/x")` returns a
+  single fragment — and `ShellTool.getConfirmationDetails` passes such fragments
+  unnormalized. It is not a lone-CR guarantee on every path either:
+  `checkCommandPermissions` collapses `\r`, `\v`, `\f`, NBSP and U+2028 to a
+  space first, so that path is sound because of its pre-split and
+  `detectCommandSubstitution`'s hard denial, not because of the `\r` guard (see
+  #12089);
+- a `#` outside quotes starts after a space or tab and the line it opens has
+  non-whitespace code before it — a line whose first non-whitespace character is
+  `#` is entirely a comment, so it can no longer match any `Bash(...)` rule and
+  collapsing it would silently drop an explicit user rule. The test is on the
+  line, not on the `#` the scan stopped at, so a second word-start `#` inside
+  the comment splits conservatively too;
+- the code before that `#` contains no shell operator, escape, expansion,
+  substitution, grouping, or redirection syntax.
 
 Every other input uses the existing splitter unchanged. Unsupported syntax can therefore retain an extra prompt, but it cannot gain a broader allow decision from this change.
 
@@ -49,14 +69,16 @@ The fast path covers only the four `Bash(...)` rule paths. The virtual shell-ope
 
 Under a deny-rule-only configuration the fast path also moves the decision for a comment-bearing command from `deny` to `ask`. With `deny: ['Bash(rm *)']` and no allow rule, `echo 'a' # comment ; rm -rf /tmp/x` hard-blocked at the merge base, because the comment-blind split exposed `rm -rf /tmp/x` as its own segment; here the command stays one segment, so `findMatchingDenyRule` and `hasRelevantRules` both come back empty and the decision falls to the tool default `ask`. That is the intended direction of the fix — Bash executes only the pre-comment `echo`, so a rule about `rm` has nothing to match — and it is not reversible without breaking the acceptance criterion that an allowed `echo` resolves to `allow`: a gate that bailed out on a deny match inside the hidden segment would bail out in the allow+deny case too.
 
-The residual hazard sits on the other side of that `ask`. The confirmation dialog it now reaches still segments with the legacy comment-blind splitter (a Non-goal above, owned by #11882), so for this command it lists `rm -rf /tmp/x` — which Bash never runs — as a confirmable sub-command and derives `permissionRules: ['Bash(rm *)']` from `extractCommandRules('rm -rf /tmp/x')`. One "Always allow" click therefore persists a broad `Bash(rm *)` allow rule into `settings.json`, driven entirely by text inside a comment. It stays inert while the operator's own deny stands (measured: with both rules present, `rm -rf /tmp/x` still evaluates to `deny`) and goes live the moment that deny is edited or removed (measured: allow-only evaluates to `allow`). Until #11882 converges the dialog's splitter, an operator relying on a deny-only configuration should treat a `Bash(...)` allow rule proposed on a comment-bearing command as untrusted rather than as a description of what the shell will execute.
+The fall-through is L3's, not L4's. `evaluatePermissionRules` reaches `pm.evaluate()` only while `hasRelevantRules` is true, and the collapse is what makes it false, so the verdict production ships is `ShellToolInvocation.getDefaultPermission()`. For a shell-wrapper shape that is `allow` rather than `ask`: `getDefaultPermission` gates substitution on the raw command but classifies `stripShellWrapper(command)`, and the strip discards the comment with the wrapper — `bash -c "ls" # ; rm -rf /tmp/x` strips to `ls`, which the AST reads as read-only. So under `deny: ['Bash(rm *)']` that command auto-runs with no dialog and no rule citation, where the merge base returned `deny` citing `Bash(rm *)`. This is not a bypass, because Bash does not execute the post-`#` text, but the residual-hazard analysis below does not reach this class either — there is no `ask` and no dialog here. The layering is pinned at the flow level in `permissionFlow.test.ts`, since `pm.evaluate` cannot observe it.
+
+The residual hazard sits on the other side of that `ask`. The confirmation dialog it now reaches still segments with the legacy comment-blind splitter (a Non-goal above, owned by #11882), so for this command it lists `rm -rf /tmp/x` — which Bash never runs — as a confirmable sub-command and derives `permissionRules: ['Bash(rm *)']` from `extractCommandRules('rm -rf /tmp/x')`. One "Always allow" click therefore persists a broad `Bash(rm *)` allow rule into `settings.json`, driven entirely by text inside a comment. That minted rule stays inert only while the operator's own deny is at least as broad as the rule `extractCommandRules` derived — for `rm -rf /tmp/x` that is `Bash(rm *)`. Measured with an equally broad `deny: ['Bash(rm *)']`, `rm -rf /tmp/x` still evaluates to `deny`; against the narrower `deny: ['Bash(rm -rf *)']` a deny-only configuration instead returns `ask`, and once the click saves `allow: ['Bash(rm *)']` the minted allow outranks the operator's narrower deny immediately and permanently: `rm -r ./src` and `rm ./build` resolve to `allow` with no prompt, with no config edit required. Until #11882 converges the dialog's splitter, an operator relying on a deny-only configuration should treat a `Bash(...)` allow rule proposed on a comment-bearing command as untrusted rather than as a description of what the shell will execute.
 
 ## Validation and acceptance criteria
 
 - The #11815 command is one segment under Bash and an allowed `echo` resolves to `allow`. This criterion concerns `Bash(...)` rules only: it assumes no `Read`/`Edit`/`Write`/`WebFetch` rule matches the commented-out text, which the virtual-operation pass still reads (see Risks and constraints).
 - The same text remains split for `cmd` and PowerShell.
 - Multi-line commands, commands containing substitution syntax, and commands with an operator before the comment retain the old conservative split.
-- A command whose first non-whitespace character is `#` — at index 0 or behind leading spaces/tabs — also retains it, so an explicit `deny` rule still matches the text after the comment.
+- A command whose first non-whitespace character is `#` — at index 0 or behind leading spaces/tabs, and whether or not the comment text contains a later word-start `#` — also retains it, so an explicit `deny` rule still matches the text after the comment.
 - A `monitor` command whose `#` only exists inside the wrapper's inner quotes still splits, so a separator the spawned command executes is never swallowed as comment text.
-- Under a deny-rule-only configuration the same command resolves to `ask` rather than `deny`. This is pinned deliberately, not incidentally: the dialog that `ask` reaches still proposes rules from the legacy splitter (see Risks and constraints).
+- Under a deny-rule-only configuration the same command resolves to `ask` rather than `deny`. This is pinned deliberately, not incidentally: the dialog that `ask` reaches still proposes rules from the legacy splitter (see Risks and constraints). The claim holds for the plain shape at the layer `PermissionManager.evaluate` decides; a shell-wrapper shape resolves to `allow` one layer above it, through L3's `getDefaultPermission`, and is pinned at the flow level instead.
 - Existing permission-manager tests, formatting, lint, typecheck, and build checks pass.

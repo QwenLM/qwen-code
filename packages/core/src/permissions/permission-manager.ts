@@ -75,9 +75,18 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
  * Split a command for `Bash(...)` rule matching, recognising a trailing Bash
  * comment when it is safe to do so (#11815).
  *
- * The comment fast path requires that `command` is literally the text the
- * shell will execute. That holds for `run_shell_command` only: for `monitor`,
- * `normalizePermissionContext()` substitutes the quote-stripped
+ * The fast path needs one property, not string equality: a `#` recognised
+ * here must still begin a comment in the text the shell executes. Equality is
+ * unachievable — `ShellTool.execute()` splices attribution trailers into a
+ * quoted `git commit -m` / `gh pr create --body` argument after this decision,
+ * and `cmd`/PowerShell execution prepends an `applyUtf8Prefix()` encoding
+ * prefix. The property survives the trailer splice only because both
+ * rewriters trim a trailing unquoted comment first, so the splice lands ahead
+ * of the `#`; a rewriter that spliced after it would insert a newline that
+ * ends the comment and revives the tail.
+ *
+ * `monitor` is excluded because its scanned string is not an invocation at
+ * all: `normalizePermissionContext()` substitutes the quote-stripped
  * `normalizeMonitorCommand().safetyCommand` reconstruction while monitor
  * spawns `spawnCommand`, so a `#` that the spawned shell sees inside the
  * wrapper's inner quotes would be scanned here as an unquoted comment start
@@ -110,13 +119,16 @@ function splitCommandForRules(command: string, toolName: string): string[] {
       ch === '#' &&
       !inSingle &&
       !inDouble &&
-      // Bash only treats ASCII space and tab as word boundaries here. A `#`
-      // with nothing but whitespace before it is deliberately not collapsed —
-      // whether it sits at index 0 or behind leading spaces/tabs: the whole
-      // segment would be a comment, so no `Bash(...)` rule could match it any
-      // more and an explicit user rule would silently stop applying.
+      // Bash only treats ASCII space and tab as word boundaries here. A line
+      // whose first non-whitespace character is `#` is deliberately not
+      // collapsed — at index 0 or behind leading spaces/tabs, and regardless
+      // of any later `#` in the comment text: the collapsed segment would
+      // start with `#`, so no `Bash(...)` rule could match it any more and an
+      // explicit user rule would silently stop applying. Testing the line
+      // rather than this `#` is what makes a second word-start `#` on an
+      // otherwise comment-only line split conservatively too.
       (command[i - 1] === ' ' || command[i - 1] === '\t') &&
-      command.slice(0, i).trim() !== ''
+      !command.trimStart().startsWith('#')
     ) {
       return [command];
     }
@@ -1050,19 +1062,24 @@ export class PermissionManager {
    *
    * This hardcodes `toolName: 'run_shell_command'`, so the Bash comment fast
    * path in `splitCommandForRules` applies to whatever string a caller passes,
-   * not only to text the shell will literally execute. Two production callers
-   * pass `splitCommands()` fragments instead of the original command:
-   * `checkCommandPermissions` (utils/shell-utils.ts), which first collapses
-   * whitespace with `cmd.trim().replace(/\s+/g, ' ')`, and
-   * `ShellTool.getConfirmationDetails` (tools/shell.ts), which passes them
-   * unnormalized.
+   * not only to text the shell will literally execute. Three production
+   * callers pass something other than the original command:
+   * `checkCommandPermissions` (utils/shell-utils.ts) and
+   * `ShellTool.getConfirmationDetails` (tools/shell.ts) pass
+   * `splitCommands()` fragments, while
+   * `packages/cli/src/services/prompt-processors/shellProcessor.ts` passes a
+   * whole un-split `!{...}` injection.
    *
-   * That collapse makes the fast path's one-physical-line guard unreachable on
-   * the `checkCommandPermissions` path. It stays sound only because both
-   * callers split with `splitCommands` first, and that scanner already treats
-   * `\n` and `\r\n` as command separators, so no fragment arriving here can
-   * still contain one. A future caller that passes a reconstruction which was
-   * NOT split that way — the `monitor` failure mode documented on
+   * The one-physical-line guard in `splitCommandForRules` is load-bearing, not
+   * unreachable, and must stay: `splitCommands` splits `\n`/`\r\n` only outside
+   * quotes, backticks and substitutions, so a fragment can still contain one —
+   * `splitCommands("git status # don't\nrm -rf /tmp/x")` returns a single
+   * fragment. `checkCommandPermissions` additionally normalizes with
+   * `trim().replace(/\s+/g, ' ')`, which folds a lone `\r`, `\v`, `\f`, NBSP or
+   * U+2028 into a space — so on that path the `\r` disjunct is not what keeps
+   * the result sound; its pre-split and `detectCommandSubstitution`'s hard
+   * denial are (see #12089). A future caller that passes a reconstruction
+   * which was NOT split that way — the `monitor` failure mode documented on
    * `splitCommandForRules` — would inherit the comment fast path with no
    * guard. Gate such a caller on the invocation instead of routing another
    * reconstruction through here.
