@@ -100,23 +100,23 @@ function surfaceLength(tool: AgentTool): number {
 describe('AgentTool per-turn size budgets', () => {
   it('keeps the description within its budget in the default shape', async () => {
     // Two subagents, team off, todo on: what a default install with a
-    // couple of project agents sends. Measured at ~9,840 characters.
+    // couple of project agents sends. Measured at ~5,200 characters.
     const tool = await buildTool();
-    expect(tool.description.length).toBeLessThanOrEqual(10_200);
+    expect(tool.description.length).toBeLessThanOrEqual(5_500);
   });
 
   it('keeps the description within its budget with no subagents configured', async () => {
     // The skeleton on its own — the catalogue collapses to a one-line
-    // "no subagents are configured" placeholder. Measured at ~9,540.
+    // "no subagents are configured" placeholder. Measured at ~4,900.
     const tool = await buildTool({ subagents: [], todo: false });
-    expect(tool.description.length).toBeLessThanOrEqual(9_900);
+    expect(tool.description.length).toBeLessThanOrEqual(5_200);
   });
 
   it('keeps the description within its budget with every optional block on', async () => {
     // Team coordination guidance and the todo clause both present.
-    // Measured at ~10,760.
+    // Measured at ~6,100.
     const tool = await buildTool({ team: true, todo: true });
-    expect(tool.description.length).toBeLessThanOrEqual(11_200);
+    expect(tool.description.length).toBeLessThanOrEqual(6_400);
   });
 
   // The two optional blocks are the part a reader can lose track of,
@@ -232,11 +232,9 @@ describe('AgentTool per-turn size budgets', () => {
    * per-part budget noticing.
    */
   it('keeps the whole model-visible surface within its budget', async () => {
-    // Description plus serialized schema, default shape. Was ~14,100
-    // characters before the teammate note moved behind the team flag,
-    // ~13,760 after — roughly 3,400 tokens at 4 chars/token, on every
-    // request of every session.
+    // Description plus serialized schema, default shape. Measured at ~9,100
+    // characters after removing prose already carried by the parameter schema.
     const tool = await buildTool();
-    expect(surfaceLength(tool)).toBeLessThanOrEqual(14_200);
+    expect(surfaceLength(tool)).toBeLessThanOrEqual(9_500);
   });
 });
