@@ -2847,7 +2847,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: 10,
             description:
-              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
+              'Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike), capped by maxPreloadTokens. When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand.',
             showInDialog: true,
             // A percentage of the context window: values above 100 would set a
             // budget larger than the window and unconditionally preload every
@@ -2858,6 +2858,21 @@ const SETTINGS_SCHEMA = {
               minimum: 0,
               maximum: 100,
               default: 10,
+            },
+          },
+          maxPreloadTokens: {
+            type: 'number',
+            label: 'Deferred Tool Preload Cap (tokens)',
+            category: 'Tools',
+            requiresRestart: true,
+            default: 8000,
+            description:
+              'Absolute estimated-token cap for deferred tool preloading. The budget is the smaller of this cap and the threshold percentage of the context window. Set 0 to disable budget-based preloading. Lower caps may add ToolSearch calls and prompt-cache rebuilds.',
+            showInDialog: true,
+            jsonSchemaOverride: {
+              type: 'integer',
+              minimum: 0,
+              default: 8000,
             },
           },
         },

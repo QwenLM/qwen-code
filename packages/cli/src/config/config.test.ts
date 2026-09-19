@@ -3732,10 +3732,11 @@ describe('mergeExcludeTools', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {
-      tools: { toolSearch: { threshold: 25 } },
+      tools: { toolSearch: { threshold: 25, maxPreloadTokens: 1234 } },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getToolSearchThreshold()).toBe(25);
+    expect(config.getToolSearchMaxPreloadTokens()).toBe(1234);
   });
 
   it('should default tools.toolSearch.threshold to 10', async () => {
@@ -3743,6 +3744,7 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getToolSearchThreshold()).toBe(10);
+    expect(config.getToolSearchMaxPreloadTokens()).toBe(8000);
   });
 
   it('should enable CodeModeOnly only when explicitly configured', async () => {

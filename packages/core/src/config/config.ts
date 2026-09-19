@@ -344,6 +344,7 @@ const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
+const MEMORY_CONTEXT_WARNING_MAX_TOKENS = 10_000;
 
 /** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
 const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
@@ -351,6 +352,7 @@ const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 // Default `tools.toolSearch.threshold` (percent of the context window):
 // mirrors the settings-schema default in packages/cli.
 const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+const DEFAULT_TOOL_SEARCH_MAX_PRELOAD_TOKENS = 8_000;
 
 import {
   ModelsConfig,
@@ -1050,6 +1052,7 @@ export interface ConfigParameters {
    * excluded from this preload. `0` disables preloading.
    */
   toolSearchThreshold?: number;
+  toolSearchMaxPreloadTokens?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -2648,6 +2651,7 @@ export class Config {
   private readonly visibleTools: ReadonlySet<string>;
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
+  private readonly toolSearchMaxPreloadTokens: number;
   private readonly toolMode: ToolModeValue;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
@@ -3103,6 +3107,9 @@ export class Config {
           );
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
+    this.toolSearchMaxPreloadTokens =
+      params.toolSearchMaxPreloadTokens ??
+      DEFAULT_TOOL_SEARCH_MAX_PRELOAD_TOKENS;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -4897,8 +4904,9 @@ export class Config {
     }
 
     const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
-    const thresholdTokens = Math.floor(
-      contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    const thresholdTokens = Math.min(
+      Math.floor(contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO),
+      MEMORY_CONTEXT_WARNING_MAX_TOKENS,
     );
     if (estimatedTokens <= thresholdTokens) {
       return undefined;
@@ -4906,8 +4914,9 @@ export class Config {
 
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
-      `${estimatedTokens.toLocaleString()} tokens, more than ` +
-      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than the ` +
+      `${thresholdTokens.toLocaleString()} token warning threshold ` +
+      `(the smaller of 15% and ${MEMORY_CONTEXT_WARNING_MAX_TOKENS.toLocaleString()} tokens) for this ` +
       `model's ${contextWindowSize.toLocaleString()} token context window. ` +
       `Consider trimming long always-loaded context or moving details into ` +
       `on-demand files.`
@@ -7301,6 +7310,10 @@ export class Config {
    */
   getToolSearchThreshold(): number {
     return this.toolSearchThreshold;
+  }
+
+  getToolSearchMaxPreloadTokens(): number {
+    return this.toolSearchMaxPreloadTokens;
   }
 
   getCodeModeOnly(): boolean {

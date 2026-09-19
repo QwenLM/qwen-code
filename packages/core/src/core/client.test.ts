@@ -591,6 +591,7 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValue(contentGeneratorConfig),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getToolSearchThreshold: vi.fn().mockReturnValue(10),
+      getToolSearchMaxPreloadTokens: vi.fn().mockReturnValue(8_000),
       getModel: vi.fn().mockReturnValue('test-model'),
       getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
       getApiKey: vi.fn().mockReturnValue('test-key'),
@@ -1728,7 +1729,7 @@ describe('Gemini Client (client.ts)', () => {
       // falls back to tokenLimit('test-model') = DEFAULT_TOKEN_LIMIT,
       // scaled by the mocked 10% threshold.
       expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(
-        Math.floor(DEFAULT_TOKEN_LIMIT / 10),
+        Math.min(Math.floor(DEFAULT_TOKEN_LIMIT / 10), 8_000),
       );
     });
 
@@ -1749,6 +1750,54 @@ describe('Gemini Client (client.ts)', () => {
       await client.startChat();
 
       expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(5_000);
+    });
+
+    it('caps the preload budget on million-token windows', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: 1_000_000,
+      });
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+
+      await client.startChat();
+
+      expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(8_000);
+    });
+
+    it.each([0, -1, NaN, Infinity])(
+      'skips preload for an invalid or zero cap (%s)',
+      async (cap) => {
+        const reg = getRegistryMock();
+        reg.getTool.mockImplementation((n: string) =>
+          n === 'tool_search' ? ({} as never) : null,
+        );
+        vi.mocked(mockConfig.getToolSearchMaxPreloadTokens).mockReturnValue(
+          cap,
+        );
+        reg.preloadDeferredToolsWithinBudget.mockClear();
+        await client.startChat();
+        expect(reg.preloadDeferredToolsWithinBudget).not.toHaveBeenCalled();
+      },
+    );
+
+    it('uses a smaller custom cap rounded down to whole tokens', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      vi.mocked(mockConfig.getToolSearchMaxPreloadTokens).mockReturnValue(
+        1234.9,
+      );
+      reg.preloadDeferredToolsWithinBudget.mockClear();
+      await client.startChat();
+      expect(reg.preloadDeferredToolsWithinBudget).toHaveBeenCalledWith(1234);
     });
 
     it('skips deferred preload when the threshold is 0', async () => {
@@ -1786,6 +1835,9 @@ describe('Gemini Client (client.ts)', () => {
       // than the context window, which would unconditionally preload every
       // deferred tool. It is clamped to 100%.
       vi.mocked(mockConfig.getToolSearchThreshold).mockReturnValue(200);
+      vi.mocked(mockConfig.getToolSearchMaxPreloadTokens).mockReturnValue(
+        DEFAULT_TOKEN_LIMIT * 2,
+      );
       reg.preloadDeferredToolsWithinBudget.mockClear();
 
       await client.startChat();

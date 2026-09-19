@@ -1745,7 +1745,8 @@ export class LlmClient {
    * Preloads (reveals) every deferred tool — bundled built-ins and MCP
    * alike — at session start when the combined estimated size of their
    * schemas fits within `tools.toolSearch.threshold` percent of the
-   * context window. A small deferred set is cheaper to declare upfront
+   * context window, capped by `tools.toolSearch.maxPreloadTokens`.
+   * A small deferred set is cheaper to declare upfront
    * than to load on demand: with nothing left for ToolSearch to reveal,
    * the declaration list stays stable for the whole session and no
    * reveal ever invalidates the prompt-cache prefix.
@@ -1775,6 +1776,10 @@ export class LlmClient {
     // — the schema also bounds it, but clamp here so a hand-edited settings
     // file can't slip past.
     const boundedPercent = Math.min(thresholdPercent, 100);
+    const maxPreloadTokens = this.config.getToolSearchMaxPreloadTokens();
+    if (!Number.isFinite(maxPreloadTokens) || maxPreloadTokens <= 0) {
+      return;
+    }
     const contextWindow =
       this.config.getContentGeneratorConfig()?.contextWindowSize ??
       tokenLimit(this.config.getModel(), 'input');
@@ -1782,7 +1787,10 @@ export class LlmClient {
       return;
     }
     toolRegistry.preloadDeferredToolsWithinBudget(
-      Math.floor((contextWindow * boundedPercent) / 100),
+      Math.min(
+        Math.floor((contextWindow * boundedPercent) / 100),
+        Math.floor(maxPreloadTokens),
+      ),
     );
   }
 

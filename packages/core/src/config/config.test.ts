@@ -9598,9 +9598,28 @@ describe('Server Config (config.ts)', () => {
       expect.stringContaining("model's 1,000 token context window"),
     );
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('more than 15%'),
+      expect.stringContaining('150 token warning threshold'),
     );
   });
+
+  it.each([
+    [40_000, false],
+    [40_004, true],
+  ])(
+    'caps the large-window warning at 10000 tokens (%i characters)',
+    (chars, warns) => {
+      const config = new Config({
+        ...baseParams,
+        userMemory: 'a'.repeat(chars),
+        generationConfig: { contextWindowSize: 1_000_000 },
+      });
+      const warning = config
+        .getWarnings()
+        .find((value) => value.includes('Loaded always-on context'));
+      expect(Boolean(warning)).toBe(warns);
+      if (warns) expect(warning).toContain('10,000');
+    },
+  );
 
   it('getWarnings should include oversized context before initialize refresh runs', () => {
     const config = new Config({
