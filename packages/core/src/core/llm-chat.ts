@@ -5200,6 +5200,15 @@ export class LlmChat {
           if (isInvalidArgumentError(error.message)) return false;
         }
 
+        // Interactive rate-limit retries belong to the surrounding stream
+        // loop. It emits retryInfo for the TUI countdown, honors Retry-After,
+        // and rolls back partial output before replaying the request. Retrying
+        // them here first would make the wait invisible and multiply attempts.
+        // Preserve the explicitly requested unattended persistent behavior.
+        if (isRateLimitError(error, extraRetryErrorCodes)) {
+          return persistentMode;
+        }
+
         const status = getErrorStatus(error);
         if (status === 400) {
           // A provider-body-less 400 wrapping a low-level network failure
@@ -5210,7 +5219,6 @@ export class LlmChat {
               .kind === 'transport'
           );
         }
-        if (status === 429) return true;
         if (status && status >= 500 && status < 600) return true;
 
         // Everything an HTTP status cannot decide — provider rate-limit codes
