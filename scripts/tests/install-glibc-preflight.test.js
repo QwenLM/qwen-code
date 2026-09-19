@@ -30,8 +30,6 @@ function writeExecutable(filePath, contents) {
 function runInstaller({
   glibcVersion,
   useLddFallback = false,
-  useUnknownLibc = false,
-  unknownLibcOutput = 'musl libc (x86_64)\nVersion 1.2.5',
   lddOutput = `ldd (GNU libc) ${glibcVersion}`,
   baseUrl = '',
   useLocalArchive = false,
@@ -58,13 +56,7 @@ esac
     writeExecutable(path.join(binDir, 'getconf'), '#!/bin/sh\nexit 1\n');
     writeExecutable(
       path.join(binDir, 'ldd'),
-      useUnknownLibc
-        ? `#!/bin/sh
-cat <<'QWEN_TEST_LIBC'
-${unknownLibcOutput}
-QWEN_TEST_LIBC
-`
-        : `#!/bin/sh
+      `#!/bin/sh
 cat <<'QWEN_TEST_LIBC'
 ${lddOutput}
 QWEN_TEST_LIBC
@@ -137,7 +129,7 @@ describe('standalone installer glibc preflight', () => {
   itOnUnix('rejects glibc 2.17 before any release download', () => {
     const result = runInstaller({ glibcVersion: '2.17' });
     try {
-      expect(result.status).toBe(1);
+      expect(result.status, result.stderr).toBe(1);
       expect(result.stderr).toContain(
         'requires glibc 2.28 or newer; this system has glibc 2.17',
       );
@@ -145,7 +137,7 @@ describe('standalone installer glibc preflight', () => {
         'Use --method npm with a Node.js 22+ build compatible with this system',
       );
       expect(result.stdout).not.toContain('--base-url mirrors are checked');
-      expect(existsSync(result.curlMarker)).toBe(false);
+      expect(existsSync(result.curlMarker), result.stderr).toBe(false);
     } finally {
       cleanup(result);
     }
@@ -159,7 +151,7 @@ describe('standalone installer glibc preflight', () => {
         baseUrl: 'https://mirror.invalid/qwen',
       });
       try {
-        expect(result.status).toBe(1);
+        expect(result.status, result.stderr).toBe(1);
         expect(result.stderr).toContain(
           'The official standalone Linux archive',
         );
@@ -167,7 +159,7 @@ describe('standalone installer glibc preflight', () => {
           'The standalone Linux archive bundles',
         );
         expect(result.stdout).toContain('For a custom runtime, use --archive');
-        expect(existsSync(result.curlMarker)).toBe(false);
+        expect(existsSync(result.curlMarker), result.stderr).toBe(false);
       } finally {
         cleanup(result);
       }
@@ -180,9 +172,9 @@ describe('standalone installer glibc preflight', () => {
       useLddFallback: true,
     });
     try {
-      expect(result.status).toBe(1);
+      expect(result.status, result.stderr).toBe(1);
       expect(result.stderr).toContain('this system has glibc 2.17');
-      expect(existsSync(result.curlMarker)).toBe(false);
+      expect(existsSync(result.curlMarker), result.stderr).toBe(false);
     } finally {
       cleanup(result);
     }
@@ -190,14 +182,13 @@ describe('standalone installer glibc preflight', () => {
 
   itOnUnix('rejects an old distro-branded glibc banner via ldd', () => {
     const result = runInstaller({
-      glibcVersion: '2.17',
       useLddFallback: true,
       lddOutput: 'ldd (Ubuntu GLIBC 2.17-0ubuntu1) 2.17',
     });
     try {
-      expect(result.status).toBe(1);
+      expect(result.status, result.stderr).toBe(1);
       expect(result.stderr).toContain('this system has glibc 2.17');
-      expect(existsSync(result.curlMarker)).toBe(false);
+      expect(existsSync(result.curlMarker), result.stderr).toBe(false);
     } finally {
       cleanup(result);
     }
@@ -205,14 +196,14 @@ describe('standalone installer glibc preflight', () => {
 
   itOnUnix('allows a supported distro-branded glibc banner via ldd', () => {
     const result = runInstaller({
-      glibcVersion: '2.35',
       useLddFallback: true,
       lddOutput: 'ldd (Ubuntu GLIBC 2.35-0ubuntu3.4) 2.35',
     });
     try {
-      expect(result.status).toBe(1);
+      expect(result.status, result.stderr).not.toBe(0);
       expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
-      expect(existsSync(result.curlMarker)).toBe(true);
+      expect(result.stdout).toContain('Downloading qwen-code-linux-x64.tar.gz');
+      expect(existsSync(result.curlMarker), result.stderr).toBe(true);
     } finally {
       cleanup(result);
     }
@@ -220,14 +211,14 @@ describe('standalone installer glibc preflight', () => {
 
   itOnUnix('leaves unknown libc implementations on the existing path', () => {
     const result = runInstaller({
-      glibcVersion: '1.2',
       useLddFallback: true,
-      useUnknownLibc: true,
+      lddOutput: 'musl libc (x86_64)\nVersion 1.2.5',
     });
     try {
-      expect(result.status).toBe(1);
+      expect(result.status, result.stderr).not.toBe(0);
       expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
-      expect(existsSync(result.curlMarker)).toBe(true);
+      expect(result.stdout).toContain('Downloading qwen-code-linux-x64.tar.gz');
+      expect(existsSync(result.curlMarker), result.stderr).toBe(true);
     } finally {
       cleanup(result);
     }
@@ -237,15 +228,16 @@ describe('standalone installer glibc preflight', () => {
     'leaves unknown libc with a version on the first line unchanged',
     () => {
       const result = runInstaller({
-        glibcVersion: '1.2',
         useLddFallback: true,
-        useUnknownLibc: true,
-        unknownLibcOutput: 'unknown libc 1.2.5',
+        lddOutput: 'unknown libc 1.2.5',
       });
       try {
-        expect(result.status).toBe(1);
+        expect(result.status, result.stderr).not.toBe(0);
         expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
-        expect(existsSync(result.curlMarker)).toBe(true);
+        expect(result.stdout).toContain(
+          'Downloading qwen-code-linux-x64.tar.gz',
+        );
+        expect(existsSync(result.curlMarker), result.stderr).toBe(true);
       } finally {
         cleanup(result);
       }
@@ -255,9 +247,10 @@ describe('standalone installer glibc preflight', () => {
   itOnUnix('allows glibc 2.28 to continue to the release download', () => {
     const result = runInstaller({ glibcVersion: '2.28' });
     try {
-      expect(result.status).toBe(1);
+      expect(result.status, result.stderr).not.toBe(0);
       expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
-      expect(existsSync(result.curlMarker)).toBe(true);
+      expect(result.stdout).toContain('Downloading qwen-code-linux-x64.tar.gz');
+      expect(existsSync(result.curlMarker), result.stderr).toBe(true);
     } finally {
       cleanup(result);
     }
@@ -269,10 +262,10 @@ describe('standalone installer glibc preflight', () => {
       useLocalArchive: true,
     });
     try {
-      expect(result.status).toBe(1);
+      expect(result.status, result.stderr).toBe(1);
       expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
       expect(result.stderr).toContain('SHA256SUMS not found');
-      expect(existsSync(result.curlMarker)).toBe(false);
+      expect(existsSync(result.curlMarker), result.stderr).toBe(false);
     } finally {
       cleanup(result);
     }
