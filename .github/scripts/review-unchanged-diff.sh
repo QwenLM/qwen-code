@@ -24,15 +24,23 @@
 # reviewed agent authors every input such a lookup has, and cede/skip runs
 # make "a successful run" true without posting). A commit status written by
 # the workflow's own token from a step the agent never runs in cannot be
-# authored by the PR, so a supported `qwen-review/reviewed` status on a commit
-# means exactly "this diff was reviewed (or equals one that was)" and carries
-# the server-read review verdict needed to re-cast it. Three narrowings make
-# that hold: the status is written by the workflow's `record-reviewed` job,
-# not by review-pr (whose GITHUB_TOKEN the agent can read), on the EVENT's
-# head; only statuses whose creator is github-actions[bot] count here, so one
-# written with CI_BOT_PAT — also within the agent's reach — is ignored; and a
-# legacy status without supported verdict metadata fails closed to a full
-# review rather than becoming an incomplete skip anchor.
+# authored by the PR, so a supported `qwen-review/reviewed` status on a
+# commit means "this diff was reviewed (or equals one that was)". Three
+# narrowings defend that status's EXISTENCE: it is written by the workflow's
+# `record-reviewed` job, not by review-pr (whose GITHUB_TOKEN the agent can
+# read), on the EVENT's head; only statuses whose creator is
+# github-actions[bot] count here, so one written with CI_BOT_PAT — also
+# within the agent's reach — is ignored; and a status whose description is
+# not the whole `pr=; base=; verdict=` shape fails closed to a full review
+# rather than becoming an incomplete skip anchor — the pr/base clause being
+# what binds the grant to the pull request that earned it, since statuses are
+# repository-scoped and two PRs can share one head commit.
+#
+# None of that defends the status's CONTENT: the verdict inside it is read off
+# a bot-authored review, and CI_BOT_PAT is not this pipeline's alone. So
+# `record-reviewed` binds that review to this run and to this pipeline's
+# attribution footer, and the caller re-reads the anchor's reviews before
+# re-casting a verdict. Both can only cost a review, never skip one.
 #
 # WHY sha256 OF THE DIFF, NOT git patch-id. patch-id ignores whitespace, so a
 # formatting-only push would be skipped as "unchanged"; the raw diff (with
@@ -188,15 +196,28 @@ while read -r sha; do
     log "status lookup failed for ${sha}"
     verdict "changed status-lookup-failed"
   }
+  # The description IS the grant: anything that is not the whole
+  # `pr=; base=; verdict=` shape fails closed, never anchoring a partial skip.
   trusted_status="$(printf '%s' "$status_json" | jq -r --arg ctx "$STATUS_CONTEXT" --arg who "$STATUS_CREATOR" \
-    '[.[]? | select(.context == $ctx and .state == "success" and (.creator.login // "") == $who)] | sort_by(.created_at, .id) | last | if . == null then "" else (.description // "<missing>") end' 2>/dev/null)" || trusted_status=''
+    '[.[]? | select(.context == $ctx and .state == "success" and (.creator.login // "") == $who)] | sort_by(.created_at, .id) | last | if . == null then "" else ((.description // "") | (capture("^Reviewed by Qwen Code /review; pr=(?<pr>[0-9]+); base=(?<base>[^;]+); verdict=(?<verdict>APPROVED|CHANGES_REQUESTED|COMMENTED)$")? // null) | if . == null then "unsupported" else "\(.pr)\t\(.base)\t\(.verdict)" end) end' 2>/dev/null)" || trusted_status=''
   if [ -n "$trusted_status" ]; then
-    case "$trusted_status" in
-      'Reviewed by Qwen Code /review; verdict=APPROVED') reviewed_state='APPROVED' ;;
-      'Reviewed by Qwen Code /review; verdict=CHANGES_REQUESTED') reviewed_state='CHANGES_REQUESTED' ;;
-      'Reviewed by Qwen Code /review; verdict=COMMENTED') reviewed_state='COMMENTED' ;;
-      *) verdict "changed unsupported-status-metadata" ;;
-    esac
+    if [ "$trusted_status" = unsupported ]; then
+      verdict "changed unsupported-status-metadata"
+    fi
+    IFS=$'\t' read -r anchor_pr anchor_base reviewed_state <<< "$trusted_status"
+    # A commit status is repository-scoped, so the SHA alone does not say
+    # whose review this was: two PRs can share a head commit while differing
+    # in base, and re-targeting a base fires no run (`pull_request_target`
+    # has no `edited`) so nothing re-stamps. The fingerprint below cannot
+    # tell those apart — it uses the base THIS run passes in on both sides.
+    if [ "$anchor_pr" != "$PR_NUMBER" ]; then
+      log "anchor ${sha} was stamped for PR #${anchor_pr}, not #${PR_NUMBER}"
+      verdict "changed anchor-pr-mismatch"
+    fi
+    if [ "$anchor_base" != "$BASE_REF" ]; then
+      log "anchor ${sha} was stamped against base ${anchor_base}, not ${BASE_REF}"
+      verdict "changed anchor-base-mismatch"
+    fi
     anchor_fp="$(fingerprint "$sha")" || {
       case "$?" in
         2) verdict "changed anchor-ambiguous-merge-base" ;;

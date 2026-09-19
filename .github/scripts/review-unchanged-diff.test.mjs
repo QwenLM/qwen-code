@@ -100,8 +100,10 @@ function markReviewed(
   sha,
   creator = 'github-actions[bot]',
   verdict = 'APPROVED',
+  pr = PR,
+  base = 'main',
 ) {
-  writeFileSync(join(statusDir, sha), `${creator}|${verdict}`);
+  writeFileSync(join(statusDir, sha), `${creator}|${verdict}|${pr}|${base}`);
 }
 
 // Every status lookup the script made, as the fake `gh` recorded them.
@@ -186,8 +188,12 @@ before(() => {
       'sha="${path#*/commits/}"; sha="${sha%%/*}"',
       'if [ -f "${FAKE_STATUS_DIR}/${sha}" ]; then',
       '  record="$(cat "${FAKE_STATUS_DIR}/${sha}")"',
-      '  who="${record%%|*}"; verdict="${record#*|}"',
-      '  if [ "$verdict" = LEGACY ]; then description="Reviewed by Qwen Code /review"; else description="Reviewed by Qwen Code /review; verdict=${verdict}"; fi',
+      '  IFS="|" read -r who verdict pr base <<< "$record"',
+      // Three description shapes sit on real heads: the current pr/base-bound
+      // one, the pre-binding shape this feature shipped with (still stamped on
+      // commits reviewed before the binding landed), and a legacy one with no
+      // verdict metadata at all. The reader must honour only the first.
+      '  if [ "$verdict" = LEGACY ]; then description="Reviewed by Qwen Code /review"; elif [ -z "$pr" ]; then description="Reviewed by Qwen Code /review; verdict=${verdict}"; else description="Reviewed by Qwen Code /review; pr=${pr}; base=${base}; verdict=${verdict}"; fi',
       '  printf \'[{"id":1,"created_at":"2026-01-01T00:00:00Z","context":"qwen-review/reviewed","state":"success","description":"%s","creator":{"login":"%s"}},{"context":"ci/other","state":"failure","creator":{"login":"x"}}]\' "$description" "$who"',
       'else',
       "  printf '[]'",
@@ -352,6 +358,57 @@ describe('review-unchanged-diff', () => {
     const head = publishPrHead();
     const { verdict } = run(head);
     assert.equal(verdict, `unchanged ${anchor} CHANGES_REQUESTED`);
+  });
+
+  // R7-1. A commit status is repository-scoped, so the head SHA alone does not
+  // say whose review it records: two open PRs can share a head commit while
+  // differing in base, and re-targeting a PR's base fires no run at all
+  // (pull_request_target.types has no `edited`) and so never re-stamps. In
+  // both shapes the fingerprint below would MATCH — it is computed against the
+  // base this run passes in on both sides — so only the pr/base clause in the
+  // reader stands between a grant PR A earned and a skip PR B never reviewed.
+  it('refuses an anchor stamped for a different pull request', () => {
+    const anchor = git(work, 'rev-parse', 'HEAD');
+    markReviewed(anchor, 'github-actions[bot]', 'APPROVED', '999');
+    git(work, 'checkout', '-q', 'main');
+    commit(work, 'other-pr.txt', 'main moved\n', 'main: other pr');
+    git(work, 'push', '-q', 'origin', 'main');
+    git(work, 'checkout', '-q', 'pr');
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
+    const head = publishPrHead();
+    const { verdict, stderr } = run(head);
+    assert.equal(verdict, 'changed anchor-pr-mismatch', stderr);
+  });
+
+  it('refuses an anchor stamped against a different base', () => {
+    const anchor = git(work, 'rev-parse', 'HEAD');
+    // The grant was earned for this head against `release`; the run asks about
+    // `main`, and the diff against `main` is what was never reviewed.
+    markReviewed(anchor, 'github-actions[bot]', 'APPROVED', PR, 'release');
+    git(work, 'checkout', '-q', 'main');
+    commit(work, 'other-base.txt', 'main moved\n', 'main: other base');
+    git(work, 'push', '-q', 'origin', 'main');
+    git(work, 'checkout', '-q', 'pr');
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
+    const head = publishPrHead();
+    const { verdict, stderr } = run(head);
+    assert.equal(verdict, 'changed anchor-base-mismatch', stderr);
+  });
+
+  it('refuses a pre-binding stamp that names no pull request or base', () => {
+    const anchor = git(work, 'rev-parse', 'HEAD');
+    // Stamps written before the binding landed are still on real heads, and
+    // they cannot prove which PR or base they were earned for: fail closed
+    // into one full review rather than honour a partial grant.
+    markReviewed(anchor, 'github-actions[bot]', 'APPROVED', '');
+    git(work, 'checkout', '-q', 'main');
+    commit(work, 'prebinding.txt', 'main moved\n', 'main: pre-binding stamp');
+    git(work, 'push', '-q', 'origin', 'main');
+    git(work, 'checkout', '-q', 'pr');
+    git(work, 'merge', '-q', '--no-edit', '--no-ff', 'main');
+    const head = publishPrHead();
+    const { verdict, stderr } = run(head);
+    assert.equal(verdict, 'changed unsupported-status-metadata', stderr);
   });
 
   it('a reachable textconv driver cannot collapse the fingerprint', () => {
