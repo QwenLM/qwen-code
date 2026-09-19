@@ -563,6 +563,15 @@ function shouldReportUnsupportedProtocolVersion(version: unknown): boolean {
   return true;
 }
 
+// Wire close-reason tokens are internal identifiers; only the stop path has
+// copy of its own. Everything else renders the same generic line rather than
+// leaking tokens like `client_close` into the transcript.
+const SESSION_CLOSED_REASON_COPY: Record<string, string> = {
+  client_close: 'Session closed',
+  last_client_detached: 'Session closed after the last client detached',
+  idle_timeout: 'Session closed after idle timeout',
+};
+
 export function reduceDaemonEventToTuiUpdates(
   event: DaemonTuiEvent,
   state?: DaemonTuiReducerState,
@@ -692,6 +701,18 @@ export function reduceDaemonEventToTuiUpdates(
           daemonEventId: event.id,
         },
       ];
+    }
+
+    case 'session_closed': {
+      const data = isRecord(event.data) ? event.data : {};
+      const reason =
+        data['persistenceUnconfirmed'] === true
+          ? 'Workspace runtime stopped; session persistence is unconfirmed'
+          : data['cause'] === 'workspace_runtime_stop'
+            ? 'Workspace runtime stopped.'
+            : (SESSION_CLOSED_REASON_COPY[getString(data['reason']) ?? ''] ??
+              'Session closed');
+      return terminalUpdates(event, reason);
     }
 
     case 'session_died': {
