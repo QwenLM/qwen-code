@@ -155,6 +155,7 @@ const composerCoreState = vi.hoisted(() => ({
   imageDragActive: false,
   navigatePrevHistory: vi.fn(),
   navigateNextHistory: vi.fn(),
+  hasContent: false,
   shellMode: false,
   setShellMode: vi.fn(),
   onFileUploadRequest: undefined as
@@ -237,8 +238,8 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           mockComposerCoreState.pastedImages.length > 0 ||
           mockComposerCoreState.pastedFiles.length > 0 ||
           mockComposerCoreState.composerTags.length > 0,
-        hasContent: false,
-        canSubmit: false,
+        hasContent: composerCoreState.hasContent,
+        canSubmit: composerCoreState.hasContent,
         pendingImageBatchCount: 0,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
@@ -358,6 +359,7 @@ afterEach(() => {
   composerCoreState.navigateNextHistory.mockReset();
   composerCoreState.setShellMode.mockReset();
   composerCoreState.shellMode = false;
+  composerCoreState.hasContent = false;
   composerCoreState.workspaceActionsRef.current = undefined;
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
@@ -399,6 +401,7 @@ interface ChatEditorRenderProps
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   isRunning?: boolean;
+  onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
   onCancel?: () => void;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
@@ -726,7 +729,10 @@ describe('ChatEditor add menu (+)', () => {
     )!.portalRoot;
     await act(async () => {
       trigger(container)!.dispatchEvent(
-        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        new MouseEvent(
+          composerCoreState.mobileComposer ? 'click' : 'pointerdown',
+          { bubbles: true, button: 0 },
+        ),
       );
     });
     await act(async () => {
@@ -3007,217 +3013,188 @@ describe('ChatEditor slash command popovers', () => {
   });
 });
 
-describe('ChatEditor mobile composer quick actions', () => {
-  const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(
-    Navigator.prototype,
-    'maxTouchPoints',
-  );
-
-  function withTouchDevice(run: () => void) {
-    Object.defineProperty(navigator, 'maxTouchPoints', {
-      value: 5,
-      configurable: true,
-    });
-    try {
-      run();
-    } finally {
-      if (originalMaxTouchPoints) {
-        Object.defineProperty(
-          Navigator.prototype,
-          'maxTouchPoints',
-          originalMaxTouchPoints,
-        );
-      } else {
-        delete (navigator as unknown as Record<string, unknown>)[
-          'maxTouchPoints'
-        ];
-      }
-    }
-  }
-
-  function mobileComposerStub(): MobileComposerBackend {
-    return {
+describe('ChatEditor mobile composer actions', () => {
+  function mobileComposer(value = ''): MobileComposerBackend {
+    const backend = {
       textareaRef: createRef<HTMLTextAreaElement>(),
-      value: '',
+      value,
       onChange: vi.fn(),
       onBlur: vi.fn(),
       placeholder: '',
     };
+    composerCoreState.mobileComposer = backend;
+    return backend;
   }
 
-  function openQuickActions(container: HTMLElement) {
-    const toggle = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="more actions"]',
+  async function clickButton(label: string) {
+    const button = Array.from(document.querySelectorAll('button')).find(
+      (candidate) =>
+        candidate.textContent === label ||
+        candidate.getAttribute('aria-label') === label,
     );
-    expect(toggle).not.toBeNull();
-    act(() => toggle!.click());
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
   }
 
-  it('maps the history quick action to the search UI on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const container = renderChatEditor({});
-      openQuickActions(container);
-
-      const historyButton = Array.from(
-        container.querySelectorAll('button'),
-      ).find((button) => button.textContent === 'Question history');
-      expect(historyButton).not.toBeUndefined();
-      act(() => historyButton!.click());
-
-      expect(composerCoreState.openHistorySearch).toHaveBeenCalledTimes(1);
-    });
+  it('opens history from the add drawer without simulated keyboard keys', async () => {
+    mobileComposer();
+    renderChatEditor({ visibleToolbarActions: ['addMenu'] });
+    await clickButton('Add to message');
+    expect(
+      document.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[aria-label="more actions"]')).toBeNull();
+    expect(
+      Array.from(document.querySelectorAll('button')).some((button) =>
+        ['Tab', 'Esc', '←', '→'].includes(button.textContent ?? ''),
+      ),
+    ).toBe(false);
+    await clickButton('Input history');
+    expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
   });
 
-  it('shows the keyboard shortcut hints grid on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const mobileContainer = renderChatEditor({});
-      openQuickActions(mobileContainer);
-      expect(
-        Array.from(mobileContainer.querySelectorAll('button')).some(
-          (button) => button.textContent === 'Tab',
-        ),
-      ).toBe(true);
-
-      composerCoreState.mobileComposer = null;
-      const desktopContainer = renderChatEditor({});
-      openQuickActions(desktopContainer);
-      expect(
-        Array.from(desktopContainer.querySelectorAll('button')).some(
-          (button) => button.textContent === 'Tab',
-        ),
-      ).toBe(true);
+  it('calls history navigation directly without submitting or moving focus', async () => {
+    const backend = mobileComposer('working draft');
+    const onSubmit = vi.fn();
+    const container = renderChatEditor({ onSubmit });
+    act(() => backend.textareaRef.current!.focus());
+    const previous = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Previous input"]',
+    )!;
+    const pointerDown = new Event('pointerdown', {
+      bubbles: true,
+      cancelable: true,
     });
+    previous.dispatchEvent(pointerDown);
+    expect(pointerDown.defaultPrevented).toBe(true);
+    composerCoreState.focus.mockClear();
+    await clickButton('Previous input');
+    await clickButton('Next input');
+    expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledOnce();
+    expect(composerCoreState.navigateNextHistory).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(backend.textareaRef.current);
   });
 
-  it('walks prompt history from the hint arrows on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const container = renderChatEditor({});
-      openQuickActions(container);
-      const pressHint = (label: string) => {
-        const button = Array.from(container.querySelectorAll('button')).find(
-          (candidate) => candidate.textContent === label,
-        );
-        expect(button).not.toBeUndefined();
-        act(() => button!.click());
-      };
-
-      pressHint('↑');
-      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
-      pressHint('↓');
-      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
-
-      // Tab has no completion target on the textarea backend.
-      pressHint('Tab');
-      expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledTimes(1);
-      expect(composerCoreState.navigateNextHistory).toHaveBeenCalledTimes(1);
-    });
+  it('disables both history buttons when the composer is disabled', () => {
+    mobileComposer('draft');
+    const container = renderChatEditor({ disabled: true });
+    for (const label of ['Previous input', 'Next input']) {
+      const button = container.querySelector<HTMLButtonElement>(
+        `[aria-label="${label}"]`,
+      )!;
+      expect(button.disabled).toBe(true);
+      act(() => button.click());
+    }
+    expect(composerCoreState.navigatePrevHistory).not.toHaveBeenCalled();
+    expect(composerCoreState.navigateNextHistory).not.toHaveBeenCalled();
   });
 
-  it('cancels the running turn from the Esc hint on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const onCancel = vi.fn();
-      const container = renderChatEditor({ isRunning: true, onCancel });
-      openQuickActions(container);
-      const escButton = Array.from(container.querySelectorAll('button')).find(
-        (button) => button.textContent === 'Esc',
-      );
-      expect(escButton).not.toBeUndefined();
-      act(() => escButton!.click());
-      expect(onCancel).toHaveBeenCalledTimes(1);
-    });
+  it('keeps the history arrow controls out of the desktop composer', () => {
+    const container = renderChatEditor({});
+    expect(container.querySelector('[aria-label="Previous input"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Next input"]')).toBeNull();
   });
 
-  it('moves the textarea caret from the cursor hints on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      const container = renderChatEditor({});
-      const textarea = container.querySelector<HTMLTextAreaElement>('textarea');
-      expect(textarea).not.toBeNull();
-      openQuickActions(container);
-      // Setting the value after the panel opens keeps React's controlled
-      // state from resetting it on the panel re-render.
-      textarea!.value = 'abcd';
-      textarea!.setSelectionRange(1, 3);
-      const pressHint = (label: string) => {
-        const button = Array.from(container.querySelectorAll('button')).find(
-          (candidate) => candidate.textContent === label,
-        );
-        expect(button).not.toBeUndefined();
-        act(() => button!.click());
-      };
-
-      // An existing selection collapses to its far edge first.
-      pressHint('→');
-      expect(textarea!.selectionStart).toBe(3);
-      pressHint('→');
-      expect(textarea!.selectionStart).toBe(4);
-      pressHint('←');
-      expect(textarea!.selectionStart).toBe(3);
-
-      // Movement skips whole code points so an emoji is never split.
-      textarea!.value = 'a😀b';
-      textarea!.setSelectionRange(1, 1);
-      pressHint('→');
-      expect(textarea!.selectionStart).toBe(3);
-      pressHint('←');
-      expect(textarea!.selectionStart).toBe(1);
-    });
+  it('keeps stop and send reachable with a draft without clearing it', async () => {
+    const backend = mobileComposer('keep this draft');
+    composerCoreState.hasContent = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({ isRunning: true, onCancel });
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    )!;
+    expect(stop.disabled).toBe(false);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!.disabled,
+    ).toBe(false);
+    act(() => stop.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(backend.textareaRef.current!.value).toBe('keep this draft');
+    expect(composerCoreState.setText).not.toHaveBeenCalled();
   });
 
-  it('exits shell mode from the Esc hint on the mobile composer', () => {
-    withTouchDevice(() => {
-      composerCoreState.mobileComposer = mobileComposerStub();
-      composerCoreState.shellMode = true;
-      const container = renderChatEditor({ isRunning: true });
-      openQuickActions(container);
-      const escButton = Array.from(container.querySelectorAll('button')).find(
-        (button) => button.textContent === 'Esc',
-      );
-      expect(escButton).not.toBeUndefined();
-      act(() => escButton!.click());
-      expect(composerCoreState.setShellMode).toHaveBeenCalledWith(false);
-    });
+  it('blurs the textarea without bubbling back into composer focus', async () => {
+    const backend = mobileComposer('draft');
+    renderChatEditor({});
+    act(() => backend.textareaRef.current!.focus());
+    composerCoreState.focus.mockClear();
+    await clickButton('Hide keyboard');
+    expect(document.activeElement).not.toBe(backend.textareaRef.current);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(backend.textareaRef.current!.value).toBe('draft');
   });
 
-  it('hides other toolbar actions while mobile voice capture is active', () => {
-    withTouchDevice(() => {
-      const container = renderChatEditor({
-        currentModel: 'qwen-test',
-        availableModels: [{ id: 'qwen-test' }],
-      });
-
-      expect(
-        container.querySelector('[data-web-shell-toolbar-leading]'),
-      ).toBeTruthy();
-      expect(
-        container.querySelector(
-          'button[aria-label="more actions"][data-hide-during-mobile-voice]',
-        ),
-      ).toBeTruthy();
-      expect(
-        container.querySelector('[data-web-shell-composer-submit]'),
-      ).toBeTruthy();
-
-      act(() => {
-        voiceButtonState.onActiveChange?.(true);
-      });
-
-      expect(
-        container.querySelector('[data-mobile-voice-active="true"]'),
-      ).toBeTruthy();
-
-      act(() => {
-        voiceButtonState.onActiveChange?.(false);
-      });
-
-      expect(
-        container.querySelector('[data-mobile-voice-active="true"]'),
-      ).toBeFalsy();
+  it('expands the same draft and restores selection without dropping attachments', async () => {
+    const backend = mobileComposer('hello world');
+    const container = renderChatEditor({
+      pastedFiles: [
+        { name: 'notes.txt', media_type: 'text/plain', text: 'notes' },
+      ],
     });
+    backend.textareaRef.current!.setSelectionRange(2, 5);
+    await clickButton('Expand editor');
+    const expanded = document.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-expanded-editor] textarea',
+    )!;
+    expect(expanded.value).toBe('hello world');
+    expect([expanded.selectionStart, expanded.selectionEnd]).toEqual([2, 5]);
+    await clickButton('Done');
+    expect(backend.textareaRef.current!.value).toBe('hello world');
+    expect([
+      backend.textareaRef.current!.selectionStart,
+      backend.textareaRef.current!.selectionEnd,
+    ]).toEqual([2, 5]);
+    expect(
+      container.querySelector('[data-web-shell-composer-attachments]')!
+        .textContent,
+    ).toContain('notes');
+    expect(mockComposerCoreState.pastedFiles).toHaveLength(1);
+  });
+
+  it('closes expanded editing when the owning session changes', async () => {
+    mobileComposer('draft');
+    const container = renderChatEditor({ sessionId: 'a' });
+    await clickButton('Expand editor');
+    rerenderChatEditor(container, { sessionId: 'b' });
+    expect(
+      document.querySelector('[data-web-shell-expanded-editor]'),
+    ).toBeNull();
+  });
+
+  it('offers explicit shell exit without canceling a turn', async () => {
+    mobileComposer();
+    composerCoreState.shellMode = true;
+    const onCancel = vi.fn();
+    renderChatEditor({ isRunning: true, onCancel });
+    await clickButton('Exit Shell');
+    expect(composerCoreState.setShellMode).toHaveBeenCalledWith(false);
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('retains the reduced toolbar during mobile voice capture', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      currentModel: 'qwen-test',
+      availableModels: [{ id: 'qwen-test' }],
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(
+      container.querySelector('[data-mobile-voice-active="true"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-composer-submit]'),
+    ).not.toBeNull();
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(
+      container.querySelector('[data-mobile-voice-active="true"]'),
+    ).toBeNull();
   });
 });
 

@@ -1,5 +1,6 @@
 .picker {
   width: 380px;
+  max-width: calc(100vw - 16px);
   max-height: 480px;
   display: flex;
   flex-direction: column;

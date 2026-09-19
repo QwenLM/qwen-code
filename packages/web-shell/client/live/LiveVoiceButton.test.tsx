@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveVoiceButton } from './LiveVoiceButton';
@@ -45,11 +45,13 @@ vi.mock('./useLiveVoice', () => ({
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-function mount(): HTMLElement {
+function mount(
+  props: ComponentProps<typeof LiveVoiceButton> = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<LiveVoiceButton />));
+  act(() => root.render(<LiveVoiceButton {...props} />));
   mounted.push({ root, container });
   return container;
 }
@@ -379,5 +381,32 @@ describe('LiveVoiceButton as a browser Host', () => {
     // ...minus the claim that the browser microphone is never used.
     expect(document.body.textContent).not.toContain('live.noFallback');
     expect(buttonNamed('live.browser.connect')).toBeTruthy();
+  });
+});
+
+describe('mobile Live voice entry', () => {
+  it('opens from a controlled secondary entry while keeping the idle trigger hidden', () => {
+    const onSupportedChange = vi.fn();
+    const container = mount({
+      hideInactiveTrigger: true,
+      open: true,
+      onOpenChange: vi.fn(),
+      onSupportedChange,
+    });
+    expect(container.querySelector('button')).toBeNull();
+    expect(
+      document.querySelector('[data-web-shell-live-dialog]'),
+    ).not.toBeNull();
+    expect(onSupportedChange).toHaveBeenCalledWith(true);
+    expect(mocks.result.refresh).toHaveBeenCalledOnce();
+  });
+  it('keeps the toolbar trigger available during an active call', () => {
+    mocks.result.status = {
+      ...mocks.result.status!,
+      available: true,
+      state: 'listening',
+    };
+    const container = mount({ hideInactiveTrigger: true });
+    expect(container.querySelector('[data-active="true"]')).not.toBeNull();
   });
 });
