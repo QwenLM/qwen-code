@@ -262,18 +262,156 @@ export function getCustomSystemPrompt(
 }
 
 /**
+ * The tools a session declared to the model, used to keep tool-specific prompt
+ * text in step with the request (#12032). `declaredTools: undefined` means
+ * "assume every tool is declared" and reproduces the prompt byte for byte as it
+ * was before gating existed, which is what every caller that has no registry
+ * snapshot to offer gets.
+ */
+export interface PromptToolSurface {
+  declaredTools?: ReadonlySet<string>;
+}
+
+/**
+ * Which tools each gated line of `## Using Your Tools` talks about. A line
+ * survives only when every tool it names is declared: a line that named a
+ * missing tool would send the model after something it cannot call, which is
+ * the defect this gating exists to fix. Lines absent from this table are policy
+ * that holds regardless of the tool surface (tool fallback, parallel calls,
+ * questions, respecting denials) and are never dropped.
+ */
+const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
+  prefix: string;
+  tools: readonly string[];
+}> = [
+  { prefix: '- **Prefer Dedicated Tools:**', tools: [ToolNames.SHELL] },
+  { prefix: '  - To read files use', tools: [ToolNames.READ_FILE] },
+  { prefix: '  - To edit files use', tools: [ToolNames.EDIT] },
+  { prefix: '  - To create files use', tools: [ToolNames.WRITE_FILE] },
+  { prefix: '  - To search for files use', tools: [ToolNames.GLOB] },
+  { prefix: '  - To search the content of files', tools: [ToolNames.GREP] },
+  { prefix: '  - Reserve using the', tools: [ToolNames.SHELL] },
+  { prefix: '- **Task Management:**', tools: [ToolNames.TODO_WRITE] },
+  {
+    prefix: '- **File Paths:**',
+    tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE],
+  },
+  { prefix: '- **Background Processes:**', tools: [ToolNames.SHELL] },
+  { prefix: '- **Interactive Commands:**', tools: [ToolNames.SHELL] },
+  { prefix: '- **Subagent Delegation:**', tools: [ToolNames.AGENT] },
+  {
+    prefix: '- **Codebase Search:**',
+    tools: [ToolNames.AGENT, ToolNames.GREP, ToolNames.GLOB],
+  },
+];
+
+const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
+
+/**
+ * Drops the tool-guidance lines whose tools this session did not declare.
+ *
+ * Implemented as a line filter rather than a rebuilt template on purpose: with
+ * no snapshot the section returns unchanged, so the default prompt cannot drift
+ * while gating is added.
+ */
+function gateToolGuidance(
+  section: string,
+  surface: PromptToolSurface | undefined,
+): string {
+  const declared = surface?.declaredTools;
+  if (!declared) return section;
+
+  const kept = section.split('\n').filter((line) => {
+    const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
+      line.startsWith(entry.prefix),
+    );
+    return !gate || gate.tools.every((tool) => declared.has(tool));
+  });
+  // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
+  // goes when every tool it was going to recommend is gone.
+  const parentIndex = kept.findIndex((line) =>
+    line.startsWith(PREFER_DEDICATED_TOOLS_PREFIX),
+  );
+  if (
+    parentIndex !== -1 &&
+    !kept[parentIndex + 1]?.startsWith('  - To ') &&
+    !kept[parentIndex + 1]?.startsWith('  - Reserve using the')
+  ) {
+    kept.splice(parentIndex, 1);
+  }
+  return kept.join('\n');
+}
+
+// Every notation the example blocks use, because `getToolCallExamples` picks a
+// different one per model: the bracket form (general and code mode), the
+// qwen-coder XML form, the qwen-vl JSON form, and the Gemma 4 native form. The
+// JSON alternative requires the `"arguments"` key that always follows it, so a
+// `"name"` field in unrelated JSON inside an example is not read as a call.
+const TOOL_CALL_IN_EXAMPLE =
+  /\[tool_call:\s*([A-Za-z0-9_]+)|<function=([A-Za-z0-9_]+)>|"name":\s*"([A-Za-z0-9_]+)",\s*"arguments"|<\|tool_call>call:([A-Za-z0-9_]+)/g;
+
+function exampleToolNames(block: string): string[] {
+  return [...block.matchAll(TOOL_CALL_IN_EXAMPLE)].map(
+    (match) => match[1] ?? match[2] ?? match[3] ?? match[4]!,
+  );
+}
+
+// Matched as a pair rather than split on blank lines: a single example can
+// contain blank lines of its own, and splitting on them orphans the tool calls
+// in its later paragraphs from the `<example>` tag that gates them.
+const EXAMPLE_BLOCK = /<example>[\s\S]*?<\/example>\n*/g;
+
+/**
+ * Drops `<example>` blocks that demonstrate a tool this session did not
+ * declare, so the prompt never shows the model a call it cannot make (#12032).
+ *
+ * When no example survives the heading goes too, rather than leaving a section
+ * with nothing under it. All four notations are recognised, so gating does not
+ * silently stop working on the model-specific example sets.
+ */
+function filterToolCallExamples(
+  examples: string,
+  surface: PromptToolSurface | undefined,
+): string {
+  const declared = surface?.declaredTools;
+  if (!declared) return examples;
+
+  let keptExamples = 0;
+  const filtered = examples.replace(EXAMPLE_BLOCK, (block) => {
+    const callsUndeclared = exampleToolNames(block).some(
+      (name) => !declared.has(name),
+    );
+    if (callsUndeclared) return '';
+    keptExamples++;
+    return block;
+  });
+  // Defensive: every shipped example set has blocks that call no tool at all
+  // (`user: 1 + 2`), so they survive any declared set and the heading always
+  // has something under it. This guards an example set that one day has none.
+  if (keptExamples === 0) return '';
+  // Dropping a block from the middle can leave the gap behind it.
+  return filtered.replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
+/**
  * The workflow guidance for performing software-engineering work.
  *
  * Split out so an output style with `keepCodingInstructions: false` can drop
  * exactly this section and nothing else — mandates, safety rules, tool
  * guidance and tone stay in force under every style.
  */
-function getSoftwareEngineeringTasksSection(): string {
+function getSoftwareEngineeringTasksSection(todoWriteEnabled: boolean): string {
+  const planGuidance = todoWriteEnabled
+    ? `Use '${ToolNames.TODO_WRITE}' for complex, ambiguous, or multi-step work when visible progress tracking adds value. Keep the plan short and outcome-oriented; skip it for simple tasks unless the user explicitly requests a plan.`
+    : 'For complex, ambiguous, or multi-step work, form a concise, outcome-oriented approach and revise it as you learn. Skip formal planning for simple tasks unless the user explicitly requests a plan.';
+  const todoAdaptationGuidance = todoWriteEnabled
+    ? ' If a todo list exists, keep it current as the scope or approach changes.'
+    : '';
   return `## Software Engineering Tasks
 When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this iterative approach:
-- **Plan:** Use '${ToolNames.TODO_WRITE}' for complex, ambiguous, or multi-step work when visible progress tracking adds value. Keep the plan short and outcome-oriented; skip it for simple tasks unless the user explicitly requests a plan.
+- **Plan:** ${planGuidance}
 - **Implement:** Begin implementing while gathering context as needed. Use available search and editing tools strategically, adhering to project conventions (see 'Core Mandates'). Do not add features, refactor code, or make "improvements" beyond what was asked. Don't add error handling, fallbacks, or validation for scenarios that can't happen—only validate at system boundaries (user input, external APIs). Don't create helpers, utilities, or abstractions for one-time operations. Three similar lines of code is better than a premature abstraction. Prefer editing existing files over creating new ones.
-- **Adapt:** Refine your approach as you discover new information or encounter obstacles. If a todo list exists, keep it current as the scope or approach changes. If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
+- **Adapt:** Refine your approach as you discover new information or encounter obstacles.${todoAdaptationGuidance} If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
 - **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands. Before reporting a task complete, verify it actually works. If you can't verify (no test exists, can't run the code), say so explicitly rather than claiming success.
 - **Verify (Standards):** When your task involves a code or system change, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .') that you have identified for this project (or obtained from the user). This ensures code quality and adherence to standards. Read-only or explanatory turns do not require verification.
 - **Report outcomes faithfully:** If tests fail, say so with the relevant output. If you did not run a verification step, say that rather than implying it succeeded. Never claim "all tests pass" when output shows failures, never suppress failing checks to manufacture a green result, and never characterize incomplete or broken work as done.
@@ -281,6 +419,72 @@ When requested to perform tasks like fixing bugs, adding features, refactoring, 
 **Key Principle:** Start with a reasonable approach based on available information, then adapt as you learn. Users prefer seeing progress quickly rather than waiting for perfect understanding.
 
 `;
+}
+
+/**
+ * Builds the "Using Your Tools" section.
+ *
+ * In CodeModeOnly the model can only call `exec`, so the Direct-mode text would
+ * name a tool surface it does not have. The mechanics of `exec` itself live in
+ * its tool description; this section carries only policy.
+ */
+function getToolGuidanceSection(
+  questions: string,
+  codeModeOnly: boolean,
+  todoWriteEnabled: boolean,
+  surface?: PromptToolSurface,
+): string {
+  const taskManagementToolGuidance = todoWriteEnabled
+    ? `- **Task Management:** Use '${ToolNames.TODO_WRITE}' only when explicit tracking adds value. Keep plans concise, outcome-oriented, and current; do not create a todo list for simple or single-step work unless the user explicitly requests one.\n`
+    : '';
+  const directControls = todoWriteEnabled
+    ? `'${ToolNames.TODO_WRITE}', '${ToolNames.AGENT}' and the other direct controls`
+    : `'${ToolNames.AGENT}' and the other direct controls`;
+  if (codeModeOnly) {
+    return `
+## Using Your Tools
+- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<name>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Prefer Dedicated Tools:** Do NOT use \`tools.${ToolNames.SHELL}\` to run commands when a relevant dedicated tool is provided. Using dedicated tools allows the user to better understand and review your work. This is CRITICAL to assisting the user:
+  - To read files use \`tools.${ToolNames.READ_FILE}\` instead of cat, head, tail, or sed
+  - To edit files use \`tools.${ToolNames.EDIT}\` instead of sed or awk
+  - To create files use \`tools.${ToolNames.WRITE_FILE}\` instead of cat with heredoc or echo redirection
+  - To search for files use \`tools.${ToolNames.GLOB}\` instead of find or ls
+  - To search the content of files, use \`tools.${ToolNames.GREP}\` instead of grep or rg
+  - Reserve \`tools.${ToolNames.SHELL}\` exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on \`tools.${ToolNames.SHELL}\` for these if it is absolutely necessary.
+- **Batch Into One Program:** Put independent calls in a single '${ToolNames.EXEC}' program and await them together with \`Promise.all\`. Sequence calls only when a later one needs a value an earlier one produced. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. A denied or failed call aborts the whole program, so keep a call that may be refused out of a batch you would then have to repeat.
+- **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
+${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when referring to files with tools like \`tools.${ToolNames.READ_FILE}\` or \`tools.${ToolNames.WRITE_FILE}\`. Relative paths are not supported. You must provide an absolute path.
+- **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
+- **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
+- **Questions:** ${questions}
+- **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself. A background subagent's result arrives as a task notification in a later turn; while waiting, do not read its transcript, predict its findings, or launch a replacement for the same task.
+- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) call \`tools.${ToolNames.GREP}\` or \`tools.${ToolNames.GLOB}\` yourself. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than calling them yourself, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.
+- **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
+`.trim();
+  }
+  // CodeModeOnly is deliberately not gated above: there the declared surface is
+  // `exec` plus a few direct controls, while the tools this section names are
+  // reached as `tools.<name>` inside `exec` and are not declarations at all.
+  const directGuidance = `
+## Using Your Tools
+- **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Using dedicated tools allows the user to better understand and review your work. This is CRITICAL to assisting the user:
+  - To read files use '${ToolNames.READ_FILE}' instead of cat, head, tail, or sed
+  - To edit files use '${ToolNames.EDIT}' instead of sed or awk
+  - To create files use '${ToolNames.WRITE_FILE}' instead of cat with heredoc or echo redirection
+  - To search for files use '${ToolNames.GLOB}' instead of find or ls
+  - To search the content of files, use '${ToolNames.GREP}' instead of grep or rg
+  - Reserve using the '${ToolNames.SHELL}' exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the '${ToolNames.SHELL}' tool for these if it is absolutely necessary.
+- **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
+${taskManagementToolGuidance}- **Parallel Tool Calls:** You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
+- **File Paths:** Always use absolute paths when referring to files with tools like '${ToolNames.READ_FILE}' or '${ToolNames.WRITE_FILE}'. Relative paths are not supported. You must provide an absolute path.
+- **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
+- **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
+- **Questions:** ${questions}
+- **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself. A background subagent's result arrives as a task notification in a later turn; while waiting, do not read its transcript, predict its findings, or launch a replacement for the same task.
+- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than using '${ToolNames.GREP}' or '${ToolNames.GLOB}' directly, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.
+- **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
+`.trim();
+  return gateToolGuidance(directGuidance, surface);
 }
 
 /**
@@ -292,7 +496,10 @@ When requested to perform tasks like fixing bugs, adding features, refactoring, 
 function buildDefaultBasePrompt(
   interaction: { role: string; questions: string },
   model: string | undefined,
-  outputStyle?: OutputStyleDefinition | null,
+  outputStyle: OutputStyleDefinition | null | undefined,
+  todoWriteEnabled = false,
+  codeModeOnly = false,
+  surface?: PromptToolSurface,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -300,14 +507,33 @@ function buildDefaultBasePrompt(
   const softwareEngineeringTasks =
     outputStyle?.keepCodingInstructions === false
       ? ''
-      : getSoftwareEngineeringTasksSection();
+      : getSoftwareEngineeringTasksSection(todoWriteEnabled);
 
+  const taskManagementSection = todoWriteEnabled
+    ? `# Task Management
+You have access to the ${ToolNames.TODO_WRITE} tool to keep user-visible progress for work that benefits from explicit tracking. Use it for complex, ambiguous, or multi-phase tasks or requests with multiple independent outcomes. Do not use it for simple or single-step queries that you can answer or complete immediately unless the user explicitly asks for a plan.
+
+When you create a todo list:
+- Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
+- Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
+- Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
+
+`
+    : '';
   // A QWEN_SYSTEM_IDENTITY_MD override is inserted verbatim, so the styled
   // variant applies only to the default identity sentence — the override is
   // distributor-owned wording we must not rewrite.
   const coreIdentity =
     resolveCoreIdentityOverride() ??
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
+
+  const toolGuidance = getToolGuidanceSection(
+    interaction.questions,
+    codeModeOnly,
+    todoWriteEnabled,
+    surface,
+  );
   return `
 ${coreIdentity}
 
@@ -327,16 +553,7 @@ ${coreIdentity}
 - **Plan before uncertain work:** If the task is not yet clear enough to safely execute, do not make small speculative edits. Continue read-only investigation, make a plan in the current mode, or follow the active interaction mode's question guidance. Do not enter plan mode or call ${ToolNames.ENTER_PLAN_MODE} on your own just because the task involves planning or complexity. Use plan mode only when the user explicitly asks you to switch to plan mode, has already enabled it, or confirms they want it.
 
 
-# Task Management
-You have access to the ${ToolNames.TODO_WRITE} tool to keep user-visible progress for work that benefits from explicit tracking. Use it for complex, ambiguous, or multi-phase tasks or requests with multiple independent outcomes. Do not use it for simple or single-step queries that you can answer or complete immediately unless the user explicitly asks for a plan.
-
-When you create a todo list:
-- Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
-- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
-- Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
-- Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
-
-# Primary Workflows
+${taskManagementSection}# Primary Workflows
 
 ${softwareEngineeringTasks}- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
 - When you see a <persisted-output> tag in a tool result, the full output was saved to disk because it was too large. Use the read_file tool to access the complete content if the preview is insufficient.
@@ -366,24 +583,7 @@ Final responses should be concise by default, but their shape and depth must mat
 - **Explain Critical Commands:** Before executing commands with '${ToolNames.SHELL}' that modify the file system, codebase, or system state, you *must* provide a brief explanation of the command's purpose and potential impact. Prioritize user understanding and safety. Follow the active permission policy and do not assume an interactive confirmation dialog is available.
 - **Security First:** Always apply security best practices. Never introduce code that exposes, logs, or commits secrets, API keys, or other sensitive information.
 
-## Using Your Tools
-- **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Using dedicated tools allows the user to better understand and review your work. This is CRITICAL to assisting the user:
-  - To read files use '${ToolNames.READ_FILE}' instead of cat, head, tail, or sed
-  - To edit files use '${ToolNames.EDIT}' instead of sed or awk
-  - To create files use '${ToolNames.WRITE_FILE}' instead of cat with heredoc or echo redirection
-  - To search for files use '${ToolNames.GLOB}' instead of find or ls
-  - To search the content of files, use '${ToolNames.GREP}' instead of grep or rg
-  - Reserve using the '${ToolNames.SHELL}' exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the '${ToolNames.SHELL}' tool for these if it is absolutely necessary.
-- **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
-- **Task Management:** Use '${ToolNames.TODO_WRITE}' only when explicit tracking adds value. Keep plans concise, outcome-oriented, and current; do not create a todo list for simple or single-step work unless the user explicitly requests one.
-- **Parallel Tool Calls:** You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
-- **File Paths:** Always use absolute paths when referring to files with tools like '${ToolNames.READ_FILE}' or '${ToolNames.WRITE_FILE}'. Relative paths are not supported. You must provide an absolute path.
-- **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
-- **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
-- **Questions:** ${interaction.questions}
-- **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.
-- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than using '${ToolNames.GREP}' or '${ToolNames.GLOB}' directly, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.
-- **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
+${toolGuidance}
 
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
@@ -392,12 +592,24 @@ Final responses should be concise by default, but their shape and depth must mat
 ${(function () {
   // Determine sandbox status based on environment variables
   const isSandboxExec = process.env['SANDBOX'] === 'sandbox-exec';
+  // The in-place bwrap backend confines this process behind a read-only host
+  // root rather than running a container, and its denials read "Read-only
+  // file system" instead of "Operation not permitted" — so it needs its own
+  // section rather than the container wording below.
+  const isKernelSandbox = process.env['SANDBOX'] === 'bwrap';
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
   if (isSandboxExec) {
     return `
 # macOS Seatbelt
 You are running under macos seatbelt with limited access to files outside the project directory or system temp directory, and with limited access to host system resources such as ports. If you encounter failures that could be due to MacOS Seatbelt (e.g. if a command fails with 'Operation not permitted' or similar error), as you report the error to the user, also explain why you think it could be due to MacOS Seatbelt, and how the user may need to adjust their Seatbelt profile.
+`;
+  } else if (isKernelSandbox) {
+    const backend = process.env['SANDBOX'];
+    return `
+# Kernel Sandbox (${backend})
+You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY outside the writable roots configured at startup; /dev is the exception — a minimal synthetic device tree replaces it, so host device nodes (/dev/shm, /dev/kvm, /dev/dri, /dev/snd) are absent rather than read-only, and no writable root restores them. You cannot inspect the writable set from in here: 'QWEN_SANDBOX=bwrap qwen sandbox' explicitly selects this backend and only reports from outside, so tell the user to run it from this project directory on the host — the report reflects that directory's settings, and a session started elsewhere or with '--include-directories' may bind a different set. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions, even inside a writable root. Host services reached through Unix sockets remain outside this filesystem boundary, including in closed network mode. Proxied mode supplies proxy settings without preventing direct connections. Granted repository Git metadata, including config and hooks, remains writable and can affect later unconfined Git commands.
+When a write fails with EROFS, report it to the user, name the refused path, and explain that changing the writable roots requires restarting with the appropriate sandbox configuration. Do NOT work around a refusal by writing somewhere else, by escalating privileges, or by retrying the same write.
 `;
   } else if (isGenericSandbox) {
     return `
@@ -442,7 +654,7 @@ ${(function () {
   return '';
 })()}
 
-${getToolCallExamples(model || '')}
+${codeModeOnly ? codeModeToolCallExamples : filterToolCallExamples(getToolCallExamples(model || ''), surface)}
 
 # Final Reminder
 Your core function is efficient and safe assistance. Balance conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
@@ -457,9 +669,13 @@ Interaction mode reminder: ${interaction.questions}
  * together, so a session is never reminded about a style its prompt does not
  * carry. Prompt overrides own their wording end to end: neither a custom
  * `systemPrompt` nor a `QWEN_SYSTEM_MD` replacement gets a style section, so
- * neither gets a reminder. Uses a structural type, like
- * {@link resolveInteractionMode}, to avoid a hard dependency on the full
- * Config class.
+ * neither gets a reminder. A checked-in style file is a prompt, so a
+ * `project` style is dropped as soon as the workspace stops being trusted:
+ * the catalog is read once at startup but trust can flip mid-session, so the
+ * gate is re-checked here, where the prompt and the reminder consume it.
+ * Uses a structural type, like {@link resolveInteractionMode}, to avoid a
+ * hard dependency on the full Config class; a config that reports no trust
+ * verdict keeps whatever style it resolved.
  */
 export function resolveMainSessionOutputStyle(config: {
   getSystemPrompt(): string | undefined;
@@ -467,14 +683,16 @@ export function resolveMainSessionOutputStyle(config: {
   getExperimentalZedIntegration(): boolean;
   getInputFormat?(): string;
   isInteractive(): boolean;
+  isTrustedFolder?(): boolean;
 }): OutputStyleDefinition | undefined {
   if (config.getSystemPrompt() || isSystemMdActive()) {
     return undefined;
   }
-  return resolveEffectiveOutputStyle(
-    config.getOutputStyle(),
-    resolveInteractionMode(config),
-  );
+  const style = config.getOutputStyle();
+  if (style?.source === 'project' && config.isTrustedFolder?.() === false) {
+    return undefined;
+  }
+  return resolveEffectiveOutputStyle(style, resolveInteractionMode(config));
 }
 
 /**
@@ -491,6 +709,9 @@ export function resolveMainSessionOutputStyle(config: {
  * @param interactionMode - Interactive vs. headless prompt variant.
  * @param outputStyle - Active output style, layered onto the base prompt.
  *   Ignored when `QWEN_SYSTEM_MD` replaces the base prompt (see below).
+ * @param todoWriteEnabled - Whether the default prompt may advertise Todo.
+ * @param codeModeOnly - Whether the model's only callable ordinary tool is
+ *   `exec`, which selects the code-mode tool guidance and worked examples.
  */
 export function getCoreSystemPrompt(
   userMemory?: string,
@@ -498,6 +719,12 @@ export function getCoreSystemPrompt(
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
   outputStyle?: OutputStyleDefinition | null,
+  todoWriteEnabled = false,
+  codeModeOnly = false,
+  // Trailing options object rather than an eighth positional parameter: this
+  // function is re-exported from the package root and its arity is asserted by
+  // callers' tests (#12032).
+  options?: PromptToolSurface,
 ): string {
   const effectiveOutputStyle = resolveEffectiveOutputStyle(
     outputStyle,
@@ -538,7 +765,14 @@ export function getCoreSystemPrompt(
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
     ? fs.readFileSync(systemMdPath, 'utf8')
-    : buildDefaultBasePrompt(interaction, model, effectiveOutputStyle);
+    : buildDefaultBasePrompt(
+        interaction,
+        model,
+        effectiveOutputStyle,
+        todoWriteEnabled,
+        codeModeOnly,
+        options,
+      );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
@@ -560,7 +794,14 @@ export function getCoreSystemPrompt(
       writePath,
       systemMdEnabled
         ? basePrompt
-        : buildDefaultBasePrompt(interaction, model, undefined),
+        : buildDefaultBasePrompt(
+            interaction,
+            model,
+            undefined,
+            todoWriteEnabled,
+            codeModeOnly,
+            options,
+          ),
     );
   }
 
@@ -591,6 +832,12 @@ export interface SystemPromptLayers {
    */
   base: string;
   /**
+   * Stable layer: the omni progressive-media-understanding contract
+   * (omni/media-guidance.ts) — fixed for the whole session (the omni
+   * config and provider do not change in-session).
+   */
+  mediaGuidance?: string | null;
+  /**
    * Context layer: concatenated context files (QWEN.md hierarchy, baseline
    * rules, extension files). Reloaded only on explicit refresh.
    */
@@ -614,6 +861,7 @@ export interface SystemPromptLayers {
 export function assembleSystemPrompt(layers: SystemPromptLayers): string {
   return (
     layers.base +
+    buildSystemPromptSuffix(layers.mediaGuidance ?? undefined) +
     buildSystemPromptSuffix(layers.contextFiles) +
     buildSystemPromptSuffix(layers.appendPrompt) +
     (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
@@ -808,6 +1056,108 @@ user: Where are all the 'app.config' files in this project? I need to check thei
 model:
 [tool_call: ${ToolNames.GLOB} for pattern './**/app.config']
 (Assuming GlobTool returns a list of paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
+I found the following 'app.config' files:
+- /path/to/moduleA/app.config
+- /path/to/moduleB/app.config
+To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
+</example>
+`.trim();
+
+/**
+ * Worked examples for CodeModeOnly.
+ *
+ * The model-family variants below teach a direct tool-call syntax; in
+ * CodeModeOnly the only surface is one `exec` tool whose argument is a
+ * JavaScript program, so the syntax differences they exist for do not apply.
+ */
+const codeModeToolCallExamples = `
+# Examples (Illustrating Tone and Workflow)
+<example>
+user: 1 + 2
+model: 3
+</example>
+
+<example>
+user: is 13 a prime number?
+model: true
+</example>
+
+<example>
+user: start the server implemented in server.js
+model: [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.SHELL}({ command: 'node server.js', is_background: true });]
+</example>
+
+<example>
+user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
+model: Okay, I can refactor 'src/auth.py'.
+First I'll check for a test safety net and confirm 'requests' is a dependency. Those two lookups are independent, so they go in one program.
+[tool_call: ${ToolNames.EXEC} with source:
+const [tests, requirements] = await Promise.all([
+  tools.${ToolNames.GLOB}({ pattern: 'tests/test_auth.py' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/requirements.txt' }),
+]);
+text(tests.output);
+text(requirements.output);
+]
+(After analysis)
+Great, 'tests/test_auth.py' covers the core authentication logic and 'requests' is available. With this safety net in place, I can safely plan the refactoring.
+
+Here's the plan:
+1.  Replace the 'urllib' calls with 'requests'.
+2.  Add proper 'try...except' error handling for the new network calls.
+3.  Remove the old 'urllib' import.
+4.  Run the project's linter and tests to verify the changes.
+
+[tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.EDIT}({ file_path: '/path/to/src/auth.py', old_string: '(exact old code)', new_string: '(new code)' });]
+Refactoring complete. Running verification...
+[tool_call: ${ToolNames.EXEC} with source:
+const checks = await tools.${ToolNames.SHELL}({ command: 'ruff check src/auth.py && pytest' });
+text(checks.output);
+]
+(After verification passes)
+All checks passed. This is a stable checkpoint.
+Would you like me to write a commit message and commit these changes?
+</example>
+
+<example>
+user: Delete the temp directory.
+model: I can run \`rm -rf /path/to/project/temp\`. This will permanently delete the directory and all its contents.
+</example>
+
+<example>
+user: Write tests for someFile.ts
+model:
+Okay, I can write those tests. First I'll read the source together with an existing test to pick up the local conventions.
+[tool_call: ${ToolNames.EXEC} with source:
+const [source, existing] = await Promise.all([
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.ts' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/existingTest.test.ts' }),
+]);
+text(source.output);
+text(existing.output);
+]
+(After reviewing both)
+Now I'll check whether the intended test file already exists. A failed call aborts the whole program, so this probe stays on its own.
+[tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' })).output);]
+(After ${ToolNames.READ_FILE} reports that /path/to/someFile.test.ts does not exist)
+[tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.WRITE_FILE}({ file_path: '/path/to/someFile.test.ts', content: '(test code content)' });]
+I've written the tests. Now I'll run the project's test command to verify them.
+[tool_call: ${ToolNames.EXEC} with source:
+const result = await tools.${ToolNames.SHELL}({ command: 'npm run test' });
+text(result.output);
+]
+(After verification passes)
+All checks passed. This is a stable checkpoint.
+</example>
+
+<example>
+user: Where are all the 'app.config' files in this project? I need to check their settings.
+model:
+[tool_call: ${ToolNames.EXEC} with source:
+const found = await tools.${ToolNames.GLOB}({ pattern: './**/app.config' });
+text(found.output);
+]
+(Assuming the glob call returns paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
 I found the following 'app.config' files:
 - /path/to/moduleA/app.config
 - /path/to/moduleB/app.config

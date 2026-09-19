@@ -105,6 +105,47 @@ you edit other fields.
 
 Set `"useConnectionManager": false` to disable Qwen Code's connection manager and fall back to the SDK's keepalive and automatic reconnect behavior.
 
+### Turn Output Mode
+
+The [shared `outputMode` setting](./overview#turn-output-mode) controls when DingTalk delivers assistant results. DingTalk is currently the only adapter integrated with this policy. The default is `per_turn`, including when `outputMode` is omitted:
+
+- `per_task`: wait for the main task and its associated background tasks and notifications to finish, then deliver one final result card containing the task's last non-empty assistant reply.
+- `per_response`: each complete assistant response gets its own completed result card. Token chunks update the current card; they do not create new cards. Background assistant responses are delivered separately too.
+- `per_turn`: the main status card completes with the turn's last non-empty assistant reply as soon as the main prompt ends. Each later background notification turn keeps its own last non-empty assistant reply and sends it as a separate completed card.
+
+Background shell, monitor, and workflow output in `per_turn` and `per_task` includes a heading with its kind, status, and task label when available. In `per_response`, the response body is delivered as-is. Background agent replies keep their original body in every mode.
+
+In the default `per_turn` mode, background tasks never extend the main card's lifetime, and a later callback cannot overwrite it. For example, a main result followed by eleven separate background notification turns produces a main result card and eleven follow-up result cards. Choose `per_task` to wait for that task's associated background work and receive one final result instead. The result comes from the assistant; no additional summary is generated and intermediate replies are not concatenated.
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "outputMode": "per_turn",
+      "interactiveCards": {
+        "enabled": true,
+        "statusCard": { "enabled": true }
+      }
+    }
+  }
+}
+```
+
+Interactive status cards provide the native card presentation. When status cards are unavailable or all interactive cards are disabled, the same output policy applies through ordinary messages: `per_task` waits for the complete task, `per_response` sends each complete response, and `per_turn` sends one result per turn. Background results that exceed the card content limit also fall back to ordinary messages. Platform message-length limits may split long text. File and image delivery keeps its existing rules.
+
+The setting applies to DingTalk conversation replies and their associated background follow-ups. It does not merge unrelated tasks in the same conversation. Channel loops and webhook runs retain their existing presentation.
+
+`per_task` waits for Agent, background shell, monitor, and workflow work linked to that prompt, including work started by their notification turns. Paused tasks and long-running monitors keep it open until they finish or you cancel. Future scheduled runs and independently managed daemon child sessions are separate work and are not included in this task boundary.
+
+If Todo Stop Guard yields to a message queued in the same session, the waiting `per_task` request ends as cancelled so the queued message can start. Its retained reply is not delivered as a successful task result. Associated background work remains available to the session.
+
+Standalone background turns that are interrupted, or have not ended after ten minutes, may deliver a result marked as partial. This does not reopen a completed main card.
+
+Only `per_task`, `per_response`, and `per_turn` are accepted. The unpublished `final_only` and `process_and_result` values are not aliases; replace them with the desired mode. Removing `outputMode` restores the `per_turn` default. There is no separate background-aggregation toggle.
+
 ## Running
 
 ```bash
@@ -160,6 +201,8 @@ By default, the bot requires an @mention in group chats (`requireMention: true`)
 
 Set `"atSender": true` to have the bot @mention the member whose group message triggered its response. It is off by default and only applies to agent replies with a DingTalk staff ID. Replies are sent as DingTalk markdown whether or not they carry a mention; the mention prefix is included in the first message chunk.
 
+Qwen Code preserves the text content supplied by DingTalk when constructing the canonical message; it does not remove a leading mention itself. When DingTalk omits the bot mention from a plain-text callback, a body such as `/clear` or `!command` still begins with that command marker and follows the normal local-command rules. When the callback retains a leading bot mention, as rich-text callbacks can, `@Bot /clear` and `@Bot !command` remain ordinary agent input because the canonical text does not begin with `/` or `!`. `isInAtList` continues to determine whether the group message addressed the bot.
+
 ### Finding a Group's Conversation ID
 
 DingTalk uses `conversationId` to identify groups. You can find it in the channel service logs when someone sends a message in the group — look for the `conversationId` field in the log output.
@@ -172,7 +215,7 @@ You can send photos and documents to the bot, not just text.
 
 **Files:** Send a PDF, code file, or any document. The bot downloads it from DingTalk's servers and saves it locally so the agent can read it with its file tools. Audio and video files are also supported. This works with any model.
 
-**Generated files:** Ask the agent explicitly to send a completed local file and it can return the file as a native DingTalk attachment. Files must be non-empty, no larger than 20 MB, and located inside the configured workspace or the system temporary directory. One response can send at most five files. Outbound file attachments are unavailable when `blockStreaming` is set to `"on"`; upload or delivery failures are reported in the final text instead.
+**Generated files:** Ask the agent explicitly to send a completed local file and it can return the file as a native DingTalk attachment. Files must be non-empty, no larger than 20 MB, and located inside the configured workspace or the system temporary directory. One response can send at most five files. Upload or delivery failures are reported in the final text instead.
 
 ## Forwarded Chat Records
 
@@ -199,7 +242,7 @@ The multi-line layout above is what the agent sees in a 1:1 chat. In a group the
 
 - **Use DingTalk markdown-aware instructions** — DingTalk supports headings, bold text, links, code blocks, and tables. Keep tables compact because narrow screens may scroll horizontally.
 - **Restrict access** — In an organization context, `senderPolicy: "open"` may be acceptable. For tighter control, use `"allowlist"` or `"pairing"`. See [DM Pairing](./overview#dm-pairing) for details.
-- **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. If the quoted message is a picture, file, audio, or video message, the bot downloads and attaches it the same way as when sent directly. Quoting bot responses is not yet supported.
+- **Referenced messages** — Quoting (replying to) a user message includes the quoted text as context for the agent. Rich-text quotes preserve their text order and attach embedded pictures. If the quoted message is a picture, file, audio, or video message, the bot downloads and attaches it the same way as when sent directly. Quoting bot responses is not yet supported.
 
 ## Troubleshooting
 

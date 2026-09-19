@@ -24,14 +24,20 @@
  * queue instead of dropping them.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import { readFileSync } from 'node:fs';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   collectText,
   normalizeParts,
-  ToolConfirmationOutcome,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { Part, PartListUnion } from '@google/genai';
 import {
   foldLiveEvent,
@@ -104,15 +110,29 @@ export interface OpenTuiSubmitOptions {
    * also submits without provenance.
    */
   submittedPrompt?: string;
+  /**
+   * The transcript already holds the user row for this submit, because the
+   * dispatcher echoed the typed invocation. Set by a `submit_prompt` outcome:
+   * its content is generated, never typed, and ink's `submit_prompt` case
+   * returns before adding a USER history item for it.
+   */
+  invocationEchoed?: boolean;
 }
 
 export interface OpenTuiLiveTurn {
   items: readonly LiveHistoryItem[];
   streaming: boolean;
+  /**
+   * Output characters streamed so far this turn. A ref so per-delta events
+   * never re-render the transcript; the loading indicator polls it.
+   */
+  streamingCharsRef: RefObject<number>;
+  /** False while waiting on the API (↑), true once content arrives (↓). */
+  isReceivingContent: boolean;
   /** Scheduler calls parked in awaiting_approval, awaiting a dialog. */
   waitingCalls: readonly WaitingCallInfo[];
-  /** Number of mid-turn prompts queued (composer queueLength parity). */
-  queueLength: number;
+  /** Mid-turn queued prompts, oldest first (composer badge + Esc pop-back). */
+  messageQueue: readonly string[];
   /** Pops the whole queue back into the composer (Esc parity). */
   popQueue(): string | null;
   /**
@@ -137,8 +157,8 @@ export interface OpenTuiLiveTurn {
 /** Folds a replay batch into a fresh item list (single commit). */
 export function foldBatch(
   events: readonly OpenTuiStreamEvent[],
-): LiveHistoryItem[] {
-  let items: LiveHistoryItem[] = [];
+): readonly LiveHistoryItem[] {
+  let items: readonly LiveHistoryItem[] = [];
   for (const ev of events) items = foldLiveEvent(items, ev);
   return items;
 }
@@ -153,10 +173,19 @@ export function useOpenTuiLiveTurn(
     [],
   );
   const queueRef = useRef<string[]>([]);
-  const [queueLength, setQueueLength] = useState(0);
+  // queueRef stays the synchronous source — a turn drains and restores within
+  // one tick, before any render. This mirror only exists to be displayed.
+  const [queue, setQueue] = useState<readonly string[]>([]);
+  const syncQueue = useCallback(() => setQueue([...queueRef.current]), []);
   const abortRef = useRef<AbortController | null>(null);
 
   const streamingRef = useRef(false);
+  // Output chars streamed this turn (ink streamingResponseLengthRef parity):
+  // the loading indicator divides by 4 to estimate tokens and polls this ref,
+  // so per-delta events must not re-render anything.
+  const streamingCharsRef = useRef(0);
+  const receivingRef = useRef(false);
+  const [isReceivingContent, setIsReceivingContent] = useState(false);
   // Generation counter: resetTranscript invalidates the in-flight turn so
   // its late events, settles, and queue resubmits cannot touch the fresh
   // transcript (P2-2).
@@ -171,28 +200,40 @@ export function useOpenTuiLiveTurn(
     setStreaming(busy);
   }, []);
 
+  const setReceiving = useCallback((receiving: boolean) => {
+    if (receivingRef.current === receiving) return;
+    receivingRef.current = receiving;
+    setIsReceivingContent(receiving);
+  }, []);
+
   const apply = useCallback((ev: OpenTuiStreamEvent) => {
     setItems((prev) => foldLiveEvent(prev, ev));
   }, []);
 
-  const pushQueue = useCallback((text: string) => {
-    queueRef.current.push(text);
-    setQueueLength(queueRef.current.length);
-  }, []);
+  const pushQueue = useCallback(
+    (text: string) => {
+      queueRef.current.push(text);
+      syncQueue();
+    },
+    [syncQueue],
+  );
 
   const drainQueue = useCallback((): string[] => {
     const drained = queueRef.current;
     queueRef.current = [];
-    setQueueLength(0);
+    syncQueue();
     return drained;
-  }, []);
+  }, [syncQueue]);
 
-  const restoreQueue = useCallback((texts: readonly string[]) => {
-    const restored = texts.map((text) => text.trim()).filter(Boolean);
-    if (restored.length === 0) return;
-    queueRef.current = [...restored, ...queueRef.current];
-    setQueueLength(queueRef.current.length);
-  }, []);
+  const restoreQueue = useCallback(
+    (texts: readonly string[]) => {
+      const restored = texts.map((text) => text.trim()).filter(Boolean);
+      if (restored.length === 0) return;
+      queueRef.current = [...restored, ...queueRef.current];
+      syncQueue();
+    },
+    [syncQueue],
+  );
 
   const runTurn = useCallback(
     async (
@@ -203,6 +244,10 @@ export function useOpenTuiLiveTurn(
       const seq = ++turnSeqRef.current;
       const abort = new AbortController();
       abortRef.current = abort;
+      // A runTurn is a new user query, so the counter restarts; tool-result
+      // continuations happen inside this same loop and keep accumulating.
+      streamingCharsRef.current = 0;
+      setReceiving(false);
       setBusy(true);
       try {
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
@@ -222,11 +267,37 @@ export function useOpenTuiLiveTurn(
           },
         })) {
           if (seq !== turnSeqRef.current) return;
+          // ink counts model text, thoughts and tool-args JSON toward the
+          // token estimate, but only model text means content is arriving.
+          // Tool output is tool-generated, so it counts nowhere.
+          switch (ev.type) {
+            case 'text':
+              streamingCharsRef.current += ev.delta.length;
+              setReceiving(true);
+              break;
+            case 'thinking':
+              streamingCharsRef.current += ev.delta.length;
+              break;
+            case 'tool-args':
+              streamingCharsRef.current += ev.args.length;
+              break;
+            case 'tool-end':
+              // The results go back to the model here, so the next API call
+              // starts with no content yet — ink's ↑ phase.
+              setReceiving(false);
+              break;
+            default:
+              break;
+          }
           apply(ev);
         }
         // ink parity (use-llm-stream submitPromptOnCompleteRef): fired once
-        // after the turn completes successfully, never on error/abort.
-        if (seq === turnSeqRef.current) {
+        // after the turn completes successfully, never on error/abort. The
+        // abort paths inside the generator end it with a normal return, so
+        // the seq guard alone cannot tell them apart — gate on the signal
+        // (R6-6). A decline of every confirmation without Esc is a genuinely
+        // completed turn and keeps firing.
+        if (seq === turnSeqRef.current && !abort.signal.aborted) {
           void turnOptions?.onComplete?.().catch(() => {});
         }
       } catch (error) {
@@ -253,7 +324,7 @@ export function useOpenTuiLiveTurn(
           if (rest.length > 0) {
             const [text, ...remaining] = rest;
             queueRef.current = remaining;
-            setQueueLength(remaining.length);
+            syncQueue();
             apply({ type: 'user', text });
             // ink keeps provenance for a queued submission, and the raw text
             // is what the stream layer expands `@path` mentions from.
@@ -264,7 +335,7 @@ export function useOpenTuiLiveTurn(
         }
       }
     },
-    [config, apply, drainQueue, restoreQueue, setBusy],
+    [config, apply, drainQueue, restoreQueue, setBusy, setReceiving, syncQueue],
   );
 
   const submit = useCallback(
@@ -295,7 +366,9 @@ export function useOpenTuiLiveTurn(
       const prompt: PartListUnion =
         parts.length > 0 ? [{ text }, ...parts] : content;
       const promptId = nextLivePromptId(config);
-      apply({ type: 'user', text, promptId, sentToModel: true });
+      if (!options?.invocationEchoed) {
+        apply({ type: 'user', text, promptId, sentToModel: true });
+      }
       void runTurn(prompt, promptId, options);
     },
     [config, apply, pushQueue, runTurn],
@@ -323,7 +396,7 @@ export function useOpenTuiLiveTurn(
       }
       abort?.abort();
       queueRef.current = [];
-      setQueueLength(0);
+      syncQueue();
       waitingCallsRef.current = [];
       setWaitingCalls([]);
       // Synchronous: a submit right after the reset must start a fresh turn,
@@ -331,7 +404,7 @@ export function useOpenTuiLiveTurn(
       setBusy(false);
       setItems(foldBatch(events));
     },
-    [setBusy],
+    [setBusy, syncQueue],
   );
 
   const settleWaitingCall = useCallback((callId: string) => {
@@ -340,7 +413,11 @@ export function useOpenTuiLiveTurn(
 
   const popQueue = useCallback((): string | null => {
     if (queueRef.current.length === 0) return null;
-    return drainQueue().join('\n');
+    // U-11 (ink aggregateUserMessages parity): the Esc restore joins with a
+    // blank line, not a single newline. ink's peer/slash queue filters have no
+    // counterpart here — this queue only ever holds plain composer text
+    // (slash commands defer in the shell instead of queueing).
+    return drainQueue().join('\n\n');
   }, [drainQueue]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -348,8 +425,10 @@ export function useOpenTuiLiveTurn(
   return {
     items,
     streaming,
+    streamingCharsRef,
+    isReceivingContent,
     waitingCalls,
-    queueLength,
+    messageQueue: queue,
     popQueue,
     submit,
     interrupt,

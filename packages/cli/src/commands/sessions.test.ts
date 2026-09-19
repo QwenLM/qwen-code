@@ -28,6 +28,13 @@ vi.mock('./sessions/control-commands.js', () => ({
   stopCommand: { command: 'stop <session>', describe: 'Stop' },
 }));
 
+vi.mock('./sessions/controllers.js', () => ({
+  controllersCommand: {
+    command: 'controllers',
+    describe: 'Manage trusted controller tokens',
+  },
+}));
+
 import { sessionsCommand } from './sessions.js';
 import { type Argv } from 'yargs';
 import yargs from 'yargs';
@@ -70,7 +77,7 @@ describe('sessions command', () => {
     }
     builder(mockYargs as unknown as Argv);
 
-    expect(mockYargs.command).toHaveBeenCalledTimes(5);
+    expect(mockYargs.command).toHaveBeenCalledTimes(6);
 
     const commandCalls = mockYargs.command.mock.calls;
     const commandNames = commandCalls.map((call) => call[0].command);
@@ -84,6 +91,7 @@ describe('sessions command', () => {
       'peek <session>',
       'answer <session> <text>',
       'stop <session>',
+      'controllers',
     ]);
 
     expect(mockYargs.demandCommand).toHaveBeenCalledWith(

@@ -5,10 +5,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { RequestError } from '@agentclientprotocol/sdk';
 import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import {
+  AcpChildCapacityExceededError,
   BridgeChannelQuarantinedError,
   BridgeTimeoutError,
   InvalidSessionMetadataError,
@@ -18,7 +20,83 @@ import {
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 
+describe('capacity RPC errors', () => {
+  it('carries an explicit HTTP status and machine reason', () => {
+    const error = new AcpChildCapacityExceededError(6, 6);
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        httpStatus: 503,
+        errorKind: error.code,
+        maxConcurrentChildren: 6,
+        committedAcpChildren: 6,
+      },
+    });
+  });
+  it('preserves standalone rollback classification with nested capacity', () => {
+    const capacity = {
+      code: 'acp_child_capacity_exhausted' as const,
+      maxConcurrentChildren: 1,
+      committedAcpChildren: 1,
+    };
+    expect(
+      toRpcError(
+        new StandaloneSessionServiceError(
+          'standalone_creation_rolled_back',
+          'id',
+          'rollback',
+          true,
+          capacity,
+        ),
+      ),
+    ).toMatchObject({
+      data: {
+        code: 'standalone_creation_rolled_back',
+        httpStatus: 503,
+        capacity,
+        sessionId: 'id',
+      },
+    });
+  });
+});
+
 describe('toRpcError', () => {
+  it.each(['request', 'wire'] as const)(
+    'preserves workflow parameter details from a %s error',
+    (transport) => {
+      const source = RequestError.invalidParams(
+        { errorKind: 'workflow_invalid_params' },
+        '`sourceRef` must contain non-empty id and revision strings',
+      );
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
+
+      expect(toRpcError(error)).toEqual({
+        code: RPC.INVALID_PARAMS,
+        message: source.message,
+        data: { errorKind: 'workflow_invalid_params', httpStatus: 400 },
+      });
+    },
+  );
+
+  it.each([
+    new Error('Unexpected workflow failure'),
+    RequestError.invalidParams(undefined, 'Unclassified parameter error'),
+    RequestError.internalError(
+      { errorKind: 'unknown_workflow_error' },
+      'Unexpected workflow failure',
+    ),
+  ])('keeps unclassified errors as internal failures: %s', (error) => {
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: 'Internal error',
+      data: { errorKind: 'internal' },
+    });
+  });
+
   it('maps sealed maintenance to a JSON-RPC server error', () => {
     expect(toRpcError(new DaemonDrainingError())).toEqual({
       code: RPC.INTERNAL_ERROR,

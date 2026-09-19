@@ -1,4 +1,5 @@
 import {
+  createElement,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -10,6 +11,7 @@ import {
   type DragEventHandler,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { FileTypeIcon } from '../components/FileTypeIcon';
 import {
   Decoration,
   EditorView,
@@ -27,7 +29,12 @@ import {
   StateEffect,
   StateField,
 } from '@codemirror/state';
-import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  isolateHistory,
+} from '@codemirror/commands';
 import {
   acceptCompletion,
   autocompletion,
@@ -78,11 +85,22 @@ import { isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
   getComposerTagSerialized,
+  getComposerTagValue,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
+} from '../utils/composerTag';
+// Re-exported for existing importers; the definitions moved to
+// utils/composerTag.ts so read-only consumers can reach them without pulling
+// CodeMirror in (#11031).
+export {
+  getComposerTagDisplay,
+  getComposerTagLabel,
+  getComposerTagValue,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
@@ -112,6 +130,10 @@ import {
   sanitizeAttachmentName,
   type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
+import {
+  createPastedTextFile,
+  shouldFoldPastedText,
+} from '../utils/largePaste';
 
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
@@ -480,18 +502,6 @@ function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
   return tags.map(serializeComposerTag).join('\n');
 }
 
-export function getComposerTagLabel(tag: WebShellComposerTag): string {
-  return tag.label?.trim() ?? '';
-}
-
-export function getComposerTagValue(tag: WebShellComposerTag): string {
-  return tag.value?.trim() ?? '';
-}
-
-export function getComposerTagDisplay(tag: WebShellComposerTag): string {
-  return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
-}
-
 export function buildComposerPrompt(
   text: string,
   tags: readonly WebShellComposerTag[],
@@ -661,6 +671,18 @@ class ComposerTagWidget extends WidgetType {
         });
       });
     }
+    const hasCustomTooltip =
+      this.tag.tooltip !== undefined && this.tag.tooltip !== null;
+    if (isPreviewableFileComposerTag(this.tag)) {
+      chip.style.verticalAlign = 'middle';
+      chip.style.background = 'var(--chat-editor-bg-primary)';
+      chip.style.borderRadius = '8px';
+      chip.style.minHeight = '28px';
+      chip.style.fontFamily = 'var(--font-sans,system-ui,sans-serif)';
+      if (!hasCustomTooltip) {
+        chip.title = getComposerTagValue(this.tag);
+      }
+    }
     const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
     const tagLabel = this.tag.kind ? '' : rawTagLabel;
@@ -698,7 +720,22 @@ class ComposerTagWidget extends WidgetType {
       }
     }
 
-    if (!renderedCustomContent && safeIconUrl) {
+    if (
+      !renderedCustomContent &&
+      isPreviewableFileComposerTag(this.tag) &&
+      !this.tag.icon &&
+      safeIconUrl === getComposerTagIconUrl('file')
+    ) {
+      const icon = document.createElement('span');
+      icon.style.cssText =
+        'display:inline-flex;width:16px;height:16px;flex:0 0 auto;margin-left:8px;color:var(--muted-foreground);';
+      icon.setAttribute('aria-hidden', 'true');
+      this.contentRoot = createRoot(icon);
+      this.contentRoot.render(
+        createElement(FileTypeIcon, { name: tagValue, size: 16 }),
+      );
+      chip.appendChild(icon);
+    } else if (!renderedCustomContent && safeIconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
         'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
@@ -966,7 +1003,7 @@ function getFollowupRemainder(
   return remainder.length > 0 ? remainder : null;
 }
 
-function mapRestoredInputAnnotationsAfterTextChange(
+export function mapRestoredInputAnnotationsAfterTextChange(
   annotations: readonly DaemonInputAnnotation[],
   previousText: string,
   nextText: string,
@@ -1082,6 +1119,12 @@ function createFollowupGhostExtension(suggestion: string | null) {
 export type ComposerSubmitCommit = () => void;
 
 export interface ComposerSubmitMetadata {
+  retainDraftDuringSessionCreation?: (
+    operation: (
+      onSessionAllocated: (sessionId: string) => void,
+    ) => Promise<unknown>,
+  ) => Promise<unknown>;
+  isCurrentDraft?: (options?: { allowSessionAssignment?: boolean }) => boolean;
   inputAnnotations?: DaemonInputAnnotation[];
 }
 
@@ -1101,14 +1144,13 @@ export interface UseComposerCoreOptions {
   /**
    * Whether the composer may react to FILE drags at all (drag highlight and
    * drop ingestion on the inline image/text lane). `false` leaves paste
-   * working but makes file drag-and-drop inert, matching a host that
-   * force-disables file upload via `fileUploadEnabled={false}`. Defaults to
-   * `true`.
+   * working but makes attachment drag-and-drop inert. Defaults to `true`.
    */
   fileDragEnabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
+  allowEmptySlashMenu?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -1359,6 +1401,7 @@ export interface UseComposerCoreReturn {
   removeImage: (index: number) => void;
   pastedFiles: PromptFile[];
   removeFile: (index: number) => void;
+  expandPastedText: (index: number) => void;
   composerTags: WebShellComposerTag[];
   removeTopTag: (id: string) => void;
   addTags: (
@@ -1414,6 +1457,7 @@ export function useComposerCore(
     placeholderText = 'Type a message...',
     commands,
     skills = [],
+    allowEmptySlashMenu = false,
     slashCommandCategoryOrder,
     autoSubmitSlashCommands = false,
     queuedMessages = [],
@@ -1483,6 +1527,9 @@ export function useComposerCore(
     workspaceCwd: storageScopeKey,
     storageKey: composerDraftStorageKey,
   });
+  const draftSessionAssignmentRef = useRef<
+    { storageKey: string | undefined; assignedSessionId?: string } | undefined
+  >(undefined);
   const unscopedDraftEditedRef = useRef(false);
   const saveCurrentDraftRef = useRef<() => void>(() => undefined);
   const scheduleDraftSaveRef = useRef<() => void>(() => undefined);
@@ -1546,6 +1593,8 @@ export function useComposerCore(
   workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
+  const allowEmptySlashMenuRef = useRef(allowEmptySlashMenu);
+  allowEmptySlashMenuRef.current = allowEmptySlashMenu;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
   const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
@@ -1904,9 +1953,75 @@ export function useComposerCore(
     (files: readonly File[]) => enqueueExtractedTransfer(extractFiles(files)),
     [enqueueExtractedTransfer],
   );
+  /**
+   * Whether a paste landed in the composer's own editor rather than in one of
+   * the other text controls that share the composer surface.
+   */
+  const pastedInEditor = useCallback((target: EventTarget | null): boolean => {
+    if (!(target instanceof Node)) return false;
+    if (mobileTextareaRef.current === target) return true;
+    return viewRef.current?.dom.contains(target) ?? false;
+  }, []);
+  /**
+   * Folds an oversized paste into an attachment card. Returns whether the
+   * caller should stop the browser's own insertion: a short paste stays inline,
+   * and a disabled composer, a shell command, or a host with attachments turned
+   * off has no card to fold into, so each leaves today's behavior alone.
+   */
+  const foldPastedTextIntoCard = useCallback((text: string): boolean => {
+    // The exemptions are checked before the measurement: sizing a paste costs a
+    // full UTF-8 encode, which a multi-megabyte paste in shell mode should not
+    // pay for something that is about to be discarded.
+    if (
+      disabledRef.current ||
+      shellModeRef.current ||
+      !attachmentsEnabledRef.current
+    ) {
+      return false;
+    }
+    const view = viewRef.current;
+    const textarea = mobileTextareaRef.current;
+    if (
+      view?.state.selection.ranges.some((range) => !range.empty) ||
+      (textarea && textarea.selectionStart !== textarea.selectionEnd)
+    ) {
+      return false;
+    }
+    const draft = view?.state.doc.toString() ?? mobileTextRef.current;
+    const caret =
+      view?.state.selection.main.from ?? textarea?.selectionStart ?? 0;
+    if (
+      /^[!/]/.test(draft.trimStart()) ||
+      /^[!/]/.test(
+        (draft.slice(0, caret) + text + draft.slice(caret)).trimStart(),
+      )
+    ) {
+      return false;
+    }
+    if (!shouldFoldPastedText(text)) return false;
+    const taken = new Set(pastedFilesRef.current.map((file) => file.name));
+    const next = [...pastedFilesRef.current, createPastedTextFile(text, taken)];
+    pastedFilesRef.current = next;
+    setPastedFiles(next);
+    return true;
+  }, []);
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
       onPasteCapture: (event) => {
+        const pastedText = event.clipboardData.getData('text/plain');
+        if (pastedText) {
+          // These handlers live on the composer surface, which also contains
+          // controls that take text of their own (the history search box), so
+          // only a paste aimed at the editor may be folded.
+          if (
+            pastedInEditor(event.target) &&
+            foldPastedTextIntoCard(pastedText)
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+          return;
+        }
         if (enqueueImageTransfer(event.clipboardData, 'paste')) {
           event.preventDefault();
           event.stopPropagation();
@@ -1967,7 +2082,13 @@ export function useComposerCore(
         }
       },
     }),
-    [clearImageDragState, enqueueImageTransfer, isTouchComposer],
+    [
+      clearImageDragState,
+      enqueueImageTransfer,
+      foldPastedTextIntoCard,
+      isTouchComposer,
+      pastedInEditor,
+    ],
   );
   useEffect(() => {
     if (!imageDragActive) return;
@@ -1982,7 +2103,7 @@ export function useComposerCore(
     if (disabled) clearImageDragState();
   }, [clearImageDragState, disabled]);
   useEffect(() => {
-    // A host flipping `fileUploadEnabled` to false mid-drag gates the
+    // Disabling attachment drags mid-drag gates the
     // leave handler, so a depth already counted would never drain; clear
     // the highlight explicitly instead of waiting for dragend/blur.
     if (fileDragEnabled === false) clearImageDragState();
@@ -2250,6 +2371,7 @@ export function useComposerCore(
       languageRef.current,
       tRef.current,
       slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+      allowEmptySlashMenuRef.current,
     );
     if (!result) return false;
     setSlashMenu({
@@ -2301,6 +2423,7 @@ export function useComposerCore(
         languageRef.current,
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
+        allowEmptySlashMenuRef.current,
       );
       if (!relativeResult) {
         setSlashMenu(null);
@@ -2492,7 +2615,24 @@ export function useComposerCore(
   const navigatePrevHistory = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
-    if (!view) return;
+    if (!view) {
+      // Touch textarea backend: browse the same prompt history with a
+      // plain-text restore (inline tag chips are not recreated).
+      if (!isTouchComposer) return;
+      const history = shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current;
+      const current = mobileTextRef.current;
+      if (!history.isNavigating()) {
+        saveCurrentDraftRef.current();
+      }
+      const prev = history.navigateUp(current);
+      if (prev !== null) {
+        historyBrowseActiveRef.current = true;
+        restoreSelectedHistoryMatch(prev);
+      }
+      return;
+    }
     if (completionStatus(view.state) === 'active') {
       moveCompletionSelection(false)(view);
       view.focus();
@@ -2518,12 +2658,28 @@ export function useComposerCore(
       restoreHistoryEntry(view, prev);
     }
     view.focus();
-  }, [rememberPromptHistoryDraftTags, restoreHistoryEntry]);
+  }, [
+    isTouchComposer,
+    rememberPromptHistoryDraftTags,
+    restoreHistoryEntry,
+    restoreSelectedHistoryMatch,
+  ]);
 
   const navigateNextHistory = useCallback(() => {
     if (disabledRef.current) return;
     const view = viewRef.current;
-    if (!view) return;
+    if (!view) {
+      if (!isTouchComposer) return;
+      const history = shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current;
+      const next = history.navigateDown();
+      if (next !== null) {
+        historyBrowseActiveRef.current = history.isNavigating();
+        restoreSelectedHistoryMatch(next);
+      }
+      return;
+    }
     if (completionStatus(view.state) === 'active') {
       moveCompletionSelection(true)(view);
       view.focus();
@@ -2547,10 +2703,19 @@ export function useComposerCore(
       }
     }
     view.focus();
-  }, [restoreHistoryEntry, restorePromptHistoryDraftTags]);
+  }, [
+    isTouchComposer,
+    restoreHistoryEntry,
+    restorePromptHistoryDraftTags,
+    restoreSelectedHistoryMatch,
+  ]);
 
   const handleMobileChange = useCallback(
     (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+      // Mirror the CodeMirror updateListener: a genuine edit ends history
+      // browsing so the draft starts persisting again. Programmatic restores
+      // go through setMobileText, never this handler.
+      historyBrowseActiveRef.current = false;
       setMobileText(event.target.value);
     },
     [setMobileText],
@@ -2610,10 +2775,17 @@ export function useComposerCore(
         : [];
     const editorText = view ? view.state.doc.toString() : mobileTextRef.current;
     const followup = followupStateRef.current;
+    // A folded paste leaves the draft empty, which is the state the follow-up
+    // completion submits from, so the suggestion would become the message with
+    // the paste along as an attachment. The paste wins while a card waits.
+    const foldedPastePending = pastedFilesRef.current.some(
+      (file) => file.text !== undefined,
+    );
     const followupCompletion =
       textOverride === undefined &&
       !suppressFollowupCompletion &&
       inlineTags.length === 0 &&
+      !foldedPastePending &&
       followup?.isVisible
         ? getFollowupCompletion(editorText, followup.suggestion)
         : null;
@@ -2697,6 +2869,48 @@ export function useComposerCore(
     const restoredInputAnnotationsAtSubmit =
       restoredInputAnnotationsRef.current;
     const shellModeAtSubmit = shellModeRef.current;
+    const isCurrentDraft = (options?: { allowSessionAssignment?: boolean }) =>
+      viewRef.current === view &&
+      (composerIdentityRef.current.sessionId === submissionIdentity.sessionId ||
+        (options?.allowSessionAssignment === true &&
+          submissionIdentity.sessionId === undefined &&
+          draftAssignment.assignedSessionId !== undefined &&
+          composerIdentityRef.current.sessionId ===
+            draftAssignment.assignedSessionId)) &&
+      composerIdentityRef.current.promptHistoryStorageKey ===
+        submissionIdentity.promptHistoryStorageKey &&
+      (view
+        ? view.state.doc === editorDocAtSubmit
+        : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
+      composerTagsRef.current === composerTagsAtSubmit &&
+      pastedImagesRef.current === pastedImagesAtSubmit &&
+      pastedFilesRef.current === pastedFilesAtSubmit &&
+      restoredInputAnnotationsRef.current ===
+        restoredInputAnnotationsAtSubmit &&
+      shellModeRef.current === shellModeAtSubmit;
+    const draftAssignment = {
+      storageKey: submissionIdentity.draftStorageKey,
+      assignedSessionId: undefined as string | undefined,
+    };
+    const retainDraftDuringSessionCreation = async (
+      operation: (
+        onSessionAllocated: (sessionId: string) => void,
+      ) => Promise<unknown>,
+    ) => {
+      const onSessionAllocated = (sessionId: string) => {
+        if (draftSessionAssignmentRef.current === draftAssignment)
+          draftAssignment.assignedSessionId = sessionId;
+      };
+      if (submissionIdentity.sessionId !== undefined)
+        return operation(onSessionAllocated);
+      draftSessionAssignmentRef.current = draftAssignment;
+      try {
+        await operation(onSessionAllocated);
+      } finally {
+        if (draftSessionAssignmentRef.current === draftAssignment)
+          draftSessionAssignmentRef.current = undefined;
+      }
+    };
     let committed = false;
     const commitAccepted = () => {
       if (committed) return;
@@ -2704,7 +2918,9 @@ export function useComposerCore(
       const currentIdentity = composerIdentityRef.current;
       const sourceChanged =
         viewRef.current !== view ||
-        currentIdentity.sessionId !== submissionIdentity.sessionId ||
+        (currentIdentity.sessionId !== submissionIdentity.sessionId &&
+          (draftAssignment.assignedSessionId === undefined ||
+            currentIdentity.sessionId !== draftAssignment.assignedSessionId)) ||
         currentIdentity.promptHistoryStorageKey !==
           submissionIdentity.promptHistoryStorageKey;
       if (sourceChanged) {
@@ -2750,6 +2966,8 @@ export function useComposerCore(
       if (!composerUnchanged) return;
 
       saveComposerDraft(submissionIdentity.draftStorageKey, '');
+      if (draftAssignment.assignedSessionId)
+        saveComposerDraft(currentIdentity.draftStorageKey, '');
       setSlashMenu(null);
       if (followupCompletion) {
         onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
@@ -2776,7 +2994,11 @@ export function useComposerCore(
       images.length > 0 ? [...images] : undefined,
       files.length > 0 ? [...files] : undefined,
       commitAccepted,
-      inputAnnotations.length > 0 ? { inputAnnotations } : undefined,
+      {
+        ...(inputAnnotations.length > 0 ? { inputAnnotations } : {}),
+        isCurrentDraft,
+        retainDraftDuringSessionCreation,
+      },
     );
     if (accepted === false) return true;
     commitAccepted();
@@ -2939,8 +3161,8 @@ export function useComposerCore(
           if (atMenu.accept()) {
             return true;
           }
-          if (slashMenuRef.current) {
-            return acceptSlashCompletion(undefined, true);
+          if (slashMenuRef.current && acceptSlashCompletion(undefined, true)) {
+            return true;
           }
           if (completionStatus(view.state) === 'active') return false;
           const text = view.state.doc.toString();
@@ -3001,7 +3223,7 @@ export function useComposerCore(
           if (closeAtMenuIfOpen()) {
             return true;
           }
-          if (slashMenuRef.current) {
+          if (slashMenuRef.current?.items.length) {
             closeSlashMenu();
             return true;
           }
@@ -3040,7 +3262,12 @@ export function useComposerCore(
           // the sticky history.isNavigating — see its declaration.)
           if (!isBrowsingHistory) {
             if (atMenu.moveSelection('up')) return true;
-            if (moveSlashCompletionSelection('up')) return true;
+            // An open slash menu owns the arrows even with zero items, so
+            // they never reach history recall behind the visible popover.
+            if (slashMenuRef.current) {
+              moveSlashCompletionSelection('up');
+              return true;
+            }
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(false)(view);
             }
@@ -3090,7 +3317,12 @@ export function useComposerCore(
           // user is no longer paging through history.
           if (!isBrowsingHistory) {
             if (atMenu.moveSelection('down')) return true;
-            if (moveSlashCompletionSelection('down')) return true;
+            // Symmetric with ArrowUp: an open slash menu owns the key even
+            // when it has no items to move through.
+            if (slashMenuRef.current) {
+              moveSlashCompletionSelection('down');
+              return true;
+            }
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(true)(view);
             }
@@ -3141,8 +3373,12 @@ export function useComposerCore(
           if (acceptFollowupIntoEditor(view, 'tab')) {
             return true;
           }
-          if (slashMenuRef.current) {
+          const slashMenu = slashMenuRef.current;
+          if (slashMenu) {
             if (acceptSlashCompletion()) return true;
+            // An open-but-empty menu still owns Tab so the key cannot fall
+            // through to the cycle-mode fallback beneath the popover.
+            if (slashMenu.items.length === 0) return true;
             if (!cycleModeOnTabRef.current) return false;
           }
           if (completionStatus(view.state) === 'active') {
@@ -3495,6 +3731,27 @@ export function useComposerCore(
 
     if (!sessionChanged && !workspaceChanged) return;
 
+    const assignment = draftSessionAssignmentRef.current;
+    if (
+      assignment &&
+      previousDraftIdentity.sessionId === undefined &&
+      sessionId !== undefined &&
+      sessionId === assignment.assignedSessionId &&
+      !workspaceChanged &&
+      previousDraftIdentity.storageKey === assignment.storageKey
+    ) {
+      draftIdentityRef.current = {
+        sessionId,
+        workspaceCwd: storageScopeKey,
+        storageKey: composerDraftStorageKey,
+      };
+      saveComposerDraft(
+        composerDraftStorageKey,
+        view ? view.state.doc.toString() : mobileTextRef.current,
+      );
+      return;
+    }
+
     resetImageIngestion();
     restoredInputAnnotationsRef.current = [];
     historyActionsRef.current.reset();
@@ -3649,7 +3906,12 @@ export function useComposerCore(
     if (slashMenuRef.current) {
       refreshSlashMenuForView(viewRef.current);
     }
-  }, [slashMenuDataKey, language, refreshSlashMenuForView]);
+  }, [
+    slashMenuDataKey,
+    language,
+    refreshSlashMenuForView,
+    allowEmptySlashMenu,
+  ]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -4429,6 +4691,32 @@ export function useComposerCore(
     setPastedFiles(next);
   }, []);
 
+  /**
+   * Moves a folded paste into the editor: the card disappears and the text
+   * lands at the caret as one undoable edit. There is no way back, so this is
+   * the user's explicit choice rather than a toggle.
+   */
+  const expandPastedText = useCallback(
+    (index: number) => {
+      const file = pastedFilesRef.current[index];
+      if (!file || file.text === undefined) return;
+      const view = viewRef.current;
+      if (view) {
+        view.dispatch({
+          ...view.state.replaceSelection(file.text),
+          annotations: isolateHistory.of('full'),
+          scrollIntoView: true,
+        });
+        view.focus();
+      } else {
+        if (!mobileTextareaRef.current) return;
+        insertText(file.text);
+      }
+      removeFile(index);
+    },
+    [insertText, removeFile],
+  );
+
   // ---- Computed ----
 
   const canSubmit =
@@ -4559,6 +4847,7 @@ export function useComposerCore(
     removeImage,
     pastedFiles,
     removeFile,
+    expandPastedText,
     composerTags,
     removeTopTag,
     addTags,

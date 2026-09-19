@@ -604,6 +604,10 @@ describe('EditTool', () => {
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+      // `filePath` must carry the full path: UI consumers (e.g. the VSCode
+      // companion) cannot resolve a clickable location from `fileName`
+      // alone once the file is outside the workspace root.
+      expect(display.filePath).toBe(filePath);
       expect(writeSpy).toHaveBeenCalledWith(
         expect.objectContaining({ toolWriteOrigin: 'edit' }),
       );

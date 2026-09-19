@@ -122,10 +122,7 @@ export function selectImages(candidates, opts = {}) {
  * whether we render at all; this decides whether a "nothing changed" RESULT
  * deserves a second look.
  */
-const RENDER_SHAPING_PREFIXES = [
-  'packages/web-shell/client/',
-  'packages/webui/src/',
-];
+const RENDER_SHAPING_PREFIXES = ['packages/web-shell/client/'];
 
 /**
  * Extensions that change what a view LOOKS like. Deliberately narrow: a `.ts`

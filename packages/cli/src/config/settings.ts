@@ -34,6 +34,7 @@ import {
   setNestedPropertySafe,
   WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS,
 } from './settingsUtils.js';
 import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
@@ -401,6 +402,28 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         `Warning: ${ref.section}.${ref.key} in workspace settings (${workspaceFile.path}) is ignored because ${definingScope} scope settings also set it. A workspace value is honored only when no User, System, or SystemDefaults scope sets this setting.`,
       );
     }
+    // Tighten-only keys: the same verdict the merge applied, so the
+    // warning and the strip cannot disagree about a value. A value that
+    // merely repeats what is already in force is dropped without a
+    // warning — it lost nothing.
+    for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
+      const verdict = tightenOnlyVerdict(entry, workspaceFile.settings, {
+        system: loadedSettings.system.settings,
+        systemDefaults: loadedSettings.systemDefaults.settings,
+        user: loadedSettings.user.settings,
+      });
+      if (verdict === undefined || verdict.kept) continue;
+      const key = `${entry.section}.${entry.key}`;
+      if (verdict.reason === 'system-sets') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because System scope settings also set it.`,
+        );
+      } else if (verdict.reason === 'looser') {
+        warningSet.add(
+          `Warning: ${key} in workspace settings (${workspaceFile.path}) is ignored because it would loosen the ${verdict.against} value. A workspace may only make this setting stricter.`,
+        );
+      }
+    }
   }
   return [...warningSet];
 }
@@ -489,6 +512,80 @@ function stripWorkspaceOverrides(
   );
 }
 
+type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
+
+type TightenOnlyVerdict =
+  | { kept: true }
+  | { kept: false; reason: 'system-sets' }
+  | {
+      kept: false;
+      reason: 'looser';
+      against: 'User' | 'SystemDefaults' | 'default';
+    }
+  | { kept: false; reason: 'same' };
+
+/**
+ * Decide one tighten-only key for a workspace, or `undefined` when the
+ * workspace does not set it.
+ *
+ * System wins outright, as it does for every setting. Otherwise the
+ * workspace value is compared against the value that would be in force
+ * without it — User's when User sets the key, since User overrides
+ * SystemDefaults in the merge, else SystemDefaults', else the feature's
+ * default. Strictly stricter is kept; equal is dropped silently; looser is
+ * dropped with a warning. Comparing against the stricter of User and
+ * SystemDefaults instead would call a workspace value "equal" to a
+ * SystemDefaults value that User already loosened, and drop the one
+ * tightening that would have taken effect.
+ */
+function tightenOnlyVerdict(
+  entry: TightenOnlyEntry,
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): TightenOnlyVerdict | undefined {
+  const read = (settings: Settings): unknown =>
+    (settings[entry.section] as Record<string, unknown> | undefined)?.[
+      entry.key
+    ];
+  const candidate = read(workspace);
+  if (candidate === undefined) return undefined;
+  if (read(scopes.system) !== undefined) {
+    return { kept: false, reason: 'system-sets' };
+  }
+  const userValue = read(scopes.user);
+  const systemDefaultsValue = read(scopes.systemDefaults);
+  const against: 'User' | 'SystemDefaults' | 'default' =
+    userValue !== undefined
+      ? 'User'
+      : systemDefaultsValue !== undefined
+        ? 'SystemDefaults'
+        : 'default';
+  const baseline = entry.strictness(
+    userValue !== undefined ? userValue : systemDefaultsValue,
+  );
+  const rank = entry.strictness(candidate);
+  if (rank > baseline) return { kept: true };
+  if (rank === baseline) return { kept: false, reason: 'same' };
+  return { kept: false, reason: 'looser', against };
+}
+
+/**
+ * Drop the workspace's tighten-only values that would not make the
+ * setting stricter than the operator scopes already have it.
+ */
+function stripWorkspaceLoosenings(
+  workspace: Settings,
+  scopes: { system: Settings; systemDefaults: Settings; user: Settings },
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_TIGHTEN_ONLY_SETTINGS.filter((entry) => {
+      const verdict = tightenOnlyVerdict(entry, workspace, scopes);
+      return verdict !== undefined && !verdict.kept;
+    }),
+  );
+}
+
 function mergeSettings(
   system: Settings,
   systemDefaults: Settings,
@@ -498,11 +595,14 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
-          systemDefaults,
-          user,
-          system,
-        ]),
+        stripWorkspaceLoosenings(
+          stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
+            systemDefaults,
+            user,
+            system,
+          ]),
+          { system, systemDefaults, user },
+        ),
         'workspace',
       )
     : ({} as Settings);
@@ -731,6 +831,25 @@ export class LoadedSettings {
     }
     this._merged = this.computeMergedSettings();
     return false;
+  }
+
+  /**
+   * Get system-scope hooks: the SystemDefaults and System settings files,
+   * merged with the same strategy as the full merge (each `hooks.<Event>` list
+   * is concatenated), SystemDefaults first. Administrator configuration is not
+   * gated by folder trust, exactly like user hooks. Returns undefined, not an
+   * empty object, when neither file configures hooks, so callers can tell a
+   * scope with no data apart from one with data.
+   */
+  getSystemHooks(): Record<string, unknown> | undefined {
+    const merged = customDeepMerge(
+      getMergeStrategyForPath,
+      {},
+      { hooks: this.systemDefaults.settings.hooks ?? {} },
+      { hooks: this.system.settings.hooks ?? {} },
+    ) as Settings;
+    const hooks = merged.hooks;
+    return hooks && Object.keys(hooks).length > 0 ? hooks : undefined;
   }
 
   /**

@@ -7,6 +7,7 @@
 import {
   AuthType,
   hasVertexProjectConfigured,
+  resolveModelSelectionAuthType,
   VERTEX_ADC_HINT,
   type Config,
   type ModelProvidersConfig,
@@ -22,6 +23,7 @@ import { t } from '../i18n/index.js';
  */
 const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_OPENAI]: 'OPENAI_API_KEY',
+  [AuthType.USE_OPENAI_RESPONSES]: 'OPENAI_API_KEY',
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
@@ -129,13 +131,25 @@ function hasApiKeyForAuth(
   // that accounts for CLI args, env vars, and settings. Fall back to the
   // persisted settings.model.{name,baseUrl}.
   const { modelId, baseUrl } = resolveSelectedModel(settings, config);
+  const modelAuthType =
+    !config &&
+    (authType === AuthType.USE_OPENAI ||
+      authType === AuthType.USE_OPENAI_RESPONSES)
+      ? resolveModelSelectionAuthType(
+          authType,
+          modelId,
+          modelProviders,
+          settings.providerProtocol,
+          baseUrl,
+        )
+      : authType;
 
   // Try to find model-specific envKey from modelProviders, disambiguating by
   // baseUrl so duplicate-id providers resolve to the selected one.
   const modelConfig = findModelConfig(
     modelProviders,
     settings.providerProtocol,
-    authType,
+    modelAuthType,
     modelId,
     baseUrl,
   );
@@ -266,7 +280,10 @@ export function validateAuthMethod(
   const settings = loadSettings(process.cwd(), false);
   loadEnvironment(settings.merged);
 
-  if (authMethod === AuthType.USE_OPENAI) {
+  if (
+    authMethod === AuthType.USE_OPENAI ||
+    authMethod === AuthType.USE_OPENAI_RESPONSES
+  ) {
     const { hasKey, checkedEnvKey, isExplicitEnvKey } = hasApiKeyForAuth(
       authMethod,
       settings.merged,
