@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { getTranslator, I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { AddMenu, type AddMenuProps } from './AddMenu';
 
@@ -56,7 +56,10 @@ function render(ui?: ReactNode): AddMenuProps {
   return props;
 }
 
-function renderWith(props: AddMenuProps): void {
+function renderWith(
+  props: AddMenuProps,
+  language: WebShellLanguage = 'en',
+): void {
   container = document.createElement('div');
   portalRoot = document.createElement('div');
   portalRoot.dataset.webShellPortalRoot = '';
@@ -66,7 +69,7 @@ function renderWith(props: AddMenuProps): void {
   act(() =>
     root!.render(
       <WebShellPortalRootContext.Provider value={portalRoot}>
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <AddMenu {...props} />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -217,9 +220,6 @@ describe('AddMenu', () => {
     overrides: Partial<NonNullable<AddMenuProps['plan']>> = {},
   ): NonNullable<AddMenuProps['plan']> => ({
     checked: false,
-    disabledReason: 'Switching mode',
-    label: 'Plan mode',
-    description: 'Plan first, run after you approve',
     onToggle: vi.fn(),
     ...overrides,
   });
@@ -282,6 +282,18 @@ describe('AddMenu', () => {
     expect(onToggle).not.toHaveBeenCalled();
     // A disabled row does not close the menu either.
     expect(menuItem('composer-add-menu-plan')).not.toBeNull();
+  });
+
+  it('localizes the Plan row, including the reason it is disabled', async () => {
+    renderWith(baseProps({ plan: planControl({ disabled: true }) }), 'zh-CN');
+    await openMenu();
+    // Read from the catalog, so a literal in place of t() goes red.
+    const zh = getTranslator('zh-CN');
+    expect(menuItem('composer-add-menu-plan')!.textContent).toBe(
+      `${zh('composerAdd.plan.label')}${zh(
+        'composerAdd.plan.description',
+      )}${zh('composerAdd.plan.busy')}`,
+    );
   });
 
   it('closes on a Plan choice and toggles once without refocusing the trigger', async () => {
