@@ -84,6 +84,9 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
+      - name: 'Build packages'
+        run: 'npm run build'
+
       - name: 'Install Playwright Chromium'
         run: 'npx playwright install --with-deps chromium'
 
@@ -162,6 +165,13 @@ jobs:
         working-directory: 'base'
         run: 'npm ci --prefer-offline --no-audit --progress=false'
 
+      - name: 'Build base packages'
+        id: 'base_build'
+        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
+        working-directory: 'base'
+        continue-on-error: true
+        run: 'npm run build'
+
       # Run ONLY when the checkout AND install both succeeded. `base/` is nested
       # under the head checkout, so if the base's own node_modules is absent (a
       # failed npm ci) the render would resolve Playwright/Vite UP to the head's
@@ -177,7 +187,7 @@ jobs:
       # (flows.spec.ts) and the animation-harness test (harness.spec.ts) stay
       # out — the base arm discards recordings, so rendering them is waste.
       - name: 'Capture before (base) screenshots'
-        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
+        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' && steps.base_build.outcome == 'success' }}"
         working-directory: 'base'
         continue-on-error: true
         env:

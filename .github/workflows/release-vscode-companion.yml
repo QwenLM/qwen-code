@@ -100,6 +100,9 @@ jobs:
         run: |-
           npm ci
 
+      - name: 'Build packages'
+        run: 'npm run build'
+
       - name: 'Verify published export renderer'
         # An exported transcript loads its renderer from unpkg, pinned to this
         # exact version and guarded by an sha384 SRI digest computed from the
@@ -266,6 +269,9 @@ jobs:
           # Keep the verified, prebuilt export renderer reference pinned to the
           # published CLI version from the selected source ref.
           npm run release:version -- "${RELEASE_VERSION}"
+
+      - name: 'Build packages'
+        run: 'npm run build'
 
       - name: 'Prepare VSCode Extension'
         env:
