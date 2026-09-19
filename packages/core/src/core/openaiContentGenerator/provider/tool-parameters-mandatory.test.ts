@@ -48,20 +48,24 @@ function createConfig(
   } as ContentGeneratorConfig;
 }
 
-function outboundTool(
+function outboundRequest(
   config: ContentGeneratorConfig,
   provider: OpenAICompatibleProvider,
-  tool: OpenAI.Chat.ChatCompletionTool = CONVERTER_SHAPE,
-): OpenAI.Chat.ChatCompletionTool {
-  const request = provider.buildRequest(
+  tools: OpenAI.Chat.ChatCompletionTool[] | null = [CONVERTER_SHAPE],
+): OpenAI.Chat.ChatCompletionCreateParams {
+  return provider.buildRequest(
     {
       model: config.model,
       messages: [{ role: 'user', content: 'Hello' }],
-      tools: [tool],
+      ...(tools === null ? {} : { tools }),
     },
     'prompt-id',
   );
+}
 
+function outboundTool(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): OpenAI.Chat.ChatCompletionTool {
   const emitted = request.tools?.[0];
   if (!emitted) throw new Error('expected the request to carry a tool');
   return emitted;
@@ -71,23 +75,45 @@ describe('generationConfig.toolParametersMandatory', () => {
   describe('routes whose vendor predicate matches the model name', () => {
     // These four predicates match a model id at any baseUrl, so a self-hosted
     // strict server reaches them without ever reaching the default provider.
+    // max_tokens is contributed by the request the provider builds before the
+    // repair runs, so pinning it catches a repair wired to the inbound request
+    // instead of the built one — the tool mapping alone cannot tell them apart.
     const cases = [
-      { model: 'deepseek-v4.1-flash', ctor: DeepSeekOpenAICompatibleProvider },
-      { model: 'glm-4.6', ctor: ZaiOpenAICompatibleProvider },
-      { model: 'mimo-7b', ctor: MiMoOpenAICompatibleProvider },
-      { model: 'mistral-small', ctor: MistralOpenAICompatibleProvider },
+      {
+        model: 'deepseek-v4.1-flash',
+        ctor: DeepSeekOpenAICompatibleProvider,
+        maxTokens: 64_000,
+      },
+      {
+        model: 'glm-4.6',
+        ctor: ZaiOpenAICompatibleProvider,
+        maxTokens: 32_000,
+      },
+      {
+        model: 'mimo-7b',
+        ctor: MiMoOpenAICompatibleProvider,
+        maxTokens: 32_000,
+      },
+      {
+        model: 'mistral-small',
+        ctor: MistralOpenAICompatibleProvider,
+        maxTokens: 32_000,
+      },
     ] as const;
 
     it.each(cases)(
       'repairs on the $model route while its provider stays selected',
-      ({ model, ctor }) => {
+      ({ model, ctor, maxTokens }) => {
         const config = createConfig(model, 'http://localhost:5000/v1', true);
         const provider = determineProvider(config, mockCliConfig);
 
         expect(provider).toBeInstanceOf(ctor);
-        expect(outboundTool(config, provider).function.parameters).toEqual(
+        const request = outboundRequest(config, provider);
+
+        expect(outboundTool(request).function.parameters).toEqual(
           EMPTY_PARAMETERS,
         );
+        expect(request.max_tokens).toBe(maxTokens);
       },
     );
   });
@@ -98,9 +124,10 @@ describe('generationConfig.toolParametersMandatory', () => {
       const provider = determineProvider(config, mockCliConfig);
 
       expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
-      expect(
-        outboundTool(config, provider).function.parameters,
-      ).toBeUndefined();
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toBeUndefined();
+      expect(request.max_tokens).toBe(32_000);
     });
 
     it('emits the schema when opted in', () => {
@@ -112,9 +139,12 @@ describe('generationConfig.toolParametersMandatory', () => {
       const provider = determineProvider(config, mockCliConfig);
 
       expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
-      expect(outboundTool(config, provider).function.parameters).toEqual(
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toEqual(
         EMPTY_PARAMETERS,
       );
+      expect(request.max_tokens).toBe(32_000);
     });
 
     it('repairs a tool that declares no schema at all', () => {
@@ -125,38 +155,68 @@ describe('generationConfig.toolParametersMandatory', () => {
       );
       const provider = determineProvider(config, mockCliConfig);
 
-      expect(
-        outboundTool(config, provider, {
+      const request = outboundRequest(config, provider, [
+        {
           type: 'function',
           function: { name: 'cron_list', description: 'desc' },
-        }).function.parameters,
-      ).toEqual(EMPTY_PARAMETERS);
+        },
+      ]);
+
+      expect(outboundTool(request).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
+      );
+      expect(request.max_tokens).toBe(32_000);
     });
   });
 
   describe('the route that builds its request without super', () => {
+    // DashScope merges user extra_body last and calls the repair from that
+    // merge, so extra_body is what its own build step contributes.
+    const EXTRA_BODY = { custom: 'value' };
+
+    function dashScopeConfig(
+      toolParametersMandatory?: boolean,
+    ): ContentGeneratorConfig {
+      return {
+        ...createConfig(
+          'qwen3-8b',
+          'http://localhost:5000/v1',
+          toolParametersMandatory,
+        ),
+        extra_body: EXTRA_BODY,
+      };
+    }
+
     it('emits the schema on DashScope when opted in', () => {
-      const config = createConfig('qwen3-8b', 'http://localhost:5000/v1', true);
+      const config = dashScopeConfig(true);
       const provider = new DashScopeOpenAICompatibleProvider(
         config,
         mockCliConfig,
       );
 
-      expect(outboundTool(config, provider).function.parameters).toEqual(
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toEqual(
         EMPTY_PARAMETERS,
+      );
+      expect(request as unknown as Record<string, unknown>).toMatchObject(
+        EXTRA_BODY,
       );
     });
 
     it('leaves the DashScope omission intact without the opt-in', () => {
-      const config = createConfig('qwen3-8b', 'http://localhost:5000/v1');
+      const config = dashScopeConfig();
       const provider = new DashScopeOpenAICompatibleProvider(
         config,
         mockCliConfig,
       );
 
-      expect(
-        outboundTool(config, provider).function.parameters,
-      ).toBeUndefined();
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toBeUndefined();
+      expect(request as unknown as Record<string, unknown>).toMatchObject(
+        EXTRA_BODY,
+      );
     });
   });
 
@@ -166,9 +226,12 @@ describe('generationConfig.toolParametersMandatory', () => {
       const provider = determineProvider(config, mockCliConfig);
 
       expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
-      expect(outboundTool(config, provider).function.parameters).toEqual(
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toEqual(
         EMPTY_PARAMETERS,
       );
+      expect(request.max_tokens).toBe(32_000);
     });
 
     it('emits the schema on MiniMax when opted in', () => {
@@ -180,9 +243,12 @@ describe('generationConfig.toolParametersMandatory', () => {
       const provider = determineProvider(config, mockCliConfig);
 
       expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
-      expect(outboundTool(config, provider).function.parameters).toEqual(
+      const request = outboundRequest(config, provider);
+
+      expect(outboundTool(request).function.parameters).toEqual(
         EMPTY_PARAMETERS,
       );
+      expect(request.max_tokens).toBe(32_000);
     });
   });
 
@@ -200,23 +266,16 @@ describe('generationConfig.toolParametersMandatory', () => {
       );
       const provider = determineProvider(config, mockCliConfig);
 
-      const request = provider.buildRequest(
+      const request = outboundRequest(config, provider, [
         {
-          model: config.model,
-          messages: [{ role: 'user', content: 'Hello' }],
-          tools: [
-            {
-              type: 'function',
-              function: {
-                name: 'read_file',
-                description: 'desc',
-                parameters: schema,
-              },
-            },
-          ],
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: 'desc',
+            parameters: schema,
+          },
         },
-        'prompt-id',
-      );
+      ]);
 
       expect(request.tools).toEqual([
         {
@@ -228,6 +287,7 @@ describe('generationConfig.toolParametersMandatory', () => {
           },
         },
       ]);
+      expect(request.max_tokens).toBe(32_000);
     });
 
     it('keeps a request without tools tool-free', () => {
@@ -238,15 +298,10 @@ describe('generationConfig.toolParametersMandatory', () => {
       );
       const provider = determineProvider(config, mockCliConfig);
 
-      const request = provider.buildRequest(
-        {
-          model: config.model,
-          messages: [{ role: 'user', content: 'Hello' }],
-        },
-        'prompt-id',
-      );
+      const request = outboundRequest(config, provider, null);
 
       expect(request.tools).toBeUndefined();
+      expect(request.max_tokens).toBe(32_000);
     });
   });
 });
