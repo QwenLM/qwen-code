@@ -121,10 +121,23 @@ export class HookRegistry {
     try {
       this.entries = [...agentEntries];
       this.processHooksFromConfig();
+      const restoredKeys = new Set<string>();
       for (const entry of this.entries) {
-        const enabled = enabledSnapshot.get(this.getHookStateKey(entry));
+        const key = this.getHookStateKey(entry);
+        const enabled = enabledSnapshot.get(key);
         if (enabled !== undefined) {
           entry.enabled = enabled;
+          restoredKeys.add(key);
+        }
+      }
+
+      for (const [key, enabled] of enabledSnapshot) {
+        if (!enabled && !restoredKeys.has(key)) {
+          debugLogger.warn(
+            `A previously disabled hook was not found after reload ` +
+              `(key=${key}). Its state has been reset because its name was ` +
+              'changed or removed. Re-disable it by name if still needed.',
+          );
         }
       }
     } catch (err) {
@@ -206,8 +219,10 @@ export class HookRegistry {
    */
   setHookEnabled(hookName: string, enabled: boolean): void {
     const updated = this.entries.filter((entry) => {
-      const name = this.getHookName(entry);
-      if (name === hookName) {
+      if (!entry.config.name) {
+        return false;
+      }
+      if (entry.config.name === hookName) {
         entry.enabled = enabled;
         return true;
       }
@@ -219,7 +234,11 @@ export class HookRegistry {
         `${enabled ? 'Enabled' : 'Disabled'} ${updated.length} hook(s) matching "${hookName}"`,
       );
     } else {
-      debugLogger.warn(`No hooks found matching "${hookName}"`);
+      debugLogger.warn(
+        `No individually disable-able hooks found matching "${hookName}". ` +
+          'Hooks without a "name" field cannot be disabled individually; ' +
+          'add a "name" to the hook definition to enable per-hook toggling.',
+      );
     }
   }
 
@@ -253,7 +272,7 @@ export class HookRegistry {
       entry.eventName,
       entry.source,
       entry.agentScope ?? null,
-      this.getHookIdentity(entry),
+      entry.config.name ?? null,
       entry.matcher ?? null,
       entry.sequential ?? null,
     ]);
