@@ -521,7 +521,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       }
       // Both bounds are code-point columns, so the new length is arithmetic.
       const remaining = startCol + cpLen(line) - endCol;
-      if (remaining > 0 && startCol >= remaining) {
+      if (startCol >= remaining) {
         buffer.vimMoveLeft(1);
       }
       return true;

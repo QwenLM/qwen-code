@@ -2653,7 +2653,8 @@ describe('useVim hook', () => {
         }),
         vimEscapeInsertMode: vi.fn(),
       };
-      return buffer as unknown as TextBuffer & Record<string, Mock>;
+      return buffer as unknown as Omit<TextBuffer, 'replaceRange'> &
+        Record<'replaceRange', Mock>;
     };
 
     const press = (
