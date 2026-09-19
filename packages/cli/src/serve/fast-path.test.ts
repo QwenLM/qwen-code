@@ -2491,6 +2491,37 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['FAST_PATH_SYSTEM_DEFAULTS_MARKER']).toBeUndefined();
   });
 
+  it('uses system folder trust over a disabled user setting', async () => {
+    delete process.env['FAST_PATH_SYSTEM_TRUST_MARKER'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-system-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: false } } }),
+    );
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
+      qwenHome,
+      'system.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'],
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: { FAST_PATH_SYSTEM_TRUST_MARKER: 'from-workspace-settings' },
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['FAST_PATH_SYSTEM_TRUST_MARKER']).toBeUndefined();
+  });
+
   it('names an undecided folder trust in a diagnostic the declined case omits', async () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(

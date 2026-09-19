@@ -1427,6 +1427,11 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('should use system folderTrust over user setting', () => {
+      vi.mocked(isWorkspaceTrusted).mockImplementation((settings) => ({
+        isTrusted:
+          settings.security?.folderTrust?.enabled === true ? undefined : true,
+        source: undefined,
+      }));
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettingsContent = {
         security: {
@@ -1441,6 +1446,7 @@ describe('Settings Loading and Merging', () => {
             enabled: true, // This should be ignored
           },
         },
+        context: { fileName: 'WORKSPACE.md' },
       };
       const systemSettingsContent = {
         security: {
@@ -1464,6 +1470,8 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.security?.folderTrust?.enabled).toBe(true); // System setting should be used
+      expect(settings.isTrusted).toBe(false);
+      expect(settings.merged.context?.fileName).toBeUndefined();
     });
 
     it('should handle contextFileName correctly when only in user settings', () => {

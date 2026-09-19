@@ -1265,8 +1265,8 @@ export function loadSettings(
     getMergeStrategyForPath,
     {},
     systemDefaultSettings,
-    systemSettings,
     userSettings,
+    systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??

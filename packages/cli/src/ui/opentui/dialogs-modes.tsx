@@ -152,7 +152,11 @@ export function OpenTuiApprovalModeDialog(props: {
       // applies the merged setting (useApprovalModeCommand parity).
       config?.setApprovalMode?.(mode);
       settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
-      onApprovalModeChanged(mode);
+      const effectiveMode = settings.merged.tools?.approvalMode ?? mode;
+      if (effectiveMode !== mode) {
+        config?.setApprovalMode?.(effectiveMode);
+      }
+      onApprovalModeChanged(effectiveMode);
     } catch (e) {
       // Keep the dialog open and show the refusal: an empty catch here made a
       // gate rejection indistinguishable from an accepted choice.

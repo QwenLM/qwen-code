@@ -750,8 +750,8 @@ export function loadServeFastPathSettings(
   // trusted workspace may contribute cannot decide its own trust.
   const initialTrustCheckSettings = mergeFastPathSettings(
     systemDefaults,
-    system,
     user,
+    system,
   );
   const trustDecision = isWorkspaceTrustedFastPath(
     initialTrustCheckSettings,
