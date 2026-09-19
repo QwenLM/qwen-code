@@ -16,28 +16,35 @@ export type { Key };
  * @param onKeypress - The callback function to execute on each keypress.
  * @param options - Options to control the hook's behavior.
  * @param options.isActive - Whether the hook should be actively listening for input.
+ * @param options.exclusive - While subscribed, ordinary (non-exclusive)
+ *   handlers do not receive keys; returning `false` from the handler releases
+ *   a declined key back to them. Reserved for modal surfaces that own the
+ *   keyboard while mounted (the right-click context menu overlay).
  */
 export function useKeypress(
   onKeypress: KeypressHandler,
-  { isActive }: { isActive: boolean },
+  { isActive, exclusive = false }: { isActive: boolean; exclusive?: boolean },
 ) {
   const { subscribe, unsubscribe } = useKeypressContext();
   const onKeypressRef = useRef(onKeypress);
 
   onKeypressRef.current = onKeypress;
 
-  const handleKeypress = useCallback<KeypressHandler>((key) => {
-    onKeypressRef.current(key);
-  }, []);
+  // Forward the inner return value: an exclusive handler's `false` (key
+  // declined) must reach KeypressContext's broadcast, not die here.
+  const handleKeypress = useCallback<KeypressHandler>(
+    (key) => onKeypressRef.current(key),
+    [],
+  );
 
   useEffect(() => {
     if (!isActive) {
       return;
     }
 
-    subscribe(handleKeypress);
+    subscribe(handleKeypress, { exclusive });
     return () => {
       unsubscribe(handleKeypress);
     };
-  }, [isActive, handleKeypress, subscribe, unsubscribe]);
+  }, [isActive, exclusive, handleKeypress, subscribe, unsubscribe]);
 }
