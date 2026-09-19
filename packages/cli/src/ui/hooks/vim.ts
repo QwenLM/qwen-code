@@ -43,6 +43,8 @@ const CMD_TYPES = {
   YANK_WORD_FORWARD: 'yw',
   YANK_WORD_BACKWARD: 'yb',
   YANK_WORD_END: 'ye',
+  DELETE_TO_EOL_MOTION: 'd$',
+  CHANGE_TO_EOL_MOTION: 'c$',
   YANK_TO_EOL: 'y$',
   DELETE_TO_LINE_START: 'd0',
   CHANGE_TO_LINE_START: 'c0',
@@ -95,8 +97,8 @@ for (const operator of ['d', 'c', 'y'] as const) {
 
 const LINE_MOTION_COMMANDS: Record<LineMotion, Record<OperatorChar, string>> = {
   $: {
-    d: CMD_TYPES.DELETE_TO_EOL,
-    c: CMD_TYPES.CHANGE_TO_EOL,
+    d: CMD_TYPES.DELETE_TO_EOL_MOTION,
+    c: CMD_TYPES.CHANGE_TO_EOL_MOTION,
     y: CMD_TYPES.YANK_TO_EOL,
   },
   '0': {
@@ -383,8 +385,9 @@ function firstNonBlankCol(line: string): number {
 
 /**
  * Half-open [startCol, endCol) an operator covers for a line motion, or null
- * when the motion spans nothing. `$` is inclusive of the line's last
- * character; `0` and `^` are exclusive of the position they land on.
+ * when the motion spans nothing. `$` runs through the line's last character.
+ * `0` and `^` run backwards and include the position they land on; `^` with
+ * the cursor inside the indentation runs forwards and stops before it.
  */
 function lineMotionRange(
   line: string,
@@ -500,7 +503,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       startCol: number,
       endCol: number,
     ): boolean => {
-      if (endCol <= startCol) return false;
+      if (endCol <= startCol) {
+        // An empty change still lands in insert mode, as `C` does at end of
+        // line; returning false keeps it out of dot-repeat.
+        if (operator === 'c') {
+          updateMode('INSERT');
+        }
+        return false;
+      }
       const line = bufferRef.current.lines[row] ?? '';
       yankRange(row, startCol, row, endCol, false);
       if (operator === 'y') return true;
@@ -527,9 +537,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         col,
         motion,
       );
-      return range
-        ? applyCharOperator(operator, row, range[0], range[1])
-        : false;
+      return applyCharOperator(
+        operator,
+        row,
+        range?.[0] ?? col,
+        range?.[1] ?? col,
+      );
     },
     [applyCharOperator],
   );
@@ -545,9 +558,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       const line = bufferRef.current.lines[row] ?? '';
       const foundCol = findRawCharCol(line, findType, char, col, count);
       const range = findMotionRange(col, findType, foundCol);
-      return range
-        ? applyCharOperator(operator, row, range[0], range[1])
-        : false;
+      return applyCharOperator(
+        operator,
+        row,
+        range?.[0] ?? col,
+        range?.[1] ?? col,
+      );
     },
     [applyCharOperator],
   );
@@ -660,27 +676,24 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           updateMode('INSERT');
           break;
         }
+        case CMD_TYPES.DELETE_TO_EOL_MOTION:
+          return applyLineMotion('d', '$');
+        case CMD_TYPES.CHANGE_TO_EOL_MOTION:
+          return applyLineMotion('c', '$');
         case CMD_TYPES.YANK_TO_EOL:
-          applyLineMotion('y', '$');
-          break;
+          return applyLineMotion('y', '$');
         case CMD_TYPES.DELETE_TO_LINE_START:
-          applyLineMotion('d', '0');
-          break;
+          return applyLineMotion('d', '0');
         case CMD_TYPES.CHANGE_TO_LINE_START:
-          applyLineMotion('c', '0');
-          break;
+          return applyLineMotion('c', '0');
         case CMD_TYPES.YANK_TO_LINE_START:
-          applyLineMotion('y', '0');
-          break;
+          return applyLineMotion('y', '0');
         case CMD_TYPES.DELETE_TO_FIRST_NONBLANK:
-          applyLineMotion('d', '^');
-          break;
+          return applyLineMotion('d', '^');
         case CMD_TYPES.CHANGE_TO_FIRST_NONBLANK:
-          applyLineMotion('c', '^');
-          break;
+          return applyLineMotion('c', '^');
         case CMD_TYPES.YANK_TO_FIRST_NONBLANK:
-          applyLineMotion('y', '^');
-          break;
+          return applyLineMotion('y', '^');
         case CMD_TYPES.YANK_LINE: {
           const lines = bufferRef.current.lines;
           const [row] = bufferRef.current.cursor;
@@ -1347,16 +1360,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         }
         return false;
       }
-      const [row, col] = bufferRef.current.cursor;
-      const spans =
-        lineMotionRange(bufferRef.current.lines[row] ?? '', col, motion) !==
-        null;
       const count = getCurrentCount();
       const cmdType = LINE_MOTION_COMMANDS[motion][operator];
-      // The end-of-line commands yank before deciding the motion is empty, so
-      // an empty range must not reach them or it overwrites the register.
-      if (spans) {
-        executeCommand(cmdType, count);
+      // The command owns the emptiness rule, so an empty range cannot yank and
+      // is not recorded for dot-repeat.
+      if (executeCommand(cmdType, count)) {
         dispatch({
           type: 'SET_LAST_COMMAND',
           command: { type: cmdType, count },
@@ -1404,6 +1412,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           normalizedKey.sequence.charCodeAt(0) >= 32
         ) {
           return handleCharRead(normalizedKey.sequence);
+        }
+        // Keeping the read armed would apply the operator to whatever printable
+        // key comes next, so drop the whole sequence instead.
+        if (s.pendingOperator) {
+          dispatch({ type: 'CLEAR_PENDING_STATES' });
         }
         return true;
       }

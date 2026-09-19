@@ -7,7 +7,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { execFile } from 'child_process';
 import { renderHook, act } from '@testing-library/react';
 import type React from 'react';
 import { useVim } from './vim.js';
@@ -2681,22 +2680,67 @@ describe('useVim hook', () => {
       const { buffer, result } = renderApplying('hello world', [0, 5]);
       press(result, 'd$');
       expect(buffer.lines).toEqual(['hello']);
-      expect(buffer.cursor).toEqual([0, 5]);
+      expect(buffer.cursor).toEqual([0, 4]);
     });
 
-    it('leaves the yank register and clipboard alone when d$ deletes nothing', () => {
-      const { buffer, result } = renderApplying('hello world', [0, 5]);
+    it('puts the cursor on the last remaining character when d$ ate the line', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 0]);
       press(result, 'd$');
-      expect(buffer.lines).toEqual(['hello']);
-      const clipboardWrites = vi.mocked(execFile).mock.calls.length;
-      expect(clipboardWrites).toBeGreaterThan(0);
-
-      // The cursor sits one past the shortened line, so this second d$ spans
-      // nothing and must not re-enter the yank path.
-      press(result, 'd$');
-      expect(buffer.lines).toEqual(['hello']);
-      expect(vi.mocked(execFile).mock.calls).toHaveLength(clipboardWrites);
+      expect(buffer.lines).toEqual(['']);
+      expect(buffer.cursor).toEqual([0, 0]);
     });
+
+    it('leaves the yank register alone when d$ deletes nothing', () => {
+      const { buffer, result } = renderApplying('keep', [0, 0]);
+      press(result, 'd$');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(0, 0, 0, 4, '');
+      buffer.replaceRange.mockClear();
+
+      // The line is empty now, so this d$ spans nothing and must not
+      // overwrite what the first one yanked.
+      press(result, 'd$');
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+      press(result, 'p');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        'keep',
+      );
+    });
+
+    it('keeps the yank register when an empty d$ is repeated with dot', () => {
+      const { buffer, result } = renderApplying('keep', [0, 0]);
+      press(result, 'd$');
+      buffer.replaceRange.mockClear();
+
+      // Dot-repeat takes the same command the keystroke did, so it has to hit
+      // the same empty-range guard.
+      press(result, '.');
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+      press(result, 'p');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        'keep',
+      );
+    });
+
+    it.each(['c$', 'c0', 'c^'])(
+      'enters insert mode when %s has nothing to change',
+      (keys) => {
+        const text = keys === 'c^' ? '  hello' : 'hello';
+        const cursor: [number, number] =
+          keys === 'c0' ? [0, 0] : keys === 'c$' ? [0, 5] : [0, 2];
+        const { buffer, result } = renderApplying(text, cursor);
+        press(result, keys);
+        expect(buffer.lines).toEqual([text]);
+        expect(result.current.mode).toBe('INSERT');
+      },
+    );
 
     it('changes to end of line with c$ and enters INSERT', () => {
       const { buffer, result } = renderApplying('hello world', [0, 5]);
@@ -2711,6 +2755,42 @@ describe('useVim hook', () => {
       expect(buffer.lines).toEqual(['hello world']);
       press(result, 'p');
       expect(buffer.replaceRange).toHaveBeenCalledWith(0, 6, 0, 6, ' world');
+    });
+
+    it.each([
+      ['y0', 'hello world', [0, 6] as [number, number], 'hello '],
+      ['y^', '  hello', [0, 4] as [number, number], 'he'],
+      ['yt ', 'hello world', [0, 0] as [number, number], 'hello'],
+    ])('yanks with %s for a later paste', (keys, text, cursor, yanked) => {
+      const { buffer, result } = renderApplying(text, cursor);
+      press(result, keys);
+      expect(buffer.lines).toEqual([text]);
+      buffer.replaceRange.mockClear();
+      press(result, 'p');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        yanked,
+      );
+    });
+
+    it('does not make a line motion that deleted nothing repeatable', () => {
+      const { buffer, result } = renderApplying('hello', [0, 0]);
+      press(result, 'd0');
+      expect(buffer.lines).toEqual(['hello']);
+      press(result, 'll');
+      press(result, '.');
+      expect(buffer.lines).toEqual(['hello']);
+    });
+
+    it('cancels operator+find when a non-printable key answers the read', () => {
+      const { buffer, result } = renderApplying('axbc', [0, 0]);
+      press(result, 'df');
+      act(() => result.current.handleInput(makeKey('\r', 'return')));
+      press(result, 'x');
+      expect(buffer.lines).toEqual(['xbc']);
     });
 
     it('deletes to start of line with d0, leaving the cursor on the text', () => {
