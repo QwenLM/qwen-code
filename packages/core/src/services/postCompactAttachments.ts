@@ -515,20 +515,74 @@ const RESUME_TRAILER =
  *    nested `<analysis>` tags, this pattern will leak content. The
  *    compression prompt is under our control, so we keep the pattern
  *    strict rather than over-engineering.
- *  - The unclosed-tag fallback (`<analysis>[\s\S]*$`) catches the case
- *    where the model started an `<analysis>` block and ran out of
- *    output tokens before closing it. Without this, the closed-tag
- *    regex above misses and the entire scratchpad leaks into history
- *    via the fallback path in `postProcessSummary`.
+ *  - The closed-block pattern accepts the reasoning tags thinking models
+ *    actually close with (`</think>` and friends), not just the literal
+ *    `</analysis>` the prompt asks for: a thinking model instructed to open
+ *    `<analysis>` often emits its native closer, and a strict single-tag
+ *    pattern then treats the whole answer as unterminated and swallows the
+ *    real summary after it (#11969). Cross-pair closers like
+ *    `<analysis>...</think>` are accepted for the same reason.
+ *  - The unclosed-tag fallback (line-anchored `<analysis>[\s\S]*$`)
+ *    catches the case where the model started an `<analysis>` block and
+ *    ran out of output tokens before closing it. Without this, the
+ *    closed-tag regex above misses and the entire scratchpad leaks into
+ *    history via the fallback path in `postProcessSummary`. The line
+ *    anchor keeps prose that merely names a reasoning tag mid-sentence
+ *    intact.
  */
+const REASONING_TAG_NAMES = '(?:analysis|think|thinking|reasoning)';
+const CLOSED_REASONING_BLOCK = new RegExp(
+  `<${REASONING_TAG_NAMES}>[\\s\\S]*?<\\/${REASONING_TAG_NAMES}>\\s*`,
+  'gi',
+);
+// The unclosed fallback fires only at a line boundary: the truncation case it
+// exists for (model ran out of output tokens mid-block) always leaves the tag
+// at the start of a line, while a mid-sentence mention like "about <think>
+// tags" is prose and keeps its tail.
+const UNCLOSED_REASONING_BLOCK = new RegExp(
+  `(?:^|\\n)[ \\t]*<${REASONING_TAG_NAMES}>[\\s\\S]*$`,
+  'gi',
+);
+// The summary contract from `getCompressionPrompt()`: when the model emits a
+// closed envelope, the envelope alone is the payload.
+const ENVELOPE_OPEN = '<state_snapshot>';
+const ENVELOPE_CLOSE = '</state_snapshot>';
+const REASONING_TAG_OPEN = new RegExp(`<${REASONING_TAG_NAMES}>`, 'i');
+
 export function stripAnalysisBlock(rawSummary: string): string {
-  // First pass: strip well-formed `<analysis>...</analysis>` blocks
-  // (handles multiple via `/g`, newlines via `[\s\S]`).
-  let result = rawSummary.replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '');
-  // Second pass: strip any remaining unclosed `<analysis>` tag (the
-  // model ran out of output tokens before closing). Uses an
-  // end-of-string anchor since there's no closing tag to stop at.
-  result = result.replace(/<analysis>[\s\S]*$/g, '');
+  // A closed <state_snapshot> envelope IS the summary: anything before it is
+  // drafting scratchpad, anything after it is chatter. Binding the strip to
+  // the envelope keeps the tag patterns outside the payload, so a reasoning
+  // tag quoted inside the snapshot is never a strip candidate.
+  const start = rawSummary.indexOf(ENVELOPE_OPEN);
+  const closeAt =
+    start >= 0
+      ? rawSummary.indexOf(ENVELOPE_CLOSE, start + ENVELOPE_OPEN.length)
+      : -1;
+  if (start >= 0 && closeAt > start) {
+    // The envelope only counts at top level. A state_snapshot quoted inside
+    // the scratchpad is a draft, so refuse the binding while the preamble
+    // still holds an open reasoning block.
+    const preamble = rawSummary
+      .slice(0, start)
+      .replace(CLOSED_REASONING_BLOCK, '');
+    if (!REASONING_TAG_OPEN.test(preamble)) {
+      const end = closeAt + ENVELOPE_CLOSE.length;
+      const suffix = rawSummary
+        .slice(end)
+        .replace(CLOSED_REASONING_BLOCK, '')
+        .replace(UNCLOSED_REASONING_BLOCK, '');
+      return (rawSummary.slice(start, end) + suffix).trim();
+    }
+  }
+  // First pass: strip well-formed reasoning blocks (handles multiple via
+  // `/g`, newlines via `[\s\S]`, any of the native closer tags above).
+  let result = rawSummary.replace(CLOSED_REASONING_BLOCK, '');
+  // Second pass: strip any remaining unclosed reasoning tag (the model ran
+  // out of output tokens before closing). Anchored to a line boundary plus
+  // the end of the string, so prose that merely names a tag mid-sentence is
+  // left alone.
+  result = result.replace(UNCLOSED_REASONING_BLOCK, '');
   return result.trim();
 }
 
