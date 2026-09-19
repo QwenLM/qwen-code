@@ -76,6 +76,17 @@ export function findRunningLegacyGoalCard(
   return running;
 }
 
+/** The card kinds a replay shows; a card of any other kind is not one. */
+const GOAL_CARD_KINDS = new Set([
+  'set',
+  'achieved',
+  'cleared',
+  'failed',
+  'aborted',
+  'paused',
+  'checking',
+]);
+
 interface LegacyGoalCard {
   kind: string;
   condition: string;
@@ -111,7 +122,13 @@ function legacyGoalCards(record: GoalRecoveryRecord): LegacyGoalCard[] {
     if (raw['type'] !== 'goal_status') continue;
     const kind = raw['kind'];
     const condition = raw['condition'];
-    if (typeof kind !== 'string' || typeof condition !== 'string') continue;
+    if (
+      typeof kind !== 'string' ||
+      !GOAL_CARD_KINDS.has(kind) ||
+      typeof condition !== 'string'
+    ) {
+      continue;
+    }
     const iterations = finiteNumber(raw['iterations']);
     const setAt = finiteNumber(raw['setAt']);
     cards.push({

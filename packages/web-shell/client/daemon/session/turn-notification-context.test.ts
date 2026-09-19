@@ -272,6 +272,32 @@ describe('turn notification content', () => {
     expect(notify).toHaveBeenCalledWith(expect.objectContaining(content!));
   });
 
+  it('skips a compression row when selecting the turn response', () => {
+    // The row renders as `role: 'system'` but its `meta.source` is
+    // `slash_command`, so only the adapter's own decision excludes it (#12141).
+    const content = getTurnNotificationContent(
+      terminal(),
+      [
+        block('final response'),
+        block('Context compressed (~2123 -> ~58).', {
+          meta: {
+            source: 'slash_command',
+            contextCompression: {
+              phase: 'done',
+              originalTokenCount: 2123,
+              newTokenCount: 58,
+            },
+          },
+        }),
+      ],
+      'Session title',
+    );
+    expect(content).toEqual({
+      sessionTitle: 'Session title',
+      responseText: 'final response',
+    });
+  });
+
   it('uses this turn request when a new session has no title yet', () => {
     const blocks = [
       block('old request', { kind: 'user', promptId: 'old' }),

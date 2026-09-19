@@ -870,6 +870,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_runtime_removal',
   'native_directory_picker',
   'workspace_runtime',
+  'workspace_runtime_stop',
   'workspace_local_open',
   'workspace_local_terminal',
   'workspace_qualified_rest_core',
@@ -3760,6 +3761,27 @@ describe('createServeApp', () => {
               workspaceRuntimeRemovalAvailable: true,
             }),
           ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_runtime_stop') {
+          expect(predicate({ workspaceRuntimeStopAvailable: true })).toBe(true);
+          expect(predicate({ workspaceRuntimeStopAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeStopAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeStopAvailable: false,
+            }),
+          ).not.toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
@@ -43474,7 +43496,8 @@ describe('Live Appshot server integration', () => {
         expect(capabilities.body.features.includes('realtime_voice')).toBe(
           native,
         );
-        // Shipped Web Shells turn these keys into the native install card.
+        // Listed on every platform; `/live/setup.nativeHost` tells the Web
+        // Shell whether the install / launch / shortcut parts apply.
         const settings = await request(app)
           .get('/workspace/settings')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -43482,7 +43505,11 @@ describe('Live Appshot server integration', () => {
           settings.body.settings.some((setting: { key: string }) =>
             setting.key.startsWith('experimental.liveVoice.'),
           ),
-        ).toBe(native);
+        ).toBe(true);
+        const setup = await request(app)
+          .get('/live/setup')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(setup.body.nativeHost).toBe(native);
       } finally {
         (app?.locals['stopLiveCoordinator'] as (() => void) | undefined)?.();
         restoreEnv('QWEN_HOME', previousQwenHome);

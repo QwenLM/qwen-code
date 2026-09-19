@@ -12,7 +12,7 @@ import {
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import {
   apiActivityTracker,
-  projectGoalStateToLegacy,
+  projectGoalCard,
   type GoalRecord,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -52,14 +52,8 @@ export function buildGoalStateUpdate(
   cause?: GoalStateCause,
   previousGoal: GoalRecord | null = null,
 ): SessionUpdate {
-  const projection = cause
-    ? projectGoalStateToLegacy({ v: 2, cause, snapshot }, previousGoal)
-    : undefined;
-  const goalStatus = projection
-    ? (() => {
-        const { type: _type, ...status } = projection.goalStatus;
-        return status;
-      })()
+  const goalStatus = cause
+    ? projectGoalCard({ v: 2, cause, snapshot }, previousGoal)
     : undefined;
   return {
     sessionUpdate: 'agent_message_chunk',
@@ -67,9 +61,6 @@ export function buildGoalStateUpdate(
     _meta: {
       goalState: snapshot,
       ...(goalStatus ? { goalStatus } : {}),
-      ...(projection?.goalTerminal
-        ? { goalTerminal: projection.goalTerminal }
-        : {}),
     },
   };
 }
