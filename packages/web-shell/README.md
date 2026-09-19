@@ -692,3 +692,31 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 支持 turn navigation 的 daemon 会分页搜索持久化历史，不受当前可见区域限制；
 旧 daemon 只能搜索已加载消息，弹框会明确提示。搜索结果最多展示 200 条，
 超过时可缩小关键词范围。搜索不修改草稿或中断正在进行的回复。
+
+### 宿主定位持久化消息
+
+宿主先通过 `WebShellWithProviders` 的 `sessionId` 和 workspace props 打开目标会话，再调用公开 API：
+
+```tsx
+import { useRef } from 'react';
+import { WebShellWithProviders, type WebShellApi } from '@qwen-code/web-shell';
+
+const shellRef = useRef<WebShellApi>(null);
+// 将 shellRef 传给 <WebShellWithProviders shellRef={shellRef} {...connectionProps} />。
+// 会话/历史就绪后，在宿主的结果点击处理函数里调用：
+const result = await shellRef.current?.navigateToMessage({
+  sessionId: selectedSessionId,
+  recordId: selectedPersistedRecordId,
+  signal: abortController.signal,
+});
+```
+
+公开类型为 `WebShellMessageNavigationRequest`、`WebShellMessageNavigationResult`。
+`recordId` 是持久化用户/助手转录记录 ID，不是渲染消息 ID 或摘要。
+接口分页加载尚未渲染的历史、激活目标并在随后渲染中滚动高亮，不修改草稿；
+搜索图标隐藏时也可调用。很旧的目标需要线性扫描历史，找到记录即停止。
+
+结果 `status` 为 `located`、`not_found`、`not_ready`、`session_mismatch`、`unsupported`、
+`cancelled` 或 `error`；`located` 不代表滚动动画已结束。未就绪时宿主须等待会话/视图就绪后再调用。
+新请求、会话/工作目录变化、卸载或 AbortSignal 取消会使旧请求失效。
+现有跨会话搜索接口仅返回会话和摘要，不提供 `recordId`；宿主搜索需补齐记录 ID 后才可精确定位。

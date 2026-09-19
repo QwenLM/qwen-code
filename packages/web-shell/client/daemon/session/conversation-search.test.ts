@@ -91,6 +91,47 @@ async function ready(
 }
 
 describe('conversation search', () => {
+  it('resolves the exact persisted record even when messages have identical text', async () => {
+    const { store, client, first, second } = fixture();
+    await ready(store);
+    first[1]!.text = 'Repeated answer';
+    second[1]!.text = 'Repeated answer';
+    vi.mocked(client.getTranscriptPage).mockClear();
+    const hit = await store.resolveMessageRecord('a2', {
+      isCurrent: () => true,
+    });
+    expect(hit).toMatchObject({
+      recordId: 'a2',
+      turnId: 'u2',
+      turnOrdinal: 1,
+      sessionId: 'session',
+    });
+    expect(client.getTranscriptPage).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops reading after finding a record and returns undefined for missing records', async () => {
+    const { store, client } = fixture();
+    await ready(store);
+    vi.mocked(client.getTranscriptPage).mockClear();
+    expect(
+      await store.resolveMessageRecord('a1', { isCurrent: () => true }),
+    ).toMatchObject({ recordId: 'a1' });
+    expect(client.getTranscriptPage).toHaveBeenCalledTimes(1);
+    expect(
+      await store.resolveMessageRecord('missing', { isCurrent: () => true }),
+    ).toBeUndefined();
+  });
+
+  it('cancels external record resolution before reading history', async () => {
+    const { store, client } = fixture();
+    await ready(store);
+    vi.mocked(client.getTranscriptPage).mockClear();
+    await expect(
+      store.resolveMessageRecord('a1', { isCurrent: () => false }),
+    ).rejects.toThrow('cancelled');
+    expect(client.getTranscriptPage).not.toHaveBeenCalled();
+  });
+
   it('acquires a snapshot before requesting the first page of a long index', async () => {
     const { store, client, turns } = fixture();
     await ready(store);

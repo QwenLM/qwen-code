@@ -194,6 +194,10 @@ export interface DaemonHistoryNavigationStore
     query: string,
     options: ConversationSearchOptions,
   ): Promise<ConversationSearchResult>;
+  resolveMessageRecord(
+    recordId: string,
+    request: HistoryViewportRequest,
+  ): Promise<ConversationSearchHit | undefined>;
   locateViewportSearchHit(
     hit: ConversationSearchHit,
     request: HistoryViewportRequest,
@@ -847,6 +851,7 @@ export function createDaemonTurnNavigationStore(
   async function scanConversation(
     query: string,
     request: ConversationSearchOptions,
+    targetRecordId?: string,
   ): Promise<ConversationSearchResult> {
     const result: ConversationSearchResult = {
       hits: [],
@@ -971,7 +976,11 @@ export function createDaemonTurnNavigationStore(
         const text = sameMessage ? previousTextTail + block.text : block.text;
         previousTextTail = text.slice(-Math.max(60, query.length));
         lastRecordId = ids.at(-1);
-        const match = createConversationSearchSnippet(text, query);
+        const match = targetRecordId
+          ? ids.includes(targetRecordId)
+            ? { snippet: '', matchStart: 0, matchEnd: 0 }
+            : undefined
+          : createConversationSearchSnippet(text, query);
         if (match && messageTurn && recordId !== lastMatchedRecordId) {
           lastMatchedRecordId = recordId;
           result.matchCount += 1;
@@ -980,13 +989,14 @@ export function createDaemonTurnNavigationStore(
               sessionId: activeSessionId,
               snapshot: searchSnapshot,
               revision,
-              recordId,
+              recordId: targetRecordId ?? recordId,
               turnId: messageTurn.turnId,
               turnOrdinal: messageTurn.ordinal,
               role: block.kind,
               ...match,
             });
           else result.truncated = true;
+          if (targetRecordId) return result;
         }
         if (
           request.stopAfterMessages !== undefined &&
@@ -1798,6 +1808,8 @@ export function createDaemonTurnNavigationStore(
     locateOrdinal,
     locateViewportOrdinal: locateOrdinal,
     scanConversation,
+    resolveMessageRecord: async (recordId, request) =>
+      (await scanConversation('', request, recordId)).hits[0],
     locateViewportSearchHit,
     refreshHead,
     loadOlder: (rangeId) => loadBoundary(rangeId, 'older'),

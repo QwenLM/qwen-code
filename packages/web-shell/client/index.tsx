@@ -310,3 +310,8 @@ export type {
   WebShellSettingItemId,
   WebShellSettingsOptions,
 } from './settings';
+
+export type {
+  WebShellMessageNavigationRequest,
+  WebShellMessageNavigationResult,
+} from './hooks/useMessageNavigation';

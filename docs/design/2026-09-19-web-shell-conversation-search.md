@@ -29,3 +29,13 @@ Verify the 10/11 boundary and custom thresholds; old messages outside the live w
 ## Open questions
 
 None. The threshold is a host component option; a settings-page control and cross-session search are outside this issue.
+
+## Public host navigation
+
+`WebShellApi.navigateToMessage({ sessionId, recordId, signal? })` is available through `shellRef` on both embedding components. Request/result types are exported from the package root. The host selects the session/workspace through the existing provider lifecycle first. This API never switches sessions or sends prompts; it can run with the timeline hidden or the search threshold unmet.
+
+`recordId` is the stable persisted transcript identity, not a rendered block ID, timestamp, or snippet. Resolution scans a frozen historical snapshot until that exact user/assistant record is found, retaining only one hit. Navigation then reuses the bounded historical viewport and highlights the projected message. Duplicate text cannot redirect the operation to a different record. Very old targets require linear transcript reads; no server-side record index is introduced.
+
+The promise returns a `status`: `located` (the navigation target is activated; scrolling/highlighting occurs on the subsequent React render, not an animation-completion signal), `not_found` (absent persisted user/assistant record), `not_ready` (session/history/viewport not ready), `session_mismatch`, `unsupported` (legacy history), `cancelled`, or `error` (read/navigation failure). Host callers should react to readiness instead of treating `not_ready` as an empty result. `AbortSignal`, a newer host request, session/workspace changes, transcript revision changes, and unmounting invalidate pending work.
+
+Cross-session search still returns a session and one snippet, without record IDs. A host must retain the persisted record ID in its search results before using exact navigation. Extending that search endpoint, archive search, and downstream host UI are separate work; this API does not imply those capabilities exist.
