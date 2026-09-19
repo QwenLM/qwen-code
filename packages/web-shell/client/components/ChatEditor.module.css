@@ -1595,6 +1595,14 @@
   flex: 0 0 auto;
 }
 
+.planControl [data-slot='switch'][data-state='checked'] {
+  background: var(--chat-editor-accent-color);
+}
+
+.planControl [data-slot='switch-thumb'][data-state='checked'] {
+  background: #fff;
+}
+
 .planControl[data-disabled] {
   cursor: default;
 }
