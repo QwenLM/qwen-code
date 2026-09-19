@@ -614,3 +614,46 @@ describe('e2e build artifact upload retry (e2e.yml build job)', () => {
     );
   });
 });
+
+describe('e2e workflow timeboxing (e2e.yml)', () => {
+  // The same stall class that motivated the upload retry also applies to the
+  // download legs: a blackholed route landing on a download step holds the
+  // runner until the job ceiling — and e2e-test-macos, isolated-nightly, and
+  // web-shell-browser-regression carried no job-level ceiling at all, so the
+  // GitHub default (360 minutes) applied. Pin explicit ceilings on every
+  // artifact download leg and on every job in this workflow.
+  const doc = parse(readFileSync(E2E_WORKFLOW, 'utf8'));
+  const downloadLegs = Object.entries(doc.jobs).flatMap(([jobName, job]) =>
+    (job.steps ?? [])
+      .filter((s) =>
+        String(s.uses || '').startsWith('actions/download-artifact@'),
+      )
+      .map((s) => ({
+        job: jobName,
+        name: s.name,
+        'timeout-minutes': s['timeout-minutes'],
+      })),
+  );
+
+  it('time-boxes every artifact download leg', () => {
+    assert.ok(
+      downloadLegs.length > 0,
+      'the workflow must still have artifact download legs to time-box',
+    );
+    for (const leg of downloadLegs) {
+      assert.ok(
+        Number.isFinite(leg['timeout-minutes']),
+        `step "${leg.name}" (${leg.job}) must carry a step-level timeout-minutes`,
+      );
+    }
+  });
+
+  it('gives every job in the workflow a job-level ceiling', () => {
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      assert.ok(
+        Number.isFinite(job['timeout-minutes']),
+        `job "${jobName}" must carry a job-level timeout-minutes (the GitHub default is 360 minutes)`,
+      );
+    }
+  });
+});
