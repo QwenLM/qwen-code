@@ -1325,8 +1325,8 @@ const MCP_MEDIA_REMEDY =
  * Shrink oversized inline images to the same visual budget `read_file`
  * applies, so a full-resolution screenshot from a browser automation server
  * does not enter the conversation verbatim. Images that already fit, and any
- * the renderer cannot handle, are forwarded unchanged; media too large to send
- * inline at all becomes a text placeholder instead.
+ * the renderer cannot handle, are forwarded unchanged; images too large to
+ * send inline at all become a text placeholder instead.
  *
  * `subject` names the server and tool the bytes came from. It is the only way
  * to tell configured MCP servers apart in a bounding failure, since these bytes
@@ -1358,7 +1358,7 @@ async function boundInlineImageParts(
       typeof inline.data !== 'string' ||
       !(isImagePart(part) || inline.mimeType === 'application/octet-stream')
     ) {
-      boundedParts.push(clampToInlineLimit(part));
+      boundedParts.push(part);
       continue;
     }
     const { mimeType, data } = inline;
@@ -1421,7 +1421,12 @@ async function boundInlineImageParts(
         debugLogger.debug(message);
       }
     }
-    boundedParts.push(clampToInlineLimit(boundedPart));
+    // Only what ends up being an image is subject to the inline limit: an
+    // untyped blob the renderer could not decode is forwarded exactly as the
+    // server sent it.
+    boundedParts.push(
+      isImagePart(boundedPart) ? clampToInlineLimit(boundedPart) : boundedPart,
+    );
   }
   return boundedParts;
 }

@@ -1048,31 +1048,6 @@ describe('DiscoveredMCPTool', () => {
           .toBuffer()
       ).toString('base64');
 
-    it('applies the inline media limit to non-image media from an MCP tool', async () => {
-      vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
-      mockCallTool.mockResolvedValue([
-        {
-          functionResponse: {
-            name: serverToolName,
-            response: {
-              content: [{ type: 'audio', mimeType: 'audio/wav', data: 'AAAA' }],
-            },
-          },
-        },
-      ] as Part[]);
-
-      const result = await tool
-        .build({ param: 'recording' })
-        .execute(new AbortController().signal);
-
-      expect(result.llmContent).toEqual([
-        {
-          text: `[Tool '${serverToolName}' provided the following audio data with mime-type: audio/wav]`,
-        },
-        { text: expect.stringContaining('[Media omitted: audio/wav') },
-      ]);
-    });
-
     it('bounds an oversized image a resource block does not type', async () => {
       mockCallTool.mockResolvedValue([
         {
