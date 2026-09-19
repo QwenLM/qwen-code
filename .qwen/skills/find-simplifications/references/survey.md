@@ -147,8 +147,14 @@ figures with nothing calling it. So when the gate fires on a **subsystem**
 (not a single symbol), date the wiring rather than the code:
 
 ```bash
-# has anything outside it ever referenced it?
-"$RG" -l '<dir>/' --glob '!<dir>/**' packages
+# has anything outside it ever referenced it? The two spellings differ on
+# purpose: `<dir>` is the full repo-relative path in the glob, while the
+# pattern is only its last segment, because an import specifier spells
+# '../agent-view/x.js' and never 'packages/cli/src/agent-view/'. Classify
+# the hits — a bare segment also reaches same-named directories elsewhere,
+# and cross-package consumers spell the package export subpath, so § 4's
+# corpus grep stays the authoritative consumer check.
+"$RG" -l '/<basename>/' --glob '!<dir>/**' packages
 # and are the PRs that would wire it still open?
 gh pr list --repo QwenLM/qwen-code --search '<feature> in:title' --state all
 ```
