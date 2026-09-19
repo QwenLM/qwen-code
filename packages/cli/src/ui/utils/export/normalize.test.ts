@@ -105,6 +105,10 @@ describe('normalizeSessionData', () => {
         (message) => message.message?.role === 'assistant',
       );
       expect(thinkingMessages).toHaveLength(2);
+      expect(thinkingMessages.map((message) => message.uuid)).toEqual([
+        'assistant-usage-1',
+        'assistant-usage-2',
+      ]);
       expect(thinkingMessages.every((message) => !message.usageMetadata)).toBe(
         true,
       );
