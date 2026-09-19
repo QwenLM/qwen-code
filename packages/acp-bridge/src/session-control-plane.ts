@@ -4817,6 +4817,15 @@ export function createSessionControlPlane(
       // admitted immediately ahead of the fatal frame.
       await Promise.resolve();
       if (channelClosedToFreshWork(ci.harness)) {
+        // A condemned generation stays alive until its sessions drain, so
+        // unlike the `isDying` case this rejection would leave the child-side
+        // session open with no daemon-side owner able to close it.
+        void settleAbandonedNewSession(
+          ci,
+          abandonedToken,
+          newSessionResp.sessionId,
+          requestedSessionId,
+        ).catch(() => undefined);
         throw new BridgeChannelClosedError('after newSession');
       }
 
@@ -8008,6 +8017,10 @@ export function createSessionControlPlane(
         throw new Error('AcpSessionBridge is shutting down');
       }
       if (channelClosedToFreshWork(ci.harness) || !harness.has(ci.harness)) {
+        // Same shape as the `after newSession` guard: the load succeeded on a
+        // child that a condemnation keeps alive, so the session it now holds
+        // has no daemon-side owner left to close it.
+        void settleAbandonedRestore(ci, 'success').catch(() => undefined);
         restoreEvents.close();
         throw new Error(
           `Session ${req.sessionId} restored on a closed agent channel`,

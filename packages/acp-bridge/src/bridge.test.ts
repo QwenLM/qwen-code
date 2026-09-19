@@ -32938,8 +32938,16 @@ describe('createAcpSessionBridge', () => {
       // would also pin that generation open until the session closed.
       const secondNewSessionStarted = deferred<void>();
       const releaseSecondNewSession = deferred<void>();
+      const firstClose = deferred<void>();
+      const closeCalls: Array<Record<string, unknown>> = [];
       let newSessionCalls = 0;
       const gen1 = makeChannel({
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          closeCalls.push(params);
+          firstClose.resolve();
+          return { closed: true, holds: [] };
+        },
         newSessionImpl: async () => {
           newSessionCalls++;
           if (newSessionCalls === 1) return { sessionId: 'sess-drain-a' };
@@ -32980,6 +32988,12 @@ describe('createAcpSessionBridge', () => {
       expect(() => bridge.getSessionSummary('sess-drain-b')).toThrow(
         SessionNotFoundError,
       );
+      // ...and the child-side session the rejection dropped is closed: gen1
+      // stays alive until its sessions drain, so nothing else can reach it.
+      await firstClose.promise;
+      expect(closeCalls.map((call) => call['sessionId'])).toEqual([
+        'sess-drain-b',
+      ]);
       // The surviving session keeps its own (draining) generation.
       expect(bridge.getSessionSummary(first.sessionId).sessionId).toBe(
         'sess-drain-a',
@@ -32998,7 +33012,15 @@ describe('createAcpSessionBridge', () => {
       // also pin that generation open until the session closed.
       const restoreStarted = deferred<void>();
       const releaseRestore = deferred<void>();
+      const firstClose = deferred<void>();
+      const closeCalls: Array<Record<string, unknown>> = [];
       const gen1 = makeChannel({
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          closeCalls.push(params);
+          firstClose.resolve();
+          return { closed: true, holds: [] };
+        },
         newSessionImpl: async () => ({ sessionId: 'sess-drain-a' }),
         loadSessionImpl: async () => {
           restoreStarted.resolve();
@@ -33039,6 +33061,12 @@ describe('createAcpSessionBridge', () => {
       expect(() => bridge.getSessionSummary('sess-drain-b')).toThrow(
         SessionNotFoundError,
       );
+      // ...and the child-side session the rejection dropped is closed: gen1
+      // stays alive until its sessions drain, so nothing else can reach it.
+      await firstClose.promise;
+      expect(closeCalls.map((call) => call['sessionId'])).toEqual([
+        'sess-drain-b',
+      ]);
 
       // The surviving session keeps its own (draining) generation.
       expect(bridge.getSessionSummary(first.sessionId).sessionId).toBe(

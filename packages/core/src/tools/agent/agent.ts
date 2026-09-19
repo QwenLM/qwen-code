@@ -1521,10 +1521,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): void {
     let pendingConfirmationCallId: string | undefined;
     const preserveProtocolPayloads = !this.config.isInteractive();
+    // Reads the parked call only. `TOOL_CALL` stamps every prepared call in
+    // the batch `executing` up front, so a sibling that never started would
+    // suppress the flag and leave a nested approval wait on the parent
+    // watchdog's tool deadline.
     const waitingForApproval = () =>
       this.currentToolCalls!.some(
         (call) => call.status === 'awaiting_approval',
-      ) && !this.currentToolCalls!.some((call) => call.status === 'executing');
+      );
 
     eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
@@ -3918,7 +3922,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 recordTerminalOutcome();
               }
 
-              if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) break;
+              if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) {
+                registry.appendRetainedTerminalDetail(
+                  hookOpts.agentId,
+                  wtSuffix,
+                );
+                break;
+              }
 
               if (terminateMode === AgentTerminateMode.GOAL) {
                 keepResident =
@@ -4037,7 +4047,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
             const errorMsg = baseErrorMsg + wtSuffix;
 
-            if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) return;
+            if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) {
+              registry.appendRetainedTerminalDetail(hookOpts.agentId, wtSuffix);
+              return;
+            }
 
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop

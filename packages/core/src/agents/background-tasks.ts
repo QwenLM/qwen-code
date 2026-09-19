@@ -969,6 +969,27 @@ export class BackgroundTaskRegistry {
     this.drainWaitQueue();
   }
 
+  /**
+   * Publish what a retained run's own unwind produced, without replacing the
+   * terminal state the escalation already wrote. `failUnresponsive` latches
+   * `notified` before invoking the callback, so the natural unwind can never
+   * re-publish through the notification — and a preserved worktree location
+   * is recorded nowhere else, so the sidecar is the only channel left for it.
+   */
+  appendRetainedTerminalDetail(agentId: string, detail: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry?.retainsPhysicalSlot || !detail) return;
+    const merged = entry.error ? entry.error + detail : detail;
+    entry.error = merged;
+    if (entry.metaPath) {
+      patchAgentMeta(entry.metaPath, {
+        lastUpdatedAt: new Date().toISOString(),
+        lastError: merged,
+      });
+    }
+    this.emitStatusChange(entry);
+  }
+
   // Cancellation aborts the signal and marks the entry as cancelled, but
   // does *not* emit the terminal notification immediately. The natural
   // completion path (bgBody) fires complete()/fail()/finalizeCancelled()
@@ -1478,11 +1499,14 @@ export class BackgroundTaskRegistry {
    * that some exists — use this. The daemon's active-work snapshot builds
    * one hold per id so a restart controller and the session-retention path
    * both see the same set the registry itself would report, with no second
-   * ledger to drift out of sync. Deliberately shares
-   * `hasUnfinalizedTasks()`'s predicate (and not `hasRunningTasks()`'s):
-   * a cancelled entry still owes its terminal task-notification, and
-   * dropping it here would let the daemon reap the session inside the
-   * cancel → finalizeCancelled() window.
+   * ledger to drift out of sync. Shares `hasUnfinalizedTasks()`'s predicate
+   * (and not `hasRunningTasks()`'s): a cancelled entry still owes its
+   * terminal task-notification, and dropping it here would let the daemon
+   * reap the session inside the cancel → finalizeCancelled() window. It adds
+   * one term `hasUnfinalizedTasks()` must not have: a watchdog-terminal entry
+   * whose run ignored the abort still holds a physical slot, so the session
+   * is still doing work and must not grade idle — while the headless
+   * holdback loop would otherwise pin on an entry that can never settle.
    */
   listUnfinalizedBackgroundAgentIds(): string[] {
     const ids: string[] = [];
@@ -1490,7 +1514,8 @@ export class BackgroundTaskRegistry {
       if (!entry.isBackgrounded) continue;
       if (
         entry.status === 'running' ||
-        (entry.status === 'cancelled' && !entry.notified)
+        (entry.status === 'cancelled' && !entry.notified) ||
+        entry.retainsPhysicalSlot === true
       ) {
         ids.push(entry.agentId);
       }

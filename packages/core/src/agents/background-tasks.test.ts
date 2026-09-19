@@ -420,6 +420,10 @@ describe('BackgroundTaskRegistry', () => {
     expect(entry.error).toContain('no model/control progress');
     expect(entry.retainsPhysicalSlot).toBe(true);
     expect(registry.hasRunningTasks()).toBe(true);
+    // The run is still executing behind the terminal state, so the id must
+    // stay in the set the daemon grades active work from — dropping it here
+    // would let the session be reaped around a live execution.
+    expect(registry.listUnfinalizedBackgroundAgentIds()).toEqual(['test-1']);
     expect(callback).toHaveBeenCalledOnce();
     const [, , meta] = callback.mock.calls[0] as [
       string,
@@ -427,6 +431,75 @@ describe('BackgroundTaskRegistry', () => {
       NotificationMeta,
     ];
     expect(meta.recordOnly).toBe(true);
+  });
+
+  it('publishes a retained run unwind detail without re-settling it', () => {
+    const patchSpy = vi
+      .spyOn(transcript, 'patchAgentMeta')
+      .mockImplementation(() => undefined);
+    try {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        metaPath: '/tmp/test-1.meta.json',
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+
+      registry.failUnresponsive(
+        'test-1',
+        'Background agent made no model/control progress for 900000ms.',
+      );
+      patchSpy.mockClear();
+
+      // The unwind of a run that ignored its abort still preserves the
+      // worktree, and the latched notification can never carry that location.
+      const detail = '\n\n[worktree preserved: /tmp/wt (branch agent/test-1)]';
+      registry.appendRetainedTerminalDetail('test-1', detail);
+
+      const entry = registry.get('test-1')!;
+      expect(entry.status).toBe('failed');
+      expect(entry.error).toBe(
+        'Background agent made no model/control progress for 900000ms.' +
+          detail,
+      );
+      expect(patchSpy).toHaveBeenCalledWith(
+        '/tmp/test-1.meta.json',
+        expect.objectContaining({ lastError: entry.error }),
+      );
+      // The published terminal state stays the escalation's own.
+      expect(patchSpy).not.toHaveBeenCalledWith(
+        '/tmp/test-1.meta.json',
+        expect.objectContaining({ status: expect.anything() }),
+      );
+      expect(callback).toHaveBeenCalledOnce();
+    } finally {
+      patchSpy.mockRestore();
+    }
+  });
+
+  it('ignores a retained unwind detail once the physical slot is released', () => {
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+
+    registry.failUnresponsive('test-1', 'no model/control progress');
+    registry.releaseRetainedPhysicalSlot('test-1');
+    registry.appendRetainedTerminalDetail('test-1', '\n\n[worktree preserved]');
+
+    expect(registry.get('test-1')!.error).toBe('no model/control progress');
   });
 
   it('keeps a finalized cancellation settled when the escalation lands late', () => {

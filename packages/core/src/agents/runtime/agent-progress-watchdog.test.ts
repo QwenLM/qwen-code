@@ -153,6 +153,29 @@ describe('attachAgentProgressWatchdog', () => {
     expect(abortPhase()).toBe('model/control');
   });
 
+  it('stops charging the model deadline once the reasoning loop finishes', () => {
+    attach();
+    emitter.emit(AgentEventType.ROUND_START, {} as AgentRoundEvent);
+    emitter.emit(AgentEventType.ROUND_END, {} as AgentRoundEvent);
+    emitter.emit(AgentEventType.FINISH, {} as never);
+    // The post-loop window (stop hooks, worktree cleanup, settlement) emits
+    // nothing the watchdog renews on, so it must not run on the model budget.
+    vi.advanceTimersByTime(2 * MODEL_TIMEOUT_MS);
+    expect(abortPhase()).toBeUndefined();
+    expect(onUnresponsive).not.toHaveBeenCalled();
+  });
+
+  it('keeps an executing tool on its own deadline after the loop finishes', () => {
+    attach();
+    toolCall('t1');
+    toolProgress('t1');
+    emitter.emit(AgentEventType.FINISH, {} as never);
+    vi.advanceTimersByTime(TOOL_TIMEOUT_MS - 1);
+    expect(abortPhase()).toBeUndefined();
+    vi.advanceTimersByTime(1);
+    expect(abortPhase()).toBe('tool');
+  });
+
   it('keeps a provider-backoff deadline extension across a clock-drift re-arm', () => {
     // performance.now() drives the drift guard. Couple it to the fake clock
     // and add a constant offset to stand in for a timer that lands late

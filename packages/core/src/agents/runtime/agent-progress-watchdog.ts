@@ -218,6 +218,12 @@ export function attachAgentProgressWatchdog(
     tools.delete(event.callId);
     armModel();
   };
+  // The reasoning loop is over, so what follows (stop hooks, cleanup,
+  // settlement) is not model or control progress and must not be charged to
+  // its deadline. Tool deadlines and the escalation path stay armed.
+  const onFinish = () => {
+    clearModel();
+  };
 
   emitter.on(AgentEventType.START, onActivity);
   emitter.on(AgentEventType.ROUND_START, onRoundStart);
@@ -230,6 +236,7 @@ export function attachAgentProgressWatchdog(
   emitter.on(AgentEventType.TOOL_PROGRESS, onToolHeartbeat);
   emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
   emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  emitter.on(AgentEventType.FINISH, onFinish);
   armModel();
 
   return () => {
@@ -252,5 +259,6 @@ export function attachAgentProgressWatchdog(
     emitter.off(AgentEventType.TOOL_PROGRESS, onToolHeartbeat);
     emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.off(AgentEventType.FINISH, onFinish);
   };
 }

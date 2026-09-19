@@ -6400,6 +6400,52 @@ describe('AgentTool', () => {
       expect(snapshots.at(-1)?.skills).toEqual(['repo-ops']);
     });
 
+    it('flags awaitingApproval when the parked call has a batch sibling', async () => {
+      const snapshots: AgentResultDisplay[] = [];
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        // agent-core announces every prepared call in the batch up front, so
+        // the sibling reads `executing` in the display while the scheduler
+        // holds it back behind the parked approval.
+        for (const callId of ['call-a', 'call-b']) {
+          emitter.emit(AgentEventType.TOOL_CALL, {
+            subagentId: 'sub-1',
+            round: 1,
+            callId,
+            name: 'edit_file',
+            args: { path: '/test.ts' },
+            description: 'Editing test.ts',
+            timestamp: Date.now(),
+          } satisfies AgentToolCallEvent);
+        }
+        emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-a',
+          name: 'edit_file',
+          description: 'Editing test.ts',
+          timestamp: Date.now(),
+          confirmationDetails: {
+            type: 'edit' as const,
+            title: 'Edit file',
+            fileName: 'test.ts',
+            filePath: '/test.ts',
+            fileDiff: '',
+            originalContent: 'old',
+            newContent: 'new',
+          },
+          respond: vi.fn(),
+        } as unknown as AgentApprovalRequestEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        snapshots.push(output as AgentResultDisplay);
+      });
+
+      // The parent watchdog suspends the nested tool deadline off this flag,
+      // so an unbounded user approval wait must not be charged to it.
+      expect(snapshots.at(-1)?.awaitingApproval).toBe(true);
+    });
+
     it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
       // Track whether pendingConfirmation was set then cleared, using
       // snapshots that safely handle function properties (structuredClone
