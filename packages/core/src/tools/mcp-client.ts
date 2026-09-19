@@ -114,6 +114,23 @@ const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
  * hang teardown (see `disconnect()`).
  */
 const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
+/**
+ * Bound `transport.close()` / `client.close()` during disconnect. The SDK's
+ * close path has no timeout of its own; a hung transport I/O would otherwise
+ * leave the pool's cleanup barrier (`PoolEntry.cleanupInFlight`) unresolved
+ * forever, permanently blocking every later acquire for the same server.
+ * Descendants are already SIGTERM'd before this point, so a timed-out close
+ * cannot leak a subprocess tree — only the caller's wait is bounded.
+ */
+const TRANSPORT_CLOSE_TIMEOUT_MS = 3_000;
+/**
+ * Worst-case wall-clock budget for `McpClient.disconnect()`: the bounded
+ * session termination plus the two bounded closes. The pool's cleanup barrier
+ * must wait at least this long, otherwise a teardown that finishes within its
+ * own budget would still time the barrier out.
+ */
+export const MCP_TEARDOWN_TIMEOUT_MS =
+  TERMINATE_SESSION_TIMEOUT_MS + 2 * TRANSPORT_CLOSE_TIMEOUT_MS;
 
 const invocationContextTransports = new WeakSet<Transport>();
 const invocationContextClients = new WeakSet<Client>();
@@ -540,11 +557,20 @@ export class McpClient {
     private readonly workspaceContext: WorkspaceContext,
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
+    options: { trackTransportClose?: boolean } = {},
   ) {
     this.client = createMcpClient(
       `qwen-cli-mcp-client-${this.serverName}`,
       this.serverConfig,
     );
+    const onClose = this.client.onclose;
+    this.client.onclose = () => {
+      onClose?.();
+      if (this.isDisconnecting || !options.trackTransportClose) return;
+      // EOF/process exit does not invoke the SDK's onerror callback.
+      this.lastTransportError ??= new Error('MCP transport closed');
+      this.updateStatus(MCPServerStatus.DISCONNECTED);
+    };
   }
 
   /**
@@ -804,7 +830,8 @@ export class McpClient {
     this.status = MCPServerStatus.DISCONNECTED;
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
-    if (this.transport) {
+    const transport = this.transport;
+    if (transport) {
       // Streamable HTTP only: the SDK's `transport.close()` aborts local
       // state but leaves the server-side session alive. Per spec, a client
       // that no longer needs a session SHOULD terminate it explicitly
@@ -816,7 +843,7 @@ export class McpClient {
       // multi-session servers accumulate orphaned sessions. Best-effort —
       // a dead/unreachable server must not block teardown. Must run BEFORE
       // `close()` aborts the transport's request machinery.
-      const streamableTransport = this.transport as {
+      const streamableTransport = transport as {
         terminateSession?: () => Promise<void>;
       };
       if (typeof streamableTransport.terminateSession === 'function') {
@@ -841,9 +868,30 @@ export class McpClient {
           );
         }
       }
-      await this.transport.close();
+      try {
+        await runWithTimeout(
+          transport.close(),
+          TRANSPORT_CLOSE_TIMEOUT_MS,
+          `transport.close for server '${this.serverName}'`,
+        );
+      } finally {
+        try {
+          // stdio close can return before the process close event. Settle
+          // SDK requests now, before reusing the client for another transport.
+          if (this.client.transport === transport) transport.onclose?.();
+        } finally {
+          transport.onclose = undefined;
+          transport.onerror = undefined;
+          transport.onmessage = undefined;
+          if (this.transport === transport) this.transport = undefined;
+        }
+      }
     }
-    this.client.close();
+    await runWithTimeout(
+      Promise.resolve(this.client.close()),
+      TRANSPORT_CLOSE_TIMEOUT_MS,
+      `client.close for server '${this.serverName}'`,
+    );
     this.instructions = undefined;
   }
 
