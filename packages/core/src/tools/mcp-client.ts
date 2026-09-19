@@ -583,7 +583,32 @@ export class McpClient {
         debugLogger.error(
           `MCP ERROR (${this.serverName}): ${getErrorMessage(error)}`,
         );
-        this.updateStatus(MCPServerStatus.DISCONNECTED);
+        // A RECORDED DISCONNECTED is death evidence for abort recovery
+        // (mcp-tool's `hasAbortRecoveryEvidence`) and the pool's
+        // silent-drop listener, so it must not be written for errors
+        // that leave the transport usable. The SDK dispatches
+        // `Protocol._onerror` for at least eight NON-FATAL conditions
+        // (unknown message type, a throwing notification handler, a
+        // progress notification for an unknown token, a response for
+        // an unknown message ID, ...) none of which close the
+        // transport. BUT terminal network death also reaches ONLY
+        // `onerror`: a remote HTTP failure fires
+        // `Maximum reconnection attempts (N) exceeded.` /
+        // `SSE stream disconnected:` WITHOUT a transport close, so
+        // `_onclose` never runs, the SDK never clears its transport
+        // reference, and a `transport === undefined` gate never fires —
+        // a dead network server stays recorded CONNECTED (R5-4
+        // round 7). So classify the error instead: the transports'
+        // terminal network messages plus undici's `fetch failed` family
+        // mean death; anything else defers to the `onclose` chain
+        // below, which owns close-shaped death.
+        const terminalNetworkDeath =
+          /maximum reconnection attempts|sse stream disconnected|econnrefused|socket hang up|connection error|fetch failed/i.test(
+            getErrorMessage(error),
+          );
+        if (this.client.transport === undefined || terminalNetworkDeath) {
+          this.updateStatus(MCPServerStatus.DISCONNECTED);
+        }
       };
 
       this.client.registerCapabilities({
@@ -608,6 +633,26 @@ export class McpClient {
       });
       this.instructions = this.client.getInstructions();
       bindInvocationContextPolicy(this.client, this.transport);
+
+      // Chain, don't replace, any onclose the SDK or a wrapper installed
+      // (`connectToMcpServer`'s directory-listener cleanup relies on this).
+      // A stdio child's exit reaches the MCP SDK as a transport *close*, not
+      // an error: StdioClientTransport maps `process.on('close')` to
+      // `onclose`, and `Protocol._onclose` settles pending requests with
+      // `SdkError(ConnectionClosed)` — `onerror` never fires. Without this
+      // write, a crashed stdio child stays CONNECTED in the status registry
+      // and every recorded-status consumer (abort recovery, timeout
+      // diversion, Footer pill) misreads a dead transport as healthy.
+      // `isDisconnecting` guard matches `onerror`: intentional teardown
+      // already writes DISCONNECTED via `disconnect()` itself, and
+      // post-teardown late closes must not resurrect a dropped entry.
+      const previousOnclose = this.client.onclose;
+      this.client.onclose = () => {
+        previousOnclose?.();
+        if (!this.isDisconnecting) {
+          this.updateStatus(MCPServerStatus.DISCONNECTED);
+        }
+      };
 
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
