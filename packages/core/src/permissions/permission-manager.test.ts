@@ -41,9 +41,34 @@ const debugLoggerMock = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
+const shellTypeMock = vi.hoisted(() => ({
+  value: 'bash' as 'bash' | 'cmd' | 'powershell',
+}));
+
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => debugLoggerMock,
 }));
+
+vi.mock('../utils/shell-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/shell-utils.js')>();
+  return {
+    ...actual,
+    getShellConfiguration: () => ({
+      ...actual.getShellConfiguration(),
+      shell: shellTypeMock.value,
+    }),
+  };
+});
+
+// `shellTypeMock` backs the file-level `vi.mock` above, so it is a mutable
+// file-global that every describe building a real PermissionManager reads.
+// Reset it for the whole file rather than only inside
+// `describe('PermissionManager')`, so the later top-level describes cannot
+// inherit a shell type left behind by an earlier test's execution order.
+beforeEach(() => {
+  shellTypeMock.value = 'bash';
+});
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
@@ -2583,6 +2608,207 @@ describe('PermissionManager', () => {
           command: "echo 'a && b'",
         }),
       ).toBe('allow');
+    });
+
+    it.each([
+      ['bash', `echo 'a' # comment ; rm -rf /tmp/x`, 'allow'],
+      ['cmd', `echo 'a' # comment ; rm -rf /tmp/x`, 'deny'],
+      ['powershell', `echo 'a' # comment ; rm -rf /tmp/x`, 'deny'],
+      ['bash', 'echo $(date) # comment ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi # comment\nrm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi ; rm -rf /tmp/x # comment ; echo ignored', 'deny'],
+      ['bash', 'echo a#b ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a\v# comment ; rm -rf /tmp/x', 'deny'],
+      ['bash', '# noop ; rm -rf /tmp/x', 'deny'],
+      // Leading whitespace must not turn the line into one comment-only
+      // segment: Bash executes nothing for either spelling, but collapsing it
+      // leaves no text for an explicit `Bash(...)` rule to match. The guard is
+      // about the line, not about the `#` the scan stopped at, so a second
+      // word-start `#` inside the comment must not collapse either: testing
+      // `command.slice(0, i).trim() !== ''` instead of the line keeps only the
+      // whitespace-led spelling and lets `# noop # ; rm -rf /tmp/x` through.
+      ['bash', ' # noop ; rm -rf /tmp/x', 'deny'],
+      ['bash', '\t# noop ; rm -rf /tmp/x', 'deny'],
+      ['bash', '# noop # ; rm -rf /tmp/x', 'deny'],
+      ['bash', ' # a # b ; rm -rf /tmp/x', 'deny'],
+      ['bash', "echo 'a # b' ; rm -rf /tmp/x", 'deny'],
+      ['bash', 'echo "a # b" ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi > /tmp/o # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi | tee /tmp/o # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi # c\r; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo hi\t# comment ; rm -rf /tmp/x', 'allow'],
+      ['bash', ' echo hi # comment ; rm -rf /tmp/x', 'allow'],
+      // `\`, `$` and the backtick are disjuncts of their own on the bail line
+      // (permission-manager.ts:102), not members of the ';&|(){}<>' literal,
+      // so each one needs a row where it is the FIRST guard character the scan
+      // meets. Otherwise the scan bails on something else and deleting that
+      // single disjunct leaves the suite green: the `echo $(date)` row above
+      // cannot pin `$` for exactly that reason, because with `$` gone the scan
+      // still bails at `(`. The backtick row is the security-relevant one —
+      // without the bail, `allow` would cover a command whose substitution
+      // really does execute.
+      ['bash', 'echo `whoami` # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo $HOME # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a\\ b # c ; rm -rf /tmp/x', 'deny'],
+      // Same standard for the remaining single-deletion survivors: the six
+      // characters of the bail literal not yet pinned above — `&`, `<`, `(`,
+      // `)`, `{`, `}` — and the two quote cross-checks, `&& !inDouble` and
+      // `&& !inSingle`. Each row makes its target disjunct
+      // the FIRST guard the scan meets and, so that deleting that one disjunct
+      // really changes the verdict, carries no OTHER bail character ahead of
+      // its `#` either. That is why the `(` and `{` probes are unbalanced
+      // fragments: any closing counterpart would keep the mutated scan
+      // bailing and leave the row green.
+      ['bash', 'echo hi && rm -rf /tmp/x # c', 'deny'],
+      ['bash', 'sort < /etc/passwd # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo (a # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo {a # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo a} # c ; rm -rf /tmp/x', 'deny'],
+      ['bash', 'echo x) # c ; rm -rf /tmp/x', 'deny'],
+      // Mixed quote kinds ahead of the `#`, and the `;` deliberately after it:
+      // the intact scan returns at the `#`, while a scan missing either
+      // cross-check latches a quote, never sees the `#`, and bails at the `;`.
+      ['bash', `echo "don't" # c ; rm -rf /tmp/x`, 'allow'],
+      ['bash', `echo 'a"b' # c ; rm -rf /tmp/x`, 'allow'],
+      // Characterization rows for #11815's measured table. Bash runs only the
+      // `echo`, but the `\` bails the fast path, and the splitter (which does
+      // not model comments) closes `'a\'` as bash does and splits at the
+      // in-comment separator: a fail-closed `ask` where `main` read the quote as
+      // unterminated and returned `allow`.
+      ['bash', "echo 'a\\' # note: use ; carefully", 'ask'],
+      ['bash', "echo 'a\\' # trailing && touch /tmp/x", 'ask'],
+      ['bash', "echo 'a\\' # trailing | touch /tmp/x", 'ask'],
+    ] as const)(
+      'handles comments conservatively for %s: %s',
+      async (shell, command, expected) => {
+        shellTypeMock.value = shell;
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(echo *)'],
+            permissionsDeny: ['Bash(rm *)'],
+          }),
+        );
+        pm.initialize();
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command,
+          }),
+        ).toBe(expected);
+      },
+    );
+
+    // Row 6 of the same measured table, kept out of it because the segment
+    // starts with `git`: the table's `Bash(echo *)` rule cannot match, so the
+    // verdict there comes from the read-only default (`ask`) rather than from a
+    // rule. The split is asserted as well — a bare `echo B` also resolves to
+    // `allow`, so the verdict alone would stay green if the apostrophe in
+    // `don't` ever stopped masking the `;`.
+    it("keeps `git status # don't ; echo B` one allowed segment", async () => {
+      shellTypeMock.value = 'bash';
+      const command = "git status # don't ; echo B";
+      expect(splitCompoundCommand(command)).toEqual([command]);
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(git *)'] }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('allow');
+    });
+
+    // The comment fast path is only sound when the scanned string is literally
+    // what the shell executes. That holds for run_shell_command, but not for
+    // monitor: normalizePermissionContext() analyses the quote-stripped
+    // `safetyCommand` reconstruction while monitor spawns `spawnCommand`, so a
+    // `#` that only exists inside the wrapper's inner quotes would swallow a
+    // separator the spawned command really runs.
+    it.each([
+      [
+        "bash -c 'echo hi # done' ; rm -rf /tmp/x",
+        ['Bash(echo *)'],
+        ['Bash(rm *)'],
+      ],
+      ['cmd /c "dir # & del C:\\temp\\x"', ['Bash(dir *)'], ['Bash(del *)']],
+    ] as const)(
+      'keeps splitting monitor commands whose comment is only apparent: %s',
+      async (command, permissionsAllow, permissionsDeny) => {
+        shellTypeMock.value = 'bash';
+        pm = new PermissionManager(
+          makeConfig({
+            permissionsAllow: [...permissionsAllow],
+            permissionsDeny: [...permissionsDeny],
+          }),
+        );
+        pm.initialize();
+        expect(await pm.evaluate({ toolName: 'monitor', command })).toBe(
+          'deny',
+        );
+      },
+    );
+
+    // `splitCommandForRules` has to drive every Bash-rule consumer, not just
+    // `evaluate()`. Each of the three below re-splits the command on its own
+    // path, so reverting any one of them to `splitCompoundCommand` would leave
+    // it silently disagreeing with `evaluate()` — citing a deny rule evaluate
+    // never applied, or hiding "Always allow" for a command that is allowed —
+    // while the rest of the suite stayed green. Every assertion pairs the bash
+    // arm (comment recognised → one segment) with the cmd arm (no Bash
+    // comments → the conservative split is expected).
+    const commented = `echo 'a' # comment ; rm -rf /tmp/x`;
+
+    const buildPm = (
+      shell: 'bash' | 'cmd',
+      rules: {
+        permissionsAllow?: string[];
+        permissionsAsk?: string[];
+        permissionsDeny?: string[];
+      },
+    ) => {
+      shellTypeMock.value = shell;
+      const manager = new PermissionManager(makeConfig(rules));
+      manager.initialize();
+      return manager;
+    };
+
+    it('findMatchingDenyRule does not cite a rule the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(buildPm('bash', deny).findMatchingDenyRule(ctx)).toBeUndefined();
+      expect(buildPm('cmd', deny).findMatchingDenyRule(ctx)).toBe('Bash(rm *)');
+    });
+
+    it('hasRelevantRules drops the segment the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(buildPm('bash', deny).hasRelevantRules(ctx)).toBe(false);
+      expect(buildPm('cmd', deny).hasRelevantRules(ctx)).toBe(true);
+    });
+
+    it('hasMatchingAskRule does not ask for a rule the comment hid', () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const ask = { permissionsAsk: ['Bash(rm *)'] };
+      expect(buildPm('bash', ask).hasMatchingAskRule(ctx)).toBe(false);
+      expect(buildPm('cmd', ask).hasMatchingAskRule(ctx)).toBe(true);
+    });
+
+    // The three above pin the rule lookups; this pins the decision they add up
+    // to. Under a deny-only config the collapse demotes a hard `deny` to the
+    // tool default `ask`. That is the direction #11815 asks for — Bash runs
+    // only the pre-comment `echo`, so a rule about `rm` has nothing to match —
+    // and it cannot be gated away without also breaking the allow+deny arm,
+    // which must stay `allow`. It is pinned because `ask` is a behaviour change
+    // rather than a no-op: the confirmation dialog it lands on still segments
+    // with the legacy comment-blind splitter, so it lists the never-executed
+    // `rm -rf /tmp/x` and proposes `Bash(rm *)` from text inside the comment.
+    // See docs/design/safe-bash-comment-splitting.md, "Risks and constraints".
+    // Reverting `splitCommandForRules` to `splitCompoundCommand` reds the bash
+    // arm back to `deny`.
+    it('deny-only config: the commented command asks instead of denying', async () => {
+      const ctx = { toolName: 'run_shell_command', command: commented };
+      const deny = { permissionsDeny: ['Bash(rm *)'] };
+      expect(await buildPm('bash', deny).evaluate(ctx)).toBe('ask');
+      expect(await buildPm('cmd', deny).evaluate(ctx)).toBe('deny');
     });
 
     // The splitter's array is an intermediate result; the verdict is the
