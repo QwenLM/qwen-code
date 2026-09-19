@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SessionListItem } from '@qwen-code/qwen-code-core';
+import type {
+  SessionListCursor,
+  SessionListItem,
+} from '@qwen-code/qwen-code-core';
 import { getCachedStringWidth } from './textUtils.js';
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, {
@@ -17,7 +20,7 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, {
 export interface SessionState {
   sessions: SessionListItem[];
   hasMore: boolean;
-  nextCursor?: number;
+  nextCursor?: SessionListCursor;
 }
 
 /**

@@ -6,6 +6,9 @@
 
 import {
   addDaemonRequestAttribute,
+  decodeSessionListCursor,
+  encodeSessionListCursor,
+  InvalidSessionListCursorError,
   SESSION_PR_LIST_LIMIT,
   SessionService,
   SessionOrganizationError,
@@ -16,6 +19,7 @@ import {
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
+  type SessionListCursor,
   type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -131,26 +135,30 @@ export function invalidateWorkspaceSessionListCache(
 export class InvalidCursorError extends Error {
   constructor(
     cursor: string,
-    kind: 'numeric' | 'organized' | 'live' | 'parent' | 'metadata' = 'numeric',
+    kind:
+      | 'numeric'
+      | 'organized'
+      | 'live'
+      | 'parent'
+      | 'metadata'
+      | 'session-list' = 'numeric',
   ) {
     super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
   }
 }
 
-function parseSessionCursor(cursor: string): number | undefined {
-  if (cursor === '') return undefined;
-  const trimmed = cursor.trim();
-  const parsed = Number(trimmed);
-  if (
-    trimmed === '' ||
-    !Number.isFinite(parsed) ||
-    parsed < 0 ||
-    parsed > Number.MAX_SAFE_INTEGER
-  ) {
-    throw new InvalidCursorError(cursor);
+function parseSessionCursor(
+  cursor: string,
+): number | SessionListCursor | undefined {
+  try {
+    return decodeSessionListCursor(cursor);
+  } catch (error) {
+    if (error instanceof InvalidSessionListCursorError) {
+      throw new InvalidCursorError(cursor, 'session-list');
+    }
+    throw error;
   }
-  return parsed;
 }
 
 interface OrganizedCursor {
@@ -685,7 +693,7 @@ async function loadAllPersistedSummaries(
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
   let scanPages = 0;
-  let cursor: number | undefined;
+  let cursor: number | SessionListCursor | undefined;
   do {
     scanPages += 1;
     const page = await sessionService.listSessions({
@@ -1394,16 +1402,16 @@ async function listWorkspaceSessionsForResponseInRuntime(
     );
   }
 
-  let numericCursor: number | undefined;
+  let parsedCursor: number | SessionListCursor | undefined;
   if (options?.cursor != null) {
-    numericCursor = parseSessionCursor(options.cursor);
+    parsedCursor = parseSessionCursor(options.cursor);
   }
-  const isFirstPage = numericCursor === undefined;
+  const isFirstPage = parsedCursor === undefined;
 
   const sessionService = new SessionService(workspaceCwd);
   const archiveState = options?.archiveState ?? 'active';
   const persisted = await sessionService.listSessions({
-    cursor: numericCursor,
+    cursor: parsedCursor,
     size: pageSize,
     archiveState,
     ...(readOptions.signal ? { signal: readOptions.signal } : {}),
@@ -1432,7 +1440,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
     const nextCursor =
-      persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
+      persisted.nextCursor != null
+        ? encodeSessionListCursor(persisted.nextCursor)
+        : undefined;
     return { sessions, nextCursor };
   }
 
@@ -1472,7 +1482,9 @@ async function listWorkspaceSessionsForResponseInRuntime(
   readOptions.signal?.throwIfAborted();
 
   const nextCursor =
-    persisted.nextCursor != null ? String(persisted.nextCursor) : undefined;
+    persisted.nextCursor != null
+      ? encodeSessionListCursor(persisted.nextCursor)
+      : undefined;
 
   return { sessions, nextCursor };
 }

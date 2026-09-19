@@ -17,6 +17,13 @@ import type {
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
+import * as path from 'path';
+import {
+  compareSessionFileNames,
+  decodeSessionListCursor,
+  encodeSessionListCursor,
+  type SessionListCursor,
+} from '@qwen-code/qwen-code-core';
 import { qwenContentToText, qwenRecordToText } from './qwenTranscriptText.js';
 import { QwenSessionManager } from './qwenSessionManager.js';
 import type {
@@ -42,6 +49,37 @@ import { getErrorMessage } from '../utils/errorMessage.js';
 import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
 
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
+
+interface FallbackCursor {
+  mtime: number;
+  sessionId?: string;
+}
+
+/** Return the id half only when this fallback row can mint a core cursor. */
+function fallbackCursorSessionId(key: string): string | undefined {
+  if (!key.endsWith('.jsonl')) return undefined;
+  const sessionId = key.slice(0, -'.jsonl'.length);
+  return /^[0-9a-fA-F-]{32,36}$/.test(sessionId) ? sessionId : undefined;
+}
+
+/**
+ * Parse a session-list cursor for the filesystem fallback via core's
+ * authoritative decoder ? the same grammar the daemon mints, including
+ * fractional mtimeMs and the full accepted magnitude domain. Anything the
+ * decoder rejects is malformed here too, and the caller fails closed,
+ * because an unfiltered page would re-serve page one and duplicate rows.
+ */
+function parseFallbackCursor(cursor: string): FallbackCursor | undefined {
+  let decoded: number | SessionListCursor | undefined;
+  try {
+    decoded = decodeSessionListCursor(cursor);
+  } catch {
+    return undefined;
+  }
+  if (decoded === undefined) return undefined;
+  if (typeof decoded === 'number') return { mtime: decoded };
+  return { mtime: decoded.mtime, sessionId: decoded.sessionId };
+}
 
 /**
  * Extract session list items from ACP response.
@@ -554,11 +592,11 @@ export class QwenAgentManager {
    * Falls back to file system scan with equivalent pagination semantics.
    */
   async getSessionListPaged(params?: {
-    cursor?: number;
+    cursor?: string;
     size?: number;
   }): Promise<{
     sessions: Array<Record<string, unknown>>;
-    nextCursor?: number;
+    nextCursor?: string;
     hasMore: boolean;
   }> {
     const size = params?.size ?? 20;
@@ -585,22 +623,22 @@ export class QwenAgentManager {
         cwd: item.cwd,
       }));
 
-      // SDK returns nextCursor as string; convert to numeric cursor for paging
-      let nextCursorNum: number | undefined;
+      // The session-list cursor is opaque: servers may return a legacy bare
+      // mtime or the composite "<mtimeMs>:<sessionId>" form. Pass it back
+      // verbatim; never parse it as a number, or pagination silently stops
+      // at the first composite cursor.
+      let nextCursor: string | undefined;
       if (typeof res === 'object' && res !== null && 'nextCursor' in res) {
         const raw = (res as { nextCursor?: unknown }).nextCursor;
         if (typeof raw === 'number') {
-          nextCursorNum = raw;
-        } else if (typeof raw === 'string') {
-          const parsed = Number(raw);
-          if (!Number.isNaN(parsed)) {
-            nextCursorNum = parsed;
-          }
+          nextCursor = String(raw);
+        } else if (typeof raw === 'string' && raw !== '') {
+          nextCursor = raw;
         }
       }
-      const hasMore = nextCursorNum !== undefined;
+      const hasMore = nextCursor !== undefined;
 
-      return { sessions: mapped, nextCursor: nextCursorNum, hasMore };
+      return { sessions: mapped, nextCursor, hasMore };
     } catch (error) {
       logger.warn('[QwenAgentManager] Paged ACP session list failed:', error);
       // fall through to file system
@@ -612,16 +650,103 @@ export class QwenAgentManager {
         this.currentWorkingDir,
         false,
       );
-      // Sorted by lastUpdated desc already per reader
-      const allWithMtime = all.map((s) => ({
-        raw: s,
-        mtime: new Date(s.lastUpdated).getTime(),
-      }));
+      // Full-precision mtimeMs: lastUpdated round-trips through an ISO
+      // string and loses sub-millisecond precision, while the daemon's
+      // composite cursor compares mtime with exact equality, so a truncated
+      // boundary would drop the unserved members of a tie group on the
+      // ACP<->disk handover.
+      // Rows without a usable session id cannot be paged at all — a cursor
+      // minted from one is rejected by core's decoder — and a missing id
+      // would throw inside the comparator mid-scan, emptying every valid
+      // session behind the fallback's catch. Drop them here instead.
+      const pageable = all.filter(
+        (s) => typeof s.sessionId === 'string' && s.sessionId !== '',
+      );
+      if (pageable.length !== all.length) {
+        logger.warn(
+          '[QwenAgentManager] Dropping session rows with a missing/invalid sessionId from the paged list:',
+          all.length - pageable.length,
+        );
+      }
+      const allWithMtime = pageable.map((s) => {
+        const mtime = s.mtimeMs ?? new Date(s.lastUpdated).getTime();
+        return {
+          raw: s,
+          // A legacy session row can lack both timestamps; NaN here would
+          // poison the sort and mint a "NaN:<id>" cursor downstream.
+          mtime: Number.isFinite(mtime) ? mtime : 0,
+          // Core's tie-break compares the file name ("<id>.jsonl") in
+          // code-unit order; derive the same key so the daemon and this
+          // fallback order identically across the ACP<->disk handover.
+          key: s.filePath ? path.basename(s.filePath) : `${s.sessionId}.jsonl`,
+        };
+      });
+      // The daemon wire cursor is the composite "<mtimeMs>:<sessionId>" form
+      // now, so an ACP failure mid-pagination lands here holding one: parse
+      // it and keep serving the remainder from disk instead of dropping the
+      // rest of the list. The fallback orders by mtime desc, sessionId asc
+      // itself (matching the daemon composite ordering) so a cursor handed
+      // over mid-pagination splits the same sequence. A genuinely malformed
+      // cursor still fails closed with an empty page: re-serving page one
+      // would duplicate rows in the webview.
+      const parsedCursor =
+        cursor === undefined || cursor === ''
+          ? undefined
+          : parseFallbackCursor(cursor);
+      if (cursor !== undefined && cursor !== '' && parsedCursor === undefined) {
+        // Fail closed, but not silently: this is the only exit that decides
+        // the rest of the list is unreachable, so name the rejected cursor.
+        logger.warn(
+          '[QwenAgentManager] Rejecting unparseable session-list cursor in fallback:',
+          cursor,
+        );
+        return { sessions: [], hasMore: false };
+      }
+      const ordered = [...allWithMtime].sort(
+        (a, b) => b.mtime - a.mtime || compareSessionFileNames(a.key, b.key),
+      );
       const filtered =
-        cursor !== undefined
-          ? allWithMtime.filter((x) => x.mtime < cursor)
-          : allWithMtime;
-      const page = filtered.slice(0, size);
+        parsedCursor === undefined
+          ? ordered
+          : ordered.filter((x) => {
+              const boundary = parsedCursor;
+              if (x.mtime < boundary.mtime) {
+                return true;
+              }
+              if (x.mtime > boundary.mtime) {
+                return false;
+              }
+              return (
+                boundary.sessionId !== undefined &&
+                compareSessionFileNames(x.key, `${boundary.sessionId}.jsonl`) >
+                  0
+              );
+            });
+      // A legacy session-*.json row can land exactly at the nominal page
+      // boundary. It is valid to display, but its basename cannot mint a
+      // cursor accepted by core. Advance the boundary until a mintable row
+      // (or exhaustion) instead of conflating "cannot mint here" with
+      // "there is no next page".
+      let pageEnd = Math.min(size, filtered.length);
+      let boundaryRow = pageEnd > 0 ? filtered[pageEnd - 1] : undefined;
+      let mintId = boundaryRow
+        ? fallbackCursorSessionId(boundaryRow.key)
+        : undefined;
+      if (pageEnd < filtered.length && mintId === undefined) {
+        const nominalEnd = pageEnd;
+        while (pageEnd < filtered.length && mintId === undefined) {
+          pageEnd += 1;
+          boundaryRow = filtered[pageEnd - 1];
+          mintId = boundaryRow
+            ? fallbackCursorSessionId(boundaryRow.key)
+            : undefined;
+        }
+        logger.warn(
+          '[QwenAgentManager] Advanced filesystem fallback page past unmintable legacy boundary rows:',
+          pageEnd - nominalEnd,
+        );
+      }
+      const page = filtered.slice(0, pageEnd);
       const sessions = page.map((x) => ({
         id: x.raw.sessionId,
         sessionId: x.raw.sessionId,
@@ -634,9 +759,18 @@ export class QwenAgentManager {
         filePath: x.raw.filePath,
         cwd: x.raw.cwd,
       }));
+      const lastRow = page.at(-1);
+      // Mint with core's encoder, and only from the same file-name key the
+      // sort/filter use. If pageEnd reached exhaustion on legacy-only rows,
+      // there is no next page, so an absent cursor is correct.
       const nextCursorVal =
-        page.length > 0 ? page[page.length - 1].mtime : undefined;
-      const hasMore = filtered.length > size;
+        lastRow === undefined || mintId === undefined
+          ? undefined
+          : encodeSessionListCursor({
+              mtime: lastRow.mtime,
+              sessionId: mintId,
+            });
+      const hasMore = filtered.length > page.length;
       return { sessions, nextCursor: nextCursorVal, hasMore };
     } catch (error) {
       logger.error('[QwenAgentManager] File system paged list failed:', error);

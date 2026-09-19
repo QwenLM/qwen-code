@@ -525,10 +525,9 @@ describe('SessionService - rename and custom title', () => {
     });
 
     it('should not skip matches when multiple sessions share the same mtime (regression for PR #3093 review)', async () => {
-      // Three sessions sharing identical mtimes would fall on the page
-      // boundary of a paginated listSessions() and the third would be
-      // dropped by the strict `mtime < cursor` filter. Verify the exhaustive
-      // scan path returns all three.
+      // Three sessions sharing identical mtimes exercise the tie group that
+      // once broke paginated listSessions() (fixed: composite cursor). Verify
+      // the exhaustive scan path returns all three.
       const sessionIdC = '7ba7b810-9dad-11d1-80b4-00c04fd430c9';
       const recordC1: ChatRecord = {
         uuid: 'c1',

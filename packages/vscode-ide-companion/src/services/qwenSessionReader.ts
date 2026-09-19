@@ -35,6 +35,14 @@ export interface QwenSession {
   projectHash: string;
   startTime: string;
   lastUpdated: string;
+  /**
+   * Full-precision file mtime in milliseconds. lastUpdated round-trips
+   * through an ISO string and loses sub-millisecond precision, which the
+   * daemon's composite session-list cursor compares with exact equality ?
+   * paginating on lastUpdated alone drops the unserved members of an mtime
+   * tie group on the ACP<->disk handover.
+   */
+  mtimeMs?: number;
   messages: QwenMessage[];
   filePath?: string;
   messageCount?: number;
@@ -310,6 +318,7 @@ export class QwenSessionReader {
         projectHash,
         startTime: startTime || new Date(stats.birthtimeMs).toISOString(),
         lastUpdated: new Date(stats.mtimeMs).toISOString(),
+        mtimeMs: stats.mtimeMs,
         messages: includeMessages ? messages : [],
         filePath,
         messageCount: seenUuids.size,

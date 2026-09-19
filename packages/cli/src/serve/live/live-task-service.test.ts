@@ -1510,6 +1510,116 @@ describe('LiveTaskService', () => {
     expect(harness.sendPrompt).not.toHaveBeenCalled();
   });
 
+  it('bounds the persisted scan for an unlocatable thread to the page cap', async () => {
+    // The thread is persisted under /project but unknown to the bridge, so
+    // locateTask falls into the scan loop. Every page reports no match with
+    // a fresh composite cursor: without the cap this never terminates.
+    const harness = makeHarness();
+    persistedSessions.set('missing-thread', persisted('missing-thread'));
+    persistedSessionOwners.set('missing-thread', '/project');
+    // Fresh cursor per page, but only up to CAP_PROBE_PAGES: if the cap is
+    // removed the scan ends by exhaustion and the call-count assertion below
+    // fails as an assertion instead of dying on heap exhaustion.
+    const CAP_PROBE_PAGES = 150; // past MAX_TASK_SCAN_PAGES (100)
+    let pageNo = 0;
+    listWorkspaceSessionsForResponse.mockImplementation(async () => {
+      pageNo += 1;
+      if (pageNo > CAP_PROBE_PAGES) {
+        return { sessions: [], nextCursor: undefined };
+      }
+      return {
+        sessions: [],
+        nextCursor: `1779019140000:550e8400-e29b-41d4-a716-44665544${String(pageNo).padStart(4, '0')}`,
+      };
+    });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await expect(
+        harness.service.handle({
+          callerSessionId: 'live-root',
+          name: 'read_thread',
+          arguments: { threadId: 'missing-thread' },
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(listWorkspaceSessionsForResponse).toHaveBeenCalledTimes(100);
+      // Cap exhaustion is diagnosable: exactly one truncation line naming the
+      // budget, so it never reads as a plain "thread does not exist".
+      const truncationLines = stderrSpy.mock.calls.filter(([chunk]) =>
+        String(chunk).includes('locateTask scan truncated at 100 pages'),
+      );
+      expect(truncationLines).toHaveLength(1);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('stops the persisted scan at list exhaustion instead of re-requesting page one', async () => {
+    // An undefined nextCursor means the list is exhausted. Without that
+    // exit condition the loop would re-request page one on every iteration
+    // until the page cap: a hundred identical calls for a single lookup
+    // miss.
+    const harness = makeHarness();
+    persistedSessions.set('missing-thread', persisted('missing-thread'));
+    persistedSessionOwners.set('missing-thread', '/project');
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [],
+      nextCursor: undefined,
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'missing-thread' },
+      }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+
+    expect(listWorkspaceSessionsForResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the persisted scan as soon as the thread is found', async () => {
+    const harness = makeHarness();
+    persistedSessions.set('late-thread', persisted('late-thread'));
+    persistedSessionOwners.set('late-thread', '/project');
+    const summary: BridgeSessionSummary = {
+      sessionId: 'late-thread',
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:02.000Z',
+      displayName: 'Late task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    listWorkspaceSessionsForResponse
+      .mockResolvedValueOnce({
+        sessions: [],
+        nextCursor: '1779019140000:550e8400-e29b-41d4-a716-446655440000',
+      })
+      .mockResolvedValueOnce({ sessions: [summary] });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'late-thread' },
+      }),
+    ).resolves.toMatchObject({ thread: { id: 'late-thread' } });
+    expect(listWorkspaceSessionsForResponse).toHaveBeenCalledTimes(2);
+    // Page 2 must carry page 1's cursor: dropping it re-requests page one
+    // forever and a thread past page one is never reached.
+    expect(listWorkspaceSessionsForResponse).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        cursor: '1779019140000:550e8400-e29b-41d4-a716-446655440000',
+      }),
+      expect.anything(),
+    );
+  });
+
   it('routes an explicit standalone follow-up through service admission', async () => {
     const harness = makeHarness();
     const summary: BridgeSessionSummary = {
