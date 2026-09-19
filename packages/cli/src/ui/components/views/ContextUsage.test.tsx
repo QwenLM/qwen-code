@@ -65,6 +65,58 @@ describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', ()
     expect(frame).not.toContain('No API response yet');
   });
 
+  it('renders the startup context, unattributed and cached prefix rows only when nonzero (#12033)', () => {
+    const present = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe', {
+          startupContext: 1_200,
+          unattributed: 900,
+          cachedTokens: 30_000,
+        })}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+      />,
+    );
+    const frame = present.lastFrame() ?? '';
+    expect(frame).toContain('Startup context');
+    expect(frame).toContain('Unattributed');
+    expect(frame).toContain('Cached prefix');
+    present.unmount();
+
+    // Zero-suppression half. `makeBreakdown`'s defaults omit all three fields,
+    // which is the shape of a `context_usage` item persisted by an older build
+    // and replayed after `/restore`; `startupContext` is also 0 by
+    // construction on a pre-first-send `/context`. Without the `> 0` guards
+    // these rows render as `undefined tokens (NaN%)`.
+    // `totalTokens` must stay > 0: `Cached prefix` and `Unattributed` are
+    // `hasTokenCount`-gated, so at 0 neither can render with or without its
+    // guard, and only the `Startup context` row would be witnessed.
+    const absent = render(
+      <ContextUsage
+        modelName="qwen3-coder"
+        totalTokens={50_000}
+        contextWindowSize={128_000}
+        breakdown={makeBreakdown('safe')}
+        builtinTools={[]}
+        mcpTools={[]}
+        memoryFiles={[]}
+        skills={[]}
+      />,
+    );
+    const zeroFrame = absent.lastFrame() ?? '';
+    // The legend still renders, so the absences below are the guards and not
+    // an empty frame.
+    expect(zeroFrame).toContain('Usage by category');
+    expect(zeroFrame).not.toContain('Startup context');
+    expect(zeroFrame).not.toContain('Unattributed');
+    expect(zeroFrame).not.toContain('Cached prefix');
+  });
+
   it('renders the new three-tier section with all four threshold rows', () => {
     const { lastFrame } = render(
       <ContextUsage
