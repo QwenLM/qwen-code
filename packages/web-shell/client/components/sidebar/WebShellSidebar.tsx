@@ -6149,6 +6149,7 @@ export function WebShellSidebar({
                                   // branch the composer never shows the armed
                                   // intent and the daemon rejects the session.
                                   ...(ws.trusted &&
+                                  !ws.ssh &&
                                   onNewWorktreeSession &&
                                   gitBranch
                                     ? {

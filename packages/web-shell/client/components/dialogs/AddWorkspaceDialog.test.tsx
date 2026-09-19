@@ -118,7 +118,9 @@ describe('AddWorkspaceDialog', () => {
     submit();
 
     const err = alert();
-    expect(err?.textContent).toBe('Path must be absolute');
+    expect(err?.textContent).toBe(
+      'Enter an absolute path or an SSH workspace URL.',
+    );
     expect(input().getAttribute('aria-invalid')).toBe('true');
     expect(input().getAttribute('aria-describedby')).toBe(
       'add-workspace-error add-workspace-hint',
@@ -145,6 +147,32 @@ describe('AddWorkspaceDialog', () => {
 
     expect(onAdd).toHaveBeenCalledWith('/abs/project', true);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits an SSH URL without asking the local directory browser for suggestions', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onSuggest = vi.fn();
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={onAdd}
+        onSuggest={onSuggest}
+        browseDirectories
+      />,
+    );
+    type('ssh://alice@build-box:2222/srv/project');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onAdd).toHaveBeenCalledWith(
+      'ssh://alice@build-box:2222/srv/project',
+      true,
+    );
+    expect(onSuggest).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('button[aria-label="Parent directory"]'),
+    ).toBeNull();
   });
 
   it('submits an optional trimmed display name', async () => {

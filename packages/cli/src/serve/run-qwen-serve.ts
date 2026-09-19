@@ -23,6 +23,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -3928,6 +3929,7 @@ async function runQwenServeImpl(
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
+          readSshWorkspace(cwd);
         } catch (err) {
           writeStderrLine(
             `qwen serve: skipping persisted workspace registration ${JSON.stringify(

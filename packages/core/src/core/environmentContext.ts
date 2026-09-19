@@ -53,6 +53,9 @@ export function formatDateForContext(date: Date = new Date()): string {
 export async function getDirectoryContextString(
   config: Config,
 ): Promise<string> {
+  if (config.getExecutionEnvironment?.()) {
+    return 'Project files and commands use an isolated execution environment. Use workspace tools to inspect its working directory and operating system.';
+  }
   const workspaceContext = config.getWorkspaceContext();
   const workspaceDirectories = workspaceContext.getDirectories();
 
@@ -88,14 +91,15 @@ ${folderStructure}`;
  */
 export async function getEnvironmentContext(config: Config): Promise<Part[]> {
   const today = formatDateForContext();
-  const platform = process.platform;
+  const platform = config.getExecutionEnvironment?.()
+    ? ''
+    : `My operating system is: ${process.platform}\n`;
   const directoryContext = await getDirectoryContextString(config);
 
   const context = `
 This is the Qwen Code. We are setting up the context for our chat.
 Today's date is ${today}.
-My operating system is: ${platform}
-${directoryContext}
+${platform}${directoryContext}
         `.trim();
 
   return [{ text: context }];

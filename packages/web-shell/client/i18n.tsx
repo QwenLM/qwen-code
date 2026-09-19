@@ -1758,8 +1758,10 @@ const EN: Messages = {
     'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceRefreshError':
     'Workspace added, but the workspace list could not be refreshed',
-  'sidebar.addWorkspaceAbsError': 'Path must be absolute',
-  'sidebar.addWorkspaceHint': 'Enter the absolute path to a project directory.',
+  'sidebar.addWorkspaceAbsError':
+    'Enter an absolute path or an SSH workspace URL.',
+  'sidebar.addWorkspaceHint':
+    'Enter a local absolute path or ssh://user@host/absolute/project. SSH requires key authentication, a trusted host key and Python 3 on the remote computer; Qwen is not required there.',
   'sidebar.addWorkspaceSuggestions': 'Directory suggestions',
   'sidebar.addWorkspacePersist': 'Keep after daemon restart',
   'sidebar.addWorkspacePersistHint':
@@ -5700,8 +5702,9 @@ const ZH: Messages = {
   'sidebar.addWorkspaceBusyError': '另一个工作区操作正在进行中',
   'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceRefreshError': '工作区已添加，但无法刷新工作区列表',
-  'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',
-  'sidebar.addWorkspaceHint': '请输入项目目录的绝对路径。',
+  'sidebar.addWorkspaceAbsError': '请输入绝对路径或 SSH 工作区地址。',
+  'sidebar.addWorkspaceHint':
+    '请输入本地绝对路径或 ssh://user@host/absolute/project。SSH 需要密钥认证、已确认的主机密钥，以及远端 Python 3；远端无需安装 Qwen。',
   'sidebar.addWorkspaceSuggestions': '目录建议',
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',

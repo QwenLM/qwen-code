@@ -176,6 +176,7 @@ export interface DaemonWorkspaceCapability {
   id: string;
   cwd: string;
   displayName?: string;
+  ssh?: { host: string; port?: number; directory: string };
   primary: boolean;
   trusted: boolean;
   /** Whether new sessions in this workspace can use Workflow. */
