@@ -2465,6 +2465,32 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
+  it('honours folder trust enabled only in system defaults', async () => {
+    delete process.env['FAST_PATH_SYSTEM_DEFAULTS_MARKER'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-system-defaults-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'system-defaults.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: { FAST_PATH_SYSTEM_DEFAULTS_MARKER: 'from-workspace-settings' },
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    // The operator scope enables folder trust and nothing has answered for
+    // this workspace, so its own settings scope stays unmerged - the same
+    // call the CLI makes once it sees folder trust as enabled.
+    expect(process.env['FAST_PATH_SYSTEM_DEFAULTS_MARKER']).toBeUndefined();
+  });
+
   it('does not load env before a folder trust decision', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();

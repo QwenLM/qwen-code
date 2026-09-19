@@ -743,7 +743,15 @@ export function loadServeFastPathSettings(
   const user = readSettingsSummary(
     path.join(getGlobalQwenDirLite(), 'settings.json'),
   );
-  const initialTrustCheckSettings = mergeFastPathSettings(system, user);
+  // `system-defaults` participates so an operator enabling
+  // `security.folderTrust` there reaches the same answer the merged settings
+  // use; the workspace scope stays out, since a workspace file that only a
+  // trusted workspace may contribute cannot decide its own trust.
+  const initialTrustCheckSettings = mergeFastPathSettings(
+    systemDefaults,
+    system,
+    user,
+  );
   const trustDecision = isWorkspaceTrustedFastPath(
     initialTrustCheckSettings,
     realWorkspaceDir,

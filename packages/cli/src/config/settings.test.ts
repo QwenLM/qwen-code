@@ -3327,6 +3327,44 @@ describe('Settings Loading and Merging', () => {
       },
     );
 
+    it('reads folder trust enabled only in system defaults for the initial check', async () => {
+      // Folder trust enabled by the fleet/operator scope alone must reach the
+      // phase-1 trust check, not just the merged settings: otherwise the
+      // loader trusts the workspace and applies its scope while every
+      // Config-side gate (loadCliConfig derives `trustedFolder` from the
+      // merged settings) reports it untrusted.
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: undefined,
+        source: undefined,
+      });
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemDefaultsPath()) {
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+      expect(settings.isTrusted).toBe(false);
+
+      // `loadCliConfig` re-runs the real resolver against the merged
+      // settings; the phase-1 argument must yield the same decision.
+      const { isWorkspaceTrusted: resolveTrust } = await vi.importActual<
+        typeof import('./trustedFolders.js')
+      >('./trustedFolders.js');
+      const phase1Settings = vi.mocked(isWorkspaceTrusted).mock.calls[0][0];
+      expect(resolveTrust(phase1Settings).isTrusted).toBe(
+        resolveTrust(settings.merged).isTrusted,
+      );
+    });
+
     it('should use an explicit runtime trust decision instead of cached folder trust', () => {
       vi.mocked(isWorkspaceTrusted).mockReturnValue({
         isTrusted: false,
