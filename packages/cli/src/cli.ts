@@ -24,6 +24,7 @@ import {
 } from './config/top-level-options.js';
 import {
   BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
 } from './agent-view/entry-flags.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -64,13 +65,6 @@ export const TOP_LEVEL_COMMANDS = [
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
-
-// The command names of TOP_LEVEL_COMMANDS without their yargs argument
-// suffixes. A first positional matching one of these is a subcommand
-// launch the `--bg` intercept must not shadow.
-const TOP_LEVEL_COMMAND_NAMES = new Set(
-  TOP_LEVEL_COMMANDS.map(([command]) => command.split(' ')[0]),
-);
 
 export const MCP_COMMANDS = [
   ['add <name> <commandOrUrl> [args...]', 'Add a server'],
@@ -541,62 +535,74 @@ export async function runCliEntry(
     delete process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'];
   }
 
-  if (route === 'version') {
-    await printBootstrapVersion();
+  // Agent View's entry intercepts, ahead of the version route and the
+  // parser, and after the guard-token scrub above so the serve-only
+  // credential never reaches a child they spawn. Each fires only when its
+  // token LEADS the argv: the same token anywhere else is prompt data, and
+  // a scan that matched one anywhere would hand `qwen explain what --bg
+  // does` to the dispatch path. Leading is also the only shape these
+  // tokens arrive in — `qwen --bg "<prompt>"`, and the two argv shapes the
+  // supervisor spawns (`--internal-agent-view-supervisor`, and
+  // `--internal-agent-view-pty-host <launch record> <socket>`). The dynamic
+  // import stays gated on that one-token test, so an ordinary launch pays
+  // nothing.
+  const entryToken = argv[0];
+
+  if (entryToken === INTERNAL_AGENT_VIEW_SUPERVISOR_ARG) {
+    const { runAsAgentViewSupervisor } = await import(
+      './agent-view/background-entry.js'
+    );
+    await runAsAgentViewSupervisor();
     return;
   }
 
-  // Agent View's two entry intercepts run only on the default route, and
-  // therefore only after the guard-token scrub above: the serve-only
-  // credential never reaches the supervisor they can spawn, and the
-  // version/help/subcommand routes keep their established behavior. Both
-  // scans stop at `--`, where the tokens are the user's own data — a
-  // `--bg` or a supervisor flag passed as a prompt word must not hijack
-  // the launch. The dynamic import stays gated on the raw-argv scan so an
-  // ordinary launch pays nothing.
-  if (route === 'default') {
-    const separator = rawArgv.indexOf('--');
-    const routableArgv =
-      separator === -1 ? rawArgv : rawArgv.slice(0, separator);
-
-    // This process may have been spawned to BE the Agent View supervisor.
-    // The flag that says so is internal — the strict parser below would
-    // reject it, which is why the supervisor never served.
-    if (routableArgv.includes(INTERNAL_AGENT_VIEW_SUPERVISOR_ARG)) {
-      const { runAsAgentViewSupervisor } = await import(
-        './agent-view/background-entry.js'
+  // Neither internal flag is in any parser, and the strict parser below
+  // rejects an unknown argument — which is why the spawned supervisor
+  // never served, and why a dispatched session's PTY host never came up.
+  if (entryToken === INTERNAL_AGENT_VIEW_PTY_HOST_ARG) {
+    const launchPath = argv[1];
+    const socketPath = argv[2];
+    if (launchPath === undefined || socketPath === undefined) {
+      writeStderrLine(
+        `${INTERNAL_AGENT_VIEW_PTY_HOST_ARG} needs the launch record path and the socket path.`,
       );
-      await runAsAgentViewSupervisor();
+      process.exitCode = 1;
       return;
     }
+    const { runAsAgentViewPtyHost } = await import(
+      './agent-view/background-entry.js'
+    );
+    await runAsAgentViewPtyHost(launchPath, socketPath);
+    return;
+  }
 
-    // `--bg` needs a prompt and a directory, nothing else the interactive
-    // startup path would load. A first positional that is a top-level
-    // command means the subcommand launch is the intent: let it fall
-    // through to the parser (which declines the unsupported `--bg`)
-    // instead of collecting the subcommand tokens as a prompt.
-    const firstPositional = firstPositionalArg(argv);
-    if (
-      routableArgv.includes(BACKGROUND_FLAG) &&
-      (firstPositional === undefined ||
-        !TOP_LEVEL_COMMAND_NAMES.has(firstPositional))
-    ) {
-      const { readBackgroundPrompt, runBackgroundDispatch } = await import(
-        './agent-view/background-entry.js'
-      );
-      const read = readBackgroundPrompt(rawArgv);
-      if (read !== undefined) {
-        if ('prompt' in read) {
-          process.exitCode = await runBackgroundDispatch(read.prompt);
-        } else {
-          writeStderrLine(
-            `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it.`,
-          );
-          process.exitCode = 1;
-        }
-        return;
+  // `--bg` needs a prompt and a directory, nothing else the interactive
+  // startup path would load. It is read ahead of the version route because
+  // that route's scan is position-independent: a `-v` sitting in an
+  // unquoted prompt would otherwise print a version and exit 0 with
+  // nothing dispatched. An explicit `--help` still wins — asking for help
+  // is not a launch.
+  if (entryToken === BACKGROUND_FLAG && route !== 'help') {
+    const { readBackgroundPrompt, runBackgroundDispatch } = await import(
+      './agent-view/background-entry.js'
+    );
+    const read = readBackgroundPrompt(argv);
+    if (read !== undefined) {
+      if ('prompt' in read) {
+        process.exitCode = await runBackgroundDispatch(read.prompt);
+      } else {
+        writeStderrLine(
+          `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it.`,
+        );
+        process.exitCode = 1;
       }
+      return;
     }
+  }
+
+  if (route === 'version') {
+    await printBootstrapVersion();
+    return;
   }
 
   if (route === 'serve') {

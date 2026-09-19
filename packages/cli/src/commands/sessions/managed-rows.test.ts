@@ -20,9 +20,8 @@ vi.mock('@qwen-code/qwen-code-core/utils/process-liveness.js', () => ({
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
 }));
 
-const { managedSessionRows, mergeSessionRows } = await import(
-  './managed-rows.js'
-);
+const { managedSessionRows, mergeSessionRows, reconcileRowLiveness } =
+  await import('./managed-rows.js');
 
 const NOW = Date.parse('2026-09-04T12:00:00Z');
 
@@ -201,7 +200,12 @@ describe('managedSessionRows', () => {
 
   it('drops an unparseable createdAt instead of dating the row to 1970', () => {
     const [row] = managedSessionRows(
-      [snapshot({ state: state({ createdAt: 'not-a-date' }) })],
+      [
+        snapshot({
+          state: state({ createdAt: 'not-a-date' }),
+          worker: workerFile({ workerPid: 200 }),
+        }),
+      ],
       NOW,
     );
     expect(row.startedAt).toBeUndefined();
@@ -223,8 +227,76 @@ describe('managedSessionRows', () => {
   });
 
   it('carries the created stamp through as epoch milliseconds', () => {
-    const [row] = managedSessionRows([snapshot()], NOW);
+    const [row] = managedSessionRows(
+      [snapshot({ worker: workerFile({ workerPid: 200 }) })],
+      NOW,
+    );
     expect(row.startedAt).toBe(Date.parse('2026-09-04T11:58:00Z'));
+  });
+
+  it('dates nothing for a row whose process is gone', () => {
+    // AGE prints beside PID: counting a session's age next to a `-` would
+    // date a row that has nothing running behind it.
+    isPidAlive.mockImplementation(() => false);
+    const [row] = managedSessionRows(
+      [snapshot({ worker: workerFile({ workerPid: 200 }) })],
+      NOW,
+    );
+    expect(row.pid).toBeUndefined();
+    expect(row.startedAt).toBeUndefined();
+  });
+});
+
+describe('reconcileRowLiveness', () => {
+  it('reports the supervisor’s own verdict for a state whose worker is gone', () => {
+    // The store outlives the supervisor and nothing reaps it, so a row can
+    // still claim `working` or `needs input` beside a `PID -` that
+    // contradicts it. The supervisor's heal turns starting/working/
+    // needs_input into `failed` when no recorded pid runs; a reader with
+    // no supervisor to ask says the same rather than inventing a state.
+    const rows = managedSessionRows(
+      [
+        snapshot({ state: state({ sessionState: 'working' }) }),
+        snapshot({
+          state: state({ sessionState: 'needs_input', sessionId: 'managed-2' }),
+        }),
+      ],
+      NOW,
+    );
+    expect(reconcileRowLiveness(rows).map((row) => row.taskState)).toEqual([
+      'failed',
+      'failed',
+    ]);
+  });
+
+  it('keeps the store state for a session it can still see running', () => {
+    const rows = managedSessionRows(
+      [
+        snapshot({
+          state: state({ sessionState: 'working' }),
+          worker: workerFile({ workerPid: 200 }),
+        }),
+      ],
+      NOW,
+    );
+    expect(reconcileRowLiveness(rows)[0].taskState).toBe('running');
+  });
+
+  it('leaves a session the store already reports as finished alone', () => {
+    // `ready` beside no pid is a finished session, not a stale one.
+    for (const sessionState of ['idle', 'stopped', 'failed'] as const) {
+      const [row] = reconcileRowLiveness(
+        managedSessionRows([snapshot({ state: state({ sessionState }) })], NOW),
+      );
+      expect(row.taskState).toBe(
+        sessionState === 'idle' ? 'ready' : sessionState,
+      );
+    }
+  });
+
+  it('leaves a registry row, which has no task state to correct', () => {
+    const [row] = reconcileRowLiveness(mergeSessionRows([record()], []));
+    expect(row.taskState).toBeUndefined();
   });
 });
 
@@ -259,6 +331,56 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].taskState).toBe('running');
+  });
+
+  it('matches the store’s lowercased id against the record’s spelling', () => {
+    // The store keys a session by its directory name, which
+    // `sanitizeSessionId` lowercases; a record keeps the spelling the
+    // session was launched with. Comparing raw strings lists one
+    // mixed-case session twice.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'Managed-1' })],
+      managedSessionRows([snapshot()], NOW),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(true);
+  });
+
+  it('keeps the record on a session that is both managed and registered', () => {
+    // `--json` emits a record's fields verbatim, so replacing the row
+    // wholesale would drop `procStart`, `pidNs` and `qwenVersion` from a
+    // session consumers already saw them on.
+    const rec = record({ sessionId: 'managed-1' });
+    const [row] = mergeSessionRows(
+      [rec],
+      managedSessionRows([snapshot()], NOW),
+    );
+    expect(row.record).toBe(rec);
+    expect(row.name).toBe('managed-1');
+  });
+
+  it('takes the record’s live pid when the managed side has none', () => {
+    // The registry half has just proven a process is alive; a managed row
+    // whose worker pid is not recorded yet must not suppress it, and the
+    // row's age then dates that process.
+    const [row] = mergeSessionRows(
+      [record({ sessionId: 'managed-1' })],
+      managedSessionRows([snapshot()], NOW),
+    );
+    expect(row.pid).toBe(4242);
+    expect(row.startedAt).toBe(NOW - 90_000);
+  });
+
+  it('claims one record at a time, so a duplicate id still surfaces', () => {
+    const rows = mergeSessionRows(
+      [
+        record({ sessionId: 'managed-1', pid: 1 }),
+        record({ sessionId: 'managed-1', pid: 2 }),
+      ],
+      managedSessionRows([snapshot()], NOW),
+    );
+    expect(rows.map((row) => row.managed)).toEqual([true, false]);
+    expect(rows.map((row) => row.pid)).toEqual([1, 2]);
   });
 
   it('lets a live registry record survive the adopting window', () => {

@@ -28,6 +28,7 @@ import { AlreadyReportedError } from './utils/errors.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
   BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
 } from './agent-view/entry-flags.js';
 import {
@@ -56,6 +57,7 @@ const mocks = vi.hoisted(() => ({
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
   runAsAgentViewSupervisor: vi.fn(),
+  runAsAgentViewPtyHost: vi.fn(),
   runBackgroundDispatch: vi.fn(),
 }));
 
@@ -97,6 +99,7 @@ vi.mock('./agent-view/background-entry.js', async (importOriginal) => {
   return {
     ...actual,
     runAsAgentViewSupervisor: mocks.runAsAgentViewSupervisor,
+    runAsAgentViewPtyHost: mocks.runAsAgentViewPtyHost,
     runBackgroundDispatch: mocks.runBackgroundDispatch,
   };
 });
@@ -1135,6 +1138,78 @@ describe('runCliEntry', () => {
       expect(mocks.main).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
       expect(stderr.join('')).toContain('--yolo');
+    });
+
+    it('runs a process spawned as a PTY host, with its two operands', async () => {
+      // The supervisor spawns every session's host as the CLI entry plus
+      // this internal flag; unparsed, the child died in the strict parser
+      // and no dispatched session ever got a worker.
+      await runCliEntry([
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/q/jobs/s/launch.json',
+        '/q/jobs/s/pty-host.sock',
+      ]);
+
+      expect(mocks.runAsAgentViewPtyHost).toHaveBeenCalledWith(
+        '/q/jobs/s/launch.json',
+        '/q/jobs/s/pty-host.sock',
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('reports a PTY host spawn missing an operand instead of parsing it', async () => {
+      await runCliEntry([INTERNAL_AGENT_VIEW_PTY_HOST_ARG, '/q/launch.json']);
+
+      expect(mocks.runAsAgentViewPtyHost).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('does not hijack a query that only mentions --bg', async () => {
+      // A token sitting in the prompt is the user's data. Deciding on bare
+      // presence turned an ordinary question into a background dispatch.
+      await runCliEntry(['explain', 'what', BACKGROUND_FLAG, 'does']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispatches a prompt whose first word is a command name', async () => {
+      // A leading `--bg` is the whole intent. Gating on the first
+      // positional sent this to the parser, which accepted `--bg` as a
+      // registered option nothing reads and started an interactive
+      // session instead of a background one.
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([BACKGROUND_FLAG, 'review', 'the', 'release', 'notes']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
+        'review the release notes',
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('reads the prompt from the normalized argv, not the launch path', async () => {
+      // In the packaged launch shape the first raw token is the CLI entry
+      // path; read as a prompt word it dispatches the wrong task and
+      // reports it as started.
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry(['/x/dist/qwen-cli/cli.js', BACKGROUND_FLAG, 'audit']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('audit');
+    });
+
+    it('declines a version token in an unquoted prompt instead of printing one', async () => {
+      // The version scan is position-independent, so it used to win over
+      // the launch: a version on stdout, exit code 0, nothing dispatched.
+      await runCliEntry([BACKGROUND_FLAG, 'explain', 'the', '-v', 'flag']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(stdout.join('')).not.toContain('9.9.9');
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain('-v');
     });
   });
 

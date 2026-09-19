@@ -15,7 +15,11 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStdoutLine,
+  writeStderrLine,
+} from '../../utils/stdioHelpers.js';
 import {
   answerManagedSession,
   peekManagedSession,
@@ -52,8 +56,14 @@ const connectSupervisor: ConnectSupervisor = async () => {
  * Failure lines go to stderr, the way `list`, `ps` and `--bg` report
  * errors; success lines stay on stdout, so redirecting the command's
  * output never captures an error message alongside the result.
+ *
+ * The supervisor operation has already completed by the time anything is
+ * printed, so a reader that went away (`qwen sessions stop x | head -0`)
+ * must not turn a finished stop into a crash-class exit — the guard the
+ * other state-mutating commands install for the same reason.
  */
 function report(result: ManagedControlResult): void {
+  ignoreBrokenPipe();
   const write = result.exitCode !== 0 ? writeStderrLine : writeStdoutLine;
   for (const line of result.lines) write(line);
   if (result.exitCode !== 0) process.exitCode = result.exitCode;

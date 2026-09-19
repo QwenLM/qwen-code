@@ -147,11 +147,24 @@ figures with nothing calling it. So when the gate fires on a **subsystem**
 (not a single symbol), date the wiring rather than the code:
 
 ```bash
-# has anything outside it ever referenced it?
-"$RG" -l '<dir>/' --glob '!<dir>/**' packages
+# has anything outside it ever referenced it? In-repo references are
+# relative import specifiers, so match the directory's BASENAME as a path
+# segment and exclude the directory at any depth. A repo-root path
+# (`packages/cli/src/x/`) appears in no specifier and returns nothing —
+# a false "unreferenced" — and `--glob '!x/**'` is anchored at the search
+# root, so it excludes nothing either.
+name=$(basename <dir>)
+"$RG" -l "/$name/" --glob "!**/$name/**" packages
 # and are the PRs that would wire it still open?
 gh pr list --repo QwenLM/qwen-code --search '<feature> in:title' --state all
 ```
+
+Two checks before believing a zero from that first command. Sanity-check
+the pattern against a directory that IS referenced — a pattern that cannot
+match anything reports success. And read the hits: a basename can be shared
+(`packages/cli/src/agent-view/` and `packages/cli/src/ui/components/agent-view/`
+both answer to `agent-view`), so hits for the wrong directory are not
+wiring for this one.
 
 Recent commits inside the directory plus no external reference plus an open,
 stalled wiring PR is **not** a deletion candidate and **not** a drop. It is a
@@ -294,7 +307,11 @@ costs more trust than the finding is worth.
 
 What this example originally got wrong was the second half — "do not mention
 it". Measured again on 2026-09-04: **11,004 production lines, still zero
-external references**, up ~8,000 in four weeks. The five merged PRs of its
+external references**, up ~8,000 in four weeks. The zero is right — re-checked
+with the corrected pattern above, the only external `/agent-view/` hits on
+`main` belong to the unrelated `ui/components/agent-view/` — but the command
+that produced it could not have seen wiring had there been any, so it was
+luck rather than measurement. The five merged PRs of its
 stack shipped the supervisor, the PTY workers and the lifecycle; the two that
 would give it an entry point (#7802 commands, #7803 roster TUI) have been
 open since 2026-07-27, the second at +31,699 lines across 104 files and

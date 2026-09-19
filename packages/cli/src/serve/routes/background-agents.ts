@@ -5,7 +5,7 @@
  */
 
 /**
- * `GET /background-agents` — the sessions a supervisor is running.
+ * `GET /background-agents` — the sessions a supervisor knows about.
  *
  * The daemon has its own idea of what a session is, and it is not this
  * one: `standalone-session-service` tracks conversations the daemon
@@ -15,8 +15,10 @@
  *
  * The rows come from `managedSessionRows`, the same function
  * `qwen sessions ps` renders, so the CLI and anything built on this route
- * cannot describe one session two different ways. See
- * `docs/plans/2026-09-04-background-agent-surfaces.md` for why the roster
+ * cannot describe one session two different ways. They are read from the
+ * supervisor's session store, which still lists a session after its
+ * worker exits; the roster only supplies display names. See
+ * `docs/plans/2026-09-04-background-agent-surfaces.md` for why that store
  * is the authority rather than the daemon's own model.
  *
  * Read-only by design. Acting on a background agent — answering it,
@@ -27,7 +29,10 @@
 
 import type { Application } from 'express';
 import { listAgentViewSessionSnapshots } from '../../agent-view/supervisor-store.js';
-import { managedSessionRows } from '../../commands/sessions/managed-rows.js';
+import {
+  managedSessionRows,
+  reconcileRowLiveness,
+} from '../../commands/sessions/managed-rows.js';
 import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 import { sendUntrustedWorkspaceResponse } from '../workspace-route-runtime.js';
 
@@ -42,13 +47,18 @@ export interface BackgroundAgentView {
    *
    * The presentation layer's own token, not the label `qwen sessions ps`
    * prints. A JSON field pinned to display wording breaks every client
-   * the day someone rewords a column.
+   * the day someone rewords a column. A session the store still calls
+   * `running` or `waiting` with no process behind it is reported as
+   * `failed`, the same verdict the supervisor's own heal reaches.
    */
   taskState: AgentViewTaskState;
   cwd: string;
   /** Absent when no process is running for this session. */
   pid?: number;
-  /** ISO 8601, absent when the recorded stamp is unusable. */
+  /**
+   * ISO 8601, absent when no process is running for this session or the
+   * recorded stamp is unusable.
+   */
   startedAt?: string;
 }
 
@@ -70,7 +80,9 @@ export function registerBackgroundAgentRoutes(
       return;
     }
     try {
-      const rows = managedSessionRows(await listSnapshots());
+      const rows = reconcileRowLiveness(
+        managedSessionRows(await listSnapshots()),
+      );
       // `taskState` is set on every row `managedSessionRows` returns —
       // it only maps owned snapshots. The guard is for the type, and for
       // the day that changes: an agent reported with no state at all is

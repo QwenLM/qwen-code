@@ -10,8 +10,10 @@
  * `qwen sessions ps` has always walked the live-process registry, which
  * only a top-level interactive UI writes. A managed Agent View session is
  * just as live and considerably more interesting — it may be sitting on a
- * question nobody has answered — but it registers under a supervisor
- * rather than in that registry, so the command could not see it.
+ * question nobody has answered — but the registry knows only that a
+ * process is alive: not the session's title, not its task state, and
+ * nothing at all about one whose worker has exited or has not spawned yet.
+ * The supervisor's store knows all three, so the command reads both.
  *
  * This module turns both sources into one row shape. It is deliberately
  * pure: the readers stay in the command, so the merge and the labelling
@@ -41,7 +43,10 @@ export interface SessionRow {
    * missing pid is not the same as pid 0.
    */
   pid?: number;
-  /** Epoch milliseconds, or undefined when the source's stamp is unusable. */
+  /**
+   * Epoch milliseconds, or undefined when there is nothing to date: an
+   * unusable stamp, or a managed row with no process behind it.
+   */
   startedAt?: number;
   cwd: string;
   /**
@@ -58,11 +63,14 @@ export interface SessionRow {
   /** True for an Agent View session, false for a registry record. */
   managed: boolean;
   /**
-   * The registry record this row was built from, absent for a managed
-   * session. Carried rather than looked up again: session ids are not
+   * The registry record for this session id, when one exists.
+   *
+   * Carried rather than looked up again: session ids are not
    * guaranteed unique across records (a stale writer, a restored
    * transcript), and a lookup by id would then emit one record twice and
-   * drop the other. `--json` emits this verbatim for registry rows.
+   * drop the other. `--json` emits a record's fields verbatim, so a
+   * managed session whose worker also registered keeps the fields only a
+   * record carries — `ipcPath`, `procStart`, `pidNs`, `qwenVersion`.
    */
   record?: SessionRegistryRecord;
 }
@@ -99,6 +107,7 @@ export function managedSessionRows(
         activity: snapshot.activity,
         now: new Date(now),
       });
+      const pid = liveWorkerPid(snapshot.worker);
       const createdAt = Date.parse(snapshot.state.createdAt);
       return {
         // `title` is derived from the roster entry, the activity file
@@ -113,8 +122,13 @@ export function managedSessionRows(
           !presentation.title
             ? snapshot.state.sessionId
             : presentation.title,
-        pid: liveWorkerPid(snapshot.worker),
-        startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
+        pid,
+        // Dated only while a process is behind it: AGE prints beside PID,
+        // and counting a session's age next to a `-` would date a row that
+        // has nothing running. For a live worker the creation stamp is
+        // when it was spawned.
+        startedAt:
+          pid === undefined || Number.isNaN(createdAt) ? undefined : createdAt,
         cwd: snapshot.state.activeCwd,
         taskState: presentation.taskState,
         sessionId: snapshot.state.sessionId,
@@ -159,11 +173,18 @@ function registryRow(record: SessionRegistryRecord): SessionRow {
 /**
  * One listing from both sources, managed sessions first.
  *
- * A managed worker is a Qwen Code session like any other, so it can also
- * write a registry record — and then the same session would be listed
- * twice, once as `interactive` and once with its real state. The managed
- * row wins: it knows the group, the supervisor and the session's title,
- * where the registry record knows only that a process is alive.
+ * A managed worker is a Qwen Code session like any other, so it also
+ * writes a registry record — and then the same session would be listed
+ * twice, once as `interactive` and once with its real state. One row
+ * survives, carrying both halves: the managed side contributes the title
+ * and the task state, the record contributes the process facts it alone
+ * knows. Ids are matched case-insensitively because the store keys a
+ * session by its directory name, which `sanitizeSessionId` lowercases,
+ * while a record keeps the spelling the session was launched with.
+ *
+ * A record is claimed by at most one managed row, so two records sharing
+ * an id still both surface: the second stays a registry row rather than
+ * being dropped for a session already listed.
  *
  * Ordering is managed-before-interactive rather than by age, because the
  * reason to run this command is usually a session waiting on an answer.
@@ -174,11 +195,60 @@ export function mergeSessionRows(
   records: readonly SessionRegistryRecord[],
   managed: readonly SessionRow[],
 ): SessionRow[] {
-  const managedIds = new Set(managed.map((row) => row.sessionId));
+  const keyOf = (sessionId: string): string => sessionId.toLowerCase();
+  const claimed = new Set<number>();
+
+  const merged = managed.map((row) => {
+    const match = records.findIndex(
+      (record, candidateIndex) =>
+        !claimed.has(candidateIndex) &&
+        keyOf(record.sessionId) === keyOf(row.sessionId),
+    );
+    if (match === -1) return row;
+    claimed.add(match);
+    const record = records[match]!;
+    return {
+      ...row,
+      // The registry half has just proven a process is alive, so a
+      // managed row whose worker pid is not recorded yet must not lose it
+      // — nor the record's own start stamp, which is that process's.
+      pid: row.pid ?? record.pid,
+      startedAt: row.startedAt ?? record.startedAt,
+      record,
+    };
+  });
+
   return [
-    ...managed,
-    ...records
-      .filter((record) => !managedIds.has(record.sessionId))
-      .map(registryRow),
+    ...merged,
+    ...records.filter((_record, index) => !claimed.has(index)).map(registryRow),
   ];
+}
+
+/** The task states that claim a process is doing something right now. */
+const LIVE_TASK_STATES: readonly AgentViewTaskState[] = ['running', 'waiting'];
+
+/**
+ * The verdict on a managed row whose process is gone.
+ *
+ * The store outlives the supervisor and nothing reaps it, so a row can
+ * still say `working` long after its worker exited. The supervisor's own
+ * heal turns `starting`, `working` and `needs_input` into `failed` with a
+ * `stale_worker` reason when no recorded pid runs; a reader with no
+ * supervisor to ask applies the same verdict rather than printing
+ * `working` beside a `PID -` that contradicts it. A session the store
+ * already reports as finished keeps its own state — `ready` beside no pid
+ * is a finished session, not a stale one.
+ *
+ * Runs after the merge, so a pid the registry half contributed counts.
+ */
+export function reconcileRowLiveness(
+  rows: readonly SessionRow[],
+): SessionRow[] {
+  return rows.map((row) =>
+    row.pid === undefined &&
+    row.taskState !== undefined &&
+    LIVE_TASK_STATES.includes(row.taskState)
+      ? { ...row, taskState: 'failed' as const }
+      : row,
+  );
 }

@@ -715,14 +715,14 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command                     | Description                                   | Usage Examples                                                                   |
-| --------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------- |
-| `qwen sessions list`        | List recent conversation sessions             | `qwen sessions list`, `qwen sessions list --json --limit 50`                     |
-| `qwen sessions ps`          | List the sessions running right now           | `qwen sessions ps`, `qwen sessions ps --json`                                    |
-| `qwen sessions peek`        | Show what a background session is doing       | `qwen sessions peek 0f8e1c42`                                                    |
-| `qwen sessions answer`      | Answer a background session waiting for input | `qwen sessions answer 0f8e1c42 "yes, go ahead"`                                  |
-| `qwen sessions stop`        | Stop a background session                     | `qwen sessions stop 0f8e1c42`                                                    |
-| `qwen sessions controllers` | Manage trusted controller tokens              | `qwen sessions controllers add --label <name>`, `qwen sessions controllers list` |
+| Command                     | Description                                           | Usage Examples                                                                   |
+| --------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `qwen sessions list`        | List recent conversation sessions                     | `qwen sessions list`, `qwen sessions list --json --limit 50`                     |
+| `qwen sessions ps`          | List the sessions running or recorded on this machine | `qwen sessions ps`, `qwen sessions ps --json`                                    |
+| `qwen sessions peek`        | Show what a background session is doing               | `qwen sessions peek 0f8e1c42`                                                    |
+| `qwen sessions answer`      | Answer a background session waiting for input         | `qwen sessions answer 0f8e1c42 "yes, go ahead"`                                  |
+| `qwen sessions stop`        | Stop a background session                             | `qwen sessions stop 0f8e1c42`                                                    |
+| `qwen sessions controllers` | Manage trusted controller tokens                      | `qwen sessions controllers add --label <name>`, `qwen sessions controllers list` |
 
 #### `qwen sessions list`
 
@@ -766,7 +766,9 @@ qwen sessions list --json | jq .
 
 Experimental. Runs a prompt as a background session and returns immediately, printing the session id.
 
-The session is owned by a supervisor process that outlives the shell you started it from, so closing that terminal does not stop the work. `qwen sessions ps` lists it, and says whether it is `working` or has stopped to ask you something. It is a full Qwen Code session, so — when `agents.crossSessionMessaging` is on — it also appears in another session's `list_agents` and can be addressed with `send_message` (see [Messaging Another Running Session](#6-messaging-another-running-session)).
+Pass the prompt as one quoted argument. Unquoted words are separate argv tokens, so a word that looks like a flag is read as one: `qwen --bg explain the -v flag` declines and names `-v` rather than dispatching it, and `qwen --bg -- "-O2 fix"` is the spelling for a prompt whose first word starts with a dash.
+
+The session is owned by a supervisor process that outlives the shell you started it from, so closing that terminal does not stop the work. `qwen sessions ps` lists it with the state its supervisor records. It is a full Qwen Code session, so — when `agents.crossSessionMessaging` is on — it also appears in another session's `list_agents`. The name it is addressable by there is the registry name its worker registered under (`<directory>-<hex>`, the `name` field of its record in `qwen sessions ps --json`), not the display title the table shows. See [Messaging Another Running Session](#6-messaging-another-running-session).
 
 ```bash
 qwen --bg "find out why the release job is flaky"
@@ -774,21 +776,26 @@ qwen --bg "find out why the release job is flaky"
 # See it with: qwen sessions ps
 ```
 
-See what it is doing with `qwen sessions peek`, reply to it with `qwen sessions answer`, and end it with `qwen sessions stop`. What is still missing: attaching to a background session's terminal and reading its full transcript. Those land with the Agent View roster.
+See what it is doing with `qwen sessions peek`, reply to it with `qwen sessions answer`, and end it with `qwen sessions stop`. What is still missing: attaching to a background session's terminal and reading its full transcript, and a worker reporting that it has stopped to ask a question — until that reporting lands, a background session is listed as `working` and `answer` has nothing waiting to answer. Those land with the Agent View roster.
 
 #### `qwen sessions ps`
 
-Lists the Qwen Code sessions running on this machine right now.
+Lists the Qwen Code sessions on this machine: the ones running at this
+moment, and the managed ones a supervisor still records — including a
+session whose worker has stopped or failed, which stays listed so its
+outcome is not lost with the process.
 `sessions list` walks saved transcripts ("what have I worked on"); this
-answers "what is running at this moment".
+answers "what is going on at this moment".
 
-Two kinds of session are listed. An **interactive** session is one you
-started in a terminal; it registers in the live-process registry, and
-records left behind by a killed session are swept as they are found. A
-**managed** session is an Agent View session owned by a supervisor: it
-writes no registry record, so it used to be invisible here. Managed
-sessions are listed first, because one of them may be waiting for an
-answer.
+Two kinds of session are listed. An **interactive** session is one whose
+process registered itself in the live-process registry, and records left
+behind by a killed session are swept as they are found. A **managed**
+session is an Agent View session owned by a supervisor: its worker
+registers like any other session, but the registry knows nothing about
+the session once that worker exits, and nothing about its title or task
+state while it runs — the supervisor's store does, so this command reads
+it too. Managed sessions are listed first, because one of them may be
+waiting for an answer.
 
 Headless sessions (`qwen -p`) register nowhere and are not shown.
 
@@ -810,33 +817,44 @@ program drives. Several `serve` or `headless` rows can share one PID: a
 the daemon spawned it, `headless` when a client is driving it directly —
 and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
-session is allowed to do depends on it. A managed session writes no
-registry record, so nothing registered it and its KIND reads `managed`
-rather than borrowing a word some registrant wrote. See
+session is allowed to do depends on it. A managed row reads `managed`
+even when its worker also registered: the supervisor's store says nothing
+about what registered, so the column reports what the row is rather than
+borrowing a word some registrant wrote. See
 [Cross-Session Protocol](./cross-session-protocol.md) for the record
 format and for how to register a program of your own.
 
-STATE is `interactive` for a session you started yourself. For a managed
-session it is what that session is actually doing — `needs input`,
-`working`, `ready`, `stopped` or `failed`. Those are display labels; the
-`--json` output carries stable tokens instead (see below). PID and AGE print `-` for a
-managed session with no process behind it (one that has exited, or has
-not started its worker yet).
+STATE is what the source actually knows. For a managed session it is what
+that session is doing — `needs input`, `working`, `ready`, `stopped` or
+`failed`; a session the store still calls `working` whose process is gone
+is reported as `failed`, which is the same verdict the supervisor reaches
+when it heals one. For a registry row it is `interactive` when that row's
+own KIND is `tui`, and `-` otherwise: a record proves a process is alive,
+not that anyone is sitting at it. Those are display labels; the `--json`
+output carries stable tokens instead (see below). PID and AGE print `-`
+for a managed session with no process behind it (one that has exited, or
+has not started its worker yet); AGE is that session's age, counted from
+when it was created and its worker spawned.
 
 **JSON output (`--json`):**
 
 Outputs JSON Lines on stdout, managed sessions first. Every line carries
 a `managed` field saying which kind it is.
 
-An interactive session is emitted as its whole registry record, plus
-`managed: false`:
+A session whose process registered is emitted as its whole registry
+record, plus `managed: false`:
 
 ```
 schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
 qwenVersion, kind, ipcPath (when peer messaging is available), managed
 ```
 
-A managed session has no such record and is emitted as the row itself:
+A managed session whose worker registered that way keeps every one of
+those fields, with `managed: true` and two additions: `taskState`, and the
+display `title` the table shows. Its `name` stays the registry name,
+because that is what peer messaging addresses the session by. A managed
+session with no record behind it — its worker exited, or has not spawned
+yet — is emitted as the row itself, where `name` is that title:
 
 ```
 name, pid, startedAt, cwd, taskState, sessionId, managed
@@ -844,7 +862,8 @@ name, pid, startedAt, cwd, taskState, sessionId, managed
 
 `taskState` is the machine-readable form of the STATE column, and is the
 field to script against: `running`, `waiting`, `ready`, `stopped` or
-`failed`. The column's wording can change; these tokens will not.
+`failed`. The column's wording can change; these tokens will not. Nothing
+reports `waiting` yet — see the `--bg` note above.
 
 Nothing else is written to stdout — an empty listing prints nothing at
 all — so `qwen sessions ps --json | jq .` is safe to script against. If
@@ -867,16 +886,16 @@ qwen sessions ps
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
 
-# Which background sessions are waiting on me?
+# Which background sessions are there, and what is each one doing?
 # Note: `jq -r` renders the raw recorded value in your terminal (see the
-# raw-data note above); a session name is session-generated text, so pipe
+# raw-data note above); a session title is session-generated text, so pipe
 # through a sanitizer if it is untrusted.
-qwen sessions ps --json | jq -r 'select(.taskState == "waiting") | .name'
+qwen sessions ps --json | jq -r 'select(.managed) | "\(.sessionId) \(.taskState) \(.title // .name)"'
 ```
 
 #### `qwen sessions peek|answer|stop <session>`
 
-A background session started with `--bg` runs with nobody watching it. These three commands are how you catch up with one. Each takes a session id or any unique prefix of one — the short form `qwen sessions ps` and `--bg` print is enough.
+A background session started with `--bg` runs with nobody watching it. These three commands are how you catch up with one. Each takes a session id or any unique prefix of one: the id `--bg` printed at launch, or `qwen sessions ps --json | jq -r .sessionId` — the table shows a session's title, not its id.
 
 `peek` shows what the session is doing, and what it has stopped to ask:
 

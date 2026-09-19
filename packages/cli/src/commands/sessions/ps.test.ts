@@ -189,7 +189,7 @@ describe('qwen sessions ps', () => {
         'serve'.padEnd(KIND_COL) +
         '4242'.padEnd(PID_COL) +
         '5s'.padEnd(AGE_COL) +
-        'interactive'.padEnd(STATE_COL) +
+        '-'.padEnd(STATE_COL) +
         '/w/app',
     );
     expect([NAME_COL, KIND_COL, PID_COL, AGE_COL, STATE_COL]).toEqual([
@@ -205,6 +205,26 @@ describe('qwen sessions ps', () => {
     );
   });
 
+  it('claims `interactive` only where the record itself says terminal', async () => {
+    // `listLiveSessions` returns every kind of record, so a row used to
+    // read `KIND serve … STATE interactive` — a fact the registry never
+    // knew. A record proves a process is alive, not that anyone is at it.
+    const stateCell = (line: string) =>
+      line.slice(
+        NAME_COL + KIND_COL + PID_COL + AGE_COL,
+        NAME_COL + KIND_COL + PID_COL + AGE_COL + STATE_COL,
+      );
+
+    listLiveSessions.mockResolvedValue([record({ kind: 'tui' })]);
+    await run({ json: false });
+    expect(stateCell(stdout[1])).toBe('interactive'.padEnd(STATE_COL));
+
+    stdout.length = 0;
+    listLiveSessions.mockResolvedValue([record({ kind: 'headless' })]);
+    await run({ json: false });
+    expect(stateCell(stdout[1])).toBe('-'.padEnd(STATE_COL));
+  });
+
   it('truncates an over-long kind instead of shifting the columns after it', async () => {
     // A newer build can write a kind up to sixteen characters, which is
     // wider than this column: without the truncation the PID, AGE, STATE
@@ -218,7 +238,7 @@ describe('qwen sessions ps', () => {
     expect(stdout[1].slice(NAME_COL + KIND_COL)).toBe(
       '4242'.padEnd(PID_COL) +
         formatAge(90_000).padEnd(AGE_COL) +
-        'interactive'.padEnd(STATE_COL) +
+        '-'.padEnd(STATE_COL) +
         '/w/app',
     );
   });
@@ -408,6 +428,41 @@ describe('qwen sessions ps', () => {
       stdout[1].slice(NAME_COL + KIND_COL, NAME_COL + KIND_COL + PID_COL),
     ).toBe('-'.padEnd(PID_COL));
     expect(stdout[1]).not.toContain('777');
+    // Nor may the state outlive the process: `needs input` beside a `-`
+    // is a claim the same row contradicts, and nothing reaps the store
+    // when no supervisor runs. This is the supervisor's own verdict for a
+    // session whose recorded pids are gone.
+    expect(
+      stdout[1].slice(
+        NAME_COL + KIND_COL + PID_COL + AGE_COL,
+        NAME_COL + KIND_COL + PID_COL + AGE_COL + STATE_COL,
+      ),
+    ).toBe('failed'.padEnd(STATE_COL));
+  });
+
+  it('keeps the record’s fields for a session both managed and registered', async () => {
+    // A managed worker registers like any other session. Replacing the
+    // registry row wholesale would drop the fields only a record carries
+    // from a line consumers already saw them on, and with them the name
+    // peer messaging addresses the session by.
+    listLiveSessions.mockResolvedValue([
+      record({ sessionId: 'managed-1', ipcPath: '/tmp/a.sock' }),
+    ]);
+    listAgentViewSessionSnapshots.mockResolvedValue([managedSnapshot()]);
+    await run({ json: true });
+
+    expect(stdout).toHaveLength(1);
+    const row = JSON.parse(stdout[0]);
+    expect(row).toMatchObject({
+      managed: true,
+      taskState: 'waiting',
+      name: 'app-ab',
+      title: 'svc-audit',
+      ipcPath: '/tmp/a.sock',
+      procStart: '123',
+      qwenVersion: '1.0.0',
+    });
+    expect(row).not.toHaveProperty('ipcToken');
   });
 
   it('still lists interactive sessions when the supervisor store cannot be read', async () => {

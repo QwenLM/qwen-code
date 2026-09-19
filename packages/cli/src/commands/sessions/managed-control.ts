@@ -52,16 +52,26 @@ export interface ManagedControlResult {
   exitCode: number;
 }
 
+// A failed socket probe is not evidence about the sessions: they persist
+// in the supervisor's store, which `sessions ps` reads with no supervisor
+// at all, and a worker's PTY host is spawned detached and outlives the
+// supervisor that started it. So this reports what could not be reached,
+// and never claims that nothing is running.
 const NO_SUPERVISOR: ManagedControlResult = {
   lines: [
-    'No background sessions are running (no supervisor to ask).',
-    'Start one with: qwen --bg "<prompt>"',
+    'Cannot reach the Agent View supervisor.',
+    'Its sessions may still be recorded; list them with: qwen sessions ps',
+    'Start a supervisor with: qwen --bg "<prompt>"',
   ],
   exitCode: 1,
 };
 
+/** Cells a line's own decoration costs: `  [0f8e1c42]`, `Directory: `. */
+const LINE_OVERHEAD_CELLS = 12;
+const DEFAULT_COLUMNS = 80;
+
 /**
- * Text from a managed session, made safe for a terminal.
+ * Text from a managed session, made safe for one terminal line.
  *
  * Every string here was written by another process — a model's own
  * words, or a path it chose — so it carries the same risk as a registry
@@ -74,12 +84,19 @@ const NO_SUPERVISOR: ManagedControlResult = {
  * — a fake `Answer it with:` hint, for instance. The one-line renderer
  * `ps.ts` drops those two on top of the shared helper for exactly this
  * reason, so this does the same.
+ *
+ * Wrapping forges the same thing without a single control byte: a row
+ * longer than the terminal continues at column 0, where padded session
+ * text is indistinguishable from this command's own output. So the width
+ * cap is the terminal's, not a fixed cell count — the same trade `ps.ts`
+ * makes with its columns.
  */
 function clean(value: string | undefined, limit = 500): string {
   if (!value) return '';
+  const columns = process.stdout.columns ?? DEFAULT_COLUMNS;
   return truncateToWidth(
     sanitizeTerminalText(value).replace(/[\t\n]/g, ''),
-    limit,
+    Math.max(0, Math.min(limit, columns - LINE_OVERHEAD_CELLS)),
   );
 }
 
@@ -89,7 +106,6 @@ interface PeekResponse {
   activity?: AgentViewActivityFile;
   rosterEntry?: AgentViewRosterEntry;
   launch?: AgentViewLaunchFile;
-  live?: boolean;
 }
 
 function isPeekResponse(value: unknown): value is PeekResponse {
@@ -140,7 +156,14 @@ export async function peekManagedSession(
   const title = clean(presentation.title, 200);
   const lines = [
     `${title}  [${shortSessionId(response.state.sessionId)}]`,
-    `State:     ${presentation.taskState}${response.live === false ? ' (no live process)' : ''}`,
+    // The state alone, with no liveness gloss: peek asks a supervisor
+    // whether it holds an in-memory host handle, which a worker spawned
+    // before this supervisor started, or reconnected by pid, does not
+    // give it. Printing that as "no live process" reports a running
+    // worker as dead, beside a `sessions ps` row that says otherwise.
+    // What the state itself says is already reconciled — peek heals a
+    // session whose recorded pids are gone before it answers.
+    `State:     ${presentation.taskState}`,
     `Directory: ${clean(response.state.activeCwd, 200)}`,
   ];
 

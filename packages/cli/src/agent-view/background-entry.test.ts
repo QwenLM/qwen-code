@@ -7,22 +7,20 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const ensureAgentViewSupervisor = vi.fn();
-const dispatchAgentViewSession = vi.fn();
+const dispatch = vi.fn();
 
 vi.mock('./supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: (...args: unknown[]) =>
     ensureAgentViewSupervisor(...args),
 }));
 
-vi.mock('./supervisor-dispatch.js', () => ({
-  dispatchAgentViewSession: (...args: unknown[]) =>
-    dispatchAgentViewSession(...args),
-}));
-
 const stdout: string[] = [];
 let stderr: string[] = [];
+const ignoreBrokenPipe = vi.fn();
+const writeStdoutLineSafe = vi.fn((line: string) => stdout.push(line));
 vi.mock('../utils/stdioHelpers.js', () => ({
-  writeStdoutLine: (line: string) => stdout.push(line),
+  writeStdoutLineSafe: (line: string) => writeStdoutLineSafe(line),
+  ignoreBrokenPipe: () => ignoreBrokenPipe(),
   // Mirror the real helpers' newline contract so the assertions pin
   // the exact bytes the user sees.
   writeStderrLine: (line: string) => {
@@ -38,10 +36,15 @@ const { BACKGROUND_FLAG } = await import('./entry-flags.js');
 beforeEach(() => {
   stdout.length = 0;
   stderr = [];
-  ensureAgentViewSupervisor.mockReset().mockResolvedValue(undefined);
-  dispatchAgentViewSession
+  ignoreBrokenPipe.mockReset();
+  writeStdoutLineSafe.mockReset().mockImplementation((line: string) => {
+    stdout.push(line);
+    return undefined;
+  });
+  dispatch.mockReset().mockResolvedValue({ sessionId: 'sess-abc' });
+  ensureAgentViewSupervisor
     .mockReset()
-    .mockResolvedValue({ sessionId: 'sess-abc', state: 'created' });
+    .mockResolvedValue({ dispatch: (...args: unknown[]) => dispatch(...args) });
 });
 
 afterEach(() => {
@@ -113,31 +116,56 @@ describe('readBackgroundPrompt', () => {
     );
   });
 
+  it('collects the tokens after `--` as prompt instead of dropping them', () => {
+    // Dropping them dispatches a different task than the one asked for and
+    // then reports it as started: the whole suite instead of one file.
+    expect(
+      readBackgroundPrompt([
+        BACKGROUND_FLAG,
+        'run',
+        'vitest',
+        '--',
+        'src/a.test.ts',
+      ]),
+    ).toEqual({ prompt: 'run vitest src/a.test.ts' });
+  });
+
+  it('dispatches a prompt whose first word starts with a dash', () => {
+    // `--` is the only spelling there is for one: scanned as a flag the
+    // word declines, and dropped after the separator the launch had
+    // nothing to read.
+    expect(readBackgroundPrompt([BACKGROUND_FLAG, '--', '-O2', 'fix'])).toEqual(
+      { prompt: '-O2 fix' },
+    );
+  });
+
   it('reports an empty prompt rather than guessing one', () => {
     expect(readBackgroundPrompt([BACKGROUND_FLAG])).toEqual({ prompt: '' });
   });
 });
 
 describe('runBackgroundDispatch', () => {
-  it('starts the supervisor before recording the session', async () => {
-    // Dispatching without a supervisor records a session nothing spawns.
+  it('dispatches through the supervisor, which is what launches the worker', async () => {
+    // The supervisor's dispatch op is the only path that both records the
+    // session and launches its PTY host. Writing the store directly
+    // records a session nothing ever starts — while printing that it
+    // started.
     const order: string[] = [];
     ensureAgentViewSupervisor.mockImplementation(async () => {
       order.push('ensure');
-    });
-    dispatchAgentViewSession.mockImplementation(async () => {
-      order.push('dispatch');
-      return { sessionId: 'sess-abc', state: 'created' };
+      return {
+        dispatch: (...args: unknown[]) => {
+          order.push('dispatch');
+          return dispatch(...args);
+        },
+      };
     });
 
     const code = await runBackgroundDispatch('audit the release', '/w/app');
 
     expect(code).toBe(0);
     expect(order).toEqual(['ensure', 'dispatch']);
-    expect(dispatchAgentViewSession).toHaveBeenCalledWith(
-      'audit the release',
-      '/w/app',
-    );
+    expect(dispatch).toHaveBeenCalledWith('audit the release', '/w/app');
   });
 
   it('prints the session id and where to see it', async () => {
@@ -146,12 +174,36 @@ describe('runBackgroundDispatch', () => {
     expect(stdout.join('\n')).toContain('qwen sessions ps');
   });
 
+  it('guards the pipe before printing a launch that already happened', async () => {
+    // Both success writes come after the session is durably recorded and
+    // its worker launched, so a reader that went away must not turn that
+    // into a crash-class exit with no session id on any stream.
+    const code = await runBackgroundDispatch('audit', '/w/app');
+    expect(code).toBe(0);
+    expect(ignoreBrokenPipe).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report a finished launch as a failure when stdout is gone', async () => {
+    // The success writes sit outside the launch `try`: were they inside
+    // it, a write failure would be re-reported as "Could not start a
+    // background session" with exit code 1 for a session that is running.
+    writeStdoutLineSafe.mockImplementationOnce(() => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    });
+
+    await expect(runBackgroundDispatch('audit', '/w/app')).rejects.toThrow(
+      'EPIPE',
+    );
+    expect(dispatch).toHaveBeenCalledWith('audit', '/w/app');
+    expect(stderr.join('')).not.toContain('Could not start');
+  });
+
   it('refuses an empty prompt with the usage, and dispatches nothing', async () => {
     const code = await runBackgroundDispatch('', '/w/app');
     expect(code).toBe(1);
     expect(stderr.join('')).toContain('needs a prompt');
     expect(ensureAgentViewSupervisor).not.toHaveBeenCalled();
-    expect(dispatchAgentViewSession).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it('reports a supervisor that will not start as a reason, not a stack', async () => {
@@ -167,13 +219,22 @@ describe('runBackgroundDispatch', () => {
     expect(stderr.join('')).toBe(
       'Could not start a background session: EADDRINUSE: supervisor socket in use\n',
     );
-    expect(dispatchAgentViewSession).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it('reports a failed dispatch the same way', async () => {
-    dispatchAgentViewSession.mockRejectedValue(new Error('prompt too large'));
+    dispatch.mockRejectedValue(new Error('prompt too large'));
     const code = await runBackgroundDispatch('audit', '/w/app');
     expect(code).toBe(1);
     expect(stderr.join('')).toContain('prompt too large');
+  });
+
+  it('reports a dispatch that names no session instead of inventing one', async () => {
+    // A supervisor from another build can answer without the id; printing
+    // an empty one would send the user after a session that does not exist.
+    dispatch.mockResolvedValue({ state: 'created' });
+    const code = await runBackgroundDispatch('audit', '/w/app');
+    expect(code).toBe(1);
+    expect(stderr.join('')).toContain('did not report a session id');
   });
 });

@@ -15,13 +15,17 @@ vi.mock('../../agent-view/supervisor-runner.js', () => ({
 
 const stdout: string[] = [];
 const stderr: string[] = [];
+const ignoreBrokenPipe = vi.fn();
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: (line: string) => stdout.push(line),
   writeStderrLine: (line: string) => stderr.push(line),
+  ignoreBrokenPipe: () => ignoreBrokenPipe(),
 }));
 
-const { answerCommand, peekCommand } = await import('./control-commands.js');
+const { answerCommand, peekCommand, stopCommand } = await import(
+  './control-commands.js'
+);
 
 const SESSION = '0f8e1c42-9d3a-4d21-8f77-2b6a7c9e0c31';
 
@@ -30,6 +34,7 @@ let savedExitCode: typeof process.exitCode;
 beforeEach(() => {
   stdout.length = 0;
   stderr.length = 0;
+  ignoreBrokenPipe.mockReset();
   savedExitCode = process.exitCode;
   process.exitCode = undefined;
   connectExistingAgentViewSupervisor.mockReset();
@@ -53,7 +58,9 @@ describe('session control command reporting', () => {
     // in the success channel of a `qwen sessions peek <id> > last.log`.
     connectExistingAgentViewSupervisor.mockResolvedValue(undefined);
     await run(peekCommand, { session: SESSION });
-    expect(stderr.join('\n')).toContain('No background sessions');
+    expect(stderr.join('\n')).toContain(
+      'Cannot reach the Agent View supervisor',
+    );
     expect(stdout).toEqual([]);
     expect(process.exitCode).toBe(1);
   });
@@ -81,5 +88,23 @@ describe('session control command reporting', () => {
     expect(stdout).toEqual(['Answer delivered.']);
     expect(stderr).toEqual([]);
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it('wires stop to the stop operation, and guards the write after it', async () => {
+    // `stopManagedSession` and `peekManagedSession` have the same
+    // signature, so a swapped handler type-checks; only the op it calls
+    // shows the difference. And by the time either prints, the supervisor
+    // has already acted, so a reader that went away (`qwen sessions stop
+    // <id> | head -0`) must not turn a completed stop into a crash.
+    const stop = vi
+      .fn()
+      .mockResolvedValue({ sessionId: SESSION, stopped: true });
+    connectExistingAgentViewSupervisor.mockResolvedValue({ stop });
+
+    await run(stopCommand, { session: SESSION });
+
+    expect(stop).toHaveBeenCalledWith(SESSION);
+    expect(stdout).toEqual(['Stopped.']);
+    expect(ignoreBrokenPipe).toHaveBeenCalledTimes(1);
   });
 });

@@ -99,6 +99,20 @@ describe('GET /background-agents', () => {
     expect(response.body.agents[0].taskState).toBe('failed');
   });
 
+  it('reports a session whose worker is gone as failed, not as waiting', async () => {
+    // The store outlives the supervisor and nothing reaps it, so a row can
+    // still claim `needs_input` with no process behind it. A client
+    // rendering this route would then tell the user an agent is waiting on
+    // them when there is nothing left to answer. The supervisor's own heal
+    // reaches the same verdict from the same evidence.
+    const response = await request(appWith(async () => [snapshot()])).get(
+      '/background-agents',
+    );
+
+    expect(response.body.agents[0].taskState).toBe('failed');
+    expect(response.body.agents[0]).not.toHaveProperty('pid');
+  });
+
   it('omits pid and startedAt rather than inventing them', async () => {
     const response = await request(
       appWith(async () => [

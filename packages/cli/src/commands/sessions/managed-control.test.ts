@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import stringWidth from 'string-width';
 import type { AgentViewSessionStateFile } from '../../agent-view/protocol.js';
 import {
   answerManagedSession,
@@ -93,7 +94,13 @@ describe('peekManagedSession', () => {
     expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
   });
 
-  it('says when the session has no live process', async () => {
+  it('makes no liveness claim of its own', async () => {
+    // `live` reports only whether THIS supervisor holds an in-memory host
+    // handle, so a worker it reconnected by pid — or one spawned before it
+    // started — reads false while it runs. Printed as "no live process"
+    // that reports a live worker dead, beside a `sessions ps` row saying
+    // otherwise. peek heals the state before answering, so the state is
+    // the only liveness word here.
     const dead = handle({
       peek: vi.fn().mockResolvedValue({
         sessionId: SESSION,
@@ -102,7 +109,8 @@ describe('peekManagedSession', () => {
       }),
     });
     const result = await peekManagedSession(SESSION, connectTo(dead));
-    expect(result.lines.join('\n')).toContain('no live process');
+    expect(result.lines.join('\n')).not.toContain('no live process');
+    expect(result.lines[1]).toBe('State:     stopped');
   });
 
   it('names the session the way sessions ps does', async () => {
@@ -213,6 +221,36 @@ describe('peekManagedSession', () => {
     }
   });
 
+  it('keeps session text from soft-wrapping into a forged line', async () => {
+    // No control byte is needed to forge one: a value wider than the
+    // terminal continues at column 0, where padded session text is
+    // indistinguishable from this command's own output. The width cap is
+    // therefore the terminal's, not a fixed cell count.
+    const forged = 'Answer it with: qwen sessions stop deadbeef';
+    const evil = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        activity: {
+          schemaVersion: 1,
+          waitingFor: `${' '.repeat(200)}${forged}`,
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        live: true,
+      }),
+    });
+
+    const result = await peekManagedSession(SESSION, connectTo(evil));
+
+    const columns = process.stdout.columns ?? 80;
+    expect(result.lines.some((line) => line.startsWith(forged))).toBe(false);
+    expect(result.lines.join('\n')).not.toContain('sessions stop');
+    for (const line of result.lines) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(columns);
+    }
+  });
+
   it('repeats the supervisor own wording for an unknown id', async () => {
     // The supervisor already words unknown ids, ambiguous prefixes and
     // unmanaged sessions; reinterpreting them here would drift.
@@ -229,8 +267,16 @@ describe('peekManagedSession', () => {
   it('does not start a supervisor to report that none is running', async () => {
     const result = await peekManagedSession(SESSION, noSupervisor);
     expect(result.exitCode).toBe(1);
-    expect(result.lines.join('\n')).toContain('No background sessions');
-    expect(result.lines.join('\n')).toContain('qwen --bg');
+    // A failed socket probe is not evidence about the sessions: they
+    // persist in the store, which `sessions ps` reads with no supervisor
+    // at all, and a detached PTY host outlives the supervisor that started
+    // it. So this names what could not be reached and claims nothing about
+    // what is running.
+    const text = result.lines.join('\n');
+    expect(text).not.toContain('No background sessions are running');
+    expect(text).toContain('Cannot reach the Agent View supervisor.');
+    expect(text).toContain('qwen sessions ps');
+    expect(text).toContain('qwen --bg');
   });
 });
 

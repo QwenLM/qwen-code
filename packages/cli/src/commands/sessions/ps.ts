@@ -5,26 +5,29 @@
  */
 
 /**
- * `qwen sessions ps` — list the Qwen Code sessions running right now.
+ * `qwen sessions ps` — list the Qwen Code sessions on this machine.
  *
  * The sibling `qwen sessions list` walks saved transcripts; this walks the
  * live-process registry, so the two answer different questions: "what have
- * I worked on" versus "what is running on this machine at this moment".
+ * I worked on" versus "what is going on at this moment".
  *
- * Two things can be running: an interactive session, which writes the
- * live-process registry, and a managed Agent View session, which is owned
- * by a supervisor and writes no registry record. Both are listed, managed
- * ones first — see `managed-rows.ts` for the merge.
+ * Two sources are read. The live-process registry is written by a session's
+ * own process and knows only that the process is alive. The Agent View
+ * supervisor's store also knows a managed session's title and task state —
+ * and still knows the session after its worker exits, which is why a
+ * listing can include rows with nothing running. One row per session,
+ * managed ones first; see `managed-rows.ts` for the merge.
  *
  * KIND says what registered each one — an interactive terminal, a
  * daemon-managed session, a program that is not Qwen Code at all. It is a
  * self-report, like NAME and DIRECTORY: everything here was written by
- * the process it describes. A managed row has no record behind it, so its
- * KIND says what the row is instead of borrowing a registrant's word.
+ * the process it describes. A managed row's KIND says what the row is
+ * instead of borrowing a registrant's word.
  *
- * "Interactive" is a registration fact, not a filter: only the
- * interactive UI registers sessions, so headless runs (`qwen -p`) never
- * appear here. A managed session appears whether or not it registers.
+ * STATE is claimed only where a source knows it: a managed row reports its
+ * task state, and a registry row says `interactive` only when its own
+ * record says a terminal registered it. A one-shot `qwen -p` run registers
+ * nothing and is never shown.
  */
 
 import type { CommandModule, Argv } from 'yargs';
@@ -42,6 +45,7 @@ import { listAgentViewSessionSnapshots } from '../../agent-view/supervisor-store
 import {
   managedSessionRows,
   mergeSessionRows,
+  reconcileRowLiveness,
   type SessionRow,
 } from './managed-rows.js';
 import type { AgentViewTaskState } from '../../agent-view/presentation.js';
@@ -119,11 +123,18 @@ const TASK_STATE_LABEL: Record<AgentViewTaskState, string> = {
   failed: 'failed',
 };
 
-/** A registry row knows only that a process is alive. */
+/**
+ * What the `STATE` column prints for a registry row.
+ *
+ * A record knows that a process is alive and how that process described
+ * itself, so `interactive` is claimed only for a terminal's own
+ * self-report. A `serve`, `headless` or `external` record gets no state
+ * here rather than one the registry never knew — its KIND cell already
+ * carries the word it did write.
+ */
 function stateLabel(row: SessionRow): string {
-  return row.taskState === undefined
-    ? 'interactive'
-    : TASK_STATE_LABEL[row.taskState];
+  if (row.taskState !== undefined) return TASK_STATE_LABEL[row.taskState];
+  return describeSessionKind(row.record?.kind) === 'tui' ? 'interactive' : '-';
 }
 
 /**
@@ -131,15 +142,13 @@ function stateLabel(row: SessionRow): string {
  *
  * A registry row prints the kind its own process recorded, which
  * `describeSessionKind` reads as `tui` when the writer predates the field.
- * A managed row has no record behind it — the supervisor store claims
- * nothing about what registered — so printing `tui` for it would spend the
- * one word this table reserves for "someone is sitting at a terminal" on a
- * session nobody is.
+ * A managed row prints what it is even when its worker also registered:
+ * the supervisor's store claims nothing about what registered, and
+ * printing `tui` for a session nobody is sitting at would spend the one
+ * word this table reserves for "someone is at a terminal" on it.
  */
 function kindLabel(row: SessionRow): string {
-  return row.record === undefined
-    ? 'managed'
-    : describeSessionKind(row.record.kind);
+  return row.managed ? 'managed' : describeSessionKind(row.record?.kind);
 }
 
 function outputHuman(rows: SessionRow[], now: number): void {
@@ -200,7 +209,7 @@ async function handlePs(argv: PsArgs): Promise<void> {
     listLiveSessions(),
     readManagedRows(now),
   ]);
-  const rows = mergeSessionRows(records, managed);
+  const rows = reconcileRowLiveness(mergeSessionRows(records, managed));
 
   if (argv.json) {
     for (const row of rows) {
@@ -210,28 +219,35 @@ async function handlePs(argv: PsArgs): Promise<void> {
       // `sessions list --json`); consumers that RENDER these values in a
       // terminal own the sanitization.
       //
-      // Registry rows keep the whole record so existing consumers see
-      // every field they always saw, minus the inbox token — a
-      // credential, not data: tooling that really needs it can read the
-      // record file, but it must not spill into logs and pipelines by
-      // default. Managed rows have no record behind them and are emitted
-      // as the row itself.
+      // A record is emitted whenever one exists, so consumers keep every
+      // field they always saw, minus the inbox token — a credential, not
+      // data: tooling that really needs it can read the record file, but
+      // it must not spill into logs and pipelines by default. A managed
+      // session whose worker also registered adds the task state only the
+      // supervisor knows, and its display title as `title` — the record's
+      // own `name` stays, because that is the name peer messaging
+      // addresses the session by. A managed session with no record behind
+      // it is emitted as the row itself, where `name` is that title.
       writeStdoutLine(
-        row.record
-          ? JSON.stringify({
-              ...row.record,
-              ipcToken: undefined,
-              managed: false,
-            })
-          : JSON.stringify(row),
+        JSON.stringify(
+          row.record
+            ? {
+                ...row.record,
+                ipcToken: undefined,
+                managed: row.managed,
+                ...(row.managed
+                  ? { title: row.name, taskState: row.taskState }
+                  : {}),
+              }
+            : row,
+        ),
       );
     }
     return;
   }
 
-  // "Running", not "registered": a managed session is listed whether or
-  // not it ever wrote a registry record, so an empty listing is a claim
-  // about both sources at once.
+  // An empty listing is a claim about both sources at once: no live
+  // registry record, and no managed session the store still records.
   if (rows.length === 0) {
     writeStdoutLine('No other Qwen Code sessions are running.');
     return;
@@ -242,7 +258,7 @@ async function handlePs(argv: PsArgs): Promise<void> {
 
 export const psCommand: CommandModule<unknown, PsArgs> = {
   command: 'ps',
-  describe: 'List Qwen Code sessions running right now',
+  describe: 'List Qwen Code sessions running or recorded on this machine',
   builder: (yargs: Argv) =>
     yargs.option('json', {
       type: 'boolean',
