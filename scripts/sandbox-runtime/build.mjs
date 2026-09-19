@@ -8,9 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { wasmLoader } from 'esbuild-plugin-wasm';
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { hashFile, readSourceIdentity } from './source-manifest.mjs';
 
 const source = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(source, '../..');
@@ -114,10 +114,6 @@ const workers = await build({
   outdir: output,
 });
 await fs.writeFile(path.join(output, 'package.json'), '{"type":"module"}\n');
-const hash = async (p) =>
-  createHash('sha256')
-    .update(await fs.readFile(p))
-    .digest('hex');
 const inputs = {};
 for (const file of Object.keys({
   ...result.metafile.inputs,
@@ -125,7 +121,7 @@ for (const file of Object.keys({
 })) {
   if (file.startsWith('wasm-binary:')) continue;
   try {
-    inputs[file] = await hash(path.resolve(root, file));
+    inputs[file] = await hashFile(path.resolve(root, file));
   } catch {
     /* virtual loader modules are described in esbuild metafile */
   }
@@ -134,27 +130,46 @@ for (const name of [
   'baseline.mjs',
   'build.mjs',
   'launcher.mjs',
+  'source-manifest.mjs',
   'verify.mjs',
   'README.md',
 ]) {
   const file = path.join(source, name);
-  inputs[path.relative(root, file)] = await hash(file);
+  inputs[path.relative(root, file)] = await hashFile(file);
 }
+const sourceManifestTest = path.join(
+  root,
+  'scripts/tests/sandbox-runtime-source-manifest.test.js',
+);
+inputs[path.relative(root, sourceManifestTest)] =
+  await hashFile(sourceManifestTest);
 await fs.copyFile(
   path.join(source, 'verify.mjs'),
   path.join(output, 'verify.mjs'),
 );
+await fs.copyFile(
+  path.join(source, 'source-manifest.mjs'),
+  path.join(output, 'source-manifest.mjs'),
+);
 const artifacts = {};
 for (const file of await fs.readdir(output))
-  artifacts[file] = await hash(path.join(output, file));
+  artifacts[file] = await hashFile(path.join(output, file));
+const sourceIdentity = readSourceIdentity(root);
 await fs.writeFile(
   path.join(output, 'manifest.json'),
   JSON.stringify(
-    { created: new Date().toISOString(), inputs, artifacts },
+    {
+      created: new Date().toISOString(),
+      ...sourceIdentity,
+      inputs,
+      artifacts,
+    },
     null,
     2,
   ),
 );
+if (sourceIdentity.dirty)
+  console.warn('WARNING: candidate built from a dirty worktree.');
 console.log(
   JSON.stringify(
     { output, inputs: Object.keys(inputs).length, artifacts },
