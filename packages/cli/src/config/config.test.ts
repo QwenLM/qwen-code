@@ -927,16 +927,179 @@ describe('parseArguments', () => {
   });
 
   it('accepts --batch against a loopback endpoint (local proxy or the test harness)', async () => {
-    vi.stubEnv('OPENAI_API_KEY', 'sk-test');
-    vi.stubEnv('OPENAI_BASE_URL', 'http://127.0.0.1:8899/v1');
+    try {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+      vi.stubEnv('OPENAI_BASE_URL', 'http://127.0.0.1:8899/v1');
+      process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { security: { auth: { selectedType: 'openai' } } } as Settings,
+        argv,
+      );
+      expect(config.getBatchMode()).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('accepts --batch against an IPv6 loopback endpoint', async () => {
+    // WHATWG URL.hostname keeps the brackets on an IPv6 literal; the
+    // loopback allowance must strip them or `[::1]` can never match.
+    try {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+      vi.stubEnv('OPENAI_BASE_URL', 'http://[::1]:8899/v1');
+      process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+      const argv = await parseArguments();
+      await expect(
+        loadCliConfig(
+          { security: { auth: { selectedType: 'openai' } } } as Settings,
+          argv,
+        ),
+      ).resolves.toBeDefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('rejects --batch with an OpenAI key but no base URL anywhere', async () => {
+    // isDashScopeProvider treats an empty baseUrl as DashScope-by-default,
+    // but the runtime resolves that same empty value to a non-DashScope
+    // default — the gate must not inherit the short-circuit.
+    try {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+      vi.stubEnv('OPENAI_MODEL', 'qwen-plus');
+      vi.stubEnv('OPENAI_BASE_URL', '');
+      process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+      const argv = await parseArguments();
+      await expect(
+        loadCliConfig(
+          { security: { auth: { selectedType: 'openai' } } } as Settings,
+          argv,
+        ),
+      ).rejects.toThrow(
+        '--batch needs an OpenAI-compatible API key on a DashScope endpoint',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('rejects --batch on a non-DashScope OpenAI-compatible host', async () => {
+    try {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+      vi.stubEnv('OPENAI_BASE_URL', 'https://openrouter.ai/api/v1');
+      process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+      const argv = await parseArguments();
+      await expect(
+        loadCliConfig(
+          { security: { auth: { selectedType: 'openai' } } } as Settings,
+          argv,
+        ),
+      ).rejects.toThrow(
+        '--batch needs an OpenAI-compatible API key on a DashScope endpoint',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('accepts --batch on the real DashScope host', async () => {
+    try {
+      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
+      vi.stubEnv(
+        'OPENAI_BASE_URL',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+      process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
+      const argv = await parseArguments();
+      await expect(
+        loadCliConfig(
+          { security: { auth: { selectedType: 'openai' } } } as Settings,
+          argv,
+        ),
+      ).resolves.toBeDefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('rejects --batch with a FatalConfigError, not a generic crash', async () => {
+    // Neighbouring startup validations all throw FatalConfigError so the
+    // user gets the one-line rejection instead of an "unexpected critical
+    // error" banner plus a stack trace.
     process.argv = ['node', 'script.js', '--batch', '-p', 'hello'];
     const argv = await parseArguments();
     await expect(
       loadCliConfig(
-        { security: { auth: { selectedType: 'openai' } } } as Settings,
+        { security: { auth: { selectedType: 'gemini' } } } as Settings,
         argv,
       ),
-    ).resolves.toBeDefined();
+    ).rejects.toBeInstanceOf(FatalConfigError);
+  });
+
+  it('rejects --batch together with --acp', async () => {
+    process.argv = ['node', 'script.js', '--batch', '--acp'];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--batch cannot be combined with --acp/--experimental-acp',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --batch together with --experimental-acp', async () => {
+    process.argv = ['node', 'script.js', '--batch', '--experimental-acp'];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--batch cannot be combined with --acp/--experimental-acp',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --batch together with --input-format stream-json', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--batch',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--batch cannot be combined with --input-format stream-json',
+      ),
+    );
+
+    mockExit.mockRestore();
   });
 
   it('exits after a `batch` subcommand instead of falling through to the main flow', async () => {

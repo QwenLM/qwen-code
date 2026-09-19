@@ -14,6 +14,9 @@ const SETTLED = new Set(['completed', 'failed', 'expired', 'cancelled']);
 // not end the turn — but a persistently unreachable endpoint must not spin
 // forever either.
 const MAX_POLL_FAILURES = 5;
+// A settled status normally appears at `expires_at`; this grace covers clock
+// skew and a slow final status flip before the wait is abandoned.
+const EXPIRY_GRACE_S = 600;
 
 interface BatchOutputLine {
   custom_id: string;
@@ -36,6 +39,31 @@ interface BatchOutputLine {
  */
 export class BatchNotRetryableError extends Error {
   override readonly name = 'BatchNotRetryableError';
+}
+
+// Mirrors MAX_TRANSPORT_CAUSE_DEPTH in utils/retryErrorClassification.ts:
+// wrappers nest only a handful of times before the predicate gives up.
+const MAX_CAUSE_DEPTH = 4;
+
+/**
+ * True when `error` is — or wraps — a BatchNotRetryableError.
+ *
+ * Matched by name, not `instanceof`, so callers need no import of the class
+ * itself, and walked along the `cause` chain because the pipeline's error
+ * handler rethrows a timeout-shaped give-up as a plain `Error` carrying the
+ * original as `cause` (and `redactProxyError` may clone either link, again
+ * preserving `name`). Keep this function in this module: `llm-chat.ts` is
+ * re-exported from the package barrel, and this retry policy is not public
+ * API (same rule as stream-transport-retry.ts).
+ */
+export function isNonRetryableBatchError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth += 1) {
+    if (!(current instanceof Error)) return false;
+    if (current.name === 'BatchNotRetryableError') return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 const abortError = () =>
@@ -103,29 +131,35 @@ async function failureDetail(
  * fetch function does not support file uploads". The global fetch used here
  * takes the same route `qwen batch submit` already uses.
  *
- * Costs of the bypass: no `maxRetries`, no proxy/`QWEN_TLS_INSECURE`
- * dispatcher, no SDK default or user `customHeaders`, and a hand-formatted
- * error instead of a typed `APIError`. Deliberate — it keeps this line for
- * line consistent with the `qwen batch submit` uploader in
- * packages/cli/src/commands/batch.ts, so both halves fail the same way.
+ * Costs of the bypass: no `maxRetries`, the `QWEN_TLS_INSECURE` dispatcher is
+ * not applied (it is pinned onto the SDK's custom fetch, not the global one),
+ * and a hand-formatted error instead of a typed `APIError` — so the HTTP
+ * status is stamped onto the thrown error for the caller's classifier, and
+ * the client's `customHeaders` are passed in explicitly. The global fetch
+ * does honour the process-wide proxy dispatcher installed by
+ * `Config.initialize`, which this path runs after.
  */
 async function uploadInputFile(
   client: OpenAI,
   jsonl: string,
   signal?: AbortSignal,
+  customHeaders?: Record<string, string>,
 ): Promise<{ id: string }> {
   const form = new FormData();
   form.append('purpose', 'batch');
   form.append('file', new File([jsonl], 'turn.jsonl'));
   const res = await fetch(`${client.baseURL.replace(/\/+$/, '')}/files`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${client.apiKey}` },
+    headers: { Authorization: `Bearer ${client.apiKey}`, ...customHeaders },
     body: form,
     signal,
   });
   if (!res.ok) {
     const detail = (await res.text()).slice(0, 500);
-    throw new Error(`POST /files -> HTTP ${res.status}: ${detail}`);
+    throw Object.assign(
+      new Error(`POST /files -> HTTP ${res.status}: ${detail}`),
+      { status: res.status },
+    );
   }
   return (await res.json()) as { id: string };
 }
@@ -143,6 +177,7 @@ export async function runBatchCompletion(
   request: OpenAI.Chat.ChatCompletionCreateParams,
   signal?: AbortSignal,
   pollMs = 30_000,
+  customHeaders?: Record<string, string>,
 ): Promise<OpenAI.Chat.ChatCompletion> {
   const { stream: _stream, stream_options: _streamOptions, ...body } = request;
   const line = JSON.stringify({
@@ -151,7 +186,12 @@ export async function runBatchCompletion(
     url: '/v1/chat/completions',
     body,
   });
-  const file = await uploadInputFile(client, line + '\n', signal);
+  const file = await uploadInputFile(
+    client,
+    line + '\n',
+    signal,
+    customHeaders,
+  );
   const fileIds = [file.id];
   // Set when the job is left running on purpose: the wait was abandoned but
   // the batch is neither settled nor cancelled, so its files must survive for
@@ -163,14 +203,29 @@ export async function runBatchCompletion(
   // (nothing to cancel) from "polling threw" without hitting a TDZ.
   let batch: Awaited<ReturnType<typeof client.batches.create>> | undefined;
   try {
-    batch = await client.batches.create(
-      {
-        input_file_id: file.id,
-        endpoint: '/v1/chat/completions',
-        completion_window: '24h',
-      },
-      { signal },
-    );
+    try {
+      // maxRetries: 0 — POST /batches is not idempotent and carries no
+      // idempotency key, so the SDK's own retry could start a second paid
+      // job underneath the caller's retry policy, which owns retries here.
+      batch = await client.batches.create(
+        {
+          input_file_id: file.id,
+          endpoint: '/v1/chat/completions',
+          completion_window: '24h',
+        },
+        { signal, maxRetries: 0 },
+      );
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // The create may or may not have been accepted server-side; either way
+      // a caller-side retry would risk a duplicate paid job, so fail fast by
+      // type. The uploaded input file is deleted by the `finally`.
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new BatchNotRetryableError(
+        `Batch create failed after the input file was uploaded: ${detail}`,
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
     // Written to stderr, not only debug-logged: if this process dies mid-wait
     // the id is the only handle left (`qwen batch fetch <id>`).
     const dueBy = batch.expires_at
@@ -182,8 +237,31 @@ export async function runBatchCompletion(
     let pollFailures = 0;
     while (!SETTLED.has(batch.status)) {
       await sleep(pollMs, signal);
+      // A job is supposed to settle by its own deadline; if the provider
+      // never flips the status the loop would otherwise wait forever, so
+      // give up shortly after expiry and leave the job recoverable.
+      if (
+        batch.expires_at &&
+        Date.now() > (batch.expires_at + EXPIRY_GRACE_S) * 1000
+      ) {
+        abandoned = true;
+        throw new BatchNotRetryableError(
+          `Batch ${batch.id} passed its completion window ` +
+            `(${new Date(batch.expires_at * 1000).toISOString()}) without ` +
+            `settling. It may still finish — recover the result with ` +
+            `\`qwen batch fetch ${batch.id}\`.`,
+        );
+      }
+      // One child signal per poll: the SDK adds an abort listener per
+      // request attempt and never removes it, so reusing the turn-long
+      // signal would pile thousands of listeners onto it over a 24h wait.
+      const pollAc = new AbortController();
+      const abortPoll = () => pollAc.abort();
+      signal?.addEventListener('abort', abortPoll, { once: true });
       try {
-        batch = await client.batches.retrieve(batch.id, { signal });
+        batch = await client.batches.retrieve(batch.id, {
+          signal: pollAc.signal,
+        });
         pollFailures = 0;
       } catch (error) {
         if (signal?.aborted) throw error;
@@ -206,6 +284,8 @@ export async function runBatchCompletion(
           `batch ${batch.id} poll failed (${pollFailures}/${MAX_POLL_FAILURES}): ${detail}`,
         );
         continue;
+      } finally {
+        signal?.removeEventListener('abort', abortPoll);
       }
       debugLogger.debug(`batch ${batch.id} ${batch.status}`);
     }
@@ -220,7 +300,23 @@ export async function runBatchCompletion(
         `Batch ${batch.id} ${batch.status}${detail ? `: ${detail}` : ''}`,
       );
     }
-    const [output] = await readLines(client, batch.output_file_id);
+    // A failure reading the result of a settled, paid job must not escape
+    // untyped: the caller's retry would create a second job, and the
+    // `finally` would delete the completed output. Keep the files and point
+    // at the recovery command instead.
+    let output: BatchOutputLine | undefined;
+    try {
+      [output] = await readLines(client, batch.output_file_id);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      abandoned = true;
+      const readDetail = error instanceof Error ? error.message : String(error);
+      throw new BatchNotRetryableError(
+        `Batch ${batch.id} settled, but reading its output failed ` +
+          `(${readDetail}). Recover the result with \`qwen batch fetch ${batch.id}\`.`,
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
     if (output?.response?.status_code === 200) {
       return output.response.body as OpenAI.Chat.ChatCompletion;
     }
@@ -235,7 +331,22 @@ export async function runBatchCompletion(
     );
   } catch (error) {
     if (signal?.aborted && batch && !SETTLED.has(batch.status)) {
-      await client.batches.cancel(batch.id).catch(() => undefined);
+      // Short timeout, no SDK retries: the user is waiting on the interrupt,
+      // and a non-idempotent cancel must not pile up attempts.
+      const cancelled = await client.batches
+        .cancel(batch.id, { maxRetries: 0, timeout: 10_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!cancelled) {
+        // The job may still be running and billing; keep its files and say
+        // so, rather than exiting clean while the meter runs.
+        abandoned = true;
+        process.stderr.write(
+          `[batch] could not cancel ${batch.id} (it may still be running). ` +
+            `Check with \`qwen batch status ${batch.id}\`, cancel with ` +
+            `\`qwen batch cancel ${batch.id}\`.\n`,
+        );
+      }
     }
     throw error;
   } finally {

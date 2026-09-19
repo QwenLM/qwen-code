@@ -795,6 +795,18 @@ export async function parseArguments(): Promise<CliArgs> {
           ) {
             return '--batch is only available in non-interactive runs: pass a prompt (-p or positional) or pipe stdin';
           }
+          if (argv['batch'] && (argv['acp'] || argv['experimentalAcp'])) {
+            // ACP runs an editor-driven turn loop on piped stdin, so the TTY
+            // check above passes while every turn would still be deferred to
+            // a >=24h batch job. Both spellings: experimental-acp is only
+            // mapped onto acp after parsing.
+            return '--batch cannot be combined with --acp/--experimental-acp: batch mode is non-interactive only.';
+          }
+          if (argv['batch'] && argv['inputFormat'] === 'stream-json') {
+            // stream-json input is the long-lived headless protocol; every
+            // turn of it would become a separate batch job.
+            return '--batch cannot be combined with --input-format stream-json: batch mode is non-interactive only.';
+          }
           if (
             argv['inputFormat'] === 'stream-json' &&
             argv['outputFormat'] !== OutputFormat.STREAM_JSON
@@ -1589,9 +1601,12 @@ function warnAboutOutputStyle(warning: string): void {
 function isLoopbackEndpoint(baseUrl: string | undefined): boolean {
   if (!baseUrl) return false;
   try {
+    // WHATWG keeps the brackets on an IPv6 literal, so strip them.
     const hostname = new URL(baseUrl).hostname.toLowerCase();
     return (
-      hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname.replace(/^\[|\]$/g, '') === '::1'
     );
   } catch {
     return false;
@@ -2133,18 +2148,25 @@ export async function loadCliConfig(
   // all, and a non-DashScope OpenAI-compatible host fails server-side with a
   // 404 only after the first upload. Fail fast instead, before any request.
   if (argv.batch) {
+    // `isDashScopeProvider` short-circuits to true on an empty baseUrl (a
+    // DashScope-compatible endpoint is its default assumption), but the
+    // runtime resolves that same empty value to a non-DashScope default —
+    // so the gate must require an explicitly configured DashScope host, with
+    // only the loopback allowance beside it.
+    const baseUrl = resolvedCliConfig.baseUrl;
     const isDashScopeKeyAuth =
       selectedAuthType === AuthTypeValues.USE_OPENAI &&
-      (DashScopeOpenAICompatibleProvider.isDashScopeProvider({
-        authType: selectedAuthType,
-        baseUrl: resolvedCliConfig.baseUrl,
-      } as ContentGeneratorConfig) ||
-        isLoopbackEndpoint(resolvedCliConfig.baseUrl));
+      ((!!baseUrl &&
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider({
+          authType: selectedAuthType,
+          baseUrl,
+        } as ContentGeneratorConfig)) ||
+        isLoopbackEndpoint(baseUrl));
     if (!isDashScopeKeyAuth) {
-      throw new Error(
+      throw new FatalConfigError(
         '--batch needs an OpenAI-compatible API key on a DashScope endpoint ' +
           `(auth type "openai"); resolved auth type is "${selectedAuthType ?? 'none'}"` +
-          `${resolvedCliConfig.baseUrl ? ` at ${resolvedCliConfig.baseUrl}` : ''}. ` +
+          `${baseUrl ? ` at ${baseUrl}` : ''}. ` +
           'No other provider has a Batch API, so the run would silently go realtime at full price.',
       );
     }

@@ -34,6 +34,7 @@ import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import { ResponsesHttpError } from '../utils/responses-http-error.js';
 import { convertGeminiContentsToResponsesInput } from './openaiResponsesContentGenerator/responses-converter.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
+import { BatchNotRetryableError } from './openaiContentGenerator/batch.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGenerator.js';
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
@@ -5405,6 +5406,218 @@ describe('LlmChat', async () => {
         { text: '', thought: true, thoughtSignature: first + 'sigB' },
         { functionCall: { id: 'call1', name: 'tool', args: {} } },
       ]);
+    });
+  });
+
+  describe('batch mode (executionMode)', () => {
+    const enableBatchMode = () => {
+      (mockConfig as unknown as Record<string, unknown>)['getBatchMode'] = () =>
+        true;
+    };
+
+    it("stamps executionMode: 'batch' on the main-loop request when enabled", async () => {
+      enableBatchMode();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'ok' }])),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-batch-stamp',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const [request] = vi.mocked(mockContentGenerator.generateContentStream)
+        .mock.calls[0]!;
+      expect((request as { executionMode?: string }).executionMode).toBe(
+        'batch',
+      );
+    });
+
+    it('never stamps a forked chat — side calls stay realtime', async () => {
+      // createForkedChat builds its LlmChat on the caller's Config verbatim
+      // (no deriveConfig), so the fork guard must live at the stamp site.
+      enableBatchMode();
+      chat.isForkedChat = true;
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'ok' }])),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-batch-forked',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const [request] = vi.mocked(mockContentGenerator.generateContentStream)
+        .mock.calls[0]!;
+      expect(
+        (request as { executionMode?: string }).executionMode,
+      ).toBeUndefined();
+    });
+
+    it('does not stamp batch mode on a fallback-served turn', async () => {
+      // The startup gate validated only the primary route; a fallback model
+      // may be served by a provider with no Batch API.
+      enableBatchMode();
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['fallback-b']);
+      const fallbackStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'fallback ok' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+      const fallbackGenerator = {
+        generateContent: vi.fn(),
+        generateContentStream: fallbackStream,
+        embedContent: vi.fn(),
+        batchEmbedContents: vi.fn(),
+      } as unknown as ContentGenerator;
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          contentGenerator: fallbackGenerator,
+          contentGeneratorConfig: { modalities: {} },
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-b',
+        }),
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'gemini-pro@test0001',
+      );
+      const capacityError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        ),
+        { status: 429 },
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            usageMetadata: { promptTokenCount: 10, totalTokenCount: 10 },
+          } as GenerateContentResponse;
+          throw capacityError;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-batch-fallback',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const [primaryRequest] = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[0]!;
+      expect((primaryRequest as { executionMode?: string }).executionMode).toBe(
+        'batch',
+      );
+      const [fallbackRequest] = fallbackStream.mock.calls[0]!;
+      expect(
+        (fallbackRequest as { executionMode?: string }).executionMode,
+      ).toBeUndefined();
+      expect(
+        events.some((e) => e.type === StreamEventType.MODEL_FALLBACK),
+      ).toBe(true);
+    });
+
+    it('fails a Batch API give-up fast instead of rate-limit-retrying it', async () => {
+      // The give-up message interpolates provider-authored detail; a
+      // throttle-shaped body would otherwise schedule up to 10 re-sends, each
+      // a fresh paid job.
+      const giveUp = new BatchNotRetryableError(
+        'Batch b7 is still running, but polling it failed 6 times in a row ' +
+          '({"error":{"type":"rate_limit_error","message":"Too many requests, please try again later"}}). ' +
+          'Recover the result with `qwen batch fetch b7`.',
+      );
+      vi.mocked(mockContentGenerator.generateContentStream).mockRejectedValue(
+        giveUp,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-batch-fast-fail',
+      );
+      const events: StreamEvent[] = [];
+      await expect(
+        (async () => {
+          for await (const event of stream) {
+            events.push(event);
+          }
+        })(),
+      ).rejects.toThrow('Batch b7');
+
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(events.some((e) => e.type === StreamEventType.RETRY)).toBe(false);
+    });
+
+    it('classifies a handler-wrapped batch give-up as non-retryable', async () => {
+      // The pipeline's error handler rethrows a timeout-shaped give-up as a
+      // plain Error stamped ETIMEDOUT; the retry predicate must still see the
+      // batch identity through the cause chain.
+      let predicate: ((error: unknown) => boolean) | undefined;
+      mockRetryWithBackoff.mockImplementation(async (apiCall, options) => {
+        predicate = options?.shouldRetryOnError as
+          | ((error: unknown) => boolean)
+          | undefined;
+        return apiCall();
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'ok' }])),
+      );
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-batch-predicate',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+      expect(predicate).toBeDefined();
+
+      const errorHandler = new EnhancedErrorHandler(() => true);
+      let wrapped: unknown;
+      try {
+        errorHandler.handle(
+          new BatchNotRetryableError(
+            'Batch b7 is still running, but polling it failed 6 times in a ' +
+              'row (Request timed out.). Recover with `qwen batch fetch b7`.',
+          ),
+          { model: 'test-model', modalities: {}, startTime: Date.now() },
+          { model: 'test-model', contents: [] },
+        );
+      } catch (error) {
+        wrapped = error;
+      }
+      expect(wrapped).toBeInstanceOf(Error);
+      expect((wrapped as Error).name).not.toBe('BatchNotRetryableError');
+      expect(predicate!(wrapped)).toBe(false);
     });
   });
 

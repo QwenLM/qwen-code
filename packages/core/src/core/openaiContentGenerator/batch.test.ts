@@ -5,15 +5,17 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
 import type OpenAI from 'openai';
 import {
   BatchNotRetryableError,
   completionAsChunk,
+  isNonRetryableBatchError,
   runBatchCompletion,
   singleChunkStream,
 } from './batch.js';
-import { isNonRetryableBatchError } from '../llm-chat.js';
 import { isRetryableUpstreamError } from '../../utils/retryErrorClassification.js';
+import { getErrorStatus } from '../../utils/errors.js';
 
 const completion = {
   id: 'chatcmpl-1',
@@ -77,9 +79,13 @@ describe('runBatchCompletion', () => {
   let uploadFetch: ReturnType<typeof vi.fn>;
   beforeEach(() => {
     client = mockClient();
+    // A fresh Response per call: a Response body can only be read once, and
+    // the multi-call tests below must not die on an already-consumed body.
     uploadFetch = vi
       .fn()
-      .mockResolvedValue(new Response(JSON.stringify({ id: 'file-in' })));
+      .mockImplementation(async () =>
+        Promise.resolve(new Response(JSON.stringify({ id: 'file-in' }))),
+      );
     vi.stubGlobal('fetch', uploadFetch);
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   });
@@ -160,6 +166,22 @@ describe('runBatchCompletion', () => {
     expect(client.files.delete).toHaveBeenCalledWith('file-err');
   });
 
+  it('surfaces a per-request failure reported inside the output file', async () => {
+    // A failed line comes back as a non-200 output line, not only in the
+    // error file; its reason lives in the line's response body.
+    client.batches.create.mockResolvedValue({
+      id: 'b2s',
+      status: 'completed',
+      output_file_id: 'file-out',
+    });
+    client.files.content.mockResolvedValue(
+      outputLine({ error: { message: 'input too long' } }, 400),
+    );
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow('Batch b2s request failed: input too long');
+  });
+
   it('rejects a batch that settled without completing, with the reason from the error file', async () => {
     client.batches.create.mockResolvedValue({
       id: 'b3',
@@ -203,13 +225,134 @@ describe('runBatchCompletion', () => {
 
   it('deletes the uploaded input file when `batches.create` fails', async () => {
     // The file is already uploaded — and billed — by the time create runs, so
-    // a create failure must not orphan it.
+    // a create failure must not orphan it. The error must be typed: an
+    // untyped 5xx/transport failure would be retried by the caller, and
+    // POST /batches is not idempotent — a retry can create a second paid job.
     client.batches.create.mockRejectedValue(new Error('quota exceeded'));
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow(BatchNotRetryableError);
     await expect(
       runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
     ).rejects.toThrow('quota exceeded');
     expect(client.files.delete).toHaveBeenCalledWith('file-in');
     expect(client.batches.cancel).not.toHaveBeenCalled();
+  });
+
+  it('passes maxRetries: 0 to the non-idempotent batches.create', async () => {
+    client.batches.create.mockResolvedValue({
+      id: 'b0',
+      status: 'completed',
+      output_file_id: 'file-out',
+    });
+    client.files.content.mockResolvedValue(outputLine(completion));
+    await runBatchCompletion(
+      client as unknown as OpenAI,
+      request,
+      undefined,
+      0,
+    );
+    expect(client.batches.create).toHaveBeenCalledWith(
+      expect.objectContaining({ input_file_id: 'file-in' }),
+      expect.objectContaining({ maxRetries: 0 }),
+    );
+  });
+
+  it('keeps the files and names the fetch command when reading a settled output fails', async () => {
+    // The job completed and was paid for; an untyped read failure would let
+    // the caller retry into a second job while `finally` deletes the answer.
+    client.batches.create.mockResolvedValue({
+      id: 'b7r',
+      status: 'completed',
+      output_file_id: 'file-out',
+    });
+    client.files.content.mockRejectedValue(
+      Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+    );
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow('qwen batch fetch b7r');
+    expect(client.files.delete).not.toHaveBeenCalled();
+  });
+
+  it('gives up shortly after the batch passes its own deadline', async () => {
+    // A job whose status never flips must not hold the turn open forever.
+    client.batches.create.mockResolvedValue({
+      id: 'b7e',
+      status: 'validating',
+      expires_at: Math.floor(Date.now() / 1000) - 86400,
+    });
+    await expect(
+      runBatchCompletion(client as unknown as OpenAI, request, undefined, 0),
+    ).rejects.toThrow('qwen batch fetch b7e');
+    // Abandoned, not cleaned up: the job may still settle server-side.
+    expect(client.files.delete).not.toHaveBeenCalled();
+  });
+
+  it('stamps the HTTP status on an upload failure for the caller classifier', async () => {
+    uploadFetch.mockImplementation(async () =>
+      Promise.resolve(new Response('busy', { status: 503 })),
+    );
+    const error = await runBatchCompletion(
+      client as unknown as OpenAI,
+      request,
+      undefined,
+      0,
+    ).then(
+      () => {
+        throw new Error('expected a rejection');
+      },
+      (e) => e,
+    );
+    expect(getErrorStatus(error)).toBe(503);
+  });
+
+  it('sends the configured customHeaders on the upload', async () => {
+    client.batches.create.mockResolvedValue({
+      id: 'b0h',
+      status: 'completed',
+      output_file_id: 'file-out',
+    });
+    client.files.content.mockResolvedValue(outputLine(completion));
+    await runBatchCompletion(
+      client as unknown as OpenAI,
+      request,
+      undefined,
+      0,
+      { 'x-audit': 'tenant-7' },
+    );
+    const [, uploadInit] = uploadFetch.mock.calls[0] as [string, RequestInit];
+    expect((uploadInit.headers as Record<string, string>)['x-audit']).toBe(
+      'tenant-7',
+    );
+  });
+
+  it('polls with a per-poll child signal, not the turn-long signal', async () => {
+    // The SDK adds a never-removed abort listener per request attempt;
+    // handing it the turn signal would grow its listener list without bound
+    // over a 24h wait.
+    client.batches.create.mockResolvedValue({
+      id: 'b0p',
+      status: 'in_progress',
+    });
+    client.batches.retrieve.mockResolvedValue({
+      id: 'b0p',
+      status: 'completed',
+      output_file_id: 'file-out',
+    });
+    client.files.content.mockResolvedValue(outputLine(completion));
+    const ac = new AbortController();
+    await runBatchCompletion(
+      client as unknown as OpenAI,
+      request,
+      ac.signal,
+      0,
+    );
+    const pollSignal = client.batches.retrieve.mock.calls[0][1]
+      ?.signal as AbortSignal;
+    expect(pollSignal).toBeInstanceOf(AbortSignal);
+    expect(pollSignal).not.toBe(ac.signal);
+    expect(getEventListeners(ac.signal, 'abort')).toHaveLength(0);
   });
 
   it('reports the abort and cleans up when aborted during create', async () => {
@@ -293,8 +436,37 @@ describe('runBatchCompletion', () => {
     await vi.waitFor(() => expect(client.batches.create).toHaveBeenCalled());
     ac.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-    expect(client.batches.cancel).toHaveBeenCalledWith('b4');
+    // No SDK retries on the cancel: the user is waiting on the interrupt.
+    expect(client.batches.cancel).toHaveBeenCalledWith(
+      'b4',
+      expect.objectContaining({ maxRetries: 0 }),
+    );
     expect(client.batches.retrieve).not.toHaveBeenCalled();
+  });
+
+  it('keeps the files and says so when the cancel itself fails', async () => {
+    client.batches.create.mockResolvedValue({
+      id: 'b4c',
+      status: 'in_progress',
+      input_file_id: 'file-in',
+    });
+    client.batches.cancel.mockRejectedValue(new Error('cancel failed'));
+    const ac = new AbortController();
+    const pending = runBatchCompletion(
+      client as unknown as OpenAI,
+      request,
+      ac.signal,
+      60_000,
+    );
+    await vi.waitFor(() => expect(client.batches.create).toHaveBeenCalled());
+    ac.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    // A failed cancel leaves the job running and billing; the input file
+    // must survive and the stderr hint must name the recovery commands.
+    expect(client.files.delete).not.toHaveBeenCalled();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining('qwen batch cancel b4c'),
+    );
   });
 });
 
@@ -325,6 +497,23 @@ describe("the give-up error and the caller's retry classifier", () => {
       isNonRetryableBatchError(new BatchNotRetryableError(withHttpStatus)),
     ).toBe(true);
     expect(isNonRetryableBatchError(new Error(withThrottleBody))).toBe(false);
+  });
+
+  it('sees through wrappers that keep the give-up as `cause`', () => {
+    // The pipeline's error handler rethrows a timeout-shaped give-up as a
+    // plain Error with the original as `cause` (stamped ETIMEDOUT); a
+    // name-only check on the outer error would classify that retryable.
+    const wrapped = Object.assign(
+      new Error('Request timeout after 300s.', {
+        cause: new BatchNotRetryableError(withThrottleBody),
+      }),
+      { code: 'ETIMEDOUT' },
+    );
+    expect(isNonRetryableBatchError(wrapped)).toBe(true);
+    // The walk is bounded; a chain deeper than the cap fails open.
+    let deep: Error = new BatchNotRetryableError(withThrottleBody);
+    for (let i = 0; i < 6; i += 1) deep = new Error('wrap', { cause: deep });
+    expect(isNonRetryableBatchError(deep)).toBe(false);
   });
 
   it('is the type every give-up path throws', async () => {

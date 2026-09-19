@@ -29,6 +29,7 @@ import {
   formatQuotaExhaustedMessage,
 } from '../utils/quotaErrorDetection.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
+import { isNonRetryableBatchError } from './openaiContentGenerator/batch.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   containsXmlToolCalls,
@@ -3795,6 +3796,15 @@ export class LlmChat {
             ) {
               throw error;
             }
+            // A Batch API give-up is never re-sent from any layer: a retry
+            // re-enters runBatchCompletion from the top, uploading a new
+            // input file and creating a SECOND paid job while the first may
+            // still be running. Fast-fail before the rate-limit branch — the
+            // give-up message interpolates provider-authored detail, which
+            // the text classifier could otherwise read as a throttle.
+            if (isNonRetryableBatchError(error)) {
+              throw error;
+            }
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
@@ -4860,7 +4870,12 @@ export class LlmChat {
               extraRetryErrorCodes,
             });
 
-            if (isFallbackEligible(currentErrorClassification)) {
+            // A Batch API give-up must not start the fallback chain either:
+            // each fallback turn would upload and create its own paid job.
+            if (
+              !isNonRetryableBatchError(lastError) &&
+              isFallbackEligible(currentErrorClassification)
+            ) {
               let fallbackSucceeded = false;
               let fallbackIndex = 0;
               let currentModel = model;
@@ -5179,9 +5194,16 @@ export class LlmChat {
         ...(transportContinuationPrefix !== undefined && {
           continuationInFlight: true,
         }),
-        ...(this.config.getBatchMode?.() && {
-          executionMode: 'batch' as const,
-        }),
+        // Batch mode is scoped to the main loop's own turns on the primary
+        // route: a forked chat's side call must stay realtime even when it
+        // inherits the caller's Config (createForkedChat does not derive),
+        // and an overrides-served turn (the fallback chain) runs against a
+        // provider the --batch startup gate never validated.
+        ...(this.config.getBatchMode?.() &&
+          !this.isForkedChat &&
+          !overrides && {
+            executionMode: 'batch' as const,
+          }),
       };
       return generator.generateContentStream(request, prompt_id);
     };
@@ -6772,22 +6794,6 @@ export function isSchemaDepthError(errorMessage: string): boolean {
 
 export function isInvalidArgumentError(errorMessage: string): boolean {
   return errorMessage.includes('Request contains an invalid argument');
-}
-
-/**
- * A Batch API give-up (`BatchNotRetryableError`), which must fail fast.
- *
- * Retrying re-enters `runBatchCompletion` from the top: a new upload and a
- * second paid job, while the first may still be running and unreachable. The
- * message carries provider-authored detail, and this repo's classifier reads
- * provider payloads out of message text — a rate-limit body or an
- * `HTTP_STATUS/503` in that detail is enough to make the classifier call it
- * retryable — so the decision is taken on the error's identity instead.
- * Matched by name, not `instanceof`, so `core/` needs no import from the
- * OpenAI provider directory.
- */
-export function isNonRetryableBatchError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'BatchNotRetryableError';
 }
 
 /** @deprecated Use `LlmChat`; retained until a future major release. */

@@ -448,7 +448,13 @@ export class ContentGenerationPipeline {
         'Batch mode needs an API key: the Qwen OAuth endpoint has no Batch API.',
       );
     }
-    return runBatchCompletion(this.client, openaiRequest, signal);
+    return runBatchCompletion(
+      this.client,
+      openaiRequest,
+      signal,
+      undefined,
+      this.contentGeneratorConfig.customHeaders,
+    );
   }
 
   async execute(
