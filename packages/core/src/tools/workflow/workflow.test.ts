@@ -903,8 +903,10 @@ await agent('scan package.json')
     // limits and the description the size guideline paragraph, which put the
     // fallback at 25,759. Raised again from 26,500 when the reference gained
     // `agent({tools})`, whose entry states what the allowlist refuses and what
-    // it cannot promise, which put the fallback at 26,900.
-    expect(tool.description.length).toBeLessThanOrEqual(27_500);
+    // it cannot promise, which put the fallback at 26,900. Raised again from
+    // 27,500, which the resume refusals had reached exactly, when the reference
+    // gained how a run interrupted by its process exiting is listed.
+    expect(tool.description.length).toBeLessThanOrEqual(28_000);
   });
 
   it('rejects build() when script is missing', () => {
@@ -1025,11 +1027,16 @@ await agent('scan package.json')
       await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
       const runId = first.workflowRunId;
       expect(runId).toMatch(/^wf_/);
+      // The completion callback fires from fail()/complete() while the
+      // runner's finally block still holds the run's handle; a resume that
+      // lands before releaseHandle is refused with "has not exited yet".
+      await registry.getHandle(runId!)?.completion;
 
       await tool
         .buildSessionOwnedBackground({ script, resumeFromRunId: runId })
         .execute(new AbortController().signal);
       await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(2));
+      await registry.getHandle(runId!)?.completion;
       const retryText = completion.mock.calls[1][1] as string;
       expect(retryText).toContain(
         'This reads the saved /review-and-fix workflow',

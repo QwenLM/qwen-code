@@ -1011,8 +1011,8 @@ describe('PlaywrightRuntime command contracts', () => {
     await expect(
       fixture.runtime.dispatch('tab.title', { tabId: tab.id }),
     ).resolves.toBe('Fixture');
-    // The unrelated popup and the matching page were each probed once.
-    expect(fixture.probeDetach).toHaveBeenCalledTimes(2);
+    // All three other pages and the matching page were each probed once.
+    expect(fixture.probeDetach).toHaveBeenCalledTimes(4);
     expect(fixture.cdp.detach).not.toHaveBeenCalled();
   });
 
@@ -1555,7 +1555,7 @@ describe('PlaywrightRuntime command contracts', () => {
     ).resolves.toMatchObject({ message: 'Second' });
     fixture.emitEvent({
       type: 'event',
-      tabId: 18,
+      tabId: 22,
       method: 'Page.javascriptDialogClosed',
       params: {},
     });
@@ -2010,13 +2010,13 @@ describe('PlaywrightRuntime command contracts', () => {
         if (method === 'tabs.queryDerived')
           return [
             {
-              providerTabId: 18,
+              providerTabId: 22,
               title: 'Popup',
               url: 'https://example.com/popup',
               derivedFromProviderTabId: 17,
             },
           ];
-        if (method === 'tabs.attach' && params.tabId === 18)
+        if (method === 'tabs.attach' && params.tabId === 22)
           throw new Error('Cannot attach to target');
         return null;
       },
@@ -2027,6 +2027,50 @@ describe('PlaywrightRuntime command contracts', () => {
     ).resolves.toEqual([expect.objectContaining({ id: tab.id })]);
   });
 
+  it('lists healthy derived tabs after an earlier popup fails to attach', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    fixture.derivedTabs.push({ providerTabId: 22 }, { providerTabId: 23 });
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(async (method, params = {}) => {
+      if (method === 'tabs.attach' && params.tabId === 22)
+        throw new Error('Cannot attach to target');
+      return await request(method, params);
+    });
+
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toEqual([
+      expect.objectContaining({ id: tab.id }),
+      expect.objectContaining({ title: 'Nested popup' }),
+    ]);
+    expect(fixture.request).toHaveBeenCalledWith('tabs.attach', { tabId: 23 });
+  });
+
+  it.each(['BROWSER_DISCONNECTED', 'STALE_BROWSER_SESSION'] as const)(
+    'propagates %s after an earlier derived-tab attachment failure',
+    async (code) => {
+      const fixture = await runtimeFixture();
+      await createTab(fixture.runtime);
+      fixture.derivedTabs.push({ providerTabId: 22 }, { providerTabId: 23 });
+      const request = fixture.request.getMockImplementation()!;
+      fixture.request.mockImplementation(async (method, params = {}) => {
+        if (method === 'tabs.attach' && params.tabId === 22)
+          throw new Error('Cannot attach to target');
+        if (method === 'tabs.attach' && params.tabId === 23)
+          throw new BrowserRuntimeError(code, 'Chrome session lost');
+        return await request(method, params);
+      });
+
+      await expect(
+        fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+      ).rejects.toMatchObject({ code });
+      expect(fixture.request).toHaveBeenCalledWith('tabs.attach', {
+        tabId: 23,
+      });
+    },
+  );
+
   it('propagates a lost connection while syncing derived tabs', async () => {
     const fixture = await runtimeFixture();
     await createTab(fixture.runtime);
@@ -2035,13 +2079,13 @@ describe('PlaywrightRuntime command contracts', () => {
         if (method === 'tabs.queryDerived')
           return [
             {
-              providerTabId: 18,
+              providerTabId: 22,
               title: 'Popup',
               url: 'https://example.com/popup',
               derivedFromProviderTabId: 17,
             },
           ];
-        if (method === 'tabs.attach' && params.tabId === 18)
+        if (method === 'tabs.attach' && params.tabId === 22)
           throw new BrowserRuntimeError(
             'BROWSER_DISCONNECTED',
             'Chrome extension disconnected',
@@ -2169,13 +2213,13 @@ describe('PlaywrightRuntime command contracts', () => {
     fixture.request.mockImplementation(
       async (method: string, params: Record<string, unknown> = {}) => {
         if (method === 'tabs.get')
-          return { providerTabId: 18, title: 'Popup', url: 'about:blank' };
+          return { providerTabId: 22, title: 'Popup', url: 'about:blank' };
         return await original(method, params);
       },
     );
     const popupTracked = (openerTabId: number): BridgeEvent => ({
       type: 'event',
-      tabId: 18,
+      tabId: 22,
       method: 'qwenBrowser.derivedTabTracked',
       params: { openerTabId },
     });
@@ -2192,7 +2236,7 @@ describe('PlaywrightRuntime command contracts', () => {
         fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
       ).resolves.toHaveLength(2);
     });
-    expect(lookups()).toEqual([['tabs.get', { tabId: 18 }]]);
+    expect(lookups()).toEqual([['tabs.get', { tabId: 22 }]]);
     await expect(
       fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
     ).resolves.toEqual([
@@ -2216,7 +2260,7 @@ describe('PlaywrightRuntime command contracts', () => {
         if (method === 'tabs.queryDerived')
           return [
             {
-              providerTabId: 18,
+              providerTabId: 22,
               title: 'Popup',
               url: 'about:blank',
               derivedFromProviderTabId: 17,
@@ -2296,13 +2340,13 @@ describe('PlaywrightRuntime command contracts', () => {
     );
     fixture.emitEvent({
       type: 'event',
-      tabId: 18,
+      tabId: 22,
       method: 'qwenBrowser.derivedTabTracked',
       params: { openerTabId: 17 },
     });
     await fixture.runtime.stop();
     expect(fixture.listenerCount()).toBe(0);
-    finish({ providerTabId: 18, title: 'Popup', url: 'about:blank' });
+    finish({ providerTabId: 22, title: 'Popup', url: 'about:blank' });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(
       fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach'),
@@ -2424,6 +2468,73 @@ describe('PlaywrightRuntime command contracts', () => {
     ).toHaveLength(1);
   });
 
+  it.each(['handoff', 'cleanup'] as const)(
+    'finalizes a re-registered crashed provider once for %s',
+    async (disposition) => {
+      const fixture = await runtimeFixture();
+      const oldTab = await createTab(fixture.runtime);
+      const listeners = new Map(
+        fixture.page.on.mock.calls as Array<[string, () => void]>,
+      );
+      listeners.get('crash')!();
+      const newTab = await createTab(fixture.runtime);
+      expect(newTab.id).not.toBe(oldTab.id);
+      listeners.get('close')!();
+
+      await fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep:
+          disposition === 'handoff'
+            ? [{ tabId: newTab.id, status: 'handoff' }]
+            : [],
+      });
+
+      expect(
+        fixture.request.mock.calls.filter(
+          ([method]) => method === 'tabs.close',
+        ),
+      ).toEqual(
+        disposition === 'handoff' ? [] : [['tabs.close', { tabId: 17 }]],
+      );
+    },
+  );
+
+  it.each(['STALE_TAB', 'OPERATION_FAILED'] as const)(
+    'only forgets a crash-retained tab when cleanup reports it gone: %s',
+    async (code) => {
+      const fixture = await runtimeFixture();
+      await createTab(fixture.runtime);
+      const listeners = new Map(
+        fixture.page.on.mock.calls as Array<[string, () => void]>,
+      );
+      listeners.get('crash')!();
+      listeners.get('close')!();
+      const request = fixture.request.getMockImplementation()!;
+      const error = new BrowserRuntimeError(code, 'Controlled cleanup failure');
+      fixture.request.mockImplementation(async (method, params = {}) => {
+        if (method === 'tabs.close') throw error;
+        return await request(method, params);
+      });
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = fixture.runtime.dispatch('tabs.finalize', {
+            browserId: 'chrome',
+            keep: [],
+          });
+          if (code === 'STALE_TAB') await expect(result).resolves.toBeNull();
+          else await expect(result).rejects.toBe(error);
+        }
+        expect(
+          fixture.request.mock.calls.filter(
+            ([method]) => method === 'tabs.close',
+          ),
+        ).toHaveLength(code === 'STALE_TAB' ? 1 : 2);
+      } finally {
+        fixture.request.mockImplementation(request);
+      }
+    },
+  );
+
   it('releases tab and transport state when a page closes', async () => {
     const fixture = await runtimeFixture();
     const oldTab = await createTab(fixture.runtime);
@@ -2447,6 +2558,464 @@ describe('PlaywrightRuntime command contracts', () => {
       fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach'),
     ).toHaveLength(2);
   });
+
+  it('finalizes created, deliverable, and handoff tabs by disposition', async () => {
+    const disposable = await runtimeFixture();
+    await createTab(disposable.runtime);
+    await disposable.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [],
+    });
+    expect(disposable.request).toHaveBeenCalledWith('tabs.close', {
+      tabId: 17,
+    });
+
+    const claimed = await runtimeFixture();
+    const candidates = (await claimed.runtime.dispatch(
+      'browser.user.openTabs',
+      { browserId: 'chrome' },
+    )) as Array<{ id: string; title: string | null; url: string | null }>;
+    await claimed.runtime.dispatch('browser.user.claimTab', {
+      browserId: 'chrome',
+      tab: candidates[0],
+    });
+    await claimed.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+    });
+    expect(claimed.request).toHaveBeenCalledWith('tabs.release', { tabId: 17 });
+    expect(claimed.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+
+    const deliverable = await runtimeFixture();
+    const deliverableTab = await createTab(deliverable.runtime);
+    await deliverable.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [{ tabId: deliverableTab.id, status: 'deliverable' }],
+    });
+    expect(deliverable.request).toHaveBeenCalledWith('tabs.release', {
+      tabId: 17,
+    });
+    expect(deliverable.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+
+    const handoff = await runtimeFixture();
+    const handoffTab = await createTab(handoff.runtime);
+    await handoff.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [{ tabId: handoffTab.id, status: 'handoff' }],
+    });
+    await expect(
+      handoff.runtime.dispatch('tab.url', { tabId: handoffTab.id }),
+    ).resolves.toBe('about:blank');
+    expect(handoff.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(handoff.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+    await handoff.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [],
+    });
+    expect(handoff.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+
+    const popup = await runtimeFixture();
+    await createTab(popup.runtime);
+    popup.derivedTabs.push(
+      {
+        providerTabId: 23,
+        derivedFromProviderTabId: 22,
+        title: 'Nested popup',
+        url: 'https://example.com/nested-popup',
+      },
+      {
+        providerTabId: 22,
+        derivedFromProviderTabId: 17,
+        title: 'Popup',
+        url: 'https://example.com/popup',
+      },
+    );
+    await popup.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [],
+    });
+    expect(popup.request).toHaveBeenCalledWith('tabs.close', { tabId: 22 });
+    expect(popup.request).toHaveBeenCalledWith('tabs.close', { tabId: 23 });
+
+    const latePopup = await runtimeFixture();
+    await createTab(latePopup.runtime);
+    latePopup.openTabs.splice(0, 1, {
+      providerTabId: 22,
+      title: 'Late popup',
+      url: 'https://example.com/late-popup',
+    });
+    const lateCandidates = (await latePopup.runtime.dispatch(
+      'browser.user.openTabs',
+      { browserId: 'chrome' },
+    )) as Array<{ id: string; title: string | null; url: string | null }>;
+    await latePopup.runtime.dispatch('browser.user.claimTab', {
+      browserId: 'chrome',
+      tab: lateCandidates[0],
+    });
+    latePopup.derivedTabs.push({
+      providerTabId: 22,
+      derivedFromProviderTabId: 17,
+      title: 'Late popup',
+      url: 'https://example.com/late-popup',
+    });
+    await latePopup.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [],
+    });
+    expect(latePopup.request).toHaveBeenCalledWith('tabs.close', { tabId: 22 });
+    expect(latePopup.request).not.toHaveBeenCalledWith('tabs.release', {
+      tabId: 22,
+    });
+
+    const crashed = await runtimeFixture();
+    await createTab(crashed.runtime);
+    const crashHandler = crashed.page.on.mock.calls.find(
+      ([event]) => event === 'crash',
+    )?.[1] as (() => void) | undefined;
+    expect(crashHandler).toBeDefined();
+    crashHandler?.();
+    await crashed.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [],
+    });
+    expect(crashed.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+  });
+
+  it.each(['created', 'claimed', 'deliverable', 'handoff'] as const)(
+    'preserves %s disposition and cleans healthy popups after an attachment failure',
+    async (disposition) => {
+      const fixture = await runtimeFixture();
+      let tab: TabInfo;
+      if (disposition === 'claimed') {
+        const candidates = (await fixture.runtime.dispatch(
+          'browser.user.openTabs',
+          { browserId: 'chrome' },
+        )) as Array<{ id: string }>;
+        tab = (await fixture.runtime.dispatch('browser.user.claimTab', {
+          browserId: 'chrome',
+          tab: candidates[0],
+        })) as TabInfo;
+      } else {
+        tab = await createTab(fixture.runtime);
+      }
+      fixture.derivedTabs.push({ providerTabId: 22 }, { providerTabId: 23 });
+      const request = fixture.request.getMockImplementation()!;
+      fixture.request.mockImplementation(async (method, params = {}) => {
+        if (method === 'tabs.attach' && params.tabId === 22) {
+          throw new Error('Popup attachment failed');
+        }
+        return await request(method, params);
+      });
+
+      await expect(
+        fixture.runtime.dispatch('tabs.finalize', {
+          browserId: 'chrome',
+          keep:
+            disposition === 'handoff' || disposition === 'deliverable'
+              ? [{ tabId: tab.id, status: disposition }]
+              : [],
+        }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('Popup attachment failed'),
+      });
+
+      expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId: 23 });
+      expect(fixture.request).not.toHaveBeenCalledWith('tabs.close', {
+        tabId: 22,
+      });
+      if (disposition === 'handoff') {
+        expect(fixture.request).not.toHaveBeenCalledWith('tabs.close', {
+          tabId: 17,
+        });
+        expect(fixture.request).not.toHaveBeenCalledWith('tabs.release', {
+          tabId: 17,
+        });
+        await expect(
+          fixture.runtime.dispatch('tab.url', { tabId: tab.id }),
+        ).resolves.toBe('about:blank');
+      } else {
+        expect(fixture.request).toHaveBeenCalledWith(
+          disposition === 'created' ? 'tabs.close' : 'tabs.release',
+          { tabId: 17 },
+        );
+        if (disposition !== 'created') {
+          expect(fixture.request).not.toHaveBeenCalledWith('tabs.close', {
+            tabId: 17,
+          });
+        }
+        await expect(
+          fixture.runtime.dispatch('tab.url', { tabId: tab.id }),
+        ).rejects.toMatchObject({ code: 'STALE_TAB' });
+      }
+    },
+  );
+
+  it('cleans known tabs and reports a failed derived-tab query', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(async (method, params = {}) => {
+      if (method === 'tabs.queryDerived')
+        throw new Error('Derived query failed');
+      return await request(method, params);
+    });
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [],
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('Derived query failed'),
+    });
+    expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+  });
+
+  it('finalizes an agent-created popup after its opener closes', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    const closeHandler = fixture.page.on.mock.calls.find(
+      ([event]) => event === 'close',
+    )?.[1] as (() => void) | undefined;
+    expect(closeHandler).toBeDefined();
+    closeHandler?.();
+    fixture.derivedTabs.push({
+      providerTabId: 22,
+      derivedFromProviderTabId: 17,
+      title: 'Orphaned popup',
+      url: 'https://example.com/orphaned-popup',
+    });
+
+    await fixture.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [],
+    });
+
+    expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId: 22 });
+  });
+
+  it('syncs authoritative derived tabs without changing the selected tab', async () => {
+    const fixture = await runtimeFixture();
+    const selected = await createTab(fixture.runtime);
+    fixture.derivedTabs.push(
+      {
+        providerTabId: 23,
+        derivedFromProviderTabId: 22,
+        title: 'Nested popup',
+        url: 'https://example.com/nested-popup',
+      },
+      {
+        providerTabId: 22,
+        derivedFromProviderTabId: 17,
+        title: 'Popup',
+        url: 'https://example.com/popup',
+      },
+    );
+
+    await expect(
+      fixture.runtime.dispatch('tabs.list', { browserId: 'chrome' }),
+    ).resolves.toHaveLength(3);
+    await expect(
+      fixture.runtime.dispatch('tabs.selected', { browserId: 'chrome' }),
+    ).resolves.toMatchObject({ id: selected.id });
+  });
+
+  it('cleans up controlled tabs when the runtime closes', async () => {
+    const created = await runtimeFixture();
+    await createTab(created.runtime);
+    await created.runtime.stop();
+    expect(created.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+
+    const claimed = await runtimeFixture();
+    const candidates = (await claimed.runtime.dispatch(
+      'browser.user.openTabs',
+      { browserId: 'chrome' },
+    )) as Array<{ id: string }>;
+    await claimed.runtime.dispatch('browser.user.claimTab', {
+      browserId: 'chrome',
+      tab: candidates[0],
+    });
+    await claimed.runtime.stop();
+    expect(claimed.request).toHaveBeenCalledWith('tabs.release', { tabId: 17 });
+
+    const handoff = await runtimeFixture();
+    const handoffTab = await createTab(handoff.runtime);
+    await handoff.runtime.dispatch('tabs.finalize', {
+      browserId: 'chrome',
+      keep: [{ tabId: handoffTab.id, status: 'handoff' }],
+    });
+    await handoff.runtime.stop();
+    expect(handoff.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+  });
+
+  it('preserves crashed tab ownership when detachment emits close', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    for (const event of ['crash', 'close']) {
+      const handler = fixture.page.on.mock.calls.find(
+        ([name]) => name === event,
+      )?.[1];
+      expect(handler).toBeDefined();
+      handler?.();
+    }
+
+    await fixture.runtime.stop();
+
+    expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.detach'),
+    ).toEqual([['tabs.detach', { tabId: 17 }, 2_000]]);
+  });
+
+  it('closes derived tabs on stop without admitting new attachments', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+    fixture.derivedTabs.push(
+      { providerTabId: 22, derivedFromProviderTabId: 17 },
+      { providerTabId: 23, derivedFromProviderTabId: 22 },
+    );
+
+    await fixture.runtime.stop();
+
+    for (const tabId of [17, 22, 23]) {
+      expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId });
+    }
+    expect(
+      fixture.request.mock.calls.filter(([method]) => method === 'tabs.attach'),
+    ).toEqual([['tabs.attach', { tabId: 17 }]]);
+    expect(fixture.listenerCount()).toBe(0);
+    expect(fixture.stopBridge).toHaveBeenCalledOnce();
+  });
+
+  it('retains authoritative popup ownership during shutdown', async () => {
+    const fixture = await runtimeFixture();
+    const candidates = (await fixture.runtime.dispatch(
+      'browser.user.openTabs',
+      {
+        browserId: 'chrome',
+      },
+    )) as Array<{ id: string }>;
+    await fixture.runtime.dispatch('browser.user.claimTab', {
+      browserId: 'chrome',
+      tab: candidates[0],
+    });
+    fixture.derivedTabs.push({ providerTabId: 17 });
+
+    await fixture.runtime.stop();
+
+    expect(fixture.request).toHaveBeenCalledWith('tabs.close', { tabId: 17 });
+    expect(fixture.request).not.toHaveBeenCalledWith('tabs.release', {
+      tabId: 17,
+    });
+  });
+
+  it('validates every kept tab before finalization mutates Chrome', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [
+          { tabId: tab.id, status: 'deliverable' },
+          { tabId: tab.id, status: 'handoff' },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+  });
+
+  it('rejects an unknown kept tab id before finalization mutates Chrome', async () => {
+    const fixture = await runtimeFixture();
+    await createTab(fixture.runtime);
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [{ tabId: 'tab-not-registered', status: 'deliverable' }],
+      }),
+    ).rejects.toMatchObject({ code: 'STALE_TAB' });
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+  });
+
+  it('rejects a kept tab whose page already closed before finalization mutates Chrome', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const closeHandler = fixture.page.on.mock.calls.find(
+      ([name]) => name === 'close',
+    )?.[1];
+    expect(closeHandler).toBeDefined();
+    closeHandler?.();
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [{ tabId: tab.id, status: 'deliverable' }],
+      }),
+    ).rejects.toMatchObject({ code: 'STALE_TAB' });
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+  });
+
+  it('rejects an invalid keep set without cleanup even when synchronization fails', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const request = fixture.request.getMockImplementation()!;
+    fixture.request.mockImplementation(async (method, params = {}) => {
+      if (method === 'tabs.queryDerived')
+        throw new Error('Derived query failed');
+      return await request(method, params);
+    });
+
+    await expect(
+      fixture.runtime.dispatch('tabs.finalize', {
+        browserId: 'chrome',
+        keep: [
+          { tabId: tab.id, status: 'deliverable' },
+          { tabId: tab.id, status: 'handoff' },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.close',
+      expect.anything(),
+    );
+    expect(fixture.request).not.toHaveBeenCalledWith(
+      'tabs.release',
+      expect.anything(),
+    );
+  });
 });
 
 interface RuntimeFixture {
@@ -2462,6 +3031,8 @@ interface RuntimeFixture {
     detach: ReturnType<typeof vi.fn>;
   };
   request: ReturnType<typeof vi.fn>;
+  derivedTabs: Array<Record<string, unknown>>;
+  openTabs: Array<Record<string, unknown>>;
   probeDetach: ReturnType<typeof vi.fn>;
   disconnect(): void;
   browserDisconnect(): void;
@@ -2537,9 +3108,11 @@ async function runtimeFixture(
   const unrelatedPage = options.unrelatedPage
     ? fakePage(locator.value, 'Unrelated popup')
     : undefined;
+  const nestedPopupPage = fakePage(locator.value, 'Nested popup');
   const pageTargetIds = new Map<Page, string>([
     [page.value, 'target-17'],
-    [popupPage.value, 'target-18'],
+    [popupPage.value, 'target-22'],
+    [nestedPopupPage.value, 'target-23'],
   ]);
   if (unrelatedPage !== undefined)
     pageTargetIds.set(unrelatedPage.value, 'target-popup');
@@ -2562,8 +3135,9 @@ async function runtimeFixture(
       )?.predicate;
       for (const candidate of [
         unrelatedPage?.value,
-        page.value,
+        nestedPopupPage.value,
         popupPage.value,
+        page.value,
       ]) {
         if (
           candidate !== undefined &&
@@ -2595,6 +3169,7 @@ async function runtimeFixture(
   } as unknown as BrowserContext;
   page.methods.context.mockReturnValue(context);
   popupPage.methods.context.mockReturnValue(context);
+  nestedPopupPage.methods.context.mockReturnValue(context);
   unrelatedPage?.methods.context.mockReturnValue(context);
   const browserOn = vi.fn();
   const browser = {
@@ -2606,6 +3181,14 @@ async function runtimeFixture(
 
   const connectionListeners = new Set<(connected: boolean) => void>();
   const eventListeners = new Set<(event: BridgeEvent) => void>();
+  const derivedTabs: Array<Record<string, unknown>> = [];
+  const openTabs: Array<Record<string, unknown>> = [
+    {
+      providerTabId: 17,
+      title: 'Fixture',
+      url: 'https://example.com/',
+    },
+  ];
   const request = vi.fn(
     async (method: string, params: Record<string, unknown> = {}) => {
       if (method === 'tabs.create') {
@@ -2615,7 +3198,8 @@ async function runtimeFixture(
           url: 'about:blank',
         };
       }
-      if (method === 'tabs.queryDerived') return [];
+      if (method === 'tabs.queryOpen') return openTabs;
+      if (method === 'tabs.queryDerived') return derivedTabs;
       if (method === 'cdp.send' && params.method === 'Page.getLayoutMetrics')
         return {
           cssVisualViewport: {
@@ -2630,10 +3214,20 @@ async function runtimeFixture(
         return { result: { value: 2 } };
       if (method === 'cdp.send' && params.method === 'Page.captureScreenshot')
         return { data: jpeg(2, 3).toString('base64') };
+      if (method === 'tabs.get') {
+        return (
+          openTabs.find((tab) => tab['providerTabId'] === params.tabId) ?? {
+            providerTabId: params.tabId,
+            title: 'Fixture',
+            url: 'https://example.com/',
+          }
+        );
+      }
       if (method === 'cdp.send' && params.method === 'Target.getTargetInfo') {
+        const tabId = params.tabId as number;
         return {
           targetInfo: {
-            targetId: `target-${params.tabId}`,
+            targetId: `target-${tabId}`,
             type: 'page',
             title: 'Fixture',
             url: 'about:blank',
@@ -2672,6 +3266,8 @@ async function runtimeFixture(
     typingState,
     cdp,
     request,
+    derivedTabs,
+    openTabs,
     probeDetach,
     stopBridge: bridge.stop as ReturnType<typeof vi.fn>,
     browserDisconnect() {
