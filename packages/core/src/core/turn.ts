@@ -467,6 +467,9 @@ export enum CompressionStatus {
    * apart from model output quality failures.
    */
   COMPRESSION_FAILED_API_ERROR,
+
+  /** The compression input could not leave enough room for a usable summary. */
+  COMPRESSION_FAILED_INPUT_TOO_LARGE,
 }
 
 export function isCompressionFailureStatus(
@@ -477,7 +480,8 @@ export function isCompressionFailureStatus(
     status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
     status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE
   );
 }
 
