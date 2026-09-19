@@ -201,6 +201,72 @@ export interface DaemonWorkspaceRemovalActivity {
   workspaceRuntime?: number;
 }
 
+export interface DaemonRuntimeStopRequest {
+  confirmInterruptions: true;
+  expectedChannelId: string;
+  expectedRuntimeEpoch: number;
+  expectedStopToken: string;
+  expectedSessionIds: string[];
+}
+
+export interface DaemonRuntimeStopSession {
+  sessionId: string;
+  displayName?: string;
+  hasActivePrompt: boolean;
+  queuedPrompts: number;
+  isWaitingForPermission: boolean;
+  isWaitingForUserQuestion: boolean;
+  hasRunningBackgroundTasks?: boolean;
+}
+
+export interface DaemonRuntimeStopResult {
+  channelId: string;
+  runtimeEpoch: number;
+  stopToken: string;
+  state: 'stopping' | 'stopped' | 'incomplete' | 'failed';
+  stopped: boolean;
+  released: boolean;
+  affectedSessionIds: string[];
+  closedSessionIds: string[];
+  interruptedSessionIds: string[];
+  remainingSessionIds: string[];
+  /** Failure detail, or a warning if stopped and released are true. */
+  error?: string;
+}
+
+export interface DaemonRuntimeStopSnapshot {
+  channelId?: string;
+  runtimeEpoch: number;
+  stopToken: string;
+  blockedReasons: string[];
+  sessions: DaemonRuntimeStopSession[];
+  lastStop?: DaemonRuntimeStopResult;
+}
+
+export interface DaemonRuntimeStopOption extends DaemonRuntimeStopSnapshot {
+  workspaceId: string;
+  cwd: string;
+  displayName?: string;
+  primary: boolean;
+  state: string;
+  canStop: boolean;
+  enabledTaskCount: number | null;
+  activity?: DaemonWorkspaceRemovalActivity;
+}
+
+export interface DaemonRuntimeStopOptions {
+  committedAcpChildren: number;
+  maxConcurrentChildren: number | null;
+  workspaces: DaemonRuntimeStopOption[];
+}
+
+export interface DaemonWorkspaceRuntimeStopResult
+  extends DaemonRuntimeStopResult {
+  workspaceId: string;
+  committedAcpChildren: number;
+  maxConcurrentChildren: number | null;
+}
+
 export interface DaemonWorkspaceRemovalResult {
   removed: true;
   workspaceId: string;
@@ -3897,6 +3963,12 @@ export interface DaemonLiveSetupStatus {
   voice?: string;
   /** `realtimeOnly` routes the user may pick from; absent on older daemons. */
   models?: Array<{ id: string; provider: string; name?: string }>;
+  /**
+   * Whether the native macOS Host can attach on this daemon. `false` means
+   * the browser is the only endpoint, so install/launch/shortcut do not
+   * apply. Absent on older daemons, which are macOS-only.
+   */
+  nativeHost?: boolean;
   shortcut: string;
   install: DaemonLiveHostInstallStatus;
   live: DaemonLiveStatus;

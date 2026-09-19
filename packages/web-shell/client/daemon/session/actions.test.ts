@@ -6579,6 +6579,28 @@ describe('accepted attachment sources', () => {
   });
 });
 
+it('clearing selected stopped session removes stale stop and recovery flags', () => {
+  const next = getConnectionAfterSessionClear(
+    {
+      status: 'disconnected',
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      runtimeStopped: true,
+      runtimeStopPersistenceUnconfirmed: true,
+      capacityRecovery: {
+        sessionId: 'session-1',
+        mode: 'load',
+        error: new Error('full'),
+      },
+    },
+    'session-1',
+  );
+  expect(next.sessionId).toBeUndefined();
+  expect(next.runtimeStopped).not.toBe(true);
+  expect(next.runtimeStopPersistenceUnconfirmed).not.toBe(true);
+  expect(next.capacityRecovery).toBeUndefined();
+});
+
 function createTimedCreateClient({
   features = ['session_source_metadata'],
   capabilitiesDelayMs = 20_000,
