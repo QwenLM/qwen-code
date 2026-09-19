@@ -859,7 +859,7 @@ describe('mcp reconnect command', () => {
       );
     });
 
-    it('defaults to trusted when workspace trust is undecided', async () => {
+    it('treats an undecided workspace as untrusted, like a real session', async () => {
       mockedLoadSettings.mockReturnValue({
         merged: {
           mcpServers: {
@@ -877,9 +877,12 @@ describe('mcp reconnect command', () => {
       ) => Promise<void>;
       await handler({ 'server-name': 'test-server', all: false });
 
+      // loadCliConfig reads an undecided folder as untrusted, and this Config
+      // is built without folderTrust, so `?? true` here would spawn servers a
+      // normal session skips.
       expect(MockedConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          trustedFolder: true,
+          trustedFolder: false,
         }),
       );
     });

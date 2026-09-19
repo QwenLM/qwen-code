@@ -79,11 +79,43 @@ describe('handleInstall', () => {
   beforeEach(() => {
     mockRefreshCache.mockResolvedValue(undefined);
     mockLoadSettings.mockReturnValue({ merged: {} });
-    mockIsWorkspaceTrusted.mockReturnValue(true);
+    mockIsWorkspaceTrusted.mockReturnValue({ isTrusted: true, source: 'file' });
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('builds the extension manager as untrusted when the folder is undecided', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+    const { ExtensionManager } = await import('@qwen-code/qwen-code-core');
+
+    mockIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    mockParseInstallSource.mockResolvedValue({
+      type: 'http',
+      url: 'http://google.com',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'http-extension' });
+
+    await handleInstall({
+      source: 'http://google.com',
+    });
+
+    // Installing writes repo-supplied code into the global store, so an
+    // undecided folder must reach the manager as untrusted — the same verdict
+    // a normal session gets from loadCliConfig.
+    expect(ExtensionManager).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isWorkspaceTrusted: false,
+      }),
+    );
+
+    processSpy.mockRestore();
   });
 
   it('should install an extension from a http source', async () => {

@@ -88,8 +88,11 @@ export async function handleInstall(args: InstallArgs) {
     extensionManager = new ExtensionManager({
       workspaceDir,
       locale: getCurrentLanguage(),
+      // Undecided counts as untrusted, matching the session gate loadCliConfig
+      // applies: installing writes repo-supplied code into the global store.
       isWorkspaceTrusted:
-        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ===
+        true,
       requestConsent,
       requestChoicePlugin: requestChoicePluginNonInteractive,
     });

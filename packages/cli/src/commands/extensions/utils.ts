@@ -33,8 +33,10 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
       requestConsentNonInteractive,
     ),
     requestChoicePlugin: requestChoicePluginNonInteractive,
+    // Undecided counts as untrusted, matching the session gate loadCliConfig
+    // applies: the extension manager refuses workspace writes when untrusted.
     isWorkspaceTrusted:
-      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
+      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted === true,
   });
   await extensionManager.refreshCache();
   return extensionManager;

@@ -99,10 +99,13 @@ async function createMinimalConfig(): Promise<Config> {
       : undefined,
     // Mirror a real session's trust gate: discovery skips MCP servers in an
     // untrusted workspace, so the throwaway Config must carry the same trust
-    // state. Without it `isTrustedFolder()` defaults to true here, the
-    // untrusted-skip reporting below becomes unreachable, and this command
-    // would attempt connections a normal session would not (issue #9944).
-    trustedFolder: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
+    // state — undecided included, because `loadCliConfig` reads a missing
+    // decision as untrusted. This Config is built without `folderTrust`, so
+    // core's `?? !this.folderTrust` fallback would answer trusted for an
+    // `undefined` decision; compare explicitly, or the untrusted-skip
+    // reporting below becomes unreachable and this command would attempt
+    // connections a normal session would not (issue #9944).
+    trustedFolder: isWorkspaceTrusted(settings.merged).isTrusted === true,
     ...(fileFiltering !== undefined ? { fileFiltering } : {}),
   });
 
