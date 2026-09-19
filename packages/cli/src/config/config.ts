@@ -2435,6 +2435,7 @@ export async function loadCliConfig(
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
+    todosDirectory: settings.todosDirectory,
     proxy:
       argv.proxy ||
       settings.proxy ||
