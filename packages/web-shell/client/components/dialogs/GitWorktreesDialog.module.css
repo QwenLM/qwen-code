@@ -65,6 +65,15 @@
   color: var(--muted-foreground);
 }
 
+.notice {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+  font-size: 12px;
+}
+
 .list {
   display: flex;
   flex-direction: column;
@@ -124,7 +133,6 @@
   gap: 3px;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono, monospace);
   font-size: 12px;
@@ -136,6 +144,12 @@
   font-family: var(--font-mono, monospace);
   font-size: 11px;
   color: var(--muted-foreground);
+}
+
+.branchName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status {
@@ -241,6 +255,10 @@
   min-width: 0;
 }
 
+.sentence {
+  display: block;
+}
+
 .confirmActions {
   display: flex;
   flex-shrink: 0;
@@ -286,5 +304,12 @@
 @keyframes gitWorktreesSpin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* One of these per unsettled row, and a repository can have hundreds. */
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
   }
 }

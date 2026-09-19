@@ -210,7 +210,7 @@ const EN: Messages = {
   'gitWorktrees.detached': 'detached HEAD',
   'gitWorktrees.bare': 'bare',
   'gitWorktrees.locked': 'locked',
-  'gitWorktrees.prunable': 'directory missing',
+  'gitWorktrees.prunable': 'stale',
   'gitWorktrees.clean': 'clean',
   'gitWorktrees.dirty': (v) => `${v?.count ?? 0} change(s)`,
   'gitWorktrees.statusError': 'status unavailable',
@@ -220,14 +220,33 @@ const EN: Messages = {
   'gitWorktrees.cancel': 'Cancel',
   'gitWorktrees.confirm':
     'Remove this worktree? Its directory is deleted from disk; the branch is kept.',
+  'gitWorktrees.confirmStale':
+    'Remove this stale entry? Git stops tracking worktrees it can no longer find; no files are deleted.',
+  'gitWorktrees.confirmDetached':
+    'Remove this worktree? Its directory is deleted from disk. It is on a detached HEAD, so there is no branch to keep.',
   'gitWorktrees.blockedDirty': (v) =>
     `${v?.count ?? 0} uncommitted change(s) would be discarded.`,
   'gitWorktrees.blockedInUse': (v) =>
     `${v?.count ?? 0} running session(s) would lose their checkout.`,
   'gitWorktrees.blockedUnknown':
-    'The working tree could not be checked for uncommitted changes.',
+    'The working tree could not be checked for uncommitted changes, and any there would be discarded.',
+  'gitWorktrees.blockedOperation': (v) =>
+    `An unfinished ${v?.operation ?? 'git'} would be lost.`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `No branch keeps the commits here; ${String(v?.head ?? '').slice(0, 7)} would be left for git to collect.`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason
+      ? `This worktree is locked: ${v.reason}`
+      : 'This worktree is locked.',
+  'gitWorktrees.blockedRefused': 'Git refused to remove this worktree.',
+  'gitWorktrees.blockedSubmodules':
+    'A submodule checked out here keeps its own repository, and forcing deletes that too.',
   'gitWorktrees.removeAnyway': 'Remove anyway',
   'gitWorktrees.removeFailed': 'Failed to remove the worktree',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git no longer tracks ${v?.name ?? ''}, but its directory is still on disk.`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    `Removing ${v?.name ?? ''} was refused while you were looking elsewhere.`,
   'githubPrs.title': 'Pull requests',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} open`,
   'githubPrs.loading': 'Loading pull requests…',
@@ -4096,7 +4115,7 @@ const ZH: Messages = {
   'gitWorktrees.detached': '游离 HEAD',
   'gitWorktrees.bare': '裸仓库',
   'gitWorktrees.locked': '已锁定',
-  'gitWorktrees.prunable': '目录已丢失',
+  'gitWorktrees.prunable': '已失效',
   'gitWorktrees.clean': '干净',
   'gitWorktrees.dirty': (v) => `${v?.count ?? 0} 处改动`,
   'gitWorktrees.statusError': '状态不可用',
@@ -4105,12 +4124,30 @@ const ZH: Messages = {
   'gitWorktrees.removing': '删除中…',
   'gitWorktrees.cancel': '取消',
   'gitWorktrees.confirm': '删除这个 worktree？其目录会从磁盘删除，分支保留。',
+  'gitWorktrees.confirmStale':
+    '删除这个已失效条目？Git 将不再跟踪它已经找不到的 worktree，不会删除任何文件。',
+  'gitWorktrees.confirmDetached':
+    '删除这个 worktree？其目录会从磁盘删除。它处于游离 HEAD，因此没有分支可留。',
   'gitWorktrees.blockedDirty': (v) => `${v?.count ?? 0} 处未提交改动将被丢弃。`,
   'gitWorktrees.blockedInUse': (v) =>
     `${v?.count ?? 0} 个运行中的会话将失去其检出。`,
-  'gitWorktrees.blockedUnknown': '无法检查该工作树是否有未提交改动。',
+  'gitWorktrees.blockedUnknown':
+    '无法检查该工作树是否有未提交改动，若有也将一并丢弃。',
+  'gitWorktrees.blockedOperation': (v) =>
+    `尚未完成的 ${v?.operation ?? 'git'} 操作将会丢失。`,
+  'gitWorktrees.blockedUnmerged': (v) =>
+    `没有分支保住这里的提交；${String(v?.head ?? '').slice(0, 7)} 将被 git 回收。`,
+  'gitWorktrees.blockedLocked': (v) =>
+    v?.reason ? `该 worktree 已加锁：${v.reason}` : '该 worktree 已加锁。',
+  'gitWorktrees.blockedRefused': 'Git 拒绝删除这个 worktree。',
+  'gitWorktrees.blockedSubmodules':
+    '这里检出的子模块有自己的仓库，强制删除会把它一并删掉。',
   'gitWorktrees.removeAnyway': '仍然删除',
   'gitWorktrees.removeFailed': '删除 worktree 失败',
+  'gitWorktrees.keptDirectory': (v) =>
+    `Git 已不再跟踪 ${v?.name ?? ''}，但它的目录仍在磁盘上。`,
+  'gitWorktrees.refusedElsewhere': (v) =>
+    `你看向别处时，删除 ${v?.name ?? ''} 被拒绝了。`,
   'githubPrs.title': '拉取请求',
   'githubPrs.subtitle': (v) => `${v?.count ?? 0} 个开放`,
   'githubPrs.loading': '加载拉取请求中…',

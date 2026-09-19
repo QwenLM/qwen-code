@@ -256,11 +256,26 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_github_prs: { since: 'v1' },
   // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
   // workspace's repository, `GET .../git/worktrees/status?path=` reads one
-  // worktree's working-tree counters, and `POST .../git/worktrees/remove`
-  // removes a linked worktree. Removal refuses the main worktree and any
-  // registered workspace outright, and a dirty or session-hosting worktree
-  // unless the body carries `force: true` (409 `worktree_dirty` /
-  // `worktree_in_use`).
+  // listed worktree's working-tree counters, and
+  // `POST .../git/worktrees/remove` removes one linked worktree by path,
+  // leaving the repository's other registrations alone except where git
+  // refuses per-path removal of a registration it has marked stale — usually
+  // a directory that outlived its gitfile — which falls back to
+  // `git worktree prune`. Removal refuses the main
+  // worktree and any registered workspace outright, and a dirty or
+  // session-hosting worktree unless the body carries `force: true` (409
+  // `worktree_dirty` / `worktree_in_use` / `worktree_locked` /
+  // `worktree_operation_in_progress` / `worktree_unmerged_commits` /
+  // `worktree_status_unknown`). Any
+  // other refusal git makes on a removal that changed nothing comes back as
+  // 409 `worktree_remove_refused` with git's own sentence in `detail`, so a
+  // refusal `--force --force` would clear is not a dead end. Whichever
+  // refusal answers, it carries everything else the same `force` would take. The session count spans every
+  // registered workspace's current runtime, draining ones included, so a
+  // worktree holding another workspace's session is refused too. A success
+  // carries `directoryRemains` when the registration went and the directory
+  // did not — an unfinished deletion, or the prune fallback, which deletes
+  // no files.
   workspace_git_worktrees: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)

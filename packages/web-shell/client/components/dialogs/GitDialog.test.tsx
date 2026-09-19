@@ -329,8 +329,11 @@ describe('GitDialog', () => {
       v: 1,
       workspaceCwd: '/repo',
       available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
       files: [],
-      summary: { filesChanged: 0, linesAdded: 0, linesRemoved: 0 },
+      hiddenCount: 0,
     });
     mount('worktrees');
     await flush();
@@ -368,7 +371,12 @@ describe('GitDialog', () => {
     const tab = document.getElementById('git-dialog-tab-worktrees');
     expect(tab?.getAttribute('aria-selected')).toBe('true');
     expect(workspaceGitWorktrees).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).toContain('this workspace');
+    // A row, not a phrase: "this workspace" is also a substring of the
+    // "Git is not available for this workspace" placeholder, so asserting it
+    // passes even when the tab renders nothing.
+    expect(
+      document.body.querySelectorAll('[data-testid="git-worktree-row"]'),
+    ).toHaveLength(1);
   });
 
   it('falls back to the diff view when PRs are requested without the capability', async () => {

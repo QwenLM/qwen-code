@@ -470,6 +470,12 @@ export interface DaemonGitWorktreeStatus {
 export interface DaemonGitWorktreeRemoveResult {
   removed: true;
   path: string;
+  /**
+   * Present when git dropped the registration but the directory is still on
+   * disk: the checkout's deletion failed, or the entry was stale and cleared
+   * by a prune, which deletes no files.
+   */
+  directoryRemains?: true;
 }
 
 /** Response from `POST /workspaces/:workspace/git/checkout`. */

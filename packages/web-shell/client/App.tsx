@@ -10494,8 +10494,15 @@ export function App({
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const handleOpenWorktrees = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
-    setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'worktrees' });
-  }, [gitDiffWorkspaceCwd]);
+    // The dialog's tab bar reaches Changes and History from here, and both
+    // read `gitCwd`. Omitting it would answer a session running in a worktree
+    // with the workspace root's diff and log.
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'worktrees',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const handleOpenLog = useCallback(() => {
     if (!gitDiffWorkspaceCwd) return;
     setGitDialog({
@@ -13855,9 +13862,8 @@ export function App({
     workspace.client,
   ]);
 
-  // Clicking a card in the Session Overview panel switches the current window
-  // to that session. loadSidebarSession already closes the panel, so this just
-  // returns to the chat view and reports load failures.
+  // Shared by the sidebar entry and the Worktrees tab so both start a
+  // worktree draft the same way.
   const handleNewWorktreeSession = useCallback(
     (workspaceCwd?: string) => {
       // The intent travels with the draft it belongs to: set inside
@@ -13878,6 +13884,9 @@ export function App({
     },
     [createNewSession, lockedWorkspaceCwd],
   );
+  // Clicking a card in the Session Overview panel switches the current window
+  // to that session. loadSidebarSession already closes the panel, so this just
+  // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
     (
       sessionId: string,

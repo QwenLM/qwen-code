@@ -14,6 +14,7 @@ import {
   parseGitWorktreeList,
   pruneGitWorktrees,
   removeGitWorktree,
+  worktreeHoldsSubmodules,
 } from './git-worktrees.js';
 
 const tmpRoots: string[] = [];
@@ -31,6 +32,9 @@ function makeRepo(): string {
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  // Neutralize an inherited global core.hooksPath (hook managers installed
+  // machine-wide), which would otherwise run somebody else's hooks here.
+  git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
   git(dir, 'commit', '-q', '-m', 'init');
@@ -153,20 +157,113 @@ describe('removeGitWorktree', () => {
     await removeGitWorktree(repo, linked, { force: true });
     expect(fs.existsSync(linked)).toBe(false);
   });
+
+  it('drops one stale registration without touching the others', async () => {
+    const repo = makeRepo();
+    const first = path.join(path.dirname(repo), 'gone-a');
+    const second = path.join(path.dirname(repo), 'gone-b');
+    git(repo, 'worktree', 'add', '-q', first, '-b', 'feat-a');
+    git(repo, 'worktree', 'add', '-q', second, '-b', 'feat-b');
+    fs.rmSync(first, { recursive: true, force: true });
+    fs.rmSync(second, { recursive: true, force: true });
+
+    const before = await listGitWorktrees(repo);
+    expect(before).toHaveLength(3);
+    expect(before.slice(1).every((entry) => entry.prunable)).toBe(true);
+
+    // No force: a directory that is already gone holds nothing to lose, so
+    // git drops the registration on its own. Repository-wide prune would
+    // have taken `gone-b` with it.
+    await removeGitWorktree(repo, first);
+    const after = await listGitWorktrees(repo);
+    expect(after.map((entry) => entry.path.endsWith('gone-b'))).toEqual([
+      false,
+      true,
+    ]);
+    expect(git(repo, 'branch', '--list', 'feat-a').trim()).toBe('feat-a');
+  });
+
+  it('rejects a registration whose directory outlived its gitfile', async () => {
+    const repo = makeRepo();
+    const linked = path.join(path.dirname(repo), 'orphan');
+    git(repo, 'worktree', 'add', '-q', linked, '-b', 'feat');
+    fs.writeFileSync(path.join(linked, 'kept.txt'), 'x\n');
+    fs.rmSync(path.join(linked, '.git'));
+
+    // git marks it prunable, but validates `<path>/.git` because the
+    // directory is still there — at every force level.
+    expect((await listGitWorktrees(repo))[1].prunable).toBeTruthy();
+    await expect(removeGitWorktree(repo, linked)).rejects.toThrow();
+    await expect(
+      removeGitWorktree(repo, linked, { force: true }),
+    ).rejects.toThrow();
+  });
 });
 
 describe('pruneGitWorktrees', () => {
-  it('drops entries whose directory is gone', async () => {
+  it('clears what remove cannot, and keeps the files on disk', async () => {
     const repo = makeRepo();
-    const linked = path.join(path.dirname(repo), 'gone');
+    const linked = path.join(path.dirname(repo), 'orphan');
     git(repo, 'worktree', 'add', '-q', linked, '-b', 'feat');
-    fs.rmSync(linked, { recursive: true, force: true });
-
-    const before = await listGitWorktrees(repo);
-    expect(before).toHaveLength(2);
-    expect(before[1].prunable).toBeTruthy();
+    fs.writeFileSync(path.join(linked, 'kept.txt'), 'x\n');
+    fs.rmSync(path.join(linked, '.git'));
 
     await pruneGitWorktrees(repo);
+
     expect(await listGitWorktrees(repo)).toHaveLength(1);
+    expect(fs.existsSync(path.join(linked, 'kept.txt'))).toBe(true);
   });
+
+  it('leaves a locked worktree alone, and never marks one prunable', async () => {
+    const repo = makeRepo();
+    const locked = path.join(path.dirname(repo), 'locked');
+    git(repo, 'worktree', 'add', '-q', locked, '-b', 'feat');
+    git(repo, 'worktree', 'lock', locked, '--reason', 'busy');
+    fs.rmSync(locked, { recursive: true, force: true });
+
+    // A locked worktree is never marked prunable, even with its directory
+    // gone, so `prunable` implies prune will clear it.
+    const before = (await listGitWorktrees(repo))[1];
+    expect(before.locked).toBe('busy');
+    expect(before.prunable).toBeUndefined();
+
+    await pruneGitWorktrees(repo);
+    expect(await listGitWorktrees(repo)).toHaveLength(2);
+  });
+});
+
+describe('worktreeHoldsSubmodules', () => {
+  it('ignores a submodule nobody checked out', async () => {
+    const outer = makeRepo();
+    const inner = makeRepo();
+    git(
+      outer,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      inner,
+      'sub',
+    );
+    git(outer, 'commit', '-q', '-m', 'add submodule');
+    const wt = path.join(path.dirname(outer), 'wt');
+    git(outer, 'worktree', 'add', '-q', wt, '-b', 'side');
+
+    // `git worktree add` does not initialise submodules, so nothing under
+    // the new checkout has a repository of its own yet, and warning that one
+    // would be deleted would be a warning about a loss that cannot happen.
+    expect(await worktreeHoldsSubmodules(wt)).toBe(false);
+
+    git(
+      wt,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'update',
+      '--init',
+      '-q',
+    );
+    expect(await worktreeHoldsSubmodules(wt)).toBe(true);
+  }, 30_000);
 });

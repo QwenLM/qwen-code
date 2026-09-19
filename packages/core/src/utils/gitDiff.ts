@@ -1206,12 +1206,26 @@ export interface GitWorkingTreeStatus {
 
 export async function getGitWorkingTreeStatus(
   cwd: string,
+  options: { countHiddenUntracked?: boolean } = {},
 ): Promise<GitWorkingTreeStatus | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
 
   const stdout = await runGit(
-    ['--no-optional-locks', 'status', '--porcelain=v1', '--branch', '-z'],
+    [
+      '--no-optional-locks',
+      // A repository can set `status.showUntrackedFiles = no`, which hides
+      // untracked files from `git status` — and from git's own safety check.
+      // A caller about to destroy the directory asks for them anyway;
+      // `normal` is the default, so the output it gets is the ordinary one.
+      ...(options.countHiddenUntracked
+        ? ['-c', 'status.showUntrackedFiles=normal']
+        : []),
+      'status',
+      '--porcelain=v1',
+      '--branch',
+      '-z',
+    ],
     gitRoot,
   );
   if (stdout == null) return null;
