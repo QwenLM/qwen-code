@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readOperatorSandboxSettings } from '../config/execution-sandbox-settings.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -781,6 +782,15 @@ export function loadServeFastPathSettings(
   const workspace = isTrusted ? workspaceFromDisk : {};
 
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
+  const operator = readOperatorSandboxSettings();
+  if (operator.tools?.executionSandbox !== undefined) {
+    merged.tools = {
+      ...merged.tools,
+      executionSandbox: operator.tools.executionSandbox as NonNullable<
+        Settings['tools']
+      >['executionSandbox'],
+    };
+  }
   if (startupChannelsTrusted && workspaceFromDisk.serve) {
     merged.serve = {
       channels: workspaceFromDisk.serve.channels,
