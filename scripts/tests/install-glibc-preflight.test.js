@@ -125,6 +125,31 @@ function cleanup(result) {
   rmSync(result.root, { recursive: true, force: true });
 }
 
+const proceedsToDownload = [
+  [
+    'a supported distro-branded glibc banner via ldd',
+    {
+      useLddFallback: true,
+      lddOutput: 'ldd (Ubuntu GLIBC 2.35-0ubuntu3.4) 2.35',
+    },
+  ],
+  [
+    'unknown libc implementations',
+    {
+      useLddFallback: true,
+      lddOutput: 'musl libc (x86_64)\nVersion 1.2.5',
+    },
+  ],
+  [
+    'unknown libc with a version on the first line',
+    {
+      useLddFallback: true,
+      lddOutput: 'unknown libc 1.2.5',
+    },
+  ],
+  ['glibc 2.28', { glibcVersion: '2.28' }],
+];
+
 describe('standalone installer glibc preflight', () => {
   itOnUnix('rejects glibc 2.17 before any release download', () => {
     const result = runInstaller({ glibcVersion: '2.17' });
@@ -194,67 +219,22 @@ describe('standalone installer glibc preflight', () => {
     }
   });
 
-  itOnUnix('allows a supported distro-branded glibc banner via ldd', () => {
-    const result = runInstaller({
-      useLddFallback: true,
-      lddOutput: 'ldd (Ubuntu GLIBC 2.35-0ubuntu3.4) 2.35',
-    });
-    try {
-      expect(result.status, result.stderr).not.toBe(0);
-      expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
-      expect(result.stdout).toContain('Downloading qwen-code-linux-x64.tar.gz');
-      expect(existsSync(result.curlMarker), result.stderr).toBe(true);
-    } finally {
-      cleanup(result);
-    }
-  });
-
-  itOnUnix('leaves unknown libc implementations on the existing path', () => {
-    const result = runInstaller({
-      useLddFallback: true,
-      lddOutput: 'musl libc (x86_64)\nVersion 1.2.5',
-    });
-    try {
-      expect(result.status, result.stderr).not.toBe(0);
-      expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
-      expect(result.stdout).toContain('Downloading qwen-code-linux-x64.tar.gz');
-      expect(existsSync(result.curlMarker), result.stderr).toBe(true);
-    } finally {
-      cleanup(result);
-    }
-  });
-
-  itOnUnix(
-    'leaves unknown libc with a version on the first line unchanged',
-    () => {
-      const result = runInstaller({
-        useLddFallback: true,
-        lddOutput: 'unknown libc 1.2.5',
-      });
+  itOnUnix.each(proceedsToDownload)(
+    'lets %s continue to the release download',
+    (_name, fixture) => {
+      const result = runInstaller(fixture);
       try {
-        expect(result.status, result.stderr).not.toBe(0);
+        expect(result.status, result.stdout).not.toBe(0);
         expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
         expect(result.stdout).toContain(
           'Downloading qwen-code-linux-x64.tar.gz',
         );
-        expect(existsSync(result.curlMarker), result.stderr).toBe(true);
+        expect(existsSync(result.curlMarker), result.stdout).toBe(true);
       } finally {
         cleanup(result);
       }
     },
   );
-
-  itOnUnix('allows glibc 2.28 to continue to the release download', () => {
-    const result = runInstaller({ glibcVersion: '2.28' });
-    try {
-      expect(result.status, result.stderr).not.toBe(0);
-      expect(result.stderr).not.toContain('requires glibc 2.28 or newer');
-      expect(result.stdout).toContain('Downloading qwen-code-linux-x64.tar.gz');
-      expect(existsSync(result.curlMarker), result.stderr).toBe(true);
-    } finally {
-      cleanup(result);
-    }
-  });
 
   itOnUnix('keeps offline custom archives outside the glibc preflight', () => {
     const result = runInstaller({
