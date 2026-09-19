@@ -3526,6 +3526,29 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('getMainSessionSystemInstruction', () => {
+    it('skips host Git snapshots throughout a sandboxed shell session', async () => {
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue({
+        workspace: '/test/project/root',
+        installation: '/test/installation',
+        state: '/test/state',
+        filesystem: 'workspace-write',
+        network: 'closed',
+      });
+      vi.mocked(getRecentGitStatus).mockClear();
+      vi.mocked(getRecentGitStatus).mockReturnValue('Host Git snapshot');
+
+      await client.startChat();
+      await client.addWorkingDirectoryChangedContext(
+        '/test/project/root',
+        '/test/project/root/subdir',
+      );
+
+      expect(getRecentGitStatus).not.toHaveBeenCalled();
+      expect(
+        client.getChat()['generationConfig'].systemInstruction,
+      ).not.toContain('Host Git snapshot');
+    });
+
     it('records the gitStatus-free base as the static system prefix on Config', () => {
       vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
       vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');
