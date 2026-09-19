@@ -26,7 +26,7 @@ const {
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
   discardAbandonedRemoteWorkspaceAdd,
-  getRemoteWorkspaceAddStep,
+  isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
   selectRemoteWorkspaceLocation,
   startRemoteWorkspaceAdd,
@@ -76,7 +76,7 @@ describe('remote workspace add navigation', () => {
       'https://remote.example',
       'secret',
       {
-        continueRemoteWorkspaceAdd: true,
+        continueFlow: 'workspace',
       },
     );
     expect(window.sessionStorage.getItem('qwen-remote-workspace-return')).toBe(
@@ -92,7 +92,7 @@ describe('remote workspace add navigation', () => {
 
     expect(selectRemoteWorkspaceLocation(testOrigin)).toBe(true);
     expect(navigateToDaemon).toHaveBeenLastCalledWith(testOrigin, undefined, {
-      continueRemoteWorkspaceAdd: true,
+      continueFlow: 'workspace',
     });
     expect(window.sessionStorage.getItem('qwen-remote-workspace-return')).toBe(
       `${testOrigin}/session/original?workspace=local`,
@@ -124,7 +124,7 @@ describe('remote workspace add navigation', () => {
 
     completeRemoteWorkspaceAdd();
 
-    expect(getRemoteWorkspaceAddStep()).toBeUndefined();
+    expect(isRemoteWorkspaceAddActive()).toBe(false);
     expect(window.sessionStorage.getItem('qwen-remote-workspace-return')).toBe(
       null,
     );
@@ -138,7 +138,7 @@ describe('remote workspace add navigation', () => {
       'qwen-remote-workspace-return',
       `${testOrigin}/session/original`,
     );
-    expect(getRemoteWorkspaceAddStep()).toBeUndefined();
+    expect(isRemoteWorkspaceAddActive()).toBe(false);
 
     discardAbandonedRemoteWorkspaceAdd();
 
@@ -163,10 +163,10 @@ describe('remote workspace add navigation', () => {
     );
   });
 
-  it('reports no step for an entry point evaluated outside a document', () => {
+  it('reports the add flow inactive outside a document', () => {
     vi.stubGlobal('window', undefined);
     try {
-      expect(getRemoteWorkspaceAddStep()).toBeUndefined();
+      expect(isRemoteWorkspaceAddActive()).toBe(false);
     } finally {
       vi.unstubAllGlobals();
     }
