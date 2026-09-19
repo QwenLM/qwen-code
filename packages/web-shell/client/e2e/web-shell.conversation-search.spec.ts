@@ -81,6 +81,12 @@ async function setup(
       });
     }
     if (url.pathname.endsWith('/turn-index')) {
+      if (url.searchParams.has('start') && !url.searchParams.has('snapshot')) {
+        return route.fulfill({
+          status: 400,
+          json: { error: '`start` requires `snapshot`' },
+        });
+      }
       const totalTurns = count / 2;
       const limit = Number(url.searchParams.get('limit'));
       const start = Number(

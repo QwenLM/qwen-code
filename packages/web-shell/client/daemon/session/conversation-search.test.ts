@@ -49,7 +49,11 @@ function fixture(maxHistoricalPages = 2) {
   ];
   const client: DaemonTurnNavigationClient = {
     owner: {},
-    getTurnIndexPage: vi.fn(async () => turns),
+    getTurnIndexPage: vi.fn(async (options) => {
+      if (options.start !== undefined && !options.snapshot)
+        throw new Error('`start` requires `snapshot`');
+      return turns;
+    }),
     getTranscriptPage: vi.fn(async (options) => ({
       v: 1,
       sessionId: 'session',
@@ -87,6 +91,35 @@ async function ready(
 }
 
 describe('conversation search', () => {
+  it('acquires a snapshot before requesting the first page of a long index', async () => {
+    const { store, client, turns } = fixture();
+    await ready(store);
+    vi.mocked(client.getTurnIndexPage)
+      .mockClear()
+      .mockImplementation(async (options) => {
+        if (options.start !== undefined) {
+          expect(options.snapshot).toBe('frozen');
+          expect(options.start).toBe(0);
+          return turns;
+        }
+        return { ...turns, start: 1, turns: turns.turns.slice(1) };
+      });
+    const result = await store.scanConversation('match', {
+      isCurrent: () => true,
+    });
+    expect(result.complete).toBe(true);
+    expect(result.messageCount).toBe(4);
+    expect(result.matchCount).toBe(2);
+    expect(client.getTurnIndexPage).toHaveBeenNthCalledWith(1, {
+      limit: expect.any(Number),
+    });
+    expect(client.getTurnIndexPage).toHaveBeenNthCalledWith(2, {
+      snapshot: 'frozen',
+      start: 0,
+      limit: expect.any(Number),
+    });
+  });
+
   it('scans all pages without filling the historical viewport and maps actual navigation turns', async () => {
     const { store } = fixture();
     await ready(store);

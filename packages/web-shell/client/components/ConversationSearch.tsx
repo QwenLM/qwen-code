@@ -21,7 +21,7 @@ import {
   type ConversationSearchResult,
 } from '../daemon/session/turn-navigation-store';
 import { transcriptBlocksToLocalizedMessages } from '../adapters/localizedMessages';
-import { useI18n } from '../i18n';
+import { useConversationSearchI18n } from './conversation-search-i18n';
 import type { MessageListHandle } from './MessageList';
 import { DialogShell } from './dialogs/DialogShell';
 import { Button } from './ui/button';
@@ -50,7 +50,7 @@ export function ConversationSearch({
   messageListRef,
   registerInteractionBlocker,
 }: ConversationSearchProps) {
-  const { t } = useI18n();
+  const t = useConversationSearchI18n();
   const store = useTranscriptStore();
   const history = useDaemonHistoryNavigationStore();
   const transcript = useSyncExternalStore(store.subscribe, store.getSnapshot);

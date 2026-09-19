@@ -890,15 +890,20 @@ export function createDaemonTurnNavigationStore(
       if (!current()) throw new Error('Conversation search cancelled');
     };
     check();
-    let index = await activeClient.getTurnIndexPage({
-      start: 0,
-      limit: indexPageSize,
-    });
-    check();
-    validateIndexResponse(index, activeSessionId, undefined, indexPageSize);
+    const readIndex = async (snapshot?: string, start?: number) => {
+      const page = await activeClient.getTurnIndexPage({
+        limit: indexPageSize,
+        ...(snapshot === undefined ? {} : { snapshot, start }),
+      });
+      check();
+      validateIndexResponse(page, activeSessionId, snapshot, indexPageSize);
+      return page;
+    };
+    let index = await readIndex();
     const searchSnapshot = index.snapshot;
     if (index.totalTurns === 0)
       return { ...result, messageCount: remainingLive.size, complete: true };
+    if (index.start !== 0) index = await readIndex(searchSnapshot, 0);
     let indexOffset = 0;
     let nextTurn = index.turns[indexOffset];
     if (!nextTurn || nextTurn.ordinal !== 0)
@@ -931,18 +936,7 @@ export function createDaemonTurnNavigationStore(
             indexOffset >= index.turns.length &&
             currentTurn.ordinal + 1 < index.totalTurns
           ) {
-            index = await activeClient.getTurnIndexPage({
-              snapshot: searchSnapshot,
-              start: currentTurn.ordinal + 1,
-              limit: indexPageSize,
-            });
-            check();
-            validateIndexResponse(
-              index,
-              activeSessionId,
-              searchSnapshot,
-              indexPageSize,
-            );
+            index = await readIndex(searchSnapshot, currentTurn.ordinal + 1);
             if (index.start !== currentTurn.ordinal + 1 || !index.turns.length)
               throw new Error('Conversation search index did not advance');
             indexOffset = 0;
