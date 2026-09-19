@@ -1,4 +1,5 @@
 import './styles/globals.css';
+import { ConversationSearch } from './components/ConversationSearch';
 import { getSourceEntries } from './components/sources/sourceEntries';
 import { openSourceEntry } from './components/panels/SourcesSection';
 import { isSessionWriterBlockedCode } from './daemon/session/session-context';
@@ -1409,6 +1410,8 @@ export interface WebShellProps {
   markdownTableMode?: MarkdownTableMode;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
+  /** 会话消息数超过此阈值时显示搜索入口，默认 10。 */
+  conversationSearchThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
   /**
@@ -3112,6 +3115,7 @@ export function App({
   collapseCompletedTurns = true,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
+  conversationSearchThreshold = 10,
   markdown,
   loadingPhrases,
   onAgentTasksChange,
@@ -19918,6 +19922,19 @@ export function App({
                           : styles.footer
                       }
                     >
+                      {connection.sessionId && (
+                        <ConversationSearch
+                          key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
+                          threshold={conversationSearchThreshold}
+                          registerInteractionBlocker={registerInteractionBlocker}
+                          messageListRef={messageListRef}
+                          className={[
+                            styles.scrollToBottomButton,
+                            styles.conversationSearchButton,
+                            showBottomPanels ? styles.conversationSearchButtonWithTodos : '',
+                          ].join(' ')}
+                        />
+                      )}
                       {canScrollMessageListToBottom && (
                         <div
                           className={

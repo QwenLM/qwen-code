@@ -678,3 +678,16 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 | `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
 | `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
 | `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
+
+## 当前会话内容搜索
+
+`conversationSearchThreshold` 控制搜索入口的消息数阈值，默认 `10`。
+当前会话的用户和助手消息数严格超过阈值时显示入口（默认第 11 条起），
+图标位于置底按钮右侧；即使已在底部，搜索入口仍可使用。
+`WebShell` 和 `WebShellWithProviders` 均支持此 prop，例如
+`<WebShellWithProviders conversationSearchThreshold={20} {...connectionProps} />`。
+
+弹框搜索用户和助手正文（包括代码），点击摘要可定位并高亮对应消息。
+支持 turn navigation 的 daemon 会分页搜索持久化历史，不受当前可见区域限制；
+旧 daemon 只能搜索已加载消息，弹框会明确提示。搜索结果最多展示 200 条，
+超过时可缩小关键词范围。搜索不修改草稿或中断正在进行的回复。

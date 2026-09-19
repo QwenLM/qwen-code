@@ -2313,6 +2313,11 @@ export interface MessageListHandle {
    * highlight it. Returns false when the message is not in the list.
    */
   scrollToMessage: (messageId: string, callId?: string) => boolean;
+  /** 定位持久化历史搜索结果；调用方可取消仍在加载的选择。 */
+  scrollToSearchHit?: (
+    hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean>;
   /** Resume bottom-follow mode and scroll to the latest output. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }

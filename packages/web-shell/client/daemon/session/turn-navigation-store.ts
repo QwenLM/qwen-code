@@ -39,6 +39,47 @@ class TurnIndexPageTooLargeError extends Error {
   }
 }
 
+export interface ConversationSearchHit {
+  sessionId: string;
+  snapshot: string;
+  revision: number;
+  recordId: string;
+  turnId: string;
+  turnOrdinal: number;
+  role: 'user' | 'assistant';
+  snippet: string;
+  matchStart: number;
+  matchEnd: number;
+}
+
+export interface ConversationSearchResult {
+  hits: ConversationSearchHit[];
+  messageCount: number;
+  matchCount: number;
+  complete: boolean;
+  truncated: boolean;
+}
+
+export interface ConversationSearchOptions extends HistoryViewportRequest {
+  onProgress?: (result: ConversationSearchResult) => void;
+  stopAfterMessages?: number;
+}
+
+export function createConversationSearchSnippet(text: string, query: string) {
+  if (!query) return undefined;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(escaped, 'iu').exec(text);
+  if (!match) return undefined;
+  const start = Math.max(0, match.index - 60);
+  const prefix = start > 0 ? '…' : '';
+  const end = Math.min(text.length, match.index + match[0].length + 140);
+  return {
+    snippet: prefix + text.slice(start, end) + (end < text.length ? '…' : ''),
+    matchStart: prefix.length + match.index - start,
+    matchEnd: prefix.length + match.index - start + match[0].length,
+  };
+}
+
 export interface DaemonTurnIndexPage {
   start: number;
   end: number;
@@ -149,6 +190,15 @@ export interface HistoryViewportRequest {
 
 export interface DaemonHistoryNavigationStore
   extends DaemonTurnNavigationStore {
+  scanConversation(
+    query: string,
+    options: ConversationSearchOptions,
+  ): Promise<ConversationSearchResult>;
+  locateViewportSearchHit(
+    hit: ConversationSearchHit,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation>;
   locateViewportOrdinal(
     ordinal: number,
     request: HistoryViewportRequest,
@@ -792,6 +842,263 @@ export function createDaemonTurnNavigationStore(
       }
       throw error;
     }
+  }
+
+  async function scanConversation(
+    query: string,
+    request: ConversationSearchOptions,
+  ): Promise<ConversationSearchResult> {
+    const result: ConversationSearchResult = {
+      hits: [],
+      messageCount: 0,
+      matchCount: 0,
+      complete: false,
+      truncated: false,
+    };
+    const activeClient = client;
+    const activeSessionId = sessionId;
+    if (!activeClient || !activeSessionId || snapshot.mode === 'legacy')
+      return result;
+    const remainingLive = new Set(
+      (lastLiveBlocks ?? []).filter(
+        (block) => block.kind === 'user' || block.kind === 'assistant',
+      ),
+    );
+    const liveByRecord = new Map<string, DaemonTranscriptBlock[]>();
+    const unstampedByPrompt = new Map<string, DaemonTranscriptBlock[]>();
+    const promptKey = (block: DaemonTranscriptBlock) => {
+      if (block.kind !== 'user' && block.kind !== 'assistant') return undefined;
+      const id = block.promptId ?? block.meta?.['promptId'];
+      return typeof id === 'string' ? `${block.kind}:${id}` : undefined;
+    };
+    for (const block of remainingLive) {
+      for (const id of block.sourceRecordIds ?? [])
+        liveByRecord.set(id, [...(liveByRecord.get(id) ?? []), block]);
+      const key = promptKey(block);
+      if (!block.sourceRecordIds?.length && key)
+        unstampedByPrompt.set(key, [
+          ...(unstampedByPrompt.get(key) ?? []),
+          block,
+        ]);
+    }
+    const revision = viewportSnapshot.revision;
+    const current = () =>
+      request.isCurrent() &&
+      viewportSnapshot.revision === revision &&
+      isCurrentClient(activeClient);
+    const check = () => {
+      if (!current()) throw new Error('Conversation search cancelled');
+    };
+    check();
+    let index = await activeClient.getTurnIndexPage({
+      start: 0,
+      limit: indexPageSize,
+    });
+    check();
+    validateIndexResponse(index, activeSessionId, undefined, indexPageSize);
+    const searchSnapshot = index.snapshot;
+    if (index.totalTurns === 0)
+      return { ...result, messageCount: remainingLive.size, complete: true };
+    let indexOffset = 0;
+    let nextTurn = index.turns[indexOffset];
+    if (!nextTurn || nextTurn.ordinal !== 0)
+      throw new Error('Conversation search index is incomplete');
+    let currentTurn: DaemonSessionTurnIndexEntry | undefined;
+    let page = await activeClient.getTranscriptPage({
+      atRecordId: nextTurn.turnId,
+      snapshot: searchSnapshot,
+      limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+    });
+    let lastRecordId: string | undefined;
+    let lastMatchedRecordId: string | undefined;
+    let previousTextTail = '';
+    let previousCursor: string | undefined;
+    while (true) {
+      check();
+      validateHistoricalResponse(page, activeSessionId);
+      const materialized = activeClient.materializeTranscriptEvents(
+        page.events,
+        1,
+        new Set(),
+      );
+      const recordTurns = new Map<string, DaemonSessionTurnIndexEntry>();
+      for (const recordId of materialized.encounteredRecordIds) {
+        check();
+        if (nextTurn && recordId === nextTurn.turnId) {
+          currentTurn = nextTurn;
+          indexOffset += 1;
+          if (
+            indexOffset >= index.turns.length &&
+            currentTurn.ordinal + 1 < index.totalTurns
+          ) {
+            index = await activeClient.getTurnIndexPage({
+              snapshot: searchSnapshot,
+              start: currentTurn.ordinal + 1,
+              limit: indexPageSize,
+            });
+            check();
+            validateIndexResponse(
+              index,
+              activeSessionId,
+              searchSnapshot,
+              indexPageSize,
+            );
+            if (index.start !== currentTurn.ordinal + 1 || !index.turns.length)
+              throw new Error('Conversation search index did not advance');
+            indexOffset = 0;
+          }
+          nextTurn = index.turns[indexOffset];
+        }
+        if (currentTurn) recordTurns.set(recordId, currentTurn);
+      }
+      for (const block of materialized.blocks) {
+        check();
+        const ids = block.sourceRecordIds ?? [];
+        const messageTurn = ids.map((id) => recordTurns.get(id)).find(Boolean);
+        if (
+          (block.kind !== 'user' && block.kind !== 'assistant') ||
+          !ids.length
+        )
+          continue;
+        // 同一持久化消息可能投影为相邻块；只计一次，避免跨页重复结果。
+        const recordId = ids[0]!;
+        const sameMessage = recordId === lastRecordId;
+        let matchedLive = false;
+        for (const id of ids) {
+          for (const live of liveByRecord.get(id) ?? [])
+            matchedLive = remainingLive.delete(live) || matchedLive;
+        }
+        if (!sameMessage && !matchedLive) {
+          const key = promptKey(block);
+          const echo = key ? unstampedByPrompt.get(key)?.shift() : undefined;
+          if (echo) remainingLive.delete(echo);
+        }
+        if (!sameMessage) result.messageCount += 1;
+        const text = sameMessage ? previousTextTail + block.text : block.text;
+        previousTextTail = text.slice(-Math.max(60, query.length));
+        lastRecordId = ids.at(-1);
+        const match = createConversationSearchSnippet(text, query);
+        if (match && messageTurn && recordId !== lastMatchedRecordId) {
+          lastMatchedRecordId = recordId;
+          result.matchCount += 1;
+          if (result.hits.length < 200)
+            result.hits.push({
+              sessionId: activeSessionId,
+              snapshot: searchSnapshot,
+              revision,
+              recordId,
+              turnId: messageTurn.turnId,
+              turnOrdinal: messageTurn.ordinal,
+              role: block.kind,
+              ...match,
+            });
+          else result.truncated = true;
+        }
+        if (
+          request.stopAfterMessages !== undefined &&
+          result.messageCount >= request.stopAfterMessages
+        ) {
+          return result;
+        }
+      }
+      request.onProgress?.({ ...result, hits: [...result.hits] });
+      check();
+      if (!page.hasMore) {
+        if (nextTurn)
+          throw new Error(
+            'Conversation search transcript omitted navigation turns',
+          );
+        return {
+          ...result,
+          messageCount: result.messageCount + remainingLive.size,
+          complete: true,
+        };
+      }
+      if (!page.nextCursor || page.nextCursor === previousCursor)
+        throw new Error('Conversation search history did not advance');
+      previousCursor = page.nextCursor;
+      page = await activeClient.getTranscriptPage({
+        cursor: page.nextCursor,
+        limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+      });
+    }
+  }
+
+  async function locateViewportSearchHit(
+    hit: ConversationSearchHit,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation> {
+    const valid = () =>
+      request.isCurrent() &&
+      hit.sessionId === sessionId &&
+      hit.revision === viewportSnapshot.revision;
+    if (!valid()) throw new Error('Conversation search result expired');
+    await loadOrdinal(hit.turnOrdinal);
+    if (
+      !valid() ||
+      findIndexEntry(hit.turnOrdinal)?.entry.turnId !== hit.turnId
+    )
+      throw new Error('Conversation search result expired');
+    const location = await locateOrdinal(
+      hit.turnOrdinal,
+      { isCurrent: valid },
+      releaseAnchor,
+    );
+    let rangeId = location.rangeId;
+    while (valid()) {
+      const liveBlock = lastLiveBlocks?.find((block) =>
+        block.sourceRecordIds?.includes(hit.recordId),
+      );
+      if (liveBlock)
+        return { turnId: hit.turnId, blockId: liveBlock.id, view: 'live' };
+      const table = pageTable.getSnapshot();
+      for (const range of table.ranges) {
+        for (const pageId of range.pageIds) {
+          const block = table.pages
+            .get(pageId)
+            ?.blocks.find((item) =>
+              item.sourceRecordIds?.includes(hit.recordId),
+            );
+          if (block)
+            return {
+              turnId: hit.turnId,
+              blockId: block.id,
+              view: 'historical',
+              rangeId: range.id,
+              pageId,
+            };
+        }
+      }
+      if (location.view !== 'historical' || !rangeId) break;
+      const range = table.ranges.find((item) => item.id === rangeId);
+      if (
+        !range ||
+        (range.newer.kind !== 'loadable' && range.newer.kind !== 'cached')
+      )
+        break;
+      if (range.newer.kind === 'cached') {
+        rangeId = range.newer.rangeId;
+        continue;
+      }
+      const edge = range.pageIds.at(-1);
+      releaseAnchor();
+      if (edge) pageTable.select(range.id, edge);
+      await loadViewportBoundary(
+        range.id,
+        'newer',
+        { isCurrent: valid },
+        releaseAnchor,
+      );
+      if (
+        pageTable
+          .getSnapshot()
+          .ranges.find((item) => item.id === range.id)
+          ?.pageIds.at(-1) === edge
+      )
+        break;
+    }
+    throw new Error('Conversation search message is unavailable');
   }
 
   async function locateOrdinal(
@@ -1496,6 +1803,8 @@ export function createDaemonTurnNavigationStore(
     loadOrdinal,
     locateOrdinal,
     locateViewportOrdinal: locateOrdinal,
+    scanConversation,
+    locateViewportSearchHit,
     refreshHead,
     loadOlder: (rangeId) => loadBoundary(rangeId, 'older'),
     loadNewer: (rangeId) => loadBoundary(rangeId, 'newer'),
