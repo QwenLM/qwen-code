@@ -1237,3 +1237,32 @@
   color: var(--foreground);
   background: color-mix(in srgb, var(--foreground) 8%, transparent);
 }
+
+.conversationSearchButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  margin-left: -5px;
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.conversationSearchButton:hover,
+.conversationSearchButton:focus-visible {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.conversationSearchButton:focus-visible {
+  outline: 1px solid var(--foreground);
+  outline-offset: 2px;
+}

@@ -301,6 +301,42 @@ describe('TranscriptViewport pending first entry', () => {
     expect(list().scrollTop).toBe(400);
   });
 
+  it('clears pending search navigation when its dialog request is cancelled', async () => {
+    const { ref, store, mode, getTranscriptPage, settle } = await setup();
+    const request = deferred<DaemonSessionTranscriptPage>();
+    getTranscriptPage.mockReturnValue(request.promise);
+    let current = true;
+    let navigation: Promise<boolean> | undefined;
+    await act(async () => {
+      navigation = ref.current!.scrollToSearchHit!(
+        {
+          sessionId: 'session',
+          snapshot: 'snapshot',
+          revision: store.getViewportSnapshot().revision,
+          recordId: 'old',
+          turnId: 'old',
+          turnOrdinal: 0,
+          role: 'user',
+          snippet: 'old',
+          matchStart: 0,
+          matchEnd: 3,
+        },
+        () => current,
+      );
+    });
+    expect(container!.querySelector('[role="status"]')).not.toBeNull();
+    current = false;
+    await act(async () => {
+      request.resolve(page);
+      await navigation;
+    });
+    settle();
+    expect(await navigation).toBe(false);
+    expect(mode()).toBe('live');
+    expect(container!.querySelector('[role="status"]')).toBeNull();
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it('cancels a distant selection when the user scrolls before it resolves', async () => {
     const { store, mode, open, list, getTranscriptPage, settle } =
       await setup();
