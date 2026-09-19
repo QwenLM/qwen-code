@@ -207,6 +207,42 @@ describe('prepareNodeReplCell', () => {
       );
     }
 
+    // A carried `var` loop body is rewritten and re-parsed as a block, so the
+    // ambiguity must be recorded from the original source-item boundary.
+    const carriedVarOptions = {
+      previousBindings: [{ name: 'k', kind: 'var' }] as const,
+      cellId: 'tagged-template-carried-var',
+    };
+    await expect(
+      prepareNodeReplCell('for (var k in obj) tag\n`<p>`', carriedVarOptions),
+    ).rejects.toThrow(/tagged template/);
+    const { source: carriedVarControl } = await prepareNodeReplCell(
+      'for (var k in obj) tag;\n`<p>`',
+      carriedVarOptions,
+    );
+    expect(() =>
+      compileInChild(carriedVarControl, 'template-control:carried-var'),
+    ).not.toThrow();
+    const { source: carriedVarSameLine } = await prepareNodeReplCell(
+      'for (var k in obj) tag`<p>`',
+      carriedVarOptions,
+    );
+    expect(() =>
+      compileInChild(
+        carriedVarSameLine,
+        'template-control:carried-var-same-line',
+      ),
+    ).not.toThrow();
+    // With no bindings there is no injected commit or semicolon, so this native
+    // tagged template must remain allowed.
+    const { source: noCommitTaggedTemplate } = await prepareNodeReplCell(
+      'tag\n`<p>`',
+      { previousBindings: [], cellId: 'tagged-template-no-commit' },
+    );
+    expect(() =>
+      compileInChild(noCommitTaggedTemplate, 'template-control:no-commit'),
+    ).not.toThrow();
+
     for (const [index, code] of [
       'const t = html; /* separate statements */\n`<p>`',
       'const t = html; // separate statements\n`<p>`',

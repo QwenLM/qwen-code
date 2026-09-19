@@ -564,6 +564,19 @@ export async function prepareNodeReplCell(
     if (tree.rootNode.hasError) {
       throw new Error('JavaScript syntax could not be parsed safely');
     }
+    // `carriedVarEdits` can reparse an expression-bodied loop as a block and
+    // hide an original tagged-template boundary. Preserve original item indexes;
+    // the later check still rejects only a boundary that receives a commit.
+    const originalSourceItems =
+      tree.rootNode.namedChildren.filter(isSourceItem);
+    const ambiguousOriginalSourceItemIndexes = new Set<number>();
+    for (const [index, item] of originalSourceItems.entries()) {
+      if (
+        hasAmbiguousTemplateBoundary(code, item, originalSourceItems[index + 1])
+      ) {
+        ambiguousOriginalSourceItemIndexes.add(index);
+      }
+    }
     const carriedNames = new Set(
       options.previousBindings.map(({ name }) => name),
     );
@@ -791,9 +804,7 @@ export async function prepareNodeReplCell(
       generatedCommitChars += commit.length;
 
       if (commit) {
-        if (
-          hasAmbiguousTemplateBoundary(code, item, sourceItems[itemIndex + 1])
-        ) {
+        if (ambiguousOriginalSourceItemIndexes.has(itemIndex)) {
           throw new Error(
             'JavaScript cell cannot be transformed safely: a template literal after an unterminated statement may be a tagged template. Add `;` to make the statements separate, or keep the tag and template on the same line.',
           );
