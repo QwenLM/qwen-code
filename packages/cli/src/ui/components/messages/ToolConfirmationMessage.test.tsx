@@ -1262,4 +1262,87 @@ describe('ToolConfirmationMessage', () => {
 
     expect(onConfirm).not.toHaveBeenCalled();
   });
+
+  it('does not submit a nested custom answer aimed at an open context menu', async () => {
+    // The `ask_user_question` flavour nests a free-text TextInput one level
+    // below the dialog's own subscriber. Quieting only the dialog left that
+    // input hot, so one Enter aimed at "Open Link" submitted the half-typed
+    // draft as the answer and the teammate round proceeded on it.
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'ask_user_question',
+      title: 'Question',
+      questions: [
+        {
+          question: 'What is your favorite color?',
+          header: 'Color',
+          options: [
+            { label: 'Red', description: 'A warm color' },
+            { label: 'Blue', description: 'A cool color' },
+            { label: 'Green', description: '' },
+          ],
+          multiSelect: false,
+        },
+      ],
+      onConfirm,
+    };
+
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider>
+          <ToolConfirmationMessage
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <MenuProbe />
+        </ContextMenuProvider>,
+      ),
+    );
+
+    const settle = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      });
+
+    // Row 4 is the custom answer; typing into it mounts the nested input.
+    await settle();
+    await act(async () => {
+      stdin.write('4');
+    });
+    await settle();
+    await act(async () => {
+      stdin.write('draft');
+    });
+    await settle();
+
+    // Control: with no menu open, Enter submits exactly that draft — which is
+    // also the proof the nested input is mounted and live.
+    await act(async () => {
+      stdin.write('\r');
+    });
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'draft' } },
+      ),
+    );
+    onConfirm.mockClear();
+
+    await act(async () => {
+      menuApi?.openMenu(
+        [{ id: 'open-link', label: 'Open Link', onSelect: () => {} }],
+        { x: 4, y: 2 },
+      );
+    });
+    expect(menuApi?.menu).not.toBeNull();
+
+    await act(async () => {
+      stdin.write('\r'); // aimed at "Open Link", not at the draft
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
 });
