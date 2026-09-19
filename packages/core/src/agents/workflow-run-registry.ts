@@ -57,7 +57,12 @@ import {
   NO_JOURNAL_NO_RESUME_NOTE,
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from './workflow-resume-call.js';
-import { escapeXml, escapeXmlElementText } from '../utils/xml.js';
+import {
+  escapeXml,
+  escapeXmlElementText,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
 
@@ -663,7 +668,7 @@ export class WorkflowRunRegistry {
     const label = stripAnsiAndControl(entry.description) || entry.runId;
     const displayText = `Background workflow "${label}" ${statusText}.`;
     const modelParts = [
-      '<task-notification>',
+      TASK_NOTIFICATION_OPEN,
       '<kind>workflow</kind>',
       `<task-id>${escapeXml(entry.runId)}</task-id>`,
       `<status>${entry.status}</status>`,
@@ -709,7 +714,7 @@ export class WorkflowRunRegistry {
         `<${tag}>${escapeXmlElementText(recovery.join('\n'))}</${tag}>`,
       );
     }
-    modelParts.push('</task-notification>');
+    modelParts.push(TASK_NOTIFICATION_CLOSE);
 
     const meta: WorkflowRunCompletionMeta = {
       runId: entry.runId,
