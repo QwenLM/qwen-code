@@ -381,12 +381,14 @@ describe('AgentTool', () => {
     it('rejects code mode before starting a container, including when validation is bypassed', async () => {
       config.getCodeModeOnly = () => true;
       expect(agentTool.validateToolParams(params)).toContain(
-        'tools.codeModeOnly',
+        'tools.mode = "code_mode_only"',
       );
       const result = await (agentTool as AgentToolWithProtectedMethods)
         .createInvocation(params)
         .execute();
-      expect(partToString(result.llmContent)).toContain('tools.codeModeOnly');
+      expect(partToString(result.llmContent)).toContain(
+        'tools.mode = "code_mode_only"',
+      );
       expect(config.getExecutionEnvironmentFactory()).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
     });

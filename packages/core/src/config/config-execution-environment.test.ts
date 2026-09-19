@@ -13,6 +13,7 @@ import {
   deriveWorktreeConfig,
 } from './config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
 import {
   ExecutionCleanupError,
@@ -203,13 +204,16 @@ describe('execution environment ownership', () => {
   );
 
   it('rejects a code-mode-only container registry for direct derived Config callers', async () => {
-    const parent = new Config({ ...params, codeModeOnly: true });
+    const parent = new Config({
+      ...params,
+      toolMode: ToolMode.CodeModeOnly,
+    });
     const child = deriveConfig(parent, {
       getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
     });
     await expect(
       child.createToolRegistry(undefined, { skipDiscovery: true }),
-    ).rejects.toThrow('tools.codeModeOnly');
+    ).rejects.toThrow('tools.mode = "code_mode_only"');
     expect(parent.getCodeModeOnly()).toBe(true);
     expect(parent.getExecutionEnvironment()).toBeUndefined();
   });

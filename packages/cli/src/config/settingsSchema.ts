@@ -35,6 +35,7 @@ import {
   REASONING_EFFORT_TIERS,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
+import { ToolMode } from '@qwen-code/qwen-code-core/tools/code-mode.js';
 import type { CustomTheme } from '../ui/themes/theme.js';
 import { getLanguageSettingsOptions } from '../i18n/languages.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
@@ -2724,15 +2725,20 @@ const SETTINGS_SCHEMA = {
     description: 'Settings for built-in and custom tools.',
     showInDialog: false,
     properties: {
-      codeModeOnly: {
-        type: 'boolean',
-        label: 'Code Mode Only (Experimental)',
+      mode: {
+        type: 'enum',
+        label: 'Tool Mode (Experimental)',
         category: 'Tools',
         requiresRestart: true,
-        default: false,
+        default: ToolMode.Direct,
         description:
-          'Expose ordinary tools to the model only through the isolated exec JavaScript tool. Direct control tools remain available. Ignored in safe and bare modes.',
+          'Choose how tools are exposed to the model. Direct uses ordinary tool calls; Code Mode also exposes the isolated exec JavaScript tool; Code Mode Only exposes ordinary tools only through exec. Safe and bare modes always use Direct.',
         showInDialog: true,
+        options: [
+          { value: ToolMode.Direct, label: 'Default' },
+          { value: ToolMode.CodeMode, label: 'Code Mode' },
+          { value: ToolMode.CodeModeOnly, label: 'Code Mode Only' },
+        ],
       },
       sandbox: {
         type: 'object',
@@ -3029,7 +3035,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas cannot be revealed directly. In Code Mode, exec-capable tools stay available through exec; otherwise withheld tools are unreachable. A warning also names each group. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {

@@ -112,7 +112,11 @@ import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
-import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
+import {
+  getToolExposure,
+  isCodeModeEnabled,
+  ToolMode,
+} from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
@@ -727,7 +731,7 @@ export class AgentCore {
         matchesToolPattern(pattern, name),
       ) === true;
 
-    if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
+    if (isCodeModeEnabled(this.runtimeContext.getToolMode?.())) {
       const stringTools =
         this.toolConfig?.tools.filter(
           (tool): tool is string => typeof tool === 'string',
@@ -751,20 +755,33 @@ export class AgentCore {
           (name) =>
             (!configuredNames ||
               configuredNames.has(name) ||
+              name === ToolNames.EXEC ||
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
             !isHiddenByEagerAllowList(name) &&
             !isDisallowed(name) &&
-            this.isToolExecutionAllowed(name),
+            this.isToolExecutionAllowed(name, true),
         );
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
           (name) => getToolExposure(name) === 'code-mode-callable',
         ),
       );
-      const declarations =
-        toolRegistry.getFunctionDeclarationsFiltered(allowedNames);
+      const declarationNames =
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeMode
+          ? allowedNames.filter(
+              (name) =>
+                (!configuredNames ||
+                  name === ToolNames.EXEC ||
+                  configuredNames.has(name)) &&
+                this.isToolExecutionAllowed(name),
+            )
+          : allowedNames;
+      const declarations = toolRegistry.getFunctionDeclarationsFiltered(
+        declarationNames,
+        new Set(this.codeModeAllowedToolNames),
+      );
       declarations.push(
         ...inlineTools.filter(
           (tool) =>
@@ -1691,26 +1708,30 @@ export class AgentCore {
   ): boolean {
     return (
       (declaredToolNames.has(ToolNames.SKILL) ||
-        (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+        (isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
           declaredToolNames.has(ToolNames.EXEC) &&
           !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
           this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true)) &&
-      this.isToolExecutionAllowed(ToolNames.SKILL)
+      this.isToolExecutionAllowed(ToolNames.SKILL, true)
     );
   }
 
-  private isToolExecutionAllowed(toolName: string): boolean {
+  private isToolExecutionAllowed(
+    toolName: string,
+    forNestedBinding = false,
+  ): boolean {
     if (this.executionAllowedTools === undefined) {
       return true;
     }
     if (
       toolName === ToolNames.EXEC &&
-      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+      isCodeModeEnabled(this.runtimeContext.getToolMode?.())
     ) {
       return true;
     }
     if (
-      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+      forNestedBinding &&
+      isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
       this.executionAllowedExactTools?.has(ToolNames.EXEC) &&
       getToolExposure(toolName) === 'code-mode-callable'
     ) {
@@ -1800,7 +1821,7 @@ export class AgentCore {
   }> {
     if (
       this.codeModeAllowedToolNames === undefined &&
-      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+      isCodeModeEnabled(this.runtimeContext.getToolMode?.())
     ) {
       await this.prepareTools();
     }
@@ -2291,7 +2312,7 @@ export class AgentCore {
         response_id: responseId,
         wasOutputTruncated,
         ...(toolName === ToolNames.EXEC &&
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+        isCodeModeEnabled(this.runtimeContext.getToolMode?.())
           ? {
               codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
             }

@@ -128,6 +128,31 @@ describe('collectContextData (contextCommand)', () => {
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith();
   });
 
+  it('accounts for decorated CodeMode declarations in per-tool rows', async () => {
+    const execTool = {
+      name: 'exec',
+      schema: { name: 'exec', description: 'raw' },
+    };
+    const decoratedExec = {
+      name: 'exec',
+      description: 'decorated '.repeat(200),
+    };
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([execTool]),
+        getFunctionDeclarations: vi.fn().mockReturnValue([decoratedExec]),
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0]?.name).toBe('exec');
+    expect(data.builtinTools[0]?.tokens).toBeGreaterThan(100);
+  });
+
   it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {
     // uiTelemetryService is a module-level singleton shared by every session
     // in a `serve` daemon. Reading it here would report whichever session most

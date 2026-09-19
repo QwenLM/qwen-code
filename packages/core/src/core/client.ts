@@ -92,7 +92,7 @@ import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
-import { ToolMode } from '../tools/code-mode.js';
+import { getToolExposure, ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
 import {
@@ -1854,8 +1854,9 @@ export class LlmClient {
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
    * advertise tools the model has no way to load on demand. Tools held back
-   * by `tools.eager` in that state are unreachable for the session, which is
-   * warned about once per session.
+   * by `tools.eager` in that state are unavailable directly. Hybrid CodeMode
+   * can still call them through `exec`; Direct mode cannot reach them. The
+   * active behavior is warned about once per session.
    */
   private resolveDeferredToolsForReminder(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1880,11 +1881,28 @@ export class LlmClient {
         }
         if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
           this.warnedAboutUnreachableEagerTools = true;
+          const hybridCodeMode =
+            this.config.getToolMode?.() === ToolMode.CodeMode;
+          const nestedReachable = new Set(
+            hybridCodeMode && toolRegistry.getTool(ToolNames.EXEC)
+              ? withheld.filter(
+                  (name) => getToolExposure(name) === 'code-mode-callable',
+                )
+              : [],
+          );
+          const unreachable = withheld.filter(
+            (name) => !nestedReachable.has(name),
+          );
           // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
           console.warn(
             `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
-              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
-              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+              (nestedReachable.size > 0
+                ? `so these tools remain callable through exec: ${[...nestedReachable].join(', ')}. Their top-level declarations cannot be loaded until restart. `
+                : '') +
+              (unreachable.length > 0
+                ? `These tools are unreachable until restart: ${unreachable.join(', ')}. `
+                : '') +
+              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to make them directly loadable, ` +
               `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
           );
         }

@@ -306,7 +306,7 @@ function getExecutionBackendError(
     return 'Container execution is not enabled by this host.';
   }
   if (config.getCodeModeOnly?.()) {
-    return 'Container execution cannot be combined with tools.codeModeOnly.';
+    return 'Container execution cannot be combined with tools.mode = "code_mode_only".';
   }
   if (params.name !== undefined || !isTopLevelSession()) {
     return 'Container execution is available only for top-level regular subagents.';

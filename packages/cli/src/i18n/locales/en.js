@@ -746,7 +746,10 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
-  'Code Mode Only (Experimental)': 'Code Mode Only (Experimental)',
+  'Tool Mode (Experimental)': 'Tool Mode (Experimental)',
+  Default: 'Default',
+  'Code Mode': 'Code Mode',
+  'Code Mode Only': 'Code Mode Only',
   'Vim Mode': 'Vim Mode',
   'Attribution: commit': 'Attribution: commit',
   'Terminal Bell Notification': 'Terminal Bell Notification',

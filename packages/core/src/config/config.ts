@@ -116,6 +116,8 @@ import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  isCodeModeEnabled,
+  isToolMode,
   ToolMode,
   type ToolMode as ToolModeValue,
 } from '../tools/code-mode.js';
@@ -1039,8 +1041,8 @@ export interface ConfigParameters {
    * auto-approval and never affects registration (#10075).
    */
   eagerTools?: string[];
-  /** Replace ordinary model-facing tools with the isolated exec bridge. */
-  codeModeOnly?: boolean;
+  /** Select how model-facing tools are exposed. */
+  toolMode?: ToolModeValue;
   /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
@@ -3320,9 +3322,11 @@ export class Config {
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
     this.toolMode =
-      params.codeModeOnly && !this.bareMode && !this.safeMode
-        ? ToolMode.CodeModeOnly
-        : ToolMode.Direct;
+      this.bareMode || this.safeMode
+        ? ToolMode.Direct
+        : isToolMode(params.toolMode)
+          ? params.toolMode
+          : ToolMode.Direct;
     if (this.safeMode) {
       this.debugLogger.info(
         'Safe mode active: hooks, extensions, skills, MCP servers, context files, rules disabled',
@@ -11031,7 +11035,7 @@ export class Config {
     if (environment) {
       if (this.getCodeModeOnly()) {
         throw new Error(
-          'Container execution cannot be combined with tools.codeModeOnly.',
+          'Container execution cannot be combined with tools.mode = "code_mode_only".',
         );
       }
       const [{ createExecutionTools }, { wrapExecutionTool }] =
@@ -11107,7 +11111,7 @@ export class Config {
     };
 
     const registerExecIfEnabled = async (): Promise<void> => {
-      if (this.getToolMode() !== ToolMode.CodeModeOnly) return;
+      if (!isCodeModeEnabled(this.getToolMode())) return;
       await registerLazy(ToolNames.EXEC, async () => {
         const { ExecTool } = await import('../tools/exec.js');
         return new ExecTool(this);
