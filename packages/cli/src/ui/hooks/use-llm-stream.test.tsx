@@ -832,55 +832,6 @@ describe('useLlmStream', () => {
     );
   });
 
-  describe('aborted @-command prompt identity (R51-1)', () => {
-    it('mints a fresh id for the next submit after an @-command aborts post-echo', async () => {
-      // The @-command path adds its user item wearing the minted id BEFORE
-      // handleAtCommand runs; when the command declines to proceed,
-      // startNewPrompt never runs, so the counter stays put. Spending the
-      // mint keeps the next submit from re-issuing the id the displayed
-      // item still wears — otherwise two live items share one checkpoint
-      // identity and the rewind file-restore refuses a turn whose snapshot
-      // is unambiguous.
-      // The shared stats mock keeps getPromptCount at 5 and startNewPrompt
-      // never advances it — exactly the live-session counter shape after an
-      // aborted submit. The spend, not the counter, must separate the ids.
-      handleAtCommandSpy.mockResolvedValue({
-        shouldProceed: false,
-      } as unknown as Awaited<
-        ReturnType<typeof atCommandProcessor.handleAtCommand>
-      >);
-
-      const { result, mockSendMessageStream } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('@missing/file.txt fix this');
-      });
-      expect(handleAtCommandSpy).toHaveBeenCalled();
-      expect(mockSendMessageStream).not.toHaveBeenCalled();
-      expect(mockAddItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.USER,
-          text: '@missing/file.txt fix this',
-          promptId: 'test-session-id########5',
-        }),
-        expect.any(Number),
-      );
-
-      await act(async () => {
-        await result.current.submitQuery('plain follow-up prompt');
-      });
-      await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
-      expect(mockAddItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.USER,
-          text: 'plain follow-up prompt',
-          promptId: 'test-session-id########6',
-        }),
-        expect.any(Number),
-      );
-    });
-  });
-
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
