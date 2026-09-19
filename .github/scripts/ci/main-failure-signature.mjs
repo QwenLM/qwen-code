@@ -20,6 +20,10 @@ export const TEST_MARKER_PREFIX = 'qwen-main-ci-failure-test:';
 /** Pre-dedupe marker, still used for runs whose failing tests are unknown. */
 export const LEGACY_MARKER_PREFIX = 'qwen-main-ci-failure:';
 export const SIGNATURE_MARKER_PREFIX = 'qwen-main-ci-failure-sig:';
+/** Workflow-scoped bridge marker: the last search marker in both arms, so a
+ * search reaches the most recent failure issue of the same workflow even when
+ * the per-test and per-commit marker classes are disjoint (#12133). */
+export const WORKFLOW_MARKER_PREFIX = 'qwen-main-ci-failure-workflow:';
 export const OCCURRENCE_MARKER = '<!-- qwen-main-ci-failure-occurrences -->';
 export const MAX_OCCURRENCES = 10;
 
@@ -153,9 +157,12 @@ export function analyzeLogs(workflowName, logTexts, failedJobs = []) {
         )
       : '',
     markers: tests.map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
-    searchMarkers: tests
-      .slice(0, MAX_SEARCH_MARKERS)
-      .map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
+    searchMarkers: [
+      ...tests
+        .slice(0, MAX_SEARCH_MARKERS - 1)
+        .map((test) => `${TEST_MARKER_PREFIX}${test.key}`),
+      `${WORKFLOW_MARKER_PREFIX}${workflowName}`,
+    ],
     title: tests.length
       ? `Main CI failed: ${workflowName} — ${shortenForTitle(tests[0].id)}${extra}`
       : '',
@@ -220,6 +227,7 @@ function failedJobLines(failedJobs) {
 function renderPerCommitBody({ analysis, occurrence }) {
   return [
     `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
+    `<!-- ${WORKFLOW_MARKER_PREFIX}${analysis.workflow} -->`,
     '',
     'A main-branch CI run failed on `main` before any test result was',
     'reported, so this issue is tracked per commit.',
@@ -265,11 +273,44 @@ export function renderIssueBody({
   existingBody = '',
 }) {
   if (!analysis.tests.length) {
-    // Nothing to merge into: the per-commit path opens one issue per commit and
-    // an existing body means the same commit was already filed.
-    return existingBody.trim()
-      ? existingBody
-      : renderPerCommitBody({ analysis, occurrence });
+    if (!existingBody.trim()) {
+      return renderPerCommitBody({ analysis, occurrence });
+    }
+    // A workflow-scoped bridge marker can land this run on an issue filed
+    // under a different commit (or by the per-test arm), so an existing body
+    // no longer means "the same commit was already filed". Merge the new
+    // occurrence into the recorded body — the run link, the failed job and
+    // the new per-commit marker must be visible on the issue, or the
+    // recurrence is silently lost while the log claims it was recorded
+    // (#12133).
+    const perCommitMarker = `${LEGACY_MARKER_PREFIX}${occurrence.sha}`;
+    const workflowMarker = `${WORKFLOW_MARKER_PREFIX}${analysis.workflow}`;
+    const { head, lines, tail } = splitOccurrenceBlock(existingBody);
+    // The heading is re-emitted with the refreshed block below, so a body
+    // that already carries one does not accumulate a second heading.
+    const withoutHeading = head.replace(/\n*##\s+Recurrences\s*$/, '');
+    const baseProse = tail ? `${withoutHeading}\n\n${tail}` : withoutHeading;
+    const missingMarkers = [perCommitMarker, workflowMarker].filter(
+      (marker) => !baseProse.includes(`<!-- ${marker} -->`),
+    );
+    const mergedHead = missingMarkers.length
+      ? `${baseProse}\n${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}`
+      : baseProse;
+    const kept = lines.filter(
+      (line) => !line.includes(`[run ${occurrence.runId}]`),
+    );
+    const combined = [occurrenceLine(occurrence), ...kept];
+    const nextLines = combined.slice(0, maxOccurrences);
+    const footer = combined.length > nextLines.length ? ['', TRIMMED_NOTE] : [];
+    return [
+      mergedHead,
+      '',
+      RECURRENCE_HEADING,
+      '',
+      OCCURRENCE_MARKER,
+      ...nextLines,
+      ...footer,
+    ].join('\n');
   }
 
   // Search only ever uses the first MAX_SEARCH_MARKERS markers, so the body
@@ -282,6 +323,7 @@ export function renderIssueBody({
     const head = [
       `<!-- ${SIGNATURE_MARKER_PREFIX}${analysis.signature} -->`,
       ...bodyMarkers.map((marker) => `<!-- ${marker} -->`),
+      `<!-- ${WORKFLOW_MARKER_PREFIX}${analysis.workflow} -->`,
       '',
       `A main-branch \`${analysis.workflow}\` run failed on \`main\`.`,
       '',
@@ -317,7 +359,8 @@ export function renderIssueBody({
 
   // Record markers for tests that joined the failure set after the issue was
   // opened, so the next run still matches this issue on either test.
-  const missingMarkers = bodyMarkers.filter(
+  const workflowMarker = `${WORKFLOW_MARKER_PREFIX}${analysis.workflow}`;
+  const missingMarkers = [...bodyMarkers, workflowMarker].filter(
     (marker) => !strippedProse.includes(marker),
   );
   const missingTests = testLines.filter(
@@ -415,7 +458,10 @@ export function runCli(argv) {
         body: renderIssueBody({ analysis, existingBody, occurrence }),
         searchMarkers: analysis.tests.length
           ? analysis.searchMarkers
-          : [`${LEGACY_MARKER_PREFIX}${occurrence.sha}`],
+          : [
+              `${LEGACY_MARKER_PREFIX}${occurrence.sha}`,
+              `${WORKFLOW_MARKER_PREFIX}${analysis.workflow}`,
+            ],
       })}\n`,
     );
     return;
