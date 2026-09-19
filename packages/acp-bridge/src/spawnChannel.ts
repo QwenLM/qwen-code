@@ -681,6 +681,7 @@ export function createSpawnChannelFactory(
       kill: () => trackedChild.terminate(),
       killSync: () => trackedChild.killSync(),
       exited: trackedChild.exited,
+      registryReleased: trackedChild.registryReleased,
     };
   };
   markChannelFactoryForwardsChildEnv(factory);
