@@ -1427,6 +1427,11 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('should use system folderTrust over user setting', () => {
+      vi.mocked(isWorkspaceTrusted).mockImplementation((settings) => ({
+        isTrusted:
+          settings.security?.folderTrust?.enabled === true ? undefined : true,
+        source: undefined,
+      }));
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettingsContent = {
         security: {
@@ -1441,6 +1446,7 @@ describe('Settings Loading and Merging', () => {
             enabled: true, // This should be ignored
           },
         },
+        context: { fileName: 'WORKSPACE.md' },
       };
       const systemSettingsContent = {
         security: {
@@ -1464,6 +1470,8 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.security?.folderTrust?.enabled).toBe(true); // System setting should be used
+      expect(settings.isTrusted).toBe(false);
+      expect(settings.merged.context?.fileName).toBeUndefined();
     });
 
     it('should handle contextFileName correctly when only in user settings', () => {
@@ -3288,37 +3296,81 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.ui?.theme).toBe('dark');
     });
 
-    it('should NOT merge workspace settings when workspace is not trusted', () => {
+    it.each([false, undefined])(
+      'should NOT merge workspace settings when trust is %s',
+      (isTrusted) => {
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        const userSettingsContent = {
+          ui: { theme: 'dark' },
+          security: { folderTrust: { enabled: true } },
+          tools: { sandbox: false },
+          context: { fileName: 'USER.md' },
+        };
+        const workspaceSettingsContent = {
+          tools: { sandbox: true },
+          security: { folderTrust: { enabled: false } },
+          context: { fileName: 'WORKSPACE.md' },
+        };
+
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify(workspaceSettingsContent);
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+        expect(settings.merged.tools?.sandbox).toBe(false); // User setting
+        expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
+        expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      },
+    );
+
+    it('reads folder trust enabled only in system defaults for the initial check', async () => {
+      // Folder trust enabled by the fleet/operator scope alone must reach the
+      // phase-1 trust check, not just the merged settings: otherwise the
+      // loader trusts the workspace and applies its scope while every
+      // Config-side gate (loadCliConfig derives `trustedFolder` from the
+      // merged settings) reports it untrusted.
       vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
+        isTrusted: undefined,
+        source: undefined,
       });
       (mockFsExistsSync as Mock).mockReturnValue(true);
-      const userSettingsContent = {
-        ui: { theme: 'dark' },
-        tools: { sandbox: false },
-        context: { fileName: 'USER.md' },
-      };
-      const workspaceSettingsContent = {
-        tools: { sandbox: true },
-        context: { fileName: 'WORKSPACE.md' },
-      };
-
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
+          if (p === getSystemDefaultsPath()) {
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+            });
+          }
           return '{}';
         },
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.merged.tools?.sandbox).toBe(false); // User setting
-      expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
-      expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+      expect(settings.isTrusted).toBe(false);
+
+      // `loadCliConfig` re-runs the real resolver against the merged
+      // settings; the phase-1 argument must yield the same decision.
+      const { isWorkspaceTrusted: resolveTrust } = await vi.importActual<
+        typeof import('./trustedFolders.js')
+      >('./trustedFolders.js');
+      const phase1Settings = vi.mocked(isWorkspaceTrusted).mock.calls[0][0];
+      expect(resolveTrust(phase1Settings).isTrusted).toBe(
+        resolveTrust(settings.merged).isTrusted,
+      );
     });
 
     it('should use an explicit runtime trust decision instead of cached folder trust', () => {
@@ -5069,46 +5121,49 @@ describe('Settings Loading and Merging', () => {
       expect(process.env['TESTTEST']).toEqual('1234');
     });
 
-    it('does not load project .env files from untrusted workspaces', () => {
-      delete process.env['PROJECT_ENV_VAR'];
-      const cwdSpy = vi
-        .spyOn(process, 'cwd')
-        .mockReturnValue(MOCK_WORKSPACE_DIR);
+    it.each([false, undefined])(
+      'does not load project .env files when trust is %s',
+      (isTrusted) => {
+        delete process.env['PROJECT_ENV_VAR'];
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
 
-      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+        const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
 
-      vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
-      });
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-        [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
-      );
-      const userSettingsContent: Settings = {
-        ui: {
-          theme: 'dark',
-        },
-        security: {
-          folderTrust: {
-            enabled: true,
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
+        );
+        const userSettingsContent: Settings = {
+          ui: {
+            theme: 'dark',
           },
-        },
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
-          return '{}';
-        },
-      );
+          security: {
+            folderTrust: {
+              enabled: true,
+            },
+          },
+        };
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
+            return '{}';
+          },
+        );
 
-      loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
-      // Project .env should NOT be loaded when workspace is untrusted
-      expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
-      cwdSpy.mockRestore();
-    });
+        // Project .env should NOT be loaded when workspace is untrusted
+        expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+        cwdSpy.mockRestore();
+      },
+    );
 
     it('uses user .qwen/.env as fallback when the project .env lacks an API key', () => {
       delete process.env['OPENCODE_GO_API_KEY'];

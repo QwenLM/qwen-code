@@ -2978,6 +2978,52 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
 
+    it('emits live snapshots before exit while retaining the buffered final result', async () => {
+      const { result } = await simulateExecutionWithConfig(
+        'live-buffered-output',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from('ready\n'));
+          expect(onOutputEventMock).toHaveBeenCalledWith({
+            type: 'data',
+            chunk: 'ready\n',
+          });
+          cp.stdout?.emit('data', Buffer.from('done\n'));
+          expect(onOutputEventMock).toHaveBeenLastCalledWith({
+            type: 'data',
+            chunk: 'ready\ndone\n',
+          });
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, streamBufferedOutput: true },
+      );
+      expect(result.output).toBe('ready\ndone');
+    });
+
+    it('bounds cumulative previews while preserving complete stdout and stderr', async () => {
+      const stdout = 'x'.repeat(200000);
+      const { result } = await simulateExecutionWithConfig(
+        'bounded-preview',
+        (cp) => {
+          cp.stdout?.emit('data', Buffer.from(stdout));
+          cp.stderr?.emit('data', Buffer.from('\u001b[31merror\u001b[0m'));
+          expect(onOutputEventMock).toHaveBeenLastCalledWith({
+            type: 'data',
+            chunk: 'x'.repeat(65530) + '\nerror',
+          });
+          cp.stdout?.emit('data', Buffer.from('end'));
+          expect(onOutputEventMock).toHaveBeenLastCalledWith({
+            type: 'data',
+            chunk: 'x'.repeat(65527) + 'end\nerror',
+          });
+          cp.emit('exit', 0, null);
+          cp.emit('close', 0, null);
+        },
+        { ...shellExecutionConfig, streamBufferedOutput: true },
+      );
+      expect(result.output).toBe(stdout + 'end\nerror');
+    });
+
     it('reports capture-limit notice for streaming child_process output', async () => {
       const { result } = await simulateExecutionWithConfig(
         'streaming-large-output',

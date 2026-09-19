@@ -1280,12 +1280,18 @@ export function loadSettings(
     workspaceSettings.ui.theme = DEFAULT_DARK_THEME_NAME;
   }
 
-  // For the initial trust check, we can only use user and system settings.
+  // For the initial trust check we can only use the scopes that do not need
+  // the decision being computed. `system-defaults` participates so an operator
+  // enabling `security.folderTrust` there reaches the same "trust enabled"
+  // answer the final merged settings (and `loadCliConfig`'s `trustedFolder`)
+  // use; the workspace scope stays out, since a workspace file that only a
+  // trusted workspace may contribute cannot decide its own trust.
   const initialTrustCheckSettings = customDeepMerge(
     getMergeStrategyForPath,
     {},
-    systemSettings,
+    systemDefaultSettings,
     userSettings,
+    systemSettings,
   );
   const isTrusted =
     opts.workspaceTrusted ??
@@ -1294,7 +1300,7 @@ export function loadSettings(
       undefined,
       realWorkspaceDir,
     ).isTrusted ??
-    true;
+    false;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(
