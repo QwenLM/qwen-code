@@ -26,6 +26,7 @@ import {
 } from './channel-startup.js';
 import { BridgeTimeoutError, SERVE_CONTROL_EXT_METHODS } from './status.js';
 import { terminateChannel } from './channel-transport.js';
+import { WorkspaceDrainingError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 export interface ChannelWorkExclusions {
@@ -38,6 +39,7 @@ interface ChannelHarnessOptions
     ChannelStartupOptions,
     'channelLifecycle' | 'killChannelWithLog' | 'handleChannelExit'
   > {
+  isRuntimeStopping(): boolean;
   beforeChannelExit(info: HarnessChannel): void;
   handleChannelExit(
     info: HarnessChannel,
@@ -160,7 +162,12 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     ci: HarnessChannel,
     context?: string,
   ): Promise<void> {
-    if (ci.isDying || liveHarnessChannel() !== ci) return;
+    if (
+      options.isRuntimeStopping() ||
+      ci.isDying ||
+      liveHarnessChannel() !== ci
+    )
+      return;
     const timeoutMs = resolvedChannelIdleTimeoutMs();
     if (timeoutMs <= 0) {
       await killChannelWithLog(ci, context);
@@ -177,6 +184,14 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       }
     }, timeoutMs);
     idleTimer.unref();
+  }
+
+  function retireChannel(info: HarnessChannel, context: string) {
+    info.isDying = true;
+    cancelIdleTimer();
+    keepAliveUntil = 0;
+    info.channelLiveness?.stop();
+    return terminateChannel(info.channel, initTimeoutMs, context);
   }
 
   async function reapPendingEmptyChannel(
@@ -201,6 +216,8 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     fn: () => Promise<T>,
     recordUse = true,
   ): Promise<T> {
+    if (options.isRuntimeStopping())
+      throw new WorkspaceDrainingError(options.boundWorkspace ?? '');
     if (liveHarnessChannel() === ci) cancelIdleTimer();
     if (recordUse) ci.lastUsedAt = Date.now();
     ci.workspaceControlInFlight++;
@@ -255,6 +272,8 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
    * multiplexed sessions.
    */
   async function ensureChannel(): Promise<HarnessChannel> {
+    if (options.isRuntimeStopping())
+      throw new WorkspaceDrainingError(options.boundWorkspace ?? '');
     if (isShuttingDown()) {
       throw new Error('AcpSessionBridge is shutting down');
     }
@@ -423,16 +442,11 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     preheat,
     reclaimIdleChannel(info: HarnessChannel) {
       // Retire only this child; shutdown would permanently seal the bridge.
-      info.isDying = true;
-      cancelIdleTimer();
-      keepAliveUntil = 0;
-      info.channelLiveness?.stop();
       writeStderrLine(`qwen serve: reclaiming idle ACP channel ${info.id}`);
-      return terminateChannel(
-        info.channel,
-        initTimeoutMs,
-        'capacity reclamation',
-      );
+      return retireChannel(info, 'capacity reclamation');
+    },
+    stopChannel(info: HarnessChannel) {
+      return retireChannel(info, 'user-confirmed workspace stop');
     },
     markDying(channels: readonly HarnessChannel[]) {
       for (const ci of channels) {

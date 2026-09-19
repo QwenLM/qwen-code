@@ -1275,3 +1275,22 @@ describe('WorkspaceRuntimeCoordinator', () => {
     );
   });
 });
+
+it('runtime-stop completion cannot clear a concurrent removal drain', async () => {
+  const { runtime } = makeRuntime();
+  const coordinator = getWorkspaceRuntimeCoordinator(runtime);
+  const finish = coordinator.beginStop();
+  await expect(coordinator.ensure()).rejects.toBeInstanceOf(
+    WorkspaceDrainingError,
+  );
+  coordinator.beginDrain();
+  expect(finish()).toBe(false);
+  await expect(coordinator.ensure()).rejects.toBeInstanceOf(
+    WorkspaceDrainingError,
+  );
+  coordinator.cancelDrain();
+  await expect(coordinator.ensure()).resolves.toMatchObject({
+    runtimeLive: true,
+  });
+  expect(finish()).toBe(false);
+});
