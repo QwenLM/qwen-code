@@ -10,6 +10,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
@@ -1703,6 +1704,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   private getSedEditInfo(): SedEditInfo | null {
     if (
+      this.config.getShellExecutionSandbox?.() ||
       this.params.is_background ||
       LEADING_ENV_ASSIGNMENT_RE.test(this.params.command)
     ) {
@@ -2052,6 +2054,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getShellExecutionSandbox?.()) return 'ask';
     // Gate on the RAW command before `stripShellWrapper` runs.
     // `stripShellWrapper` drops leading env-assignment tokens AND
     // unwraps `bash -c '...'` to its inner script — so for
@@ -2142,6 +2145,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
     for (const sub of subCommands) {
+      if (this.config.getShellExecutionSandbox?.()) {
+        confirmableSubCommands.push(sub);
+        continue;
+      }
       let isReadOnly = false;
       try {
         isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
@@ -2343,9 +2350,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // `git -C /other commit`), no consumer reads preHead and the
     // ~10–50 ms execFileSync is dead work that just blocks the
     // event loop before the user's real command spawns.
-    const preHead: string | null = commitCtx.attributableInCwd
-      ? this.getGitHeadSync(cwd)
-      : null;
+    const preHead: string | null =
+      !this.config.getShellExecutionSandbox?.() && commitCtx.attributableInCwd
+        ? this.getGitHeadSync(cwd)
+        : null;
 
     // Snapshot the attribution inputs BEFORE spawn so bindGhPrCreate can
     // tell a run that CREATED a PR from one that merely RESOLVED the
@@ -2360,7 +2368,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let preRunBranch: string | undefined;
     let preRunRepoKeys: AttributionRepoKeys | undefined;
     let preRunGhEnv: Readonly<Record<string, string | undefined>> | undefined;
-    if (commandRunsGhPrCreate(commandToExecute)) {
+    if (
+      !this.config.getShellExecutionSandbox?.() &&
+      commandRunsGhPrCreate(commandToExecute)
+    ) {
       // The verification legs must authenticate the way the create itself
       // does (inline GH_TOKEN with no ambient gh auth), or the gate's
       // advertised token shape binds nothing. The inline record is an
@@ -2618,7 +2629,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     let executionHandle;
     try {
-      executionHandle = await ShellExecutionService.execute(
+      executionHandle = await executeRuntimeShell(
+        this.config,
         commandToExecute,
         cwd,
         onShellOutputEvent,
@@ -2855,7 +2867,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // succeeded but the per-file git note didn't land — without it, the only
     // signal is a QWEN_DEBUG_LOG_FILE entry the user has likely never set up.
     let attributionWarning: string | null = null;
-    if (commitCtx.attributableInCwd) {
+    if (
+      !this.config.getShellExecutionSandbox?.() &&
+      commitCtx.attributableInCwd
+    ) {
       // `git commit --amend` rewrites HEAD in place, so the standard
       // parent-vs-postHead diff (`${postHead}~1..${postHead}`) would
       // span the entire amended commit (the amended commit's parent
@@ -3175,6 +3190,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     preRunRepoKeys: AttributionRepoKeys | undefined,
     ghCreateEnv?: Readonly<Record<string, string | undefined>>,
   ): void {
+    if (this.config.getShellExecutionSandbox?.()) return;
     void (async () => {
       try {
         if (!commandRunsGhPrCreate(command)) return;
@@ -3887,32 +3903,40 @@ export class ShellToolInvocation extends BaseToolInvocation<
       abortController: entryAc,
     };
 
-    const { result: resultPromise, pid } = await ShellExecutionService.execute(
-      processedCommand,
-      cwd,
-      (event: ShellOutputEvent) => {
-        if (event.type === 'data' && typeof event.chunk === 'string') {
-          // Strip ANSI escape codes (color, cursor-move, clear-screen) before
-          // writing — agents read the file as plain text, and dev servers /
-          // build tools spam plenty of escape sequences that would render as
-          // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
-          outputStream.write(stripAnsi(event.chunk));
-        }
-        // ANSI array chunks and binary streams are not written to the output
-        // file: agents read the file as plain text and binary spam would be
-        // unhelpful.
-      },
-      entryAc.signal,
-      // Background shells are non-interactive by design — no terminal to
-      // attach a PTY to, no human to type at it. Force the child_process
-      // path so we don't pull in node-pty for fire-and-forget commands.
-      false,
-      shellExecutionConfig ?? {},
-      // Stream stdout/stderr through to the output file as chunks arrive.
-      // Default child_process mode buffers until exit, which would leave
-      // dev-server / watcher output files empty until the process dies.
-      { streamStdout: true },
-    );
+    let executionHandle;
+    try {
+      executionHandle = await executeRuntimeShell(
+        this.config,
+        processedCommand,
+        cwd,
+        (event: ShellOutputEvent) => {
+          if (event.type === 'data' && typeof event.chunk === 'string') {
+            // Strip ANSI escape codes (color, cursor-move, clear-screen) before
+            // writing — agents read the file as plain text, and dev servers /
+            // build tools spam plenty of escape sequences that would render as
+            // garbage. Costs ~one regex per chunk; cheap relative to disk I/O.
+            outputStream.write(stripAnsi(event.chunk));
+          }
+          // ANSI array chunks and binary streams are not written to the output
+          // file: agents read the file as plain text and binary spam would be
+          // unhelpful.
+        },
+        entryAc.signal,
+        // Background shells are non-interactive by design — no terminal to
+        // attach a PTY to, no human to type at it. Force the child_process
+        // path so we don't pull in node-pty for fire-and-forget commands.
+        false,
+        shellExecutionConfig ?? {},
+        // Stream stdout/stderr through to the output file as chunks arrive.
+        // Default child_process mode buffers until exit, which would leave
+        // dev-server / watcher output files empty until the process dies.
+        { streamStdout: true },
+      );
+    } catch (error) {
+      outputStream.destroy();
+      throw error;
+    }
+    const { result: resultPromise, pid } = executionHandle;
 
     if (pid !== undefined) registration.pid = pid;
     const registry = this.config.getBackgroundShellRegistry();
