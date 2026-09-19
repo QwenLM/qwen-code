@@ -73,12 +73,14 @@ const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
+  'execution-worker.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for
   // `qwen serve` so daemon startup gets the same fast path as npm installs.
   'cli-entry.js',

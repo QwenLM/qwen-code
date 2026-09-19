@@ -24,6 +24,13 @@ export class SubagentValidator {
     const errors: string[] = [];
     const warnings: string[] = [];
 
+    if (
+      config.executionBackend !== undefined &&
+      config.executionBackend !== 'container'
+    ) {
+      errors.push('executionBackend must be "container" when provided');
+    }
+
     const nameValidation = this.validateName(config.name);
     if (!nameValidation.isValid) {
       errors.push(...nameValidation.errors);

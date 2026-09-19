@@ -107,16 +107,19 @@ function mount(
     blocked,
     hold,
     cwd,
+    stopped,
   }: {
     state: typeof streamingState;
     activeSessionId: string;
     blocked: boolean;
     hold: boolean;
     cwd: string | null;
+    stopped: boolean;
   }) {
     latest = useQueuedPrompts({
       connected,
-      writeBlocked: blocked,
+      writeBlocked: blocked || stopped,
+      runtimeStopped: stopped,
       sessionId: activeSessionId,
       workspaceCwd: cwd ?? undefined,
       clientId: 'client-1',
@@ -139,6 +142,7 @@ function mount(
   let blocked = writeBlocked;
   let held = holdQueuedPromptsLocally;
   let cwd = workspaceCwd;
+  let stopped = false;
   const render = (
     state: typeof streamingState,
     nextSessionId = activeSessionId,
@@ -146,12 +150,14 @@ function mount(
     nextWriteBlocked = blocked,
     nextHold = held,
     nextCwd: string | null = cwd,
+    nextStopped = stopped,
   ) => {
     if (replaceOwner) sdk.ownerVersion += 1;
     activeSessionId = nextSessionId;
     blocked = nextWriteBlocked;
     held = nextHold;
     cwd = nextCwd;
+    stopped = nextStopped;
     act(() =>
       root.render(
         <Harness
@@ -160,6 +166,7 @@ function mount(
           blocked={blocked}
           hold={held}
           cwd={cwd}
+          stopped={stopped}
         />,
       ),
     );
@@ -2216,4 +2223,119 @@ describe('useQueuedPrompts writer-blocked recovery', () => {
     render('idle', 'session-1', true, false);
     expect(actions.submitPrompt).toHaveBeenCalledOnce();
   });
+});
+
+it('does not resubmit locally held prompts after an explicit runtime stop and resume', () => {
+  const { actions } = createActions();
+  const { render } = mount('idle', actions, true, true, false, true);
+  act(() => latest.enqueuePrompt('do not silently rerun'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  render('idle', 'session-1', true, false, true, '/workspace', true);
+  expect(latest.queuedPrompts).toHaveLength(0);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+  expect(actions.removePendingPrompt).not.toHaveBeenCalled();
+});
+
+it('runtime stop fences sibling session stash in same workspace', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'responding',
+    actions,
+    true,
+    true,
+    false,
+    true,
+  );
+  act(() => latest.enqueuePrompt('sibling text from before runtime stop'));
+  render('responding', 'session-2', true, false, true);
+  expect(latest.queuedPrompts).toEqual([]);
+  render('idle', 'session-2', true, false, true, '/workspace', true);
+  render('idle', 'session-2', true, false, false, '/workspace', false);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith(
+    'sibling text from before runtime stop',
+  );
+});
+it('runtime stop returns unaccepted mid-turn text to composer', () => {
+  const { actions } = createActions();
+  vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
+    new Promise(() => undefined),
+  );
+  const { editor, render } = mount('responding', actions);
+  act(() => latest.enqueuePrompt('unaccepted before runtime stop'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  render('responding', 'session-1', true, false, false, '/workspace', true);
+  expect(latest.queuedPrompts).toEqual([]);
+  expect(editor.setText).toHaveBeenCalledWith('unaccepted before runtime stop');
+});
+
+it('preserves another workspace held queue when switching into a stopped workspace', async () => {
+  const { actions } = createActions();
+  const { render } = mount('responding', actions, true, true, false, true);
+  act(() => latest.enqueuePrompt('unaffected workspace draft'));
+  render('idle', 'session-2', true, false, false, '/other', true);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {});
+  expect(actions.submitPrompt).toHaveBeenCalledOnce();
+});
+
+it('runtime stop fences a stash written before the workspace cwd resolved', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'idle',
+    actions,
+    true,
+    true,
+    false,
+    true,
+    null,
+  );
+  act(() => latest.enqueuePrompt('queued before stop, cwd unresolved'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  // Switch away while the cwd is still unresolved: the stash keys as
+  // `\u0000session-1`.
+  render('idle', 'session-2', true, false, true, null);
+  expect(latest.queuedPrompts).toHaveLength(0);
+  // The cwd resolves and the stop is observed; the unresolved-cwd stash
+  // belongs to the stopped workspace and must be fenced with it.
+  render('idle', 'session-2', true, false, true, '/workspace', true);
+  render('idle', 'session-2', true, false, true, '/workspace', false);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith(
+    'queued before stop, cwd unresolved',
+  );
+});
+
+it('runtime stop fences the live queue stashed while the workspace cwd is unresolved', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'idle',
+    actions,
+    true,
+    true,
+    false,
+    true,
+    null,
+  );
+  act(() => latest.enqueuePrompt('queued before cwd resolved'));
+  // The cwd resolves and the stop is observed in the same owner change: the
+  // departure stash is written under the unresolved-cwd key.
+  render('idle', 'session-1', false, false, true, '/workspace', true);
+  expect(latest.queuedPrompts).toEqual([]);
+  render('idle', 'session-1', false, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith('queued before cwd resolved');
 });
