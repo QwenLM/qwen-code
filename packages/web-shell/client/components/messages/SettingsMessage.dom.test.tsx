@@ -218,6 +218,7 @@ function renderPanel(
     modelManagement: ModelManagementProps;
     initialCategory: string;
     presentation: WebShellSettingsOptions;
+    connections: ReactNode;
   }> = {},
 ): HTMLElement {
   return render(
@@ -233,6 +234,7 @@ function renderPanel(
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagement={overrides.modelManagement}
+        connections={overrides.connections}
       />
     </I18nProvider>,
   );
@@ -335,6 +337,21 @@ describe('SettingsMessage initialCategory', () => {
     );
 
     expect(activeCategoryButton(container).textContent).toContain('General');
+  });
+
+  it('renders browser-local connections without workspace scope tabs', () => {
+    const container = renderPanel(makeState([boolSetting()], vi.fn()), {
+      initialCategory: 'Connections',
+      connections: <div data-testid="connections-panel">connections</div>,
+    });
+
+    expect(activeCategoryButton(container).textContent).toContain(
+      'Connections',
+    );
+    expect(
+      container.querySelector('[data-testid="connections-panel"]'),
+    ).not.toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
   });
 
   it('does not force the deep-linked category again after a manual switch', async () => {

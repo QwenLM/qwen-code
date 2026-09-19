@@ -2469,6 +2469,83 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
   });
 
+  it('honours folder trust enabled only in system defaults', async () => {
+    delete process.env['FAST_PATH_SYSTEM_DEFAULTS_MARKER'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-system-defaults-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'system-defaults.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: { FAST_PATH_SYSTEM_DEFAULTS_MARKER: 'from-workspace-settings' },
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    // The operator scope enables folder trust and nothing has answered for
+    // this workspace, so its own settings scope stays unmerged - the same
+    // call the CLI makes once it sees folder trust as enabled.
+    expect(process.env['FAST_PATH_SYSTEM_DEFAULTS_MARKER']).toBeUndefined();
+  });
+
+  it('uses system folder trust over a disabled user setting', async () => {
+    delete process.env['FAST_PATH_SYSTEM_TRUST_MARKER'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-system-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: false } } }),
+    );
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = join(
+      qwenHome,
+      'system.json',
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'],
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        env: { FAST_PATH_SYSTEM_TRUST_MARKER: 'from-workspace-settings' },
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['FAST_PATH_SYSTEM_TRUST_MARKER']).toBeUndefined();
+  });
+
+  it('does not load env before a folder trust decision', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-undecided-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-undecided-workspace\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
   it('does not load env from a descendant of an explicitly untrusted workspace', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();
@@ -2568,6 +2645,41 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(childWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('loads an ancestor .env of an explicitly trusted child workspace', async () => {
+    delete process.env['QWEN_SERVER_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trusted-ancestor-')),
+    );
+    const childWorkspace = join(tempWorkspace, 'child');
+    mkdirSync(childWorkspace);
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'QWEN_SERVER_TOKEN=from-trusted-ancestor-env\n',
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+    );
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+      qwenHome,
+      'trustedFolders.json',
+    );
+    // The rule is keyed on the child workspace only, so it cannot match the
+    // ancestor: re-resolving trust per candidate directory would drop this
+    // .env, and with it the value the daemon freezes into its base env.
+    writeFileSync(
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+      JSON.stringify({
+        [childWorkspace]: TrustLevel.TRUST_FOLDER,
+      }),
+    );
+
+    await bootstrapServeFastPathEnvironment(childWorkspace);
+
+    expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-trusted-ancestor-env');
   });
 
   it('treats TRUST_PARENT as trusting the containing folder', async () => {

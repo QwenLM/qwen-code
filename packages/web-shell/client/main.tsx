@@ -4,6 +4,7 @@ import React from 'react';
 import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { StandaloneContext } from './config/standalone';
 import { isKnownDaemonTarget } from './config/daemon';
+import { isRemoteConnectionKnown } from './config/remote-connections';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -37,7 +38,9 @@ const INVALID_DAEMON_TARGET =
 // A `?daemon=` link can name any origin; one this browser has never connected
 // to is shown for confirmation instead of being probed on load.
 const UNCONFIRMED_DAEMON_TARGET =
-  Boolean(DAEMON_BASE_URL) && !isKnownDaemonTarget(DAEMON_BASE_URL);
+  Boolean(DAEMON_BASE_URL) &&
+  !isKnownDaemonTarget(DAEMON_BASE_URL) &&
+  !isRemoteConnectionKnown(DAEMON_BASE_URL);
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
