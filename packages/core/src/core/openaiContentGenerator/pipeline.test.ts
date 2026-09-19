@@ -154,6 +154,108 @@ describe('ContentGenerationPipeline', () => {
     });
   });
 
+  describe('batch execution mode', () => {
+    // `executionMode: 'batch'` reroutes the turn through the provider's Batch
+    // API (files -> batches -> poll -> output file) instead of the realtime
+    // chat.completions route.
+    const completionBody = {
+      id: 'chatcmpl-b1',
+      object: 'chat.completion',
+      created: 1,
+      model: 'test-model',
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'ok' },
+        },
+      ],
+    };
+    const batchOutputLine =
+      JSON.stringify({
+        custom_id: 'turn',
+        response: { status_code: 200, body: completionBody },
+      }) + '\n';
+
+    function mockBatchBackend() {
+      (mockClient as unknown as { baseURL: string }).baseURL =
+        'https://api.openai.com/v1';
+      (mockClient as unknown as { apiKey: string }).apiKey = 'sk-test';
+      (mockClient as unknown as { files: unknown }).files = {
+        content: vi.fn().mockResolvedValue(new Response(batchOutputLine)),
+        delete: vi.fn().mockResolvedValue({}),
+      };
+      (mockClient as unknown as { batches: unknown }).batches = {
+        create: vi.fn().mockResolvedValue({
+          id: 'b1',
+          status: 'completed',
+          output_file_id: 'file-out',
+        }),
+        retrieve: vi.fn(),
+        cancel: vi.fn(),
+      };
+      // The upload goes through the global fetch (see batch.ts for why).
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValue(new Response(JSON.stringify({ id: 'file-in' }))),
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('routes executionMode: batch through the Batch API, never chat.completions', async () => {
+      mockBatchBackend();
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+      const mockLlmResponse = new GenerateContentResponse();
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        mockLlmResponse,
+      );
+      mockReportOpenAiRequest.mockReturnValueOnce({});
+
+      const result = await pipeline.execute(
+        {
+          model: 'test-model',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          executionMode: 'batch',
+        } as unknown as GenerateContentParameters,
+        'prompt-batch',
+      );
+
+      expect(result).toBe(mockLlmResponse);
+      expect(mockClient.chat.completions.create).not.toHaveBeenCalled();
+      const batches = (mockClient as unknown as { batches: { create: Mock } })
+        .batches;
+      expect(batches.create).toHaveBeenCalledWith(
+        expect.objectContaining({ input_file_id: 'file-in' }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
+    });
+
+    it('rejects batch mode on Qwen OAuth before any request', async () => {
+      mockContentGeneratorConfig.authType = AuthType.QWEN_OAUTH;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+      (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([]);
+
+      await expect(
+        pipeline.execute(
+          {
+            model: 'test-model',
+            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+            executionMode: 'batch',
+          } as unknown as GenerateContentParameters,
+          'prompt-batch-oauth',
+        ),
+      ).rejects.toThrow('Batch mode needs an API key');
+      expect(mockClient.chat.completions.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('execute', () => {
     it('should successfully execute non-streaming request', async () => {
       // Arrange
