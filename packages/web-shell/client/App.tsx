@@ -4221,7 +4221,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
-  } = useSessionArtifacts();
+  } = useSessionArtifacts(t);
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
   const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
