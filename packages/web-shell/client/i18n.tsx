@@ -1027,6 +1027,9 @@ const EN: Messages = {
   'contextUsage.free': 'Free',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
+  'contextUsage.startupContext': 'Startup context',
+  'contextUsage.unattributed': 'Unattributed',
+  'contextUsage.cachedPrefix': 'Cached prefix',
   'contextUsage.mcpTools': 'MCP tools',
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
@@ -1798,7 +1801,6 @@ const EN: Messages = {
   'sidebar.reloadWorkspace': 'Reload runtime',
   'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
-  'sidebar.workspacesOnHost': (v) => `Workspaces on ${v?.host}`,
   'sidebar.sessionsRunning': (v) =>
     `${v?.count ?? 0} running session${v?.count === 1 ? '' : 's'}`,
   'sidebar.sessionsAttention': (v) =>
@@ -5008,6 +5010,9 @@ const ZH: Messages = {
   'contextUsage.free': '空闲',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
+  'contextUsage.startupContext': '启动上下文',
+  'contextUsage.unattributed': '未归因',
+  'contextUsage.cachedPrefix': '缓存前缀',
   'contextUsage.mcpTools': 'MCP 工具',
   'contextUsage.model': '模型',
   'contextUsage.noSession':
@@ -5725,7 +5730,6 @@ const ZH: Messages = {
   'sidebar.reloadWorkspace': '重新加载运行时',
   'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
-  'sidebar.workspacesOnHost': (v) => `${v?.host} 上的工作区`,
   'sidebar.sessionsRunning': (v) => `${v?.count ?? 0} 个会话运行中`,
   'sidebar.sessionsAttention': (v) => `${v?.count ?? 0} 个会话等待处理`,
   'sidebar.sessionsTotal': (v) =>

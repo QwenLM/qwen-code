@@ -389,6 +389,16 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
             symbolColor={isOverLimit ? theme.status.error : theme.text.accent}
             isOverLimit={isOverLimit}
           />
+          {/* Annotation, not a category: the cached prefix spans several categories. */}
+          {(breakdown.cachedTokens ?? 0) > 0 && (
+            <CategoryRow
+              symbol={FILLED}
+              label={t('Cached prefix')}
+              tokens={breakdown.cachedTokens!}
+              contextWindowSize={contextWindowSize}
+              symbolColor={theme.text.secondary}
+            />
+          )}
           <CategoryRow
             symbol={EMPTY}
             label={t('Free')}
@@ -449,6 +459,15 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
         contextWindowSize={contextWindowSize}
         symbolColor={theme.text.accent}
       />
+      {(breakdown.startupContext ?? 0) > 0 && (
+        <CategoryRow
+          symbol={FILLED}
+          label={t('Startup context')}
+          tokens={breakdown.startupContext!}
+          contextWindowSize={contextWindowSize}
+          symbolColor={theme.text.accent}
+        />
+      )}
       {/* Show Messages whenever a numeric token count is available. */}
       {hasTokenCount && (
         <CategoryRow
@@ -457,6 +476,15 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           tokens={breakdown.messages}
           contextWindowSize={contextWindowSize}
           symbolColor={theme.text.accent}
+        />
+      )}
+      {hasTokenCount && (breakdown.unattributed ?? 0) > 0 && (
+        <CategoryRow
+          symbol={FILLED}
+          label={t('Unattributed')}
+          tokens={breakdown.unattributed!}
+          contextWindowSize={contextWindowSize}
+          symbolColor={theme.text.secondary}
         />
       )}
 

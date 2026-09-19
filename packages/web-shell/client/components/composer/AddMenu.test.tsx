@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { getTranslator, I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { AddMenu, type AddMenuProps } from './AddMenu';
 
@@ -56,7 +56,10 @@ function render(ui?: ReactNode): AddMenuProps {
   return props;
 }
 
-function renderWith(props: AddMenuProps): void {
+function renderWith(
+  props: AddMenuProps,
+  language: WebShellLanguage = 'en',
+): void {
   container = document.createElement('div');
   portalRoot = document.createElement('div');
   portalRoot.dataset.webShellPortalRoot = '';
@@ -66,7 +69,7 @@ function renderWith(props: AddMenuProps): void {
   act(() =>
     root!.render(
       <WebShellPortalRootContext.Provider value={portalRoot}>
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <AddMenu {...props} />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -217,9 +220,6 @@ describe('AddMenu', () => {
     overrides: Partial<NonNullable<AddMenuProps['plan']>> = {},
   ): NonNullable<AddMenuProps['plan']> => ({
     checked: false,
-    disabledReason: 'Switching mode',
-    label: 'Plan mode',
-    description: 'Plan first, run after you approve',
     onToggle: vi.fn(),
     ...overrides,
   });
@@ -282,6 +282,28 @@ describe('AddMenu', () => {
     expect(onToggle).not.toHaveBeenCalled();
     // A disabled row does not close the menu either.
     expect(menuItem('composer-add-menu-plan')).not.toBeNull();
+  });
+
+  it('localizes the Plan row, including the reason it is disabled', async () => {
+    renderWith(baseProps({ plan: planControl({ disabled: true }) }), 'zh-CN');
+    await openMenu();
+    // Read from the catalog, so a literal in place of t() goes red.
+    const zh = getTranslator('zh-CN');
+    // The catalog oracle cannot see a key dropped from zh-CN: the translator
+    // falls back to English on both sides. Pin that the keys are translated.
+    const en = getTranslator('en');
+    for (const key of [
+      'composerAdd.plan.label',
+      'composerAdd.plan.description',
+      'composerAdd.plan.busy',
+    ] as const) {
+      expect(zh(key)).not.toBe(en(key));
+    }
+    expect(menuItem('composer-add-menu-plan')!.textContent).toBe(
+      `${zh('composerAdd.plan.label')}${zh(
+        'composerAdd.plan.description',
+      )}${zh('composerAdd.plan.busy')}`,
+    );
   });
 
   it('closes on a Plan choice and toggles once without refocusing the trigger', async () => {
@@ -1114,14 +1136,31 @@ describe('mobile AddMenu', () => {
       portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
     ).toBeNull();
   });
+  it.each(['en', 'zh-CN'] as const)(
+    'localizes the busy mobile Plan row in %s',
+    async (language) => {
+      const onToggle = vi.fn();
+      renderWith(
+        mobileProps({ plan: { checked: false, disabled: true, onToggle } }),
+        language,
+      );
+      await openMenu();
+      const row = menuItem('composer-add-menu-plan') as HTMLButtonElement;
+      const t = getTranslator(language);
+      expect(row.textContent).toBe(
+        `${t('composerAdd.plan.label')}${t('composerAdd.plan.busy')}`,
+      );
+      expect(row.disabled).toBe(true);
+      await act(async () => row.click());
+      expect(onToggle).not.toHaveBeenCalled();
+    },
+  );
+
   it('toggles Plan once and notifies history only after closing', async () => {
     const onToggle = vi.fn();
     const props = mobileProps({
       plan: {
         checked: false,
-        disabledReason: 'busy',
-        label: 'Plan',
-        description: 'Plan first',
         onToggle,
       },
     });
@@ -1132,7 +1171,7 @@ describe('mobile AddMenu', () => {
     });
     renderWith(props);
     await openMenu();
-    await tap('Plan');
+    await tap('Plan mode');
     expect(onToggle).toHaveBeenCalledOnce();
     await openMenu();
     await tap('Input history');
