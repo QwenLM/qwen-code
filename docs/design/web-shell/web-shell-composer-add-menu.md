@@ -96,9 +96,13 @@ These are facts about the current system that shape the design, and each one rul
 
 ## Touch
 
-`+` shows the same items on touch and desktop. Attachment and reference insertion reuse their existing lanes; skill prepend targets CodeMirror on desktop and the native textarea on touch.
-
-**Unverified:** right-side flyouts depend on hover, and touch has none. The menu primitive is expected to fall back to click/focus for non-mouse pointers, but that needs a real-device check. If it fails, touch keeps the single item that does not need a submenu and this section is rewritten.
+The mobile layout and its additional actions are now specified by
+[Mobile composer actions](mobile-composer-actions.md). It replaces horizontal
+flyouts with a bottom drawer with Back and Close controls, and adds explicit
+photo/camera, command, history, Shell, and Live voice entries. The non-goals below
+continue to describe the desktop dropdown; the linked design supersedes them
+for touch. Attachment and reference insertion reuse their existing lanes; skill
+and command prefixes preserve the native textarea draft.
 
 ## Non-goals
 

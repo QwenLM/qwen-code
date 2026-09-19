@@ -85,11 +85,11 @@ test('keeps voice controls reachable on an extra-narrow touch viewport', async (
 
   await gotoSession(page, scenario, daemon);
   const model = page.locator('[data-web-shell-model-button]');
-  const more = page.getByRole('button', { name: 'more actions' });
+  const add = page.getByRole('button', { name: 'Add to message' });
   const voice = page.getByRole('button', { name: 'Start voice dictation' });
   const send = page.locator('[data-web-shell-composer-submit]');
   await expect(model).toBeVisible();
-  await expect(more).toBeVisible();
+  await expect(add).toBeVisible();
   await expect(voice).toBeVisible();
   await expect(send).toBeVisible();
 
@@ -98,7 +98,7 @@ test('keeps voice controls reachable on an extra-narrow touch viewport', async (
   const activeToolbar = page.locator('[data-mobile-voice-active="true"]');
   await expect(activeToolbar).toBeVisible();
   await expect(model).toBeHidden();
-  await expect(more).toBeHidden();
+  await expect(add).toBeHidden();
   await expect(send).toBeVisible();
   await expect(activeToolbar.locator('button:visible')).toHaveCount(2);
 });
@@ -299,6 +299,153 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
 
   await expect(page.locator('.cm-editor')).toBeVisible();
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveCount(0);
+});
+
+test('mobile editing preserves draft, selection and keyboard dismissal', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('检查 😀 draft\nsecond line');
+  await textarea.evaluate((element: HTMLTextAreaElement) =>
+    element.setSelectionRange(3, 5),
+  );
+  await page.getByRole('button', { name: 'Expand editor' }).tap();
+  const dialog = page.locator('[data-web-shell-expanded-editor]');
+  const expanded = dialog.getByRole('textbox');
+  await expect(expanded).toHaveValue('检查 😀 draft\nsecond line');
+  expect(
+    await expanded.evaluate((element: HTMLTextAreaElement) => [
+      element.selectionStart,
+      element.selectionEnd,
+    ]),
+  ).toEqual([3, 5]);
+  await expanded.fill('edited 😀\nsecond line');
+  await expanded.evaluate((element: HTMLTextAreaElement) => {
+    element.setSelectionRange(2, 6);
+    element.dispatchEvent(new Event('select', { bubbles: true }));
+  });
+  await dialog.getByRole('button', { name: 'Done', exact: true }).tap();
+  await expect(dialog).toBeHidden();
+  await expect(textarea).toHaveValue('edited 😀\nsecond line');
+  expect(
+    await textarea.evaluate((element: HTMLTextAreaElement) => [
+      element.selectionStart,
+      element.selectionEnd,
+    ]),
+  ).toEqual([2, 6]);
+  await page.getByRole('button', { name: 'Hide keyboard' }).tap();
+  await expect(textarea).not.toBeFocused();
+  await expect(textarea).toHaveValue('edited 😀\nsecond line');
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('expanded mobile editing retains attachment paste and selection exemptions', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await page.locator(COMPOSER_TEXTAREA).fill('keep draft');
+  await page.getByRole('button', { name: 'Expand editor' }).tap();
+  const expanded = page.locator('[data-web-shell-expanded-editor] textarea');
+  const pasteLongText = (selected: boolean) =>
+    expanded.evaluate((element: HTMLTextAreaElement, replace) => {
+      element.setSelectionRange(0, replace ? element.value.length : 0);
+      const clipboard = new DataTransfer();
+      clipboard.setData('text/plain', 'pasted line\n'.repeat(250));
+      const event = new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    }, selected);
+  expect(await pasteLongText(true)).toBe(false);
+  await expect(
+    page.locator('[data-web-shell-composer-attachments]'),
+  ).toHaveCount(0);
+  expect(await pasteLongText(false)).toBe(true);
+  await expanded.evaluate((element) => {
+    const clipboard = new DataTransfer();
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const bytes = Uint8Array.from(
+      atob(canvas.toDataURL().split(',')[1]),
+      (value) => value.charCodeAt(0),
+    );
+    clipboard.items.add(new File([bytes], 'pasted.png', { type: 'image/png' }));
+    element.dispatchEvent(
+      new ClipboardEvent('paste', {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: clipboard,
+      }),
+    );
+  });
+  await page.getByRole('button', { name: 'Done', exact: true }).tap();
+  const attachments = page.locator('[data-web-shell-composer-attachments]');
+  await expect(attachments).toContainText('pasted line');
+  await expect(
+    page.locator('[data-web-shell-composer-images] img'),
+  ).toHaveCount(1);
+  await expect(page.locator(COMPOSER_TEXTAREA)).toHaveValue('keep draft');
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile drawer inserts commands without replacing or submitting the draft', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('keep my instructions');
+  await page.getByRole('button', { name: 'Add to message' }).tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await expect(drawer).toBeVisible();
+  await page.getByRole('button', { name: 'All commands', exact: true }).tap();
+  await page.getByRole('textbox', { name: 'Search commands' }).fill('goal');
+  await drawer.getByRole('button', { name: /^\/goal/ }).tap();
+  await expect(drawer).toBeHidden();
+  await expect(textarea).toHaveValue('/goal keep my instructions');
+  expect(daemon.promptRequests()).toHaveLength(0);
+  await page.getByRole('button', { name: 'Add to message' }).tap();
+  await page.getByRole('button', { name: 'Input history', exact: true }).tap();
+  await expect(
+    page.locator('[data-web-shell-composer-history-search]'),
+  ).toBeVisible();
+  await page
+    .locator('[data-web-shell-composer-surface]')
+    .getByRole('button', { name: 'close', exact: true })
+    .tap();
+  await expect(textarea).toHaveValue('/goal keep my instructions');
+});
+
+test('mobile stop remains reachable with a queued draft', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('start a turn');
+  await page.locator('[data-web-shell-composer-submit]').tap();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  await textarea.fill('keep this follow-up');
+  const stop = page.locator('[data-web-shell-composer-stop]');
+  await expect(stop).toBeVisible();
+  await expect(page.locator('[data-web-shell-composer-submit]')).toBeEnabled();
+  await stop.tap();
+  await expect
+    .poll(() =>
+      daemon.requests.some((request) => request.path.endsWith('/cancel')),
+    )
+    .toBe(true);
+  await expect(textarea).toHaveValue('keep this follow-up');
 });
 
 async function installScenario(

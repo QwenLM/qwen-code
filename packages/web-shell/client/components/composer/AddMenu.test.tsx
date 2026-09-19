@@ -885,3 +885,117 @@ describe('AddMenu', () => {
     });
   });
 });
+
+describe('mobile AddMenu', () => {
+  function mobileProps(overrides: Partial<AddMenuProps> = {}) {
+    return baseProps({
+      mobileActions: {
+        commands: [{ name: 'goal', description: 'Set a goal' }],
+        onHistory: vi.fn(),
+        onToggleShell: vi.fn(),
+        shellMode: false,
+      },
+      ...overrides,
+    });
+  }
+  async function tap(label: string) {
+    const button = Array.from(portalRoot!.querySelectorAll('button')).find(
+      (item) =>
+        item.textContent === label || item.getAttribute('aria-label') === label,
+    );
+    expect(button).toBeDefined();
+    await act(async () => {
+      button!.click();
+    });
+    await settle();
+  }
+  it('uses the scoped bottom drawer and supports reference search and back', async () => {
+    const props = mobileProps({
+      getWorkspaceActions: () => ({
+        globWorkspace: vi.fn().mockResolvedValue({ matches: ['src/main.ts'] }),
+      }),
+    });
+    renderWith(props);
+    await openMenu();
+    expect(
+      portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).not.toBeNull();
+    await tap('Reference file');
+    await typeIntoSearch('composer-add-menu-reference-file-search', 'main');
+    expect(menuItem('composer-add-menu-reference-file-item')!.textContent).toBe(
+      'src/main.ts',
+    );
+    await tap('back');
+    expect(menuItem('composer-add-menu-reference-file-search')).toBeNull();
+    await tap('close');
+    expect(
+      portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).toBeNull();
+    expect(props.onInsertReference).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['Photos', 'image/*', null, 'attach'],
+    ['Take photo', 'image/*', 'environment', 'attach'],
+    ['Attach files', '', null, 'attach'],
+    ['Upload to workspace', '', null, 'upload'],
+  ] as const)(
+    'opens %s with the correct picker and destination',
+    async (label, accept, capture, destination) => {
+      const props = mobileProps({ uploadAvailable: true });
+      renderWith(props);
+      await openMenu();
+      const input =
+        container!.querySelector<HTMLInputElement>('input[type="file"]')!;
+      const click = vi
+        .spyOn(input, 'click')
+        .mockImplementation(() => undefined);
+      await tap(label);
+      expect(click).toHaveBeenCalledOnce();
+      expect(input.accept).toBe(accept);
+      expect(input.getAttribute('capture')).toBe(capture);
+      const file = new File(['image'], 'photo.png', { type: 'image/png' });
+      Object.defineProperty(input, 'files', {
+        configurable: true,
+        value: [file],
+      });
+      await act(async () =>
+        input.dispatchEvent(new Event('change', { bubbles: true })),
+      );
+      expect(props.onAddFiles).toHaveBeenCalledWith([file], destination);
+    },
+  );
+  it('prefixes a selected command through the insertion lane and closes', async () => {
+    const props = mobileProps();
+    renderWith(props);
+    await openMenu();
+    await tap('All commands');
+    const command = Array.from(portalRoot!.querySelectorAll('button')).find(
+      (button) => button.textContent?.startsWith('/goal'),
+    )!;
+    await act(async () => command.click());
+    await settle();
+    expect(props.onPrependSkill).toHaveBeenCalledExactlyOnceWith('/goal');
+    expect(
+      portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).toBeNull();
+  });
+  it('toggles Plan once and notifies history only after closing', async () => {
+    const onToggle = vi.fn();
+    const props = mobileProps({
+      plan: {
+        checked: false,
+        disabledReason: 'busy',
+        label: 'Plan',
+        description: 'Plan first',
+        onToggle,
+      },
+    });
+    renderWith(props);
+    await openMenu();
+    await tap('Plan');
+    expect(onToggle).toHaveBeenCalledOnce();
+    await openMenu();
+    await tap('Input history');
+    expect(props.mobileActions!.onHistory).toHaveBeenCalledOnce();
+  });
+});

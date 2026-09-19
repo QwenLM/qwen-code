@@ -102,6 +102,7 @@
 /* ── popover ──────────────────────────────── */
 .popover {
   width: 310px;
+  max-width: calc(100vw - 16px);
   padding: 6px;
   gap: 2px;
 }

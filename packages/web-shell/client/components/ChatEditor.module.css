@@ -1964,15 +1964,6 @@
   height: 18px;
 }
 
-.quickActionsBtn {
-  display: inline-flex;
-}
-
-.quickActionsBtn .toolBtnIcon svg {
-  width: 18px;
-  height: 18px;
-}
-
 .toolBtnModeIcon,
 .toolBtnModelIcon {
   display: inline-flex;
@@ -2018,121 +2009,6 @@
   display: block;
   width: 16px;
   height: 16px;
-}
-
-.quickActionsPanel {
-  display: block;
-  position: relative;
-  z-index: 2;
-  margin-top: 8px;
-  padding: 8px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 12px;
-  background: var(--background);
-  box-shadow: 0 8px 24px color-mix(in srgb, #000 12%, transparent);
-  cursor: default;
-}
-
-.quickActionsHeader {
-  padding: 6px 2px;
-  color: var(--chat-editor-text-dimmed);
-  font-size: 12px;
-  line-height: 1.2;
-}
-
-.quickActionsLayout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(104px, 0.7fr);
-  gap: 7px;
-  align-items: stretch;
-}
-
-.quickActionsGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-auto-rows: minmax(22px, auto);
-  gap: 3px;
-  padding-right: 6px;
-  border-right: 1px solid var(--chat-editor-border-color);
-}
-
-.quickAction {
-  display: flex;
-  min-width: 0;
-  min-height: 22px;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 5px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--chat-editor-text-primary);
-  font-family: var(--font-sans, system-ui, sans-serif);
-  text-align: center;
-  cursor: pointer;
-}
-
-.quickAction:hover,
-.quickAction:focus-visible {
-  background: var(--chat-editor-bg-tertiary);
-  outline: none;
-}
-
-.quickActionLabel {
-  display: -webkit-box;
-  overflow: hidden;
-  max-width: 100%;
-  font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 10px;
-  line-height: 1.15;
-  text-overflow: ellipsis;
-  white-space: normal;
-  word-break: keep-all;
-  overflow-wrap: anywhere;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.quickKeysGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(3, minmax(0, 1fr));
-  align-self: stretch;
-  gap: 4px;
-  height: 100%;
-  min-height: 100%;
-}
-
-.quickKey {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  align-items: center;
-  justify-content: center;
-  padding: 3px 4px;
-  border: 1px solid var(--chat-editor-border-color);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--chat-editor-text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1;
-  text-align: center;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.quickKeyLabel {
-  overflow: hidden;
-  max-width: 100%;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quickKey:hover,
-.quickKey:focus-visible {
-  background: var(--chat-editor-bg-tertiary);
-  outline: none;
 }
 
 .sendBtn {
@@ -2820,4 +2696,101 @@
   flex: 0 0 auto;
   margin-left: 8px;
   color: var(--muted-foreground);
+}
+
+.editorShell[data-web-shell-mobile-composer] .container {
+  --chat-editor-max-height: min(480px, 60dvh);
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolBtn,
+.editorShell[data-web-shell-mobile-composer] .sendBtn,
+.editorShell[data-web-shell-mobile-composer] .toolbarRight button,
+.editorShell[data-web-shell-mobile-composer] .mobileContextRow button,
+.editorShell[data-web-shell-mobile-composer] .dropdownWrapperCompact {
+  min-width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbar,
+.editorShell[data-web-shell-mobile-composer] .toolbarLeft {
+  flex-wrap: wrap;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarLeading {
+  max-width: 100%;
+  margin-left: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarRight {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.mobileEditingActions,
+.mobileContextRow,
+.mobileExpandedHeader {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mobileContextRow {
+  flex-wrap: wrap;
+}
+
+.mobileContextRow > *,
+.mobileContextRow [data-web-shell-git-branch] {
+  max-width: 100%;
+}
+
+.editorShell[data-web-shell-mobile-composer] .mobileContextRow button {
+  max-width: 100%;
+  flex-shrink: 1;
+}
+
+.mobileEditingActions {
+  margin-top: -8px;
+}
+
+.mobileEditingActions svg {
+  width: 18px;
+  height: 18px;
+}
+
+.mobileEditingSpacer {
+  flex: 1;
+}
+
+.mobileExpandedEditor {
+  display: flex;
+  width: calc(100% - 16px);
+  max-width: 720px;
+  height: 85dvh;
+  max-height: 100%;
+  flex-direction: column;
+  padding: 12px;
+  gap: 8px;
+}
+
+.mobileExpandedHeader h2 {
+  flex: 1;
+}
+
+.mobileExpandedTextarea {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+.editorShell[data-web-shell-mobile-composer] .searchResult {
+  min-height: 44px;
 }
