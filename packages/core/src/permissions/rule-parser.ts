@@ -968,9 +968,16 @@ export interface CompoundCommandSegment {
  *
  * See {@link splitCompoundCommand} for the string-only form and for examples;
  * this is the same split, and that function is a projection of this one.
+ *
+ * With `backslashLiteralInSingleQuotes` the scan follows bash's rule that a
+ * backslash is literal inside single quotes instead of escaping the closing
+ * quote. The default keeps the pre-existing escape-everywhere reading; the
+ * shell-semantics walker evaluates both readings so a terminator only one of
+ * them sees cannot decide a `cd`'s effect on its own.
  */
 export function splitCompoundCommandSegments(
   command: string,
+  options?: { backslashLiteralInSingleQuotes?: boolean },
 ): CompoundCommandSegment[] {
   const segments: CompoundCommandSegment[] = [];
   let inSingle = false;
@@ -988,7 +995,7 @@ export function splitCompoundCommandSegments(
       escaped = false;
       continue;
     }
-    if (ch === '\\') {
+    if (ch === '\\' && !(inSingle && options?.backslashLiteralInSingleQuotes)) {
       escaped = true;
       continue;
     }

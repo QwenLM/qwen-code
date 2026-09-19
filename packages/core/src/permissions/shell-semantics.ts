@@ -2140,7 +2140,27 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  const ops = walkCompoundCommand(command, cwd, 0, false, false);
+  if (!command.includes('\\')) {
+    return ops;
+  }
+  // The two quote readings can disagree on where the operators are when a
+  // backslash appears: the escape-everywhere reading sees terminators that
+  // bash's literal-backslash-in-single-quotes reading does not (and vice
+  // versa). A boundary only one reading sees must not decide a `cd`'s
+  // foreground/background effect on its own — evaluate the bash-accurate
+  // reading as well and keep both operation sets, since the permission
+  // layer aggregates to the most restrictive verdict (#12246).
+  const bashOps = walkCompoundCommand(command, cwd, 0, false, true);
+  const seen = new Set(ops.map((op) => JSON.stringify(op)));
+  for (const op of bashOps) {
+    const key = JSON.stringify(op);
+    if (!seen.has(key)) {
+      ops.push(op);
+      seen.add(key);
+    }
+  }
+  return ops;
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2262,8 +2282,14 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  backslashLiteralInSingleQuotes: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  const subCommands = splitCompoundCommandSegments(
+    stripHeredocBodies(command),
+    {
+      backslashLiteralInSingleQuotes,
+    },
+  );
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
@@ -2303,6 +2329,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            backslashLiteralInSingleQuotes,
           ),
         );
         continue;

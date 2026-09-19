@@ -755,6 +755,21 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('attributes the write to the real cwd when quoting hides the async operator (#12246)', () => {
+    // The `;` between the two quote fragments only exists under the
+    // escape-everywhere reading; bash reads `\'...'` as literal backslash
+    // plus a re-opened quote, so the second `cd` runs in a background
+    // subshell and the write lands in the first cd's target.
+    expect(
+      extractShellOperationsAcrossCommand(
+        `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
   it('does not mark later paths uncertain for a backgrounded dynamic `cd`', () => {
     // The foreground form below cannot know where it landed; the backgrounded
     // one can, because it did not move the cwd at all.

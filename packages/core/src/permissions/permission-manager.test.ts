@@ -2404,6 +2404,34 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('deny rule applies when quoting hides the async operator from the splitter (#12246)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // bash reads `'x\''` + `';echo '` as one concatenated argument, so the
+      // second `cd` is backgrounded by the real ` & ` and the write lands in
+      // .qwen — the deny rule must fire, not a phantom foreground reading.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+      // Controls keep their verdicts.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd .qwen ; cd x & echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
     it('semicolon compound: deny in second → deny', async () => {
       pm = new PermissionManager(
         makeConfig({
