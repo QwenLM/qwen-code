@@ -18,7 +18,7 @@ override; narrow desktop windows keep desktop editing.
 
 ### Toolbar and editing
 
-Remove the legacy touch action grid and simulated keyboard keys. Keep add,
+Remove the legacy touch action grid and simulated Tab/Esc/left/right keys. Keep add,
 model, approval, dictation, and send controls. Hide the width toggle and the
 duplicate context control on touch. Put workspace selection and Git controls
 in a separate context row so starting a task in a particular workspace or
@@ -29,8 +29,13 @@ clip them. Keep Plan as an active-state chip. While a turn runs, stop remains
 available alongside send when there is a draft; stopping never clears that
 draft. Voice capture retains its existing reduced toolbar.
 
-Add a small editing row with expand and, while the textarea is focused, hide
-keyboard. Hide keyboard blurs without returning focus through the composer
+Add a small editing row with previous/next input history on the left, expand,
+and, while the textarea is focused, hide keyboard. The history arrows call the
+existing navigation actions directly: up recalls older inputs, down recalls
+newer inputs and then restores the draft saved before browsing. They never
+submit. History search in Add remains available for finding a specific input.
+The row wraps on extra-narrow screens and its history controls are disabled with the
+composer. Hide keyboard blurs without returning focus through the composer
 surface click handler. A modal expanded editor edits the same controlled draft,
 preserves its selection when returning, and does not submit when closed. Its
 Done and keyboard controls are touch sized. Shell mode gets an explicit exit
@@ -79,7 +84,8 @@ Use the global qwen CLI for a baseline attempt and the repository browser
 harness for deterministic UI coverage. Verify local bundled UI when available.
 Record any runtime limitations separately from mocked browser results.
 
-- At phone widths, the old action grid and keyboard keys are absent; toolbar
+- At phone widths, the old action grid and simulated keyboard keys are absent;
+  labelled history arrows remain in the editing row. Toolbar
   actions are reachable with no horizontal overflow. Desktop behavior remains.
 - Stop works with a pending draft and keeps the draft; send still queues it.
 - Hide keyboard blurs the editor; expand/edit/Done preserves text, selection,
@@ -89,6 +95,9 @@ Record any runtime limitations separately from mocked browser results.
   actions remain honest, and Plan toggles exactly once.
 - Commands and skills preserve existing drafts and tags; history can be opened,
   selected, or dismissed. Live voice remains accessible.
+- History arrows recall older/newer inputs and restore a multiline draft
+  without submitting. Empty history is inert, and both arrows remain reachable
+  with 44px targets at 390px and 240px widths.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

@@ -301,6 +301,77 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveCount(0);
 });
 
+for (const width of [390, 240]) {
+  test(`history arrows restore the draft without submitting at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        'qwen-web-shell-history',
+        JSON.stringify(['first input', 'second input']),
+      );
+    });
+    const scenario = createWebShellDaemonScenario();
+    const daemon = await installScenario(page, scenario, testInfo);
+    await gotoSession(page, scenario, daemon);
+    const textarea = page.locator(COMPOSER_TEXTAREA);
+    const draft = '当前草稿 😀\nsecond line';
+    await textarea.fill(draft);
+    const previous = page.getByRole('button', {
+      name: 'Previous input',
+      exact: true,
+    });
+    const next = page.getByRole('button', { name: 'Next input', exact: true });
+    for (const button of [
+      previous,
+      next,
+      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+      page.getByRole('button', { name: 'Expand editor', exact: true }),
+    ]) {
+      const bounds = await button.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.width).toBeGreaterThanOrEqual(44);
+      expect(bounds!.height).toBeGreaterThanOrEqual(44);
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+    }
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBe(width);
+    await next.tap();
+    await expect(textarea).toHaveValue(draft);
+    await previous.tap();
+    await expect(textarea).toHaveValue('second input');
+    await expect(textarea).toBeFocused();
+    await previous.tap();
+    await expect(textarea).toHaveValue('first input');
+    await previous.tap();
+    await expect(textarea).toHaveValue('first input');
+    await next.tap();
+    await expect(textarea).toHaveValue('second input');
+    await next.tap();
+    await expect(textarea).toHaveValue(draft);
+    await next.tap();
+    await expect(textarea).toHaveValue(draft);
+    expect(daemon.promptRequests()).toHaveLength(0);
+  });
+}
+
+test('history arrows leave the draft intact when history is empty', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('keep this draft');
+  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
+  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
+  await expect(textarea).toHaveValue('keep this draft');
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
 test('mobile editing preserves draft, selection and keyboard dismissal', async ({
   page,
 }, testInfo) => {

@@ -401,6 +401,7 @@ interface ChatEditorRenderProps
   modeControlsDisabled?: boolean;
   onTogglePlan?: () => void;
   isRunning?: boolean;
+  onSubmit?: ComponentProps<typeof ChatEditor>['onSubmit'];
   onCancel?: () => void;
   currentModel?: string;
   availableModels?: Array<{ id: string; label?: string }>;
@@ -3048,11 +3049,55 @@ describe('ChatEditor mobile composer actions', () => {
     expect(document.querySelector('[aria-label="more actions"]')).toBeNull();
     expect(
       Array.from(document.querySelectorAll('button')).some((button) =>
-        ['Tab', 'Esc', '↑', '↓', '←', '→'].includes(button.textContent ?? ''),
+        ['Tab', 'Esc', '←', '→'].includes(button.textContent ?? ''),
       ),
     ).toBe(false);
     await clickButton('Input history');
     expect(composerCoreState.openHistorySearch).toHaveBeenCalledOnce();
+  });
+
+  it('calls history navigation directly without submitting or moving focus', async () => {
+    const backend = mobileComposer('working draft');
+    const onSubmit = vi.fn();
+    const container = renderChatEditor({ onSubmit });
+    act(() => backend.textareaRef.current!.focus());
+    const previous = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Previous input"]',
+    )!;
+    const pointerDown = new Event('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    previous.dispatchEvent(pointerDown);
+    expect(pointerDown.defaultPrevented).toBe(true);
+    composerCoreState.focus.mockClear();
+    await clickButton('Previous input');
+    await clickButton('Next input');
+    expect(composerCoreState.navigatePrevHistory).toHaveBeenCalledOnce();
+    expect(composerCoreState.navigateNextHistory).toHaveBeenCalledOnce();
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(backend.textareaRef.current);
+  });
+
+  it('disables both history buttons when the composer is disabled', () => {
+    mobileComposer('draft');
+    const container = renderChatEditor({ disabled: true });
+    for (const label of ['Previous input', 'Next input']) {
+      const button = container.querySelector<HTMLButtonElement>(
+        `[aria-label="${label}"]`,
+      )!;
+      expect(button.disabled).toBe(true);
+      act(() => button.click());
+    }
+    expect(composerCoreState.navigatePrevHistory).not.toHaveBeenCalled();
+    expect(composerCoreState.navigateNextHistory).not.toHaveBeenCalled();
+  });
+
+  it('keeps the history arrow controls out of the desktop composer', () => {
+    const container = renderChatEditor({});
+    expect(container.querySelector('[aria-label="Previous input"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Next input"]')).toBeNull();
   });
 
   it('keeps stop and send reachable with a draft without clearing it', async () => {

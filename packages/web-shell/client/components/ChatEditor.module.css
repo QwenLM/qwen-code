@@ -2750,6 +2750,7 @@
 }
 
 .mobileEditingActions {
+  flex-wrap: wrap;
   margin-top: -8px;
 }
 
