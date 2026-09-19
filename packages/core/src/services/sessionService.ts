@@ -86,6 +86,7 @@ import {
   resolveBranchPoints,
 } from './branch-points.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
+import { findRunningLegacyGoalCard } from '../goals/goal-legacy-cards.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 export {
   buildApiHistoryFromConversation,
@@ -2271,11 +2272,14 @@ export class SessionService {
     records: ChatRecord[],
   ): string | undefined {
     const recovery = recoverGoalFromRecords(records);
+    // A build before #7895 journaled the Goal as a card, not state. The
+    // runtime restores no Goal from it, but the card is still the only thing
+    // that labels a session whose one prompt was `/goal`.
     const objective =
       recovery.kind === 'v2'
         ? recovery.payload.snapshot.goal?.objective
-        : recovery.kind === 'legacy'
-          ? recovery.objective
+        : recovery.kind === 'none'
+          ? findRunningLegacyGoalCard(records)?.condition.trim()
           : undefined;
     return objective ? this.truncatePromptForDisplay(objective) : undefined;
   }

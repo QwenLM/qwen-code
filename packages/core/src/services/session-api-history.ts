@@ -145,8 +145,36 @@ function hasUniqueToolResult(history: Content[], toolCallId: unknown): boolean {
   return calls === 1 && results === 1;
 }
 
+/**
+ * Whether `record` is one the recorder stamped as a system-injected background
+ * notification rather than user input.
+ *
+ * `createNotificationRecord` (chatRecordingService.ts) is the only producer of
+ * `subtype: 'notification'` and it always pairs it with `provenance: 'system'`.
+ * Both are required so a legacy or hand-written transcript cannot claim the
+ * recovery trim on one half of the stamp, and so a real user prompt that
+ * happens to LOOK like an envelope (its `provenance` is `'real_user'`) can
+ * never be mistaken for one — which is exactly what shape alone cannot rule
+ * out. `'cron'` is deliberately excluded: `recordCronPrompt` reuses the same
+ * `provenance` but carries a user-authored prompt, and the shape predicate
+ * this signal refines never trimmed those.
+ */
+function isSystemNotificationRecord(record: ChatRecord): boolean {
+  return record.provenance === 'system' && record.subtype === 'notification';
+}
+
 export class SessionApiHistoryAccumulator {
   private history: Content[] = [];
+  /**
+   * Per-entry companion to {@link history}: `true` when the entry was appended
+   * from a record the recorder stamped as a system-injected notification.
+   *
+   * Kept as a parallel array because the authoritative stamp lives on the
+   * `ChatRecord` and cannot ride along on `Content` (that type comes from
+   * `@google/genai`). Every mutation of `history` is mirrored here so the two
+   * can never drift out of alignment.
+   */
+  private systemNotificationFlags: boolean[] = [];
   private compressionCandidate: unknown;
   private completedToolCallIds = new Set<string>();
   private lastMaterialRecord?: ChatRecord;
@@ -179,6 +207,7 @@ export class SessionApiHistoryAccumulator {
           parts[0].text === payload.rawCommand
         ) {
           this.history.pop();
+          this.systemNotificationFlags.pop();
         }
         if (previous?.type === 'user') this.lastMaterialRecord = undefined;
         return;
@@ -218,6 +247,9 @@ export class SessionApiHistoryAccumulator {
             return copy;
           })
         : [];
+      // Compressed history is raw `Content[]` with no source record behind it,
+      // so no entry can claim the authoritative notification stamp.
+      this.systemNotificationFlags = this.history.map(() => false);
       this.completedToolCallIds = new Set(
         Array.isArray(payload.completedToolCallIds)
           ? payload.completedToolCallIds.filter((toolCallId) =>
@@ -244,7 +276,13 @@ export class SessionApiHistoryAccumulator {
         this.completedToolCallIds.delete(part.functionResponse.id);
       }
     }
+    const lengthBeforeAppend = this.history.length;
     appendApiHistoryRecord(this.history, record, this.completedToolCallIds);
+    // A `mid_turn_user_message` merges into the previous entry instead of
+    // pushing; only a real append gets a flag, so the two arrays stay aligned.
+    if (this.history.length > lengthBeforeAppend) {
+      this.systemNotificationFlags.push(isSystemNotificationRecord(record));
+    }
     this.lastMaterialRecord = record;
   }
 
@@ -253,18 +291,60 @@ export class SessionApiHistoryAccumulator {
   }
 
   finish(options: BuildApiHistoryOptions = {}): Content[] {
+    return this.finishSession(options).apiHistory;
+  }
+
+  /**
+   * The same projection as {@link finish}, plus how many TRAILING entries of
+   * the returned history came from records the recorder stamped as
+   * system-injected background notifications.
+   *
+   * This is the authoritative provenance signal that `Content` cannot carry
+   * (its type comes from `@google/genai`). Session recovery uses it to tell a
+   * real user prompt that happens to look like a `<task-notification>`
+   * envelope from a cold notification record — the two are identical by shape,
+   * and only the record's own stamp separates them. A trailing COUNT rather
+   * than a full index set is all a consumer needs, because the only question
+   * ever asked is how far back from the end the notification run reaches.
+   *
+   * The count is derived here, alongside the entries, so it survives
+   * `stripThoughtsFromHistory` dropping entries: the flags are filtered in
+   * lockstep with the history they describe.
+   */
+  finishSession(options: BuildApiHistoryOptions = {}): {
+    apiHistory: Content[];
+    trailingSystemNotifications: number;
+  } {
     if (
       this.compressionCandidate !== undefined &&
       !Array.isArray(this.compressionCandidate)
     ) {
-      return (this.compressionCandidate as Content[]).map(
-        copyContentForApiHistory,
-      );
+      return {
+        apiHistory: (this.compressionCandidate as Content[]).map(
+          copyContentForApiHistory,
+        ),
+        trailingSystemNotifications: 0,
+      };
     }
-    if (!options.stripThoughtsFromHistory) return this.history;
-    return this.history
-      .map(stripThoughtsFromContent)
-      .filter((content): content is Content => content !== null);
+    let apiHistory = this.history;
+    let flags = this.systemNotificationFlags;
+    if (options.stripThoughtsFromHistory) {
+      const keptHistory: Content[] = [];
+      const keptFlags: boolean[] = [];
+      for (let i = 0; i < apiHistory.length; i++) {
+        const stripped = stripThoughtsFromContent(apiHistory[i]!);
+        if (stripped === null) continue;
+        keptHistory.push(stripped);
+        keptFlags.push(flags[i] === true);
+      }
+      apiHistory = keptHistory;
+      flags = keptFlags;
+    }
+    let trailingSystemNotifications = 0;
+    for (let i = flags.length - 1; i >= 0 && flags[i]; i--) {
+      trailingSystemNotifications++;
+    }
+    return { apiHistory, trailingSystemNotifications };
   }
 }
 
@@ -288,15 +368,26 @@ export function buildApiHistoryFromConversation(
 export function buildSessionHistoryFromConversation(
   conversation: { messages: readonly ChatRecord[] },
   options: BuildApiHistoryOptions = {},
-): { apiHistory: Content[]; completedToolCallIds?: string[] } {
+): {
+  apiHistory: Content[];
+  completedToolCallIds?: string[];
+  trailingSystemNotifications: number;
+} {
   const accumulator = new SessionApiHistoryAccumulator();
   for (const record of conversation.messages) accumulator.add(record);
-  const apiHistory = accumulator.finish(options);
+  const { apiHistory, trailingSystemNotifications } =
+    accumulator.finishSession(options);
   const completedToolCallIds = accumulator
     .getCompletedToolCallIds()
     .filter((toolCallId) => hasUniqueToolResult(apiHistory, toolCallId));
   return {
     apiHistory,
     ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
+    // Always present, including as 0: unlike `completedToolCallIds`, zero is
+    // not the absence of information. It is the recorder affirmatively saying
+    // the tail is NOT a system notification, which is precisely what stops an
+    // envelope-shaped real prompt from being trimmed. Omitting it would drop
+    // the consumer back to shape-only guessing.
+    trailingSystemNotifications,
   };
 }

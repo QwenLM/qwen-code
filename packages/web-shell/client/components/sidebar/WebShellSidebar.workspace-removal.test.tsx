@@ -136,6 +136,7 @@ const {
         | undefined,
     },
     workspace: {
+      baseUrl: '',
       capabilities: undefined as
         | {
             qwenCodeVersion: string;
@@ -782,6 +783,7 @@ beforeEach(() => {
   connection.supportedCommands = undefined;
   connection.capabilities = capabilities;
   workspace.capabilities = capabilities;
+  workspace.baseUrl = '';
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
   workspace.client.workspaceByCwd.mockReset();
@@ -882,6 +884,40 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
+  it('names the daemon host once above the workspace list', () => {
+    workspace.baseUrl = 'https://remote.example.com';
+
+    renderSidebar();
+
+    // The host is named once, while each workspace keeps a compact remote
+    // folder mark like Codex's local/remote source distinction.
+    const indicators = container.querySelectorAll(
+      '[data-testid="remote-workspace-indicator"]',
+    );
+    expect(indicators).toHaveLength(1);
+    expect(indicators[0].textContent).toContain('remote.example.com');
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(capabilities.workspaces.length);
+  });
+
+  it('leaves the header unmarked for the page origin daemon', () => {
+    workspace.baseUrl = window.location.origin;
+
+    renderSidebar();
+
+    expect(
+      container.querySelectorAll('[data-testid="remote-workspace-indicator"]'),
+    ).toHaveLength(0);
+    expect(
+      container.querySelectorAll(
+        '[data-testid="remote-workspace-folder-icon"]',
+      ),
+    ).toHaveLength(0);
+  });
+
   it('delegates Add workspace to the App-owned dialog', () => {
     const onOpenAddWorkspace = vi.fn();
     renderSidebar({ onOpenAddWorkspace });

@@ -1375,22 +1375,10 @@ describe('LlmClient Goal admission', () => {
       (event) =>
         event.type === LlmEventType.GoalState && event.cause === undefined,
     );
-    const initialActiveGoalIndex = eventIndex(
-      events,
-      LlmEventType.ActiveGoal,
-      (event) => event.type === LlmEventType.ActiveGoal && event.value !== null,
-    );
     expect(initialGoalStateIndex).toBeGreaterThanOrEqual(0);
-    expect(initialActiveGoalIndex).toBeGreaterThan(initialGoalStateIndex);
-    expect(events[initialActiveGoalIndex]).toEqual({
-      type: LlmEventType.ActiveGoal,
-      value: {
-        condition: 'ship',
-        iterations: 0,
-        setAt: 1,
-        tokensAtStart: 0,
-        hookId: 'goal-v2:goal-1:1',
-      },
+    expect(events[initialGoalStateIndex]).toMatchObject({
+      type: LlmEventType.GoalState,
+      value: { goal: { objective: 'ship', goalId: 'goal-1', revision: 1 } },
     });
   });
 
@@ -1915,15 +1903,9 @@ describe('LlmClient Goal admission', () => {
       (event) =>
         event.type === LlmEventType.GoalState && event.cause === 'pause',
     );
-    const inactiveProjectionIndex = eventIndex(
-      events,
-      LlmEventType.ActiveGoal,
-      (event) => event.type === LlmEventType.ActiveGoal && event.value === null,
-    );
     const loopIndex = eventIndex(events, LlmEventType.StopHookLoop);
     expect(pauseStateIndex).toBeGreaterThanOrEqual(0);
-    expect(inactiveProjectionIndex).toBeGreaterThan(pauseStateIndex);
-    expect(loopIndex).toBeGreaterThan(inactiveProjectionIndex);
+    expect(loopIndex).toBeGreaterThan(pauseStateIndex);
   });
 
   it('reports stop_hook_active on a goal-bound Stop hook continuation', async () => {
@@ -2061,11 +2043,6 @@ describe('LlmClient Goal admission', () => {
       (event) =>
         event.type === LlmEventType.GoalState && event.cause === 'pause',
     );
-    const inactiveProjectionIndex = eventIndex(
-      events,
-      LlmEventType.ActiveGoal,
-      (event) => event.type === LlmEventType.ActiveGoal && event.value === null,
-    );
     const finishStateIndex = eventIndex(
       events,
       LlmEventType.GoalState,
@@ -2074,8 +2051,7 @@ describe('LlmClient Goal admission', () => {
         event.cause === 'turn_finished',
     );
     expect(pauseStateIndex).toBeGreaterThanOrEqual(0);
-    expect(inactiveProjectionIndex).toBeGreaterThan(pauseStateIndex);
-    expect(finishStateIndex).toBeGreaterThan(inactiveProjectionIndex);
+    expect(finishStateIndex).toBeGreaterThan(pauseStateIndex);
     expect(eventIndex(events, LlmEventType.StopHookLoop)).toBe(-1);
     expect(runtime.finishTurn).toHaveBeenCalledOnce();
   });

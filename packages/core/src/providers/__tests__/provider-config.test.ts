@@ -95,6 +95,33 @@ describe('buildInstallPlan', () => {
     },
   );
 
+  it('keeps a hand-written realtimeOnly route on reconnect and never selects it', () => {
+    const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+    // Listed first on purpose: position must not make it the conversation
+    // model.
+    const existing = [
+      { id: 'omni-realtime', baseUrl, envKey, realtimeOnly: true },
+      { id: 'chat', baseUrl, envKey },
+    ];
+    const plan = buildInstallPlanSrc(
+      customProvider,
+      {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl,
+        apiKey: 'test-only',
+        modelIds: ['omni-realtime', 'chat'],
+      },
+      existing,
+    );
+    expect(
+      plan.modelProviders![0]!.models.find(
+        (model) => model.id === 'omni-realtime',
+      )?.realtimeOnly,
+    ).toBe(true);
+    expect(plan.modelSelection).toMatchObject({ modelId: 'chat' });
+  });
+
   it.each(['generated', 'prebuilt', 'preserved'] as const)(
     'rejects a final Responses voice model (%s)',
     (source) => {
