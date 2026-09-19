@@ -324,19 +324,21 @@ export function navigateToDaemon(
   raw: string,
   token?: string,
   options?: {
-    continueRemoteWorkspaceAdd?: boolean;
-    continueRemoteConnectionAdd?: boolean;
+    continueFlow?: 'workspace' | 'connection';
   },
 ): boolean {
   const daemonOrigin = getAllowedDaemonOrigin(raw);
   const builtUrl = buildDaemonConnectionUrl(raw, window.location.href);
   if (!daemonOrigin || !builtUrl) return false;
   const nextUrl = new URL(builtUrl);
-  if (options?.continueRemoteWorkspaceAdd) {
-    nextUrl.searchParams.set('addRemoteWorkspace', 'browse');
-  }
-  if (options?.continueRemoteConnectionAdd) {
-    nextUrl.searchParams.set('addRemoteConnection', 'verify');
+  const continuation =
+    options?.continueFlow === 'workspace'
+      ? (['addRemoteWorkspace', 'browse'] as const)
+      : options?.continueFlow === 'connection'
+        ? (['addRemoteConnection', 'verify'] as const)
+        : undefined;
+  if (continuation) {
+    nextUrl.searchParams.set(continuation[0], continuation[1]);
   }
   // Read before the assign: getDaemonBaseUrl() follows the live URL.
   const previousDaemonOrigin = getDaemonBaseUrl() || window.location.origin;
@@ -362,14 +364,9 @@ export function navigateToDaemon(
     // Unless the credential cannot outlive it: with storage disabled the
     // reloaded page would boot with no token at all, so stay on this one.
     if (token !== undefined && !hasReloadSurvivableDaemonToken()) return false;
-    if (options?.continueRemoteWorkspaceAdd) {
+    if (continuation) {
       const currentUrl = new URL(window.location.href);
-      currentUrl.searchParams.set('addRemoteWorkspace', 'browse');
-      window.history.replaceState(null, '', currentUrl);
-    }
-    if (options?.continueRemoteConnectionAdd) {
-      const currentUrl = new URL(window.location.href);
-      currentUrl.searchParams.set('addRemoteConnection', 'verify');
+      currentUrl.searchParams.set(continuation[0], continuation[1]);
       window.history.replaceState(null, '', currentUrl);
     }
     window.location.reload();
