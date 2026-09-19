@@ -10823,3 +10823,41 @@ describe('DaemonClient', () => {
     });
   });
 });
+
+describe('workspace runtime stop', () => {
+  it('uses the exact selected workspace and never retries a destructive POST', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { workspaces: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse(503, { code: 'workspace_runtime_stop_in_progress' }),
+      );
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      token: 'secret',
+      fetch,
+    });
+    await client.runtimeStopOptions();
+    const confirmation = {
+      confirmInterruptions: true as const,
+      expectedChannelId: 'child',
+      expectedRuntimeEpoch: 1,
+      expectedStopToken: 'receipt',
+      expectedSessionIds: ['s1'],
+    };
+    await expect(
+      client.workspaceById('workspace/id').stopRuntime(confirmation),
+    ).rejects.toBeInstanceOf(DaemonHttpError);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(fetch.mock.calls[0][0])).toBe(
+      'http://daemon/workspaces/runtime-stop-options',
+    );
+    expect(String(fetch.mock.calls[1][0])).toBe(
+      'http://daemon/workspaces/workspace%2Fid/runtime/stop',
+    );
+    expect(fetch.mock.calls[1][1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify(confirmation),
+    });
+  });
+});
