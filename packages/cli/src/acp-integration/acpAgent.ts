@@ -6841,6 +6841,27 @@ class QwenAgent implements Agent {
   }
 
   /**
+   * Refuse a workspace-scoped settings write into an untrusted workspace.
+   * `setValue` persists to disk and updates the in-memory workspace scope, but
+   * `mergeSettings` drops that scope when the workspace is untrusted, so the
+   * write would sit inert while the caller is told it was saved. The method
+   * level trust gate in `serve/acp-http/dispatch.ts` cannot cover this: it is
+   * keyed on the method, not the `scope` param, and every `qwen/settings/*`
+   * write accepts an untrusted-safe `user` scope.
+   */
+  private assertWorkspaceScopeWritable(
+    settings: LoadedSettings,
+    scope: SettingScope,
+  ): void {
+    if (scope === SettingScope.Workspace && !settings.isTrusted) {
+      throw new RequestError(-32003, 'Workspace is not trusted.', {
+        errorKind: 'untrusted_workspace',
+        httpStatus: 403,
+      });
+    }
+  }
+
+  /**
    * Resolve the workspace root for the session-aware `qwen/settings/*` +
    * `qwen/permissions/*` handlers — the ones whose write and read-back share
    * the resolved coordinate. The handlers whose status/apply routes are
@@ -13936,6 +13957,7 @@ class QwenAgent implements Agent {
           params['value'],
         );
         const scope = toSettingsScope(params['scope']);
+        this.assertWorkspaceScopeWritable(settings, scope);
         settings.setValue(scope, key, normalizedValue);
         if (settingKey === 'model.name') {
           // Selecting a model by id here can't disambiguate providers that
@@ -13977,6 +13999,7 @@ class QwenAgent implements Agent {
         const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
+        this.assertWorkspaceScopeWritable(settings, settingScope);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
@@ -14008,6 +14031,7 @@ class QwenAgent implements Agent {
         const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
+        this.assertWorkspaceScopeWritable(settings, settingScope);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
@@ -14030,6 +14054,7 @@ class QwenAgent implements Agent {
         const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
+        this.assertWorkspaceScopeWritable(settings, settingScope);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
@@ -14087,6 +14112,7 @@ class QwenAgent implements Agent {
         const settingsCwd = requestedCwd || this.config.getTargetDir();
         const settings = this.loadRequestSettings(settingsCwd);
         const settingScope = toSettingsScope(params['scope']);
+        this.assertWorkspaceScopeWritable(settings, settingScope);
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);

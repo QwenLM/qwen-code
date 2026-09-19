@@ -19550,6 +19550,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings/setHook refuses a workspace write in an untrusted workspace', async () => {
+    // `mergeSettings` drops the workspace scope when the workspace is
+    // untrusted, so accepting this write would persist a hook that no session
+    // reads while still answering "saved". The HTTP dispatch trust gate cannot
+    // cover it: `qwen/settings/setHook` is not in TRUSTED_WORKSPACE_METHODS,
+    // and the same method must keep serving `user`-scoped writes.
+    const settings = makeCoreSettings();
+    (settings as unknown as { isTrusted: boolean }).isTrusted = false;
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setHook', {
+        scope: 'workspace',
+        event: 'PreToolUse',
+        hook: { hooks: [{ type: 'command', command: 'echo hi' }] },
+      }),
+    ).rejects.toMatchObject({
+      code: -32003,
+      data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+    });
+    expect(settings.setValue).not.toHaveBeenCalled();
+
+    await agent.extMethod('qwen/settings/setHook', {
+      scope: 'user',
+      event: 'PreToolUse',
+      hook: { hooks: [{ type: 'command', command: 'echo hi' }] },
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'hooks',
+      expect.anything(),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings/setHook rejects an invalid event and appends a valid hook', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
