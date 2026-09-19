@@ -132,6 +132,18 @@ describe('LspTool', () => {
           expect(result).toBeNull();
         },
       );
+
+      it.each(locationOperations)(
+        'allows character to be omitted for %s',
+        (operation) => {
+          const result = tool.validateToolParams({
+            operation,
+            filePath: 'src/app.ts',
+            line: 10,
+          } as LspToolParams);
+          expect(result).toBeNull();
+        },
+      );
     });
 
     describe('documentSymbol operation', () => {
@@ -345,6 +357,28 @@ describe('LspTool', () => {
     });
 
     describe('goToDefinition operation', () => {
+      it('defaults an omitted character to the first column', async () => {
+        const client = createMockClient();
+        const tool = createTool(client);
+
+        const invocation = tool.build({
+          operation: 'goToDefinition',
+          filePath: 'src/app.ts',
+          line: 10,
+        });
+        await invocation.execute(abortSignal);
+
+        expect(client.definitions).toHaveBeenCalledWith(
+          expect.objectContaining({
+            range: expect.objectContaining({
+              start: { line: 9, character: 0 },
+            }),
+          }),
+          undefined,
+          20,
+        );
+      });
+
       it('dispatches to definitions and formats results', async () => {
         const client = createMockClient();
         const tool = createTool(client);
