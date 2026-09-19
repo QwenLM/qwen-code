@@ -212,14 +212,14 @@ differs only by the change under test; the verdict is the pair of counts.
   a full `npm ci` at head (the `prepare` build included; measured ~8 min
   warm-cache on a 12-core aarch64 box). A prototype/source-level harness
   whose bundler compiles the TS sources directly (e.g.
-  `scripts/sandbox-prototype/build.mjs`) needs only `npm ci
-  --ignore-scripts` (~20 s warm) plus the bundle step. For the base control
-  with an untouched lockfile, `cp -al` the head tree's `node_modules` (root
-  plus any per-package ones) into the base worktree: hardlinks are free, and
-  the relative `@qwen-code/*` symlinks then resolve into the base tree,
-  which the realpath assertion above can confirm. Do not symlink the
-  directory itself — the internal links would resolve through it back into
-  the head tree and both arms would run head code.
+  `scripts/sandbox-prototype/build.mjs`) needs only
+  `npm ci --ignore-scripts` (~20 s warm) plus the bundle step. For the base
+  control with an untouched lockfile, `cp -al` the head tree's
+  `node_modules` (root plus any per-package ones) into the base worktree:
+  hardlinks are free, and the relative `@qwen-code/*` symlinks then resolve
+  into the base tree, which the realpath assertion above can confirm. Do not
+  symlink the directory itself — the internal links would resolve through it
+  back into the head tree and both arms would run head code.
 - Report the cell table: environment per cell, observable oracle per cell
   (exit code, stderr line, wire request, rendered frame), and `X/Y` at head
   vs control. "5/9 flip from broken to fixed" is the shape to aim for.
