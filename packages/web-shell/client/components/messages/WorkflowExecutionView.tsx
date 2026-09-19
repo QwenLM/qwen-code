@@ -1,3 +1,4 @@
+import { saveBlob } from '../../utils/saveBlob';
 import {
   useEffect,
   useId,
@@ -230,7 +231,7 @@ function initialDispatchId(task: DaemonSessionWorkflowTaskStatus): string {
 function downloadWorkflowHistory(
   task: DaemonSessionWorkflowTaskStatus,
   runs: readonly DaemonSessionWorkflowTaskStatus[],
-): void {
+): Promise<void> {
   const content = JSON.stringify(
     {
       schemaVersion: 1,
@@ -297,19 +298,10 @@ function downloadWorkflowHistory(
     null,
     2,
   );
-  const url = URL.createObjectURL(
+  return saveBlob(
     new Blob([content], { type: 'application/json' }),
+    `workflow-${task.id.replace(/[^a-zA-Z0-9._-]/g, '-')}-history.json`,
   );
-  try {
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `workflow-${task.id.replace(/[^a-zA-Z0-9._-]/g, '-')}-history.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  } finally {
-    URL.revokeObjectURL(url);
-  }
 }
 
 export function WorkflowExecutionView({
@@ -359,6 +351,8 @@ export function WorkflowExecutionView({
   const [focusedDispatchId, setFocusedDispatchId] = useState('');
   const [showComparison, setShowComparison] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [exportError, setExportError] = useState<string>();
+  const [exporting, setExporting] = useState(false);
   const [historyFilter, setHistoryFilter] =
     useState<WorkflowHistoryFilter>('all');
   const [pendingDeleteRunId, setPendingDeleteRunId] = useState('');
@@ -584,14 +578,23 @@ export function WorkflowExecutionView({
             <button
               type="button"
               className={styles.compareButton}
-              disabled={filteredHistoricalRuns.length === 0}
-              onClick={() =>
-                downloadWorkflowHistory(task, filteredHistoricalRuns)
-              }
+              disabled={exporting || filteredHistoricalRuns.length === 0}
+              onClick={() => {
+                setExportError(undefined);
+                setExporting(true);
+                void downloadWorkflowHistory(task, filteredHistoricalRuns)
+                  .catch((error: unknown) =>
+                    setExportError(
+                      error instanceof Error ? error.message : String(error),
+                    ),
+                  )
+                  .finally(() => setExporting(false));
+              }}
             >
               {t('workflow.history.exportVisible')}
             </button>
           </div>
+          {exportError && <div role="alert">{exportError}</div>}
           {filteredHistoricalRuns.length === 0 ? (
             <div className={styles.historyEmpty}>
               {t('workflow.history.filterEmpty')}
