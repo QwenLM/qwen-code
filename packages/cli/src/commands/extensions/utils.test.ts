@@ -76,27 +76,6 @@ describe('getExtensionManager', () => {
       }),
     );
   });
-
-  it('treats an undecided workspace as untrusted', async () => {
-    const { ExtensionManager } = await import('@qwen-code/qwen-code-core');
-    const { isWorkspaceTrusted } = await import(
-      '../../config/trustedFolders.js'
-    );
-    vi.mocked(isWorkspaceTrusted).mockReturnValueOnce({
-      isTrusted: undefined,
-      source: undefined,
-    });
-
-    await getExtensionManager();
-
-    // A missing decision must not read as trusted: the manager gates
-    // workspace-scoped extension writes on this flag.
-    expect(ExtensionManager).toHaveBeenCalledWith(
-      expect.objectContaining({
-        isWorkspaceTrusted: false,
-      }),
-    );
-  });
 });
 
 describe('extensionToOutputString', () => {

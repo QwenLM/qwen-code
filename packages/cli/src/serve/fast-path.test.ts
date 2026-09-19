@@ -2522,44 +2522,6 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['FAST_PATH_SYSTEM_TRUST_MARKER']).toBeUndefined();
   });
 
-  it('names an undecided folder trust in a diagnostic the declined case omits', async () => {
-    const qwenHome = useTempQwenHome();
-    tempWorkspace = realpathSync(
-      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-diagnostic-')),
-    );
-    const undecidedWorkspace = join(tempWorkspace, 'undecided');
-    const declinedWorkspace = join(tempWorkspace, 'declined');
-    mkdirSync(undecidedWorkspace);
-    mkdirSync(declinedWorkspace);
-    writeFileSync(
-      join(qwenHome, 'settings.json'),
-      JSON.stringify({ security: { folderTrust: { enabled: true } } }),
-    );
-    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
-      qwenHome,
-      'trustedFolders.json',
-    );
-    writeFileSync(
-      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
-      JSON.stringify({ [declinedWorkspace]: TrustLevel.DO_NOT_TRUST }),
-    );
-    const stderrWrites: string[] = [];
-    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
-      stderrWrites.push(String(chunk));
-      return true;
-    });
-
-    await bootstrapServeFastPathEnvironment(undecidedWorkspace);
-
-    expect(stderrWrites.join('')).toContain('has not been decided');
-
-    stderrWrites.length = 0;
-
-    await bootstrapServeFastPathEnvironment(declinedWorkspace);
-
-    expect(stderrWrites.join('')).not.toContain('has not been decided');
-  });
-
   it('does not load env before a folder trust decision', async () => {
     delete process.env['QWEN_SERVER_TOKEN'];
     const qwenHome = useTempQwenHome();

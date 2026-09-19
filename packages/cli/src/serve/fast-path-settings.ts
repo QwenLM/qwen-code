@@ -32,7 +32,6 @@ import {
 } from '../config/trust-precedence.js';
 import { publishPendingCompileCache } from '../config/compile-cache.js';
 import { captureEnvironmentBeforeLoad } from '../config/environment-snapshot.js';
-import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 
@@ -758,14 +757,6 @@ export function loadServeFastPathSettings(
     realWorkspaceDir,
   );
   const isTrusted = trustDecision ?? false;
-  if (trustDecision === undefined) {
-    // Not the same state as an explicit DO_NOT_TRUST: nothing has answered
-    // for this folder yet, so say so and name a way to answer it. The rest
-    // of startup is silent about the workspace data this drops.
-    writeStderrLineSafe(
-      `qwen serve: this workspace's folder trust has not been decided, so its settings, .env files and privileged approval modes were skipped. Answer the folder trust prompt in an interactive session, or record a decision in trustedFolders.json.`,
-    );
-  }
   const startupChannelsTrusted =
     isWorkspaceTrustedFastPath(
       mergeFastPathSettings(systemDefaults, user, system),

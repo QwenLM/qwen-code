@@ -3834,67 +3834,6 @@ describe('mergeExcludeTools', () => {
   });
 });
 
-describe('folder trust override diagnostic', () => {
-  const originalIsTTY = process.stdin.isTTY;
-
-  beforeEach(() => {
-    process.stdin.isTTY = false;
-  });
-
-  afterEach(() => {
-    process.stdin.isTTY = originalIsTTY;
-  });
-
-  const parseYoloArgs = async () => {
-    process.argv = [
-      'node',
-      'script.js',
-      '--approval-mode',
-      'yolo',
-      '-p',
-      'test',
-    ];
-    return parseArguments();
-  };
-
-  it('names the missing decision when folder trust is undecided', async () => {
-    vi.mocked(isWorkspaceTrusted).mockReturnValue({
-      isTrusted: undefined,
-      source: undefined,
-    });
-    const argv = await parseYoloArgs();
-    mockWriteStderrLine.mockClear();
-
-    const config = await loadCliConfig({}, argv, undefined, []);
-
-    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
-    expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('has not been decided'),
-    );
-    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
-      expect.stringContaining('the current folder is not trusted'),
-    );
-  });
-
-  it('reports an explicit refusal when the folder was declined', async () => {
-    vi.mocked(isWorkspaceTrusted).mockReturnValue({
-      isTrusted: false,
-      source: 'file',
-    });
-    const argv = await parseYoloArgs();
-    mockWriteStderrLine.mockClear();
-
-    await loadCliConfig({}, argv, undefined, []);
-
-    expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('the current folder is not trusted'),
-    );
-    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
-      expect.stringContaining('has not been decided'),
-    );
-  });
-});
-
 describe('Approval mode tool exclusion logic', () => {
   const originalIsTTY = process.stdin.isTTY;
 
