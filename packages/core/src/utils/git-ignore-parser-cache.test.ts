@@ -38,6 +38,7 @@ describe('GitIgnoreParser cache retention', () => {
 
   it('keeps the matcher cache reset interval within the retention budget', () => {
     expect(MATCHER_CACHE_RESET_INTERVAL).toBeLessThanOrEqual(10_000);
+    expect(MATCHER_CACHE_RESET_INTERVAL).toBeGreaterThanOrEqual(1_000);
   });
 
   it('shares compiled rules between directories with the same ignore chain', async () => {
