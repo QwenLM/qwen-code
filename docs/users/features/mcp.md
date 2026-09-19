@@ -490,6 +490,41 @@ Optional:
 | `targetAudience`       | string                                        | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
 | `targetServiceAccount` | string                                        | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
 
+### MCP App resource limits
+
+MCP Apps can return bundled HTML larger than the default 1 MiB or take longer
+than the default 10 seconds to load. Configure only the server that needs more
+headroom in `settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "amplitude": {
+      "httpUrl": "https://mcp.amplitude.com/mcp",
+      "appResourceMaxBytes": 4194304,
+      "appResourceTimeoutMs": 30000
+    }
+  }
+}
+```
+
+Amplitude still requires OAuth authentication. These settings do not enable
+additional App bridge capabilities or guarantee that every App is compatible.
+
+- `appResourceMaxBytes`: maximum decoded HTML size in UTF-8 bytes. Defaults to
+  1,048,576 (1 MiB); clamped to 1–4,194,304 bytes (4 MiB).
+- `appResourceTimeoutMs`: resource-read deadline, independent of tool execution
+  when explicitly set; clamped to 100–120,000 ms. Without an override, the
+  deadline remains the smaller of the general `timeout` and 10,000 ms.
+- Finite values are rounded down and clamped. Nonnumeric or nonfinite values
+  fall back to defaults. Cancellation remains effective at any configured limit.
+
+A limit failure preserves the successful tool result and displays a warning
+with the applicable configuration key. Larger HTML stays outside model context,
+while increasing retained transcript and replay size. The size check happens
+**after** the SDK reads the response; it does not cap network transfer or peak
+memory. Sandbox and CSP protections are unchanged.
+
 <a id="qwen-mcp-cli"></a>
 
 ### Manage MCP servers with `qwen mcp`

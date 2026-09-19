@@ -1,5 +1,7 @@
 # MCP 2026 core client foundation
 
+[English](mcp-2026-core-client-foundation.md) | [简体中文](mcp-2026-core-client-foundation.zh-CN.md)
+
 ## Context
 
 Qwen Code's configured MCP sessions currently use the v1 TypeScript SDK. A
@@ -77,6 +79,31 @@ with `Warning: MCP App '<uri>' from '<server>' could not be displayed:
 <reason>` ahead of the normal tool text; the model-visible result stays the
 plain tool text.
 
+For larger or slower Apps such as Amplitude (#11945), a server can set
+`appResourceMaxBytes` and `appResourceTimeoutMs` in `mcpServers`. The HTML
+limit defaults to 1 MiB and is clamped to 1 byte–4 MiB. The resource deadline
+defaults to the smaller of the general MCP timeout and 10 seconds; an explicit
+App timeout replaces that deadline and is clamped to 100–120,000 ms. Finite
+values are rounded down; nonnumeric or nonfinite values use the defaults.
+The SDK request and abort signal use the same deadline, and caller cancellation
+still aborts the read. Limit failures identify the relevant setting in the
+existing display warning without changing the successful tool result.
+
+These settings travel with discovered tools through metadata enrichment,
+qualified names, per-session projections, and reconnect retries. They are part
+of the pool fingerprint so sessions with different resource policies cannot
+reuse the first session's limits. Existing settings reconciliation detects the
+changed configuration. No new daemon route or sandbox capability is added.
+
+The 4 MiB ceiling provides headroom for bundled applications while leaving room
+under the existing 32 MiB transcript/replay limit even with JSON escaping (up to
+six bytes per HTML byte). The 120-second ceiling limits optional UI latency.
+These are host policy choices, not protocol limits or a guarantee of Amplitude
+compatibility. The SDK materializes the response before the size check, so the
+limit bounds accepted/retained HTML, not network transfer or peak memory.
+Larger accepted documents increase transcript and replay payloads. Streaming
+transfer limits and App-initiated tool calls remain outside this change.
+
 The daemon serves a static sandbox proxy before bearer authentication. It
 contains no session data or credentials. WebShell loads that proxy in an
 outer iframe that omits `allow-same-origin`, so even a same-URL `localhost`
@@ -101,7 +128,8 @@ not advertise privileged App capabilities.
 - Authorization and Qwen Code's MCP permission boundary are unchanged.
 - The modern cache is private per client instance; no result is shared across
   workspaces or authorization principals.
-- MCP App HTML is limited to 1 MiB and never enters model context.
+- MCP App HTML defaults to a 1 MiB limit, can be configured up to 4 MiB per
+  server, and never enters model context.
 - App HTML runs in a double-iframe sandbox. Both frames omit
   `allow-same-origin`, and the outer frame additionally uses a different
   loopback origin when one is available. Server-declared CSP is enforced by
@@ -111,7 +139,7 @@ not advertise privileged App capabilities.
 - Compaction splits by purpose. Terminal (interactive) history keeps
   `type: 'mcp_app'` with empty `html` and the original `fallbackText`, and the
   TUI renders that text instead of mounting an empty sandbox. A recorded
-  transcript keeps the App `html` within its 1 MiB resource limit so WebShell
+  transcript keeps the App `html` within its configured resource limit so WebShell
   replay can mount the app, and keeps `toolResult` only while its serialized
   form fits the retained-display budget (32 KiB); above it the field is dropped
   rather than truncated. Retained `html` reaches replay `rawOutput` and the
@@ -122,6 +150,18 @@ not advertise privileged App capabilities.
   unloading the sandbox iframe.
 
 ## Verification
+
+- A 1,048,577-byte valid App must fail under defaults and render with an explicit
+  2 MiB allowance, including text and base64 resource encodings.
+- An 11-second resource read must fail under defaults and succeed with a
+  30-second App deadline; a longer general MCP timeout alone retains the old
+  10-second ceiling. Caller cancellation must remain effective.
+- Configured limits must accept their exact boundary, reject excess HTML, clamp
+  out-of-range numbers, and fall back for nonfinite values. Different policies
+  must not share pooled tool snapshots.
+- Verify local rendering and recorded replay with a deterministic fixture.
+  Real Amplitude validation additionally requires OAuth and an accessible chart;
+  fixture success alone does not establish real-service compatibility.
 
 - A modern-only control transport must connect through `server/discover`, list
   and call a tool without `initialize`, and carry the modern request metadata.

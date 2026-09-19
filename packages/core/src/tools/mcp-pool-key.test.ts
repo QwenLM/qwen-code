@@ -108,6 +108,19 @@ describe('mcp-pool-key', () => {
       expect(fingerprint(a)).toBe(fingerprint(b));
     });
 
+    it.each(['appResourceMaxBytes', 'appResourceTimeoutMs'] as const)(
+      'isolates pooled tools with different %s limits',
+      (setting) => {
+        const base = { command: 'node' };
+        expect(fingerprint(base)).not.toBe(
+          fingerprint({ ...base, [setting]: 2_000_000 }),
+        );
+        expect(fingerprint({ ...base, [setting]: 2_000_000 })).not.toBe(
+          fingerprint({ ...base, [setting]: 3_000_000 }),
+        );
+      },
+    );
+
     it('produces a 16-char hex string', () => {
       const fp = fingerprint(new MCPServerConfig('node'));
       expect(fp).toMatch(/^[0-9a-f]{16}$/);
