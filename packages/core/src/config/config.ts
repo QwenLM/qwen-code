@@ -940,6 +940,7 @@ export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 export interface ConfigParameters {
   agentExecutionBackend?: 'container';
   executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  executionEnvironment?: ExecutionEnvironment;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
@@ -2888,6 +2889,7 @@ export class Config {
   private externalAgentExecutor?: ExternalAgentExecutor;
   private readonly agentExecutionBackend?: 'container';
   private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  private readonly executionEnvironment?: ExecutionEnvironment;
   private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
   private readonly executionShutdown = new AbortController();
   private executionCleanupPromise?: Promise<void>;
@@ -3016,6 +3018,12 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.executionEnvironment = params.executionEnvironment;
+    if (params.executionEnvironment) {
+      this.executionEnvironments = new Set([
+        Promise.resolve(params.executionEnvironment),
+      ]);
+    }
     this.agentExecutionBackend = params.agentExecutionBackend;
     const executionFactory = params.executionEnvironmentFactory;
     this.executionEnvironmentFactory = executionFactory
@@ -3604,6 +3612,15 @@ export class Config {
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
+    if (this.executionEnvironment) {
+      options = {
+        ...options,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      };
+    }
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot be initialized');
     }
@@ -3794,9 +3811,17 @@ export class Config {
           (n) => n.trim() !== '' && n.toLowerCase() !== 'none',
         );
     recordStartupEvent('config_initialize_extensions_initial_start');
-    if (!this.isSafeMode() && !this.getBareMode()) {
+    if (
+      !this.executionEnvironment &&
+      !this.isSafeMode() &&
+      !this.getBareMode()
+    ) {
       await this.extensionManager.refreshCache();
-    } else if (!this.isSafeMode() && explicitExtensionNames.length > 0) {
+    } else if (
+      !this.executionEnvironment &&
+      !this.isSafeMode() &&
+      explicitExtensionNames.length > 0
+    ) {
       await this.extensionManager.refreshCache({
         names: explicitExtensionNames,
       });
@@ -4225,7 +4250,11 @@ export class Config {
     }
 
     recordStartupEvent('config_initialize_extensions_final_start');
-    if (!this.getBareMode() && !this.isSafeMode()) {
+    if (
+      !this.executionEnvironment &&
+      !this.getBareMode() &&
+      !this.isSafeMode()
+    ) {
       await this.extensionManager.refreshCache();
     }
     recordStartupEvent('config_initialize_extensions_final_end');
@@ -4703,6 +4732,7 @@ export class Config {
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
   ): Promise<void> {
+    if (this.executionEnvironment) return;
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
@@ -7415,6 +7445,7 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
+    if (this.executionEnvironment) return {};
     // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
     // project `.mcp.json`) — not the caller's own explicit, per-invocation
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
@@ -9168,7 +9199,7 @@ export class Config {
   }
 
   getExecutionEnvironment(): ExecutionEnvironment | undefined {
-    return undefined;
+    return this.executionEnvironment;
   }
 
   shutdownExecutionEnvironments(): Promise<void> {
@@ -11040,6 +11071,7 @@ export class Config {
           import('../tools/execution-tool.js'),
         ]);
       for (const [name, tool] of createExecutionTools(this)) {
+        if (environment.toolNames && !environment.toolNames.has(name)) continue;
         if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
         await registerLazy(name as ToolName, async () =>
           wrapExecutionTool(tool, environment, this),

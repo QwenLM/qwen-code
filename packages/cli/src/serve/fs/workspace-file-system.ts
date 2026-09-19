@@ -370,6 +370,7 @@ export interface WorkspaceFileSystem {
  * `forRequest` per HTTP route invocation.
  */
 export interface WorkspaceFileSystemFactory {
+  readonly sshWorkspace?: import('@qwen-code/qwen-code-core/services/ssh-workspace.js').SshWorkspace;
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
   assertCanWrite(): void;
   /** Optional so existing custom factories remain workspace-only by default. */

@@ -3526,6 +3526,21 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('getMainSessionSystemInstruction', () => {
+    it('does not collect local git or agent context for an execution environment', async () => {
+      vi.mocked(mockConfig.getExecutionEnvironment).mockReturnValue(
+        {} as NonNullable<ReturnType<Config['getExecutionEnvironment']>>,
+      );
+      vi.mocked(getRecentGitStatus).mockClear();
+      const listSubagents = mockConfig.getSubagentManager().listSubagents;
+      vi.mocked(listSubagents).mockClear();
+
+      await client.startChat();
+      await client.refreshSystemInstruction();
+
+      expect(getRecentGitStatus).not.toHaveBeenCalled();
+      expect(listSubagents).not.toHaveBeenCalled();
+    });
+
     it('records the gitStatus-free base as the static system prefix on Config', () => {
       vi.mocked(getCoreSystemPrompt).mockReturnValueOnce('core base prompt');
       vi.mocked(getRecentGitStatus).mockReturnValueOnce('Git snapshot A');

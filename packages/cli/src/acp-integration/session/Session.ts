@@ -15576,6 +15576,7 @@ export class Session implements SessionContext {
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
+    const sshWorkspace = Boolean(this.config.getExecutionEnvironment?.());
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
@@ -15596,6 +15597,7 @@ export class Session implements SessionContext {
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
+          if (sshWorkspace) return { text: part.text };
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
@@ -15646,6 +15648,9 @@ export class Session implements SessionContext {
             },
           });
         case 'resource_link': {
+          if (sshWorkspace && part.uri.startsWith(FILE_URI_SCHEME)) {
+            return { text: `@${part.uri.slice(FILE_URI_SCHEME.length)}` };
+          }
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
               fileData: {

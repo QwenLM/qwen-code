@@ -21,15 +21,20 @@ export function workspaceBasename(cwd: string): string {
 }
 
 export function workspaceLabel(
-  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>,
+  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>,
 ): string {
-  return workspace.displayName?.trim() || workspaceBasename(workspace.cwd);
+  return (
+    workspace.displayName?.trim() ||
+    (workspace.ssh
+      ? `${workspace.ssh.host}:${workspace.ssh.directory}`
+      : workspaceBasename(workspace.cwd))
+  );
 }
 
 export function workspaceLabelForCwd(
   cwd: string,
   workspaces:
-    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>[]
+    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>[]
     | undefined,
 ): string {
   const workspace = workspaces?.find((entry) => entry.cwd === cwd);

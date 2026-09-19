@@ -498,6 +498,9 @@ export class LlmClient {
   }
 
   private async seedAgentReminderDedupFromCurrent(): Promise<void> {
+    if (this.config.getExecutionEnvironment?.()) {
+      return;
+    }
     try {
       const agents = await this.config.getSubagentManager().listSubagents();
       this.announcedAgentReminderNames = new Set(
@@ -1616,6 +1619,9 @@ export class LlmClient {
   }
 
   private getCachedGitStatus(): string | null {
+    if (this.config.getExecutionEnvironment?.()) {
+      return null;
+    }
     if (this.cachedGitStatus === undefined) {
       // Mirror claude-code: append git status (branch + recent commits) to the
       // system prompt so the main agent treats version history as authoritative

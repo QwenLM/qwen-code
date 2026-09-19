@@ -25,6 +25,7 @@ import {
 } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
+import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 
 const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -157,6 +158,91 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result.type).toBe('no_command');
+  });
+
+  it('blocks local SSH workspace commands before execution and does not load custom commands', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+    const action = vi.fn();
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'init',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp', 'non_interactive'],
+        action,
+      },
+      {
+        name: 'model',
+        kind: CommandKind.FILE,
+        supportedModes: ['acp', 'non_interactive'],
+        action,
+      },
+    ]);
+    for (const command of ['/init', '/model', '/custom']) {
+      expect(
+        (
+          await handleSlashCommand(
+            command,
+            abortController,
+            mockConfig,
+            mockSettings,
+          )
+        ).type,
+      ).toBe('unsupported');
+    }
+    expect(action).not.toHaveBeenCalled();
+    for (const [loaders] of mockCommandServiceCreate.mock.calls) {
+      expect(loaders).toEqual([expect.any(BuiltinCommandLoader)]);
+    }
+  });
+
+  it('shows only SSH session commands and prevents model setting persistence', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+    const action = vi.fn().mockResolvedValue({
+      type: 'message',
+      messageType: 'info',
+      content: 'model changed',
+    });
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'model',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp', 'non_interactive'],
+        action,
+      },
+      {
+        name: 'clear',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp', 'non_interactive'],
+        action: vi.fn(),
+      },
+    ]);
+    expect(
+      (
+        await getAvailableCommands(mockConfig, abortController.signal, 'acp')
+      ).map((command) => command.name),
+    ).toEqual(['model']);
+    expect(
+      (
+        await handleSlashCommand(
+          '/model selected',
+          abortController,
+          mockConfig,
+          mockSettings,
+        )
+      ).type,
+    ).toBe('message');
+    expect(action).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionPolicy: expect.objectContaining({
+          allowWorkspaceSettingsWrite: false,
+          persistModelSelection: false,
+        }),
+      }),
+      'selected',
+    );
+    expect(mockCommandServiceCreate.mock.calls[0]?.[0]).toEqual([
+      expect.any(BuiltinCommandLoader),
+    ]);
   });
 
   it('should return unsupported for built-in commands without non-interactive supportedModes', async () => {

@@ -70,6 +70,11 @@ import {
 } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import { createTerminalWsHandler } from './routes/terminal.js';
+import { registerSshWorkspaceBoundary } from './routes/ssh-workspace.js';
+import {
+  sshCommand,
+  quoteSshArgument,
+} from '@qwen-code/qwen-code-core/services/ssh-workspace.js';
 import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
@@ -207,6 +212,7 @@ import {
   type SendBridgeError,
 } from './server/error-response.js';
 import { resolveBridgeFsFactory } from './server/fs-factory.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
@@ -884,6 +890,14 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  if (
+    readSshWorkspace(boundWorkspace) ||
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory.sshWorkspace
+  ) {
+    throw new Error(
+      'Start qwen serve in a local workspace, then add the SSH workspace in the workspace picker.',
+    );
+  }
   if (injectedWorkspaceRegistry) {
     const primary = injectedWorkspaceRegistry.primary;
     const registryConflictCandidates = [
@@ -2246,6 +2260,7 @@ export function createServeApp(
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
+  registerSshWorkspaceBoundary(app, workspaceRegistry);
   const syncModelProvidersRuntime = async (
     route: string,
     writeScope?: SettingScope,
@@ -3594,6 +3609,15 @@ export function createServeApp(
         return {
           workspaceCwd: runtime.workspaceCwd,
           env: getRuntimeEffectiveEnv(runtime.env) ?? daemonEnvAtBoot,
+          ...(runtime.routeFileSystemFactory.sshWorkspace
+            ? {
+                command: sshCommand(
+                  runtime.routeFileSystemFactory.sshWorkspace,
+                  `cd ${quoteSshArgument(runtime.routeFileSystemFactory.sshWorkspace.directory)} && exec "\${SHELL:-/bin/sh}" -l`,
+                  true,
+                ),
+              }
+            : {}),
         };
       }),
     ],
