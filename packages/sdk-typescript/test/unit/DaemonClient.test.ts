@@ -25,6 +25,7 @@ import {
 import type {
   BranchSessionRequest,
   DaemonCapabilities,
+  DaemonSessionCatalogResult,
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
@@ -5352,6 +5353,146 @@ describe('DaemonClient', () => {
         status: 400,
         body: { code: 'invalid_max_queued' },
       });
+    });
+  });
+
+  describe('listSessionsCatalog', () => {
+    it('reads independent pages and groups in one authenticated native REST request', async () => {
+      const reply: DaemonSessionCatalogResult = {
+        workspaces: [
+          {
+            workspace: 'workspace-a',
+            workspaceId: 'workspace-a',
+            cwd: '/work/a',
+            sessions: [{ sessionId: 'session-a', workspaceCwd: '/work/a' }],
+            nextCursor: 'next-a',
+            liveMergeFailed: true,
+            groups: { groups: [], colorOptions: ['blue'] },
+          },
+          {
+            workspace: '/work/b',
+            workspaceId: 'workspace-b',
+            cwd: '/work/b',
+            sessions: [],
+            nextCursor: 'next-b',
+            truncated: true,
+          },
+          {
+            workspace: 'missing',
+            error: {
+              status: 404,
+              code: 'workspace_not_found',
+              message: 'Workspace not found',
+            },
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const transportFetch = vi.fn();
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.listSessionsCatalog({
+          workspaces: [
+            { workspace: 'workspace-a', cursor: 'cursor-a' },
+            { workspace: '/work/b', cursor: 'cursor-b' },
+            { workspace: 'missing' },
+          ],
+          options: {
+            pageSize: 100,
+            archiveState: 'archived',
+            view: 'organized',
+            group: 'pinned',
+            sourceType: 'channel',
+            sourceId: 'channel-a',
+          },
+          includeGroups: true,
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/sessions/catalog',
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer secret',
+          'content-type': 'application/json',
+        },
+      });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        workspaces: [
+          { workspace: 'workspace-a', cursor: 'cursor-a' },
+          { workspace: '/work/b', cursor: 'cursor-b' },
+          { workspace: 'missing' },
+        ],
+        options: {
+          size: 100,
+          archiveState: 'archived',
+          view: 'organized',
+          group: 'pinned',
+          sourceType: 'channel',
+          sourceId: 'channel-a',
+        },
+        includeGroups: true,
+      });
+    });
+
+    it('leaves all-workspace defaults to the daemon', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { workspaces: [] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.listSessionsCatalog({ workspaces: 'all' });
+      expect(calls).toHaveLength(1);
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ workspaces: 'all' });
+    });
+
+    it('preserves parent filters and invalid page sizes for server validation', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(400, {
+          code: 'invalid_session_catalog_request',
+          error: 'size must be between 1 and 100',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.listSessionsCatalog({
+          workspaces: [{ workspace: '/work/a' }],
+          options: { pageSize: 101, parentSessionId: 'parent' },
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        body: { code: 'invalid_session_catalog_request' },
+      });
+      expect(JSON.parse(calls[0]!.body!).options).toEqual({
+        size: 101,
+        parentSessionId: 'parent',
+      });
+    });
+
+    it('surfaces older-daemon errors without automatic fan-out', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.listSessionsCatalog({ workspaces: 'all' }),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(1);
     });
   });
 

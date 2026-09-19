@@ -430,6 +430,32 @@ When `workspace_archived_session_export` is advertised, use `client.workspaceByI
 
 When `workspace_session_live_state` is advertised, `client.getWorkspaceSessionLiveState(workspaceCwd)` or the scoped `client.workspaceById(workspaceId).getSessionLiveState()` / `client.workspaceByCwd(workspaceCwd).getSessionLiveState()` reads the selected trusted workspace's memory-only live-session snapshot plus its catalog version, returning `DaemonWorkspaceSessionLiveState` (`{ v: 1, catalogVersion: DaemonSessionCatalogVersion, sessions: DaemonSessionLiveState[] }`). These methods always use native REST with bearer authentication and an encoded workspace selector, preserve optional client identity, and use the existing short-request timeout. They do not call `requireCapability()` — a capability probe on every poll would double request volume — so consumers pre-flight `workspace_session_live_state` once from their already-loaded capabilities and fall back to existing catalog polling when the tag is absent. Do not infer support from `workspace_qualified_rest_core`. Each `DaemonSessionLiveState` carries an optional `updatedAt` activity watermark that lets a consumer refresh the recency of a catalog row it already holds instead of reloading the catalog after a completed turn; it is absent before the first running-turn terminal in the current bridge and after a daemon or runtime replacement, so a consumer must keep its existing catalog fallback for a missing value rather than treating absence as unsupported.
 
+When `session_catalog_batch` is advertised, `client.listSessionsCatalog(request)` reads independent pages for up to 20 public registered workspaces in one native REST request. The method accepts `workspaces: 'all'` or an ordered array of `{ workspace, cursor? }`, shared `options`, and optional `includeGroups`. Selectors can be workspace ids or absolute cwd paths. Options match `DaemonSessionListPageOptions` except that cursors belong to individual entries; `pageSize` is sent as wire `size` and must be 1–100 (default 20). The SDK preserves values for server validation. Source, archive, parent, and organization filters retain the catalog rules.
+
+```ts
+const caps = await client.capabilities();
+if (caps.features.includes('session_catalog_batch')) {
+  const catalog = await client.listSessionsCatalog({
+    workspaces: [
+      { workspace: 'workspace-a', cursor: savedCursorA },
+      { workspace: '/work/b', cursor: savedCursorB },
+    ],
+    options: { pageSize: 20, view: 'organized', archiveState: 'active' },
+    includeGroups: true,
+  });
+  for (const entry of catalog.workspaces) {
+    if ('error' in entry) {
+      showWorkspaceError(entry.workspace, entry.error);
+    } else {
+      showWorkspacePage(entry.cwd, entry.sessions, entry.groups);
+      saveCursor(entry.cwd, entry.nextCursor);
+    }
+  }
+}
+```
+
+The result is `DaemonSessionCatalogResult`, with an ordered array of `DaemonSessionCatalogPage | DaemonSessionCatalogError`. A successful page contains canonical `cwd`, `workspaceId`, the original `workspace` selector, existing page metadata, and the full `DaemonSessionGroupCatalog` when requested. One failed workspace does not discard successful pages. Continue each workspace with its own batch cursor and unchanged filters; batch default cursors are opaque and cannot be exchanged with legacy numeric list cursors. `all` excludes internal workspaces and fails explicitly above 20 entries, so larger callers split explicit selections. Discover the capability once from connection capabilities and use qualified list/group methods on older daemons. The method does not probe capabilities or automatically fan out: each refresh makes exactly one authenticated HTTP request, even with a custom ACP transport configured.
+
 ### Seeding `lastEventId` at Construction
 
 Callers that persist the cursor across process restarts can seed it:

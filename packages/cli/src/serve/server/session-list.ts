@@ -98,6 +98,8 @@ export interface WorkspaceSessionInfoResult {
 export interface ListWorkspaceSessionsReadOptions {
   /** Merge live bridge state into persisted summaries. */
   mergeLive?: boolean;
+  /** Paginate the combined persisted/live catalog, including unfiltered reads. */
+  paginateMerged?: boolean;
   /** Runtime root owned by the selected managed workspace. */
   runtimeBaseDir?: string;
   /** Aborts this caller's wait without cancelling other shared waiters. */
@@ -106,6 +108,7 @@ export interface ListWorkspaceSessionsReadOptions {
 
 interface ResolvedListWorkspaceSessionsReadOptions {
   mergeLive?: boolean;
+  paginateMerged?: boolean;
   runtimeBaseDir: string;
   signal?: AbortSignal;
 }
@@ -1017,9 +1020,9 @@ async function listOrganizedWorkspaceSessionsForResponse(
             ),
           );
         } else if (
-          // A live-only row has no persisted key to page by, so it stays a
-          // first-page-only insertion as before.
-          isFirstPage &&
+          // Preserve legacy first-page-only insertion unless the caller
+          // requests pagination across the complete merged catalog.
+          (isFirstPage || readOptions.paginateMerged) &&
           // `listAllPersistedSummaries` already scanned every persisted
           // session when the scan wasn't truncated, so a `sessionId` missing
           // from `bySessionId` is definitively new — no disk re-check
@@ -1332,6 +1335,9 @@ export async function listWorkspaceSessionsForResponse(
         ...(readOptions.mergeLive !== undefined
           ? { mergeLive: readOptions.mergeLive }
           : {}),
+        ...(readOptions.paginateMerged !== undefined
+          ? { paginateMerged: readOptions.paginateMerged }
+          : {}),
         ...(readOptions.signal !== undefined
           ? { signal: readOptions.signal }
           : {}),
@@ -1367,6 +1373,7 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   if (
+    readOptions.paginateMerged ||
     options?.parentSessionId !== undefined ||
     options?.sourceType !== undefined ||
     options?.conversationKind !== undefined
@@ -1374,19 +1381,19 @@ async function listWorkspaceSessionsForResponseInRuntime(
     return listWorkspaceSessionsByMetadataForResponse(
       bridge,
       workspaceCwd,
-      options,
+      options ?? {},
       pageSize,
       {
-        ...(options.parentSessionId !== undefined
+        ...(options?.parentSessionId !== undefined
           ? { parentSessionId: options.parentSessionId }
           : {}),
-        ...(options.sourceType !== undefined
+        ...(options?.sourceType !== undefined
           ? { sourceType: options.sourceType }
           : {}),
-        ...(options.sourceId !== undefined
+        ...(options?.sourceId !== undefined
           ? { sourceId: options.sourceId }
           : {}),
-        ...(options.conversationKind !== undefined
+        ...(options?.conversationKind !== undefined
           ? { conversationKind: options.conversationKind }
           : {}),
       },
