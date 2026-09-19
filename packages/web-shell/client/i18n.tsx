@@ -16,6 +16,68 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'capacityChoice.persistenceUnconfirmed':
+    'Saving the last interrupted turn could not be confirmed.',
+  'capacityChoice.title': 'Choose a workspace to stop',
+  'capacityChoice.description':
+    'No ACP capacity is available. Choose a workspace whose sessions you want to stop, or cancel and keep working.',
+  'capacityChoice.warning':
+    'Stopping interrupts all listed sessions and their tools. Files, workspace registration and saved history remain. Unsaved work may be lost. Closing this dialog after confirmation does not undo the stop.',
+  'capacityChoice.outdated':
+    'The draft, session or daemon has changed. Cancel and try the original operation again.',
+  'capacityChoice.inProgress':
+    'The selected stop is still being resolved. Refresh its status before continuing.',
+  'capacityChoice.failedUnreleased':
+    'The stop failed. This workspace remains unavailable until its old processes are confirmed stopped. Capacity is still reserved. Refresh to check cleanup.',
+  'capacityChoice.failedUnknownCleanup':
+    'The stop failed. Cleanup could not be confirmed. Refresh its status before continuing.',
+  'capacityChoice.workspaces': 'Workspace to stop',
+  'capacityChoice.requester':
+    'This workspace owns the operation you are trying to continue.',
+  'capacityChoice.running': 'Running',
+  'capacityChoice.waiting': 'Waiting for your response',
+  'capacityChoice.background': 'Background work running',
+  'capacityChoice.backgroundUnknown': 'Background work status unknown',
+  'capacityChoice.none':
+    'No workspace can currently be stopped here. Review the reasons above, stop the independent work, or cancel.',
+  'capacityChoice.refresh': 'Refresh status',
+  'capacityChoice.continue': 'Continue original operation',
+  'capacityChoice.confirm': 'Stop these sessions and continue',
+  'capacityChoice.stopped':
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  'capacityChoice.resume': 'Resume conversation',
+  'capacityChoice.blocked.stopping': 'Stopping',
+  'capacityChoice.blocked.not_live': 'No live ACP',
+  'capacityChoice.blocked.release_unavailable':
+    'Owned process release cannot be observed',
+  'capacityChoice.blocked.session_start_pending':
+    'Session startup or restore in progress',
+  'capacityChoice.blocked.workspace_control_pending':
+    'Workspace management or MCP work in progress',
+  'capacityChoice.blocked.session_closing':
+    'Session close or reset in progress',
+  'capacityChoice.blocked.runtime_unavailable':
+    'Workspace unavailable or untrusted',
+  'capacityChoice.blocked.special_runtime': 'Special-purpose workspace',
+  'capacityChoice.blocked.unsupported': 'Runtime stop is not supported',
+  'capacityChoice.blocked.activity_unknown': 'Activity could not be observed',
+  'capacityChoice.blocked.pendingSessionStarts': 'Session startup pending',
+  'capacityChoice.blocked.acpConnections': 'An ACP client is connected',
+  'capacityChoice.blocked.memoryTasks': 'Memory task running',
+  'capacityChoice.blocked.channelWorkers': 'Channel worker running',
+  'capacityChoice.blocked.voiceSessions': 'Voice session active',
+  'capacityChoice.blocked.management_pending': 'Workspace management pending',
+  'capacityChoice.blocked.scheduler_pending':
+    'Scheduled session restore in progress',
+  'capacityChoice.blocked.enabled_scheduled_tasks':
+    'Disable enabled scheduled tasks first',
+  'capacityChoice.blocked.scheduled_tasks_unknown':
+    'Scheduled tasks could not be read',
+  'capacityChoice.capacity': (v) => `ACP capacity: ${v?.used} / ${v?.limit}`,
+  'capacityChoice.sessions': (v) => `${v?.count} loaded session(s)`,
+  'capacityChoice.queued': (v) => `${v?.count} queued`,
+  'capacityChoice.outcome': (v) =>
+    `${v?.closed} session(s) closed; ${v?.remaining} remaining.`,
   'footnotes.note': (v) => `Footnote ${v?.number ?? ''}`,
   'footnotes.references': (v) => `View ${v?.count ?? ''} references`,
   'footnotes.preview': 'Reference preview',
@@ -548,6 +610,30 @@ const EN: Messages = {
   'live.noFallback':
     'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
+  'live.browser.connect': 'Talk in this browser',
+  'live.browser.connecting': 'Connecting microphone…',
+  'live.browser.requirement.host': 'This browser tab',
+  'live.browser.requirement.runtime': 'Live runtime',
+  'live.browser.takeOver': 'Take over in this tab',
+  'live.browser.disconnect': 'Release microphone',
+  'live.browser.setupDescription':
+    'Use this browser tab as the microphone and speaker for Live Voice.',
+  'live.browser.readyDescription':
+    'This tab is the microphone and speaker for Live Voice.',
+  'live.browser.otherTabDescription':
+    'Another Web Shell tab is the microphone and speaker for Live Voice.',
+  'live.browser.headphonesHint':
+    'Headphones give the best result: they keep the reply out of the microphone.',
+  'live.browser.closed.occupied':
+    'Another Live Voice endpoint is already connected.',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host took over Live Voice from this tab.',
+  'live.browser.closed.supersededTab':
+    'Another Web Shell tab took over Live Voice.',
+  'live.browser.closed.refused':
+    'Live Voice is turned off, or this workspace is not trusted.',
+  'live.browser.closed.microphone': 'The microphone could not be opened.',
+  'live.browser.closed.lost': 'The Live Voice connection was lost.',
   'settings.liveShortcut.capture': 'Press shortcut',
   'settings.liveShortcut.clear': 'Clear',
   'settings.liveShortcut.off': 'Off',
@@ -555,6 +641,8 @@ const EN: Messages = {
   'settings.liveSetup.experimental': 'Experimental',
   'settings.liveSetup.description':
     'Talk to Qwen from anywhere on this Mac with Realtime voice, Appshot, and task handoff.',
+  'settings.liveSetup.browserDescription':
+    'Talk to Qwen with Realtime voice and task handoff, using this browser as the microphone and speaker.',
   'settings.liveSetup.enable': 'Enable Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
@@ -670,6 +758,8 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'assistant.dissatisfied': 'Not satisfied',
+  'assistant.satisfied': 'Satisfied',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -714,6 +804,9 @@ const EN: Messages = {
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': 'No MCP servers are available',
   'composerAdd.skills.label': 'Skills',
+  'composerAdd.plan.label': 'Plan mode',
+  'composerAdd.plan.description': 'Plan first, run after you approve',
+  'composerAdd.plan.busy': 'Switching mode',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -991,12 +1084,15 @@ const EN: Messages = {
   'contextUsage.viewInConversation':
     'Click to view the breakdown in the conversation.',
   'daemon.title': 'Daemon Status',
-  'daemon.connection.title': 'Connection',
+  'daemon.connection.title': 'Connections',
   'daemon.connection.target': 'Current target',
   'daemon.connection.state': 'Connection state',
   'daemon.connection.address': 'Daemon address',
   'daemon.connection.token': 'Bearer token (optional)',
   'daemon.connection.connect': 'Connect',
+  'daemon.connection.add': 'Add connection',
+  'daemon.connection.saved': 'Connected computers',
+  'daemon.connection.forget': (v) => `Forget ${v?.address}`,
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
   'daemon.connection.notReady':
     'The daemon did not accept the connection; the stored credential was left unchanged.',
@@ -1008,6 +1104,7 @@ const EN: Messages = {
     'Browser storage is unavailable, so the token could not be carried to that daemon.',
   'daemon.connection.status.idle': 'Idle',
   'daemon.connection.status.connecting': 'Connecting',
+  'daemon.connection.status.adding': 'Adding',
   'daemon.connection.status.connected': 'Connected',
   'daemon.connection.status.error': 'Error',
   'daemon.details.loading': 'Loading diagnostics...',
@@ -1720,6 +1817,24 @@ const EN: Messages = {
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
   'sidebar.addWorkspaceAdding': 'Adding…',
+  'workspaceHost.source': 'Folder source',
+  'workspaceHost.thisComputer': 'This computer',
+  'workspaceHost.folderOn': (vars) => `Folder on ${vars?.address}`,
+  'workspaceHost.folderOnThisComputer': 'Folder on this computer',
+  'workspaceHost.browseHint':
+    'Choose a folder below, or type an absolute path.',
+  'workspaceHost.parent': 'Parent folder',
+  'workspaceHost.addFolder': 'Add this folder',
+  'workspaceHost.noFolders': 'No subfolders in this directory.',
+  'workspaceHost.folderListError':
+    'Could not read folders from this computer. Check the path or connection.',
+  'workspaceHost.navigationUnavailable':
+    'Browser storage is unavailable, so the remote folder flow cannot continue safely.',
+  'workspaceHost.unsupported':
+    'This computer does not support adding workspaces.',
+  'workspaceHost.loadingFolders': 'Loading folders from this computer…',
+  'workspaceHost.connectionError':
+    'Could not load workspace capabilities from this computer.',
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
   'sidebar.renameWorkspace': 'Rename…',
@@ -1740,6 +1855,7 @@ const EN: Messages = {
   'sidebar.reloadWorkspace': 'Reload runtime',
   'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
+  'sidebar.workspacesOnHost': (v) => `Workspaces on ${v?.host}`,
   'sidebar.sessionsRunning': (v) =>
     `${v?.count ?? 0} running session${v?.count === 1 ? '' : 's'}`,
   'sidebar.sessionsAttention': (v) =>
@@ -2774,6 +2890,7 @@ const EN: Messages = {
     'Use this provider for conversation. The current model is retained when it is included in the configuration.',
   'auth.purpose.image': 'Image generation',
   'auth.purpose.voice': 'Voice transcription',
+  'auth.purpose.realtime': 'Live Voice',
   'auth.purpose.imageHint':
     'Use a DashScope- or MiniMax-compatible HTTPS image-generation endpoint without query or fragment. Adding this model keeps your conversation model.',
   'auth.purpose.voiceHint':
@@ -3930,6 +4047,59 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'capacityChoice.persistenceUnconfirmed':
+    '无法确认最后一轮被中断内容是否已保存。',
+  'capacityChoice.title': '选择要停止的工作区',
+  'capacityChoice.description':
+    '当前没有可用的 ACP 容量。选择一个工作区停止其会话，或取消并继续现有工作。',
+  'capacityChoice.warning':
+    '停止将中断列出的所有会话及其工具。文件、工作区注册和已保存历史会保留，未保存工作可能丢失。确认后关闭此弹窗不会撤销停止。',
+  'capacityChoice.outdated':
+    '草稿、会话或 daemon 已变化，请取消后重新执行原操作。',
+  'capacityChoice.inProgress': '所选停止仍在处理，请刷新状态后再继续。',
+  'capacityChoice.failedUnreleased':
+    '停止失败。确认旧进程全部退出前，此工作区暂不可用，容量仍被占用。可刷新查看清理结果。',
+  'capacityChoice.failedUnknownCleanup':
+    '停止失败，清理结果尚未确认。请刷新状态后再继续。',
+  'capacityChoice.workspaces': '要停止的工作区',
+  'capacityChoice.requester': '此工作区属于正在尝试继续的原操作。',
+  'capacityChoice.running': '运行中',
+  'capacityChoice.waiting': '等待你的回复',
+  'capacityChoice.background': '后台工作运行中',
+  'capacityChoice.backgroundUnknown': '后台工作状态未知',
+  'capacityChoice.none':
+    '当前没有可在此停止的工作区。请查看上述原因，先结束独立工作，或取消。',
+  'capacityChoice.refresh': '刷新状态',
+  'capacityChoice.continue': '继续原操作',
+  'capacityChoice.confirm': '停止这些会话并继续',
+  'capacityChoice.stopped':
+    '此工作区已停止，以释放 ACP 容量。需要时可主动恢复此会话。',
+  'capacityChoice.resume': '恢复会话',
+  'capacityChoice.blocked.stopping': '正在停止',
+  'capacityChoice.blocked.not_live': '没有运行中的 ACP',
+  'capacityChoice.blocked.release_unavailable': '无法确认自有进程释放',
+  'capacityChoice.blocked.session_start_pending': '正在启动或恢复会话',
+  'capacityChoice.blocked.workspace_control_pending':
+    '工作区管理或 MCP 操作进行中',
+  'capacityChoice.blocked.session_closing': '会话正在关闭或重置',
+  'capacityChoice.blocked.runtime_unavailable': '工作区不可用或不可信',
+  'capacityChoice.blocked.special_runtime': '特殊用途工作区',
+  'capacityChoice.blocked.unsupported': '不支持停止此运行时',
+  'capacityChoice.blocked.activity_unknown': '无法确认活动状态',
+  'capacityChoice.blocked.pendingSessionStarts': '等待会话启动',
+  'capacityChoice.blocked.acpConnections': '有 ACP 客户端连接',
+  'capacityChoice.blocked.memoryTasks': '记忆任务运行中',
+  'capacityChoice.blocked.channelWorkers': '渠道 worker 运行中',
+  'capacityChoice.blocked.voiceSessions': '语音会话活跃',
+  'capacityChoice.blocked.management_pending': '工作区管理操作待完成',
+  'capacityChoice.blocked.scheduler_pending': '正在恢复定时任务会话',
+  'capacityChoice.blocked.enabled_scheduled_tasks': '请先禁用已启用的定时任务',
+  'capacityChoice.blocked.scheduled_tasks_unknown': '无法读取定时任务',
+  'capacityChoice.capacity': (v) => `ACP 容量：${v?.used} / ${v?.limit}`,
+  'capacityChoice.sessions': (v) => `${v?.count} 个已加载会话`,
+  'capacityChoice.queued': (v) => `${v?.count} 个排队请求`,
+  'capacityChoice.outcome': (v) =>
+    `已关闭 ${v?.closed} 个会话，剩余 ${v?.remaining} 个。`,
   'footnotes.note': (v) => `脚注 ${v?.number ?? ''}`,
   'footnotes.references': (v) => `查看 ${v?.count ?? ''} 条引用`,
   'footnotes.preview': '引用预览',
@@ -4518,6 +4688,27 @@ const ZH: Messages = {
   'live.noFallback':
     '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
+  'live.browser.connect': '在此浏览器中通话',
+  'live.browser.connecting': '正在连接麦克风…',
+  'live.browser.requirement.host': '此浏览器标签页',
+  'live.browser.requirement.runtime': 'Live 运行时',
+  'live.browser.takeOver': '在此标签页接管',
+  'live.browser.disconnect': '释放麦克风',
+  'live.browser.setupDescription':
+    '将此浏览器标签页用作实时语音的麦克风和扬声器。',
+  'live.browser.readyDescription': '此标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.otherTabDescription':
+    '另一个 Web Shell 标签页正作为实时语音的麦克风和扬声器。',
+  'live.browser.headphonesHint':
+    '建议佩戴耳机，避免回答的声音被麦克风再次收入。',
+  'live.browser.closed.occupied': '已有其他实时语音端连接。',
+  'live.browser.closed.supersededNative':
+    'Qwen Live Host 已从此标签页接管实时语音。',
+  'live.browser.closed.supersededTab':
+    '另一个 Web Shell 标签页已接管实时语音。',
+  'live.browser.closed.refused': '实时语音未开启，或此工作区不受信任。',
+  'live.browser.closed.microphone': '无法打开麦克风。',
+  'live.browser.closed.lost': '实时语音连接已断开。',
   'settings.liveShortcut.capture': '请按下快捷键',
   'settings.liveShortcut.clear': '清除',
   'settings.liveShortcut.off': '关闭',
@@ -4525,6 +4716,8 @@ const ZH: Messages = {
   'settings.liveSetup.experimental': '实验性',
   'settings.liveSetup.description':
     '在这台 Mac 的任意界面通过 Realtime 语音、Appshot 和任务交接与 Qwen 对话。',
+  'settings.liveSetup.browserDescription':
+    '通过 Realtime 语音和任务交接与 Qwen 对话，由此浏览器充当麦克风和扬声器。',
   'settings.liveSetup.enable': '启用 Qwen Live',
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
@@ -4639,6 +4832,8 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'assistant.dissatisfied': '不满意',
+  'assistant.satisfied': '满意',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',
@@ -4680,6 +4875,9 @@ const ZH: Messages = {
   'composerAdd.mcp.label': 'MCP',
   'composerAdd.mcp.empty': '没有可用的 MCP 服务',
   'composerAdd.skills.label': '技能',
+  'composerAdd.plan.label': '计划模式',
+  'composerAdd.plan.description': '先出计划，批准后再执行',
+  'composerAdd.plan.busy': '模式切换中',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -4924,12 +5122,15 @@ const ZH: Messages = {
   'contextUsage.viewDetails': '查看明细',
   'contextUsage.viewInConversation': '点击在对话中查看上下文组成。',
   'daemon.title': 'Daemon 状态',
-  'daemon.connection.title': '连接',
+  'daemon.connection.title': '远程连接',
   'daemon.connection.target': '当前目标',
   'daemon.connection.state': '连接状态',
   'daemon.connection.address': 'Daemon 地址',
   'daemon.connection.token': 'Bearer token（可选）',
   'daemon.connection.connect': '连接',
+  'daemon.connection.add': '添加连接',
+  'daemon.connection.saved': '已连接的计算机',
+  'daemon.connection.forget': (v) => `移除 ${v?.address}`,
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
@@ -4940,6 +5141,7 @@ const ZH: Messages = {
     '浏览器存储不可用，因此无法把 token 带到该 daemon。',
   'daemon.connection.status.idle': '空闲',
   'daemon.connection.status.connecting': '连接中',
+  'daemon.connection.status.adding': '添加中',
   'daemon.connection.status.connected': '已连接',
   'daemon.connection.status.error': '错误',
   'daemon.details.loading': '正在加载诊断信息...',
@@ -5604,6 +5806,21 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
+  'workspaceHost.source': '目录来源',
+  'workspaceHost.thisComputer': '这台计算机',
+  'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目录`,
+  'workspaceHost.folderOnThisComputer': '这台计算机上的目录',
+  'workspaceHost.browseHint': '请从下方选择目录，或输入绝对路径。',
+  'workspaceHost.parent': '上一级',
+  'workspaceHost.addFolder': '添加此文件夹',
+  'workspaceHost.noFolders': '此目录下没有子目录。',
+  'workspaceHost.folderListError':
+    '无法读取该计算机上的目录，请检查路径或连接状态。',
+  'workspaceHost.navigationUnavailable':
+    '浏览器存储不可用，无法安全继续添加远程目录。',
+  'workspaceHost.unsupported': '这台计算机不支持添加工作区。',
+  'workspaceHost.loadingFolders': '正在从这台计算机加载目录…',
+  'workspaceHost.connectionError': '无法从这台计算机加载工作区能力。',
   'sidebar.removeWorkspace': '移除工作区',
   'sidebar.workspaceActions': '工作区操作',
   'sidebar.renameWorkspace': '重命名…',
@@ -5624,6 +5841,7 @@ const ZH: Messages = {
   'sidebar.reloadWorkspace': '重新加载运行时',
   'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
+  'sidebar.workspacesOnHost': (v) => `${v?.host} 上的工作区`,
   'sidebar.sessionsRunning': (v) => `${v?.count ?? 0} 个会话运行中`,
   'sidebar.sessionsAttention': (v) => `${v?.count ?? 0} 个会话等待处理`,
   'sidebar.sessionsTotal': (v) =>
@@ -6570,6 +6788,7 @@ const ZH: Messages = {
     '将此提供商用于对话。配置包含当前模型时会保留当前选择。',
   'auth.purpose.image': '生图',
   'auth.purpose.voice': '语音转写',
+  'auth.purpose.realtime': '实时语音',
   'auth.purpose.imageHint':
     '支持 DashScope 或 MiniMax 兼容生图接口，请使用不含查询参数或片段的 HTTPS 地址。添加后保留当前对话模型。',
   'auth.purpose.voiceHint':
@@ -7640,6 +7859,7 @@ const ZH: Messages = {
   'settings.category.Context': '上下文',
   'settings.category.Tools': '工具',
   'settings.category.Daemon': '守护进程',
+  'settings.category.Connections': '连接',
   'settings.category.Experimental': '实验性',
   'settings.category.Advanced': '高级',
   'settings.label.general.enableAutoUpdate': '启用自动更新',

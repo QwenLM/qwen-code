@@ -15199,6 +15199,7 @@ Other open files:
         undefined,
         false,
         false,
+        { declaredTools: undefined },
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -15233,6 +15234,7 @@ Other open files:
         concise,
         false,
         false,
+        { declaredTools: undefined },
       );
     });
 
@@ -15258,6 +15260,7 @@ Other open files:
         undefined,
         false,
         true,
+        { declaredTools: undefined },
       );
     });
 
@@ -15292,6 +15295,7 @@ Other open files:
           undefined,
           false,
           false,
+          { declaredTools: undefined },
         );
       },
     );
