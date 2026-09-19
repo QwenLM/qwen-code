@@ -31,6 +31,12 @@ import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { clampInlineMediaPart } from '../core/inlineMediaLimit.js';
+import {
+  boundImageBuffer,
+  IMAGE_MAX_SOURCE_BYTES,
+  ImageViewError,
+} from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   getAllMCPServerStatuses,
@@ -697,13 +703,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, {
-          name: this.serverToolName,
-          args: this.params,
-        });
+        return await this.buildMcpToolError(
+          rawResponseParts,
+          {
+            name: this.serverToolName,
+            args: this.params,
+          },
+          signal,
+        );
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await boundInlineImageParts(
+        transformMcpContentToParts(rawResponseParts),
+        signal,
+      );
       const truncated = await this.truncateTextParts(transformedParts);
       const fallbackText = getDisplayFromPartsWithPersistedOutput(
         transformedParts,
@@ -863,10 +876,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const rawResponseParts = outcome;
 
       if (this.isMCPToolError(rawResponseParts)) {
-        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
+        return await this.buildMcpToolError(
+          rawResponseParts,
+          functionCalls[0],
+          signal,
+        );
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await boundInlineImageParts(
+        transformMcpContentToParts(rawResponseParts),
+        signal,
+      );
       const truncated = await this.truncateTextParts(transformedParts);
 
       return {
@@ -893,13 +913,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private async buildMcpToolError(
     rawResponseParts: Part[],
     functionCall: FunctionCall,
+    signal: AbortSignal,
   ): Promise<ToolResult> {
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
     let persistedOutputFiles: string[] | undefined;
     if (imageContent) {
-      const truncatedContent = await this.truncateTextParts(imageContent);
+      const truncatedContent = await this.truncateTextParts(
+        await boundInlineImageParts(imageContent, signal),
+      );
       llmContent = truncatedContent.parts;
       persistedOutputFiles = truncatedContent.persistedOutputFiles;
       errorMessage = `MCP tool '${
@@ -1282,6 +1305,58 @@ function transformImageAudioBlock(
       },
     },
   ];
+}
+
+/**
+ * Shrink oversized inline images to the same visual budget `read_file`
+ * applies, so a full-resolution screenshot from a browser automation server
+ * does not enter the conversation verbatim. Images that already fit, and any
+ * the renderer cannot handle, are forwarded unchanged.
+ */
+async function boundInlineImageParts(
+  parts: Part[],
+  signal: AbortSignal,
+): Promise<Part[]> {
+  const boundedParts: Part[] = [];
+  for (const part of parts) {
+    const inline = part.inlineData;
+    if (!inline?.data || !inline.mimeType?.startsWith('image/')) {
+      boundedParts.push(part);
+      continue;
+    }
+    const sourceLimitedPart = clampInlineMediaPart(
+      part,
+      IMAGE_MAX_SOURCE_BYTES,
+    );
+    if (sourceLimitedPart !== part) {
+      boundedParts.push(sourceLimitedPart);
+      continue;
+    }
+    let boundedPart = part;
+    try {
+      const view = await boundImageBuffer(
+        Buffer.from(inline.data, 'base64'),
+        inline.mimeType,
+        signal,
+      );
+      if (view) {
+        boundedPart = {
+          inlineData: {
+            ...inline,
+            data: view.bytes.toString('base64'),
+            mimeType: view.mimeType,
+          },
+        };
+      }
+    } catch (error) {
+      if (!(error instanceof ImageViewError)) {
+        throw error;
+      }
+      debugLogger.debug(`Unable to bound MCP image: ${getErrorMessage(error)}`);
+    }
+    boundedParts.push(clampInlineMediaPart(boundedPart));
+  }
+  return boundedParts;
 }
 
 function transformResourceBlock(

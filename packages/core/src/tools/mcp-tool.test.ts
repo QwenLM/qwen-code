@@ -5,6 +5,7 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import sharp from 'sharp';
 import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
@@ -30,6 +31,8 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../utils/invocation-context.js';
+import * as imageView from '../utils/image-view.js';
+import * as inlineMediaLimit from '../core/inlineMediaLimit.js';
 
 vi.mock('node:fs/promises');
 
@@ -278,6 +281,7 @@ describe('DiscoveredMCPTool', () => {
   afterEach(() => {
     removeMCPServerStatus(serverName);
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('constructor', () => {
@@ -722,6 +726,216 @@ describe('DiscoveredMCPTool', () => {
       expect(toolResult.returnDisplay).toBe(
         `First part.\n[Tool '${serverToolName}' provided the following image data with mime-type: image/jpeg]\n[image/jpeg]\nSecond part.`,
       );
+    });
+
+    it('bounds an oversized image returned by an MCP tool', async () => {
+      const oversized = await sharp({
+        create: {
+          width: 3840,
+          height: 2160,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .png()
+        .toBuffer();
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                {
+                  type: 'image',
+                  data: oversized.toString('base64'),
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const invocation = tool.build({ param: 'screenshot' });
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      const parts = toolResult.llmContent as Part[];
+      const inline = parts[1]!.inlineData!;
+      expect(inline.mimeType).toBe('image/jpeg');
+      const bounded = await sharp(
+        Buffer.from(inline.data!, 'base64'),
+      ).metadata();
+      expect(Math.max(bounded.width, bounded.height)).toBeLessThanOrEqual(1568);
+      expect(
+        Math.ceil(bounded.width / 28) * Math.ceil(bounded.height / 28),
+      ).toBeLessThanOrEqual(1568);
+    });
+
+    it('bounds images sequentially', async () => {
+      const mockBoundImageBuffer = vi.spyOn(imageView, 'boundImageBuffer');
+      let releaseFirst!: () => void;
+      const first = new Promise<null>((resolve) => {
+        releaseFirst = () => resolve(null);
+      });
+      mockBoundImageBuffer
+        .mockImplementationOnce(() => first)
+        .mockResolvedValueOnce(null);
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [
+                { type: 'image', data: 'first', mimeType: 'image/png' },
+                { type: 'image', data: 'second', mimeType: 'image/png' },
+              ],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const execution = tool
+        .build({ param: 'screenshots' })
+        .execute(new AbortController().signal);
+      await vi.waitFor(() => expect(mockBoundImageBuffer).toHaveBeenCalled());
+      const callsBeforeRelease = mockBoundImageBuffer.mock.calls.length;
+      releaseFirst();
+      await execution;
+      expect(callsBeforeRelease).toBe(1);
+      expect(mockBoundImageBuffer).toHaveBeenCalledTimes(2);
+    });
+
+    it('omits an image over the source limit before decoding it', async () => {
+      const omitted = { text: '[Media omitted]' };
+      const clamp = vi
+        .spyOn(inlineMediaLimit, 'clampInlineMediaPart')
+        .mockReturnValueOnce(omitted);
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      const image = {
+        inlineData: { mimeType: 'image/png', data: 'oversized' },
+      };
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: { content: [{ type: 'image', ...image.inlineData }] },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      expect(clamp).toHaveBeenCalledWith(
+        image,
+        imageView.IMAGE_MAX_SOURCE_BYTES,
+      );
+      expect(bound).not.toHaveBeenCalled();
+      expect(result.llmContent).toEqual([
+        {
+          text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
+        },
+        omitted,
+      ]);
+    });
+
+    it.each(['already fits', 'renderer rejects'] as const)(
+      'applies the inline media limit when an image %s',
+      async (outcome) => {
+        vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+        const bound = vi.spyOn(imageView, 'boundImageBuffer');
+        if (outcome === 'already fits') {
+          bound.mockResolvedValueOnce(null);
+        } else {
+          bound.mockRejectedValueOnce(
+            new imageView.ImageViewError('decode_failed', 'failed to decode'),
+          );
+        }
+        mockCallTool.mockResolvedValue([
+          {
+            functionResponse: {
+              name: serverToolName,
+              response: {
+                content: [
+                  { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+                ],
+              },
+            },
+          },
+        ] as Part[]);
+
+        const result = await tool
+          .build({ param: 'screenshot' })
+          .execute(new AbortController().signal);
+
+        expect(result.llmContent).toEqual([
+          {
+            text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
+          },
+          {
+            text: expect.stringContaining('[Media omitted: image/png'),
+          },
+        ]);
+      },
+    );
+
+    it('leaves an in-budget image from an MCP tool untouched', async () => {
+      const small = await sharp({
+        create: { width: 200, height: 100, channels: 4, background: '#204080' },
+      })
+        .png()
+        .toBuffer();
+      const data = small.toString('base64');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', data, mimeType: 'image/png' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const invocation = tool.build({ param: 'icon' });
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      const parts = toolResult.llmContent as Part[];
+      expect(parts[1]!.inlineData).toEqual({ mimeType: 'image/png', data });
+    });
+
+    it('forwards an image the renderer cannot bound unchanged', async () => {
+      const animated = await sharp({
+        create: {
+          width: 3840,
+          height: 2160,
+          channels: 3,
+          background: '#204080',
+        },
+      })
+        .gif()
+        .toBuffer();
+      const data = animated.toString('base64');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', data, mimeType: 'image/gif' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const invocation = tool.build({ param: 'gif' });
+      const toolResult = await invocation.execute(new AbortController().signal);
+
+      const parts = toolResult.llmContent as Part[];
+      expect(parts[1]!.inlineData).toEqual({
+        mimeType: 'image/gif',
+        data,
+      });
     });
 
     it('should ignore unknown content block types', async () => {
