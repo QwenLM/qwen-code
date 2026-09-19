@@ -184,6 +184,35 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.thinkingMandatory).toBeUndefined();
     });
+
+    it('does not inherit toolParametersMandatory onto another baseUrl', () => {
+      const config = createMockConfig({
+        ...parentConfig,
+        toolParametersMandatory: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'openai',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+      });
+
+      expect(result.baseUrl).toBe('http://127.0.0.1:8080/v1');
+      expect(result.toolParametersMandatory).toBeUndefined();
+    });
+
+    it('keeps toolParametersMandatory when the baseUrl is unchanged', () => {
+      const config = createMockConfig({
+        ...parentConfig,
+        toolParametersMandatory: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'openai',
+      });
+
+      expect(result.baseUrl).toBe('https://parent.example.com');
+      expect(result.toolParametersMandatory).toBe(true);
+    });
   });
 
   describe('cross-provider, no registry match', () => {
@@ -381,6 +410,72 @@ describe('buildAgentContentGeneratorConfig', () => {
       );
 
       expect(result.enableRequestMetadata).toBeUndefined();
+    });
+
+    it('does not inherit toolParametersMandatory onto another route', () => {
+      // A per-route wire shape: an inherited true pushes the empty-object
+      // schema at an endpoint that rejects it, so a side model on its own
+      // baseUrl loses the parent's opt-in.
+      const config = createMockConfig(
+        { ...parentConfig, toolParametersMandatory: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+          baseUrl: 'https://side.example.com',
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.baseUrl).toBe('https://side.example.com');
+      expect(result.toolParametersMandatory).toBeUndefined();
+    });
+
+    it('keeps toolParametersMandatory on the parent route', () => {
+      const config = createMockConfig(
+        { ...parentConfig, toolParametersMandatory: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+          baseUrl: parentConfig.baseUrl,
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.baseUrl).toBe(parentConfig.baseUrl);
+      expect(result.toolParametersMandatory).toBe(true);
+    });
+
+    it('lets a side entry declare its own toolParametersMandatory', () => {
+      const config = createMockConfig(
+        { ...parentConfig, toolParametersMandatory: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+          baseUrl: 'https://side.example.com',
+          generationConfig: {
+            ...resolvedModel.generationConfig,
+            toolParametersMandatory: false,
+          },
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.toolParametersMandatory).toBe(false);
     });
 
     it.each(['image', 'voice'] as const)(
