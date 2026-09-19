@@ -101,7 +101,9 @@ export class BuiltinCommandLoader implements ICommandLoader {
     // prevent ALL built-in commands from loading.
     let resolvedIdeCommand: SlashCommand | null = null;
     try {
-      resolvedIdeCommand = await ideCommand();
+      if (!this.config?.getShellExecutionSandbox?.()) {
+        resolvedIdeCommand = await ideCommand();
+      }
     } catch (error) {
       builtinDebugLogger.warn(
         'Failed to load IDE command:',

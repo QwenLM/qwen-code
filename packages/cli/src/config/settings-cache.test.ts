@@ -269,7 +269,7 @@ describe('loadSettingsCached', () => {
     fs.writeFileSync(userSettingsPath(), '[1]');
 
     expect(() => loadSettingsCached(workspaceDir)).toThrow(
-      /not a valid JSON object/,
+      /Cannot read operator sandbox policy/,
     );
 
     writeJson(userSettingsPath(), versioned({ model: { name: 'fixed' } }));
