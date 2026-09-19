@@ -5,12 +5,21 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { lstat, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import path from 'node:path';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
 import type { ManagedWorkerBoot } from './managed-runtime-activator.js';
 
 const MANAGED_WORKER_BOOT_MAX_BYTES = 32_768;
 const MANAGED_WORKER_READY_MAX_BYTES = 8_192;
+export const MANAGED_WORKER_BOOT_ENV = 'QWEN_MANAGED_RUNTIME_BOOT';
 
 const IPC_BOOT_KEYS = [
   'type',
@@ -26,6 +35,11 @@ const IPC_BOOT_KEYS = [
   'cliEntry',
 ] as const;
 const FILE_BOOT_KEYS = [...IPC_BOOT_KEYS, 'runtimeInstanceId'] as const;
+const REMOTE_FILE_BOOT_KEYS = [
+  ...FILE_BOOT_KEYS,
+  'listenHostname',
+  'listenPort',
+] as const;
 const FILE_READY_KEYS = [
   'type',
   'version',
@@ -41,6 +55,8 @@ const FILE_READY_KEYS = [
 
 export interface ManagedWorkerFileBoot extends ManagedWorkerBoot {
   readonly runtimeInstanceId: string;
+  readonly listenHostname?: '0.0.0.0';
+  readonly listenPort?: number;
 }
 
 interface ManagedWorkerFileReady {
@@ -58,6 +74,7 @@ interface ManagedWorkerFileReady {
 
 type ManagedWorkerStartup =
   | { readonly kind: 'ipc' }
+  | { readonly kind: 'environment' }
   | {
       readonly kind: 'file';
       readonly bootConfigPath: string;
@@ -68,6 +85,9 @@ export function parseManagedWorkerStartup(
   argumentsList: readonly string[],
 ): ManagedWorkerStartup {
   if (argumentsList.length === 0) return { kind: 'ipc' };
+  if (argumentsList.length === 1 && argumentsList[0] === '--boot-env') {
+    return { kind: 'environment' };
+  }
   if (
     argumentsList.length !== 4 ||
     argumentsList[0] !== '--boot-config' ||
@@ -102,6 +122,30 @@ export function parseManagedWorkerStartup(
   };
 }
 
+export function readManagedWorkerBootEnvironment(
+  environment: NodeJS.ProcessEnv,
+): ManagedWorkerFileBoot {
+  const raw = environment[MANAGED_WORKER_BOOT_ENV];
+  delete environment[MANAGED_WORKER_BOOT_ENV];
+  if (!raw || Buffer.byteLength(raw) > MANAGED_WORKER_BOOT_MAX_BYTES) {
+    throw new Error('Managed Runtime boot environment is invalid.');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('Managed Runtime boot environment is invalid.');
+  }
+  if (
+    !isManagedWorkerFileBoot(parsed) ||
+    !parsed.listenHostname ||
+    parsed.listenPort === undefined
+  ) {
+    throw new Error('Managed Runtime boot environment is invalid.');
+  }
+  return parsed;
+}
+
 export function isManagedWorkerBoot(
   value: unknown,
 ): value is ManagedWorkerBoot {
@@ -111,7 +155,15 @@ export function isManagedWorkerBoot(
 function isManagedWorkerFileBoot(
   value: unknown,
 ): value is ManagedWorkerFileBoot {
-  return validBoot(value, FILE_BOOT_KEYS);
+  if (validBoot(value, FILE_BOOT_KEYS)) return true;
+  if (!validBoot(value, REMOTE_FILE_BOOT_KEYS)) return false;
+  const boot = value as unknown as Record<string, unknown>;
+  return (
+    boot['listenHostname'] === '0.0.0.0' &&
+    Number.isSafeInteger(boot['listenPort']) &&
+    (boot['listenPort'] as number) > 0 &&
+    (boot['listenPort'] as number) <= 65_535
+  );
 }
 
 export async function readManagedWorkerBootConfig(
@@ -134,11 +186,28 @@ export async function readManagedWorkerBootConfig(
   return parsed;
 }
 
+export async function validateManagedWorkerBootWorkspace(
+  boot: ManagedWorkerBoot | ManagedWorkerFileBoot,
+): Promise<void> {
+  let canonicalWorkspace: string;
+  try {
+    canonicalWorkspace = await realpath(boot.workspaceCwd);
+  } catch {
+    throw new Error('Managed Runtime workspace identity is invalid.');
+  }
+  if (
+    canonicalWorkspace !== path.resolve(boot.workspaceCwd) ||
+    boot.workspaceId !== hashDaemonWorkspace(canonicalWorkspace)
+  ) {
+    throw new Error('Managed Runtime workspace identity is invalid.');
+  }
+}
+
 export function createManagedWorkerReadyRecord(
   boot: ManagedWorkerFileBoot,
   url: string,
 ): ManagedWorkerFileReady {
-  requireLoopbackOrigin(url);
+  const readyUrl = readyRecordUrl(boot, url);
   return {
     type: 'ready',
     version: 1,
@@ -149,7 +218,7 @@ export function createManagedWorkerReadyRecord(
     tenantId: boot.tenantId,
     workspaceId: boot.workspaceId,
     workspaceCwd: boot.workspaceCwd,
-    url,
+    url: readyUrl,
   };
 }
 
@@ -324,8 +393,27 @@ function serializedBytes(value: unknown): number {
   }
 }
 
-function requireLoopbackOrigin(value: string): void {
-  if (!validLoopbackOrigin(value)) {
+function readyRecordUrl(boot: ManagedWorkerFileBoot, value: string): string {
+  if (validLoopbackOrigin(value)) return value;
+  if (!boot.listenHostname) {
+    throw new Error('Managed Runtime endpoint is invalid.');
+  }
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== 'http:' ||
+      url.hostname !== boot.listenHostname ||
+      Number(url.port) !== boot.listenPort ||
+      url.pathname !== '/' ||
+      url.search ||
+      url.hash ||
+      url.username ||
+      url.password
+    ) {
+      throw new Error('Managed Runtime endpoint is invalid.');
+    }
+    return `http://127.0.0.1:${url.port}`;
+  } catch {
     throw new Error('Managed Runtime endpoint is invalid.');
   }
 }

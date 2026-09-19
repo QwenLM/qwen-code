@@ -10,6 +10,8 @@ import {
   isManagedWorkerBoot,
   parseManagedWorkerStartup,
   readManagedWorkerBootConfig,
+  readManagedWorkerBootEnvironment,
+  validateManagedWorkerBootWorkspace,
   writeManagedWorkerReadyRecord,
   type ManagedWorkerFileBoot,
 } from './managed-runtime-worker-bootstrap.js';
@@ -55,10 +57,11 @@ process.once('error', () => {
   void close();
 });
 async function start(
-  boot: ManagedWorkerBoot,
+  boot: ManagedWorkerBoot | ManagedWorkerFileBoot,
   publishReady: (url: string) => Promise<void>,
 ): Promise<void> {
   clearTimeout(bootTimer);
+  await validateManagedWorkerBootWorkspace(boot);
   process.env['QWEN_RUNTIME_DIR'] = boot.outputRoot;
   process.env['QWEN_CLI_ENTRY'] = boot.cliEntry;
   const { runQwenServe } = await import('./run-qwen-serve.js');
@@ -66,8 +69,11 @@ async function start(
   handle = await runQwenServe(
     {
       mode: 'http-bridge',
-      hostname: '127.0.0.1',
-      port: 0,
+      hostname:
+        'listenHostname' in boot
+          ? (boot.listenHostname ?? '127.0.0.1')
+          : '127.0.0.1',
+      port: 'listenPort' in boot ? (boot.listenPort ?? 0) : 0,
       workspace: boot.workspaceCwd,
       token: boot.token,
       requireAuth: true,
@@ -77,7 +83,7 @@ async function start(
     {
       ownedManagedRuntime: boot,
       preheatBridge: false,
-      ...(startup.kind === 'file' ? { trustedWorkspace: true } : {}),
+      ...(startup.kind !== 'ipc' ? { trustedWorkspace: true } : {}),
       daemonLogBaseDir: path.join(boot.outputRoot, 'debug'),
     },
   );
@@ -87,7 +93,7 @@ async function start(
 }
 
 function begin(
-  boot: ManagedWorkerBoot,
+  boot: ManagedWorkerBoot | ManagedWorkerFileBoot,
   publishReady: (url: string) => Promise<void>,
 ): void {
   if (starting || closing) {
@@ -147,6 +153,13 @@ if (startup.kind === 'ipc') {
   if (!process.connected) void close(1);
 } else if (process.connected) {
   void close(1);
+} else if (startup.kind === 'environment') {
+  try {
+    const boot = readManagedWorkerBootEnvironment(process.env);
+    begin(boot, async () => {});
+  } catch {
+    void close(1);
+  }
 } else {
   void readManagedWorkerBootConfig(startup.bootConfigPath)
     .then((boot) => {
