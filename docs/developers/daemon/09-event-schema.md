@@ -21,14 +21,14 @@ Grouped by domain.
 
 ### Core session
 
-| Type                         | Direction      | Trigger                                                                               | Key payload fields                                                                                           |
-| ---------------------------- | -------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `session_update`             | S->C           | Any ACP `sessionUpdate` notification: agent text, thought, tool call, or plan         | `sessionUpdate: string, content?: ...` (opaque ACP shape)                                                    |
-| `session_metadata_updated`   | S->C           | `PATCH /session/:id/metadata`                                                         | `sessionId, displayName?`                                                                                    |
-| `session_died`               | S->C terminal  | `channel.exited`                                                                      | `sessionId, reason, exitCode? \| null, signalCode? \| null`                                                  |
-| `session_closed`             | S->C terminal  | `DELETE /session/:id` or programmatic close                                           | `sessionId, reason: 'client_close' \| string, closedBy?`                                                     |
-| `session_snapshot`           | S->C synthetic | Snapshot frame after SSE attach / replay                                              | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null, recordingDegraded: boolean` |
-| `session_recording_degraded` | S->C           | The session transcript writer permanently stopped after an asynchronous write failure | `sessionId, reason: 'write_failed'`                                                                          |
+| Type                         | Direction      | Trigger                                                                               | Key payload fields                                                                                                                |
+| ---------------------------- | -------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `session_update`             | S->C           | Any ACP `sessionUpdate` notification: agent text, thought, tool call, or plan         | `sessionUpdate: string, content?: ...` (opaque ACP shape)                                                                         |
+| `session_metadata_updated`   | S->C           | `PATCH /session/:id/metadata`                                                         | `sessionId, displayName?`                                                                                                         |
+| `session_died`               | S->C terminal  | Unexpected `channel.exited` outside a workspace stop                                  | `sessionId, reason, exitCode? \| null, signalCode? \| null`                                                                       |
+| `session_closed`             | S->C terminal  | `DELETE /session/:id`, programmatic close, or confirmed workspace runtime stop        | `sessionId, reason: 'client_close' \| string, closedBy?, cause?, persistenceUnconfirmed?, exitCode? \| null, signalCode? \| null` |
+| `session_snapshot`           | S->C synthetic | Snapshot frame after SSE attach / replay                                              | `sessionId, currentModelId: string \| null, currentApprovalMode: string \| null, recordingDegraded: boolean`                      |
+| `session_recording_degraded` | S->C           | The session transcript writer permanently stopped after an asynchronous write failure | `sessionId, reason: 'write_failed'`                                                                                               |
 
 ### Subscriber-level synthetic frames
 

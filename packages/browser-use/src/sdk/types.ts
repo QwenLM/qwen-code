@@ -10,6 +10,7 @@ import type {
   BrowserInfo,
   BrowserSelectOption,
   BrowserUserTabInfo,
+  FinalizeTabStatus,
   LogEntry,
   TabInfo,
 } from '../core/primitives.js';
@@ -20,6 +21,7 @@ export type {
   BrowserInfo,
   BrowserSelectOption,
   BrowserUserTabInfo,
+  FinalizeTabStatus,
   LogEntry,
   TabInfo,
 } from '../core/primitives.js';
@@ -366,11 +368,19 @@ export interface BrowserTab {
   getJsDialog(): Promise<BrowserDialog | undefined>;
 }
 
+export interface FinalizeTabsOptions {
+  keep?: ReadonlyArray<{
+    tab: string | BrowserTab | TabInfo;
+    status: FinalizeTabStatus;
+  }>;
+}
+
 export interface BrowserTabs {
   new: () => Promise<BrowserTab>;
   list(): Promise<TabInfo[]>;
   get(tabId: string): Promise<BrowserTab>;
   selected(): Promise<BrowserTab | undefined>;
+  finalize(options: FinalizeTabsOptions): Promise<void>;
 }
 
 export interface BrowserHistoryOptions {

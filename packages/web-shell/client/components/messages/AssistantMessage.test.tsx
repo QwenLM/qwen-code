@@ -686,3 +686,132 @@ describe('AssistantMessage copy without the async Clipboard API (issue #9485)', 
     }
   });
 });
+
+describe('AssistantMessage satisfied / not-satisfied marks', () => {
+  const find = (container: HTMLElement, title: string) =>
+    container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+
+  it('offers no marks unless the host opts in', () => {
+    const container = render(
+      <AssistantMessage content="answer" showFooterActions />,
+    );
+    expect(find(container, 'Satisfied')).toBeNull();
+    expect(find(container, 'Not satisfied')).toBeNull();
+  });
+
+  it('offers both marks and marks the pressed one', () => {
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="up"
+      />,
+    );
+    expect(find(container, 'Satisfied')?.getAttribute('aria-pressed')).toBe(
+      'true',
+    );
+    expect(find(container, 'Not satisfied')?.getAttribute('aria-pressed')).toBe(
+      'false',
+    );
+  });
+
+  it('releases focus after a pointer click but keeps it for keyboard activation', () => {
+    const onRate = vi.fn();
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+        onAssistantFeedbackRate={onRate}
+      />,
+    );
+    const button = find(container, 'Satisfied')!;
+    act(() => button.focus());
+    expect(document.activeElement).toBe(button);
+
+    // Keyboard activation: focus stays, so the hover-only row is still
+    // reachable from the keyboard.
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(document.activeElement).toBe(button);
+
+    // Pointer click: a focused button would hold the row open through
+    // `:focus-within` after the pointer leaves.
+    act(() => {
+      button.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    expect(document.activeElement).not.toBe(button);
+    expect(onRate).toHaveBeenCalledTimes(2);
+  });
+
+  it('colours the mark by direction', () => {
+    const unmarked = render(
+      <AssistantMessage content="a1" showFooterActions showAssistantFeedback />,
+    );
+    expect(find(unmarked, 'Satisfied')?.className).toContain('feedbackButton');
+    expect(find(unmarked, 'Satisfied')?.className).not.toContain(
+      'feedbackButtonActiveUp',
+    );
+
+    const satisfied = render(
+      <AssistantMessage
+        content="a2"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="up"
+      />,
+    );
+    expect(find(satisfied, 'Satisfied')?.className).toContain(
+      'feedbackButtonActiveUp',
+    );
+    expect(find(satisfied, 'Not satisfied')?.className).not.toContain(
+      'feedbackButtonActiveDown',
+    );
+
+    const dissatisfied = render(
+      <AssistantMessage
+        content="a3"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="down"
+      />,
+    );
+    expect(find(dissatisfied, 'Not satisfied')?.className).toContain(
+      'feedbackButtonActiveDown',
+    );
+  });
+
+  it('reports the click to the host, and a repeat as a clear', () => {
+    const onRate = vi.fn();
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+        assistantFeedbackRating="down"
+        onAssistantFeedbackRate={onRate}
+      />,
+    );
+    act(() => find(container, 'Not satisfied')?.click());
+    expect(onRate).toHaveBeenCalledWith(null);
+    act(() => find(container, 'Satisfied')?.click());
+    expect(onRate).toHaveBeenLastCalledWith('up');
+  });
+
+  it('translates the mark titles', () => {
+    const container = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        showAssistantFeedback
+      />,
+      'zh-CN',
+    );
+    expect(find(container, '满意')).not.toBeNull();
+    expect(find(container, '不满意')).not.toBeNull();
+  });
+});
