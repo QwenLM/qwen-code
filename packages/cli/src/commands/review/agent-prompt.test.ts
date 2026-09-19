@@ -3548,8 +3548,13 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // reader is told that rule, and — when the tree is actually dirty at build
     // time — which paths to distrust.
     const clean = buildRoleBrief(PR_PLAN, '1a');
+    const sourceRoot = resolve(PR_PLAN.worktreePath);
     expect(clean).toContain(
       'Your working directory is a SHARED review worktree',
+    );
+    expect(clean).toContain(`Repository source root:** \`${sourceRoot}\``);
+    expect(clean).toContain(
+      "The diff artifact's directory is evidence storage, not a source-tree root",
     );
     expect(clean).toContain('`git show HEAD:<path>`');
     expect(clean).not.toContain('And right now it is not clean');
@@ -3612,39 +3617,62 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(buildRoleBrief(PR_PLAN, 'verify')).toContain(
       'Your working directory is a SHARED review worktree',
     );
-    expect(
-      buildChunkAgentPrompt({ ...PLAN, ...PR_PLAN }, 13, undefined, {
+    expect(buildRoleBrief(PR_PLAN, 'verify')).toContain(
+      `Repository source root:** \`${sourceRoot}\``,
+    );
+    const chunk = buildChunkAgentPrompt(
+      { ...PLAN, ...PR_PLAN },
+      13,
+      undefined,
+      {
         paths: ['x.ts'],
         total: 1,
-      }),
-    ).toContain('And right now it is not clean');
+      },
+    );
+    expect(chunk).toContain('And right now it is not clean');
+    expect(chunk).toContain(`Repository source root:** \`${sourceRoot}\``);
 
     // Agent 8's whole-diff block is built outside `buildLaunch` — the one
     // launch class that reads the shared tree and used to get neither the rule
     // nor the paths.
-    expect(
-      buildWholeDiffBlock({ ...PLAN, ...PR_PLAN }, undefined, {
-        paths: ['x.ts'],
-        total: 1,
-      }),
-    ).toContain('And right now it is not clean');
+    const wholeDiff = buildWholeDiffBlock({ ...PLAN, ...PR_PLAN }, undefined, {
+      paths: ['x.ts'],
+      total: 1,
+    });
+    expect(wholeDiff).toContain('And right now it is not clean');
+    expect(wholeDiff).toContain(`Repository source root:** \`${sourceRoot}\``);
     expect(buildWholeDiffBlock({ ...PLAN, ...PR_PLAN })).toContain(
       'Your working directory is a SHARED review worktree',
+    );
+    expect(buildWholeDiffBlock({ ...PLAN, ...PR_PLAN })).toContain(
+      `Repository source root:** \`${sourceRoot}\``,
     );
     expect(buildWholeDiffBlock(PLAN)).not.toContain(
       'Your working directory is a SHARED review worktree',
     );
+    expect(buildWholeDiffBlock(PLAN)).not.toContain('Repository source root:');
 
     // Not for a review with no worktree: there the working tree is the user's
     // own, and its uncommitted changes may be the very thing under review.
     expect(buildRoleBrief(PLAN, '1a')).not.toContain(
       'Your working directory is a SHARED review worktree',
     );
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain('Repository source root:');
     // The RULE is still not Agent 7's: it runs commands, it does not judge code.
     expect(buildRoleBrief(PR_PLAN, '7')).not.toContain(
       'Your working directory is a SHARED review worktree',
     );
+    expect(buildRoleBrief(PR_PLAN, '7')).not.toContain(
+      'Repository source root:',
+    );
     expect(buildRoleBrief(PR_PLAN, '7')).not.toContain('it is not clean');
+
+    expect(
+      buildRoleBrief(
+        { ...PR_PLAN, worktreePath: '.qwen/tmp/review\u001b[31m-pr' },
+        '1a',
+      ),
+    ).not.toContain('\u001b');
   });
 
   it('prints the worktree absolute path so agents do not read the main checkout', () => {
