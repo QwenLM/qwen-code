@@ -1,4 +1,4 @@
-import type { DaemonManagedSessionSummary } from '@qwen-code/sdk/daemon';
+import type { ManagedAgentSessionSummary } from './managed-agent-provider';
 import { useSharedNow } from '../../hooks/useSharedNow';
 import { useI18n } from '../../i18n';
 import { Spinner } from '../ui/spinner';
@@ -8,7 +8,7 @@ export function ManagedSessionProgress({
   submitting,
   loading,
 }: {
-  summary?: DaemonManagedSessionSummary;
+  summary?: ManagedAgentSessionSummary;
   submitting: boolean;
   loading: boolean;
 }) {

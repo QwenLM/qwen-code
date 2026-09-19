@@ -1,10 +1,10 @@
-import type { DaemonManagedSessionEvent } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
+import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 
 export function mergeManagedEvents(
-  current: readonly DaemonManagedSessionEvent[],
-  incoming: readonly DaemonManagedSessionEvent[],
-): DaemonManagedSessionEvent[] {
+  current: readonly ManagedAgentSessionEvent[],
+  incoming: readonly ManagedAgentSessionEvent[],
+): ManagedAgentSessionEvent[] {
   return [
     ...new Map(
       [...current, ...incoming].map((event) => [event.id, event]),
@@ -19,7 +19,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 export function managedEventsToMessages(
-  events: readonly DaemonManagedSessionEvent[],
+  events: readonly ManagedAgentSessionEvent[],
   truncatedLabel: string,
 ): Message[] {
   const messages: Message[] = [];
@@ -27,7 +27,7 @@ export function managedEventsToMessages(
   let textMessage:
     | Extract<Message, { role: 'assistant' | 'thinking' }>
     | undefined;
-  let currentPromptId: string | undefined;
+  let currentTurnId: string | undefined;
   const settle = () => {
     for (const message of messages) {
       if (message.role === 'assistant' || message.role === 'thinking') {
@@ -37,12 +37,12 @@ export function managedEventsToMessages(
     textMessage = undefined;
   };
   for (const event of events) {
-    if (event.promptId !== currentPromptId) {
+    if (event.turnId !== currentTurnId) {
       settle();
-      currentPromptId = event.promptId;
+      currentTurnId = event.turnId;
     }
     const data = record(event.data);
-    const id = `managed:${event.sessionId}:${event.promptId}:${event.id}`;
+    const id = `managed:${event.sessionId}:${event.turnId}:${event.id}`;
     if (event.type === 'accepted') {
       const prompt = Array.isArray(data['prompt']) ? data['prompt'] : [];
       const images = prompt.flatMap((value: unknown) => {
@@ -93,7 +93,7 @@ export function managedEventsToMessages(
       settle();
       const callId = data['toolCallId'];
       if (typeof callId !== 'string') continue;
-      const key = `${event.promptId}:${callId}`;
+      const key = `${event.turnId}:${callId}`;
       let tool = tools.get(key);
       if (!tool) {
         tool = {

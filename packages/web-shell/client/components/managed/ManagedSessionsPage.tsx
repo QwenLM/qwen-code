@@ -1,8 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  DaemonHttpError,
-  type DaemonManagedSessionSummary,
-} from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
@@ -16,6 +12,11 @@ import {
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
+import {
+  createDaemonManagedAgentProvider,
+  type ManagedAgentProvider,
+  type ManagedAgentSessionSummary,
+} from './managed-agent-provider';
 
 interface PendingPrompt {
   idempotencyKey: string;
@@ -56,7 +57,53 @@ function persistPending(key: string, value: PendingPrompt | undefined): void {
   }
 }
 
+function isNonRetryableClientError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('status' in error)) {
+    return false;
+  }
+  const status = (error as { status?: unknown }).status;
+  return (
+    typeof status === 'number' &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 408 &&
+    status !== 429
+  );
+}
+
 export function ManagedSessionsPage({
+  sessionId,
+  onSelectSession,
+  workspaceCwd,
+  managedAgentProvider,
+}: {
+  sessionId?: string;
+  onSelectSession: (sessionId: string | undefined) => void;
+  workspaceCwd?: string;
+  managedAgentProvider?: ManagedAgentProvider;
+}) {
+  if (managedAgentProvider) {
+    return (
+      <ManagedSessionsContent
+        sessionId={sessionId}
+        onSelectSession={onSelectSession}
+        workspaceCwd={workspaceCwd}
+        provider={managedAgentProvider}
+        enabled
+        cancellationEnabled={managedAgentProvider.canCancel}
+      />
+    );
+  }
+  return (
+    <DaemonManagedSessionsPage
+      sessionId={sessionId}
+      onSelectSession={onSelectSession}
+      workspaceCwd={workspaceCwd}
+    />
+  );
+}
+
+function DaemonManagedSessionsPage({
   sessionId,
   onSelectSession,
   workspaceCwd,
@@ -65,25 +112,58 @@ export function ManagedSessionsPage({
   onSelectSession: (sessionId: string | undefined) => void;
   workspaceCwd?: string;
 }) {
-  const { t } = useI18n();
   const { client, baseUrl, capabilities } = useWorkspace();
-  const clientId = useMemo(() => getManagedClientId(baseUrl), [baseUrl]);
-  const enabled = capabilities?.features?.includes('managed_sessions') === true;
-  const cancellationEnabled =
-    capabilities?.features?.includes('managed_session_cancel') === true;
+  const provider = useMemo(
+    () => createDaemonManagedAgentProvider(client, baseUrl),
+    [client, baseUrl],
+  );
+  return (
+    <ManagedSessionsContent
+      sessionId={sessionId}
+      onSelectSession={onSelectSession}
+      workspaceCwd={workspaceCwd}
+      provider={provider}
+      enabled={capabilities?.features?.includes('managed_sessions') === true}
+      cancellationEnabled={
+        capabilities?.features?.includes('managed_session_cancel') === true
+      }
+    />
+  );
+}
+
+function ManagedSessionsContent({
+  sessionId,
+  onSelectSession,
+  workspaceCwd,
+  provider,
+  enabled,
+  cancellationEnabled,
+}: {
+  sessionId?: string;
+  onSelectSession: (sessionId: string | undefined) => void;
+  workspaceCwd?: string;
+  provider: ManagedAgentProvider;
+  enabled: boolean;
+  cancellationEnabled: boolean;
+}) {
+  const { t } = useI18n();
+  const clientId = useMemo(
+    () => getManagedClientId(provider.storageKey),
+    [provider.storageKey],
+  );
   const detail = useManagedSession(
-    client,
+    provider,
     clientId,
     enabled ? sessionId : undefined,
   );
-  const [sessions, setSessions] = useState<DaemonManagedSessionSummary[]>([]);
+  const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
   const [listRevision, setListRevision] = useState(0);
   const [error, setError] = useState<string>();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
-  const pendingKey = `qwen-managed-pending:${baseUrl}:${clientId}`;
+  const pendingKey = `qwen-managed-pending:${provider.storageKey}:${clientId}`;
   const [pending, setPending] = useState<PendingPrompt | undefined>(() =>
     readPending(pendingKey),
   );
@@ -116,10 +196,10 @@ export function ManagedSessionsPage({
     setNextCursor(undefined);
     if (!enabled) return () => abort.abort();
     setListLoading(true);
-    void client
-      .listManagedSessions({
+    void provider
+      .listSessions({
         clientId,
-        cwd: workspaceCwd,
+        workspaceCwd: provider.acceptsWorkspaceCwd ? workspaceCwd : undefined,
         limit: 50,
         signal: abort.signal,
       })
@@ -138,7 +218,7 @@ export function ManagedSessionsPage({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [client, clientId, enabled, workspaceCwd, listRevision]);
+  }, [provider, clientId, enabled, workspaceCwd, listRevision]);
 
   const reloadSession = detail.reload;
   const refresh = useCallback(() => {
@@ -154,9 +234,9 @@ export function ManagedSessionsPage({
     listBusy.current = true;
     setListLoading(true);
     try {
-      const page = await client.listManagedSessions({
+      const page = await provider.listSessions({
         clientId,
-        cwd: workspaceCwd,
+        workspaceCwd: provider.acceptsWorkspaceCwd ? workspaceCwd : undefined,
         cursor: nextCursor,
         limit: 50,
         signal: abort.signal,
@@ -205,13 +285,19 @@ export function ManagedSessionsPage({
         idempotencyKey: attempt.idempotencyKey,
         signal: abort.signal,
       };
-      const request = {
-        prompt: [{ type: 'text' as const, text: attempt.text }],
-      };
       const admission = attempt.sessionId
-        ? await client.sendManagedPrompt(attempt.sessionId, request, opts)
-        : await client.createManagedSession(
-            { ...request, cwd: attempt.cwd },
+        ? await provider.submitPrompt(
+            attempt.sessionId,
+            { text: attempt.text },
+            opts,
+          )
+        : await provider.createSession(
+            {
+              text: attempt.text,
+              workspaceCwd: provider.acceptsWorkspaceCwd
+                ? attempt.cwd
+                : undefined,
+            },
             opts,
           );
       if (abort.signal.aborted) return;
@@ -226,13 +312,7 @@ export function ManagedSessionsPage({
       }
     } catch (failure) {
       if (abort.signal.aborted) return;
-      if (
-        failure instanceof DaemonHttpError &&
-        failure.status >= 400 &&
-        failure.status < 500 &&
-        failure.status !== 408 &&
-        failure.status !== 429
-      ) {
+      if (isNonRetryableClientError(failure)) {
         pendingRef.current = undefined;
         setPending(undefined);
         persistPending(pendingKey, undefined);
@@ -250,6 +330,7 @@ export function ManagedSessionsPage({
     const abort = lifetime.current;
     if (
       !summary?.capabilities.canCancel ||
+      !summary.activeTurnId ||
       !cancellationEnabled ||
       busy ||
       !abort ||
@@ -259,8 +340,9 @@ export function ManagedSessionsPage({
     setBusy(true);
     setError(undefined);
     try {
-      await client.cancelManagedPrompt(summary.sessionId, summary.promptId, {
+      await provider.cancel(summary.sessionId, summary.activeTurnId, {
         clientId,
+        idempotencyKey: managedRequestId(),
         signal: abort.signal,
       });
       if (!abort.signal.aborted && selection.current === summary.sessionId)
@@ -380,7 +462,7 @@ export function ManagedSessionsPage({
             <MessageList
               messages={messages}
               pendingApproval={null}
-              sessionKey={`managed:${baseUrl}:${sessionId ?? 'new'}`}
+              sessionKey={`managed:${provider.storageKey}:${sessionId ?? 'new'}`}
               loadingTranscript={detail.loading}
               isResponding={Boolean(active)}
               hasOlderHistory={Boolean(detail.olderCursor)}
@@ -434,16 +516,18 @@ export function ManagedSessionsPage({
                     {t('managed.newRequired')}
                   </span>
                 )}
-              {cancellationEnabled && summary?.capabilities.canCancel && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() => void cancel()}
-                >
-                  {t('managed.cancel')}
-                </Button>
-              )}
+              {cancellationEnabled &&
+                summary?.capabilities.canCancel &&
+                summary.activeTurnId && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void cancel()}
+                  >
+                    {t('managed.cancel')}
+                  </Button>
+                )}
               <Button
                 type="submit"
                 disabled={

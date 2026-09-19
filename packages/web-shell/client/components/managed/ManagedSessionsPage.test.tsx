@@ -10,8 +10,13 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import type {
+  ManagedAgentProvider,
+  ManagedAgentSessionSummary,
+} from './managed-agent-provider';
 
 const mocks = vi.hoisted(() => ({
+  useWorkspace: vi.fn(),
   client: {
     listManagedSessions: vi.fn(),
     getManagedSession: vi.fn(),
@@ -27,11 +32,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useWorkspace: () => ({
-    client: mocks.client,
-    baseUrl: 'http://managed-test',
-    capabilities: { features: mocks.features },
-  }),
+  useWorkspace: mocks.useWorkspace,
 }));
 vi.mock('../MessageList', () => ({
   MessageList: ({
@@ -85,6 +86,11 @@ function event(id: number, text: string): DaemonManagedSessionEvent {
   };
 }
 
+function providerSummary(sessionId = 's1'): ManagedAgentSessionSummary {
+  const { promptId, ...daemonSummary } = summary(sessionId);
+  return { ...daemonSummary, activeTurnId: promptId };
+}
+
 async function flush() {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
@@ -98,6 +104,11 @@ describe('ManagedSessionsPage', () => {
     vi.clearAllMocks();
     sessionStorage.clear();
     mocks.features = ['managed_sessions', 'managed_session_cancel'];
+    mocks.useWorkspace.mockImplementation(() => ({
+      client: mocks.client,
+      baseUrl: 'http://managed-test',
+      capabilities: { features: mocks.features },
+    }));
     mocks.client.listManagedSessions.mockResolvedValue({
       sessions: [summary()],
     });
@@ -144,7 +155,11 @@ describe('ManagedSessionsPage', () => {
     vi.useRealTimers();
   });
 
-  async function render(sessionId?: string, language: 'en' | 'zh-CN' = 'en') {
+  async function render(
+    sessionId?: string,
+    language: 'en' | 'zh-CN' = 'en',
+    managedAgentProvider?: ManagedAgentProvider,
+  ) {
     await act(async () => {
       root.render(
         <I18nProvider language={language}>
@@ -152,12 +167,44 @@ describe('ManagedSessionsPage', () => {
             sessionId={sessionId}
             onSelectSession={onSelect}
             workspaceCwd="/workspace"
+            managedAgentProvider={managedAgentProvider}
           />
         </I18nProvider>,
       );
       await flush();
     });
   }
+
+  it('uses an explicit Java provider without daemon Managed capabilities', async () => {
+    mocks.features = [];
+    const listSessions = vi.fn().mockResolvedValue({
+      sessions: [providerSummary('java-session')],
+    });
+    const provider: ManagedAgentProvider = {
+      kind: 'java',
+      storageKey: 'https://java.example/agent',
+      canCancel: true,
+      acceptsWorkspaceCwd: false,
+      listSessions,
+      getSession: vi.fn(),
+      getTranscript: vi.fn(),
+      createSession: vi.fn(),
+      submitPrompt: vi.fn(),
+      cancel: vi.fn(),
+      async *subscribeEvents() {
+        yield* [];
+      },
+    };
+
+    await render(undefined, 'en', provider);
+
+    expect(container.textContent).toContain('Task java-session');
+    expect(listSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: undefined }),
+    );
+    expect(mocks.useWorkspace).not.toHaveBeenCalled();
+    expect(mocks.client.listManagedSessions).not.toHaveBeenCalled();
+  });
 
   async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(

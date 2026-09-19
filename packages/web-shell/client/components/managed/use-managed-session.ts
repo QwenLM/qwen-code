@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
-  DaemonClient,
-  DaemonManagedSessionEvent,
-  DaemonManagedSessionSummary,
-} from '@qwen-code/sdk/daemon';
+  ManagedAgentProvider,
+  ManagedAgentSessionEvent,
+  ManagedAgentSessionSummary,
+} from './managed-agent-provider';
 import { mergeManagedEvents } from './managed-session-messages';
 
 function pause(signal: AbortSignal, ms: number): Promise<void> {
@@ -21,15 +21,15 @@ function pause(signal: AbortSignal, ms: number): Promise<void> {
 
 interface ManagedSessionState {
   sessionId?: string;
-  summary?: DaemonManagedSessionSummary;
-  events: DaemonManagedSessionEvent[];
+  summary?: ManagedAgentSessionSummary;
+  events: ManagedAgentSessionEvent[];
   olderCursor?: string;
   loading: boolean;
   error?: string;
 }
 
 export function useManagedSession(
-  client: DaemonClient,
+  provider: ManagedAgentProvider,
   clientId: string,
   sessionId: string | undefined,
 ) {
@@ -61,8 +61,8 @@ export function useManagedSession(
       });
     const snapshot = async () => {
       const [summary, transcript] = await Promise.all([
-        client.getManagedSession(sessionId, opts),
-        client.getManagedSessionTranscript(sessionId, { ...opts, limit: 100 }),
+        provider.getSession(sessionId, opts),
+        provider.getTranscript(sessionId, { ...opts, limit: 100 }),
       ]);
       if (abort.signal.aborted) return transcript.lastEventId;
       cursorRef.current = transcript.olderCursor;
@@ -90,10 +90,10 @@ export function useManagedSession(
         let gap = false;
         let retryDelayMs = 3000;
         try {
-          for await (const event of client.subscribeManagedSessionEvents(
-            sessionId,
-            { ...opts, lastEventId },
-          )) {
+          for await (const event of provider.subscribeEvents(sessionId, {
+            ...opts,
+            lastEventId,
+          })) {
             if (abort.signal.aborted) return;
             if (event.type === 'stream_gap') {
               gap = true;
@@ -112,7 +112,7 @@ export function useManagedSession(
             retryDelayMs = 0;
           } else if (!abort.signal.aborted)
             update({
-              summary: await client.getManagedSession(sessionId, opts),
+              summary: await provider.getSession(sessionId, opts),
             });
         } catch (error) {
           fail(error);
@@ -125,14 +125,14 @@ export function useManagedSession(
         await pause(abort.signal, 3000);
         if (abort.signal.aborted) return;
         try {
-          update({ summary: await client.getManagedSession(sessionId, opts) });
+          update({ summary: await provider.getSession(sessionId, opts) });
         } catch (error) {
           fail(error);
         }
       }
     })();
     return () => abort.abort();
-  }, [client, clientId, sessionId, revision]);
+  }, [provider, clientId, sessionId, revision]);
 
   const loadOlder = useCallback(async () => {
     const abort = lifetime.current;
@@ -141,7 +141,7 @@ export function useManagedSession(
       return;
     setLoadingOlder(true);
     try {
-      const page = await client.getManagedSessionTranscript(sessionId, {
+      const page = await provider.getTranscript(sessionId, {
         clientId,
         before,
         limit: 100,
@@ -164,7 +164,7 @@ export function useManagedSession(
     } finally {
       if (!abort.signal.aborted) setLoadingOlder(false);
     }
-  }, [client, clientId, sessionId, loadingOlder]);
+  }, [provider, clientId, sessionId, loadingOlder]);
   const reload = useCallback(() => setRevision((current) => current + 1), []);
   const visible =
     state.sessionId === sessionId

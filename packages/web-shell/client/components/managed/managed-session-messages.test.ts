@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonManagedSessionEvent } from '@qwen-code/sdk/daemon';
+import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import {
   managedEventsToMessages,
   mergeManagedEvents,
@@ -7,11 +7,11 @@ import {
 
 function event(
   id: number,
-  type: DaemonManagedSessionEvent['type'],
+  type: ManagedAgentSessionEvent['type'],
   data?: unknown,
-  promptId = 'p1',
-): DaemonManagedSessionEvent {
-  return { id, at: id * 100, type, sessionId: 's1', promptId, data };
+  turnId = 'p1',
+): ManagedAgentSessionEvent {
+  return { id, at: id * 100, type, sessionId: 's1', turnId, data };
 }
 
 describe('Managed transcript projection', () => {
