@@ -6,10 +6,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import * as os from 'node:os';
+import os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
 import { FatalConfigError } from '../utils/errors.js';
+import { sanitizeCwd } from '../utils/paths.js';
 
 const mockRealpathSync = vi.hoisted(() => vi.fn());
 const mockReaddirSync = vi.hoisted(() => vi.fn());
@@ -716,6 +717,174 @@ describe('Storage – runtime base dir async context isolation', () => {
         path.join(runtimeDir, 'tmp'),
       );
     });
+  });
+});
+
+describe('Storage – cleanOrphanProjectDirs', () => {
+  let baseDir: string;
+  let projectsDir: string;
+  let storage: Storage;
+  let trustedTempRoot: string;
+  let tmpdirSpy: ReturnType<typeof vi.spyOn>;
+  const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+
+  const makeEntry = (
+    originalCwd = path.join(trustedTempRoot, `gone-${path.basename(baseDir)}`),
+    sessionId = 'session',
+  ) => {
+    const entryName = sanitizeCwd(originalCwd);
+    const entry = path.join(projectsDir, entryName);
+    const chats = path.join(entry, 'chats');
+    const sidecar = path.join(chats, `${sessionId}.worktree.json`);
+    actualFs.mkdirSync(chats, { recursive: true });
+    actualFs.writeFileSync(
+      sidecar,
+      JSON.stringify({
+        slug: 'scratch',
+        worktreePath: path.join(originalCwd, '.qwen', 'worktrees', 'scratch'),
+        worktreeBranch: 'scratch',
+        originalCwd,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      }),
+    );
+    const stale = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    for (const filePath of [sidecar, chats, entry]) {
+      actualFs.utimesSync(filePath, stale, stale);
+    }
+    return { originalCwd, entryName, entry, chats, sidecar };
+  };
+
+  const missingTempPath = (name: string) =>
+    path.join(trustedTempRoot, `${name}-${path.basename(baseDir)}`);
+
+  beforeEach(() => {
+    delete process.env['QWEN_RUNTIME_DIR'];
+    trustedTempRoot =
+      process.platform === 'win32'
+        ? path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'Temp')
+        : '/tmp';
+    const fixtureRoot = os.tmpdir();
+    tmpdirSpy = vi.spyOn(os, 'tmpdir').mockReturnValue(trustedTempRoot);
+    mockRealpathSync.mockImplementation((value: unknown) =>
+      actualFs.realpathSync(String(value)),
+    );
+    baseDir = actualFs.mkdtempSync(path.join(fixtureRoot, 'qwen-orphan-test-'));
+    projectsDir = path.join(baseDir, 'projects');
+    actualFs.mkdirSync(projectsDir);
+    Storage.setRuntimeBaseDir(baseDir);
+    storage = new Storage(path.join(baseDir, 'current'));
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    tmpdirSpy.mockRestore();
+    actualFs.rmSync(baseDir, { recursive: true, force: true });
+    if (originalRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+    }
+  });
+
+  it('removes stale sidecar-only entries for missing temp projects', () => {
+    const { entry, entryName } = makeEntry();
+
+    expect(storage.cleanOrphanProjectDirs()).toEqual({
+      removed: [entryName],
+      errors: [],
+    });
+    expect(actualFs.existsSync(entry)).toBe(false);
+  });
+
+  it.each(['session.jsonl', 'session.runtime.json', 'unknown'])(
+    'keeps an entry containing %s',
+    (fileName) => {
+      const { entry, chats } = makeEntry();
+      actualFs.writeFileSync(path.join(chats, fileName), 'content');
+
+      storage.cleanOrphanProjectDirs();
+
+      expect(actualFs.existsSync(entry)).toBe(true);
+    },
+  );
+
+  it('keeps fresh or malformed sidecars', () => {
+    const fresh = makeEntry(missingTempPath('fresh'), 'fresh');
+    const malformed = makeEntry(missingTempPath('malformed'), 'malformed');
+    actualFs.utimesSync(fresh.sidecar, new Date(), new Date());
+    actualFs.writeFileSync(malformed.sidecar, '{');
+
+    storage.cleanOrphanProjectDirs();
+
+    expect(actualFs.existsSync(fresh.entry)).toBe(true);
+    expect(actualFs.existsSync(malformed.entry)).toBe(true);
+  });
+
+  it('keeps entries for existing or non-temp project roots', () => {
+    const existing = makeEntry(baseDir, 'existing');
+    const persistent = makeEntry(
+      path.join(
+        path.parse(baseDir).root,
+        `persistent-${path.basename(baseDir)}`,
+      ),
+      'persistent',
+    );
+
+    storage.cleanOrphanProjectDirs();
+
+    expect(actualFs.existsSync(existing.entry)).toBe(true);
+    expect(actualFs.existsSync(persistent.entry)).toBe(true);
+  });
+
+  it('does not trust a configured temp directory outside system temp', () => {
+    const configuredRoot = path.join(
+      path.parse(baseDir).root,
+      'qwen-configured-temp',
+      path.basename(baseDir),
+    );
+    tmpdirSpy.mockReturnValue(configuredRoot);
+    const { entry } = makeEntry(path.join(configuredRoot, 'gone'));
+
+    storage.cleanOrphanProjectDirs();
+
+    expect(actualFs.existsSync(entry)).toBe(true);
+  });
+
+  it('keeps metadata that does not prove the project entry origin', () => {
+    const mismatch = makeEntry(missingTempPath('mismatch'));
+    const renamed = `${mismatch.entry}-other`;
+    actualFs.renameSync(mismatch.entry, renamed);
+    const unmanaged = makeEntry(missingTempPath('unmanaged'));
+    const metadata = JSON.parse(
+      actualFs.readFileSync(unmanaged.sidecar, 'utf8'),
+    );
+    metadata.worktreePath = path.join(baseDir, 'elsewhere');
+    actualFs.writeFileSync(unmanaged.sidecar, JSON.stringify(metadata));
+
+    storage.cleanOrphanProjectDirs();
+
+    expect(actualFs.existsSync(renamed)).toBe(true);
+    expect(actualFs.existsSync(unmanaged.entry)).toBe(true);
+  });
+
+  it('keeps entries whose sidecars disagree about their origin', () => {
+    const firstRoot = missingTempPath('collision-root');
+    const secondRoot = firstRoot.replace('-root-', `${path.sep}root-`);
+    const first = makeEntry(firstRoot, 'first');
+    const second = makeEntry(secondRoot, 'second');
+    expect(first.entryName).toBe(second.entryName);
+
+    storage.cleanOrphanProjectDirs();
+
+    expect(actualFs.existsSync(first.entry)).toBe(true);
+  });
+
+  it('keeps the current project entry', () => {
+    const { originalCwd, entry, entryName } = makeEntry();
+    new Storage(originalCwd).cleanOrphanProjectDirs();
+    expect(actualFs.existsSync(entry)).toBe(true);
+    expect(entryName).toBe(path.basename(entry));
   });
 });
 
