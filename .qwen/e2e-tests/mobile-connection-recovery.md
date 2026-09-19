@@ -33,10 +33,13 @@ Android process-kill/relaunch and physical-device/TalkBack checks are distinct f
 
 ## Results
 
-Independent native baseline reproduction: actual Activity recreation on combined `de5a05426a` lost the connected profile/session and returned to Connections. After implementation, the full focused native suite passed on API36/WebView134: **14 passed, 1 assumption skip**, including all **8 recovery tests**. API26/WebView69: **4 passed, 11 capability skips**, not supported-profile acceptance. Modern required profile isolation. Actual renderer termination and Activity recreation were exercised; process-kill/relaunch and physical devices were not.
+Independent native baseline reproduction: actual Activity recreation on combined `de5a05426a` lost the connected profile/session and returned to Connections. After implementation, the full focused native suite passed on API36/WebView134: **15 passed, 1 assumption skip**, including all **8 recovery scenarios** and the idle-connection fixture regression. API26/WebView69: **5 passed, 11 capability skips**, not supported-profile acceptance. Modern required profile isolation. Actual renderer termination and Activity recreation were exercised; process-kill/relaunch and physical devices were not.
 
 Java17/Gradle8.2.1 debug, unsigned release, instrumentation APK, 25 JVM tests and lint passed (0 errors; 6 existing dependency notices). Desktop-isolation check passed. Native recovery changes do not modify CLI or H5 code; CLI bundling is not an Android recovery test.
 
 The first device run exposed a test fixture error: the test reinserted a retired browser ID after deletion. Deletion and origin-change tests were split into fresh independent fixtures. The one resulting synthetic vault overlap was removed by a guarded test-only repair, with encrypted backup and all other profiles preserved; final results above are from the corrected tests. Initial logs are retained. No product behavior was changed to conceal the fixture failure.
 
 Combined baseline suites at `de5a05426a`: API36 38 passed/1 skip, API26 34 passed/5 skips. Real microphone consent followed by track stop and system Open reproduces the documented microphone-background teardown limitation. It remains separate from recovery correctness.
+
+
+A later combined run timed out loading the rename fixture. Independently, the exact fixture was shown to stop permanently on an idle socket timeout. The per-socket handler was hardened and an actual idle-socket/GET regression added; the unchanged independent diagnostic and complete native suites passed afterward. The original timeout's exact socket event was not captured. Final focused Android source tree at `8e1f527e9b`: `827fa1b6567c2cd907937625a246ecb3d8eccde9`. CI requested the newer lint gate; a normal merge of upstream `9e6d058b41` preserves this native tree byte-for-byte. No force push or gate bypass was used.
