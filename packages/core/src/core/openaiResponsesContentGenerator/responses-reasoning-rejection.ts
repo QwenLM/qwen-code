@@ -499,7 +499,23 @@ export function isEncryptedReasoningRejection(
   )
     return false;
   const error = readErrorMember(gateway['error_detail']);
-  return error?.['code'] === 'invalid_encrypted_content';
+  if (error) return error['code'] === 'invalid_encrypted_content';
+
+  // This gateway also quotes the upstream error after a known failure prefix.
+  // Parse only that one object, within the outer envelope's remaining budget.
+  const message = gateway['error_message'];
+  const prefix = 'AllModelsFailed:';
+  if (typeof message !== 'string' || !message.startsWith(prefix)) return false;
+  const nestedText = toEnvelopeText(message.slice(prefix.length));
+  if (!nestedText) return false;
+  const nested = readEnvelope(
+    nestedText,
+    MAX_OBJECT_CANDIDATES - envelope.objects,
+    false,
+  );
+  return (
+    readErrorMember(nested?.value)?.['code'] === 'invalid_encrypted_content'
+  );
 }
 
 export function downgradeEncryptedReasoningItems(

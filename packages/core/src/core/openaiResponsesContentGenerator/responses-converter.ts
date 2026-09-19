@@ -69,6 +69,7 @@ function placeholderMimeType(mimeType: string | undefined): string {
 const RESPONSES_ERROR_CODE_TO_STATUS: Record<string, number> = {
   server_error: 500,
   rate_limit_exceeded: 429,
+  rate_limit_reached: 429,
 };
 
 interface ResponsesStreamError extends Error {
