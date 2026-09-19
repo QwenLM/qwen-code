@@ -758,7 +758,6 @@ describe('assertVersionUnreleased', () => {
       '@qwen-code/channel-telegram',
       '@qwen-code/channel-wecom',
       '@qwen-code/channel-weixin',
-      '@qwen-code/web-shell',
     ]);
   });
 
