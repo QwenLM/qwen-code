@@ -1135,16 +1135,39 @@ describe('AgentTool', () => {
         'Nested agents run in the foreground unless run_in_background is explicitly true',
       );
       expect(properties.properties.run_in_background.description).toContain(
+        'explicit run_in_background: true is rejected',
+      );
+      // The teammate clauses moved behind isAgentTeamEnabled(), which this
+      // config leaves off — they are about `name`, a parameter that is not
+      // declared here. Asserted in the team-enabled case below.
+      expect(properties.properties.run_in_background.description).not.toContain(
         'Named teammates are always concurrent',
       );
       expect(properties.properties.run_in_background.description).toContain(
-        'an explicit false is rejected',
-      );
-      expect(properties.properties.run_in_background.description).toContain(
-        'explicit run_in_background: true is rejected',
-      );
-      expect(properties.properties.run_in_background.description).toContain(
         'a configured background default is rejected at the top level and downgraded to the foreground for nested launches',
+      );
+    });
+
+    it('declares the teammate background rules when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const properties = teamAgentTool.schema.parametersJsonSchema as {
+        properties: {
+          run_in_background: { description?: string };
+        };
+      };
+      const description = properties.properties.run_in_background.description;
+
+      expect(description).toContain('Named teammates are always concurrent');
+      expect(description).toContain('an explicit false is rejected');
+      expect(description).toContain('must be shut down before that worktree');
+      // The flag-independent rules are still there alongside them.
+      expect(description).toContain('Set to false');
+      expect(description).toContain(
+        'explicit run_in_background: true is rejected',
       );
     });
 
