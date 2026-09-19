@@ -28,7 +28,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * Regression coverage for the `useBoxMetrics` loop guard carried in the
  * vendored Ink patch (`patches/ink+7.0.3.patch`). A box whose measured layout
  * feeds back into its own size oscillates through the commit-phase layout
- * listener until React throws #185 and the CLI exits silently (#11500).
+ * listener until React throws #185 and the CLI exits silently (#11873).
  */
 
 const mounted = new Set<Instance>();
@@ -243,7 +243,7 @@ function ConvergingBox() {
 }
 
 describe('ink useBoxMetrics loop guard', () => {
-  it('settles an oscillating box instead of throwing React #185', async () => {
+  it('settles an oscillating box instead of throwing React #185 (#11873)', async () => {
     const { stdout, lastFrame } = createTestStdout();
     await mount(<OscillatingBox />, stdout);
 
