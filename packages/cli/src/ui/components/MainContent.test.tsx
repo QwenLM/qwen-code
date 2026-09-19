@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useEffect } from 'react';
 import type React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
@@ -27,6 +28,7 @@ const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 const scrollableListPropsSpy = vi.fn();
+const scrollableListMountSpy = vi.fn();
 // Records every <Box> render's props so tests can assert layout props
 // (e.g. the pending-region maxHeight backstop) without coupling to ink's
 // Yoga internals.
@@ -117,6 +119,9 @@ vi.mock('./shared/ScrollableList.js', async () => {
       renderItem: (info: { item: { id: number }; index: number }) => unknown;
     }) => {
       scrollableListPropsSpy(props);
+      useEffect(() => {
+        scrollableListMountSpy();
+      }, []);
       // Drive renderItem once per item so historyItemDisplayPropsSpy fires —
       // mirrors what the real VirtualizedList does for the visible window.
       return (
@@ -886,6 +891,47 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toContain('APP_HEADER:1.2.3');
       // Items reach VP via renderItem
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
+    });
+
+    it('remounts the VP list when the session id changes (/clear, /resume) (#9305)', () => {
+      // /clear and /resume each start a new session (startNewSession swaps
+      // the sessionId), and the whole dataset is replaced with it. The VP
+      // list must remount on that boundary so carried scroll state — park
+      // marks, sticking, the anchor — resets by construction instead of
+      // leaking into the new session (#9305 review R18-1). Same-session
+      // re-renders must NOT remount: scroll state survives ordinary
+      // streaming updates.
+      scrollableListMountSpy.mockClear();
+
+      const vpState = (sessionId: string) =>
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, type: 'user', text: 'hello' }],
+          sessionStats: {
+            sessionId,
+            lastPromptTokenCount: 0,
+          } as UIState['sessionStats'],
+        });
+      const wrap = (uiState: UIState) => (
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={uiState}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>
+      );
+
+      const { rerender } = render(wrap(vpState('session-A')));
+      expect(scrollableListMountSpy).toHaveBeenCalledTimes(1);
+
+      rerender(wrap(vpState('session-A')));
+      expect(scrollableListMountSpy).toHaveBeenCalledTimes(1);
+
+      rerender(wrap(vpState('session-B')));
+      expect(scrollableListMountSpy).toHaveBeenCalledTimes(2);
     });
 
     // Shared fixtures for the #9420 collapse tests. A tool batch renders

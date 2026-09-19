@@ -145,6 +145,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     staticAreaMaxItemHeight,
     availableTerminalHeight,
     historyRemountKey,
+    sessionStats,
   } = uiState;
 
   // Filter out items whose display is suppressed (e.g. /history collapse).
@@ -511,6 +512,12 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     return (
       <OverflowProvider>
         <ScrollableList
+          // Session id is the dataset identity: /clear and /resume each
+          // start a new session and replace the whole history. Remount the
+          // list on that boundary so carried scroll state (anchor,
+          // sticking, park marks) resets by construction instead of
+          // leaking into the new dataset (#9305 review R18-1).
+          key={sessionStats.sessionId}
           ref={scrollRef}
           hasFocus={viewportInteractive}
           data={allVirtualItems}
