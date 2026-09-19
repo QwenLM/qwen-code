@@ -16,6 +16,7 @@ import { DeepSeekOpenAICompatibleProvider } from './deepseek.js';
 import { MiMoOpenAICompatibleProvider } from './mimo.js';
 import { MiniMaxOpenAICompatibleProvider } from './minimax.js';
 import { MistralOpenAICompatibleProvider } from './mistral.js';
+import { withEmptyToolParameters } from './utils.js';
 import { ZaiOpenAICompatibleProvider } from './zai.js';
 
 const EMPTY_PARAMETERS = { type: 'object', properties: {} };
@@ -32,6 +33,14 @@ const CONVERTER_SHAPE: OpenAI.Chat.ChatCompletionTool = {
   type: 'function',
   function: { name: 'cron_list', description: 'desc', parameters: undefined },
 };
+
+// extra_body is a user knob merged into the request ahead of the repair, so a
+// non-function tool can reach the map even though openai's types admit only
+// function tools.
+const CUSTOM_TOOL = {
+  type: 'custom',
+  custom: { name: 'code', format: { type: 'text' } },
+} as unknown as OpenAI.Chat.ChatCompletionTool;
 
 function createConfig(
   model: string,
@@ -123,7 +132,7 @@ describe('generationConfig.toolParametersMandatory', () => {
       const config = createConfig('local-model', 'http://localhost:5000/v1');
       const provider = determineProvider(config, mockCliConfig);
 
-      expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
+      expect(provider.constructor).toBe(DefaultOpenAICompatibleProvider);
       const request = outboundRequest(config, provider);
 
       expect(outboundTool(request).function.parameters).toBeUndefined();
@@ -138,7 +147,7 @@ describe('generationConfig.toolParametersMandatory', () => {
       );
       const provider = determineProvider(config, mockCliConfig);
 
-      expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
+      expect(provider.constructor).toBe(DefaultOpenAICompatibleProvider);
       const request = outboundRequest(config, provider);
 
       expect(outboundTool(request).function.parameters).toEqual(
@@ -155,6 +164,7 @@ describe('generationConfig.toolParametersMandatory', () => {
       );
       const provider = determineProvider(config, mockCliConfig);
 
+      expect(provider.constructor).toBe(DefaultOpenAICompatibleProvider);
       const request = outboundRequest(config, provider, [
         {
           type: 'function',
@@ -165,6 +175,103 @@ describe('generationConfig.toolParametersMandatory', () => {
       expect(outboundTool(request).function.parameters).toEqual(
         EMPTY_PARAMETERS,
       );
+      expect(request.max_tokens).toBe(32_000);
+    });
+  });
+
+  describe('a list carrying more than one tool', () => {
+    // #11956's confirmed capture was tools[5] missing the field, so the repair
+    // must reach every parameterless tool, not just the head of the array.
+    it('repairs every parameterless tool and leaves a declared schema intact', () => {
+      const schema = {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      };
+      const config = createConfig(
+        'local-model',
+        'http://localhost:5000/v1',
+        true,
+      );
+      const provider = determineProvider(config, mockCliConfig);
+
+      const request = outboundRequest(config, provider, [
+        CONVERTER_SHAPE,
+        {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: 'desc',
+            parameters: schema,
+          },
+        },
+        {
+          type: 'function',
+          function: { name: 'cron_delete', description: 'desc' },
+        },
+      ]);
+
+      expect(request.tools).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'cron_list',
+            description: 'desc',
+            parameters: EMPTY_PARAMETERS,
+          },
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: 'desc',
+            parameters: schema,
+          },
+        },
+        {
+          type: 'function',
+          function: {
+            name: 'cron_delete',
+            description: 'desc',
+            parameters: EMPTY_PARAMETERS,
+          },
+        },
+      ]);
+      expect(request.max_tokens).toBe(32_000);
+    });
+  });
+
+  describe('a tool that is not a function tool', () => {
+    it('passes it through when the helper is called directly', () => {
+      const request = withEmptyToolParameters({
+        model: 'local-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+        tools: [CONVERTER_SHAPE, CUSTOM_TOOL],
+      });
+
+      expect(request.tools).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'cron_list',
+            description: 'desc',
+            parameters: EMPTY_PARAMETERS,
+          },
+        },
+        CUSTOM_TOOL,
+      ]);
+    });
+
+    it('passes it through on an opted-in route that merges extra_body', () => {
+      const config: ContentGeneratorConfig = {
+        ...createConfig('local-model', 'http://localhost:5000/v1', true),
+        extra_body: { tools: [CUSTOM_TOOL] },
+      };
+      const provider = determineProvider(config, mockCliConfig);
+
+      const request = outboundRequest(config, provider);
+
+      expect(request.tools).toEqual([CUSTOM_TOOL]);
       expect(request.max_tokens).toBe(32_000);
     });
   });

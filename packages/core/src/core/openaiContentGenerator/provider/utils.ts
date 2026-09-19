@@ -51,6 +51,11 @@ export function stripReasoningContent(
 // decide per route. Running at the outbound boundary is also what lets an empty
 // `properties` reach the wire at all: `relaxSchemaForFunctionCalling` strips it
 // during conversion.
+//
+// The `type` check is a runtime guard rather than a narrowing: openai's types
+// admit only function tools, but `generationConfig.extra_body` is a user knob
+// merged into the request ahead of this repair, so a grammar or custom tool can
+// reach the map and has no `function` to dereference.
 export function withEmptyToolParameters(
   request: OpenAI.Chat.ChatCompletionCreateParams,
 ): OpenAI.Chat.ChatCompletionCreateParams {
@@ -59,7 +64,7 @@ export function withEmptyToolParameters(
   return {
     ...request,
     tools: request.tools.map((tool) =>
-      tool.function.parameters === undefined
+      tool.type === 'function' && tool.function.parameters === undefined
         ? {
             ...tool,
             function: {

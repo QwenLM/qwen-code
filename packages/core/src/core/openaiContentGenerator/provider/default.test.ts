@@ -286,8 +286,10 @@ describe('DefaultOpenAICompatibleProvider', () => {
     });
 
     it('forwards a parameterless tool without a parameters key', () => {
-      // Negative pin for the MiniMax-only scoping in minimax.ts: the default
-      // provider must not synthesize a schema for zero-argument tools.
+      // Negative pin for the off arm of the toolParametersMandatory opt-in:
+      // with the flag off — its default in settingsSchema.ts — the default
+      // provider omits a schema for zero-argument tools. The repair lives in
+      // provider/utils.ts, so an opted-in route does synthesize one.
       // converter.ts deliberately omits `parameters` for them (#11431), and
       // the endpoints #10080 was written for (llama.cpp, LM Studio, vLLM)
       // reject the empty-object shape. Assert on the serialized body because
