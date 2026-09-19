@@ -1055,7 +1055,9 @@ An accepted message reaches the model the next time the session is
 idle. A held one is shown to whoever drives the session as a permission
 request with two choices, **Deliver to this session** and **Drop**: in
 the Web Shell and other daemon clients it appears with the session's
-other pending requests and goes away when the message expires, and in an
+other pending requests and goes away when the message expires — or
+earlier, at the daemon's configured permission-response timeout, after
+which the session asks again while the message is still held — and in an
 editor that drives `qwen --acp` directly it is a permission dialog.
 `agents.crossSessionInbound` and `agents.crossSessionHeldExpiry` are
 read from the settings of the workspace the session runs in.

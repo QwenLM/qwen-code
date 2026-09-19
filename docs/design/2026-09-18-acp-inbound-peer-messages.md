@@ -105,8 +105,10 @@ on the message's expiry, not on the turn.
 withdraw a request it sent. A review therefore says when it stops
 mattering, in `_meta.expiresAt`, and the daemon ends the request at that
 moment, or at its configured permission timeout if that comes first. A
-request with no expiry keeps the configured behavior. The daemon's
-pending list never shows a message that already expired.
+hold that never expires gives the request a short deadline of its own —
+one minute, after which the session asks again while the message is
+still held — so no review outlives the hold that prompted it. The
+daemon's pending list never shows a message that already expired.
 
 **Any change to what judges a message re-judges the backlog.** Parity
 may release a held message once the addressed session changes review

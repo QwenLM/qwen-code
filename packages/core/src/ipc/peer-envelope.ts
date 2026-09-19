@@ -137,13 +137,16 @@ const MAX_ATTRIBUTE_CHARS = 200;
  * overrides and the like) complete the set: they render as nothing while
  * letting a label read differently than it compares.
  */
-export function flattenPeerLabel(value: string): string {
+export function flattenPeerLabel(
+  value: string,
+  maxChars = MAX_ATTRIBUTE_CHARS,
+): string {
   const oneLine = value.replace(INVISIBLE_CHARACTERS, ' ').trim();
   // Counted in code points, so the cut never leaves half of an astral
   // character behind as a lone surrogate.
   const points = Array.from(oneLine);
-  return points.length > MAX_ATTRIBUTE_CHARS
-    ? `${points.slice(0, MAX_ATTRIBUTE_CHARS - 1).join('')}\u2026`
+  return points.length > maxChars
+    ? `${points.slice(0, maxChars - 1).join('')}\u2026`
     : oneLine;
 }
 

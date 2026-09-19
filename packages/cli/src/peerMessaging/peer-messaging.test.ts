@@ -1503,7 +1503,9 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
   it('corrects the queued messages of a closing session once', async () => {
     const sender = await startSenderInbox();
-    const { messaging: m } = await start();
+    const admission = unmeteredAdmission();
+    const forget = vi.spyOn(admission, 'forgetMessage');
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, { admission });
     const deliveries: PeerQueuedDelivery[] = [];
     m.setSubmitFn((_modelText, _displayText, delivery) => {
       deliveries.push(delivery!);
@@ -1515,6 +1517,13 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     await settle();
 
     expect(m.expireUnconsumed([queued.msgId.toUpperCase()])).toBe(1);
+    // The correction also releases the admitted body: the receipt tells
+    // the sender nobody consumed its message, so an honest retry of the
+    // same text must not come back `duplicate`.
+    expect(forget).toHaveBeenCalledWith(
+      deliveries[0]!.admissionKey,
+      queued.msgId,
+    );
     // The persist failing afterwards, and exit, find nothing left to fix.
     m.expireUndelivered(deliveries[0]!);
     expect(m.expireUnconsumed([queued.msgId])).toBe(0);
@@ -1526,6 +1535,44 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         .filter((r) => r.type === 'control' && r.origMsgId === queued.msgId)
         .map((r) => (r as { status: string }).status),
     ).toEqual(['delivered', 'expired']);
+  });
+
+  it('keeps the ledger when the waiting-ids reader cannot answer', async () => {
+    // A throwing reader says "unknown", not "everything was consumed":
+    // pruning on it would clear the corrections a closing session still
+    // owes the senders it told `delivered`.
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start();
+    const waitingIds = new Set<string>();
+    let failReads = false;
+    m.setSubmitFn((_modelText, _displayText, delivery) => {
+      waitingIds.add(canonicalizeMsgId(delivery!.msgId));
+      return true;
+    });
+    m.setQueuedPeerIds(() => {
+      if (failReads) throw new Error('reader unavailable');
+      return waitingIds;
+    });
+
+    const first = peerFrame({ content: 'first', from: sender.socketPath });
+    await send(m.socketPath!, first);
+    await settle();
+    failReads = true;
+    const second = peerFrame({ content: 'second', from: sender.socketPath });
+    await send(m.socketPath!, second);
+    await settle();
+
+    expect(m.expireUnconsumed([first.msgId])).toBe(1);
+    failReads = false;
+    await m.close();
+    messaging = null;
+
+    const statusesFor = (msgId: string) =>
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === msgId)
+        .map((r) => (r as { status: string }).status);
+    expect(statusesFor(first.msgId)).toEqual(['delivered', 'expired']);
+    expect(statusesFor(second.msgId)).toEqual(['delivered', 'expired']);
   });
 
   it('settles a partially flushed buffer alongside queued frames at exit', async () => {

@@ -30,6 +30,7 @@ import {
   type HeldMessage,
 } from '@qwen-code/qwen-code-core/ipc/inbound-gate.js';
 import {
+  flattenPeerLabel,
   peerSenderLabel,
   sanitizePeerText,
 } from '@qwen-code/qwen-code-core/ipc/peer-envelope.js';
@@ -47,6 +48,27 @@ export const PEER_MESSAGE_INTERACTION_KIND = 'peer_message';
  * what gets delivered; this bounds only what a dialog has to lay out.
  */
 export const MAX_PEER_REVIEW_TEXT_CHARS = 2000;
+
+/**
+ * Longest body preview carried in a review's title.
+ *
+ * The title is the one part of the request every client surfaces — a
+ * voice host speaks it and keys its standing allow-rule on it — so it
+ * names the message, not just the sender, or every hold from one sender
+ * asks and auto-answers as if it were the same message.
+ */
+export const MAX_PEER_REVIEW_TITLE_CHARS = 120;
+
+/**
+ * How long a review request stays pending when the hold itself never
+ * expires. ACP gives an agent no way to withdraw a request it sent, so
+ * a hold without an expiry would otherwise leave its request in every
+ * client's pending list forever, including after the hold ended some
+ * other way. The daemon ends the request at this bound instead, and the
+ * session asks again while the message is still held — the cadence the
+ * re-ask backoff already caps at a minute.
+ */
+export const PEER_REVIEW_REQUEST_TTL_MS = 60_000;
 
 /** How a person answered a review; `cancelled` is no answer at all. */
 export type PeerReviewDecision = 'deliver' | 'drop' | 'cancelled';
@@ -77,13 +99,23 @@ export interface PeerReviewDetails {
 
 /** Who sent a held message, as a person should see it. */
 export function heldSenderLabel(entry: HeldMessage): string {
-  return peerSenderLabel({
-    from: entry.frame.from ?? 'unknown session',
+  // The same fallback the delivered path uses: a process this session
+  // started usually has no address to give, and a blank `from` — which
+  // the wire parser passes through — flattens to nothing.
+  const label = peerSenderLabel({
+    from:
+      entry.frame.from ??
+      (entry.controller
+        ? 'controller'
+        : entry.selfSent
+          ? 'own process'
+          : 'unknown session'),
     ...(entry.frame.fromName !== undefined
       ? { fromName: entry.frame.fromName }
       : {}),
     ...(entry.controller ? { controller: entry.controller } : {}),
   });
+  return label.length > 0 ? label : 'unknown session';
 }
 
 export function peerReviewDetails(
@@ -93,9 +125,15 @@ export function peerReviewDetails(
   return {
     msgId: entry.frame.msgId,
     sender: heldSenderLabel(entry),
-    ...(entry.frame.from !== undefined ? { from: entry.frame.from } : {}),
+    // Labels, not bodies: flattened to one bounded line each, like the
+    // sender they feed — the raw strings are peer-chosen up to the frame
+    // cap and would otherwise reach titles, speech and the daemon's
+    // pending-interaction store verbatim.
+    ...(entry.frame.from !== undefined
+      ? { from: flattenPeerLabel(entry.frame.from) }
+      : {}),
     ...(entry.frame.fromName !== undefined
-      ? { fromName: sanitizePeerText(entry.frame.fromName, 200) }
+      ? { fromName: flattenPeerLabel(entry.frame.fromName) }
       : {}),
     origin: entry.controller
       ? 'controller'
@@ -122,13 +160,27 @@ export function buildPeerReviewRequest(
   subject: PeerReviewSubject,
 ): RequestPermissionRequest {
   const details = peerReviewDetails(subject);
-  const expiry =
-    subject.expiresAt === null ? {} : { expiresAt: subject.expiresAt };
+  const body = sanitizePeerText(
+    subject.entry.frame.message.content,
+    MAX_PEER_REVIEW_TEXT_CHARS,
+  );
+  // The request's own deadline: the hold's expiry when it has one, and a
+  // short bound when it does not — a never-expiring hold's request must
+  // still end, or it pends in every client past the hold itself ending.
+  // `details.expiresAt` keeps the hold's truth (null = never); this is
+  // the request's lifetime, not the message's.
+  const expiry = {
+    expiresAt: subject.expiresAt ?? Date.now() + PEER_REVIEW_REQUEST_TTL_MS,
+  };
   return {
     sessionId,
     toolCall: {
       toolCallId: `peer-message:${details.msgId}`,
-      title: `Cross-session message: ${details.sender}`,
+      // The title is the one part every client surfaces — a voice host
+      // speaks it and keys its standing allow-rule on it — so it names
+      // the message itself: a one-line preview of the body the dialog
+      // shows, or every hold from one sender reads and auto-answers alike.
+      title: `Cross-session message from ${details.sender}: ${flattenPeerLabel(body, MAX_PEER_REVIEW_TITLE_CHARS)}`,
       kind: 'other',
       status: 'pending',
       content: [
@@ -136,10 +188,7 @@ export function buildPeerReviewRequest(
           type: 'content',
           content: {
             type: 'text',
-            text: sanitizePeerText(
-              subject.entry.frame.message.content,
-              MAX_PEER_REVIEW_TEXT_CHARS,
-            ),
+            text: body,
           },
         },
       ],
@@ -183,7 +232,22 @@ export function peerReviewDecision(
   }
 }
 
-/** The key a review is tracked under: one per message and hold. */
+/**
+ * The key a review is tracked under: one per message, hold, and what the
+ * review says about them. A hold re-judged into another cause, scope or
+ * provenance — a controller grant revoked while the message waits — is
+ * asked about again, or the person would decide on a sender and a reason
+ * the gate has already superseded. `expiresAt` is deliberately not here:
+ * it is recomputed from the wall clock on every read, so keying on it
+ * would re-ask every review on every change.
+ */
 export function peerReviewKey(entry: HeldMessage): string {
-  return `${entry.frame.msgId}\0${entry.heldAt}`;
+  return [
+    entry.frame.msgId,
+    entry.heldAt,
+    entry.cause,
+    entry.policyScope ?? '',
+    entry.controller?.id ?? '',
+    entry.selfSent ? 'self' : '',
+  ].join('\0');
 }

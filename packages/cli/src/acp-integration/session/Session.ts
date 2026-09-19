@@ -2168,6 +2168,7 @@ export class Session implements SessionContext {
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
   private currentWorkflowNotificationTaskId: string | null = null;
+  private currentPeerNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
   private currentNotificationWorkChainId?: string;
   private readonly channelTaskCaptures = new Set<ChannelTaskResponseCapture>();
@@ -10747,10 +10748,18 @@ export class Session implements SessionContext {
     return count;
   }
 
-  /** Ids of peer messages accepted here that no turn has handled yet. */
+  /**
+   * Ids of peer messages accepted here that no turn has handled yet —
+   * including the one a turn is handling right now: it was spliced out of
+   * the queue and may still be put back, so it only leaves this list once
+   * its turn actually ran.
+   */
   queuedPeerMessageIds(): string[] {
     return [
       ...this.acceptingPeerMessageIds,
+      ...(this.currentPeerNotificationTaskId !== null
+        ? [this.currentPeerNotificationTaskId]
+        : []),
       ...this.notificationQueue
         .filter((item) => item.kind === 'peer')
         .map((item) => item.taskId),
@@ -11004,6 +11013,12 @@ export class Session implements SessionContext {
           item.kind === 'agent' ? item.taskId : null;
         this.currentWorkflowNotificationTaskId =
           item.kind === 'workflow' ? item.taskId : null;
+        // A peer message is spliced out of the queue while its turn runs
+        // and put back when the turn never happened; the host's waiting-ids
+        // snapshot must keep naming it either way, or a correction keyed on
+        // that snapshot loses a message the sender was told was delivered.
+        this.currentPeerNotificationTaskId =
+          item.kind === 'peer' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
         this.currentNotificationWorkChainId = item.todoWorkChainId;
         this.#activeWorkChanged();
@@ -11063,6 +11078,7 @@ export class Session implements SessionContext {
         } finally {
           this.currentAgentNotificationTaskId = null;
           this.currentWorkflowNotificationTaskId = null;
+          this.currentPeerNotificationTaskId = null;
           this.currentShellNotificationActive = false;
           this.currentNotificationWorkChainId = undefined;
           this.#activeWorkChanged();

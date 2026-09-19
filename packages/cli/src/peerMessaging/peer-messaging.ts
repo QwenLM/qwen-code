@@ -289,7 +289,10 @@ export class PeerMessaging {
    * still buffered here or still queued in the session's input queue.
    * Settled with a corrective receipt at close.
    */
-  private readonly outstanding: PeerUserFrame[] = [];
+  private readonly outstanding: Array<{
+    frame: PeerUserFrame;
+    admissionKey: string;
+  }> = [];
   private queuedPeerCount: (() => number) | null = null;
   private queuedPeerIds: (() => ReadonlySet<string>) | null = null;
   private readonly heldListeners = new Set<
@@ -517,7 +520,7 @@ export class PeerMessaging {
   expireUndelivered(delivery: PeerQueuedDelivery): void {
     const key = canonicalizeMsgId(delivery.msgId);
     const index = this.outstanding.findIndex(
-      (frame) => canonicalizeMsgId(frame.msgId) === key,
+      (entry) => canonicalizeMsgId(entry.frame.msgId) === key,
     );
     // Not outstanding means already corrected — its session's removal
     // expired it (`expireUnconsumed`) — and a second receipt would be a
@@ -555,7 +558,7 @@ export class PeerMessaging {
     for (const id of msgIds) wanted.add(canonicalizeMsgId(id));
     let expired = 0;
     for (let index = this.outstanding.length - 1; index >= 0; index--) {
-      const frame = this.outstanding[index]!;
+      const { frame, admissionKey } = this.outstanding[index]!;
       if (!wanted.has(canonicalizeMsgId(frame.msgId))) continue;
       this.outstanding.splice(index, 1);
       expired += 1;
@@ -570,6 +573,10 @@ export class PeerMessaging {
           frame.replyToken,
         );
       }
+      // The receipt tells the sender to re-send if it still matters; the
+      // duplicate window must not then call that retry a repeat of a
+      // delivery nobody consumed. Same release `expireUndelivered` makes.
+      this.gate?.forgetAdmittedMessage(admissionKey, frame.msgId);
     }
     return expired;
   }
@@ -853,29 +860,40 @@ export class PeerMessaging {
 
   private unconsumedFrames(): PeerUserFrame[] {
     if (this.queuedPeerIds) {
-      let waiting: ReadonlySet<string>;
-      try {
-        waiting = this.queuedPeerIds();
-      } catch (error) {
-        debugLogger.debug(
-          `queued-peer-ids reader threw: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        waiting = new Set();
-      }
+      // A reader that cannot answer says nothing about what waits; only the
+      // buffered frames — known locally — are certain. Throwing must not
+      // read as "everything was consumed".
+      const waiting = this.waitingPeerIds() ?? new Set<string>();
       const buffered = new Set(
         this.buffered.map((entry) => canonicalizeMsgId(entry.frame.msgId)),
       );
-      return this.outstanding.filter((frame) => {
-        const key = canonicalizeMsgId(frame.msgId);
-        return buffered.has(key) || waiting.has(key);
-      });
+      return this.outstanding
+        .filter((entry) => {
+          const key = canonicalizeMsgId(entry.frame.msgId);
+          return buffered.has(key) || waiting.has(key);
+        })
+        .map((entry) => entry.frame);
     }
     const queued = this.queuedPeerCount?.() ?? 0;
-    return this.outstanding.slice(
-      Math.max(0, this.outstanding.length - this.buffered.length - queued),
-    );
+    return this.outstanding
+      .slice(
+        Math.max(0, this.outstanding.length - this.buffered.length - queued),
+      )
+      .map((entry) => entry.frame);
+  }
+
+  /** What the host says still waits, or undefined when it cannot say. */
+  private waitingPeerIds(): ReadonlySet<string> | undefined {
+    try {
+      return this.queuedPeerIds?.();
+    } catch (error) {
+      debugLogger.debug(
+        `queued-peer-ids reader threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -1056,7 +1074,7 @@ export class PeerMessaging {
         throw new Error('accepted-message backlog is full');
       }
       this.buffered.push({ frame, origin });
-      this.trackOutstanding(frame);
+      this.trackOutstanding(frame, origin);
       return;
     }
     if (this.buffered.length > 0) {
@@ -1073,20 +1091,33 @@ export class PeerMessaging {
     if (!this.submit(frame, origin)) {
       throw new Error('accepted-message backlog is full');
     }
-    this.trackOutstanding(frame);
+    this.trackOutstanding(frame, origin);
   }
 
-  private trackOutstanding(frame: PeerUserFrame): void {
-    this.outstanding.push(frame);
+  private trackOutstanding(frame: PeerUserFrame, origin: PeerOrigin): void {
+    this.outstanding.push({
+      frame,
+      admissionKey: peerSenderKey(frame, origin),
+    });
     if (this.queuedPeerIds) {
       // A host of several sessions says exactly which messages still
       // wait, and nothing else can matter: keep those and drop the rest.
       // Its sessions drain on their own schedules, so a count would drop
       // a message that is old but still waiting, and its correction with
-      // it. The host bounds what waits, per session.
-      const waiting = this.unconsumedFrames();
+      // it. The host bounds what waits, per session. A reader that cannot
+      // answer right now says nothing — pruning on that would clear the
+      // ledger — so the set is left to the next arrival.
+      const waiting = this.waitingPeerIds();
+      if (waiting === undefined) return;
+      const buffered = new Set(
+        this.buffered.map((entry) => canonicalizeMsgId(entry.frame.msgId)),
+      );
+      const kept = this.outstanding.filter((entry) => {
+        const key = canonicalizeMsgId(entry.frame.msgId);
+        return buffered.has(key) || waiting.has(key);
+      });
       this.outstanding.length = 0;
-      this.outstanding.push(...waiting);
+      this.outstanding.push(...kept);
       return;
     }
     // Only the unconsumed tail can ever matter, and it is bounded: at

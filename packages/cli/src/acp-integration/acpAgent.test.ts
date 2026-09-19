@@ -5789,6 +5789,56 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(signalOf(3).aborted).toBe(true);
     });
 
+    it('re-asks a review whose message was re-judged under it', async () => {
+      // A review shows the sender and the hold's cause. A re-judged entry
+      // that changes either — a controller grant revoked while the message
+      // waits — supersedes the outstanding review, or the person would
+      // decide on a sender the gate no longer reports.
+      const inbox = fakeInbox();
+      const { session, agentPromise } = await bootWithInbox('hosted-c', inbox);
+      const hostListener = inbox.onHeldChange.mock.calls[0]![0] as (
+        held: Array<ReturnType<typeof heldFor>>,
+      ) => void;
+      const listener = (held: Array<ReturnType<typeof heldFor>>) => {
+        inbox.getHeld.mockReturnValue(held);
+        hostListener(held);
+      };
+      session['requestPeerMessageReview']!.mockImplementation(
+        () => new Promise(() => {}),
+      );
+
+      const held = heldFor('hosted-c');
+      const attributed = {
+        ...held,
+        controller: { id: 'c_0123abcd', label: 'voice bridge' },
+      };
+      listener([attributed]);
+      await vi.waitFor(() =>
+        expect(session['requestPeerMessageReview']).toHaveBeenCalledTimes(1),
+      );
+      const firstSignal = session['requestPeerMessageReview']!.mock
+        .calls[0]![1] as AbortSignal;
+
+      listener([held]);
+      await vi.waitFor(() =>
+        expect(session['requestPeerMessageReview']).toHaveBeenCalledTimes(2),
+      );
+      expect(firstSignal.aborted).toBe(true);
+      const reasked = session['requestPeerMessageReview']!.mock
+        .calls[1]![0] as {
+        entry: { controller?: unknown; frame: { msgId: string } };
+      };
+      expect(reasked.entry.frame.msgId).toBe(held.frame.msgId);
+      expect(reasked.entry.controller).toBeUndefined();
+
+      // And an unchanged re-notification is still one review, not two.
+      listener([held]);
+      expect(session['requestPeerMessageReview']).toHaveBeenCalledTimes(2);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
     it('retries the delivery a person approved when the session could not take it', async () => {
       const inbox = fakeInbox();
       const { session, agentPromise } = await bootWithInbox('hosted-f', inbox);

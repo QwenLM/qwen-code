@@ -3829,6 +3829,29 @@ describe('task activity key', () => {
     },
   );
 
+  it('opens no panel for a peer turn: its content is this session transcript', async () => {
+    const { container } = renderApp();
+    await flush();
+    act(() =>
+      testState.backgroundDetails?.({
+        turnId: 'peer-turn',
+        taskId: 'msg-1',
+        kind: 'peer',
+        label: 'build bot',
+        startedAt: 100,
+      }),
+    );
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).toBeNull();
+    expect(
+      mockWorkspace.client.getSessionTranscriptPage,
+    ).not.toHaveBeenCalled();
+    expect(mockWorkspace.client.sessionTasks).not.toHaveBeenCalled();
+  });
+
   it('restores a subagent tab without its transcript tool call', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',

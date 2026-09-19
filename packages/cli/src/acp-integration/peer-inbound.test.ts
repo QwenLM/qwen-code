@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildUserFrame,
   describeHoldCause,
@@ -12,10 +12,12 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   buildPeerReviewRequest,
+  heldSenderLabel,
   MAX_PEER_REVIEW_TEXT_CHARS,
   PEER_DELIVER_OPTION_ID,
   PEER_DROP_OPTION_ID,
   PEER_MESSAGE_INTERACTION_KIND,
+  PEER_REVIEW_REQUEST_TTL_MS,
   peerReviewDecision,
   peerReviewDetails,
   peerReviewKey,
@@ -47,7 +49,7 @@ describe('buildPeerReviewRequest', () => {
     expect(request.sessionId).toBe('session-1');
     expect(request.toolCall).toMatchObject({
       toolCallId: `peer-message:${entry.frame.msgId}`,
-      title: 'Cross-session message: build bot',
+      title: 'Cross-session message from build bot: please rebase onto main',
       kind: 'other',
       status: 'pending',
       content: [
@@ -78,15 +80,71 @@ describe('buildPeerReviewRequest', () => {
     });
   });
 
-  it('leaves out the expiry when the hold never expires', () => {
-    const request = buildPeerReviewRequest('session-1', {
+  it("bounds a never-expiring hold's request, keeping the hold's truth in the details", () => {
+    // ACP gives no way to withdraw a sent request: without a deadline the
+    // daemon would keep it pending forever, past the hold itself ending.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(1_000_000);
+      const request = buildPeerReviewRequest('session-1', {
+        entry: held(),
+        expiresAt: null,
+      });
+      const expiresAt = 1_000_000 + PEER_REVIEW_REQUEST_TTL_MS;
+      expect(request._meta).toEqual({
+        qwenInteractionKind: PEER_MESSAGE_INTERACTION_KIND,
+        expiresAt,
+      });
+      expect(request.toolCall._meta).toMatchObject({ expiresAt });
+      // The details still say the hold itself never expires.
+      expect(
+        (request.toolCall.rawInput as { expiresAt: number | null }).expiresAt,
+      ).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names the message in the title, so two holds from one sender differ', () => {
+    const first = buildPeerReviewRequest('s', {
       entry: held(),
       expiresAt: null,
     });
-    expect(request._meta).toEqual({
-      qwenInteractionKind: PEER_MESSAGE_INTERACTION_KIND,
+    const second = buildPeerReviewRequest('s', {
+      entry: held({
+        frame: buildUserFrame({
+          content: 'deploy the release',
+          from: '/tmp/peer.sock',
+          fromName: 'build bot',
+        }),
+      }),
+      expiresAt: null,
     });
-    expect(request.toolCall._meta).not.toHaveProperty('expiresAt');
+    expect(first.toolCall.title).not.toBe(second.toolCall.title);
+    expect(second.toolCall.title).toBe(
+      'Cross-session message from build bot: deploy the release',
+    );
+  });
+
+  it('keeps the title one bounded printable line whatever the body holds', () => {
+    const request = buildPeerReviewRequest('s', {
+      entry: held({
+        frame: buildUserFrame({
+          content: `\u001b[2Jfirst line\nsecond line\n${'x'.repeat(500)}`,
+          from: '/tmp/peer.sock',
+        }),
+      }),
+      expiresAt: null,
+    });
+    const title = request.toolCall.title ?? '';
+    const control = [...title].some((ch) => {
+      const point = ch.codePointAt(0) ?? 0;
+      return point < 0x20 || (point >= 0x7f && point <= 0x9f);
+    });
+    expect(control).toBe(false);
+    expect(Array.from(title).length).toBeLessThanOrEqual(
+      'Cross-session message from /tmp/peer.sock: '.length + 120,
+    );
   });
 
   it('bounds the body a dialog has to lay out', () => {
@@ -121,6 +179,21 @@ describe('peerReviewDetails', () => {
       heldAt: 1_000,
       expiresAt: null,
     });
+  });
+
+  it('flattens the peer-chosen from and fromName to bounded one-line labels', () => {
+    const entry = held({
+      frame: buildUserFrame({
+        content: 'x',
+        from: `\u001b[2J${'a'.repeat(5_000)}`,
+        fromName: 'line one\nline two',
+      }),
+    });
+    const details = peerReviewDetails({ entry, expiresAt: null });
+    expect(details.from).not.toContain('\u001b');
+    expect(Array.from(details.from!).length).toBe(200);
+    expect(details.from!.endsWith('\u2026')).toBe(true);
+    expect(details.fromName).toBe('line one line two');
   });
 
   it('names a controller by its grant and marks own-process messages', () => {
@@ -162,5 +235,61 @@ describe('peerReviewKey', () => {
     expect(peerReviewKey(entry)).not.toBe(
       peerReviewKey({ ...entry, heldAt: entry.heldAt + 1 }),
     );
+  });
+
+  it('tells a re-attributed or re-caused hold apart from its stale review', () => {
+    const entry = held();
+    // A controller grant revoked while the message waits: the outstanding
+    // review still shows controller provenance, so it must be re-asked.
+    const withController: HeldMessage = {
+      ...entry,
+      controller: { id: 'c_0123abcd', label: 'voice bridge' },
+    };
+    expect(peerReviewKey(withController)).not.toBe(peerReviewKey(entry));
+    // Re-judged under a new cause or scope: the review's cause text no
+    // longer matches what is held.
+    expect(peerReviewKey({ ...entry, cause: 'mode-unknown' })).not.toBe(
+      peerReviewKey(entry),
+    );
+    expect(peerReviewKey({ ...entry, policyScope: 'workspace' })).not.toBe(
+      peerReviewKey(entry),
+    );
+    expect(peerReviewKey({ ...entry, selfSent: true })).not.toBe(
+      peerReviewKey(entry),
+    );
+  });
+});
+
+describe('heldSenderLabel', () => {
+  it('falls back to a readable sender when the frame gives nothing', () => {
+    // The wire parser passes a present-but-empty `from` through.
+    expect(
+      heldSenderLabel(
+        held({ frame: buildUserFrame({ content: 'x', from: '' }) }),
+      ),
+    ).toBe('unknown session');
+    expect(
+      heldSenderLabel(
+        held({
+          frame: buildUserFrame({ content: 'x', from: ' ', fromName: ' ' }),
+        }),
+      ),
+    ).toBe('unknown session');
+    // A self-sent frame with no address names what it is, matching the
+    // fallback the delivered path shows.
+    expect(
+      heldSenderLabel(
+        held({ frame: buildUserFrame({ content: 'x' }), selfSent: true }),
+      ),
+    ).toBe('own process');
+    // A controller keeps its user-given label however blank `from` is.
+    expect(
+      heldSenderLabel(
+        held({
+          frame: buildUserFrame({ content: 'x', from: '' }),
+          controller: { id: 'c_0123abcd', label: 'voice bridge' },
+        }),
+      ),
+    ).toBe('voice bridge');
   });
 });

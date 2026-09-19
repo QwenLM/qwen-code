@@ -2890,6 +2890,75 @@ describe('Session', () => {
       expect(session.queuedPeerMessageIds()).toEqual([]);
     });
 
+    it('still names a waiting message while its turn runs', async () => {
+      // The drain splices the item out of the queue to run its turn and
+      // puts it back when the turn never happened; while it is out, the
+      // waiting-ids snapshot must keep naming it, or a correction keyed on
+      // that snapshot loses a message the sender was told was delivered.
+      let finishTurn!: () => void;
+      mockChat.sendMessageStream = vi.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishTurn = () => resolve(createEmptyStream());
+          }),
+      );
+      await session.enqueuePeerMessage({
+        msgId: 'msg-in-flight',
+        displayText: 'm',
+        modelText: 'm',
+      });
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+      );
+      expect(session.queuedPeerMessageIds()).toContain('msg-in-flight');
+
+      finishTurn();
+      await vi.waitFor(() =>
+        expect(session.queuedPeerMessageIds()).not.toContain('msg-in-flight'),
+      );
+    });
+
+    it('counts a message still being recorded against the peer budget', async () => {
+      // A message is accepted before its transcript record finishes; while
+      // the record pends it sits in neither the queue nor its count, so
+      // without the reservation term a burst would overrun the budget.
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = new AbortController();
+      for (let i = 0; i < MAX_BACKGROUND_NOTIFICATION_QUEUE - 1; i++) {
+        await session.enqueuePeerMessage({
+          msgId: `msg-${i}`,
+          displayText: 'x',
+          modelText: 'x',
+        });
+      }
+      expect(session.hasRoomForPeerMessage()).toBe(true);
+
+      let finishRecord!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishRecord = resolve;
+          }),
+      );
+      const inFlight = session.enqueuePeerMessage({
+        msgId: 'msg-last',
+        displayText: 'x',
+        modelText: 'x',
+      });
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalled(),
+      );
+
+      // The last slot is spoken for by the message still being recorded.
+      expect(session.hasRoomForPeerMessage()).toBe(false);
+
+      finishRecord();
+      await expect(inFlight).resolves.toEqual({ accepted: true });
+    });
+
     it('lists waiting messages and says when the queue has no room', async () => {
       // A prompt in flight keeps everything queued.
       (
@@ -3031,6 +3100,19 @@ describe('Session', () => {
           new AbortController().signal,
         ),
       ).resolves.toBe('drop');
+      // A hold with no expiry still gives the request a deadline: the
+      // daemon cannot be told to withdraw it, so it must end on its own.
+      const unbounded = vi
+        .mocked(mockClient.requestPermission)
+        .mock.calls.at(-1)?.[0];
+      const unboundedExpiry = (unbounded?._meta as { expiresAt?: unknown })[
+        'expiresAt'
+      ];
+      expect(typeof unboundedExpiry).toBe('number');
+      expect(unboundedExpiry as number).toBeGreaterThan(Date.now());
+      expect(unboundedExpiry as number).toBeLessThanOrEqual(
+        Date.now() + 61_000,
+      );
 
       vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
         outcome: { outcome: 'cancelled' },

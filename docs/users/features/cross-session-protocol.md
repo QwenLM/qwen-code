@@ -319,12 +319,15 @@ that session's approval mode, `agents.crossSessionInbound` and
   - `_meta.qwenInteractionKind` is `peer_message`, on the request and on
     its `toolCall`.
   - `toolCall.toolCallId` is `peer-message:<msgId>`, and the tool call's
-    text content is the message body, with control characters removed
-    and cut to 2000 characters.
+    text content is the message body, with control characters other than
+    line breaks and tabs removed, CRLF normalized to LF, and the result
+    cut to 2000 code points.
   - `toolCall.rawInput` and `toolCall._meta.peerMessage` carry `msgId`,
-    `sender`, `from`, `fromName`, `origin` (`peer`, `own-process` or
-    `controller`), `controller`, `cause`, `causeText`, `heldAt` and
-    `expiresAt`.
+    `sender`, `origin` (`peer`, `own-process` or `controller`), `cause`,
+    `causeText`, `heldAt` and `expiresAt`; `from` and `fromName` appear
+    only when the frame gave them, `controller` only for a
+    controller-sent message, and `expiresAt` is `null` when the hold
+    never expires.
   - The options are `peer_deliver` and `peer_drop`. Any other answer,
     including a cancellation, leaves the message held, and the session
     asks again after a delay that doubles each time, up to a minute.
@@ -332,16 +335,20 @@ that session's approval mode, `agents.crossSessionInbound` and
     message yet, the message stays held and delivery is retried on the
     same schedule. The person is not asked again.
   - The request belongs to no prompt. A turn ending does not cancel it.
-  - `_meta.expiresAt` is when the hold expires, in epoch milliseconds.
-    It is absent when holds never expire.
+  - `_meta.expiresAt` is when the request stops mattering, in epoch
+    milliseconds: the hold's expiry, or one minute from when the request
+    was made when the hold never expires. The daemon ends the request
+    there, and the session asks again while the message is still held.
 
 ACP gives an agent no way to withdraw a request it sent. When a hold
 ends some other way, such as a mode change that releases it or the
 session closing, the session stops waiting for the answer, and a late
 answer changes nothing. The daemon ends each request at
-`_meta.expiresAt` by itself, so its pending list stays current. An
-editor that does not read the field may keep showing the dialog until
-someone answers it.
+`_meta.expiresAt` by itself — or at its configured permission-response
+timeout, if that comes first — so its pending list stays current, and
+the session asks again while the message is still held. An editor that
+does not read the field may keep showing the dialog until someone
+answers it.
 
 When a session closes and its process stays up, the messages still held
 for it are settled `expired`, and so are the accepted ones still waiting
