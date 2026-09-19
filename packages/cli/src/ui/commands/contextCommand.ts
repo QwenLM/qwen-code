@@ -287,9 +287,10 @@ interface ConversationBilling {
 /**
  * Content estimate of the conversation after the startup prelude. A part whose
  * cost another category already owns is skipped here: tracked skill bodies and
- * tail skill-listing reminders are both billed under `skills`. A top-level media
- * part has no text to estimate; the provider still counts it, so its cost
- * surfaces as `unattributed`.
+ * tail skill-listing reminders are both billed under `skills`. Top-level media
+ * is charged at the same flat per-image budget as the nested carrier: a pasted
+ * screenshot is the ordinary shape, and leaving it uncounted would hide it from
+ * `freeSpace` and `tierTokens`, which read this estimate.
  */
 function estimateConversationTokens(
   conversation: Content[],
@@ -301,6 +302,8 @@ function estimateConversationTokens(
       if (typeof part.text === 'string') {
         if (billing.billedListingTexts.has(part.text)) continue;
         tokens += estimateContextTextTokens(part.text);
+      } else if (part.inlineData || part.fileData) {
+        tokens += billing.imageTokenEstimate;
       } else if (part.functionCall) {
         tokens += estimateContextTextTokens(JSON.stringify(part.functionCall));
       } else if (part.functionResponse) {
@@ -466,9 +469,10 @@ export async function collectContextData(
     const isLoaded = loadedSkillNames.has(skill.name);
     let bodyTokens: number | undefined;
     if (isLoaded && skill.body) {
-      const baseDir = skill.filePath
-        ? skill.filePath.replace(/\/[^/]+$/, '')
-        : '';
+      // Matches every core producer, which renders the body with
+      // `path.dirname` of the platform's own separator; a `/`-only suffix strip
+      // leaves a Windows path intact and bills the body twice.
+      const baseDir = skill.filePath ? path.dirname(skill.filePath) : '';
       const body = buildSkillLlmContent(baseDir, skill.body);
       bodyTokens = estimateContextTextTokens(body);
       loadedBodiesTokens += bodyTokens;
@@ -580,33 +584,47 @@ export async function collectContextData(
   } else {
     totalTokens = apiTotalTokens;
 
-    // Categories partition the request by content (#12033). When the
-    // estimates exceed the provider total they are all scaled down together;
-    // when they fall short, the gap is reported as `unattributed` rather than
-    // folded into another category. The cached count is never subtracted: a
-    // cache hit spans several categories, so it is only an annotation.
-    // `totalTokens` is not always provider-reported: `compressFast()` and resume
-    // seeding write a count derived from core's char/4 `estimateContentTokens`
-    // and stamp it estimated. The categories here are measured with the
-    // CJK-aware estimator, which on CJK-heavy text runs up to ~6x higher, so
-    // dividing one by the other deflates every row — including the ASCII
-    // system-prompt row — by that factor. Scale only against a provider-reported
-    // total; when the total is itself an estimate, `messages` absorbs the
-    // residual instead (below).
-    const scale =
-      !isEstimated && rawContent > totalTokens ? totalTokens / rawContent : 1;
+    // Categories partition the request by content (#12033). When the overhead
+    // exceeds the provider total it is scaled down as a whole; when it falls
+    // short, the gap is reported as `unattributed` rather than folded into
+    // another category. The cached count is never subtracted: a cache hit spans
+    // several categories, so it is only an annotation.
+    //
+    // Only the overhead is scaled, and only against itself. Conversation content
+    // is deliberately kept out of the denominator: `conversationTokens` measures
+    // a strictly larger content set than the last request's `promptTokenCount`
+    // (which excludes the answer `history` already carries) with a CJK-aware
+    // estimator, so including it deflates every exactly-measured row. The total
+    // is not always provider-reported either — `compressFast()` and resume
+    // seeding stamp a char/4 estimate of the compressed history alone, which can
+    // sit below the overhead — so the clamp must stay armed there too, or the
+    // rows overshoot the total with no row able to report it. Conversation-side
+    // overshoot is absorbed by the `messages` cap below.
+    const scale = rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
 
     displaySystemPrompt = Math.round(systemPromptTokens * scale);
     const scaledAllTools = Math.round(allToolsTokens * scale);
     displayMemoryFiles = Math.round(memoryFilesTokens * scale);
-    displaySkills = Math.round(skillsTokens * scale);
     displayStartupContext = Math.round(startupContextTokens * scale);
     const scaledMcpTotal = Math.round(mcpToolsTotalTokens * scale);
-    displayMcpTools = scaledMcpTotal;
     const scaledSkillDefinition = Math.round(skillToolDefinitionTokens * scale);
+    // `displayBuiltinTools` floors at 0, so when the billed Skill definition and
+    // the MCP schemas together exceed the declared tool list, that excess would
+    // be charged to the overhead and taken straight back out of `messages`.
+    // Charge it to `mcpTools`, and charge whatever the MCP schemas cannot absorb
+    // to the Skill definition `skills` carries, so the three rows still account
+    // for exactly `scaledAllTools` plus the listing and the loaded bodies.
+    const clampDeficit = Math.max(
+      0,
+      scaledSkillDefinition + scaledMcpTotal - scaledAllTools,
+    );
+    displayMcpTools = Math.max(0, scaledMcpTotal - clampDeficit);
+    displaySkills =
+      Math.round(skillsTokens * scale) -
+      Math.max(0, clampDeficit - scaledMcpTotal);
     displayBuiltinTools = Math.max(
       0,
-      scaledAllTools - scaledSkillDefinition - scaledMcpTotal,
+      scaledAllTools - scaledSkillDefinition - displayMcpTools,
     );
 
     const attributedOverhead =
@@ -622,12 +640,10 @@ export async function collectContextData(
       // sum to the total exactly.
       messagesTokens = Math.max(0, totalTokens - attributedOverhead);
     } else {
-      // Unscaled, an estimated total can sit below the conversation estimate
-      // (the two use different units), so cap `messages` at what is left after
-      // the overhead rows rather than letting the rows overshoot the total. For
-      // a provider-reported total this cap is a no-op — there
-      // `rawContent <= totalTokens` already implies it. A genuine shortfall
-      // still surfaces as `unattributed`.
+      // Unscaled, the overhead already fits inside the total
+      // (`rawOverhead <= totalTokens`), so `messages` is capped only by the
+      // conversation estimate. A genuine shortfall still surfaces as
+      // `unattributed`.
       messagesTokens = Math.min(
         conversationTokens,
         Math.max(0, totalTokens - attributedOverhead),
