@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.24.0",
+  "version": "0.24.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -30,9 +30,7 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json && node scripts/rewrite-declaration-aliases.mjs && npm run verify:package",
-    "verify:package": "node scripts/verify-package.mjs",
-    "prepublishOnly": "npm run verify:package",
+    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
@@ -45,7 +43,8 @@
     "test:e2e": "playwright test --config playwright.config.ts",
     "test:e2e:visuals": "playwright test --config playwright.visuals.config.ts",
     "test:e2e:report": "playwright show-report client/e2e/playwright-report",
-    "verify": "npm run lint && npm run format:check && npm run typecheck && npm run test:ci"
+    "verify": "npm run lint && npm run format:check && npm run typecheck && npm run test:ci",
+    "prepublishOnly": "node scripts/verify-publish-artifacts.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",

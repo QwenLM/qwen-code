@@ -18,12 +18,20 @@ describe('web-shell package build boundary', () => {
     }
   });
 
-  it('keeps stylesheet entrypoints bundled', () => {
+  it('keeps dependency stylesheet entrypoints bundled', () => {
+    for (const packageName of runtimePackages) {
+      expect(
+        shouldExternalizeWebShellDependency(`${packageName}/styles.css`),
+      ).toBe(false);
+    }
     expect(
       shouldExternalizeWebShellDependency('@xterm/xterm/css/xterm.css'),
     ).toBe(false);
     expect(
       shouldExternalizeWebShellDependency('katex/dist/katex.min.css'),
+    ).toBe(false);
+    expect(
+      shouldExternalizeWebShellDependency('mermaid/dist/mermaid.css'),
     ).toBe(false);
   });
 
@@ -56,6 +64,9 @@ describe('web-shell package build boundary', () => {
         false,
       );
       expect(external('@xterm/xterm/css/xterm.css', undefined, false)).toBe(
+        false,
+      );
+      expect(external('mermaid/dist/mermaid.css', undefined, false)).toBe(
         false,
       );
     },
