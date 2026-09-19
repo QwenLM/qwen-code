@@ -10,6 +10,7 @@ import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
   CompressionStatus,
+  markApiHistoryPrompt,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -83,6 +84,141 @@ function compressionItem(
 // ---------------------------------------------------------------------------
 
 describe('computeApiTruncationIndex', () => {
+  it('uses identity for the first user turn when model history starts with a notification', () => {
+    const target = {
+      ...userItem(3, 'target'),
+      promptId: 'session########0',
+    } as HistoryItem;
+    const targetContent = userContent('target');
+    markApiHistoryPrompt(targetContent, 'session########0');
+
+    expect(
+      computeApiTruncationIndex(
+        [
+          { type: 'notification', id: 1, text: 'background result' },
+          llmItem(2),
+          target,
+        ] as HistoryItem[],
+        3,
+        [
+          userContent('background result'),
+          modelContent('background response'),
+          targetContent,
+        ],
+      ),
+    ).toBe(2);
+  });
+
+  it('uses a stable prompt identity instead of positional alignment', () => {
+    const target = {
+      ...userItem(3, 'target'),
+      promptId: 'session########1',
+    } as HistoryItem;
+    const targetContent = userContent('target');
+    markApiHistoryPrompt(targetContent, 'session########1');
+
+    expect(
+      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
+        userContent('first'),
+        modelContent('first response'),
+        userContent('unowned entry'),
+        modelContent('unowned response'),
+        targetContent,
+      ]),
+    ).toBe(4);
+  });
+
+  it('keeps positional mapping for an identified turn whose model entry is unmarked', () => {
+    // Only a first-party user prompt is marked in model history — a retry, a
+    // continuation or a cron send leaves its entry bare while the UI item
+    // still wears the id. Refusing there would make such turns unrewindable,
+    // so the positional mapping predating identities applies.
+    const target = {
+      ...userItem(3, 'target'),
+      promptId: 'unmarked',
+    } as HistoryItem;
+
+    expect(
+      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
+        userContent('first'),
+        modelContent('first response'),
+        userContent('target'),
+      ]),
+    ).toBe(2);
+  });
+
+  it('refuses an unmarked target the positional walk cannot reach either', () => {
+    const target = {
+      ...userItem(3, 'target'),
+      promptId: 'missing',
+    } as HistoryItem;
+
+    expect(
+      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
+        userContent('first'),
+        modelContent('first response'),
+      ]),
+    ).toBe(-1);
+  });
+
+  it('refuses an identified turn when its identity is duplicated', () => {
+    const target = {
+      ...userItem(3, 'target'),
+      promptId: 'duplicate',
+    } as HistoryItem;
+    const firstMatch = userContent('first match');
+    const secondMatch = userContent('second match');
+    markApiHistoryPrompt(firstMatch, 'duplicate');
+    markApiHistoryPrompt(secondMatch, 'duplicate');
+
+    expect(
+      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
+        firstMatch,
+        modelContent('response'),
+        secondMatch,
+      ]),
+    ).toBe(-1);
+  });
+
+  it('refuses an identity duplicated only in retained UI history', () => {
+    const target = {
+      ...userItem(3, 'absorbed target'),
+      promptId: 'duplicate',
+    } as HistoryItem;
+    const twin = {
+      ...userItem(5, 'surviving twin'),
+      promptId: 'duplicate',
+    } as HistoryItem;
+    const survivingContent = userContent('surviving twin');
+    markApiHistoryPrompt(survivingContent, 'duplicate');
+
+    expect(
+      computeApiTruncationIndex(
+        [userItem(1), llmItem(2), target, llmItem(4), twin],
+        3,
+        [userContent('first'), modelContent('response'), survivingContent],
+      ),
+    ).toBe(-1);
+  });
+
+  it('keeps positional mapping for file-key-only restored turns', () => {
+    const target = {
+      ...userItem(3, 'target'),
+      promptId: 'file-key',
+      promptIdFileKeyOnly: true,
+    } as HistoryItem;
+    const marked = userContent('later twin');
+    markApiHistoryPrompt(marked, 'file-key');
+
+    expect(
+      computeApiTruncationIndex([userItem(1), llmItem(2), target], 3, [
+        userContent('first'),
+        modelContent('response'),
+        marked,
+      ]),
+    ).toBe(2);
+  });
+
   it('returns 0 for empty API history', () => {
     const ui: HistoryItem[] = [userItem(1)];
     const api: Content[] = [];

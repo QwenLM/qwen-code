@@ -10,12 +10,16 @@ import {
   buildResumedHistoryItems,
   stripSuppressOnRestore,
   expandCollapsedHistory,
+  computeResumedPromptCountSeed,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
+import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
+import { computeApiTruncationIndex } from './historyMapping.js';
 import { SUPERSEDED_FINDINGS_MESSAGE } from './findings-coalescing.js';
 import type {
   AnyDeclarativeTool,
   Config,
+  ChatRecord,
   ConversationRecord,
   FindingsResultDisplay,
   GoalSnapshotV2,
@@ -394,13 +398,21 @@ describe('resumeHistoryUtils', () => {
     it('prefers recorded displayText over the augmented parts', () => {
       const items = buildUserItems({
         type: 'user',
+        promptId: 'prompt-1',
         message: { parts: [{ text: 'my prompt' }, { text: tagged }] },
         systemPayload: {
           displayText: 'my prompt',
           hookContext: 'injected hook context',
         },
       });
-      expect(items).toEqual([{ id: 1_001, type: 'user', text: 'my prompt' }]);
+      expect(items).toEqual([
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt',
+          promptId: 'prompt-1',
+        },
+      ]);
     });
 
     it('does not fall back to hidden text when displayText is empty', () => {
@@ -466,7 +478,11 @@ describe('resumeHistoryUtils', () => {
         },
       });
       expect(items).toEqual([
-        { id: 1_001, type: 'user', text: 'my prompt\nbare injected context' },
+        {
+          id: 1_001,
+          type: 'user',
+          text: 'my prompt\nbare injected context',
+        },
       ]);
     });
 
@@ -730,7 +746,11 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 50);
 
     expect(items).toEqual([
-      { id: 51, type: 'user', text: '[User message with attachments]' },
+      {
+        id: 51,
+        type: 'user',
+        text: '[User message with attachments]',
+      },
     ]);
   });
 
@@ -765,7 +785,13 @@ describe('resumeHistoryUtils', () => {
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'raw @file prompt',
+      },
+    ]);
   });
 
   it('projects the user turn when legacy @-command metadata has no userText', () => {
@@ -1990,5 +2016,346 @@ describe('expandCollapsedHistory', () => {
         SUPERSEDED_FINDINGS_MESSAGE,
       );
     });
+  });
+});
+
+describe('resumed identity survives a synthetic display string', () => {
+  // End-to-end through the real builders on BOTH sides: the same records
+  // produce the UI items and the model-facing history, exactly as resume
+  // does. The rewind ownership proof compares the two, so a UI item whose
+  // displayed text is synthetic ('[User message with attachments]') used to
+  // match nothing and silently lose identity resolution for that turn.
+  //
+  // The fixture makes the walk and the identity gate DISAGREE, otherwise it
+  // would pin nothing: turn 2 is a media-only prompt whose entry was cleared
+  // to a placeholder, which the rewind walk excludes from its count, so
+  // rewinding to turn 3 desyncs the walk and only identity can land it.
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  const model = (text: string) =>
+    rec({ type: 'assistant', message: { role: 'model', parts: [{ text }] } });
+
+  function truncationIndexForLastUserTurn(messages: ChatRecord[]): number {
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const userItems = ui.filter((item) => item.type === 'user');
+    return computeApiTruncationIndex(
+      ui,
+      userItems[userItems.length - 1]!.id,
+      api,
+    );
+  }
+
+  const leadingTurns = (): ChatRecord[] => [
+    rec({
+      type: 'user',
+      promptId: 's########0',
+      message: { role: 'user', parts: [{ text: 'hello' }] },
+    }),
+    model('r0'),
+    rec({
+      type: 'user',
+      promptId: 's########1',
+      message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
+    }),
+    model('r1'),
+  ];
+
+  it('resolves a plainly recorded third turn through identity', () => {
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'run the tests' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('resolves it identically when the record carries attachments', () => {
+    // Same history; the only difference is the recorded attachment
+    // references, which make the resume builder display
+    // '[User message with attachments]'. Identity remains independent of
+    // the display projection.
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'run the tests' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('resolves a turn whose recorded prompt begins with a standalone system-reminder part', () => {
+    // Per-turn reminders change the content shape but not the prompt identity.
+    expect(
+      truncationIndexForLastUserTurn([
+        ...leadingTurns(),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                text: '<system-reminder>\nplan mode is on\n</system-reminder>',
+              },
+              { text: 'run the tests' },
+            ],
+          },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it("claims a pre-identity turn's unmarked entry by its model-facing text in the safe-cut scan", () => {
+    // The safe-cut scan pairs an UNMARKED entry (here the middle turn's own,
+    // recorded before identities existed) against each still-displayed
+    // pre-target turn's model-facing text. That text was captured only when
+    // the record's promptId survived the duplicate census, so for exactly
+    // the no-mark population the scan fell back to the DISPLAY string —
+    // '[User message with attachments]' matches no entry — and the demotion
+    // cut at 4, dropping the displayed middle turn's own entry while its UI
+    // item stayed on screen (R50-1). The goal_runtime record between the
+    // turns inflates the walk (counted, no UI item) so the demotion engages.
+    expect(
+      truncationIndexForLastUserTurn([
+        rec({
+          type: 'user',
+          promptId: 's########0',
+          message: { role: 'user', parts: [{ text: 'first prompt' }] },
+        }),
+        model('r0'),
+        rec({
+          type: 'user',
+          subtype: 'goal_runtime',
+          message: { role: 'user', parts: [{ text: 'goal tick' }] },
+        }),
+        model('rX'),
+        rec({
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: 'target prompt' }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(6);
+  });
+
+  it('still resolves a placeholder-texted turn that follows an attachment-only turn', () => {
+    // R32-1 (the behind direction): an attachment-only record resumes to a
+    // visible '[User message with attachments]' turn whose API entry has no
+    // text part, so the UI turn count and the API prompt count diverge by
+    // one. The ordinal proof must count the same population on both sides —
+    // turns whose prompt carried a model-facing text — or the placeholder
+    // target's own marked, text-matching entry is refused (-1) even though
+    // nothing about it is ambiguous.
+    expect(
+      truncationIndexForLastUserTurn([
+        leadingTurns()[0]!,
+        model('r0'),
+        rec({
+          type: 'user',
+          promptId: 's########1',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+              } as unknown as Part,
+            ],
+          },
+          systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+        }),
+        model('r1'),
+        rec({
+          type: 'user',
+          promptId: 's########2',
+          message: { role: 'user', parts: [{ text: PLACEHOLDER }] },
+        }),
+        model('r2'),
+      ]),
+    ).toBe(4);
+  });
+
+  it('resolves an attachment-only target by identity', () => {
+    const messages = [
+      leadingTurns()[0]!,
+      model('r0'),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+            } as unknown as Part,
+          ],
+        },
+        systemPayload: { attachmentReferences: [{ id: 'a1' }] },
+      }),
+      model('r1'),
+      rec({
+        type: 'user',
+        promptId: 's########2',
+        message: { role: 'user', parts: [{ text: 'run the tests' }] },
+      }),
+      model('r2'),
+    ];
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const api = buildApiHistoryFromConversation(
+      sessionData.conversation as never,
+    );
+    const attachmentItem = ui.find(
+      (item) =>
+        item.type === 'user' && item.text === '[User message with attachments]',
+    )!;
+    expect(computeApiTruncationIndex(ui, attachmentItem.id, api)).toBe(2);
+  });
+});
+
+describe('resumed promptId attachment', () => {
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  it('attaches recorded prompt identities and lets lookup reject duplicates', () => {
+    const sessionData = {
+      conversation: {
+        messages: [
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'first prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r0' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########0',
+            message: { role: 'user', parts: [{ text: 'second prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r1' }] },
+          }),
+          rec({
+            type: 'user',
+            promptId: 's########2',
+            message: { role: 'user', parts: [{ text: 'third prompt' }] },
+          }),
+          rec({
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'r2' }] },
+          }),
+        ],
+      },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 1_000);
+    const userItems = ui.filter(
+      (item): item is HistoryItem & { promptId?: string } =>
+        item.type === 'user',
+    );
+    expect(userItems).toHaveLength(3);
+    expect(userItems.map((item) => item.promptId)).toEqual([
+      's########0',
+      's########0',
+      's########2',
+    ]);
+  });
+});
+
+describe('computeResumedPromptCountSeed', () => {
+  const rec = (over: Record<string, unknown>) =>
+    ({
+      sessionId: 's',
+      timestamp: new Date().toISOString(),
+      version: '1',
+      ...over,
+    }) as unknown as ChatRecord;
+
+  it('seeds past a file-history snapshot key a dropped turn retained', () => {
+    // A conversation-only rewind drops the target turn from the transcript
+    // but re-records the surviving file-history snapshots — the dropped
+    // turn's included — on the active branch. A seed derived only from the
+    // surviving user turns re-mints that key on the first post-resume
+    // submit, and the shared-key refusal then blocks that turn's file
+    // restore (R48-1).
+    const records = [
+      rec({
+        type: 'user',
+        promptId: 's########0',
+        message: { role: 'user', parts: [{ text: 'first prompt' }] },
+      }),
+      rec({
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'r0' }] },
+      }),
+      rec({
+        type: 'user',
+        promptId: 's########1',
+        message: { role: 'user', parts: [{ text: 'second prompt' }] },
+      }),
+      rec({
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'r1' }] },
+      }),
+      rec({
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 's########2',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        },
+      }),
+    ];
+    expect(computeResumedPromptCountSeed(records, 's')).toBe(3);
+  });
+
+  it('keeps seeding from zero when no turn or snapshot claims an id', () => {
+    expect(computeResumedPromptCountSeed([], 's')).toBe(0);
   });
 });

@@ -880,6 +880,11 @@ export const useSlashCommandProcessor = (
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
       existingInvocationItemId?: number,
+      // The minted id of the turn this invocation's submit_prompt content
+      // will be sent under. Echoed onto the invocation item when the command
+      // submits to the model so the marked API entry has a UI claimant
+      // (R49-2) — the rewind gate's claim scans key on it.
+      invocationPromptId?: string,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -1057,7 +1062,10 @@ export const useSlashCommandProcessor = (
           // Mark as sent to model so chat recording and telemetry work correctly
           invocationSentToModel = true;
           if (invocationItemId !== undefined) {
-            updateItem(invocationItemId, { sentToModel: true });
+            updateItem(invocationItemId, {
+              sentToModel: true,
+              ...(invocationPromptId ? { promptId: invocationPromptId } : {}),
+            });
           }
 
           // Combine all content into a single submit_prompt
@@ -1400,7 +1408,12 @@ export const useSlashCommandProcessor = (
                     // React applies this update asynchronously. No same-turn
                     // logic reads the UI history classification; rewind/resume
                     // consumers observe it after state has rendered.
-                    updateItem(invocationItemId, { sentToModel: true });
+                    updateItem(invocationItemId, {
+                      sentToModel: true,
+                      ...(invocationPromptId
+                        ? { promptId: invocationPromptId }
+                        : {}),
+                    });
                   }
                   recordSkillCommandInvocation(true);
                   void recordAutoSkillCommandUsage(config, commandToExecute);
@@ -1454,6 +1467,7 @@ export const useSlashCommandProcessor = (
                     new Set(approvedCommands),
                     undefined,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'confirm_action': {
@@ -1486,6 +1500,7 @@ export const useSlashCommandProcessor = (
                     undefined,
                     true,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'stream_messages': {

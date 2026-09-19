@@ -9782,6 +9782,7 @@ describe('Session', () => {
               withDisplayText
                 ? { displayText: 'visible prompt', hookContext: '' }
                 : undefined,
+              expect.stringContaining('test-session-id########'),
               currentPromptId,
             );
             return Promise.resolve(createEmptyStream());
@@ -9804,7 +9805,7 @@ describe('Session', () => {
           }
           expect(
             mockChatRecordingService.recordUserMessage.mock.calls.map(
-              (args) => args[3],
+              (args) => args[4],
             ),
           ).toEqual(['daemon-first', 'daemon-second']);
         },
@@ -9823,6 +9824,7 @@ describe('Session', () => {
           'untrusted identity',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
       });
@@ -10899,6 +10901,7 @@ describe('Session', () => {
         '原始语音文本',
         undefined,
         undefined,
+        expect.stringContaining('test-session-id########'),
         trustedContext.promptId,
       );
       expect(textParts(firstSentMessage())).toEqual([
@@ -10959,6 +10962,7 @@ describe('Session', () => {
             hookContext: '',
             resourceLinks: expectedLinks,
           },
+          expect.stringContaining('test-session-id########'),
           trustedContext.promptId,
         );
         expect(textParts(firstSentMessage())).toEqual([
@@ -11011,6 +11015,7 @@ describe('Session', () => {
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11038,6 +11043,7 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -11067,6 +11073,7 @@ describe('Session', () => {
         expect.objectContaining({
           attachmentReferences: [attachmentReference],
         }),
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
     });
@@ -15895,6 +15902,7 @@ describe('Session', () => {
         '3',
         undefined,
         undefined,
+        'test-session-id########3',
         undefined,
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledWith(
@@ -15924,6 +15932,7 @@ describe('Session', () => {
         'internal channel instructions\n\nhello',
         undefined,
         { displayText: 'hello', hookContext: '' },
+        expect.stringContaining('test-session-id########'),
         undefined,
       );
       expect(
@@ -26915,6 +26924,7 @@ describe('Session', () => {
           '/btw question',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
         expect(
@@ -27029,6 +27039,7 @@ describe('Session', () => {
           '/advisor check my work',
           undefined,
           undefined,
+          expect.stringContaining('test-session-id########'),
           'daemon-advisor',
         );
       });
@@ -30408,6 +30419,7 @@ describe('Session', () => {
           'hello',
           permit,
           undefined,
+          expect.stringContaining('test-session-id########'),
           undefined,
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);

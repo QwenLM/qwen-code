@@ -138,12 +138,15 @@ export interface OpenTuiLiveTurn {
   /**
    * Submits a prompt (or queues it when a turn is in flight). A
    * `submit_prompt` outcome's per-turn options travel in `options`.
+   * Returns the minted turn promptId — undefined when the submit was
+   * queued behind a streaming turn — so the dispatcher's echoed invocation
+   * row can be back-filled with it (R49-2).
    */
   submit(
     content: PartListUnion,
     imagePaths?: readonly string[],
     options?: OpenTuiSubmitOptions,
-  ): void;
+  ): string | undefined;
   /** Aborts the in-flight turn (Esc). */
   interrupt(): void;
   /** Replaces the transcript from a replay batch (session switch/resume). */
@@ -359,7 +362,7 @@ export function useOpenTuiLiveTurn(
           });
         }
         if (text.trim()) pushQueue(text);
-        return;
+        return undefined;
       }
       const { parts, notices } = imagePathsToParts(imagePaths ?? []);
       for (const notice of notices) apply({ type: 'warning', text: notice });
@@ -370,6 +373,7 @@ export function useOpenTuiLiveTurn(
         apply({ type: 'user', text, promptId, sentToModel: true });
       }
       void runTurn(prompt, promptId, options);
+      return promptId;
     },
     [config, apply, pushQueue, runTurn],
   );
