@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="connection_interrupted">Connection interrupted</string>
+    <string name="connection_resume_hint">Retry to reopen your previous session. Unsent text is not restored.</string>
     <string name="app_name">Qwen Code</string>
     <string name="retry">Retry</string>
     <string name="connections">Connections</string>
@@ -26,10 +28,6 @@
     <string name="preparing_browser_hint">Wait for the WebView provider to finish clearing this connection’s previous browser data. No page or credential is loaded before completion. You can return to Connections and retry later.</string>
     <string name="browser_preparation_failed">Could not prepare browser storage</string>
     <string name="connection_controls">Connections · %1$s</string>
-    <string name="connection_failed">Cannot reach Qwen Code</string>
-    <string name="connection_failed_hint">Check the daemon address, connection and certificate, then retry.</string>
-    <string name="renderer_stopped">WebView stopped</string>
-    <string name="retry_connection">Reconnect to open a new browser session.</string>
     <string name="storage_unavailable">Connection data unavailable</string>
     <string name="storage_unavailable_hint">The saved data could not be opened or migrated safely. Retry, or reset it and enter your connection details again.</string>
     <string name="reset_profiles">Reset connections</string>

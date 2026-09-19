@@ -59,6 +59,8 @@ retain the daemon's [origin requirements](../../docs/users/qwen-serve.md#securit
 
 ## Limitations
 
+Android Activity recreation restores the selected connection and supported session/workspace route in a fresh WebView. Renderer failure keeps an explicit Retry screen, including if that screen is recreated. Credentials are read from the encrypted profile store; saved instance state contains only profile/browser IDs, validated navigation IDs and a retry flag. Deleting a profile or changing its origin/token invalidates restoration. Cold launches without saved state, unsent text and pending native operations are not resumed. See the [recovery design](../../docs/design/mobile-connection-recovery.md).
+
 This is not a released production mobile client. File selection, microphone permission bridging, downloads and new-window handling still need native integrations. System font-scale integration and full pinch-zoom/accessibility acceptance remain follow-ups. Renderer failure offers a new connection. No foreground service runs. The Web Shell probes its existing capabilities on each fresh connection; this slice adds no native workspace cache or native REST client. Phase 2 still requires maintainer-provided per-device revocation, background SSE, notification permissions and a stronger H5 token-persistence contract.
 
 JVM tests and APK compilation are separate from emulator/physical-device acceptance. Consult the PR verification report for actual completed checks; source presence does not establish device validation.
