@@ -755,9 +755,6 @@ export function createEventMapper(
         });
         break;
       }
-      case 'active_goal':
-        // ink parity: useGeminiStream ignores this legacy projection event.
-        break;
       case 'goal_state': {
         closeThought();
         const v = ev as {

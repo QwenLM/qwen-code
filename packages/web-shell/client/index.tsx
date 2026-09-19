@@ -253,6 +253,8 @@ export type {
   WebShellFootnotePreviewHandle,
   WebShellFootnotePreviewMount,
   WebShellAssistantMessageInfo,
+  WebShellAssistantTurnOutcome,
+  WebShellAssistantTurnSettledEvent,
   WebShellAssistantTurnFooterRenderInfo,
   ArtifactImageRenderer,
   WebShellArtifactCustomization,
