@@ -21,6 +21,7 @@ import type { CallableTool, Part } from '@google/genai';
 import { SdkError, SdkErrorCode } from '@modelcontextprotocol/client';
 import { ToolErrorType } from './tool-error.js';
 import {
+  getMCPServerStatus,
   MCPServerStatus,
   removeMCPServerStatus,
   updateMCPServerStatus,
@@ -2011,7 +2012,7 @@ describe('DiscoveredMCPTool', () => {
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
 
-    it('does not reconnect a guarded invocation after an ambiguous connection error', async () => {
+    it('still fails a guarded invocation after an ambiguous connection error', async () => {
       const params = { param: 'test' };
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockRejectedValueOnce(new Error('Connection closed')),
@@ -2045,8 +2046,11 @@ describe('DiscoveredMCPTool', () => {
       ).rejects.toThrow('Connection closed');
 
       expect(mockMcpClient.callTool).toHaveBeenCalledOnce();
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
-      expect(ensureTool).not.toHaveBeenCalled();
+      // The connection repair may run so the NEXT call has a live session,
+      // but the guarded call itself is never re-executed and its error still
+      // surfaces unchanged: exactly one repair pass, no retry.
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
     });
 
     it.each<{
@@ -2380,7 +2384,9 @@ describe('DiscoveredMCPTool', () => {
 
       expect(initialClient.callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
-      expect(ensureTool).toHaveBeenCalledTimes(1);
+      // Two passes: the pre-flight repair at invocation start, then the
+      // error-path reconnect-or-replay for the ambiguous session error.
+      expect(ensureTool).toHaveBeenCalledTimes(2);
     });
 
     it.each(['Session not found', 'Session terminated', 'Session expired'])(
@@ -2538,18 +2544,18 @@ describe('DiscoveredMCPTool', () => {
       expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
-    it('should not retry aborted calls even when the server is disconnected', async () => {
+    it('repairs a DISCONNECTED server before the call instead of failing the invocation', async () => {
       const params = { param: 'test' };
-      const mockMcpClient: McpDirectClient = {
+      const staleClient: McpDirectClient = {
         callTool: vi.fn(),
       };
 
-      const retryClient: McpDirectClient = {
+      const liveClient: McpDirectClient = {
         callTool: vi
           .fn()
           .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
       };
-      const retryTool = new DiscoveredMCPTool(
+      const liveTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
         serverToolName,
@@ -2558,11 +2564,15 @@ describe('DiscoveredMCPTool', () => {
         undefined,
         undefined,
         undefined,
-        retryClient,
+        liveClient,
       );
 
-      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
-      const ensureTool = vi.fn().mockResolvedValue(retryTool);
+      // The real rediscovery re-registers the tools AND flips the recorded
+      // status back; the mock must do both or the effect cannot be pinned.
+      const discoverToolsForServer = vi.fn().mockImplementation(async () => {
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      });
+      const ensureTool = vi.fn().mockResolvedValue(liveTool);
       const mockConfig = {
         isTrustedFolder: () => true,
         getToolRegistry: () => ({
@@ -2572,11 +2582,7 @@ describe('DiscoveredMCPTool', () => {
       };
 
       updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
-      const abortError = new Error('The operation was aborted');
-      abortError.name = 'AbortError';
-      (mockMcpClient.callTool as any).mockRejectedValue(abortError);
-
-      const reconnectTool = new DiscoveredMCPTool(
+      const staleTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
         serverToolName,
@@ -2585,18 +2591,108 @@ describe('DiscoveredMCPTool', () => {
         undefined,
         undefined,
         mockConfig as any,
-        mockMcpClient,
+        staleClient,
       );
 
-      const invocation = reconnectTool.build(params);
-      await expect(
-        invocation.execute(new AbortController().signal),
-      ).rejects.toThrow('The operation was aborted');
+      const result = await staleTool
+        .build(params)
+        .execute(new AbortController().signal);
 
-      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      // The invocation is routed onto the rebuilt session and succeeds — the
+      // user's call is not lost to the earlier failure.
+      expect(liveClient.callTool).toHaveBeenCalledTimes(1);
+      expect(result.llmContent).toEqual([{ text: 'OK' }]);
+      // The recorded status no longer reads DISCONNECTED: the defect covered
+      // here is that every later call would inherit the dead connection.
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.CONNECTED);
+      // The stale client from the torn-down session was never invoked.
+      expect(staleClient.callTool).not.toHaveBeenCalled();
+      // One repair, not one per attempt.
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-initialize a connected server before the call', async () => {
+      const params = { param: 'test' };
+      const staleClient: McpDirectClient = {
+        callTool: vi
+          .fn()
+          .mockResolvedValueOnce({ content: [{ type: 'text', text: 'OK' }] }),
+      };
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const staleTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        staleClient,
+      );
+
+      const result = await staleTool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([{ text: 'OK' }]);
+      expect(staleClient.callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(ensureTool).not.toHaveBeenCalled();
-      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('does not repair an already-cancelled call', async () => {
+      const params = { param: 'test' };
+      const staleClient: McpDirectClient = {
+        callTool: vi.fn(),
+      };
+
+      const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
+      const ensureTool = vi.fn().mockResolvedValue(undefined);
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool,
+        }),
+      };
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const staleTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        mockConfig as any,
+        staleClient,
+      );
+
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        staleTool.build(params).execute(controller.signal),
+      ).rejects.toThrow('Tool call aborted');
+
+      // A cancelled call returns immediately: no registry churn, no repair.
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+      expect(staleClient.callTool).not.toHaveBeenCalled();
     });
 
     it('should not reconnect for an MCP isError result', async () => {
