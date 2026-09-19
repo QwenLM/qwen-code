@@ -6,6 +6,7 @@
 
 import type { InputModalities } from './contentGenerator.js';
 import { normalize } from './tokenLimits.js';
+import { lookupModelCatalog } from '../models/model-catalog.js';
 import { parseModelReasoningCapabilities } from './reasoning-effort.js';
 
 const FULL_MULTIMODAL: InputModalities = {
@@ -112,18 +113,22 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
 /**
  * Return the default input modalities for a model based on its name.
  *
- * Uses the same normalize-then-regex pattern as {@link tokenLimit}.
- * Unknown models default to text-only (empty object) to avoid sending
+ * Uses the same normalize-then-regex pattern as {@link tokenLimit}, merged
+ * with the models.dev catalog entry. Both sources only ever record a
+ * modality as `true`, so spreading them is a union: the catalog can add a
+ * modality a family pattern lacks but never removes one, and a model
+ * neither source knows stays text-only (empty object) to avoid sending
  * unsupported media types that would cause unrecoverable API errors.
  */
 export function defaultModalities(model: string): InputModalities {
   const norm = normalize(model);
+  const fromCatalog = lookupModelCatalog(norm)?.modalities;
   for (const [regex, modalities] of MODALITY_PATTERNS) {
     if (regex.test(norm)) {
-      return { ...modalities };
+      return { ...fromCatalog, ...modalities };
     }
   }
-  return {};
+  return { ...fromCatalog };
 }
 
 /**

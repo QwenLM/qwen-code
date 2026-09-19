@@ -7,6 +7,7 @@
 import type { SessionSourceService } from '../services/session-sources.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
   validateReasoningCapabilities,
@@ -1343,6 +1344,8 @@ export interface ConfigParameters {
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
   skipStartupContext?: boolean;
+  /** `model.customCatalog`: URL or file merged over the models.dev catalog. */
+  customModelCatalog?: string;
   bareMode?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
@@ -2927,6 +2930,7 @@ export class Config {
   private readonly maxToolCallsPerTurn: number;
   private readonly maxToolCallsPerTurnExplicit: boolean;
   private readonly skipStartupContext: boolean;
+  private readonly customModelCatalog: string | undefined;
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
   private readonly warnings: string[];
@@ -3317,6 +3321,7 @@ export class Config {
     // explicit value is honored as a hard cap; the default is adaptive.
     this.maxToolCallsPerTurnExplicit = params.maxToolCallsPerTurn !== undefined;
     this.skipStartupContext = params.skipStartupContext ?? false;
+    this.customModelCatalog = params.customModelCatalog;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
     this.toolMode =
@@ -3754,6 +3759,7 @@ export class Config {
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
+    void refreshModelCatalog(this.customModelCatalog);
     options?.signal?.throwIfAborted();
 
     // Omni multimodal support declares ffmpeg/ffprobe as hard runtime

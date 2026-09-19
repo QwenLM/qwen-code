@@ -1649,6 +1649,16 @@ const SETTINGS_SCHEMA = {
           'Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.',
         showInDialog: false,
       },
+      customCatalog: {
+        type: 'string',
+        label: 'Custom Model Catalog',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'URL or local file path of an additional model catalog merged over the bundled models.dev data (per-model context window, output limit, input modalities). Accepts the models.dev api.json format or {"models":{"<model id>":{"context":N,"output":N,"modalities":{"image":true}}}}. Meant for environments that cannot reach models.dev.',
+        showInDialog: false,
+      },
       reasoningEffort: {
         type: 'enum',
         label: 'Reasoning Effort',
