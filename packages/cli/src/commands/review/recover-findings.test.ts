@@ -412,15 +412,15 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
   });
 
   it('vetoes a return that declares a chunk uncoverable', () => {
-    // Production shape: a chunk agent's launch prompt carries its `chunk N
-    // of M` line — that line is how BOTH pipeline authorities assign the
-    // record, and the veto keys on the record's own assignment exactly as
-    // they do.
+    // Production shape: a chunk agent's launch prompt carries its identity
+    // line — that line is how BOTH pipeline authorities assign the record,
+    // and the veto keys on the record's own assignment exactly as they do.
     const recordDir = promptRecordDir(plan);
     const brief = briefPath(plan, 'chunk-1');
     writeFileSync(brief, 'The chunk-1 brief.');
     const prompt =
-      `You are reviewing chunk 1 of 2.\n` + `read_file(file_path="${brief}")`;
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\n` +
+      `read_file(file_path="${brief}")`;
     writeFileSync(
       join(recordDir, `${encodeURIComponent('chunk-1')}.txt`),
       prompt,
@@ -431,6 +431,61 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     });
     const r = recoverFindings({ plan, out: out() }, ENV);
     expect(r.recoveredKeys).toEqual([]);
+  });
+
+  it('vetoes a DE-ASSIGNED chunk agent that declares its chunk uncoverable', () => {
+    // The veto keys on the record's own assignment, and assignment reads an
+    // ANCHORED identity line — so a launch the orchestrator paraphrased, or
+    // whose slot drifted past the shared grammar, de-assigns the record and
+    // the veto went silently inert: this agent's final text was written into
+    // the recovery file as chunk 1's reviewed result while the same run's
+    // coverage ledger listed chunk 1 as a gap. Coverage's walk got the
+    // compensating arm for exactly this de-assignment (R17-4); this
+    // consumer did not (R39-4).
+    const brief = briefPath(plan, 'chunk-1');
+    writeFileSync(brief, 'The chunk-1 brief.');
+    const prompt =
+      'You are reviewing chunk 1 of 2.\n' + `read_file(file_path="${brief}")`;
+    writeFileSync(
+      join(promptRecordDir(plan), `${encodeURIComponent('chunk-1')}.txt`),
+      prompt,
+    );
+    transcript('S0', 'a0', prompt, {
+      opens: [brief, DIFF],
+      finalText: 'Uncoverable: chunk 1 — a line exceeds the read limit',
+    });
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([]);
+    expect(r.latestReverseAuditRound).toBeNull();
+  });
+
+  it('leaves a per-chunk AUDIT record that QUOTES a declaration recovered', () => {
+    // The shape the assignment key protects, and the reason the fallback is
+    // scoped to the bare `chunk-N` key: the production per-chunk audit
+    // prompt carries no `chunk N of M` line either, and its brief mandates
+    // quoting the evidence verbatim — so keying the veto on the KEY's chunk
+    // for `reverse-audit--chunk-N--…` would drop a certified auditor for
+    // doing what it was told to do.
+    const key = 'reverse-audit--chunk-1--round-2--abcdef01';
+    const brief = briefPath(plan, key);
+    writeFileSync(brief, `The ${key} brief.`);
+    const findings = findingsFilePath(plan, 'reverse-audit');
+    writeFileSync(findings, '- nothing yet');
+    const prompt =
+      `You are ${key}.\n` +
+      `read_file(file_path="${brief}")\n` +
+      `read_file(file_path="${findings}")`;
+    recordPrompt(plan, key, prompt);
+    transcript('S0', 'a0', prompt, {
+      opens: [brief, findings, DIFF],
+      finalText:
+        'The chunk-1 agent returned:\n' +
+        '  Uncoverable: chunk 1 — a line exceeds the read limit\n' +
+        'I audited that claim against the diff.',
+    });
+    expect(recoverFindings({ plan, out: out() }, ENV).recoveredKeys).toEqual([
+      key,
+    ]);
   });
 
   it('refuses a CHUNK agent that opened its brief but never the diff', () => {

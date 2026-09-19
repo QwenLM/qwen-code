@@ -36,8 +36,12 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  ChunkPartitionError,
   coverageFromTranscripts,
+  chunkReadNothing,
+  chunkReadSomething,
   TranscriptsUnavailableError,
+  type ChunkCoverageItem,
 } from './lib/coverage.js';
 import { promptRecordDir } from './lib/prompt-record.js';
 import { shellQuotePath } from './lib/shell-quote.js';
@@ -58,6 +62,65 @@ interface CheckCoverageArgs {
  * model answer is a check that fails closed on good work, and the cost of that
  * is a relaunch of an agent that had already done its job.
  */
+
+/**
+ * The half-sentence that says WHAT happened to the missing chunks, true of
+ * every one of them.
+ *
+ * FOUR answers, not two, because the line names a LIST: a set that mixes a
+ * chunk whose agents read nothing with one whose reads could not be accepted
+ * has no sentence true of both, and an all-or-nothing split has to post a
+ * false one for half the list. The mixed case therefore claims neither and
+ * sends the reader to the per-agent lines, which are per chunk and already
+ * printed above (undirected audit of R36-1's fix).
+ *
+ * ...and the refusal arm reads the POSITIVE predicate, not the complement of
+ * the other one — the rule `chunkGapReason` and the posted body already
+ * follow, and the third channel was left behind on the complement (R38-119,
+ * R39-1). "Their reads could not be accepted" is a claim that something WAS
+ * refused; a chunk whose records cleared every guard and simply never
+ * spanned its lines had nothing refused, and `unknown` with no causes means
+ * the run cannot say. So a set that is neither all-read-nothing nor
+ * all-read-something falls to a sentence that claims neither and points
+ * nowhere: a pointer at per-agent lines is worth printing only when the
+ * ledger says there are some.
+ *
+ * And no sentence here points at "the per-agent lines above" any more. That
+ * pointer was printed whether or not a line about these chunks existed —
+ * `blindAgents`, `idleAgents`, `unopenedAgents`, `rewrittenPrompts` and
+ * `driftedLaunches` can all be empty for a chunk whose read was simply
+ * refused — so the operator was sent to nothing (R39-1). The lines are
+ * printed above regardless; a claim that they exist is not this sentence's
+ * to make.
+ */
+function readWhatHappened(report: {
+  missingChunks: readonly number[];
+  chunkItems: readonly ChunkCoverageItem[];
+}): string {
+  const items = report.missingChunks.map((id) =>
+    report.chunkItems.find((i) => i.id === id),
+  );
+  const known = (pred: (i: ChunkCoverageItem) => boolean): boolean =>
+    items.length > 0 && items.every((i) => i !== undefined && pred(i));
+  if (known(chunkReadNothing)) {
+    return `Nobody read those lines. `;
+  }
+  if (known(chunkReadSomething)) {
+    return `Their reads could not be accepted for this plan. `;
+  }
+  // A mix of the two still has a line per chunk above; a set carrying a
+  // chunk the ledger cannot answer for has none to point at.
+  const nothing = items.filter(
+    (i) => i !== undefined && chunkReadNothing(i),
+  ).length;
+  const something = items.filter(
+    (i) => i !== undefined && chunkReadSomething(i),
+  ).length;
+  return nothing + something === items.length
+    ? `What happened differs by chunk; the coverage report's per-chunk ledger says which. `
+    : `No read this run could accept spans those lines. `;
+}
+
 function runCheckCoverage(args: CheckCoverageArgs): void {
   let report;
   try {
@@ -77,6 +140,23 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
       process.exitCode = 3;
       return;
     }
+    if (err instanceof ChunkPartitionError) {
+      // A defect in coverage.ts, not a fact about the agents or the
+      // environment — `compose-review` renders this arm on its own so an
+      // operator is not sent to re-capture a diff that was never the
+      // problem, and this command owes the same reader the same
+      // distinction: a raw stack trace with no ERROR line and no exit code
+      // is the one shape the orchestrator cannot act on.
+      writeStderrLine(
+        `ERROR: ${err.message}\n` +
+          'This is a defect in the coverage ledger, not a finding about the ' +
+          'agents and not an environment problem: the ledger contradicted ' +
+          'the plan it was built from. Coverage cannot be shown, so the ' +
+          'review must not certify the diff.',
+      );
+      process.exitCode = 3;
+      return;
+    }
     throw err;
   }
 
@@ -84,10 +164,15 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   writeFileSync(args.out, JSON.stringify(report, null, 2));
   writeStdoutLine(`Wrote coverage report to ${args.out}`);
 
-  const totalChunks =
-    report.coveredChunks.length +
-    report.missingChunks.length +
-    report.uncoverableChunks.length;
+  // The denominator is the PLAN's chunk count, not the sum of the outcome
+  // sets. The two are equal — `coverageFromTranscripts` asserts the partition
+  // before returning — and that is exactly why the sum was the wrong thing to
+  // print: it moves with the sets, so "17 of 17 chunks reviewed" stayed
+  // self-consistent no matter what the sets did, and the one number a reader
+  // uses to judge whether the review read the change could never contradict
+  // itself. Read the sealed set, and let the assertion be what proves they
+  // agree.
+  const totalChunks = report.plannedChunks.length;
   const worked =
     report.agents - report.blindAgents.length - report.idleAgents.length;
   writeStderrLine(
@@ -104,6 +189,44 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         ? `, ${report.idleAgents.length} made no tool call`
         : ''),
   );
+
+  // The plan no longer describes the diff its chunks index into. A NOTE, not
+  // an ERROR: nothing downstream caps on it yet, deliberately — the check is
+  // new and has never fired on a real run, so it reports for a while before
+  // anyone decides it may refuse a review. Printed before the agent-level
+  // findings because it changes how to read them: if the ranges moved, "chunk
+  // 7 was reviewed" is a statement about a chunk 7 that no longer exists.
+  if (report.selectionDrift !== null) {
+    writeStderrLine(
+      report.identityUnreadable
+        ? // The report DID account for this one: every record was refused,
+          // so the coverage above is the refusal, not a reading to caveat.
+          `NOTE: ${report.selectionDrift}. Re-capture the diff and re-plan; ` +
+            `a relaunch under this plan is refused the same way. The ` +
+            `agent-level lines below are reported for the record: with every ` +
+            `record refused, the run cannot tell a bad delivery from a good ` +
+            `one it may not credit, and none of their repairs applies until ` +
+            `the plan is re-captured.`
+        : `NOTE: ${report.selectionDrift}. The chunk coverage in this report — ` +
+            `including the summary above — is reported against the plan as ` +
+            `written; it does not yet account for this.`,
+    );
+  }
+
+  if (report.staleTranscripts.length > 0) {
+    // A NOTE, not an error, and no repair: these transcripts belong to an
+    // earlier plan of this diff, and nothing in this plan can be relaunched
+    // to satisfy them. They count for nothing above.
+    writeStderrLine(
+      `NOTE: ${report.staleTranscripts.length} transcript(s) were written ` +
+        `against a different chunking of this diff — ` +
+        `${report.staleTranscripts.join(', ')}. Their chunk id, their ` +
+        `\`of M\` count or the window they were told to read names a ` +
+        `chunking this plan is not, so the lines they name are not the lines ` +
+        `those ids name here; they count for nothing in the coverage above ` +
+        `and need no repair.`,
+    );
+  }
 
   // The defect that actually happened, named as itself.
   if (report.blindAgents.length > 0) {
@@ -197,6 +320,31 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `once, with the prompt \`agent-prompt\` printed.`,
     );
   }
+  // The paging failure, named. `rangeOf` records the range a read REQUESTED,
+  // so one call over an oversized window records the whole window while the
+  // agent saw a truncated view — the credit loop refuses it, and before this
+  // block the refusal reached no channel at all: the `chunk(s) were not
+  // reviewed` line below announced it and sent the reader to per-agent lines
+  // that did not exist, while the explainer's own definition of a read was
+  // satisfied and the repair it prescribes reproduces the identical
+  // transcript (R39-1). Printed ABOVE that line, which is what makes its
+  // pointer true.
+  if (report.oversizedWindows.length > 0) {
+    writeStderrLine(
+      // "Never paged", not "read in a single call": an agent that read the
+      // whole window and then paged its tail is refused too — its reads
+      // never show the head as a page — and "in a single call" was false
+      // of it (R40-3).
+      `ERROR: ${report.oversizedWindows.length} chunk(s) were never paged — ` +
+        `each is a window one read cannot return, and no agent's reads ` +
+        `covered it in pages that each fit — ` +
+        `${report.oversizedWindows.join('; ')}. A relaunch on a block that ` +
+        `spells one whole-window read reproduces the same truncated read. ` +
+        `Rebuild the block with \`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt ` +
+        `--plan ${shellQuotePath(args.plan)} --chunk <id>\`, which spells the ` +
+        `window as pages, and pass it verbatim.`,
+    );
+  }
   if (report.unopenedAgents.length > 0) {
     writeStderrLine(
       `ERROR: ${report.unopenedAgents.length} agent(s) were pointed at diff lines ` +
@@ -206,7 +354,10 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `at all. Relaunch each once.`,
     );
   }
-  if (report.missingChunks.length > 0) {
+  // Not under an unreadable plan identity: the rebuild-and-relaunch this
+  // explainer prescribes is refused by the seal the same way, and the drift
+  // NOTE above already carries the repair.
+  if (report.missingChunks.length > 0 && !report.identityUnreadable) {
     writeStderrLine(
       'NOTE: a chunk counts as read when an agent was pointed at its lines AND ' +
         'the harness recorded that agent opening the diff. An agent handed the ' +
@@ -238,9 +389,29 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
   }
   if (report.missingChunks.length > 0) {
     writeStderrLine(
-      `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
-        `${report.missingChunks.join(', ')}. Nobody read those lines. Do not ` +
-        `aggregate findings over a diff that was not read.`,
+      report.identityUnreadable
+        ? // Not "nobody read": the owners' reads are on record — they could
+          // not be credited to a plan whose identity cannot be read, and a
+          // relaunch is refused the same way. The repair is the NOTE's.
+          `ERROR: ${report.missingChunks.length} chunk(s) could not be ` +
+            `credited to this plan — ${report.missingChunks.join(', ')}. ` +
+            `No read can be tied to a plan whose identity this build cannot ` +
+            `read (the owners' reads, where any exist, are on record but ` +
+            `uncredited); re-plan rather than relaunch. Do not aggregate ` +
+            `findings over a diff whose reading cannot be shown.`
+        : // "Nobody read those lines" is a claim about the transcripts, so
+          // it is made only when the ledger supports it. A chunk classified
+          // `no-agent` had no record assigned to it at all; anything else —
+          // an owner whose reads the seals refused, agents that read the
+          // window and declared it unreadable without the plan being able
+          // to confirm — is a chunk somebody demonstrably read, and saying
+          // otherwise puts a false sentence beside a ledger that names the
+          // reader. Same repair either way, so this splits the sentence,
+          // not the remedy.
+          `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
+            `${report.missingChunks.join(', ')}. ` +
+            readWhatHappened(report) +
+            `Do not aggregate findings over a diff that was not read.`,
     );
   }
   // A NOTE, never an error, and never a relaunch: a disclosed gap is the soft

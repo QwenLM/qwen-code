@@ -74,6 +74,24 @@ export interface AgentRecord {
    */
   diffReads: Array<[number, number]>;
   /**
+   * Per entry of `diffReads`, the span the tool RETURNED, in the same
+   * 1-based inclusive coordinates and the same order.
+   *
+   * `diffReads` records what a read ASKED for; this is what arrived.
+   * `read_file` prefixes any read it cut short — and any ranged read —
+   * with `Showing lines X-Y of Z total lines.`, where `[X, Y]` is what
+   * reached the agent (`linesShown`, fileUtils.ts). `null` for a read
+   * whose output ends with the `... [truncated]` marker (its last line
+   * arrived in part, so no span proves the tail) or whose return cannot
+   * be proven — fail closed, matching `rangeOf`'s "null rather than
+   * guessing". No header at all is the harness's untruncated shape (the
+   * header is written iff `isTruncated`), so the request is the return.
+   * `pagedAcross` merges THESE, never the requests: two reads that each
+   * truncated used to certify an oversized chunk off their requested
+   * ranges (R42-1).
+   */
+  diffReadReturns: Array<[number, number] | null>;
+  /**
    * The arguments of every successful tool call, serialized.
    *
    * So a check can ask "did this agent open *that* file" of any path, not only the
@@ -252,6 +270,36 @@ function rangeOf(args: Record<string, unknown>): [number, number] | null {
   return [off + 1, off + limit];
 }
 
+/** The header `read_file` prefixes a cut-short — and every ranged — read with. */
+const RETURNED_SPAN_RE =
+  /^Showing lines (\d+)-(\d+) of (?:at least )?\d+ total lines\./;
+
+/** The suffix `read_file` appends to a line it returned only in part. */
+const TRUNCATION_MARKER = '... [truncated]';
+
+/**
+ * What a ranged read RETURNED, against what it asked for. See the
+ * `diffReadReturns` doc: the header's `[X, Y]` is the returned span, the
+ * marker means the last line arrived in part (`null`), and no header is
+ * the untruncated shape, so the request is the return.
+ */
+function returnedSpanOf(
+  part: FunctionResponsePart,
+  requested: [number, number],
+): [number, number] | null {
+  const resp = part.functionResponse?.response as
+    | Record<string, unknown>
+    | undefined;
+  const output = resp?.['output'];
+  if (typeof output !== 'string') return null;
+  if (output.endsWith(TRUNCATION_MARKER)) return null;
+  const m = RETURNED_SPAN_RE.exec(output);
+  if (m === null) return requested;
+  const s = Number(m[1]);
+  const e = Number(m[2]);
+  return s <= e ? [s, e] : null;
+}
+
 /**
  * Do these serialized tool-call args name the EXACT `path`?
  *
@@ -315,6 +363,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     args: string;
   }
   const diffReads: Array<[number, number]> = [];
+  const diffReadReturns: Array<[number, number] | null> = [];
   const successfulCallArgs: string[] = [];
   const successfulReadFileArgs: string[] = [];
   const byId = new Map<string, Pending>();
@@ -401,7 +450,12 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
         if (pending.readFile) successfulReadFileArgs.push(pending.args);
         if (pending.namedTheDiff) {
           diffToolCalls++;
-          if (pending.range) diffReads.push(pending.range);
+          if (pending.range) {
+            diffReads.push(pending.range);
+            diffReadReturns.push(
+              returnedSpanOf(part as FunctionResponsePart, pending.range),
+            );
+          }
         }
       }
     }
@@ -445,6 +499,7 @@ function parseTranscript(file: string, diffPath?: string): AgentRecord | null {
     successfulToolCalls,
     diffToolCalls,
     diffReads,
+    diffReadReturns,
     successfulCallArgs,
     successfulReadFileArgs,
     finalText,

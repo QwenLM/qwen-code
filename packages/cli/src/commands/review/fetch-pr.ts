@@ -1913,10 +1913,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       ...(fullSrcDiffLines === undefined ? {} : { fullSrcDiffLines }),
       ...(roundModelId ? { reviewModelId: roundModelId } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
-      ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
-        operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
-        hasDeadline: wall.explicit,
-      }),
+      ...buildPlanReport(
+        plan,
+        (path) => fileLineCount(fetchedSha, path),
+        {
+          operatorRoundCap: operatorReviewSettings().reverseAuditRounds,
+          hasDeadline: wall.explicit,
+        },
+        diffText,
+      ),
       ...wall.fields,
       ...planEffortField(args.effort),
       ...(automaticReviewRequested() &&
