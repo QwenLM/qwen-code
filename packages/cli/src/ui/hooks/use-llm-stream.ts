@@ -875,6 +875,7 @@ export const useLlmStream = (
 
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
+  const [localCommandInFlight, setLocalCommandInFlight] = useState(false);
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
   // A continuation may be admitted while an earlier submission is finalizing.
@@ -1304,7 +1305,8 @@ export const useLlmStream = (
       return StreamingState.WaitingForConfirmation;
     }
     if (
-      isResponding ||
+      (isResponding &&
+        (!localCommandInFlight || activeModelStreamsRef.current > 0)) ||
       toolCalls.some(
         (tc) =>
           tc.status === 'executing' ||
@@ -1320,7 +1322,7 @@ export const useLlmStream = (
       return StreamingState.Responding;
     }
     return StreamingState.Idle;
-  }, [isResponding, toolCalls]);
+  }, [isResponding, localCommandInFlight, toolCalls]);
 
   useEffect(() => {
     if (
@@ -3649,6 +3651,14 @@ export const useLlmStream = (
 
       const userMessageTimestamp = Date.now();
 
+      const isLocalSlashCommand =
+        submitType === SendMessageType.UserQuery &&
+        typeof query === 'string' &&
+        isSlashCommand(query.trim());
+      if (isLocalSlashCommand) {
+        setLocalCommandInFlight(true);
+      }
+
       // A thrown stream can leave partial assistant runs in the dynamic
       // region. An explicit Ctrl+Y retry is a fresh attempt, matching a core
       // non-continuation Retry event, so discard every run from the failed
@@ -3818,6 +3828,10 @@ export const useLlmStream = (
           releaseSubmissionLease();
           metadata?.onAdmissionFailed?.();
           throw error;
+        } finally {
+          if (isLocalSlashCommand) {
+            setLocalCommandInFlight(false);
+          }
         }
         const { queryToSend, shouldProceed, scheduledToolCallId } =
           preparedQuery;
