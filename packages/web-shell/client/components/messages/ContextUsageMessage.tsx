@@ -375,6 +375,15 @@ export function ContextUsageMessage({
             symbolClassName={isOverLimit ? styles.error : styles.accent}
             isOverLimit={isOverLimit}
           />
+          {/* Annotation, not a category: the cached prefix spans several categories. */}
+          {(breakdown.cachedTokens ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.cachedPrefix')}
+              tokens={breakdown.cachedTokens!}
+              symbolClassName={styles.secondary}
+            />
+          )}
           <CategoryRow
             {...categoryProps}
             label={t('contextUsage.free')}
@@ -456,11 +465,26 @@ export function ContextUsageMessage({
               />
             ) : undefined}
           </CategoryRow>
+          {(breakdown.startupContext ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.startupContext')}
+              tokens={breakdown.startupContext!}
+            />
+          )}
           {hasTokenCount && (
             <CategoryRow
               {...categoryProps}
               label={t('contextUsage.messages')}
               tokens={breakdown.messages}
+            />
+          )}
+          {hasTokenCount && (breakdown.unattributed ?? 0) > 0 && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.unattributed')}
+              tokens={breakdown.unattributed!}
+              symbolClassName={styles.secondary}
             />
           )}
         </div>
