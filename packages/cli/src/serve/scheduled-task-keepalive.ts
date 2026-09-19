@@ -42,6 +42,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
+import { resolveUnattendedAcpChildApprovalModeForWorkspace } from './unattended-acp-child-approval-mode.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
 
@@ -91,6 +92,7 @@ export interface KeepaliveBridge {
     sessionScope?: 'single' | 'thread';
     sourceType?: string;
     sourceId?: string;
+    approvalMode?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   /** Advance the in-memory session-catalog revision after a successful
@@ -164,6 +166,8 @@ async function bindAndNameSessions(
         sessionScope: 'thread',
         sourceType: 'scheduled_task',
         sourceId: task.id,
+        approvalMode:
+          resolveUnattendedAcpChildApprovalModeForWorkspace(boundWorkspace),
       });
       // spawnOrAttach is not abortable — if the timeout fires first, the
       // raw promise may still resolve later with a live session. Attach a

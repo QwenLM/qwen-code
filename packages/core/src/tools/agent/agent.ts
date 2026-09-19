@@ -378,9 +378,11 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
  * Resolves the effective permission mode for a sub-agent.
  *
  * Rules (matching claw-code):
- * - Permissive parent modes (yolo, auto-edit) always win
+ * - Permissive parent modes (yolo, auto-edit, auto) always win
  * - Otherwise, the agent definition's mode applies if set
- * - Default fallback is auto-edit (sub-agents need autonomy)
+ * - Default fallback in a trusted folder is Auto (classifier-mediated),
+ *   not AutoEdit — sub-agents need autonomy without silently becoming
+ *   auto_edit under a restrictive parent/default
  */
 export function resolveSubagentApprovalMode(
   parentApprovalMode: ApprovalMode,
@@ -431,12 +433,17 @@ export function resolveSubagentApprovalMode(
   }
 
   // Default: match parent mode. In plan mode, stay in plan.
-  // In default mode in trusted folders, auto-edit for autonomy.
+  // In default mode in trusted folders, Auto (classifier-mediated) rather
+  // than AutoEdit. AutoEdit skips the classifier, so a background
+  // subagent's non-read-only shell is hard-denied under an ACP parent that
+  // boots DEFAULT. Auto restores classifier-mediated shell while still
+  // allowing unattended autonomy. Subagents must not silently become
+  // auto_edit under a restrictive parent/default.
   if (parentApprovalMode === ApprovalMode.PLAN) {
     return PermissionMode.Plan;
   }
   if (isTrustedFolder) {
-    return PermissionMode.AutoEdit;
+    return PermissionMode.Auto;
   }
   return approvalModeToPermissionMode(parentApprovalMode);
 }

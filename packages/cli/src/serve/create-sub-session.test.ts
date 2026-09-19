@@ -11,7 +11,11 @@ import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   type AcpSessionBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
@@ -390,6 +394,26 @@ describe('sub-session launcher', () => {
     });
 
     expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
+  });
+
+  it('forwards approvalMode into spawnOrAttach', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'do the thing',
+      completion: 'sent',
+      approvalMode: ApprovalMode.AUTO,
+      callerSessionId: 'caller-1',
+    });
+
+    expect(fake.spawns[0]).toMatchObject({
+      parentSessionId: 'caller-1',
+      approvalMode: ApprovalMode.AUTO,
+    });
   });
 
   it('keeps scheduled-task run titles flat and persists their attribution', async () => {
@@ -831,6 +855,70 @@ describe('sub-session launcher', () => {
     expect(fake.subscriptions).toEqual([
       { sessionId: result.sessionId, lastEventId: 37 },
     ]);
+  });
+
+  it('forwards approvalMode into standalone createChildWithInitialPrompt', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+    });
+    const createChildWithInitialPrompt = vi.fn(
+      async (
+        request: {
+          sessionId: string;
+          parentSessionId: string;
+          promptId: string;
+          modelServiceId?: string;
+          approvalMode?: string;
+        },
+        prompt: string,
+      ) => ({
+        session: {
+          sessionId: request.sessionId,
+          workspaceCwd: WS,
+          attached: false,
+          sourceType: 'standalone',
+          sourcePersisted: true,
+          parentSessionPersisted: true,
+          modelApplied: false,
+        },
+        projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+        workingDirectory: { state: 'ready' as const },
+        initialPrompt: {
+          promptId: request.promptId,
+          lastEventId: 37,
+          turn: new Promise<never>(() => {}),
+        },
+        prompt,
+      }),
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        resume: vi.fn(),
+        continueSession: vi.fn(async (_sessionId, dispatch) =>
+          dispatch({ bridge: fake.bridge } as never, 'caller-standalone'),
+        ),
+      }),
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'standalone child task',
+      completion: 'sent',
+      approvalMode: ApprovalMode.AUTO,
+      callerSessionId: 'caller-standalone',
+    });
+
+    expect(createChildWithInitialPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parentSessionId: 'caller-standalone',
+        approvalMode: ApprovalMode.AUTO,
+        promptId: expect.any(String),
+      }),
+      'standalone child task',
+    );
+    expect(fake.spawns).toEqual([]);
   });
 
   it('preserves standalone scheduled-task model selection failures', async () => {

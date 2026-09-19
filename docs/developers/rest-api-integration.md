@@ -335,16 +335,18 @@ unanswered request keeps holding a slot in the session's prompt queue until you
 cancel or close the session. Arm your own deadline if the flow needs one.
 
 The mode is the child's own Qwen setting `tools.approvalMode`, resolved from the
-daemon host's and the `--workspace` directory's settings; the daemon pins
-nothing at spawn. Its default is `auto`, which approves one class of tool calls
-without asking — those publish no `permission_request` at all — and still asks
-for the rest. An untrusted workspace folder is forced down to `default` (ask),
-which is why one deployment sees these events and another sees none, and
-`GET /capabilities` reports the vote-mediation policy rather than the approval
-mode, so preflight will not tell you which posture you are in. If your
-integration depends on approval gating, pin `tools.approvalMode` explicitly and
-decide up front how it answers: auto-approval can already be in effect without
-anyone having chosen it.
+daemon host's and the `--workspace` directory's settings. Attended ACP / `--acp`
+children boot **Ask Permissions** (`default`) when that key is unset, so writes
+and non-read-only shell emit `permission_request`. The TUI and headless CLI
+still default to `auto` unless the key is pinned. Unattended scheduled-task
+children honor an operator pin (`plan` / `default` / `auto` / …) and only
+elevate the implicit ACP ask-default to `auto`, so a fire with nobody attached
+does not wait forever for a vote. An untrusted workspace folder is forced down
+to `default` (ask), which is why one deployment sees these events and another
+sees none, and `GET /capabilities` reports the vote-mediation policy rather
+than the approval mode, so preflight will not tell you which posture you are
+in. If your integration depends on approval gating, pin `tools.approvalMode`
+explicitly and decide up front how it answers.
 
 Answer on the session-scoped route: it reaches the owning workspace whenever
 exactly one live runtime owns the session, and never falls back to the primary

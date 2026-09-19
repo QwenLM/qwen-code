@@ -25,6 +25,7 @@ import {
   isValidCronTaskRoutingId,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
+  type ApprovalMode,
 } from '@qwen-code/qwen-code-core';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 // Wire constants shared with the child-side caller (`Session.ts`) and, for the
@@ -2116,6 +2117,7 @@ export class BridgeClient implements Client {
     }
     const model = params['model'];
     const groupId = params['groupId'];
+    const approvalMode = params['approvalMode'];
     if (model !== undefined && !isValidCronTaskRoutingId(model)) {
       throw RequestError.invalidParams(
         undefined,
@@ -2131,11 +2133,24 @@ export class BridgeClient implements Client {
         `\`groupId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters and is only supported for scheduled-task runs`,
       );
     }
+    if (
+      approvalMode !== undefined &&
+      (typeof approvalMode !== 'string' ||
+        !KNOWN_APPROVAL_MODES.has(approvalMode))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`approvalMode` must be a known approval mode when provided',
+      );
+    }
     const result = await this.onCreateSubSession({
       prompt,
       completion,
       ...(typeof model === 'string' ? { model } : {}),
       ...(typeof groupId === 'string' ? { groupId } : {}),
+      ...(typeof approvalMode === 'string'
+        ? { approvalMode: approvalMode as ApprovalMode }
+        : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
       ...source,
       callerSessionId,
