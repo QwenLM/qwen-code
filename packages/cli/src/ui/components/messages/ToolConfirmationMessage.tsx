@@ -97,7 +97,12 @@ export const ToolConfirmationMessage: React.FC<
     // (e.g. ProceedAlways) is processed first.  resolveDiffFromCli would
     // otherwise trigger the scheduler's ideConfirmation .then() handler
     // with ProceedOnce, racing with the intended CLI outcome.
-    onConfirm(outcome);
+    //
+    // Hold the rejection here: the scheduler re-throws after terminalizing a
+    // call the trust gate refused, and an unhandled rejection trips the
+    // process-level handler (llm.tsx), which shows a "file a bug report"
+    // banner and opens the debug console over a correctly-refused action.
+    void Promise.resolve(onConfirm(outcome)).catch(() => {});
 
     if (
       confirmationDetails.type === 'edit' &&
@@ -477,11 +482,17 @@ export const ToolConfirmationMessage: React.FC<
       }),
       value: ToolConfirmationOutcome.RestorePrevious,
     });
-    options.push({
-      key: 'proceed-always',
-      label: t('Yes, and auto-accept edits'),
-      value: ToolConfirmationOutcome.ProceedAlways,
-    });
+    // "Auto-accept edits" is a privileged escalation (AUTO_EDIT): in an
+    // untrusted folder the trust gate refuses it, so exit_plan_mode would only
+    // ever answer "Failed to exit plan mode". The two remaining exits
+    // (proceed once / restore previous) both stay available untrusted.
+    if (isTrustedFolder) {
+      options.push({
+        key: 'proceed-always',
+        label: t('Yes, and auto-accept edits'),
+        value: ToolConfirmationOutcome.ProceedAlways,
+      });
+    }
     options.push({
       key: 'proceed-once',
       label: t('Yes, and manually approve edits'),
@@ -736,7 +747,7 @@ export const ToolConfirmationMessage: React.FC<
                 },
               ]
             : []),
-          ...(!confirmationDetails.hideAlwaysAllow
+          ...(isTrustedFolder && !confirmationDetails.hideAlwaysAllow
             ? [
                 {
                   key: 'proceed-always',

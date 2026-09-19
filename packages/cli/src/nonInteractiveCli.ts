@@ -15,7 +15,6 @@ import type {
   GoalTurnHost,
   GoalContinuationTurn,
   GoalTurnPermit,
-  ActiveGoal,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
@@ -82,7 +81,6 @@ import {
   getErrorType,
   getActiveInteractionSpan,
   buildGoalContinuationParts,
-  goalCheckpointHealthLine,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -245,19 +243,6 @@ function sameGoalPermit(
   );
 }
 
-function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
-  const goal = snapshot.goal;
-  if (goal?.status !== 'active') return null;
-  return {
-    condition: goal.objective,
-    iterations: goal.turnCount,
-    setAt: goal.createdAt,
-    tokensAtStart: 0,
-    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
-    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
-  };
-}
-
 /**
  * The TEXT rendering of a Goal control's outcome.
  *
@@ -303,15 +288,11 @@ export function formatGoalState(
   // Every non-active status now carries a reason, so gating on two of them
   // drops a paused Goal's reason from TEXT output while STREAM_JSON still
   // ships it -- and the user doc promises every pause states why.
-  // Both lines are written to stdout as they are, so both are sanitized: a
-  // pause reason can embed a raw provider error.
+  // Written to stdout as it is, so it is sanitized: a pause reason can embed
+  // a raw provider error.
   if (goal.status !== 'active' && goal.lastReason) {
     lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
   }
-  // The checkpoint line the interactive cards show, in the same words: a
-  // checkpoint stop reason names the kind of failure, only this says which.
-  const checkpoint = goalCheckpointHealthLine(goal, sanitizeTerminalText);
-  if (checkpoint !== undefined) lines.push(`Checkpoint: ${checkpoint}`);
   return lines.join('\n');
 }
 
@@ -639,10 +620,6 @@ export async function runNonInteractive(
       adapter.processEvent({
         type: LlmEventType.GoalState,
         value: snapshot,
-      });
-      adapter.processEvent({
-        type: LlmEventType.ActiveGoal,
-        value: projectLegacyActiveGoal(snapshot),
       });
     };
     const observeGoalRuntime = (runtime: GoalRuntime) => {
@@ -2553,6 +2530,12 @@ export async function runNonInteractive(
           // Process fallback metadata only after the abandoned attempt has
           // been reset, so batch adapters do not roll the system event back.
           adapter.processEvent(event);
+          if (
+            event.type === LlmEventType.HookSystemMessage &&
+            outputFormat === OutputFormat.TEXT
+          ) {
+            process.stderr.write(`${sanitizeTerminalText(event.value)}\n`);
+          }
           if (event.type === LlmEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
@@ -2876,6 +2859,14 @@ export async function runNonInteractive(
                 }
                 discardAbandonedAttempt(event, itemToolCallRequests);
                 adapter.processEvent(event);
+                if (
+                  event.type === LlmEventType.HookSystemMessage &&
+                  outputFormat === OutputFormat.TEXT
+                ) {
+                  process.stderr.write(
+                    `${sanitizeTerminalText(event.value)}\n`,
+                  );
+                }
                 if (event.type === LlmEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }

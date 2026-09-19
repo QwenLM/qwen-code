@@ -772,14 +772,87 @@ describe('createWorkflowSandbox security', () => {
     },
   );
 
-  it('names effort and disallowedTools among the known options', async () => {
+  it('names effort, disallowedTools and tools among the known options', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     await expect(
       sandbox.run(`return agent("hi", { efort: "low" });`),
-    ).rejects.toThrow(/Known options are: .*effort.*disallowedTools/);
+    ).rejects.toThrow(/Known options are: .*effort.*disallowedTools, tools\./);
+  });
+
+  // The allowlist gets the deny list's normalization: one built-in named two
+  // ways, or the same tools in another order, is one resume key. Other names
+  // reach the host as written.
+  it('agent({tools}) hands the host a sorted, de-duplicated list of names', async () => {
+    const seen: unknown[] = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async (_p, opts) => {
+        seen.push(opts.tools);
+        return 'ok';
+      },
+    });
+    await sandbox.run(`
+      await agent("a", { tools: ["run_shell_command", "ReadFile", "Shell"] });
+      await agent("b", { tools: ["mcp__warehouse__query"] });
+      await agent("c", {});
+      return "done";
+    `);
+    expect(seen).toEqual([
+      ['read_file', 'run_shell_command'],
+      ['mcp__warehouse__query'],
+      undefined,
+    ]);
+  });
+
+  // Unlike an empty deny list, an empty allowlist would leave nothing to call.
+  it.each([['"read_file"'], ['[]'], ['[""]'], ['[" read_file"]'], ['[42]']])(
+    'agent({tools: %s}) is rejected before dispatch',
+    async (literal) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { tools: ${literal} });`),
+      ).rejects.toThrow(
+        /agent\(\{tools\}\): must be a non-empty array of tool-name strings/,
+      );
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['"*"', /"\*" is a pattern, and the allowlist takes exact tool names/],
+    ['"mcp__warehouse__*"', /is a pattern/],
+    ['"mcp__warehouse"', /names a whole MCP server/],
+    ['"exec"', /"exec" is the code-mode surface, not a tool to allow/],
+    ['"Exec"', /is the code-mode surface/],
+  ])(
+    'agent({tools: ["read_file", %s]}) is rejected before dispatch',
+    async (entry, message) => {
+      const dispatch = vi.fn(async () => 'ignored');
+      const sandbox = createWorkflowSandbox({ args: undefined, dispatch });
+      await expect(
+        sandbox.run(`return agent("hi", { tools: ["read_file", ${entry}] });`),
+      ).rejects.toThrow(message);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  // The refused entry is script-controlled and echoed in the message.
+  it('strips control characters from an echoed tools entry', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const error = (await sandbox
+      .run(`return agent("x", { tools: ["mcp\u0085__srv__*"] });`)
+      .catch((e: unknown) => e)) as Error;
+    expect(error.message).toMatch(
+      /agent\(\{tools\}\): "mcp__srv__\*" is a pattern/,
+    );
+    expect(error.message).not.toMatch(/[\u007f-\u009f]/);
   });
 
   // A rejected call must leave no phase behind: the phase is recorded only
@@ -787,6 +860,8 @@ describe('createWorkflowSandbox security', () => {
   it.each([
     ['effort: "turbo"', /unknown effort tier/],
     ['disallowedTools: "edit"', /must be an array/],
+    ['tools: []', /must be a non-empty array/],
+    ['tools: ["exec"]', /is the code-mode surface/],
   ])(
     'records no phase for a call rejected over %s',
     async (option, message) => {
