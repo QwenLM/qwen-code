@@ -105,11 +105,13 @@ function sortedEntries(
 
 /**
  * Compute the pool fingerprint for an MCP server config. Two configs
- * with identical transport semantics + auth + env produce the same
- * fingerprint and thus share a pool entry; any divergence creates a
- * distinct entry.
+ * with identical transport, auth, env, and shared tool-snapshot settings
+ * produce the same fingerprint and thus share a pool entry; any divergence
+ * creates a distinct entry. App resource limits belong in the key because
+ * discovery stores them in the shared tool snapshot without per-session
+ * re-projection.
  *
- * Hashed fields (transport-defining):
+ * Hashed fields (transport and shared tool-snapshot settings):
  *   transport, command, args, cwd, env, url, httpUrl, tcp, headers,
  *   timeout, appResourceMaxBytes, appResourceTimeoutMs, versionNegotiation,
  *   oauth, authProviderType, targetAudience,
