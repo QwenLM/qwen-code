@@ -13208,6 +13208,89 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(postToolUse?.input.duration_ms).toBeGreaterThanOrEqual(0);
   });
 
+  // #11770: a PostToolUseFailure hook's additionalContext used to be
+  // appended to `errorMessage` BEFORE the identity check below, so the gate
+  // re-armed and the producer's own sizing was undone — the trailing exit
+  // code was lost again for anyone with such a hook configured.
+  async function runBudgetedFailure(options: {
+    outputBudgetApplied?: boolean;
+    hookContext?: string;
+  }) {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: FAILURE_BODY,
+      returnDisplay: 'x',
+      ...(options.outputBudgetApplied === undefined
+        ? {}
+        : { outputBudgetApplied: options.outputBudgetApplied }),
+      error: {
+        message: FAILURE_BODY,
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PreToolUse'
+            ? { decision: 'allow' }
+            : request.eventName === 'PostToolUseFailure' && options.hookContext
+              ? {
+                  hookSpecificOutput: {
+                    additionalContext: options.hookContext,
+                  },
+                }
+              : {},
+      })),
+    };
+    const { completedCalls } = await runSingleTool({
+      execute,
+      toolName: 'budgetedFailureTool',
+      tools: [
+        new MockTool({
+          name: 'budgetedFailureTool',
+          execute,
+          maxOutputChars: 30_000,
+        }),
+      ],
+      messageBus,
+      disableHooks: false,
+    });
+    const call = completedCalls[0] as CompletedToolCall;
+    return (call.response.error?.message ?? '') as string;
+  }
+
+  const FAILURE_BODY = `${'b'.repeat(28_990)}exit 7`;
+  const HOOK_CONTEXT = 'hook says: check the mount';
+
+  it('keeps a producer-sized error body when a failure hook adds context', async () => {
+    const message = await runBudgetedFailure({
+      outputBudgetApplied: true,
+      hookContext: HOOK_CONTEXT,
+    });
+
+    // The producer's tail is what the gate used to eat.
+    expect(message).toContain('exit 7');
+    expect(message).toContain(HOOK_CONTEXT);
+  });
+
+  it('keeps it without a hook too, so the case above is the hook path', async () => {
+    const message = await runBudgetedFailure({ outputBudgetApplied: true });
+
+    expect(message).toContain('exit 7');
+  });
+
+  it('still bounds an error body the producer never sized', async () => {
+    // The control in the other direction: deferring the hook context must
+    // not turn the gate off for producers that build `error.message`
+    // separately.
+    const message = await runBudgetedFailure({ hookContext: HOOK_CONTEXT });
+
+    expect(message).not.toContain('exit 7');
+    expect(message).toContain(HOOK_CONTEXT);
+  });
+
   it.each([ToolErrorType.EXECUTION_FAILED, ToolErrorType.EXECUTION_TIMEOUT])(
     'preserves %s execution when cancellation arrives during failure postprocessing',
     async (errorType) => {
