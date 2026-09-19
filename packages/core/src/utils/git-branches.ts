@@ -134,17 +134,31 @@ export function gitEnv(
   return env;
 }
 
-export function runGit(
+/**
+ * Both streams, for the handful of subcommands that report on stderr.
+ *
+ * `git worktree prune -v` is one: everything it says it would remove goes to
+ * stderr, so a caller reading only stdout is told nothing at all.
+ */
+export function runGitCapture(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
+): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
     env: gitEnv(env),
-  }).then(({ stdout }) => stdout);
+  }).then(({ stdout, stderr }) => ({ stdout, stderr }));
+}
+
+export function runGit(
+  cwd: string,
+  args: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return runGitCapture(cwd, args, env).then(({ stdout }) => stdout);
 }
 
 const SEPARATOR = '\x00';

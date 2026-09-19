@@ -293,6 +293,7 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
@@ -2560,6 +2561,11 @@ export function createServeApp(
     mutate,
   });
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerWorkspaceQualifiedGitWorktreeRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
     mutate,

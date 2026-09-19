@@ -486,6 +486,64 @@ export interface DaemonGitBranchesResult {
   detached: boolean;
 }
 
+/** One worktree of the workspace's repository. */
+export interface DaemonGitWorktree {
+  /** Absolute path as git records it. */
+  path: string;
+  head: string;
+  /** Short branch name; `null` when detached or bare. */
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  /** Present when the worktree is locked; the reason when git recorded one. */
+  locked?: string;
+  /** Present when the directory is gone and git would prune the entry. */
+  prunable?: string;
+  /** The main worktree, listed first and never removable. */
+  isMain: boolean;
+  /** The selected workspace's own checkout. */
+  isWorkspace: boolean;
+  /** Present for worktrees Qwen Code created under `.qwen/worktrees/`. */
+  slug?: string;
+}
+
+/** Response from `GET /workspaces/:workspace/git/worktrees`. */
+export interface DaemonGitWorktreesResult {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  worktrees: DaemonGitWorktree[];
+}
+
+/** Response from `GET /workspaces/:workspace/git/worktrees/status?path=`. */
+export interface DaemonGitWorktreeStatus {
+  v: 1;
+  path: string;
+  /** `false` when the working tree could not be read. */
+  available: boolean;
+  branch?: string | null;
+  detached?: boolean;
+  staged?: number;
+  unstaged?: number;
+  untracked?: number;
+  conflicted?: number;
+  ahead?: number;
+  behind?: number;
+}
+
+/** Response from `POST /workspaces/:workspace/git/worktrees/remove`. */
+export interface DaemonGitWorktreeRemoveResult {
+  removed: true;
+  path: string;
+  /**
+   * Present when git dropped the registration but the directory is still on
+   * disk: the checkout's deletion failed, or the entry was stale and cleared
+   * by a prune, which deletes no files.
+   */
+  directoryRemains?: true;
+}
+
 /** Response from `POST /workspaces/:workspace/git/checkout`. */
 export interface DaemonGitCheckoutResult {
   branch: string;
