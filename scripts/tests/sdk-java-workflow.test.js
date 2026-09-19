@@ -2,6 +2,18 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
+const managedHostedE2E = readFileSync(
+  'scripts/run-managed-hosted-runtime-e2e.ts',
+  'utf8',
+);
+const managedAgentServerE2E = readFileSync(
+  'scripts/run-managed-agent-server-e2e.ts',
+  'utf8',
+);
+const embeddedRuntimeBroker = readFileSync(
+  'packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/service/EmbeddedRuntimeBroker.java',
+  'utf8',
+);
 const job = (name) => {
   const start = workflow.indexOf(`  ${name}:`);
   const next = workflow.slice(start + 1).search(/\n {2}[a-z0-9-]+:\n/);
@@ -9,6 +21,35 @@ const job = (name) => {
 };
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('passes one Hosted Harness capability digest to the server and Java client', () => {
+    expect(managedHostedE2E).toContain(
+      'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: harnessCapabilityDigest',
+    );
+    expect(managedHostedE2E).toContain(
+      'QWEN_MANAGED_HOSTED_E2E_CAPABILITY_DIGEST:',
+    );
+  });
+
+  it('keeps the real-model server E2E compatible with the Hosted Harness profile', () => {
+    expect(managedAgentServerE2E).not.toContain(
+      'QWEN_MANAGED_AGENT_WORKSPACE_ID',
+    );
+    expect(embeddedRuntimeBroker).toContain(
+      'resolveWorkspaceId(broker, workspaceCwd)',
+    );
+    expect(managedAgentServerE2E).toContain(
+      'modelProviders: { [selectedProviderGroup]: [selectedProvider] }',
+    );
+    expect(managedAgentServerE2E).toContain(
+      "security: sourceSettings['security']",
+    );
+    for (const section of ['hooks', 'mcpServers', 'extensions', 'tools']) {
+      expect(managedAgentServerE2E).not.toContain(
+        `sourceSettings['${section}']`,
+      );
+    }
+  });
+
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
     const block = job(name);
     for (const fragment of [
@@ -57,7 +98,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         block.match(
           /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
         ),
-      ).toHaveLength(name === 'test' ? 4 : 1);
+      ).toHaveLength(name === 'test' ? 6 : 2);
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },
