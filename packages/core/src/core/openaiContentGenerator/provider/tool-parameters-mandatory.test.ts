@@ -9,200 +9,244 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { determineProvider } from '../index.js';
-import { MiniMaxOpenAICompatibleProvider } from './minimax.js';
+import type { OpenAICompatibleProvider } from './types.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
-import { ToolParametersMandatoryOpenAICompatibleProvider } from './tool-parameters-mandatory.js';
+import { DashScopeOpenAICompatibleProvider } from './dashscope.js';
+import { DeepSeekOpenAICompatibleProvider } from './deepseek.js';
+import { MiMoOpenAICompatibleProvider } from './mimo.js';
+import { MiniMaxOpenAICompatibleProvider } from './minimax.js';
+import { MistralOpenAICompatibleProvider } from './mistral.js';
+import { ZaiOpenAICompatibleProvider } from './zai.js';
 
-describe('ToolParametersMandatoryOpenAICompatibleProvider', () => {
-  const mockCliConfig = {
-    getCliVersion: vi.fn().mockReturnValue('1.0.0'),
-    getProxy: vi.fn().mockReturnValue(undefined),
-  } as unknown as Config;
+const EMPTY_PARAMETERS = { type: 'object', properties: {} };
 
-  function createConfig(
-    baseUrl: string,
-    toolParametersMandatory?: boolean,
-  ): ContentGeneratorConfig {
-    return {
-      model: 'local-model',
-      apiKey: 'test-api-key',
-      baseUrl,
-      ...(toolParametersMandatory === undefined
-        ? {}
-        : { toolParametersMandatory }),
-    } as ContentGeneratorConfig;
-  }
+const mockCliConfig = {
+  getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+  getProxy: vi.fn().mockReturnValue(undefined),
+  getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+} as unknown as Config;
 
-  describe('isToolParametersMandatory', () => {
-    it('matches only an explicit opt-in', () => {
-      expect(
-        ToolParametersMandatoryOpenAICompatibleProvider.isToolParametersMandatory(
-          createConfig('http://localhost:5000/v1', true),
-        ),
-      ).toBe(true);
-      expect(
-        ToolParametersMandatoryOpenAICompatibleProvider.isToolParametersMandatory(
-          createConfig('http://localhost:5000/v1', false),
-        ),
-      ).toBe(false);
-      expect(
-        ToolParametersMandatoryOpenAICompatibleProvider.isToolParametersMandatory(
-          createConfig('http://localhost:5000/v1'),
-        ),
-      ).toBe(false);
-    });
+// converter.ts emits a parameterless tool with `parameters: undefined` (key
+// present), so the repair must test the value rather than key presence.
+const CONVERTER_SHAPE: OpenAI.Chat.ChatCompletionTool = {
+  type: 'function',
+  function: { name: 'cron_list', description: 'desc', parameters: undefined },
+};
 
-    it('never matches on the endpoint URL alone', () => {
-      // A self-hosted server shares localhost with llama.cpp / LM Studio /
-      // Ollama, which need the opposite shape, so the URL must not select it.
-      expect(
-        ToolParametersMandatoryOpenAICompatibleProvider.isToolParametersMandatory(
-          createConfig('http://localhost:5000/v1'),
-        ),
-      ).toBe(false);
-      expect(
-        ToolParametersMandatoryOpenAICompatibleProvider.isToolParametersMandatory(
-          createConfig('http://127.0.0.1:8080/v1'),
-        ),
-      ).toBe(false);
-    });
+function createConfig(
+  model: string,
+  baseUrl: string,
+  toolParametersMandatory?: boolean,
+): ContentGeneratorConfig {
+  return {
+    model,
+    apiKey: 'test-api-key',
+    baseUrl,
+    ...(toolParametersMandatory === undefined
+      ? {}
+      : { toolParametersMandatory }),
+  } as ContentGeneratorConfig;
+}
+
+function outboundTool(
+  config: ContentGeneratorConfig,
+  provider: OpenAICompatibleProvider,
+  tool: OpenAI.Chat.ChatCompletionTool = CONVERTER_SHAPE,
+): OpenAI.Chat.ChatCompletionTool {
+  const request = provider.buildRequest(
+    {
+      model: config.model,
+      messages: [{ role: 'user', content: 'Hello' }],
+      tools: [tool],
+    },
+    'prompt-id',
+  );
+
+  const emitted = request.tools?.[0];
+  if (!emitted) throw new Error('expected the request to carry a tool');
+  return emitted;
+}
+
+describe('generationConfig.toolParametersMandatory', () => {
+  describe('routes whose vendor predicate matches the model name', () => {
+    // These four predicates match a model id at any baseUrl, so a self-hosted
+    // strict server reaches them without ever reaching the default provider.
+    const cases = [
+      { model: 'deepseek-v4.1-flash', ctor: DeepSeekOpenAICompatibleProvider },
+      { model: 'glm-4.6', ctor: ZaiOpenAICompatibleProvider },
+      { model: 'mimo-7b', ctor: MiMoOpenAICompatibleProvider },
+      { model: 'mistral-small', ctor: MistralOpenAICompatibleProvider },
+    ] as const;
+
+    it.each(cases)(
+      'repairs on the $model route while its provider stays selected',
+      ({ model, ctor }) => {
+        const config = createConfig(model, 'http://localhost:5000/v1', true);
+        const provider = determineProvider(config, mockCliConfig);
+
+        expect(provider).toBeInstanceOf(ctor);
+        expect(outboundTool(config, provider).function.parameters).toEqual(
+          EMPTY_PARAMETERS,
+        );
+      },
+    );
   });
 
-  describe('provider selection', () => {
-    it('is selected by the OpenAI-compatible provider factory', () => {
-      const provider = determineProvider(
-        createConfig('http://localhost:5000/v1', true),
-        mockCliConfig,
-      );
-
-      expect(provider).toBeInstanceOf(
-        ToolParametersMandatoryOpenAICompatibleProvider,
-      );
-    });
-
-    it('leaves an opted-out route on the default provider', () => {
-      const provider = determineProvider(
-        createConfig('http://localhost:5000/v1'),
-        mockCliConfig,
-      );
+  describe('routes with no vendor predicate', () => {
+    it('omits the field by default', () => {
+      const config = createConfig('local-model', 'http://localhost:5000/v1');
+      const provider = determineProvider(config, mockCliConfig);
 
       expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
-      expect(provider).not.toBeInstanceOf(
-        ToolParametersMandatoryOpenAICompatibleProvider,
+      expect(
+        outboundTool(config, provider).function.parameters,
+      ).toBeUndefined();
+    });
+
+    it('emits the schema when opted in', () => {
+      const config = createConfig(
+        'local-model',
+        'http://localhost:5000/v1',
+        true,
+      );
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider).toBeInstanceOf(DefaultOpenAICompatibleProvider);
+      expect(outboundTool(config, provider).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
       );
     });
 
-    it('stays behind a vendor hostname whose provider injects its own shape', () => {
-      const provider = determineProvider(
-        createConfig('https://api.minimaxi.com/v1', true),
-        mockCliConfig,
+    it('repairs a tool that declares no schema at all', () => {
+      const config = createConfig(
+        'local-model',
+        'http://localhost:5000/v1',
+        true,
       );
+      const provider = determineProvider(config, mockCliConfig);
 
-      expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
+      expect(
+        outboundTool(config, provider, {
+          type: 'function',
+          function: { name: 'cron_list', description: 'desc' },
+        }).function.parameters,
+      ).toEqual(EMPTY_PARAMETERS);
     });
   });
 
-  describe('buildRequest', () => {
-    function buildWithTools(
-      tools: OpenAI.Chat.ChatCompletionTool[],
-    ): OpenAI.Chat.ChatCompletionCreateParams {
-      const provider = new ToolParametersMandatoryOpenAICompatibleProvider(
-        createConfig('http://localhost:5000/v1', true),
+  describe('the route that builds its request without super', () => {
+    it('emits the schema on DashScope when opted in', () => {
+      const config = createConfig('qwen3-8b', 'http://localhost:5000/v1', true);
+      const provider = new DashScopeOpenAICompatibleProvider(
+        config,
         mockCliConfig,
       );
-      return provider.buildRequest(
-        {
-          model: 'local-model',
-          messages: [{ role: 'user', content: 'Hello' }],
-          tools,
-        },
-        'prompt-id',
+
+      expect(outboundTool(config, provider).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
       );
-    }
-
-    it('emits an object schema for a tool that declares no parameters', () => {
-      const result = buildWithTools([
-        {
-          type: 'function',
-          function: { name: 'cron_list', description: 'desc' },
-        },
-      ]);
-
-      expect(result.tools).toEqual([
-        {
-          type: 'function',
-          function: {
-            name: 'cron_list',
-            description: 'desc',
-            parameters: { type: 'object', properties: {} },
-          },
-        },
-      ]);
     });
 
-    it('emits the schema when the converter left parameters present-but-undefined', () => {
-      // converter.ts emits parameterless tools with `parameters: undefined`
-      // (key present); the predicate must test the value, not key presence, or
-      // the production shape stops receiving the fix.
-      const result = buildWithTools([
-        {
-          type: 'function',
-          function: {
-            name: 'cron_status',
-            description: 'desc',
-            parameters: undefined,
-          },
-        },
-      ]);
+    it('leaves the DashScope omission intact without the opt-in', () => {
+      const config = createConfig('qwen3-8b', 'http://localhost:5000/v1');
+      const provider = new DashScopeOpenAICompatibleProvider(
+        config,
+        mockCliConfig,
+      );
 
-      expect(result.tools).toEqual([
-        {
-          type: 'function',
-          function: {
-            name: 'cron_status',
-            description: 'desc',
-            parameters: { type: 'object', properties: {} },
-          },
-        },
-      ]);
+      expect(
+        outboundTool(config, provider).function.parameters,
+      ).toBeUndefined();
+    });
+  });
+
+  describe('the vendor that needs the field unconditionally', () => {
+    it('emits the schema on MiniMax without the opt-in', () => {
+      const config = createConfig('local-model', 'https://api.minimaxi.com/v1');
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
+      expect(outboundTool(config, provider).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
+      );
     });
 
-    it('passes a tool with a declared schema through unchanged', () => {
+    it('emits the schema on MiniMax when opted in', () => {
+      const config = createConfig(
+        'local-model',
+        'https://api.minimaxi.com/v1',
+        true,
+      );
+      const provider = determineProvider(config, mockCliConfig);
+
+      expect(provider).toBeInstanceOf(MiniMaxOpenAICompatibleProvider);
+      expect(outboundTool(config, provider).function.parameters).toEqual(
+        EMPTY_PARAMETERS,
+      );
+    });
+  });
+
+  describe('tools that already declare a schema', () => {
+    it('passes a declared schema through unchanged', () => {
       const schema = {
         type: 'object',
         properties: { path: { type: 'string' } },
         required: ['path'],
       };
+      const config = createConfig(
+        'local-model',
+        'http://localhost:5000/v1',
+        true,
+      );
+      const provider = determineProvider(config, mockCliConfig);
 
-      const result = buildWithTools([
+      const request = provider.buildRequest(
         {
-          type: 'function',
-          function: { name: 'read_file', description: 'd', parameters: schema },
+          model: config.model,
+          messages: [{ role: 'user', content: 'Hello' }],
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'read_file',
+                description: 'desc',
+                parameters: schema,
+              },
+            },
+          ],
         },
-      ]);
+        'prompt-id',
+      );
 
-      expect(result.tools).toEqual([
+      expect(request.tools).toEqual([
         {
           type: 'function',
-          function: { name: 'read_file', description: 'd', parameters: schema },
+          function: {
+            name: 'read_file',
+            description: 'desc',
+            parameters: schema,
+          },
         },
       ]);
     });
 
     it('keeps a request without tools tool-free', () => {
-      const provider = new ToolParametersMandatoryOpenAICompatibleProvider(
-        createConfig('http://localhost:5000/v1', true),
-        mockCliConfig,
+      const config = createConfig(
+        'local-model',
+        'http://localhost:5000/v1',
+        true,
       );
-      const result = provider.buildRequest(
+      const provider = determineProvider(config, mockCliConfig);
+
+      const request = provider.buildRequest(
         {
-          model: 'local-model',
+          model: config.model,
           messages: [{ role: 'user', content: 'Hello' }],
         },
         'prompt-id',
       );
 
-      expect(result.tools).toBeUndefined();
+      expect(request.tools).toBeUndefined();
     });
   });
 });

@@ -2017,7 +2017,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: false,
             description:
-              'When true, a tool that declares no arguments is still sent with `"parameters": { "type": "object", "properties": {} }` instead of omitting the field. Servers that type `tools[].function.parameters` as a required field reject the request with a validation error when a parameterless tool omits it (for example TabbyAPI `Field required`). Leave false by default: llama.cpp / LM Studio / vLLM reject the replacement shapes (QwenLM/qwen-code#11431, #11410), so enable it only for an endpoint that rejects the omitted field. It is read when the request provider for that route is built, so it takes effect on the next model switch or restart.',
+              'When true, a tool that declares no arguments is still sent with `"parameters": { "type": "object", "properties": {} }` instead of omitting the field. Servers that type `tools[].function.parameters` as a required field reject the request with a validation error when a parameterless tool omits it (for example TabbyAPI `Field required`). Leave false by default: llama.cpp / LM Studio / vLLM reject the replacement shapes (QwenLM/qwen-code#11431, #11410), so enable it only for an endpoint that rejects the omitted field. It applies on whichever provider serves the route, including one selected because the model id looks like a vendor model (`deepseek`, `glm-`, `mimo-`, `mistral`), and is read when the request provider for that route is built, so it takes effect on the next model switch or restart.',
             parentKey: 'generationConfig',
             showInDialog: false,
           },

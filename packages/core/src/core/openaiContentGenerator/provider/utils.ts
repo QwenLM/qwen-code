@@ -43,3 +43,31 @@ export function stripReasoningContent(
   delete next['reasoning_content'];
   return next as unknown as OpenAI.Chat.ChatCompletionMessageParam;
 }
+
+// Servers that type `tools[].function.parameters` as a required field reject a
+// request whose parameterless tool omits it (Pydantic `Field required`, e.g.
+// TabbyAPI). The converter omits the field on purpose (#11431) because llama.cpp
+// / LM Studio / vLLM reject the shapes that replace it (#11410), so callers here
+// decide per route. Running at the outbound boundary is also what lets an empty
+// `properties` reach the wire at all: `relaxSchemaForFunctionCalling` strips it
+// during conversion.
+export function withEmptyToolParameters(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (!request.tools) return request;
+
+  return {
+    ...request,
+    tools: request.tools.map((tool) =>
+      tool.function.parameters === undefined
+        ? {
+            ...tool,
+            function: {
+              ...tool.function,
+              parameters: { type: 'object', properties: {} },
+            },
+          }
+        : tool,
+    ),
+  };
+}

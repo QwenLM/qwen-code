@@ -37,18 +37,26 @@
 否决了端点探测：自托管服务器与 llama.cpp、LM Studio、Ollama、vLLM 共用
 `localhost` —— 正是需要省略该字段的那些端点 —— 而 TabbyAPI 的端口可配置，
 所以 URL 并不能提供把它区分出来的事实。
-`openaiContentGenerator/provider/` 中现有的每一项 hostname 匹配都指向公开厂商域名，
-没有一项匹配回环地址。
+
+provider 选择同样不能充当闸门。`openaiContentGenerator/provider/` 里九项厂商
+判定条件中有四项同时按模型 id 匹配：`deepseek` 子串（`deepseek.ts`）、
+`glm-` 前缀（`zai.ts`）、`mimo-` 前缀（`mimo.ts`）以及七个 Mistral 标记
+（`mistral.ts`）。因此运行 `deepseek-v4.1-flash` 或 `glm-4.6` 蒸馏版的本地服务器
+在任何 baseUrl（包括回环地址）下都会被路由到该厂商的 provider，
+而其中只有 MiniMax 会注入 `parameters` schema。该开关改为在每次请求时读取。
 
 该字段声明在 `ContentGeneratorConfig` 上，并加入 `ModelGenerationConfig` 与
 `MODEL_GENERATION_CONFIG_FIELDS`，因此 `modelProviders` 条目可按模型设置它；
 文档见 `docs/users/configuration/settings.md`。
 
-### 在下一层修复，而不是在 converter 中
+### 在出网边界修复，而不是在 converter 中
 
-`ToolParametersMandatoryOpenAICompatibleProvider` 覆写 `buildRequest`，为转换后
-`parameters` 为 `undefined` 的任意工具补上
-`{ "type": "object", "properties": {} }`，位置与 MiniMax 执行等价修复的位置相同。
+`DefaultOpenAICompatibleProvider` 在开关开启时，为 `parameters` 为 `undefined`
+的任意工具补上 `{ "type": "object", "properties": {} }`。每一个厂商 provider 都会
+串联 `super.buildRequest`，因此无论路由由哪一个 provider 持有，修复都能到达；
+DashScope 自行组装请求，从其合并步骤调用同一份修复。映射本身放在
+`provider/utils.ts`，MiniMax 的无条件注入也使用它。
+
 若在 converter 中处理，就意味着为所有 OpenAI 兼容路由选定同一种形状，
 而 `provider/minimax.ts` 明确记录了这一约束。
 
@@ -60,32 +68,46 @@
 ### 形状
 
 采用 `{ "type": "object", "properties": {} }`，即 MiniMax 已为其自身端点注入的
-空对象 schema（#11834）。两个 provider 现在发出同一形状，因此开启该开关的路由
-无论由哪一个持有，行为都相同。只校验字段是否存在的服务器可以接受这一形状。
-本 provider 最初发出的裸 `{ "type": "object" }` 正是 #11410 在 llama.cpp、
+空对象 schema（#11834）。开关修复与 MiniMax 的无条件注入现在共用同一形状，
+因此开启该开关的路由无论由哪一个 provider 持有，行为都相同。
+只校验字段是否存在的服务器可以接受这一形状。
+本分支最初发出的裸 `{ "type": "object" }` 正是 #11410 在 llama.cpp、
 LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路由，
 因此从不开启该开关。
 
-### 选择顺序
+### 不再使用独立 provider
 
-该开关在每一项厂商 hostname 检查之后才判断，因此匹配到厂商域名的路由仍保留该厂商的
-provider —— MiniMax 会自行注入同一形状，不能被通用 provider 取代。
+本改动最初的形态是新增一个专用 provider，并在九项厂商判定条件之后加入对应分支，
+其注释声称这些都是 hostname 检查。这是错的：该分支位于上面四项模型名判定条件之下，
+因此由严格网关托管的 `deepseek`、`glm-`、`mimo-` 或 `mistral` 模型 id 会拿到
+厂商 provider，开关从未被读取，服务器仍返回该开关本要防止的同一个
+`Field required` —— 而且没有任何日志能把这个开关与未改变的线上形状联系起来。
+把分支提前会剥夺这些路由其 provider 本要提供的内容分块处理，
+而 `deepseek.ts` 与 `zai.ts` 明确记录了这一处理是为自托管的 sglang、vLLM
+与 ollama 部署而有意保留的。因此修复与所选的 provider 组合生效，
+不涉及任何 provider 类或选择分支。
+
+`zai.ts` 会在非 Z.ai 域名上的 `glm-*` 模型未能展平 `reasoning_effort` 时告警一次。
+这里的修复不需要这样的告警：它不以 hostname 为条件，
+在用户开启的任意位置都会生效。
 
 ## 限制与风险
 
-- 该开关在路由的 provider 构建时读取，因此在下一次模型切换或重启后生效，
-  而不是作用于正在进行的请求。`qwen-oauth`
+- provider 持有其构建时的 `ContentGeneratorConfig`，因此该开关在下一次模型切换
+  或重启后生效，而不是作用于正在进行的请求。`qwen-oauth`
   的热更新路径只复制固定的字段集合且不重建 provider，也不是该开关能服务的路由。
 - 该开关按模型路由生效。把多条路由指向要求相反的服务器时，
   只在需要它的那条路由上设置该键。
-- 只新增字段，从不删除。服务器会拒绝存在的 `parameters` 对象的路由仍使用默认
-  provider，不受影响。
+- 只新增字段，从不删除。服务器会拒绝存在的 `parameters` 对象的路由不会开启该开关，
+  因而不受影响。
 - 注入的 `properties` 对象发生在转换之后，因此它不会被
   `relaxSchemaForFunctionCalling` 在转换中删除空 `properties` 的那一步影响。
   拒绝空 `properties` 对象的服务器不应开启该开关。
 - 判断条件读取的是 `parameters === undefined` 这个值，而非键是否存在：
   converter 会带着 `undefined` 值发出该键，
   若只判断键是否存在，就会跳过每一个需要修复的工具。
+- DashScope 不串联 `super.buildRequest`，因此它的两条返回路径经由自身的合并步骤
+  到达这份修复。以同样方式组装请求的 provider 也必须调用它。
 
 ## 不在范围内
 
@@ -97,12 +119,19 @@ provider —— MiniMax 会自行注入同一形状，不能被通用 provider �
 
 ## 验证
 
-- 单元测试覆盖开关判断（设为 true、未设置、显式 false）、provider 选择
-  （被选中、未被选中、开启时 MiniMax 仍然胜出），以及 `buildRequest`
-  （没有 `parameters` 键、`parameters: undefined`、已声明 schema 原样透传、
-  不含 tools 的请求）。
+- 单元测试按路由固定线上形状。四条模型名路由 —— DeepSeek、Z.ai、MiMo 与
+  Mistral 的模型 id 指向 `http://localhost:5000/v1` —— 断言厂商 provider 仍被选中
+  且 schema 已存在。无厂商判定的普通路由断言默认省略、开启后发出 schema，
+  以及完全没有声明 schema 的工具。DashScope 与 MiniMax 两种状态都断言。
+  已声明的 schema 原样透传，不含 tools 的请求仍然不带 tools。
+  关闭修复时，七个依赖开关的用例会变红，而 MiniMax 与省略类用例仍为绿，
+  因此测试套件区分的是开关，而不是 provider 类。
 - 既有 converter 测试仍然固定默认省略行为，包括
   `expect(JSON.stringify(result.slice(0, 5))).not.toContain('parameters')`。
+- #11956 已确认的抓包正是一条模型名路由 —— 经网关的 `deepseek-v4.1-flash`，
+  `400 litellm.BadRequestError: ... tools[5].function: missing field parameters` ——
+  正是过去被遮蔽的那一支。回环 baseUrl 上使用 `deepseek` 模型 id 的单元测试用例
+  已将其固定；针对该网关的线上重跑仍待完成。
 - 已在真实 TabbyAPI 路由（`http://localhost:5000/v1`）上验证：请求体 A/B 显示，
   省略该字段时返回 HTTP 422，错误为
   `{"type":"missing","loc":["body","tools",0,"function","parameters"],"msg":"Field required"}`；
