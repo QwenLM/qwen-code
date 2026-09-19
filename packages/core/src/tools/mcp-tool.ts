@@ -716,6 +716,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const transformedParts = await boundInlineImageParts(
         transformMcpContentToParts(rawResponseParts),
         signal,
+        `${this.serverName}/${this.serverToolName}`,
       );
       const truncated = await this.truncateTextParts(transformedParts);
       const fallbackText = getDisplayFromPartsWithPersistedOutput(
@@ -886,6 +887,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       const transformedParts = await boundInlineImageParts(
         transformMcpContentToParts(rawResponseParts),
         signal,
+        `${this.serverName}/${this.serverToolName}`,
       );
       const truncated = await this.truncateTextParts(transformedParts);
 
@@ -921,7 +923,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     let persistedOutputFiles: string[] | undefined;
     if (imageContent) {
       const truncatedContent = await this.truncateTextParts(
-        await boundInlineImageParts(imageContent, signal),
+        await boundInlineImageParts(
+          imageContent,
+          signal,
+          `${this.serverName}/${this.serverToolName}`,
+        ),
       );
       llmContent = truncatedContent.parts;
       persistedOutputFiles = truncatedContent.persistedOutputFiles;
@@ -1312,21 +1318,45 @@ function transformImageAudioBlock(
  * applies, so a full-resolution screenshot from a browser automation server
  * does not enter the conversation verbatim. Images that already fit, and any
  * the renderer cannot handle, are forwarded unchanged.
+ *
+ * `subject` names the server and tool the bytes came from. It is the only way
+ * to tell configured MCP servers apart in a bounding failure, since these bytes
+ * have no file path to label them with.
  */
 async function boundInlineImageParts(
   parts: Part[],
   signal: AbortSignal,
+  subject: string,
 ): Promise<Part[]> {
   const boundedParts: Part[] = [];
   for (const part of parts) {
     const inline = part.inlineData;
-    if (!inline?.data || !inline.mimeType?.startsWith('image/')) {
+    // Gate on the shared predicate the vision bridge and
+    // `getMcpErrorImageContent` already use, so this bound cannot drift from
+    // the definition of "image" (and keeps excluding MCP audio blocks, which
+    // carry the identical `inlineData` shape). The `typeof` checks add no
+    // policy; they only narrow the optional fields for TypeScript.
+    if (
+      !isImagePart(part) ||
+      !inline ||
+      typeof inline.mimeType !== 'string' ||
+      typeof inline.data !== 'string'
+    ) {
       boundedParts.push(part);
       continue;
     }
+    const { mimeType, data } = inline;
     const sourceLimitedPart = clampInlineMediaPart(
       part,
       IMAGE_MAX_SOURCE_BYTES,
+      {
+        // This is the decoder's source cap, not the inline-media limit, and
+        // the bytes exist only in this tool result — no `@file` can supply
+        // them. Say so instead of borrowing the default wording.
+        limitLabel: 'image source limit',
+        remedy:
+          'Ask the user to resize or compress the image, or return it as a resource link instead of inline bytes.',
+      },
     );
     if (sourceLimitedPart !== part) {
       boundedParts.push(sourceLimitedPart);
@@ -1335,8 +1365,8 @@ async function boundInlineImageParts(
     let boundedPart = part;
     try {
       const view = await boundImageBuffer(
-        Buffer.from(inline.data, 'base64'),
-        inline.mimeType,
+        Buffer.from(data, 'base64'),
+        `${subject} ${mimeType}`,
         signal,
       );
       if (view) {
@@ -1352,7 +1382,15 @@ async function boundInlineImageParts(
       if (!(error instanceof ImageViewError)) {
         throw error;
       }
-      debugLogger.debug(`Unable to bound MCP image: ${getErrorMessage(error)}`);
+      const message = `Unable to bound MCP image from ${subject} (${mimeType}): ${getErrorMessage(error)}`;
+      // A renderer that cannot load is a persistent host condition, not a
+      // per-image one: every image of every call will fail the same way, so
+      // surface it at warn while single-image decode failures stay at debug.
+      if (error.code === 'renderer_unavailable') {
+        debugLogger.warn(message);
+      } else {
+        debugLogger.debug(message);
+      }
     }
     boundedParts.push(clampInlineMediaPart(boundedPart));
   }

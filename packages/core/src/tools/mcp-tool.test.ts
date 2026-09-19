@@ -803,6 +803,11 @@ describe('DiscoveredMCPTool', () => {
       await execution;
       expect(callsBeforeRelease).toBe(1);
       expect(mockBoundImageBuffer).toHaveBeenCalledTimes(2);
+      // The renderer's error messages label bytes by their source; a bare mime
+      // type identifies no server, and several can be configured at once.
+      const firstLabel = mockBoundImageBuffer.mock.calls[0]?.[1];
+      expect(firstLabel).toContain(`${serverName}/${serverToolName}`);
+      expect(firstLabel).toContain('image/png');
     });
 
     it('omits an image over the source limit before decoding it', async () => {
@@ -830,6 +835,7 @@ describe('DiscoveredMCPTool', () => {
       expect(clamp).toHaveBeenCalledWith(
         image,
         imageView.IMAGE_MAX_SOURCE_BYTES,
+        expect.objectContaining({ limitLabel: 'image source limit' }),
       );
       expect(bound).not.toHaveBeenCalled();
       expect(result.llmContent).toEqual([
@@ -838,6 +844,87 @@ describe('DiscoveredMCPTool', () => {
         },
         omitted,
       ]);
+    });
+
+    it('names the image source limit in the placeholder it emits', async () => {
+      // Shrink the guard's limit rather than build a >100 MiB base64 payload:
+      // the real clamp still runs, so the assertions read the real wording this
+      // site asks for instead of a stubbed one.
+      const realClamp = inlineMediaLimit.clampInlineMediaPart;
+      vi.spyOn(inlineMediaLimit, 'clampInlineMediaPart').mockImplementation(
+        (part, limitBytes, placeholderOptions) =>
+          realClamp(part, Math.min(limitBytes ?? 1, 1), placeholderOptions),
+      );
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      const result = await tool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+      const placeholder = (result.llmContent as Part[])[1]!;
+      expect(placeholder.text).toContain('image/png');
+      expect(placeholder.text).toContain('image source limit');
+      expect(placeholder.text).not.toContain('inline limit');
+      expect(placeholder.text).not.toContain('@file path');
+    });
+
+    it('never sends a non-image inline part to the renderer', async () => {
+      const bound = vi.spyOn(imageView, 'boundImageBuffer');
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'audio', mimeType: 'audio/wav', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      await tool
+        .build({ param: 'recording' })
+        .execute(new AbortController().signal);
+
+      expect(bound).not.toHaveBeenCalled();
+    });
+
+    it('warns with the server and tool when the renderer is unavailable', async () => {
+      mockDebugWarn.mockClear();
+      vi.spyOn(imageView, 'boundImageBuffer').mockRejectedValueOnce(
+        new imageView.ImageViewError(
+          'renderer_unavailable',
+          'Image rendering is unavailable because the "sharp" image module could not be loaded.',
+        ),
+      );
+      mockCallTool.mockResolvedValue([
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }],
+            },
+          },
+        },
+      ] as Part[]);
+
+      await tool
+        .build({ param: 'screenshot' })
+        .execute(new AbortController().signal);
+
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining(`${serverName}/${serverToolName}`),
+      );
     });
 
     it.each(['already fits', 'renderer rejects'] as const)(
