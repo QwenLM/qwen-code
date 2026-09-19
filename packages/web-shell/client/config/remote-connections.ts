@@ -12,11 +12,6 @@ const ADD_RETURN_URL_KEY = 'qwen-remote-connection-return';
 const SETTINGS_PARAM = 'settings';
 const CONNECTIONS_SETTINGS = 'Connections';
 
-/**
- * Host and port of a daemon origin, for display. Falls back to the raw value
- * rather than throwing: this runs on render paths, and a catalog entry that
- * predates the current validation must not take the panel down with it.
- */
 export function formatOriginHost(origin: string): string {
   try {
     return new URL(origin).host;
@@ -122,7 +117,7 @@ export function startRemoteConnectionAdd(
   }
 
   const started = navigateToDaemon(daemonOrigin, token, {
-    continueRemoteConnectionAdd: true,
+    continueFlow: 'connection',
   });
   if (started) return true;
 

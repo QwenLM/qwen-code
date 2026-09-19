@@ -884,18 +884,11 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
-  it('names the daemon host once above the workspace list', () => {
+  it('marks each remote workspace folder', () => {
     workspace.baseUrl = 'https://remote.example.com';
 
     renderSidebar();
 
-    // The host is named once, while each workspace keeps a compact remote
-    // folder mark like Codex's local/remote source distinction.
-    const indicators = container.querySelectorAll(
-      '[data-testid="remote-workspace-indicator"]',
-    );
-    expect(indicators).toHaveLength(1);
-    expect(indicators[0].textContent).toContain('remote.example.com');
     expect(
       container.querySelectorAll(
         '[data-testid="remote-workspace-folder-icon"]',
@@ -903,14 +896,11 @@ describe('WebShellSidebar workspace removal', () => {
     ).toHaveLength(capabilities.workspaces.length);
   });
 
-  it('leaves the header unmarked for the page origin daemon', () => {
+  it('leaves local workspace folders unmarked', () => {
     workspace.baseUrl = window.location.origin;
 
     renderSidebar();
 
-    expect(
-      container.querySelectorAll('[data-testid="remote-workspace-indicator"]'),
-    ).toHaveLength(0);
     expect(
       container.querySelectorAll(
         '[data-testid="remote-workspace-folder-icon"]',
