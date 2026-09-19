@@ -2081,6 +2081,41 @@ describe('ChatEditor Plan in the add menu', () => {
     );
   });
 
+  it('hands focus nowhere when the host shows no control beside the chip', () => {
+    // The chip renders only where the host lists the add menu, so the
+    // narrowest host without a handoff target still keeps it.
+    const props = {
+      visibleToolbarActions: ['addMenu', 'plan'] as const,
+      disabled: true,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('hands focus nowhere while the only control beside the chip is disabled', () => {
+    // The permission control stays disabled for as long as the reported mode
+    // change is in flight, which can outlast the chip.
+    const props = {
+      visibleToolbarActions: ['addMenu', 'approvalMode', 'plan'] as const,
+      disabled: true,
+      modeControlsDisabled: true,
+      onTogglePlan: vi.fn(),
+    };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    rerenderChatEditor(container, { ...props, planMode: false });
+    expect(planButton(container)).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
   it('leaves focus where the user has since put it', () => {
     const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
     const container = renderChatEditor({ ...props, planMode: true });

@@ -97,15 +97,20 @@ test('@smoke keeps tint, close mark, and focus on the chip while its own request
 
   try {
     // The click leaves the pointer on the chip and hands focus to the input,
-    // as it does for every composer control. The chip stays reachable while
-    // busy, so a keyboard user can land on it mid-request.
+    // as it does for every composer control.
     await chip.click();
+    // Playwright actionability follows aria-disabled: click()/dblclick()/tap()
+    // aimed at the chip once it is busy never land — they retry until the
+    // test timeout. Drive a busy press via chip.focus() + chip.press('Enter')
+    // (a real activation click) or dispatchEvent('click'); focus()/hover()
+    // are ungated.
     await expect(chip).toHaveAttribute('aria-disabled', 'true');
     // Inert, never natively disabled — toBeDisabled follows aria-disabled,
     // so the native attribute needs the JS property.
     await expect(chip).toHaveJSProperty('disabled', false);
-    await chip.focus();
-    await expect(chip).toBeFocused();
+    // Keep this sequence mouse-only and never focus the chip: the reveal
+    // assertions pin hover alone, and a visible focus would keep the mark
+    // shown when the pointer leaves.
     await expect(page.locator(MARK)).toHaveCSS('opacity', '1');
     await expect(page.locator(ICON)).toHaveCSS('opacity', '0');
     const hoveredWidth = await width();
@@ -120,6 +125,17 @@ test('@smoke keeps tint, close mark, and focus on the chip while its own request
     const restBackground = await background();
     expect(restBackground).not.toBe('rgba(0, 0, 0, 0)');
     expect(hoveredBackground).not.toBe(restBackground);
+
+    // The busy chip stays reachable by keyboard. The mode button beside it is
+    // natively disabled for the request and Shift+Tab is the host's mode-cycle
+    // hotkey, so the keypress comes forward from the add-menu trigger; reached
+    // by keyboard is what makes the focus a visible one, revealing the mark
+    // with the pointer off the chip.
+    await page.getByTestId('composer-add-menu-trigger').focus();
+    await page.keyboard.press('Tab');
+    await expect(chip).toBeFocused();
+    await expect(page.locator(MARK)).toHaveCSS('opacity', '1');
+    await expect(page.locator(ICON)).toHaveCSS('opacity', '0');
 
     await chip.hover();
     await expect(page.locator(MARK)).toHaveCSS('opacity', '1');

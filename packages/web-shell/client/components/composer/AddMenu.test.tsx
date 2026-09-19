@@ -289,6 +289,16 @@ describe('AddMenu', () => {
     await openMenu();
     // Read from the catalog, so a literal in place of t() goes red.
     const zh = getTranslator('zh-CN');
+    // The catalog oracle cannot see a key dropped from zh-CN: the translator
+    // falls back to English on both sides. Pin that the keys are translated.
+    const en = getTranslator('en');
+    for (const key of [
+      'composerAdd.plan.label',
+      'composerAdd.plan.description',
+      'composerAdd.plan.busy',
+    ] as const) {
+      expect(zh(key)).not.toBe(en(key));
+    }
     expect(menuItem('composer-add-menu-plan')!.textContent).toBe(
       `${zh('composerAdd.plan.label')}${zh(
         'composerAdd.plan.description',
