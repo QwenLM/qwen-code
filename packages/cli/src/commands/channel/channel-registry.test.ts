@@ -21,6 +21,32 @@ function invalidPlugin(
 }
 
 describe('channel registry', () => {
+  it('adds the shared output descriptor only when a plugin opts in', async () => {
+    registerPlugin({
+      channelType: 'valid-output-mode',
+      displayName: 'Shared output mode',
+      supportsOutputMode: true,
+      management: { fields: [] },
+      createChannel() {
+        throw new Error('not used');
+      },
+    });
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-output-mode',
+    );
+    const fields = entry?.fields.filter((field) => field.key === 'outputMode');
+    expect(fields).toHaveLength(1);
+    expect(fields?.[0]).toMatchObject({
+      kind: 'enum',
+      options: [
+        { value: 'per_task' },
+        { value: 'per_response' },
+        { value: 'per_turn' },
+      ],
+    });
+    expect(fields?.[0]?.default).toBe('per_turn');
+  });
+
   it('publishes a plugin session-scope descriptor once with its runtime default', async () => {
     registerPlugin({
       channelType: 'valid-custom-session-scope',
@@ -74,6 +100,19 @@ describe('channel registry', () => {
   });
 
   it.each([
+    {
+      type: 'invalid-output-mode-descriptor',
+      fields: [
+        {
+          key: 'outputMode',
+          label: 'Output Mode',
+          kind: 'enum',
+          options: [{ value: 'all', label: 'All' }],
+        },
+      ],
+      message:
+        'Channel field "outputMode" is shared; declare supportsOutputMode instead.',
+    },
     {
       type: 'invalid-nested-secret',
       fields: [
@@ -775,6 +814,42 @@ describe('channel registry', () => {
         .map((entry) => entry.type),
     ).toEqual(['dingtalk', 'dws', 'wecom', 'feishu', 'github', 'gitlab']);
     expect(
+      builtinCatalog
+        .filter((entry) =>
+          entry.fields.some((field) => field.key === 'outputMode'),
+        )
+        .map((entry) => entry.type),
+    ).toEqual(['dingtalk']);
+    // The registry skips the shared `instructions` injection for any channel
+    // that declares its own, so pin the render invariants the editor depends on
+    // for every manageable built-in: exactly one field, plus the multiline hint
+    // (without it the editor falls back to a single-line input that flattens
+    // stored guidance on the first edit). The copy guarantee is scoped to the
+    // injected descriptor, because a channel declaring its own `instructions`
+    // takes the skip branch and may carry tailored neutral copy, and it is
+    // asserted where an operator actually reads it
+    // (ChannelEditorDialog.test.tsx): fieldDescription resolves
+    // `${labelKey}.description` and falls back to this literal only when that
+    // i18n key is missing.
+    for (const entry of builtinCatalog.filter((item) => item.manageable)) {
+      const instructions = entry.fields.filter(
+        (field) => field.key === 'instructions',
+      );
+      expect(instructions).toHaveLength(1);
+      expect(instructions[0]).toMatchObject({
+        kind: 'string',
+        multiline: true,
+      });
+      const declaresOwnInstructions = (
+        await getPlugin(entry.type)
+      )?.management?.fields?.some((field) => field.key === 'instructions');
+      if (!declaresOwnInstructions) {
+        expect(instructions[0].description).toContain(
+          'replace their own default guidance',
+        );
+      }
+    }
+    expect(
       catalog.find((entry) => entry.type === 'dingtalk')?.fields,
     ).toContainEqual(
       expect.objectContaining({
@@ -785,6 +860,12 @@ describe('channel registry', () => {
     );
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(fields).not.toContainEqual(
+        expect.objectContaining({
+          key: 'messagePrefix',
+          kind: 'string',
+        }),
+      );
       expect(
         fields
           ?.find((field) => field.key === 'senderPolicy')
@@ -820,6 +901,12 @@ describe('channel registry', () => {
     }
     for (const type of ['github', 'gitlab'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
+      expect(fields).not.toContainEqual(
+        expect.objectContaining({
+          key: 'messagePrefix',
+          kind: 'string',
+        }),
+      );
       expect(
         fields?.filter((field) => field.key === 'senderPolicy'),
       ).toHaveLength(1);

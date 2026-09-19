@@ -9,6 +9,10 @@ export default defineConfig({
         __dirname,
         './client/daemon-react-sdk.ts',
       ),
+      '@qwen-code/web-shell/transcript': resolve(
+        __dirname,
+        './client/transcript.ts',
+      ),
       '@': resolve(__dirname, './client'),
     },
   },

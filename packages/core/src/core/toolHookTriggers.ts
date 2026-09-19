@@ -240,6 +240,7 @@ export async function firePostToolUseHook(
   permissionMode: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  durationMs?: number,
 ): Promise<PostToolUseHookResult> {
   if (!messageBus) {
     return { shouldStop: false };
@@ -260,6 +261,7 @@ export async function firePostToolUseHook(
           tool_response: toolResponse,
           tool_use_id: toolUseId,
           ...(tool_call_id && { tool_call_id }),
+          ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         },
         signal,
       },
@@ -335,6 +337,7 @@ export async function firePostToolUseFailureHook(
   permissionMode?: string,
   signal?: AbortSignal,
   tool_call_id?: string,
+  durationMs?: number,
 ): Promise<PostToolUseFailureHookResult> {
   if (!messageBus) {
     return {};
@@ -356,6 +359,7 @@ export async function firePostToolUseFailureHook(
           tool_input: toolInput,
           error: errorMessage,
           is_interrupt: isInterrupt,
+          ...(durationMs === undefined ? {} : { duration_ms: durationMs }),
         },
         signal,
       },
@@ -634,6 +638,27 @@ export function appendAdditionalContext(
 
   if (typeof content === 'string') {
     return content + '\n\n' + additionalContext;
+  }
+
+  const single =
+    Array.isArray(content) && content.length === 1 ? content[0] : content;
+  if (
+    typeof single === 'object' &&
+    !Array.isArray(single) &&
+    single.functionResponse
+  ) {
+    const response = single.functionResponse;
+    const updated: Part = {
+      ...single,
+      functionResponse: {
+        ...response,
+        response: {
+          ...response.response,
+          output: `${response.response?.['output'] ?? ''}\n\n${additionalContext}`,
+        },
+      },
+    };
+    return Array.isArray(content) ? [updated] : updated;
   }
 
   // For PartListUnion content, append as an additional text part

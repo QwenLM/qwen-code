@@ -5,8 +5,7 @@
  */
 
 /**
- * `qwen sessions ps` — list the interactive Qwen Code sessions running
- * right now.
+ * `qwen sessions ps` — list the Qwen Code sessions running right now.
  *
  * The sibling `qwen sessions list` walks saved transcripts; this walks the
  * live-process registry, so the two answer different questions: "what have
@@ -14,8 +13,14 @@
  *
  * Two things can be running: an interactive session, which writes the
  * live-process registry, and a managed Agent View session, which is owned
- * by a supervisor and writes no registry record. Both are listed, managed
- * ones first — see `managed-rows.ts` for the merge.
+ * by a supervisor and has richer lifecycle state in the supervisor store.
+ * Both are listed, managed ones first — see `managed-rows.ts` for the merge.
+ *
+ * KIND says what registered each one — an interactive terminal, a
+ * daemon-managed session, a program that is not Qwen Code at all. It is a
+ * self-report, like NAME and DIRECTORY: everything here was written by
+ * the process it describes. A managed row has no record behind it, so its
+ * KIND says what the row is instead of borrowing a registrant's word.
  *
  * "Interactive" is a registration fact, not a filter: only the
  * interactive UI registers sessions, so headless runs (`qwen -p`) never
@@ -23,7 +28,10 @@
  */
 
 import type { CommandModule, Argv } from 'yargs';
-import { listLiveSessions } from '@qwen-code/qwen-code-core';
+import {
+  describeSessionKind,
+  listLiveSessions,
+} from '@qwen-code/qwen-code-core';
 import stringWidth from 'string-width';
 import {
   sanitizeTerminalText,
@@ -40,6 +48,8 @@ import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 
 /** Fixed column widths for the human-readable table (exported for tests). */
 export const NAME_COL = 22;
+/** Wide enough for the longest kind this build writes (`headless`). */
+export const KIND_COL = 10;
 export const PID_COL = 9;
 export const AGE_COL = 10;
 export const STATE_COL = 13;
@@ -116,9 +126,26 @@ function stateLabel(row: SessionRow): string {
     : TASK_STATE_LABEL[row.taskState];
 }
 
+/**
+ * What the `KIND` column prints.
+ *
+ * A registry row prints the kind its own process recorded, which
+ * `describeSessionKind` reads as `tui` when the writer predates the field.
+ * A managed row has no record behind it — the supervisor store claims
+ * nothing about what registered — so printing `tui` for it would spend the
+ * one word this table reserves for "someone is sitting at a terminal" on a
+ * session nobody is.
+ */
+function kindLabel(row: SessionRow): string {
+  return row.record === undefined
+    ? 'managed'
+    : describeSessionKind(row.record.kind);
+}
+
 function outputHuman(rows: SessionRow[], now: number): void {
   writeStdoutLine(
     padDisplay('NAME', NAME_COL) +
+      padDisplay('KIND', KIND_COL) +
       padDisplay('PID', PID_COL) +
       padDisplay('AGE', AGE_COL) +
       padDisplay('STATE', STATE_COL) +
@@ -127,6 +154,12 @@ function outputHuman(rows: SessionRow[], now: number): void {
   for (const row of rows) {
     writeStdoutLine(
       padDisplay(truncateToWidth(sanitize(row.name), NAME_COL - 2), NAME_COL) +
+        // Truncated for the same reason NAME is: a newer build may write
+        // a longer kind than any this one knows, and one over-wide cell
+        // would misalign every column after it. Not sanitized — unlike
+        // NAME and DIRECTORY, the read guard already bounds `kind` to
+        // lowercase ASCII, digits and dashes.
+        padDisplay(truncateToWidth(kindLabel(row), KIND_COL - 2), KIND_COL) +
         padDisplay(row.pid === undefined ? '-' : String(row.pid), PID_COL) +
         padDisplay(
           row.startedAt === undefined ? '-' : formatAge(now - row.startedAt),
@@ -139,7 +172,7 @@ function outputHuman(rows: SessionRow[], now: number): void {
 }
 
 /**
- * Managed sessions, or an empty list plus a note on stderr.
+ * Managed sessions plus whether the store was read successfully.
  *
  * A supervisor store that cannot be read must not take the command down —
  * the registry half still answers the question. But it must not vanish
@@ -147,15 +180,20 @@ function outputHuman(rows: SessionRow[], now: number): void {
  * the failure this command exists to prevent. stderr keeps `--json`
  * stdout parseable.
  */
-async function readManagedRows(now: number): Promise<SessionRow[]> {
+async function readManagedRows(
+  now: number,
+): Promise<{ rows: SessionRow[]; complete: boolean }> {
   try {
-    return managedSessionRows(await listAgentViewSessionSnapshots(), now);
+    return {
+      rows: managedSessionRows(await listAgentViewSessionSnapshots(), now),
+      complete: true,
+    };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     writeStderrLine(
       `Managed sessions could not be listed: ${sanitize(reason)}`,
     );
-    return [];
+    return { rows: [], complete: false };
   }
 }
 
@@ -163,11 +201,11 @@ async function handlePs(argv: PsArgs): Promise<void> {
   const now = Date.now();
   // listLiveSessions reports "cannot look" as "no peers" rather than
   // throwing, so there is no failure path to surface here.
-  const [records, managed] = await Promise.all([
+  const [records, managedResult] = await Promise.all([
     listLiveSessions(),
     readManagedRows(now),
   ]);
-  const rows = mergeSessionRows(records, managed);
+  const rows = mergeSessionRows(records, managedResult.rows);
 
   if (argv.json) {
     for (const row of rows) {
@@ -196,8 +234,15 @@ async function handlePs(argv: PsArgs): Promise<void> {
     return;
   }
 
+  // "Running", not "registered": a managed session is listed whether or
+  // not it ever wrote a registry record, so an empty listing is a claim
+  // about both sources at once.
   if (rows.length === 0) {
-    writeStdoutLine('No other Qwen Code sessions are running.');
+    writeStdoutLine(
+      managedResult.complete
+        ? 'No other Qwen Code sessions are running.'
+        : 'No interactive Qwen Code sessions are running; managed sessions could not be listed.',
+    );
     return;
   }
 
@@ -206,7 +251,7 @@ async function handlePs(argv: PsArgs): Promise<void> {
 
 export const psCommand: CommandModule<unknown, PsArgs> = {
   command: 'ps',
-  describe: 'List the Qwen Code sessions running right now',
+  describe: 'List Qwen Code sessions running right now',
   builder: (yargs: Argv) =>
     yargs.option('json', {
       type: 'boolean',

@@ -152,7 +152,7 @@ await client
   .setWorkspaceSkillEnabled('review', true, { clientId: 'dashboard-1' });
 ```
 
-Pre-flight `capabilities.features.includes('workspace_skill_settings_toggle')`. The typed `DaemonSkillToggleResult` reports the trimmed requested `skillName`, whether disk state `changed`, activation state (`applied`, `deferred`, or `partial`), and refreshed/failed session counts. The write is settings-only and does not require the name to appear in `DaemonWorkspaceSkillStatus`; that status type's optional false-only `userInvocable` field remains useful for rendering the live catalog but does not gate persistence. The retired `workspace_skill_toggle` tag described the earlier catalog-validated behavior and is not advertised for this contract.
+Pre-flight `capabilities.features.includes('workspace_skill_settings_toggle')`. The typed `DaemonSkillToggleResult` reports the trimmed requested `skillName`, whether disk state `changed`, activation state (`applied`, `deferred`, `reconciling`, or `partial`), and refreshed/failed session counts. `reconciling` means the write was persisted and the workspace coordinator queued the runtime refresh. The write is settings-only and does not require the name to appear in `DaemonWorkspaceSkillStatus`; that status type's optional false-only `userInvocable` field remains useful for rendering the live catalog but does not gate persistence. The retired `workspace_skill_toggle` tag described the earlier catalog-validated behavior and is not advertised for this contract.
 
 For batch changes, pre-flight `workspace_skill_settings_batch_toggle` and call either client shape with the same contract. The routes and request bodies are unchanged:
 
@@ -185,7 +185,7 @@ const workspaceHandle = await client
 const operation = await client.waitForExtensionOperation(workspaceHandle);
 ```
 
-The terminal operation result contains ordered `results`. Targets do not need to be installed when setting `enabled` or `disabled`: the daemon stores a name declaration and preserves that activation policy when an Extension with that name is installed later. All changed targets share one Extension Store generation and one reconciliation pass. Global default batches reconcile every registered runtime; workspace batches resolve and reconcile only the selected trusted runtime. Workspace `inherit` clears the exact override but does not create a declaration for an unknown name; an all-unknown clear succeeds as a no-op without reconciliation. Singular activation methods remain installed-only.
+The terminal operation result contains ordered `results`. Targets do not need to be installed when setting `enabled` or `disabled`: the daemon stores a name declaration and preserves that activation policy when an Extension with that name is installed later. All changed targets share one Extension Store generation. When `extension_activation_explicit_refresh` is advertised, activation operations finish after the durable policy commit without refreshing active sessions. A caller that needs immediate application should then submit `workspace.refreshExtensionRuntime()` for each workspace whose sessions must apply the change immediately; the refresh is a separate operation and may be awaited or left in the background. A global default batch changes the default activation every registered workspace inherits unless that workspace holds an exact override for the name (or matches a legacy path rule), and it has no single refresh covering every runtime; a workspace batch changes only the selected trusted runtime. Older daemons already refresh inside the activation operation, so clients must not submit the extra refresh unless the capability is present. The 30-second generation reconciler remains an independent eventual-convergence path for workspaces the caller did not refresh. Workspace `inherit` clears the exact override but does not create a declaration for an unknown name; an all-unknown clear succeeds as a no-op. Singular activation methods remain installed-only.
 
 For workspace-internal Extension Skill switches, preflight `extension_state` and use the resource-grouped REST methods. These do not write Skill settings or activate a disabled parent Extension:
 
@@ -324,7 +324,7 @@ set of primitives that turn daemon events into transcript blocks:
 - Public constants include `DAEMON_PLAN_TOOL_CALL_ID`.
 - `conformance.ts` contains the cross-host consistency test suite.
 
-The first production consumer is `packages/webui/src/daemon/` through React's
+The first production consumer is `packages/web-shell/client/daemon/` through React's
 `DaemonSessionProvider`. See [`14-cli-tui-adapter.md`](./14-cli-tui-adapter.md)
 for the detailed architecture, glossary, selector table, and relationship to
 the legacy `DaemonTuiAdapter`.

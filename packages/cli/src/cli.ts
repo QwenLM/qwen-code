@@ -46,6 +46,7 @@ type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
+  ['board <command>', 'Share work with other agents through a board'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
@@ -53,6 +54,10 @@ export const TOP_LEVEL_COMMANDS = [
   [
     'review <command>',
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
+  ],
+  [
+    'sandbox [cmd...]',
+    'Inspect the sandbox backend, or run a command inside it',
   ],
   [
     'serve',

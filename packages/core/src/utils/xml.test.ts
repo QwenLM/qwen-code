@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { escapeSystemReminderTags, escapeXml } from './xml.js';
+import {
+  escapeSystemReminderTags,
+  escapeXml,
+  escapeXmlElementText,
+} from './xml.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('xml utils', () => {
@@ -21,6 +25,12 @@ describe('xml utils', () => {
         'a&amp;b&amp;c &lt;tag attr=&quot;x&quot;&gt;&apos;y&apos;&lt;/tag&gt;',
       );
     });
+  });
+
+  it('preserves quotes in element text while escaping structural characters', () => {
+    expect(escapeXmlElementText(`a&b <tag> "quoted" 'literal'`)).toBe(
+      `a&amp;b &lt;tag&gt; "quoted" 'literal'`,
+    );
   });
 
   describe('escapeSystemReminderTags', () => {

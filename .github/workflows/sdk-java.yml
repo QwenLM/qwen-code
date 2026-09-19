@@ -162,7 +162,8 @@ jobs:
     # measured 4.0-5.9 min across 11 green runs and 19.9/22.6 min on the two
     # that died, which is the whole difference between them. At that factor the
     # setup alone needs ~44 min, so 30 cancelled the job before a single
-    # assertion ran. Matches the 45 tier release.yml's quality_build uses.
+    # assertion ran. Matches the release.yml quality_build tier
+    # (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES, default 45).
     timeout-minutes: 45
     steps:
       - name: 'Restore workspace ownership'

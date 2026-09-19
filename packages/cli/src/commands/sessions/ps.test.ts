@@ -11,10 +11,56 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 const listLiveSessions = vi.fn();
 const listAgentViewSessionSnapshots = vi.fn();
 const isPidAlive = vi.fn();
+/** The start token the OS would report for a pid right now. */
+const currentProcStart = vi.fn((pid: number): string | null => `start-${pid}`);
+const pidNamespaceId = vi.fn((): number | null => null);
+const localBootId = vi.fn((): string | null => 'boot-local');
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
+  // Stated rather than imported: this suite mocks the whole package to
+  // stay a fast command test, and pulling the real barrel in for one pure
+  // function would undo that. What the function *means* — an absent kind
+  // is the interactive UI, an unknown one is shown as written — is pinned
+  // where it lives, in the registry's own suite; here it only has to be
+  // something to lay out in a column.
+  describeSessionKind: (kind: string | undefined) =>
+    kind === undefined || kind.length === 0 ? 'tui' : kind,
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
+  readProcStartToken: (...args: unknown[]) =>
+    currentProcStart(...(args as [number])),
+  readPidNamespaceId: () => pidNamespaceId(),
+  readLocalBootId: () => localBootId(),
+  // Mirrors the real degradation contract, matching `managed-rows.test.ts`:
+  // a fixture that records no token exercises the same fall-through to a
+  // bare liveness check that a pre-identity worker file gets in
+  // production, so `isPidAlive.mockReturnValue(false)` still means exactly
+  // "this pid is dead" here.
+  isSameProcess: (pid: number, procStart?: string | null) => {
+    if (!isPidAlive(pid)) return false;
+    if (procStart == null) return true;
+    const current = currentProcStart(pid);
+    if (current === null) return true;
+    return current === procStart;
+  },
+}));
+
+// `managed-rows.ts` takes the liveness helpers from the deep core module, not
+// the package root, so the barrel mock above no longer intercepts them; the
+// same fakes have to be registered under the specifier it really imports.
+vi.mock('@qwen-code/qwen-code-core/utils/process-liveness.js', () => ({
+  isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
+  readProcStartToken: (...args: unknown[]) =>
+    currentProcStart(...(args as [number])),
+  readPidNamespaceId: () => pidNamespaceId(),
+  readLocalBootId: () => localBootId(),
+  isSameProcess: (pid: number, procStart?: string | null) => {
+    if (!isPidAlive(pid)) return false;
+    if (procStart == null) return true;
+    const current = currentProcStart(pid);
+    if (current === null) return true;
+    return current === procStart;
+  },
 }));
 
 vi.mock('../../agent-view/supervisor-store.js', () => ({
@@ -30,8 +76,15 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: (line: string) => stderr.push(line),
 }));
 
-const { psCommand, formatAge, NAME_COL, PID_COL, AGE_COL, STATE_COL } =
-  await import('./ps.js');
+const {
+  psCommand,
+  formatAge,
+  NAME_COL,
+  KIND_COL,
+  PID_COL,
+  AGE_COL,
+  STATE_COL,
+} = await import('./ps.js');
 
 function record(
   over: Partial<SessionRegistryRecord> = {},
@@ -53,6 +106,9 @@ function record(
 function managedSnapshot(
   over: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  // Split the state override off: spreading `over` whole at the end
+  // would shadow the constructed state object with the partial override.
+  const { state: stateOver, ...rest } = over;
   const state = {
     schemaVersion: 1,
     sessionId: 'managed-1',
@@ -66,7 +122,7 @@ function managedSnapshot(
     createdAt: new Date(Date.now() - 5_000).toISOString(),
     updatedAt: new Date(Date.now()).toISOString(),
     worktree: { mode: 'none' },
-    ...((over['state'] as Record<string, unknown>) ?? {}),
+    ...((stateOver as Record<string, unknown>) ?? {}),
   };
   return {
     sessionId: state['sessionId'],
@@ -83,10 +139,13 @@ function managedSnapshot(
       schemaVersion: 1,
       workerPid: 777,
       protocolVersion: 1,
-      platform: 'linux',
+      // The reader's own platform: `liveWorkerPid` refuses pids from a
+      // worker file written on another OS, so a literal here would blank
+      // this fixture's pid on the macOS runner.
+      platform: process.platform,
       recentOutputBytes: 0,
     },
-    ...over,
+    ...rest,
   };
 }
 
@@ -103,6 +162,12 @@ beforeEach(() => {
   listAgentViewSessionSnapshots.mockResolvedValue([]);
   isPidAlive.mockReset();
   isPidAlive.mockReturnValue(true);
+  currentProcStart.mockReset();
+  currentProcStart.mockImplementation((pid: number) => `start-${pid}`);
+  pidNamespaceId.mockReset();
+  pidNamespaceId.mockImplementation(() => null);
+  localBootId.mockReset();
+  localBootId.mockImplementation(() => 'boot-local');
 });
 
 afterEach(() => {
@@ -136,7 +201,7 @@ describe('qwen sessions ps', () => {
     listLiveSessions.mockResolvedValue([record()]);
     await run({ json: false });
 
-    expect(stdout[0]).toMatch(/^NAME\s+PID\s+AGE\s+STATE\s+DIRECTORY$/);
+    expect(stdout[0]).toMatch(/^NAME\s+KIND\s+PID\s+AGE\s+STATE\s+DIRECTORY$/);
     expect(stdout[1]).toContain('app-ab');
     expect(stdout[1]).toContain('4242');
     expect(stdout[1]).toContain('/w/app');
@@ -149,7 +214,7 @@ describe('qwen sessions ps', () => {
     try {
       vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
       listLiveSessions.mockResolvedValue([
-        record({ startedAt: Date.now() - 5_000 }),
+        record({ startedAt: Date.now() - 5_000, kind: 'serve' }),
       ]);
       await run({ json: false });
     } finally {
@@ -158,6 +223,7 @@ describe('qwen sessions ps', () => {
 
     expect(stdout[0]).toBe(
       'NAME'.padEnd(NAME_COL) +
+        'KIND'.padEnd(KIND_COL) +
         'PID'.padEnd(PID_COL) +
         'AGE'.padEnd(AGE_COL) +
         'STATE'.padEnd(STATE_COL) +
@@ -165,15 +231,44 @@ describe('qwen sessions ps', () => {
     );
     expect(stdout[1]).toBe(
       'app-ab'.padEnd(NAME_COL) +
+        'serve'.padEnd(KIND_COL) +
         '4242'.padEnd(PID_COL) +
         '5s'.padEnd(AGE_COL) +
         'interactive'.padEnd(STATE_COL) +
         '/w/app',
     );
-    expect([NAME_COL, PID_COL, AGE_COL, STATE_COL]).toEqual([22, 9, 10, 13]);
+    expect([NAME_COL, KIND_COL, PID_COL, AGE_COL, STATE_COL]).toEqual([
+      22, 10, 9, 10, 13,
+    ]);
   });
 
-  it('says so plainly when nothing else is running', async () => {
+  it('shows a record with no kind as the interactive UI', async () => {
+    listLiveSessions.mockResolvedValue([record()]);
+    await run({ json: false });
+    expect(stdout[1].slice(NAME_COL, NAME_COL + KIND_COL)).toBe(
+      'tui'.padEnd(KIND_COL),
+    );
+  });
+
+  it('truncates an over-long kind instead of shifting the columns after it', async () => {
+    // A newer build can write a kind up to sixteen characters, which is
+    // wider than this column: without the truncation the PID, AGE, STATE
+    // and DIRECTORY cells of that one row would all slide right.
+    listLiveSessions.mockResolvedValue([record({ kind: 'abcdefghijklmnop' })]);
+    await run({ json: false });
+    expect(stringWidth(stdout[1].slice(0, NAME_COL + KIND_COL))).toBe(
+      NAME_COL + KIND_COL,
+    );
+    expect(stdout[1]).toContain('abcdefg…');
+    expect(stdout[1].slice(NAME_COL + KIND_COL)).toBe(
+      '4242'.padEnd(PID_COL) +
+        formatAge(90_000).padEnd(AGE_COL) +
+        'interactive'.padEnd(STATE_COL) +
+        '/w/app',
+    );
+  });
+
+  it('says so plainly when nothing is registered', async () => {
     listLiveSessions.mockResolvedValue([]);
     await run({ json: false });
     expect(stdout).toEqual(['No other Qwen Code sessions are running.']);
@@ -203,6 +298,15 @@ describe('qwen sessions ps', () => {
 
     expect(stdout).toEqual([expected]);
     expect(stdout[0]).not.toContain('\n');
+  });
+
+  it('carries the kind into the JSON output, unfiltered', async () => {
+    // This is the surface an aggregator reads to tell a user's own
+    // terminals from sessions something else is driving, so the field has
+    // to survive the projection the token strip does.
+    listLiveSessions.mockResolvedValue([record({ kind: 'external' })]);
+    await run({ json: true });
+    expect(JSON.parse(stdout[0]).kind).toBe('external');
   });
 
   it('strips the inbox auth token from the JSON output', async () => {
@@ -278,8 +382,8 @@ describe('qwen sessions ps', () => {
   });
 
   it('lists a managed Agent View session the registry cannot see', async () => {
-    // The whole point of the merge: a supervisor-owned session writes no
-    // registry record, so before this it was invisible to every listing.
+    // A managed session can have no live registry record; before this,
+    // such a session was invisible to every listing.
     listLiveSessions.mockResolvedValue([]);
     listAgentViewSessionSnapshots.mockResolvedValue([managedSnapshot()]);
     await run({ json: false });
@@ -288,6 +392,38 @@ describe('qwen sessions ps', () => {
     expect(stdout[1]).toContain('777');
     expect(stdout[1]).toContain('needs input');
     expect(stdout[1]).toContain('/w/svc');
+    // No registry record backs this row, so there is no self-report to
+    // print: `tui` would claim a terminal nobody is sitting at.
+    expect(stdout[1].slice(NAME_COL, NAME_COL + KIND_COL)).toBe(
+      'managed'.padEnd(KIND_COL),
+    );
+  });
+
+  it('labels every managed task state with its documented STATE text', async () => {
+    // The docs promise the STATE column reads `working`, `ready`,
+    // `stopped` or `failed` for a managed session. Before this only
+    // `needs input` had a rendering test, so any swap among the other
+    // four labels shipped green — "ready" beside a session that failed.
+    const cases: Array<[string, string]> = [
+      ['working', 'working'],
+      ['idle', 'ready'],
+      ['stopped', 'stopped'],
+      ['failed', 'failed'],
+    ];
+    for (const [sessionState, label] of cases) {
+      stdout.length = 0;
+      listLiveSessions.mockResolvedValue([]);
+      listAgentViewSessionSnapshots.mockResolvedValue([
+        managedSnapshot({ state: { sessionState } }),
+      ]);
+      await run({ json: false });
+
+      const stateCell = stdout[1].slice(
+        NAME_COL + KIND_COL + PID_COL + AGE_COL,
+        NAME_COL + KIND_COL + PID_COL + AGE_COL + STATE_COL,
+      );
+      expect(stateCell).toBe(label.padEnd(STATE_COL));
+    }
   });
 
   it('puts managed rows above interactive ones', async () => {
@@ -322,13 +458,22 @@ describe('qwen sessions ps', () => {
   it('prints a dash, not a zero, for a managed session with no process', async () => {
     listLiveSessions.mockResolvedValue([]);
     listAgentViewSessionSnapshots.mockResolvedValue([
-      managedSnapshot({ worker: undefined }),
+      managedSnapshot({
+        worker: undefined,
+        state: { createdAt: 'not-a-date' },
+      }),
     ]);
     await run({ json: false });
 
-    expect(stdout[1].slice(NAME_COL, NAME_COL + PID_COL)).toBe(
-      '-'.padEnd(PID_COL),
-    );
+    expect(
+      stdout[1].slice(NAME_COL + KIND_COL, NAME_COL + KIND_COL + PID_COL),
+    ).toBe('-'.padEnd(PID_COL));
+    expect(
+      stdout[1].slice(
+        NAME_COL + KIND_COL + PID_COL,
+        NAME_COL + KIND_COL + PID_COL + AGE_COL,
+      ),
+    ).toBe('-'.padEnd(AGE_COL));
   });
 
   it('does not render a managed pid that no process owns any more', async () => {
@@ -340,9 +485,9 @@ describe('qwen sessions ps', () => {
     isPidAlive.mockReturnValue(false);
     await run({ json: false });
 
-    expect(stdout[1].slice(NAME_COL, NAME_COL + PID_COL)).toBe(
-      '-'.padEnd(PID_COL),
-    );
+    expect(
+      stdout[1].slice(NAME_COL + KIND_COL, NAME_COL + KIND_COL + PID_COL),
+    ).toBe('-'.padEnd(PID_COL));
     expect(stdout[1]).not.toContain('777');
   });
 
@@ -359,6 +504,20 @@ describe('qwen sessions ps', () => {
     expect(stdout[1]).toContain('app-ab');
     expect(stderr.join('\n')).toContain('Managed sessions could not be listed');
     expect(stderr.join('\n')).toContain('EACCES');
+  });
+
+  it('does not claim the listing is empty when managed sessions could not be read', async () => {
+    listLiveSessions.mockResolvedValue([]);
+    listAgentViewSessionSnapshots.mockRejectedValue(
+      new Error('EACCES: permission denied'),
+    );
+
+    await run({ json: false });
+
+    expect(stdout).toEqual([
+      'No interactive Qwen Code sessions are running; managed sessions could not be listed.',
+    ]);
+    expect(stdout).not.toContain('No other Qwen Code sessions are running.');
   });
 
   it('keeps --json stdout parseable when the store fails', async () => {
@@ -418,6 +577,8 @@ describe('qwen sessions ps', () => {
     // Padding is measured in terminal cells, not code units: a 2-cell CJK
     // character must not push the PID column one cell right per character.
     const row = stdout[1];
-    expect(stringWidth(row.slice(0, row.indexOf('4242')))).toBe(22);
+    expect(stringWidth(row.slice(0, row.indexOf('4242')))).toBe(
+      NAME_COL + KIND_COL,
+    );
   });
 });

@@ -1,13 +1,17 @@
 import {
   createContext,
+  createElement,
   memo,
   useCallback,
   useContext,
   useEffect,
+  useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
+  type ComponentProps,
 } from 'react';
 import { useTheme } from '../../themeContext';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
@@ -17,7 +21,7 @@ import {
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
-import type { Components, Options } from 'react-markdown';
+import type { Components, Options, ExtraProps } from 'react-markdown';
 import { isMarkdownFenceClosed } from '@datafe-open/markdown-chart';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -38,6 +42,8 @@ import {
 } from '../../customization';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
+import { FootnoteSection, FootnoteSup } from './FootnoteCard';
+import { rehypeFootnoteCards } from './rehype-footnote-cards';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
   WebShellMarkdownChartProvider,
@@ -161,6 +167,8 @@ export function resolveFenceLanguage(
 
 const SAFE_HREF_SCHEMES = /^(https?:|mailto:)/i;
 const SAFE_IMAGE_DATA_URI = /^data:image\/(png|jpeg|gif|webp|bmp);base64,/i;
+const SAFE_DOCUMENT_IMAGE_DATA_URI =
+  /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]*={0,2}$/i;
 
 export function isSafeHref(url: string | undefined): boolean {
   if (!url) return false;
@@ -171,10 +179,14 @@ export function isSafeHref(url: string | undefined): boolean {
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
-export function isSafeImageSrc(url: string | undefined): boolean {
+export function isSafeImageSrc(
+  url: string | undefined,
+  documentMode = false,
+): boolean {
   if (!url) return false;
   const trimmed = url.trim();
   if (!trimmed) return false;
+  if (documentMode) return SAFE_DOCUMENT_IMAGE_DATA_URI.test(trimmed);
   if (trimmed.startsWith('#')) return true;
   if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return true;
   if (SAFE_IMAGE_DATA_URI.test(trimmed)) return true;
@@ -184,24 +196,51 @@ export function isSafeImageSrc(url: string | undefined): boolean {
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
-let lastMermaidTheme: string | undefined;
+let lastMermaidConfigKey: string | undefined;
+let mermaidRenderQueue: Promise<void> = Promise.resolve();
 let mermaidRenderId = 0;
+const MAX_MERMAID_TEXT_CHARS = 50_000;
+const MAX_MERMAID_EDGES = 500;
+const MERMAID_RENDER_TIMEOUT_MS = 10_000;
+// Must match `.mermaidZoomWrapper`'s padding in Markdown.module.css: the canvas
+// height is set from the diagram's own height plus this both sides.
+const MERMAID_CANVAS_PADDING_PX = 16;
 
 function MermaidBlock({ code }: { code: string }) {
   const { t } = useI18n();
   const appTheme = useTheme();
+  // Document mode no longer reaches this component: since #11091 CodeBlock
+  // renders a mermaid fence as a plain <pre> there, so the export bundle can
+  // drop mermaid entirely. The render limits below were never about the export
+  // format though — they are about rendering a transcript the viewer did not
+  // author and cannot interrupt, which is equally true of readonly replay.
+  const untrustedMode = useTranscriptRenderMode() !== 'interactive';
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
   const [copied, flashCopied] = useCopiedFlash();
   const [zoom, setZoom] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
+  // The canvas is the viewport: panning moves its scroll position, so a drag
+  // and the scrollbar are one mechanism, and the reachable range is the one the
+  // browser already reports for the scaled diagram.
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [isPanned, setIsPanned] = useState(false);
+  // Whether the diagram reaches past the canvas, i.e. whether dragging it has
+  // anywhere to go.
+  const [canPan, setCanPan] = useState(false);
+  // The box the zoom scales, and the height the canvas is held at so that
+  // zooming never reflows the transcript. Both are read off the rendered svg.
+  const [diagramBox, setDiagramBox] = useState<{
+    stageWidth: number;
+    canvasHeight: number;
+  } | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{
     startX: number;
     startY: number;
-    origX: number;
-    origY: number;
+    startLeft: number;
+    startTop: number;
   } | null>(null);
   const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
 
@@ -219,40 +258,103 @@ function MermaidBlock({ code }: { code: string }) {
     dragRef.current = null;
     setIsDragging(false);
     setZoom(1);
-    setOffset({ x: 0, y: 0 });
+    const viewport = viewportRef.current;
+    if (viewport) {
+      viewport.scrollLeft = 0;
+      viewport.scrollTop = 0;
+    }
+    setIsPanned(false);
   }, []);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      setIsDragging(true);
-      dragRef.current = {
-        startX: e.clientX,
-        startY: e.clientY,
-        origX: offset.x,
-        origY: offset.y,
-      };
-    },
-    [offset],
-  );
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    e.preventDefault();
+    setIsDragging(true);
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: viewport.scrollLeft,
+      startTop: viewport.scrollTop,
+    };
+  }, []);
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollLeft, scrollTop } = e.currentTarget;
+    setIsPanned(scrollLeft !== 0 || scrollTop !== 0);
+  }, []);
+
+  const syncViewport = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    setCanPan(
+      viewport.scrollWidth > viewport.clientWidth ||
+        viewport.scrollHeight > viewport.clientHeight,
+    );
+    setIsPanned(viewport.scrollLeft !== 0 || viewport.scrollTop !== 0);
+  }, []);
+
+  // Mermaid sizes every diagram it renders in a `viewBox`, and that is the size
+  // it designed: the box the zoom scales, and the height the canvas keeps.
+  // Outside `flowchart` — where this component asks for `useMaxWidth: false` —
+  // mermaid also marks the svg `width="100%"`, so those diagrams shrink to the
+  // canvas instead of sitting at their design size. Measuring them here is what
+  // keeps both cases working: a `fit-content` box cannot resolve that percentage
+  // and falls back to the 300x150 default object size.
+  const measureDiagram = useCallback(() => {
+    const viewport = viewportRef.current;
+    const svgEl = stageRef.current?.querySelector('svg');
+    if (!viewport || !svgEl) return;
+    const [, , boxWidth, boxHeight] = (svgEl.getAttribute('viewBox') ?? '')
+      .split(/[\s,]+/)
+      .map(Number);
+    const declaredWidth = (svgEl.getAttribute('width') ?? '').trim();
+    const declaredHeight = Number.parseFloat(
+      svgEl.getAttribute('height') ?? '',
+    );
+    const hasViewBox = boxWidth > 0 && boxHeight > 0;
+    const width = hasViewBox ? boxWidth : Number.parseFloat(declaredWidth);
+    const height = hasViewBox ? boxHeight : declaredHeight;
+    if (!(width > 0) || !(height > 0)) {
+      setDiagramBox(null);
+      return;
+    }
+    const available = viewport.clientWidth - MERMAID_CANVAS_PADDING_PX * 2;
+    const stageWidth =
+      declaredWidth.endsWith('%') && available > 0
+        ? Math.min(width, available)
+        : width;
+    // A classic (space-taking) scrollbar would otherwise be taken out of the
+    // height the canvas is held at, and hide the bottom of a diagram that
+    // exactly fills it. Overlay scrollbars measure zero.
+    const scrollbar = Math.max(
+      0,
+      viewport.offsetHeight - viewport.clientHeight,
+    );
+    setDiagramBox({
+      stageWidth,
+      canvasHeight:
+        (stageWidth * height) / width +
+        MERMAID_CANVAS_PADDING_PX * 2 +
+        scrollbar,
+    });
+  }, []);
 
   useEffect(() => {
     if (!isDragging) return;
 
     const onMouseMove = (e: MouseEvent) => {
-      if (!dragRef.current) return;
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      // Clamp Y to prevent dragging into overflow-y: hidden clipped area.
-      // X is unclamped — overflow-x: auto provides native horizontal scroll.
-      const PAN_LIMIT = 1500;
-      setOffset({
-        x: dragRef.current.origX + dx,
-        y: Math.max(
-          -PAN_LIMIT,
-          Math.min(PAN_LIMIT, dragRef.current.origY + dy),
-        ),
-      });
+      const viewport = viewportRef.current;
+      const drag = dragRef.current;
+      if (!viewport || !drag) return;
+      // Grab semantics: the diagram follows the pointer, so the scroll position
+      // moves against it. The browser clamps at both ends, which is what keeps
+      // the leading edge of an over-wide diagram reachable.
+      viewport.scrollLeft = drag.startLeft - (e.clientX - drag.startX);
+      viewport.scrollTop = drag.startTop - (e.clientY - drag.startY);
+      // Scroll events arrive asynchronously, so report the position the browser
+      // just settled on (assignments are clamped) instead of waiting for one.
+      setIsPanned(viewport.scrollLeft !== 0 || viewport.scrollTop !== 0);
     };
 
     const onMouseUp = () => {
@@ -271,53 +373,100 @@ function MermaidBlock({ code }: { code: string }) {
   }, [isDragging]);
 
   useEffect(() => {
-    setZoom(1);
-    setOffset({ x: 0, y: 0 });
-  }, [code]);
+    resetZoomAndPan();
+  }, [code, resetZoomAndPan]);
+
+  // Both the box and the drag affordance follow the rendered diagram, so they are
+  // re-read when it arrives, when the zoom changes (a diagram can reach past the
+  // canvas at one zoom and not another), and when the view is remounted.
+  useLayoutEffect(() => {
+    measureDiagram();
+    syncViewport();
+  }, [svg, zoom, viewMode, measureDiagram, syncViewport]);
+
+  // A narrower column changes both a `width="100%"` diagram's size and whether
+  // there is anything to pan, without either of those React values changing.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(() => {
+      measureDiagram();
+      syncViewport();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [svg, viewMode, measureDiagram, syncViewport]);
 
   useEffect(() => {
     let cancelled = false;
     setSvg(null);
     setError(null);
     const timer = setTimeout(() => {
-      import('mermaid').then(async (mod) => {
-        if (cancelled) return;
-        const mermaid = mod.default;
-        if (lastMermaidTheme !== mermaidTheme) {
-          mermaid.initialize({
-            startOnLoad: false,
-            theme: mermaidTheme,
-            securityLevel: 'strict',
-            suppressErrorRendering: true,
-            flowchart: {
-              wrappingWidth: 300,
-              useMaxWidth: false,
-            },
+      import('mermaid')
+        .then(async (mod) => {
+          if (cancelled) return;
+          const mermaid = mod.default;
+          const configKey = `${mermaidTheme}:${untrustedMode ? 'hardened' : 'runtime'}`;
+          const render = mermaidRenderQueue.then(async () => {
+            if (cancelled) throw new Error('Mermaid render skipped');
+            if (lastMermaidConfigKey !== configKey) {
+              mermaid.initialize({
+                startOnLoad: false,
+                theme: mermaidTheme,
+                securityLevel: 'strict',
+                suppressErrorRendering: true,
+                ...(untrustedMode
+                  ? {
+                      maxTextSize: MAX_MERMAID_TEXT_CHARS,
+                      maxEdges: MAX_MERMAID_EDGES,
+                    }
+                  : {}),
+                flowchart: {
+                  wrappingWidth: 300,
+                  useMaxWidth: false,
+                },
+              });
+              lastMermaidConfigKey = configKey;
+            }
+            const id = `mermaid-${++mermaidRenderId}`;
+            if (!untrustedMode) return mermaid.render(id, code.trim());
+            let timeoutId: ReturnType<typeof setTimeout> | undefined;
+            try {
+              return await Promise.race([
+                mermaid.render(id, code.trim()),
+                new Promise<never>((_resolve, reject) => {
+                  timeoutId = setTimeout(
+                    () => reject(new Error('Mermaid render timed out')),
+                    MERMAID_RENDER_TIMEOUT_MS,
+                  );
+                }),
+              ]);
+            } finally {
+              if (timeoutId !== undefined) clearTimeout(timeoutId);
+            }
           });
-          lastMermaidTheme = mermaidTheme;
-        }
-        try {
-          const id = `mermaid-${++mermaidRenderId}`;
-          const { svg } = await mermaid.render(id, code.trim());
+          mermaidRenderQueue = render.then(
+            () => undefined,
+            () => undefined,
+          );
+          const { svg } = await render;
           // No additional sanitization needed: securityLevel:'strict' uses
           // DOMPurify internally to sanitize SVG output.
-          if (!cancelled) {
-            setSvg(svg);
-          }
-        } catch (error: unknown) {
+          if (!cancelled) setSvg(svg);
+        })
+        .catch((error: unknown) => {
           if (!cancelled) {
             setError(
               error instanceof Error ? error.message : 'Mermaid render failed',
             );
           }
-        }
-      });
+        });
     }, 150);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code, mermaidTheme]);
+  }, [code, untrustedMode, mermaidTheme]);
 
   const handleCopy = () => {
     void writeClipboardText(code)
@@ -361,7 +510,7 @@ function MermaidBlock({ code }: { code: string }) {
                 className={styles.codeBlockCopy}
                 onClick={resetZoomAndPan}
                 title={t('mermaid.zoomReset')}
-                disabled={zoom === 1 && offset.x === 0 && offset.y === 0}
+                disabled={zoom === 1 && !isPanned}
               >
                 {t('mermaid.zoomReset')}
               </button>
@@ -402,15 +551,25 @@ function MermaidBlock({ code }: { code: string }) {
         </div>
       ) : (
         <div
-          className={`${styles.mermaidZoomWrapper} ${isDragging ? styles.mermaidDragging : ''}`}
+          className={`${styles.mermaidZoomWrapper} ${canPan ? styles.mermaidPannable : ''} ${
+            canPan && isDragging ? styles.mermaidDragging : ''
+          }`}
+          ref={viewportRef}
+          style={diagramBox ? { height: diagramBox.canvasHeight } : undefined}
           onMouseDown={handleMouseDown}
           onDoubleClick={resetZoomAndPan}
+          onScroll={handleScroll}
         >
           <div
-            className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
+            className={`${styles.mermaidBlock} ${styles.mermaidStage}`}
+            ref={stageRef}
             style={{
-              transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
-              transformOrigin: 'top center',
+              ...(diagramBox ? { width: diagramBox.stageWidth } : {}),
+              // `zoom` rather than a transform: it resizes the layout, so the
+              // scroll range follows the scaled diagram. Scaling by transform
+              // leaves Chrome computing that range from the full-size box, which
+              // lets a zoomed-out diagram be scrolled off its own canvas.
+              ...(zoom === 1 ? {} : { zoom }),
             }}
             dangerouslySetInnerHTML={{ __html: svg }}
           />
@@ -431,6 +590,7 @@ function CodeBlock({
 }) {
   const { t } = useI18n();
   const appTheme = useTheme();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [html, setHtml] = useState<string | null>(null);
   const [copied, flashCopied] = useCopiedFlash();
 
@@ -446,6 +606,7 @@ function CodeBlock({
     // repeatedly tokenizes its entire contents and can dominate rendering for
     // long responses; the settled render below highlights the final text once.
     if (
+      documentMode ||
       isStreaming ||
       lang === 'mermaid' ||
       resolvedLang === 'text' ||
@@ -496,7 +657,7 @@ function CodeBlock({
     return () => {
       cancelled = true;
     };
-  }, [code, lang, resolvedLang, shikiTheme, isStreaming]);
+  }, [code, documentMode, lang, resolvedLang, shikiTheme, isStreaming]);
 
   const handleCopy = () => {
     void writeClipboardText(code)
@@ -506,7 +667,11 @@ function CodeBlock({
       .catch(warnClipboardWriteFailure);
   };
 
-  if (lang === 'mermaid' && !isStreaming) {
+  // In document mode a mermaid fence falls through to the plain <pre> below,
+  // holding its own source: the same degradation this component already applies
+  // to syntax highlighting there, and what lets the export bundle drop mermaid
+  // and its graph dependencies (#11091).
+  if (lang === 'mermaid' && !isStreaming && !documentMode) {
     return <MermaidBlock code={code} />;
   }
 
@@ -518,7 +683,7 @@ function CodeBlock({
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {!isStreaming && html !== null ? (
+      {!documentMode && !isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}
@@ -703,21 +868,62 @@ const QWEN_SESSION_SCHEME = /^qwen-session:\/\//i;
  * to a `qwen-session:` URL — and an unknown scheme is inert in a browser anyway.
  * Every other href keeps the default sanitizer.
  */
-export function markdownUrlTransform(url: string): string {
+export function markdownUrlTransform(
+  url: string,
+  documentMode = false,
+): string {
+  if (documentMode && SAFE_DOCUMENT_IMAGE_DATA_URI.test(url.trim())) {
+    return url;
+  }
   return QWEN_SESSION_SCHEME.test(url.trim()) ? url : defaultUrlTransform(url);
 }
 
 function MarkdownLink({
   href,
   children,
-}: {
-  href?: string;
-  children?: ReactNode;
-}) {
+  node,
+  id,
+  'aria-label': ariaLabel,
+  'aria-describedby': ariaDescribedBy,
+}: ComponentProps<'a'> & ExtraProps) {
   const renderMode = useTranscriptRenderMode();
   const openExternalLink = useExternalLinkOpener();
+  const footnote =
+    node?.properties.dataFootnoteRef !== undefined ||
+    node?.properties.dataFootnoteBackref !== undefined;
+  if (footnote && href?.startsWith('#')) {
+    return (
+      <a
+        id={id}
+        href={href}
+        className={styles.link}
+        aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
+        data-footnote-ref={
+          node?.properties.dataFootnoteRef !== undefined ? '' : undefined
+        }
+        data-footnote-backref={
+          node?.properties.dataFootnoteBackref !== undefined ? '' : undefined
+        }
+        onClick={(event) => {
+          const root = event.currentTarget.getRootNode() as
+            | Document
+            | ShadowRoot;
+          const target = root.getElementById(href.slice(1));
+          if (!target) return;
+          event.preventDefault();
+          target.scrollIntoView({ block: 'nearest' });
+          if (!target.hasAttribute('tabindex') && target.tagName !== 'BUTTON')
+            target.tabIndex = -1;
+          target.focus({ preventScroll: true });
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   if (href && QWEN_SESSION_SCHEME.test(href.trim())) {
-    if (renderMode === 'readonly') {
+    if (renderMode !== 'interactive') {
       return <span className={styles.link}>{children}</span>;
     }
     const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
@@ -753,7 +959,10 @@ function MarkdownLink({
 }
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
-  const safeSrc = isSafeImageSrc(src) ? src : undefined;
+  const renderMode = useTranscriptRenderMode();
+  const safeSrc = isSafeImageSrc(src, renderMode === 'document')
+    ? src
+    : undefined;
   return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
 }
 
@@ -838,6 +1047,8 @@ function createComponents(
     pre: MarkdownPre,
     a: MarkdownLink,
     img: MarkdownImage,
+    sup: FootnoteSup,
+    section: FootnoteSection,
     table({ children }: { children?: ReactNode }) {
       if (tableMode === 'advanced') {
         const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
@@ -897,6 +1108,8 @@ export const Markdown = memo(function Markdown({
 }: MarkdownProps) {
   const { markdown, markdownTableMode } = useWebShellCustomization();
   const theme = useTheme();
+  const documentMode = useTranscriptRenderMode() === 'document';
+  const footnotePrefix = `footnote-${useId()}-`;
   const sourceMarkdown = source ? markdown : undefined;
 
   const throttledContent = useThrottledValue(content ?? '', isStreaming);
@@ -924,16 +1137,58 @@ export const Markdown = memo(function Markdown({
   }, [effectiveTableMode, renderedContent]);
 
   const sourceComponents = sourceMarkdown?.components;
+  const inlineFootnoteIcon = sourceMarkdown?.getInlineFootnoteIcon;
+  const mountFootnotePreview = sourceMarkdown?.mountFootnotePreview;
   const renderedComponents = useMemo(() => {
-    if (!sourceComponents) return components;
-    return {
+    if (!sourceComponents && !inlineFootnoteIcon && !mountFootnotePreview)
+      return components;
+    const rendered = {
       ...components,
       ...sourceComponents,
       ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
-  }, [components, effectiveTableMode, sourceComponents]);
+    const SourceLink = sourceComponents?.a;
+    if (sourceComponents) {
+      rendered.a = (props) => {
+        const footnote =
+          props.node?.properties.dataFootnoteRef !== undefined ||
+          props.node?.properties.dataFootnoteBackref !== undefined;
+        if (footnote || !SourceLink) return <MarkdownLink {...props} />;
+        if (typeof SourceLink !== 'string')
+          return createElement(SourceLink, props);
+        const { node: _node, ...elementProps } = props;
+        return createElement(SourceLink, elementProps);
+      };
+    }
+    if (!sourceComponents?.sup) {
+      rendered.sup = (props) => (
+        <FootnoteSup
+          {...props}
+          linkComponent={SourceLink}
+          iconResolver={inlineFootnoteIcon}
+          mountPreview={mountFootnotePreview}
+        />
+      );
+      rendered.section = (props) => (
+        <FootnoteSection
+          {...props}
+          sectionComponent={sourceComponents?.section}
+        />
+      );
+    }
+    return rendered;
+  }, [
+    components,
+    effectiveTableMode,
+    sourceComponents,
+    inlineFootnoteIcon,
+    mountFootnotePreview,
+  ]);
   const chart =
-    source === 'assistant' && !sourceComponents?.code && !sourceComponents?.pre
+    !documentMode &&
+    source === 'assistant' &&
+    !sourceComponents?.code &&
+    !sourceComponents?.pre
       ? (sourceMarkdown?.chart ??
         (sourceMarkdown?.renderCodeBlock
           ? undefined
@@ -973,10 +1228,30 @@ export const Markdown = memo(function Markdown({
   }, [sourceMarkdown?.remarkPlugins]);
 
   const rehypePlugins = useMemo(() => {
-    return sourceMarkdown?.rehypePlugins
-      ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
-      : [rehypeKatex];
-  }, [sourceMarkdown?.rehypePlugins]);
+    return [
+      rehypeKatex,
+      ...(sourceMarkdown?.rehypePlugins ?? []),
+      [
+        rehypeFootnoteCards,
+        {
+          prefix: footnotePrefix,
+          group: !documentMode && !sourceComponents?.sup,
+          safeHref: isSafeHref,
+          safeImage: isSafeImageSrc,
+          transformUrl: markdownUrlTransform,
+        },
+      ],
+    ] satisfies NonNullable<Options['rehypePlugins']>;
+  }, [
+    sourceMarkdown?.rehypePlugins,
+    footnotePrefix,
+    documentMode,
+    sourceComponents?.sup,
+  ]);
+  const urlTransform = useMemo(
+    () => (url: string) => markdownUrlTransform(url, documentMode),
+    [documentMode],
+  );
 
   if (!content) return null;
 
@@ -998,7 +1273,7 @@ export const Markdown = memo(function Markdown({
       components={componentsWithCharts}
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
-      urlTransform={markdownUrlTransform}
+      urlTransform={urlTransform}
     />
   );
   const chartAwareMarkdown = chart ? (

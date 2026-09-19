@@ -33,6 +33,11 @@ import type {
   SkillLevel,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItemWithoutId } from '../types.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import {
+  formatStopHookLoopText,
+  formatUserPromptSubmitBlocked,
+} from './event-adapter.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { calculateCost } from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
@@ -1082,5 +1087,124 @@ export function projectSpecialItemText(
     }
     default:
       return null;
+  }
+}
+
+/** Decides every history kind a command can record: an event, or null. */
+export function projectItemToStreamEvent(
+  item: HistoryItemWithoutId,
+  ctx: ItemProjectionContext,
+): OpenTuiStreamEvent | null {
+  const viaSpecialText = (): OpenTuiStreamEvent | null => {
+    const text = projectSpecialItemText(item, ctx);
+    return text === null ? null : { type: 'info', text };
+  };
+  switch (item.type) {
+    case 'user':
+      return {
+        type: 'user',
+        text: item.text,
+        sentToModel: item.sentToModel ?? false,
+        ...(item.promptId ? { promptId: item.promptId } : {}),
+      };
+    case 'info':
+      return viaSpecialText();
+    case 'warning':
+      return { type: 'warning', text: item.text };
+    // No success row in the live model yet; ink's green SuccessMessage
+    // renders as the info row. Reachable here only through /arena.
+    case 'success':
+      return { type: 'info', text: item.text };
+    case 'error':
+      return {
+        type: 'error',
+        text: item.text,
+        ...(item.hint ? { hint: item.hint } : {}),
+      };
+    case 'goal_state':
+      return { type: 'goal', snapshot: item.snapshot, cause: item.cause };
+    case 'goal_status':
+      return {
+        type: 'goal-legacy',
+        kind: item.kind,
+        condition: item.condition,
+        iterations: item.iterations,
+        durationMs: item.durationMs,
+        lastReason: item.lastReason,
+      };
+    case 'stop_hook_system_message':
+      return { type: 'stop-hook-message', message: item.message };
+    case 'stop_hook_loop':
+      return {
+        type: 'info',
+        text: formatStopHookLoopText(item.stopHookCount, item.reasons),
+      };
+    case 'user_prompt_submit_blocked':
+      return {
+        type: 'warning',
+        text: formatUserPromptSubmitBlocked(item.reason, item.originalPrompt),
+      };
+    case 'away_recap':
+      return { type: 'away-recap', text: item.text };
+    case 'user_shell':
+      return { type: 'user-shell', text: item.text };
+    case 'advisor':
+      return { type: 'advisor', text: item.text, model: item.model };
+    case 'arena_agent_complete':
+      return { type: 'arena-agent', agent: item.agent };
+    case 'arena_session_complete':
+      return {
+        type: 'arena-session',
+        sessionStatus: item.sessionStatus,
+        task: item.task,
+        totalDurationMs: item.totalDurationMs,
+        agents: item.agents,
+      };
+    case 'about':
+    case 'tools_list':
+    case 'model_stats':
+    case 'tool_stats':
+    case 'skill_stats':
+    case 'summary':
+    case 'insight_progress':
+    case 'context_usage':
+    case 'doctor':
+    case 'mcp_status':
+    case 'extensions_list':
+    case 'skills_list':
+    case 'memory_saved':
+    case 'quit':
+    case 'compression':
+    case 'stats':
+    case 'btw':
+      return viaSpecialText();
+    // Explicit no-ops, each a decision rather than an accident:
+    //  - `tool_group`: tool cards come from the live stream's own events; a
+    //    dispatcher-written group would duplicate them.
+    //  - `retry_countdown`, `vision_notice`, `gemini*`: the live stream folds
+    //    these from events already; a history copy would render the row twice.
+    //  - `help`: `/help` resolves to a dialog and the overlay renders from
+    //    help-content.ts; no command returns a HELP message, so nothing writes
+    //    this item in either renderer.
+    //  - the rest: ink renders these through dedicated components and no
+    //    OpenTUI writer produces them (tool_use_summary is written by ink's
+    //    use-llm-stream only; diff_stats comes from the file-history rewind
+    //    flow, which has no OpenTUI seam; notification has no writer yet).
+    case 'tool_group':
+    case 'retry_countdown':
+    case 'vision_notice':
+    case 'gemini':
+    case 'gemini_content':
+    case 'gemini_thought':
+    case 'gemini_thought_content':
+    case 'help':
+    case 'notification':
+    case 'tool_use_summary':
+    case 'diff_stats':
+      return null;
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
   }
 }

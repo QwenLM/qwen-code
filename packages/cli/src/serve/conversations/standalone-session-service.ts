@@ -21,8 +21,12 @@ import type {
   BridgeStandaloneRestoreSessionRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ServeWorkspaceProvidersStatus } from '@qwen-code/acp-bridge/status';
-import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
+  isScheduledTaskRunSource,
+  STANDALONE_SESSION_SOURCE_TYPE,
+} from '@qwen-code/acp-bridge/sessionSource';
+import {
+  createDebugLogger,
   readSessionPrs,
   SessionIdCaseConflictError,
   SessionStorageEntryError,
@@ -35,8 +39,13 @@ import {
   type SessionArchiveState,
   type SessionListItem,
   type SessionService,
+  type SessionWriterErrorKind,
   type SessionWriterLease,
 } from '@qwen-code/qwen-code-core';
+import {
+  AcpChildCapacityExceededError,
+  type AcpChildCapacity,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   parseCallerSuppliedSessionId,
   normalizeSessionIdForLookup,
@@ -72,6 +81,8 @@ import {
   type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
 
+const debugLogger = createDebugLogger('STANDALONE_SESSION_SERVICE');
+
 export type StandaloneSessionServiceErrorCode =
   | 'invalid_request'
   | 'standalone_session_not_found'
@@ -79,6 +90,7 @@ export type StandaloneSessionServiceErrorCode =
   | 'standalone_session_operation_failed'
   | 'session_archived'
   | 'session_busy'
+  | 'model_selection_failed'
   | 'standalone_creation_rolled_back'
   | 'standalone_creation_outcome_unknown'
   | 'working_directory_missing'
@@ -96,6 +108,7 @@ export class StandaloneSessionServiceError extends Error {
     readonly sessionId: string | undefined,
     message: string,
     readonly retryable = false,
+    readonly capacity?: AcpChildCapacity,
   ) {
     super(message);
   }
@@ -111,6 +124,8 @@ export interface CreateStandaloneChildSessionRequest
   extends CreateStandaloneSessionRequest {
   parentSessionId: string;
   promptId: string;
+  sourceType?: string;
+  sourceId?: string;
 }
 
 export interface CreatedStandaloneSession {
@@ -140,7 +155,7 @@ export interface StandaloneSessionMetadataResult {
 
 export interface StandaloneBatchError {
   sessionId: string;
-  code: StandaloneSessionServiceErrorCode;
+  code: StandaloneSessionServiceErrorCode | SessionWriterErrorKind;
   message: string;
 }
 
@@ -212,6 +227,7 @@ export type RestoreStandaloneSessionOptions = Pick<
   | 'clientId'
   | 'historyPageSize'
   | 'liveReplayMode'
+  | 'compactedReplayMode'
   | 'hideInheritedHistory'
   | 'approvalMode'
 >;
@@ -238,6 +254,7 @@ export interface StandaloneSessionServiceOptions {
     ConversationWorkspace,
     | 'assertExactRoot'
     | 'prepareStandaloneDirectory'
+    | 'discardEmptyConversationDirectory'
     | 'inspectStandaloneDirectory'
     | 'ensureStandaloneDirectory'
     | 'inspectStandaloneDeletionPaths'
@@ -325,6 +342,8 @@ function serviceError(
       'The standalone session operation failed.',
     session_archived: 'The standalone session is archived.',
     session_busy: 'The standalone session is busy.',
+    model_selection_failed:
+      'The selected model could not be applied to the standalone session.',
     standalone_creation_rolled_back:
       'Standalone session creation failed before durable source persistence and was rolled back.',
     standalone_creation_outcome_unknown:
@@ -422,6 +441,11 @@ function mergeLiveStandaloneSummary(
     updatedAt: laterTimestamp(live.updatedAt, persisted.updatedAt),
     clientCount: live.clientCount,
     hasActivePrompt: live.hasActivePrompt,
+    ...(live.activeWorkState !== undefined
+      ? { activeWorkState: live.activeWorkState }
+      : {}),
+    backgroundTurn: live.backgroundTurn,
+    hasRunningBackgroundTasks: live.hasRunningBackgroundTasks,
     ...(live.isWaitingForPermission !== undefined
       ? { isWaitingForPermission: live.isWaitingForPermission }
       : {}),
@@ -1394,9 +1418,12 @@ export class StandaloneSessionService {
         message: 'A previous session writer lease is still being released.',
       });
     }
+    // Parent-side lifecycle and maintenance acquisitions on the
+    // Conversations runtime share the ACP writer's hardened local policy so a
+    // provably dead same-domain writer does not fence recovery forever.
     const leaseOptions = {
       processKind: 'daemon' as const,
-      reclaimPolicy: 'never' as const,
+      reclaimPolicy: 'local' as const,
       takeoverPolicy: 'certified' as const,
     };
     try {
@@ -1554,6 +1581,11 @@ export class StandaloneSessionService {
   private batchError(sessionId: string, error: unknown): StandaloneBatchError {
     if (error instanceof StandaloneSessionServiceError) {
       return { sessionId, code: error.code, message: error.message };
+    }
+    // Preserve the session-writer protocol kind so a batch caller can
+    // distinguish a fenced same-session conflict from a storage failure.
+    if (error instanceof SessionWriterError) {
+      return { sessionId, code: error.errorKind, message: error.message };
     }
     const mapped = serviceError(
       'standalone_session_operation_failed',
@@ -1898,7 +1930,10 @@ export class StandaloneSessionService {
           await service.getSessionTranscriptParentIdentityForLifecycle(
             locked.location,
           );
-        const pinned = this.directoryStates.get(sessionId)?.pinned;
+        // The local session was closed above and the lifecycle lease is now
+        // held, so capture the directory identity fresh rather than trusting
+        // a pin that may predate another participant's legitimate recreation.
+        const pinned = this.effectiveDirectoryPin(runtime, sessionId);
         const paths =
           await this.options.workspace.inspectStandaloneDeletionPaths(
             sessionId,
@@ -2242,6 +2277,7 @@ export class StandaloneSessionService {
               throw serviceError('standalone_session_conflict', sessionId);
             }
             const prepared = await this.prepareRestoreDirectory(
+              runtime,
               sessionId,
               async () => {
                 if (!existing) return;
@@ -2300,6 +2336,9 @@ export class StandaloneSessionService {
                 : {}),
               ...(action === 'load' && options.historyPageSize !== undefined
                 ? { historyPageSize: options.historyPageSize }
+                : {}),
+              ...(action === 'load' && options.compactedReplayMode !== undefined
+                ? { compactedReplayMode: options.compactedReplayMode }
                 : {}),
               ...(action === 'load' && options.liveReplayMode !== undefined
                 ? { liveReplayMode: options.liveReplayMode }
@@ -2603,7 +2642,10 @@ export class StandaloneSessionService {
   private async createUnderExclusive(
     runtime: WorkspaceRuntime,
     sessionId: string,
-    request: CreateStandaloneSessionRequest,
+    request: CreateStandaloneSessionRequest & {
+      sourceType?: string;
+      sourceId?: string;
+    },
     prompt: string | undefined,
     promptId: string,
     parentSessionId?: string,
@@ -2638,7 +2680,25 @@ export class StandaloneSessionService {
         } catch {
           this.beginTerminalQuarantine(runtime);
         }
-        throw serviceError('standalone_creation_rolled_back', sessionId, true);
+        const outcome = serviceError(
+          'standalone_creation_rolled_back',
+          sessionId,
+          true,
+        );
+        if (error.cause instanceof AcpChildCapacityExceededError) {
+          throw new StandaloneSessionServiceError(
+            outcome.code,
+            sessionId,
+            outcome.message,
+            outcome.retryable,
+            {
+              code: error.cause.code,
+              maxConcurrentChildren: error.cause.maxConcurrentChildren,
+              committedAcpChildren: error.cause.committedAcpChildren,
+            },
+          );
+        }
+        throw outcome;
       }
       this.beginTerminalQuarantine(runtime);
     }
@@ -2673,6 +2733,24 @@ export class StandaloneSessionService {
       this.beginTerminalQuarantine(runtime);
     }
     this.assertRuntimeCurrentOrQuarantine(runtime);
+    if (
+      isScheduledTaskRunSource(request) &&
+      request.modelServiceId !== undefined &&
+      session.modelApplied === false
+    ) {
+      await this.cleanRollbackBeforePersistence(runtime, sessionId);
+      try {
+        await this.options.workspace.discardEmptyConversationDirectory(
+          sessionId,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Could not discard the rolled-back standalone directory for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      this.directoryStates.delete(sessionId);
+      throw serviceError('model_selection_failed', sessionId, true);
+    }
     let initialPrompt:
       | CreatedStandaloneChildSession['initialPrompt']
       | undefined;
@@ -2865,20 +2943,57 @@ export class StandaloneSessionService {
     return result;
   }
 
+  /**
+   * A pin is authoritative only while its matching local bridge session
+   * generation remains resident. A bare pin left by a terminal close, an
+   * entry whose session an idle reap dropped, or a replaced event epoch is
+   * daemon-local history: discard it rather than condemning a directory
+   * another participant may have legitimately recreated. An indeterminate
+   * bridge probe fails closed by propagating.
+   */
+  private effectiveDirectoryPin(
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+  ): ConversationDirectoryIdentity | undefined {
+    const state = this.directoryStates.get(sessionId);
+    if (!state) return undefined;
+    const bound = state.agentBound;
+    if (!bound) {
+      this.directoryStates.delete(sessionId);
+      return undefined;
+    }
+    let eventEpoch: string;
+    try {
+      eventEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        this.directoryStates.delete(sessionId);
+        return undefined;
+      }
+      throw error;
+    }
+    if (eventEpoch !== bound.eventEpoch) {
+      this.directoryStates.delete(sessionId);
+      return undefined;
+    }
+    return state.pinned;
+  }
+
   private async prepareRestoreDirectory(
+    runtime: WorkspaceRuntime,
     sessionId: string,
     beforeRecreate?: () => Promise<void>,
   ): Promise<PreparedRestoreDirectory> {
-    const previous = this.directoryStates.get(sessionId);
+    const expected = this.effectiveDirectoryPin(runtime, sessionId);
     const inspected = await this.options.workspace.inspectStandaloneDirectory(
       sessionId,
-      previous?.pinned,
+      expected,
     );
     if (inspected.status === 'compromised') {
       throw serviceError('working_directory_compromised', sessionId);
     }
     if (inspected.status === 'ready') {
-      if (!previous) {
+      if (!this.directoryStates.get(sessionId)) {
         this.directoryStates.set(sessionId, { pinned: inspected.identity });
       }
       return { identity: inspected.identity, state: 'ready' };
@@ -2887,7 +3002,7 @@ export class StandaloneSessionService {
     await beforeRecreate?.();
     const ensured = await this.options.workspace.ensureStandaloneDirectory(
       sessionId,
-      previous?.pinned,
+      expected,
     );
     if (ensured.status === 'compromised') {
       throw serviceError('working_directory_compromised', sessionId);

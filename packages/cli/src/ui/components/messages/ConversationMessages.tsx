@@ -17,7 +17,7 @@ import {
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
 import { t } from '../../../i18n/index.js';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { ErrorBoundary } from '../shared/ErrorBoundary.js';
 import { ICON } from '../../constants.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';

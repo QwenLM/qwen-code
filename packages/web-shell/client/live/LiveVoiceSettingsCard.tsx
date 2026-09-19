@@ -26,15 +26,10 @@ import { Separator } from '../components/ui/separator';
 import { Spinner } from '../components/ui/spinner';
 import { Switch } from '../components/ui/switch';
 import { HotkeySetter } from './HotkeySetter';
-import type { UseLiveVoiceSetupResult } from './useLiveVoiceSetup';
-
-const INSTALLING_STATES = new Set([
-  'checking',
-  'downloading',
-  'verifying',
-  'installing',
-  'launching',
-]);
+import {
+  INSTALLING_STATES,
+  type UseLiveVoiceSetupResult,
+} from './useLiveVoiceSetup';
 
 function RequirementBadge({
   state,
@@ -69,8 +64,11 @@ export function LiveVoiceSettingsCard({
   const status = setup.status;
   const enabled = status?.enabled === true;
   const busy = setup.mutating || setup.loading;
-  const installBusy = INSTALLING_STATES.has(status?.install.state ?? '');
+  const installBusy =
+    status !== undefined && INSTALLING_STATES.has(status.install.state);
   const requirements = status?.live.requirements;
+  // Absent on daemons that predate the browser Host: those are macOS-only.
+  const nativeHost = status?.nativeHost !== false;
 
   const saveKey = async () => {
     const value = apiKey.trim();
@@ -95,8 +93,14 @@ export function LiveVoiceSettingsCard({
   };
 
   const setEnabled = async (next: boolean) => {
-    if (next) {
+    // The confirmation is about downloading and installing the native Host;
+    // with no native Host on this platform there is nothing to confirm.
+    if (next && nativeHost) {
       setConfirmOpen(true);
+      return;
+    }
+    if (next) {
+      confirmEnable();
       return;
     }
     try {
@@ -129,7 +133,11 @@ export function LiveVoiceSettingsCard({
             </Badge>
           </div>
           <p className="max-w-3xl text-sm text-muted-foreground">
-            {t('settings.liveSetup.description')}
+            {t(
+              nativeHost
+                ? 'settings.liveSetup.description'
+                : 'settings.liveSetup.browserDescription',
+            )}
           </p>
         </div>
         {setup.loading && !status ? (
@@ -205,7 +213,7 @@ export function LiveVoiceSettingsCard({
           </p>
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-2" hidden={!nativeHost}>
           <div className="text-sm font-medium">
             {t('settings.liveSetup.shortcut')}
           </div>
@@ -220,7 +228,7 @@ export function LiveVoiceSettingsCard({
         </div>
       </div>
 
-      {enabled && status ? (
+      {enabled && status && nativeHost ? (
         <>
           <Separator />
           <div className="space-y-3">
@@ -290,7 +298,7 @@ export function LiveVoiceSettingsCard({
         </>
       ) : null}
 
-      {(setup.error || (enabled && status?.install.message)) && (
+      {(setup.error || (enabled && nativeHost && status?.install.message)) && (
         <p className="text-sm text-destructive" role="alert">
           {setup.error?.message ?? status?.install.message}
         </p>

@@ -164,3 +164,9 @@
     animation: none !important;
   }
 }
+
+.browserActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

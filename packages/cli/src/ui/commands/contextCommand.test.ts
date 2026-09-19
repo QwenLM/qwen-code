@@ -57,6 +57,8 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getUserMemory: vi.fn().mockReturnValue(''),
     getSystemPrompt: vi.fn().mockReturnValue(undefined),
     getOutputStyle: vi.fn().mockReturnValue(undefined),
+    getCodeModeOnly: vi.fn().mockReturnValue(false),
+    isTodoWriteEnabled: vi.fn().mockReturnValue(false),
     getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
@@ -95,6 +97,8 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -149,6 +153,73 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.totalTokens).toBe(50_000);
     // 50K < warn(150K); if the 999K global had leaked through it would be `hard`.
     expect(data.breakdown.currentTier).toBe('safe');
+  });
+
+  it('reads the per-session cached-content count, not the process-global singleton (#12047)', async () => {
+    // Same daemon cross-talk as #5763, but for the cache figure that drives
+    // the messages category (total - cached). A foreign cached count silently
+    // collapses messages toward zero via Math.max(0, ...).
+    mockGetLastPromptTokenCount.mockReturnValue(999_000);
+    mockGetLastCachedContentTokenCount.mockReturnValue(64_653); // foreign session
+    const getLastPromptTokenCount = vi.fn().mockReturnValue(65_267);
+    const getLastCachedContentTokenCount = vi.fn().mockReturnValue(1_000);
+    const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
+    const config = {
+      ...makeMockConfig(200_000),
+      getLlmClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount,
+          getLastCachedContentTokenCount,
+          isLastPromptTokenCountEstimated,
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(getLastCachedContentTokenCount).toHaveBeenCalled();
+    expect(data.totalTokens).toBe(65_267);
+    // messages ≈ total - per-session cached (1_000), not total - 64_653.
+    // Allow overhead scaling to reshape the split, but the foreign 64_653
+    // must not be what drove messages toward ~614.
+    expect(data.breakdown.messages).toBeGreaterThan(10_000);
+    // Behavioral proof above: foreign global 64_653 would yield messages ≈ 614.
+    // Do not assert the global spy was untouched — other /context helpers may
+    // still consult the singleton for unrelated figures.
+  });
+
+  it('uses overhead messages when chat cached count is zero despite a foreign global (#12047)', async () => {
+    // Pins ?? vs || on the per-session preference: a chat that reports 0 must
+    // not fall through to the process-global singleton. With ||, foreign
+    // 64_653 would collapse messages to ~614 via Math.max(0, total - foreign).
+    // With ??, apiCachedTokens stays 0 and messages comes from
+    // total − scaledOverhead.
+    mockGetLastPromptTokenCount.mockReturnValue(999_000);
+    mockGetLastCachedContentTokenCount.mockReturnValue(64_653); // foreign
+    const getLastPromptTokenCount = vi.fn().mockReturnValue(65_267);
+    const getLastCachedContentTokenCount = vi.fn().mockReturnValue(0);
+    const isLastPromptTokenCountEstimated = vi.fn().mockReturnValue(false);
+    const config = {
+      ...makeMockConfig(200_000),
+      getLlmClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount,
+          getLastCachedContentTokenCount,
+          isLastPromptTokenCountEstimated,
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(getLastCachedContentTokenCount).toHaveBeenCalled();
+    expect(data.totalTokens).toBe(65_267);
+    // Overhead branch: messages = total - scaledOverhead, not total - 64_653.
+    expect(data.breakdown.messages).toBeGreaterThan(10_000);
+    // Arithmetic fingerprint of the || leak (65_267 - 64_653).
+    expect(data.breakdown.messages).not.toBe(614);
   });
 
   it('reports a nonzero compression-derived count as estimated', async () => {
@@ -224,6 +295,8 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -273,6 +346,8 @@ describe('collectContextData (contextCommand)', () => {
       getUserMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getCodeModeOnly: vi.fn().mockReturnValue(false),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -289,6 +364,62 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(data.builtinTools).toHaveLength(1);
     expect(data.builtinTools[0].name).toBe('web_fetch');
+  });
+
+  it('excludes fixed-only media-policy tools from the per-tool breakdown (D6)', async () => {
+    // A media-policy tool without modelAccess.enabled is stripped from
+    // getFunctionDeclarations() (zero prompt tokens), so listing it in the
+    // breakdown would make the per-tool sum exceed allToolsTokens. One with
+    // modelAccess.enabled IS declared to the model and must stay listed.
+    const descriptor = {
+      kind: 'media_policy',
+      inputMediaTypes: ['image'],
+      outputs: [],
+    };
+    const hiddenPolicyTool = {
+      name: 'omni_downsample_image',
+      schema: { name: 'omni_downsample_image', description: 'policy schema' },
+      mediaPolicyDescriptor: descriptor,
+    };
+    const exposedPolicyTool = {
+      name: 'omni_probe_media',
+      schema: { name: 'omni_probe_media', description: 'probe schema' },
+      mediaPolicyDescriptor: descriptor,
+    };
+    const config = {
+      ...mockConfig,
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        contextWindowSize: 32_000,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi
+          .fn()
+          .mockReturnValue([hiddenPolicyTool, exposedPolicyTool]),
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([exposedPolicyTool.schema]),
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
+      }),
+      getOmniPolicyToolsSettings: vi.fn().mockReturnValue({
+        omni_probe_media: { modelAccess: { enabled: true } },
+      }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+      getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0].name).toBe('omni_probe_media');
   });
 
   it('lists the auto-memory section as a separate memory entry (#7651)', async () => {

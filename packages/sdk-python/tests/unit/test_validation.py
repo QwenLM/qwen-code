@@ -112,6 +112,17 @@ def test_rejects_invalid_auth_type() -> None:
         validate_query_options(QueryOptions.from_mapping({"auth_type": "custom"}))
 
 
+@pytest.mark.parametrize(
+    "auth_type",
+    ["openai", "openai-responses", "anthropic", "qwen-oauth", "gemini", "vertex-ai"],
+)
+def test_accepts_every_cli_auth_type(auth_type: str) -> None:
+    # Pins the SDK's auth-type set against the CLI's --auth-type choices. An
+    # auth type the CLI accepts but the SDK omits is rejected here with no
+    # other signal, so enumerate the whole set rather than spot-checking one.
+    validate_query_options(QueryOptions.from_mapping({"auth_type": auth_type}))
+
+
 def test_from_mapping_rejects_non_callable_can_use_tool() -> None:
     with pytest.raises(TypeError, match="can_use_tool must be callable"):
         QueryOptions.from_mapping({"can_use_tool": "bad"})
