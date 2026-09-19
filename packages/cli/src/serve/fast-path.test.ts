@@ -699,6 +699,7 @@ describe('serve fast path argument parsing', () => {
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['open-with-auth', ['--open-with-auth']],
+      ['pairing-qr', ['--pairing-qr']],
       ['local-control', ['--local-control']],
       ['local-control-address', ['--local-control-address', '192.168.1.2']],
       ['http-bridge', ['--no-http-bridge']],
@@ -1722,6 +1723,84 @@ describe('serve fast path environment bootstrap', () => {
 
     expect(settings.context?.fileName).toBe('USER.md');
     expect(settings.serve).toEqual({ channels: ['telegram'] });
+  });
+
+  it('loads serve.pairingQr from user scope but never from workspace scope', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pairing-qr-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    // A workspace file must never enable it — the key would push the
+    // operator's stable bearer into captured stdout.
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { pairingQr: true } }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.pairingQr,
+    ).toBeUndefined();
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { pairingQr: true } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
+      true,
+    );
+  });
+
+  it('keeps user-scope serve.pairingQr when workspace startup channels merge', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pairing-qr-channels-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { pairingQr: true } }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+      channels: ['telegram'],
+      pairingQr: true,
+    });
+  });
+
+  it('loads serve.pairingQr from the system scope and lets system override user', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pairing-qr-system-')),
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({ serve: { pairingQr: true } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
+      true,
+    );
+
+    // Merge precedence: system applies last, so an explicit system false
+    // must override a user true — otherwise a fleet policy cannot force the
+    // suppression back on.
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ serve: { pairingQr: true } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
+      true,
+    );
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({ serve: { pairingQr: false } }),
+    );
+    expect(loadServeFastPathSettings(tempWorkspace).serve?.pairingQr).toBe(
+      false,
+    );
   });
 
   it.each([

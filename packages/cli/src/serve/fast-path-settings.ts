@@ -48,7 +48,7 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
-  serve?: { channels?: unknown };
+  serve?: { channels?: unknown; pairingQr?: unknown };
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -427,6 +427,7 @@ function isWorkspaceTrustedFastPath(
 function readSettingsSummary(
   filePath: string,
   includeServe = false,
+  includePairingQr = false,
 ): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
 
@@ -445,7 +446,7 @@ function readSettingsSummary(
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  return pickFastPathSettings(parsed, includeServe);
+  return pickFastPathSettings(parsed, includeServe, includePairingQr);
 }
 
 function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
@@ -463,6 +464,7 @@ function shouldUseLegacyFastPathKeys(value: Record<string, unknown>): boolean {
 function pickFastPathSettings(
   value: Record<string, unknown>,
   includeServe = false,
+  includePairingQr = false,
 ): ServeFastPathSettings {
   const out: ServeFastPathSettings = {};
   const useLegacyKeys = shouldUseLegacyFastPathKeys(value);
@@ -656,10 +658,17 @@ function pickFastPathSettings(
   }
 
   const serve = value['serve'];
-  if (includeServe && isPlainObject(serve)) {
-    const channels = serve['channels'];
-    if (channels !== undefined) {
-      out.serve = { channels };
+  if (isPlainObject(serve)) {
+    const channels = includeServe ? serve['channels'] : undefined;
+    // serve.pairingQr pushes the operator's stable bearer into captured
+    // stdout, so only operator-owned scopes (user/system/system-defaults)
+    // may set it — never a workspace file, trusted or not.
+    const pairingQr = includePairingQr ? serve['pairingQr'] : undefined;
+    if (channels !== undefined || pairingQr !== undefined) {
+      out.serve = {
+        ...(channels !== undefined ? { channels } : {}),
+        ...(pairingQr !== undefined ? { pairingQr } : {}),
+      };
     }
   }
 
@@ -721,6 +730,12 @@ function mergeFastPathSettings(
     if (source.policy) {
       merged.policy = { ...(merged.policy ?? {}), ...source.policy };
     }
+    if (source.serve?.pairingQr !== undefined) {
+      merged.serve = {
+        ...(merged.serve ?? {}),
+        pairingQr: source.serve.pairingQr,
+      };
+    }
   }
   return merged;
 }
@@ -738,10 +753,16 @@ export function loadServeFastPathSettings(
     // Match loadSettings(): use the resolved path when realpath is unavailable.
   }
 
-  const system = readSettingsSummary(getSystemSettingsPath());
-  const systemDefaults = readSettingsSummary(getSystemDefaultsPath());
+  const system = readSettingsSummary(getSystemSettingsPath(), false, true);
+  const systemDefaults = readSettingsSummary(
+    getSystemDefaultsPath(),
+    false,
+    true,
+  );
   const user = readSettingsSummary(
     path.join(getGlobalQwenDirLite(), 'settings.json'),
+    false,
+    true,
   );
   // `system-defaults` participates so an operator enabling
   // `security.folderTrust` there reaches the same answer the merged settings
@@ -783,6 +804,7 @@ export function loadServeFastPathSettings(
   const merged = mergeFastPathSettings(systemDefaults, user, workspace, system);
   if (startupChannelsTrusted && workspaceFromDisk.serve) {
     merged.serve = {
+      ...(merged.serve ?? {}),
       channels: workspaceFromDisk.serve.channels,
     };
   }

@@ -361,8 +361,12 @@ it('prints nothing for an operator token on a loopback bind', async () => {
   expect(mocks.generate).not.toHaveBeenCalled();
 });
 
-it('never QRs a stable operator token into captured stdout', async () => {
+it('withholds the token-bearing QR for a stable token on captured stdout, printing a hint and an address-only QR', async () => {
   stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
   await printRemoteQuickstart({
     bind: '192.168.1.2',
     boundAddress: '192.168.1.2',
@@ -372,11 +376,51 @@ it('never QRs a stable operator token into captured stdout', async () => {
     generated: false,
     web: true,
   });
-  expect(mocks.generate).not.toHaveBeenCalled();
+  // The degraded QR encodes the bare address — already printed as plain text
+  // — and nothing else; the token reaches no line in raw or encoded form.
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170',
+    { small: true },
+    expect.any(Function),
+  );
+  expect(mocks.line).toHaveBeenCalledWith(
+    'Token-bearing QR suppressed: stable operator token with ' +
+      'non-interactive stdout. Pass --pairing-qr to print it anyway.',
+  );
+  expect(mocks.line).toHaveBeenCalledWith(
+    'Address-only QR: the Web Shell will ask for the bearer token.',
+  );
   expect(mocks.line).toHaveBeenCalledWith('Address: http://192.168.1.2:4170');
   expect(mocks.line.mock.calls.flat().join('\n')).not.toContain(
     'stable-secret',
   );
+});
+
+it('prints the token-bearing QR for a stable token on captured stdout when pairingQr opts in', async () => {
+  stubIsTTY(undefined);
+  mocks.generate.mockImplementationOnce(
+    (_url: string, _options: unknown, callback: (code: string) => void) =>
+      callback('QR\n'),
+  );
+  await printRemoteQuickstart({
+    bind: '192.168.1.2',
+    boundAddress: '192.168.1.2',
+    port: 4170,
+    tls: false,
+    token: 'stable-secret',
+    generated: false,
+    web: true,
+    pairingQr: true,
+  });
+  expect(mocks.generate).toHaveBeenCalledWith(
+    'http://192.168.1.2:4170/#token=stable-secret',
+    { small: true },
+    expect.any(Function),
+  );
+  expect(mocks.line).toHaveBeenCalledWith(
+    'SECRET QR: grants daemon access. Do not share.',
+  );
+  expect(mocks.line.mock.calls.flat().join('\n')).not.toContain('suppressed');
 });
 
 it('QRs a stable token only at an interactive terminal', async () => {

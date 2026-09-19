@@ -24,6 +24,11 @@
             "type": "string"
           }
         },
+        "pairingQr": {
+          "description": "Print the token-bearing pairing QR even when stdout is captured and the bearer is an operator-supplied (stable) token. Honored from user, system, and system-defaults settings only — a workspace settings file must not be able to push the operator's credential into logs; qwen serve --no-pairing-qr vetoes this setting for that run. Same effect as qwen serve --pairing-qr.",
+          "type": "boolean",
+          "default": false
+        },
         "maxConcurrentSubSessionsPerCaller": {
           "description": "Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.",
           "type": "integer",

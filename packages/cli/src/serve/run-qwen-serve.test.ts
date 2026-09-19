@@ -13665,6 +13665,88 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('resolves pairingQr from opts and from boot settings', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-pairing-qr');
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].pairingQr).toBe(
+        false,
+      );
+      await started.close();
+      started = undefined;
+
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { pairingQr: true } },
+        },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].pairingQr).toBe(
+        true,
+      );
+      await started.close();
+      started = undefined;
+
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          pairingQr: true,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].pairingQr).toBe(
+        true,
+      );
+      await started.close();
+      started = undefined;
+
+      // An explicit flag veto (--no-pairing-qr) must beat an enabling
+      // setting — otherwise the flag is a dead switch on a credential
+      // guard.
+      mockRemoteQuickstart.print.mockClear();
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          pairingQr: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          bootSettings: { serve: { pairingQr: true } },
+        },
+      );
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].pairingQr).toBe(
+        false,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
   it('reports what the socket bound, not what the operator typed', async () => {
     mockRemoteQuickstart.print.mockClear();
     vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-aton-pin');
