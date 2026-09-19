@@ -14,8 +14,11 @@ import {
 import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
-import { formatRuntime } from '../../utils/formatRuntime';
-import { getGoalActiveTimeMs, getGoalTokenLabel } from '../GoalStatusStrip';
+import {
+  getGoalActiveTimeLabel,
+  getGoalActiveTimeMs,
+  getGoalTokenLabel,
+} from '../GoalStatusStrip';
 import styles from './GoalsDialog.module.css';
 
 /**
@@ -466,12 +469,7 @@ export function GoalsDialog({
                 ) : null}
                 {activeTimeMs > 0 && (
                   <span className={styles.meta} data-testid="goal-elapsed">
-                    {goal.activeTimeBudgetMs === undefined
-                      ? formatRuntime(activeTimeMs)
-                      : t('goal.activeOfBudget', {
-                          used: formatRuntime(activeTimeMs),
-                          budget: formatRuntime(goal.activeTimeBudgetMs),
-                        })}
+                    {getGoalActiveTimeLabel(goal, activeTimeMs, t)}
                   </span>
                 )}
                 <button
