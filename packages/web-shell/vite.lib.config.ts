@@ -171,8 +171,10 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
-    // Keep the library and app on one syntax floor. Both public library
-    // entries externalize declared runtime packages; document-only dead-code
+    // Keep library and app builds on one syntax floor. All three public
+    // library entries externalize declared runtime packages, but intentionally
+    // share the app's ES2021 floor to prevent target drift and keep future
+    // bundling changes aligned with #11643. Document-only dead-code
     // substitutions belong in the downstream `/export html` build instead.
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
