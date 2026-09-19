@@ -1956,9 +1956,25 @@ describe('ChatEditor Plan in the add menu', () => {
       container.querySelectorAll('[data-web-shell-plan-button]'),
     ).toHaveLength(1);
     expect(chip.hasAttribute('data-web-shell-plan-chip')).toBe(true);
-    // The close mark is what makes the chip dismissible. Matched by class
-    // because the plan icon is an svg too.
-    expect(chip.querySelector('[class*="planChipClose"]')).not.toBeNull();
+    // The close mark is what makes the chip dismissible. It sits inside the
+    // icon slot, which it takes over on hover, rather than trailing the label
+    // where revealing it would widen the chip.
+    const iconSlot = chip.querySelector('[class*="planChipIcon"]')!;
+    const closeMarks = chip.querySelectorAll('[class*="planChipClose"]');
+    expect(closeMarks).toHaveLength(1);
+    // The stylesheet reaches both through a child combinator: the Plan icon
+    // first, then the mark stacked over it.
+    expect(Array.from(iconSlot.children)).toEqual([
+      iconSlot.querySelector('[style*="mode-icon-url"]'),
+      closeMarks[0],
+    ]);
+    expect(closeMarks[0]!.getAttribute('aria-hidden')).toBe('true');
+    expect(closeMarks[0]!.querySelector('svg')).not.toBeNull();
+    // The slot the mark fills is the fixed icon box, which is why revealing
+    // it cannot change the width of the chip; and the forced-colours repaint
+    // is written for the icon being a span.
+    expect(iconSlot.className).toContain('toolBtnModeIcon');
+    expect(iconSlot.firstElementChild?.tagName).toBe('SPAN');
     // Hosts that select the Plan control by this hook still find it.
     expect(chip.hasAttribute('data-web-shell-plan-control')).toBe(true);
     expect(chip.getAttribute('aria-pressed')).toBe('true');
@@ -2071,7 +2087,18 @@ describe('ChatEditor Plan in the add menu', () => {
           onTogglePlan: vi.fn(),
         });
         expect(planButton(container)!.textContent).toBe(label);
-        // The budget is only right if the replicas stand in for the real chip.
+        // Where nothing can hover, the close mark replaces the icon only on a
+        // chip that still names itself.
+        expect(planButton(container)!.hasAttribute('data-labelled')).toBe(
+          label !== '',
+        );
+        // The budget is only right if the replicas stand in for the real chip,
+        // and the mark, being stacked over the icon, takes no room in either.
+        expect(
+          container.querySelector(
+            '[data-toolbar-measure^="plan:"] [class*="planChipClose"]',
+          ),
+        ).toBeNull();
         expect(
           container.querySelector('[data-toolbar-measure="plan:collapsed"]')
             ?.textContent,

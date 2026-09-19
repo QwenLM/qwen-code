@@ -1603,7 +1603,6 @@
    entry itself is tucked into the add menu. */
 .planChip {
   flex: 0 0 auto;
-  padding: 0 6px 0 8px;
   background: color-mix(
     in srgb,
     var(--chat-editor-accent-color) 12%,
@@ -1612,7 +1611,12 @@
   color: var(--chat-editor-accent-color);
 }
 
-.toolBtn.planChip:not(:disabled):hover {
+/* Spelled out twice rather than as `.toolBtn.planChip:hover`: each half ties
+   the generic toolbar hover above on specificity and wins by coming later,
+   which the shorter selector would not. The disabled half keeps the tint from
+   dropping under the pointer during the request the click itself starts. */
+.toolBtn.planChip:not(:disabled):hover,
+.toolBtn.planChip:disabled:hover {
   background: color-mix(
     in srgb,
     var(--chat-editor-accent-color) 20%,
@@ -1632,14 +1636,77 @@
   cursor: default;
 }
 
-.planChipClose {
-  display: inline-flex;
-  align-items: center;
-  opacity: 0.7;
+/* At rest the chip shows the Plan icon and no close mark. The mark shares the
+   icon slot and takes it over on hover or keyboard focus, so revealing it
+   never changes how wide the chip is. */
+.planChipIcon {
+  position: relative;
 }
 
-.planChip:not(:disabled):hover .planChipClose {
+.planChipIcon > .planChipClose {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+}
+
+.planChipIcon > .planChipClose svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* None of the reveals is limited to an enabled chip: it is disabled for the
+   length of the request its own click starts, and swapping back under the
+   pointer would read as the click having been refused. */
+.planChip:focus-visible .planChipIcon > :not(.planChipClose) {
+  opacity: 0;
+}
+
+.planChip:focus-visible .planChipClose {
   opacity: 1;
+}
+
+/* Only where the pointer really hovers. A touch browser keeps :hover on the
+   last thing tapped, which would leave the mark stuck on a chip whose tap did
+   nothing. */
+@media (hover: hover) {
+  .planChip:hover .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip:hover .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Without hover only keyboard focus would ever reveal the mark, so it stays
+   shown — but only beside the label. A chip too narrow for its label keeps the Plan icon
+   instead: a bare × would name nothing, and a pressed button that a tap
+   releases needs no mark to work. Keyed on the primary pointer, so a
+   touchscreen laptop driven by a mouse still gets the quiet chip. */
+@media (hover: none) {
+  .planChip[data-labelled] .planChipIcon > :not(.planChipClose) {
+    opacity: 0;
+  }
+
+  .planChip[data-labelled] .planChipClose {
+    opacity: 1;
+  }
+}
+
+/* Forced colours repaint a masked background away, which would leave a chip
+   without its label blank at rest. Painting the mask with a system colour
+   keeps the icon. Every mode icon has the same gap; this covers only the one
+   this chip depends on. */
+@media (forced-colors: active) {
+  .planChipIcon > span:not(.planChipClose) {
+    forced-color-adjust: none;
+    background: ButtonText;
+  }
 }
 
 .addMenuPlanIcon {

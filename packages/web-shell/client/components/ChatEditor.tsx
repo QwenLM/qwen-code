@@ -3540,6 +3540,7 @@ export const ChatEditor = memo(
                             data-web-shell-plan-control
                             data-web-shell-plan-button
                             data-web-shell-plan-chip
+                            data-labelled={showPlanLabel ? '' : undefined}
                             // Always true, since the chip renders only while
                             // Plan is on; it is what tells a host reading
                             // these hooks that the control is pressed.
@@ -3561,20 +3562,26 @@ export const ChatEditor = memo(
                               core.focus();
                             }}
                           >
-                            <span className={styles.toolBtnModeIcon}>
+                            {/* The close mark shares the icon slot and takes
+                                it over on hover or keyboard focus, so a
+                                mouse user sees no × at rest and the chip
+                                keeps its width when the mark appears. */}
+                            <span
+                              className={`${styles.toolBtnModeIcon} ${styles.planChipIcon}`}
+                            >
                               <ModeIcon mode="plan" />
+                              <span
+                                className={styles.planChipClose}
+                                aria-hidden="true"
+                              >
+                                <XIcon size={12} strokeWidth={2} />
+                              </span>
                             </span>
                             {showPlanLabel && (
                               <span className={styles.toolBtnText}>
                                 {planLabel}
                               </span>
                             )}
-                            <span
-                              className={styles.planChipClose}
-                              aria-hidden="true"
-                            >
-                              <XIcon size={12} strokeWidth={2} />
-                            </span>
                           </button>
                         </TooltipTrigger>
                         <span id={planDescriptionId} className="sr-only">
@@ -4056,9 +4063,6 @@ export const ChatEditor = memo(
                     <span className={styles.toolBtnModeIcon}>
                       <ModeIcon mode="plan" />
                     </span>
-                    <span className={styles.planChipClose}>
-                      <XIcon size={12} strokeWidth={2} />
-                    </span>
                   </span>
                   <span
                     data-toolbar-measure="plan:expanded"
@@ -4068,9 +4072,6 @@ export const ChatEditor = memo(
                       <ModeIcon mode="plan" />
                     </span>
                     <span className={styles.toolBtnText}>{planLabel}</span>
-                    <span className={styles.planChipClose}>
-                      <XIcon size={12} strokeWidth={2} />
-                    </span>
                   </span>
                 </>
               )}
