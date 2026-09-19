@@ -309,6 +309,7 @@ const {
   mockReleaseWebTerminal,
   mockUseWorkspaceSessionLiveState,
   mockUseDaemonSessionActivityBridge,
+  mockUseDaemonActivePromptBridge,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -828,6 +829,7 @@ const {
     mockReleaseDetachedWebTerminal: vi.fn(),
     mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
     mockUseDaemonSessionActivityBridge: vi.fn(),
+    mockUseDaemonActivePromptBridge: vi.fn(),
   };
 });
 
@@ -1758,6 +1760,7 @@ vi.mock('./session-catalog/session-catalog-hooks', () => ({
     authoritative: true,
   }),
   useDaemonSessionActivityBridge: mockUseDaemonSessionActivityBridge,
+  useDaemonActivePromptBridge: mockUseDaemonActivePromptBridge,
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
@@ -10639,6 +10642,10 @@ beforeEach(() => {
     hasActivePrompt: testState.sessionHasActivePrompt,
     activeWorkState: undefined,
   }));
+  mockUseDaemonActivePromptBridge.mockReset();
+  mockUseDaemonActivePromptBridge.mockImplementation(
+    () => testState.sessionHasActivePrompt,
+  );
   mockWorkspace.status = 'connected';
   mockWorkspace.brand = undefined;
   mockWorkspace.brandSettled = false;
