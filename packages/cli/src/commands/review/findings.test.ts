@@ -40,6 +40,7 @@ import {
   holdUnwitnessedFindings,
   sharedFailingFilesOf,
 } from './findings.js';
+import { inodesVerifiable } from './lib/test-utils.js';
 
 /** A minimal valid finding, spread-and-overridden per case. */
 const base = {
@@ -1456,15 +1457,11 @@ describe('findings (command boundary)', () => {
     writeFileSync(out, JSON.stringify([base])); // a previous run's artifact
     const anchors = join(dir, 'anchors.json');
     linkSync(out, anchors);
-    // On a volume whose ids exceed the safe-integer range (NTFS) this is not a
-    // missing fixture — the guard under test is INERT there. `isSameFile`
-    // stats without `bigint`, so `hasVerifiableInode` is false and the
-    // comparison degrades to `realpathSync.native`, which cannot resolve a
-    // hard link: the alias is admitted and the previous artifact is
-    // overwritten. Skipping hides a real fail-open, so it is tracked rather
-    // than merely noted. See #11848.
-    const inode = statSync(out).ino;
-    if (!Number.isSafeInteger(inode) || inode <= 0) {
+    // `isSameFile` stats with `{ bigint: true }`, so a 64-bit NTFS id is
+    // exact and the alias guard under test is live on volumes whose ids
+    // exceed 2^53 (#11848); the only skip case left is a volume reporting
+    // no inode numbers at all (FAT/exFAT/SMB).
+    if (!inodesVerifiable(statSync, out)) {
       ctx.skip();
       return;
     }

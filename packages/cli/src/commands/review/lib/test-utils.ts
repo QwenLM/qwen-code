@@ -127,6 +127,27 @@ export type FixtureFs = Pick<
 >;
 
 /**
+ * True iff the volume hosting `path` exposes inode numbers at all. The
+ * callers are the skip gates of the alias-guard suites: `isSameFile` reads
+ * stats with `{ bigint: true }`, so a 64-bit NTFS file index is exact and
+ * the guard under test is live even on volumes whose ids exceed 2^53
+ * (#11848). The only skip case left is FAT/exFAT/SMB-style volumes reporting
+ * `ino === 0`, where the comparison deliberately falls back to canonical
+ * spellings — suites that skip there stop exercising the guard by design,
+ * and they must all agree on when that is.
+ *
+ * Takes the caller's own stat binding for the reason `FixtureFs` above
+ * records: suites that mock `node:fs` file-wide need the check to read
+ * through their mock, not a binding this module imported itself.
+ */
+export function inodesVerifiable(
+  stat: (p: string, o: { bigint: true }) => { ino: bigint },
+  path: string,
+): boolean {
+  return stat(path, { bigint: true }).ino !== 0n;
+}
+
+/**
  * A checkout-shaped tree holding all the review roots and a `dist/cli.js`
  * bundle — what the staleness check needs to reach a verdict. With only some
  * of the roots present the check answers 'could not check' instead.
