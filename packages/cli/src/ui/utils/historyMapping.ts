@@ -10,6 +10,7 @@ import type { ApiUserPromptOptions } from '@qwen-code/qwen-code-core';
 import {
   CompressionStatus,
   findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
   getStartupContextLength,
   isApiUserPrompt,
 } from '@qwen-code/qwen-code-core';
@@ -50,8 +51,9 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
 
 /**
  * Computes the number of API history entries to keep when rewinding to a UI
- * user turn. Identified turns resolve only by their stable identity; legacy
- * turns retain the positional mapping used before prompt identities existed.
+ * user turn. A turn whose API entry carries its stable identity resolves by
+ * that identity; everything else keeps the positional mapping used before
+ * prompt identities existed.
  */
 export function computeApiTruncationIndex(
   uiHistory: HistoryItem[],
@@ -106,7 +108,23 @@ export function computeApiTruncationIndex(
     ) {
       return -1;
     }
-    return findApiHistoryPromptIndex(apiHistory, target.promptId, startIndex);
+    const identified = findApiHistoryPromptIndex(
+      apiHistory,
+      target.promptId,
+      startIndex,
+    );
+    if (identified !== -1) return identified;
+    // The resolver also refuses when TWO entries claim this identity, and
+    // there the positional walk below would be guessing between them. An
+    // entry that carries no mark at all is expected — only first-party user
+    // prompts are marked, every other send stays positional — so fall
+    // through to the mapping this function had before identities existed.
+    const claimed = apiHistory.some(
+      (content, index) =>
+        index >= startIndex &&
+        getApiHistoryPromptId(content) === target.promptId,
+    );
+    if (claimed) return -1;
   }
 
   if (uiUserTurnCount === 0) return startIndex;
