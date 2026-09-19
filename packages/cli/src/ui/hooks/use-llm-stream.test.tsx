@@ -14,7 +14,6 @@ import {
   useLlmStream,
 } from './use-llm-stream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
-import { resetPromptCountFloorForTesting } from '../utils/prompt-count-floor.js';
 import type {
   TrackedToolCall,
   TrackedCompletedToolCall,
@@ -239,9 +238,6 @@ describe('useLlmStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
-    // The mint floor is module-global; a test that spends a mint (aborted
-    // @-command / vision-bridge decline) must not leak it into later mints.
-    resetPromptCountFloorForTesting();
     mockGetActiveInteractionSpan.mockReturnValue(mockInteractionSpan);
     mockRefreshMemoryAfterManagedWrite.mockResolvedValue(false);
     mockRefreshMemoryInstruction.mockResolvedValue(undefined);

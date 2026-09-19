@@ -26,10 +26,6 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
-import {
-  getPromptCountFloor,
-  recordPromptCountFloor,
-} from '../utils/prompt-count-floor.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -218,21 +214,6 @@ export function useResumeCommand(
         //    opened above covers the initialize() replay (#9833; see
         //    beginTelemetrySwap's JSDoc in core client.ts).
         resetBackgroundStateForSessionSwitch(config);
-        // Record the incoming session's prompt-count floor BEFORE the core
-        // swap: from here until the UI re-key + seed below, the composer is
-        // live (the dialog closed above), config.getSessionId() answers the
-        // incoming session, and the provider's promptCount still holds the
-        // outgoing session's count — a submit in that window would mint an
-        // id the incoming transcript already claims (R43-1). The
-        // provider-side seed below must still run after the reset, which
-        // would erase an earlier one.
-        recordPromptCountFloor(
-          sessionId,
-          computeResumedPromptCountSeed(
-            sessionData.conversation.messages,
-            sessionId,
-          ),
-        );
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -262,17 +243,11 @@ export function useResumeCommand(
         // Seed the prompt counter past the ids the resumed transcript
         // claims before any new prompt can mint one (R38-1): the reset
         // above reinstalls promptCount 0, and the seed is monotonic (0 is
-        // a no-op), so this ordering is load-bearing. The floor may have
-        // advanced past the transcript-derived seed while the swap window
-        // was open — an in-window mint spends its ordinal onto this
-        // transcript — so seed from the higher of the two (R45-1).
+        // a no-op), so this ordering is load-bearing.
         seedPromptCount(
-          Math.max(
-            computeResumedPromptCountSeed(
-              sessionData.conversation.messages,
-              sessionId,
-            ),
-            getPromptCountFloor(sessionId),
+          computeResumedPromptCountSeed(
+            sessionData.conversation.messages,
+            sessionId,
           ),
         );
         uiSwapped = true;

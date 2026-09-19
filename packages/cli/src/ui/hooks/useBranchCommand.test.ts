@@ -9,10 +9,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
 import { makeSwapSlotClient } from '../../test-utils/mock-swap-slot-client.js';
-import {
-  mintLivePromptId,
-  resetPromptCountFloorForTesting,
-} from '../utils/prompt-count-floor.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 const mockSettings = {
@@ -222,67 +218,6 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
       seedPromptCount.mock.invocationCallOrder[0]!,
     );
-  });
-
-  it('carries ordinals spent inside the swap window into the re-key seed (R45-1)', async () => {
-    // The branch twin of the /resume window: the floor is recorded before
-    // the core swap while the provider's promptCount still holds the
-    // outgoing session's count. A mint inside the window persists its id
-    // onto the fork's transcript, so the re-key seed must start above every
-    // ordinal the window spent — otherwise the post-swap counter re-mints
-    // the in-window id and two records share one promptId.
-    resetPromptCountFloorForTesting();
-    loadSession.mockImplementation(async (id: string) => ({
-      conversation: {
-        messages: [0, 1].map((turn) => ({
-          ...userRecord(`turn ${turn}`),
-          sessionId: id,
-          promptId: `${id}########${turn}`,
-        })),
-      },
-      filePath: '/tmp/new.jsonl',
-      lastCompletedUuid: 'u2',
-    }));
-
-    let liveSessionId = 'old-session-id';
-    let resolveInitialize: (() => void) | undefined;
-    const initialize = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveInitialize = resolve;
-        }),
-    );
-    config.getSessionId = () => liveSessionId;
-    config.getLlmClient = () => ({ initialize });
-    startNewSessionConfig.mockImplementation((id: string) => {
-      liveSessionId = id;
-    });
-
-    const { result } = renderHook(() => useBranchCommand(makeOptions()));
-    let branchPromise: Promise<void> | undefined;
-    act(() => {
-      branchPromise = result.current.handleBranch('seeded');
-    });
-
-    // Park the swap inside the initialize() replay: core has re-keyed to
-    // the fork, the UI has not, and the provider's promptCount still holds
-    // the outgoing session's count (5).
-    await act(async () => {
-      await vi.waitFor(() => expect(initialize).toHaveBeenCalled());
-    });
-    const newSessionId = liveSessionId;
-    expect(newSessionId).not.toBe('old-session-id');
-    // Two submits inside the window must mint distinct ids...
-    expect(mintLivePromptId(config, () => 5)).toBe(`${newSessionId}########5`);
-    expect(mintLivePromptId(config, () => 5)).toBe(`${newSessionId}########6`);
-
-    await act(async () => {
-      resolveInitialize!();
-      await branchPromise;
-    });
-    // ...and the re-key seed must land above both spent ordinals (the
-    // transcript-derived seed alone would be 2).
-    expect(seedPromptCount).toHaveBeenCalledWith(7);
   });
 
   it('clears terminal background state after the branch initializes', async () => {

@@ -131,10 +131,6 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
-import {
-  mintLivePromptId,
-  spendLivePromptId,
-} from '../utils/prompt-count-floor.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 import {
@@ -1424,9 +1420,12 @@ export const useLlmStream = (
     // lives — tools get cancelled and handleCompletedTools returns early.
     config.getArenaAgentClient()?.reportCancelled();
 
-    // Log API cancellation
+    // Log API cancellation. Prefer the id the in-flight interaction already
+    // minted: a fresh mint inside a session-swap window names the incoming
+    // session and no longer identifies the turn being cancelled.
     const prompt_id =
-      activeInteractionPromptId ?? mintLivePromptId(config, getPromptCount);
+      activeInteractionPromptId ??
+      config.getSessionId() + '########' + getPromptCount();
     const cancellationEvent = new ApiCancelEvent(
       modelOverrideRef.current ?? config.getModel(),
       prompt_id,
@@ -1724,7 +1723,6 @@ export const useLlmStream = (
                 abortSignal,
               );
               if (!bridgeResult.shouldProceed) {
-                spendLivePromptId(config, prompt_id);
                 return { queryToSend: null, shouldProceed: false };
               }
               localQueryToSendToLlm = bridgeResult.parts;
@@ -1804,7 +1802,6 @@ export const useLlmStream = (
           });
 
           if (!atCommandResult.shouldProceed) {
-            spendLivePromptId(config, prompt_id);
             return { queryToSend: null, shouldProceed: false };
           }
           localQueryToSendToLlm = atCommandResult.processedQuery;
@@ -1816,7 +1813,6 @@ export const useLlmStream = (
           abortSignal,
         );
         if (!bridgeResult.shouldProceed) {
-          spendLivePromptId(config, prompt_id);
           return { queryToSend: null, shouldProceed: false };
         }
         localQueryToSendToLlm = bridgeResult.parts;
@@ -3779,7 +3775,7 @@ export const useLlmStream = (
       }
 
       if (!prompt_id) {
-        prompt_id = mintLivePromptId(config, getPromptCount);
+        prompt_id = config.getSessionId() + '########' + getPromptCount();
       }
       if (!allowConcurrentBtwDuringResponse) {
         activeInteractionPromptIdRef.current = prompt_id;
