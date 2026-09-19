@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.24.1",
+  "version": "0.24.1-nightly.20260919.c1c00cbaab",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
