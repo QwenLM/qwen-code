@@ -19,6 +19,7 @@ import {
   RESUME_ARGS_TOO_LARGE_NOTE,
 } from './workflow-resume-call.js';
 import {
+  AUTO_REJECT_APPROVAL_PAYLOAD,
   WorkflowRunRegistry,
   MAX_PENDING_WORKFLOW_APPROVALS,
   MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS,
@@ -311,7 +312,10 @@ describe('WorkflowRunRegistry', () => {
 
     r.cancel('wf_cancel_approval', 2_000);
     await vi.waitFor(() => {
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
     expect(r.get('wf_cancel_approval')?.pendingApprovals).toEqual([]);
     await expect(
@@ -351,7 +355,10 @@ describe('WorkflowRunRegistry', () => {
 
     r.complete('wf_complete_approval', 'done', 2_000);
     await vi.waitFor(() => {
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
     expect(r.get('wf_complete_approval')?.pendingApprovals).toEqual([]);
   });
@@ -402,9 +409,11 @@ describe('WorkflowRunRegistry', () => {
     await vi.waitFor(() => {
       expect(failedRespond).toHaveBeenCalledWith(
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       expect(abortedRespond).toHaveBeenCalledWith(
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     });
     expect(r.get('wf_failed_approval')?.pendingApprovals).toEqual([]);
@@ -424,7 +433,10 @@ describe('WorkflowRunRegistry', () => {
     );
 
     await vi.waitFor(() => {
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
     expect(r.get('wf_no_channel')?.pendingApprovals).toEqual([]);
   });
@@ -500,6 +512,7 @@ describe('WorkflowRunRegistry', () => {
     await vi.waitFor(() => {
       expect(rejectedRespond).toHaveBeenCalledWith(
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     });
 
@@ -584,7 +597,10 @@ describe('WorkflowRunRegistry', () => {
     );
     r.cancel('wf_duplicate_retry', 2_000);
     await vi.waitFor(() => {
-      expect(firstRespond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(firstRespond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
     r.register(reg('wf_duplicate_retry'));
 
@@ -623,7 +639,10 @@ describe('WorkflowRunRegistry', () => {
 
     r.cancel('wf_cancelled_retry', 2_000);
     await vi.waitFor(() => {
-      expect(firstRespond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(firstRespond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
     r.register(reg('wf_cancelled_retry'));
 
@@ -835,9 +854,13 @@ describe('WorkflowRunRegistry', () => {
     );
 
     await vi.waitFor(() => {
-      expect(askRespond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(askRespond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
       expect(oversizedRespond).toHaveBeenCalledWith(
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     });
     expect(r.get('wf_restricted_approval')?.pendingApprovals).toEqual([]);
@@ -861,7 +884,7 @@ describe('WorkflowRunRegistry', () => {
     await vi.waitFor(() => {
       expect(respond).toHaveBeenCalledWith(
         ToolConfirmationOutcome.Cancel,
-        undefined,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     });
     expect(r.get('wf_failed_channel')?.pendingApprovals).toEqual([]);
@@ -886,7 +909,10 @@ describe('WorkflowRunRegistry', () => {
     // bridge rejects the responder directly, so the approval is cancelled
     // without going through resolvePendingApproval.
     await vi.waitFor(() => {
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
     expect(r.get('wf_sync_failed_channel')?.pendingApprovals).toEqual([]);
     expect(
@@ -939,6 +965,7 @@ describe('WorkflowRunRegistry', () => {
     await vi.waitFor(() => {
       expect(siblingRespond).toHaveBeenCalledWith(
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     });
     // The run's controller is aborted via the handle fallback.
@@ -973,6 +1000,7 @@ describe('WorkflowRunRegistry', () => {
     await vi.waitFor(() => {
       expect(responders.at(-1)).toHaveBeenCalledWith(
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     });
     expect(
@@ -1038,7 +1066,10 @@ describe('WorkflowRunRegistry', () => {
 
     expect(hostSignal?.aborted).toBe(true);
     await vi.waitFor(() => {
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
   });
 
@@ -1057,7 +1088,10 @@ describe('WorkflowRunRegistry', () => {
     r.reset();
 
     await vi.waitFor(() => {
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
+      );
     });
     expect(r.list()).toEqual([]);
   });
