@@ -75,16 +75,29 @@ describe('workflow parameter errors', () => {
     },
   );
 
-  it.each(['workflow_journal_unavailable', 'workflow_args_unavailable'])(
-    'answers %s with 409 and its message',
-    (errorKind) => {
+  // Each kind also runs against the wire shape: the ACP child delivers these
+  // as plain JSON, never a `RequestError` instance.
+  it.each([
+    ['workflow_journal_unavailable', 'request'],
+    ['workflow_journal_unavailable', 'wire'],
+    ['workflow_args_unavailable', 'request'],
+    ['workflow_args_unavailable', 'wire'],
+    ['workflow_run_in_progress', 'request'],
+    ['workflow_run_in_progress', 'wire'],
+  ] as const)(
+    'answers %s with 409 and its message (%s)',
+    (errorKind, transport) => {
       const source = RequestError.invalidParams(
         { errorKind },
         'Workflow run wf_1234abcd has no journal on disk',
       );
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
       const { response, status, json } = responseMock();
 
-      sendBridgeError(response, source);
+      sendBridgeError(response, error);
 
       expect(status).toHaveBeenCalledWith(409);
       expect(json).toHaveBeenCalledWith({

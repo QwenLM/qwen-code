@@ -418,6 +418,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isWorkflowRunId: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isWorkflowRunId,
+  isProcessRunning: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).isProcessRunning,
   WorkflowJournalUnavailableError: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).WorkflowJournalUnavailableError,
@@ -16908,6 +16911,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
+    it('refuses to retry a snapshot written before args were kept', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon();
+      // The legacy snapshot carries neither `args` nor `argsOmitted`, so a
+      // retry cannot tell whether the run had any: resuming with `args:
+      // undefined` would replay nothing and re-run everything under the
+      // original run id.
+      const legacy = historical();
+      delete (legacy as { args?: unknown }).args;
+      mockReadWorkflowSnapshot.mockResolvedValue(legacy);
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_args_unavailable' },
+      });
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('retries a run whose snapshot records that it had no args', async () => {
+      const daemon = await startDaemon();
+      const argless = historical({ argsRecorded: true });
+      delete (argless as { args?: unknown }).args;
+      mockReadWorkflowSnapshot.mockResolvedValue(argless);
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+
+      const [params] = daemon.buildSessionOwnedBackground.mock.calls[0]!;
+      expect(params['args']).toBeUndefined();
+      expect(params['resumeFromRunId']).toBe(runId);
+      await daemon.stop();
+    });
+
+    it('answers a restart whose snapshot is gone with unchanged, not an error', async () => {
+      const daemon = await startDaemon();
+      // The afterEach default: listed, then pruned or deleted before the
+      // click. `{changed: false}` is the documented answer for an unknown
+      // run id, not a TypeError collapsed into an internal error.
+      for (const action of ['retry', 'rerun'] as const) {
+        await expect(daemon.act(action)).resolves.toEqual({
+          changed: false,
+        });
+      }
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
     it('refuses both actions with a named error when the snapshot could not keep the args', async () => {
       const sdk = await actualSdk();
       const daemon = await startDaemon();
@@ -16948,16 +17004,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
 
     it('does not retry a run whose checkpoint shows another process still running it', async () => {
+      const sdk = await actualSdk();
       const daemon = await startDaemon();
       mockReadWorkflowSnapshot.mockResolvedValue(historical());
-      // The claim found its writer alive and left the checkpoint in place.
-      mockReadWorkflowCheckpoint.mockResolvedValue({ v: 1, runId, pid: 4242 });
+      // The claim found its writer alive and left the checkpoint in place:
+      // this machine's hostname, and this process's own pid cannot be dead.
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: process.pid,
+        hostname: os.hostname(),
+        startTime: 1_500,
+      });
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
 
-      await expect(daemon.act('retry')).resolves.toEqual({
-        changed: false,
-        status: 'failed',
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_run_in_progress' },
       });
       expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
+      await daemon.stop();
+    });
+
+    it('retries a run whose checkpoint a process on another machine left behind', async () => {
+      const daemon = await startDaemon();
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      // The claim never settles a foreign host's checkpoint — its writer
+      // cannot be checked — so it survives; it says nothing about a live
+      // writer HERE and must not bar the retry. The pid is one every
+      // machine has alive, so only the hostname arm lets the retry through.
+      mockReadWorkflowCheckpoint.mockResolvedValue({
+        v: 1,
+        runId,
+        pid: process.pid,
+        hostname: 'some-other-host',
+        startTime: 1_500,
+      });
+
+      await expect(daemon.act('retry')).resolves.toEqual({
+        changed: true,
+        status: 'running',
+      });
+      expect(daemon.buildSessionOwnedBackground).toHaveBeenCalledWith(
+        expect.objectContaining({ resumeFromRunId: runId }),
+        'deep-review',
+      );
       await daemon.stop();
     });
 
@@ -17052,6 +17145,32 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         message: expect.stringContaining(
           'rerun it to start it from the beginning',
         ),
+      });
+      await daemon.stop();
+    });
+
+    it('tells a retry whose journal cannot be read apart from one that has none', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon({
+        execute: async () => {
+          throw new WorkflowJournalUnavailableError(
+            runId,
+            'unreadable',
+            `The journal of workflow run ${runId} exists but could not be read.`,
+          );
+        },
+      });
+      mockReadWorkflowSnapshot.mockResolvedValue(historical());
+      vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+        sdk.RequestError.invalidParams,
+      );
+
+      // The 'missing' arm ends with the same remedy clause, so only the
+      // distinguishing wording pins this arm.
+      await expect(daemon.act('retry')).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'workflow_journal_unavailable' },
+        message: expect.stringContaining('could not be read'),
       });
       await daemon.stop();
     });

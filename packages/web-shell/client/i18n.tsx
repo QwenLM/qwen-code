@@ -3202,6 +3202,8 @@ const EN: Messages = {
   'workflow.history.cached': (v) => `${v?.count ?? 0} cached`,
   'workflow.history.saved': (v) => `${v?.count ?? 0} saved runs`,
   'workflow.history.restored': 'Saved run',
+  'workflow.history.argsOmitted':
+    'Saved without its launch args — start it again with run-saved or run-script and the original args.',
   'workflow.history.showRuns': (v) => `Run history (${v?.count ?? 0})`,
   'workflow.history.hideRuns': 'Hide history',
   'workflow.history.filter': 'Filter runs',
@@ -6913,6 +6915,8 @@ const ZH: Messages = {
   'workflow.history.cached': (v) => `${v?.count ?? 0} 个缓存命中`,
   'workflow.history.saved': (v) => `已保存 ${v?.count ?? 0} 次运行`,
   'workflow.history.restored': '已保存运行',
+  'workflow.history.argsOmitted':
+    '保存时未保留启动参数——请通过 run-saved 或 run-script 带上原始参数重新启动。',
   'workflow.history.showRuns': (v) => `运行历史（${v?.count ?? 0}）`,
   'workflow.history.hideRuns': '收起历史',
   'workflow.history.filter': '筛选运行',

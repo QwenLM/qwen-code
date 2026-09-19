@@ -23,7 +23,10 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { deleteInlineWorkflowScript } from './runtime/workflow-saved.js';
+import {
+  deleteInlineWorkflowScript,
+  isWorkflowRunId,
+} from './runtime/workflow-saved.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import {
   isActiveWorkflowStatus,
@@ -71,12 +74,20 @@ export interface WorkflowSnapshot {
   startMode?: WorkflowRunStartMode;
   /**
    * The `args` the run was launched with, so a run can be retried after the
-   * process that ran it is gone. Absent when the run had none, when they were
-   * too large to keep (then `argsOmitted`), and on older snapshots.
+   * process that ran it is gone. Absent when the run had none (then
+   * `argsRecorded`), when they were too large to keep (then `argsOmitted`),
+   * and on older snapshots.
    */
   args?: unknown;
   /** The run had `args` this snapshot could not keep. */
   argsOmitted?: true;
+  /**
+   * This snapshot vouches that the run had no `args`. Written by
+   * `snapshotArgs` when there were none, so a retry can tell "the run had no
+   * args" apart from "the snapshot predates recorded args", which carry
+   * neither field.
+   */
+  argsRecorded?: true;
   meta: WorkflowMeta | null;
   status: WorkflowTerminalStatus;
   script: string;
@@ -152,12 +163,13 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
 /**
  * `args` as a snapshot keeps them: the value when it serializes within
  * {@link MAX_SNAPSHOT_ARGS_CHARS}, otherwise only the fact that there were
- * some.
+ * some. A run without args records `argsRecorded`, so its snapshot can still
+ * tell "no args" apart from the pre-args snapshots that carry neither field.
  */
 export function snapshotArgs(
   args: unknown,
-): Pick<WorkflowSnapshot, 'args' | 'argsOmitted'> {
-  if (args === undefined) return {};
+): Pick<WorkflowSnapshot, 'args' | 'argsOmitted' | 'argsRecorded'> {
+  if (args === undefined) return { argsRecorded: true };
   let json: string | undefined;
   try {
     json = JSON.stringify(args);
@@ -305,7 +317,7 @@ export async function deleteWorkflowSnapshot(
   runId: string,
 ): Promise<boolean> {
   const storage = config.storage;
-  if (!storage || !/^wf_[0-9a-f]+$/.test(runId)) return false;
+  if (!storage || !isWorkflowRunId(runId)) return false;
   try {
     await fs.rm(path.dirname(storage.getWorkflowRunJournalPath(runId)), {
       recursive: true,
@@ -520,6 +532,7 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
       value['startMode'] === 'retry' ||
       value['startMode'] === 'rerun') &&
     (value['argsOmitted'] === undefined || value['argsOmitted'] === true) &&
+    (value['argsRecorded'] === undefined || value['argsRecorded'] === true) &&
     isWorkflowMeta(value['meta']) &&
     (status === 'completed' || status === 'failed' || status === 'cancelled') &&
     typeof value['script'] === 'string' &&
@@ -596,10 +609,10 @@ async function pruneSnapshots(config: Config, dir: string): Promise<void> {
       // `fs.rm(`${dir}/..`, {recursive,force})` would delete the runs dir's
       // PARENT; `notarun.json` would delete a sibling `notarun/`. A malicious
       // repo could ship such a file and trip it once pruning kicks in. Only the
-      // generated `wf_<hex>` shape (mirrors workflow.ts's resumeFromRunId guard)
-      // may drive `fs.rm`. The `.json` unlink stays unconditional — it removes
+      // generated `wf_<hex>` shape (the shared `isWorkflowRunId` guard) may
+      // drive `fs.rm`. The `.json` unlink stays unconditional — it removes
       // exactly that one file, never a directory.
-      const isRunDir = /^wf_[0-9a-f]+$/.test(runId);
+      const isRunDir = isWorkflowRunId(runId);
       const deleteArtifacts =
         isRunDir &&
         !protectedRunIds.has(runId) &&

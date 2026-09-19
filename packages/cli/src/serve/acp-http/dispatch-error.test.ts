@@ -84,16 +84,29 @@ describe('toRpcError', () => {
 
   // A run whose stored state rules out the action — no journal to resume,
   // args its snapshot could not keep — is not a daemon fault: the client
-  // gets the reason and a status it can branch on.
-  it.each(['workflow_journal_unavailable', 'workflow_args_unavailable'])(
-    'answers %s as a conflict that keeps its message',
-    (errorKind) => {
+  // gets the reason and a status it can branch on. Each kind also runs
+  // against the wire shape: the ACP child delivers these as plain JSON,
+  // which is why the mapping is duck-typed rather than `instanceof`.
+  it.each([
+    ['workflow_journal_unavailable', 'request'],
+    ['workflow_journal_unavailable', 'wire'],
+    ['workflow_args_unavailable', 'request'],
+    ['workflow_args_unavailable', 'wire'],
+    ['workflow_run_in_progress', 'request'],
+    ['workflow_run_in_progress', 'wire'],
+  ] as const)(
+    'answers %s as a conflict that keeps its message (%s)',
+    (errorKind, transport) => {
       const source = RequestError.invalidParams(
         { errorKind },
         'Workflow run wf_1234abcd has no journal on disk',
       );
+      const error: unknown =
+        transport === 'request'
+          ? source
+          : JSON.parse(JSON.stringify(source.toErrorResponse()));
 
-      expect(toRpcError(source)).toEqual({
+      expect(toRpcError(error)).toEqual({
         code: RPC.INVALID_PARAMS,
         message: source.message,
         data: { errorKind, httpStatus: 409 },

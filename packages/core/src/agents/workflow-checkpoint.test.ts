@@ -177,6 +177,13 @@ describe('checkpointFromTask', () => {
     expect('args' in cp).toBe(false);
     expect(cp.description).toBe(RUN_ID);
   });
+
+  it('records that a run had no args, so its snapshot can tell that from a pre-args record', () => {
+    const cp = checkpointFromTask(task(), { sessionId: 's', meta: null });
+    expect(cp.argsRecorded).toBe(true);
+    expect('args' in cp).toBe(false);
+    expect(cp.argsOmitted).toBeUndefined();
+  });
 });
 
 describe('writing and reading a checkpoint', () => {
@@ -407,6 +414,16 @@ describe('claimInterruptedWorkflowRuns', () => {
       agentsDispatched: 0,
       endTime: 1_700_000_000_000,
     });
+  });
+
+  it('carries the no-args record onto the claimed snapshot', async () => {
+    await leaveRun(checkpoint({ argsRecorded: true }));
+
+    const [run] = await claimInterruptedWorkflowRuns(config, stopped);
+
+    expect(run!.snapshot.argsRecorded).toBe(true);
+    expect(run!.snapshot.args).toBeUndefined();
+    expect(run!.snapshot.argsOmitted).toBeUndefined();
   });
 
   it('skips run directories without a checkpoint and names that are not runs', async () => {

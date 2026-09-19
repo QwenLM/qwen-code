@@ -10,6 +10,8 @@ import type { ServeSessionSupportedCommandsStatus } from '@qwen-code/acp-bridge/
 // The daemon's workspace trust verdict never reaches the ACP child's
 // workflow gate, so the daemon boundary redacts the surfaces itself with the
 // same fail-closed shape the child produces when its own gate denies them.
+// `workflowToolFeatures` goes too: its flags advertise capabilities this
+// gate denies, so a host gating its controls on them must not read `true`.
 export function redactWorkflowsFromSupportedCommands(
   status: ServeSessionSupportedCommandsStatus,
 ): ServeSessionSupportedCommandsStatus {
@@ -19,6 +21,7 @@ export function redactWorkflowsFromSupportedCommands(
       (command) => command.name !== 'workflows',
     ),
     workflowsEnabled: false,
+    workflowToolFeatures: undefined,
     savedWorkflows: [],
   };
 }

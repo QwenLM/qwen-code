@@ -1472,8 +1472,11 @@ function TaskDetail({
   const canResume = task.kind === 'workflow' && task.status === 'paused';
   // A run restored from history restarts like a live one, unless its
   // snapshot could not keep the args it was launched with.
-  const canRestart =
-    task.kind === 'workflow' && !(task.isHistorical && task.argsOmitted);
+  const argsNotRestartable =
+    task.kind === 'workflow' &&
+    task.isHistorical === true &&
+    task.argsOmitted === true;
+  const canRestart = task.kind === 'workflow' && !argsNotRestartable;
   const canRetry = canRestart && task.status === 'failed';
   const canRerun =
     canRestart &&
@@ -1560,6 +1563,16 @@ function TaskDetail({
 
   const promptLines =
     task.kind === 'agent' && task.prompt ? task.prompt.split('\n') : [];
+  // A row whose run cannot be restarted gets the reason where the controls
+  // would be; without it the row reads as merely stale.
+  const argsOmittedHint =
+    !documentMode && argsNotRestartable ? (
+      <div className={styles.actionBar} data-plan-interactive>
+        <span className={styles.actionHint}>
+          {t('workflow.history.argsOmitted')}
+        </span>
+      </div>
+    ) : null;
   const actionControls =
     !documentMode &&
     ((canCancel && onCancel) ||
@@ -1634,7 +1647,9 @@ function TaskDetail({
           </>
         )}
       </div>
-    ) : null;
+    ) : (
+      argsOmittedHint
+    );
   const headerContent = !hideHeader ? (
     <>
       <div className={styles.title}>{detailTitle(task, t)}</div>

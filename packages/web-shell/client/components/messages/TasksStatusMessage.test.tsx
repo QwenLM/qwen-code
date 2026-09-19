@@ -937,6 +937,10 @@ describe('TasksStatusMessage workflow details', () => {
     expect(container.textContent).toContain('Saved run');
     expect(container.textContent).not.toContain('Retry failed path');
     expect(container.textContent).not.toContain('Rerun all');
+    // With the controls withdrawn, the row itself says why.
+    expect(container.textContent).toContain(
+      'Saved without its launch args — start it again with run-saved or run-script and the original args.',
+    );
   });
 
   it('does not group workflow history by a shared display label', () => {
