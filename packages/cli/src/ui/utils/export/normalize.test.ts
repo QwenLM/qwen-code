@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
+import { collectSessionData } from './collect.js';
 import { normalizeSessionData } from './normalize.js';
 import type { ExportConfig } from './types.js';
 
@@ -13,6 +14,207 @@ describe('normalizeSessionData', () => {
   const config = {
     getToolRegistry: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
+
+  it.each(['thought-first', 'thought-last'])(
+    'attaches assistant usage to the answer after collection (%s)',
+    async (order) => {
+      const records: ChatRecord[] = [
+        {
+          uuid: 'user-usage-1',
+          parentUuid: null,
+          sessionId: 'session-usage',
+          timestamp: '2026-09-17T15:52:44.524Z',
+          type: 'user',
+          cwd: '',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'first question' }] },
+        },
+        {
+          uuid: 'assistant-usage-1',
+          parentUuid: 'user-usage-1',
+          sessionId: 'session-usage',
+          timestamp: '2026-09-17T15:52:48.291Z',
+          type: 'assistant',
+          cwd: '',
+          version: '1.0.0',
+          message: {
+            role: 'model',
+            parts: [
+              { text: 'thinking about the first answer', thought: true },
+              { text: 'the first answer' },
+            ],
+          },
+          usageMetadata: { totalTokenCount: 222 },
+        },
+        {
+          uuid: 'user-usage-2',
+          parentUuid: 'assistant-usage-1',
+          sessionId: 'session-usage',
+          timestamp: '2026-09-17T15:53:10.000Z',
+          type: 'user',
+          cwd: '',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'second question' }] },
+        },
+        {
+          uuid: 'assistant-usage-2',
+          parentUuid: 'user-usage-2',
+          sessionId: 'session-usage',
+          timestamp: '2026-09-17T15:53:14.500Z',
+          type: 'assistant',
+          cwd: '',
+          version: '1.0.0',
+          message: {
+            role: 'model',
+            parts: [
+              { text: 'thinking about the second answer', thought: true },
+              { text: 'the second answer' },
+            ],
+          },
+          usageMetadata: { totalTokenCount: 333 },
+        },
+      ];
+
+      if (order === 'thought-last') {
+        for (const record of records) {
+          if (record.type === 'assistant') record.message?.parts?.reverse();
+        }
+      }
+
+      const collected = await collectSessionData(
+        {
+          sessionId: 'session-usage',
+          startTime: '2026-09-17T15:52:48.291Z',
+          messages: records,
+        },
+        config,
+      );
+      expect(
+        collected.messages.map((message) => message.message?.role),
+      ).toEqual(
+        order === 'thought-last'
+          ? ['user', 'assistant', 'thinking', 'user', 'assistant', 'thinking']
+          : ['user', 'thinking', 'assistant', 'user', 'thinking', 'assistant'],
+      );
+      const normalized = normalizeSessionData(collected, records, config);
+
+      const thinkingMessages = normalized.messages.filter(
+        (message) => message.message?.role === 'thinking',
+      );
+      const answerMessages = normalized.messages.filter(
+        (message) => message.message?.role === 'assistant',
+      );
+      expect(thinkingMessages).toHaveLength(2);
+      expect(thinkingMessages.map((message) => message.uuid)).toEqual([
+        'assistant-usage-1',
+        'assistant-usage-2',
+      ]);
+      expect(thinkingMessages.every((message) => !message.usageMetadata)).toBe(
+        true,
+      );
+      expect(
+        answerMessages.map((message) => [
+          message.uuid,
+          message.usageMetadata?.totalTokenCount,
+        ]),
+      ).toEqual([
+        ['assistant-usage-1', 222],
+        ['assistant-usage-2', 333],
+      ]);
+    },
+  );
+
+  it.each([false, true])(
+    'keeps usage on thinking when there is no answer (tool call: %s)',
+    async (withToolCall) => {
+      const record: ChatRecord = {
+        uuid: 'assistant-thinking',
+        parentUuid: null,
+        sessionId: 'session-thinking',
+        timestamp: '2026-09-17T15:52:48.291Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'thinking before acting', thought: true },
+            ...(withToolCall
+              ? [
+                  {
+                    functionCall: {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: 'file.txt' },
+                    },
+                  },
+                ]
+              : []),
+          ],
+        },
+        usageMetadata: { totalTokenCount: 222 },
+      };
+      const collected = await collectSessionData(
+        {
+          sessionId: record.sessionId,
+          startTime: record.timestamp,
+          messages: [record],
+        },
+        config,
+      );
+      const normalized = normalizeSessionData(collected, [record], config);
+      const thinking = normalized.messages.filter(
+        (message) => message.message?.role === 'thinking',
+      );
+      expect(thinking).toHaveLength(1);
+      expect(thinking[0]).toMatchObject({
+        uuid: record.uuid,
+        usageMetadata: { totalTokenCount: 222 },
+      });
+      expect(
+        normalized.messages.filter((message) => message.usageMetadata),
+      ).toHaveLength(1);
+      expect(
+        normalized.messages.filter((message) => message.type === 'tool_call'),
+      ).toHaveLength(withToolCall ? 1 : 0);
+    },
+  );
+
+  it.each(['assistant', 'thinking'])(
+    'preserves existing usage on the selected %s message',
+    (role) => {
+      const record: ChatRecord = {
+        uuid: 'assistant-existing-usage',
+        parentUuid: null,
+        sessionId: 'session-usage',
+        timestamp: '2026-09-17T15:52:48.291Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        usageMetadata: { totalTokenCount: 222 },
+      };
+      const normalized = normalizeSessionData(
+        {
+          sessionId: record.sessionId,
+          startTime: record.timestamp,
+          messages: [
+            {
+              uuid: record.uuid,
+              timestamp: record.timestamp,
+              type: 'assistant',
+              message: { role, parts: [{ text: 'existing message' }] },
+              usageMetadata: { totalTokenCount: 111 },
+            },
+          ],
+        },
+        [record],
+        config,
+      );
+      expect(normalized.messages[0].usageMetadata).toEqual({
+        totalTokenCount: 111,
+      });
+    },
+  );
 
   it('does not export truncated saved-session previews as full diffs', () => {
     const record: ChatRecord = {

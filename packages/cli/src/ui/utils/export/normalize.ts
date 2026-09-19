@@ -42,7 +42,11 @@ export function normalizeSessionData(
   // Build index of assistant messages by uuid for usageMetadata merging
   const assistantMessageIndexByUuid = new Map<string, number>();
   normalized.forEach((message, index) => {
-    if (message.type === 'assistant') {
+    if (
+      message.type === 'assistant' &&
+      (message.message?.role !== 'thinking' ||
+        !assistantMessageIndexByUuid.has(message.uuid))
+    ) {
       assistantMessageIndexByUuid.set(message.uuid, index);
     }
   });

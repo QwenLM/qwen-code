@@ -465,7 +465,8 @@ class ExportSessionContext implements SessionContext {
     type: 'user' | 'assistant';
     role: 'user' | 'assistant' | 'thinking';
     parts: Array<{ text: string }>;
-    timestamp: number;
+    sourceUuid?: string;
+    sourceTimestamp?: string;
     usageMetadata?: GenerateContentResponseUsageMetadata;
   } | null = null;
   private activeRecordId: string | null = null;
@@ -549,8 +550,9 @@ class ExportSessionContext implements SessionContext {
   /**
    * Writes the Goal transitions journaled before `position`. A transition
    * waits for the next record so the `/goal …` line replayed from its own
-   * record lands ahead of it; whatever is buffered came from an earlier
-   * record, so it is flushed first.
+   * record lands ahead of it. The buffered message is flushed before the
+   * transition card, using a fresh uuid only when that buffer came from the
+   * transition itself.
    */
   private emitGoalStatesBefore(position: number): void {
     while (
@@ -562,7 +564,7 @@ class ExportSessionContext implements SessionContext {
       // `/goal …` line). The record's uuid belongs to the transition, which
       // is what a snapshot's record references resolve to, so the text does
       // not take it as well.
-      this.flushCurrentMessage(this.activeRecordId === uuid);
+      this.flushCurrentMessage(this.currentMessage?.sourceUuid === uuid);
       this.messages.push({
         uuid,
         sessionId: this.sessionId,
@@ -609,6 +611,11 @@ class ExportSessionContext implements SessionContext {
       this.currentMessage.role === messageRole
     ) {
       this.currentMessage.parts.push({ text: content.text });
+      // Keep the first source uuid for merged messages, but use the timestamp
+      // of the latest record that contributed text to the buffer.
+      if (this.activeRecordTimestamp) {
+        this.currentMessage.sourceTimestamp = this.activeRecordTimestamp;
+      }
       // Merge usageMetadata if provided (for assistant messages)
       if (usageMetadata && role === 'assistant') {
         this.currentMessage.usageMetadata = usageMetadata;
@@ -618,7 +625,8 @@ class ExportSessionContext implements SessionContext {
         type: role,
         role: messageRole,
         parts: [{ text: content.text }],
-        timestamp: Date.now(),
+        sourceUuid: this.activeRecordId ?? undefined,
+        sourceTimestamp: this.activeRecordTimestamp ?? undefined,
         ...(usageMetadata && role === 'assistant' ? { usageMetadata } : {}),
       };
     }
@@ -720,11 +728,21 @@ class ExportSessionContext implements SessionContext {
   private flushCurrentMessage(freshUuid = false): void {
     if (!this.currentMessage) return;
 
-    const uuid = freshUuid ? randomUUID() : this.getMessageUuid();
+    // Identity belongs to the record the message was buffered from, captured
+    // when the buffer was created: resolving it here would read whichever
+    // record is active by the time the buffer is flushed. A Goal transition is
+    // the exception: text replayed from the transition's own record keeps that
+    // record's timestamp but not its uuid, so a snapshot's record references
+    // resolve to the transition alone.
+    const uuid = freshUuid
+      ? randomUUID()
+      : (this.currentMessage.sourceUuid ?? this.getMessageUuid());
+    const timestamp =
+      this.currentMessage.sourceTimestamp ?? this.getMessageTimestamp();
     const exportMessage: ExportMessage = {
       uuid,
       sessionId: this.sessionId,
-      timestamp: this.getMessageTimestamp(),
+      timestamp,
       type: this.currentMessage.type,
       message: {
         role: this.currentMessage.role,
@@ -746,8 +764,8 @@ class ExportSessionContext implements SessionContext {
   }
 
   flushMessages(): void {
-    this.flushCurrentMessage();
     this.emitGoalStatesBefore(Number.POSITIVE_INFINITY);
+    this.flushCurrentMessage();
   }
 
   getMessages(): ExportMessage[] {
