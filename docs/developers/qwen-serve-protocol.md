@@ -209,7 +209,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ['health', 'capabilities', 'session_create', 'session_id_override', 'session_scope_override',
  'session_load', 'session_resume', 'session_transcript',
  'unstable_session_resume',
- 'session_list', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
+ 'session_list', 'session_catalog_batch', 'session_info', 'session_prompt', 'session_mid_turn_message_mutation',
  'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
@@ -2827,6 +2827,61 @@ Additional fields may appear on each session when `view=organized`:
 ```
 
 Trusted active lists include live daemon overlay fields such as `clientCount`, `hasActivePrompt`, and `activeWorkState`. Untrusted-secondary and archived lists are storage-only: live overlay fields remain absent or false, and archived entries set `isArchived` to `true`. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+
+### `POST /sessions/catalog`
+
+Read independently paginated session catalogs for several registered workspaces in one request. Pre-flight `session_catalog_batch` once; older daemons retain the workspace-qualified session-list and group endpoints. The route has batched persisted-workspace ownership: authentication and request admission are process-global, while each entry resolves and reads only its owning workspace. It never registers a workspace, creates a session, starts ACP, or falls back to the primary runtime.
+
+```json
+{
+  "workspaces": [
+    { "workspace": "workspace-a", "cursor": "previous-a-cursor" },
+    { "workspace": "/canonical/workspace-b" }
+  ],
+  "options": {
+    "size": 20,
+    "archiveState": "active",
+    "view": "organized",
+    "group": "all"
+  },
+  "includeGroups": true
+}
+```
+
+`workspaces` is an ordered array of 1–20 `{ workspace, cursor? }` entries, or `"all"` to select all public registered workspaces. Selectors resolve as exact ids before canonical absolute paths. `all` excludes internal Conversations and removed entries, includes temporarily unavailable entries, and fails if more than 20 entries would be selected; callers must then split explicit selections. An empty public registry returns an empty result. Explicit internal selectors return an entry error without booting the internal runtime.
+
+Shared `options` accept `size` (integer 1–100, default 20), `archiveState`, `view`, `group`, `parentSessionId`, `sourceType`, and `sourceId` with the existing list filters and combinations. `group` and `parentSessionId` are limited to 256 characters. `includeGroups` defaults to false. Each workspace has its own cursor. Batch default pages use activity ordering and opaque cursors, including for live-only sessions; these cursors are not interchangeable with legacy numeric list cursors. Continue with that entry's returned `cwd` and `nextCursor`, preserving the filters. There is no global sort or global pagination cursor.
+
+```json
+{
+  "workspaces": [
+    {
+      "workspace": "workspace-a",
+      "workspaceId": "workspace-a",
+      "cwd": "/canonical/workspace-a",
+      "sessions": [],
+      "groups": {
+        "groups": [],
+        "colorOptions": ["red", "orange", "yellow", "green", "blue", "purple"]
+      }
+    },
+    {
+      "workspace": "/canonical/workspace-b",
+      "error": {
+        "code": "workspace_not_found",
+        "message": "Workspace not found",
+        "status": 404
+      }
+    }
+  ]
+}
+```
+
+The result preserves selection order and the original selector as `workspace`. Successful entries include canonical `cwd`, `workspaceId`, and the existing page fields (`sessions`, optional `nextCursor`, `truncated`, and `liveMergeFailed`). Every returned session's `workspaceCwd` is normalized to its enclosing entry's canonical `cwd`. When requested, `groups` contains the complete group catalog; group identities are scoped to their enclosing workspace. Group reads retain the existing normalization and warn-and-empty fallback for malformed or unreadable organization stores. Failed entries contain `error: { code, message, status }` and resolved identity when available, without a successful empty `sessions` list. Valid batches return HTTP 200 even when some entries fail. Malformed request envelopes return HTTP 400 before storage reads.
+
+Unknown, internal, and removed workspaces produce `404 workspace_not_found`; unavailable or changed runtime generations produce `503 workspace_runtime_unavailable`; an untrusted primary produces `403 untrusted_workspace`. Untrusted secondaries keep the existing persisted-only catalog policy without live bridge reads, repair writes, or debug-session logging. Thrown cursor and group failures retain their existing codes; other thrown read failures become `500 session_catalog_failed`. Trusted active entries can merge existing live bridge state; archived entries remain storage-only.
+
+The daemon runs at most four workspace reads concurrently per batch, limits selectors to 4096 characters and cursors to 16384 characters, and caps each serialized successful entry at 512 KiB. An oversized entry returns `413 catalog_response_too_large`; reduce `size` or omit groups before retrying. This bounds a batch response to approximately 10 MiB plus envelope/error overhead. Client disconnect cancels pending reads and prevents additional workspace reads from starting. The existing daemon JSON body limit and persisted scan limits also apply. Catalog requests use the read rate-limit tier.
 
 ### `GET /workspaces/:workspace/sessions/live-state`
 

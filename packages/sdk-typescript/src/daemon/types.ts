@@ -1785,6 +1785,40 @@ export interface DaemonSessionListPage {
   truncated?: boolean;
 }
 
+export interface DaemonSessionCatalogWorkspace {
+  /** Registered workspace id or absolute cwd. */
+  workspace: string;
+  /** This workspace's opaque cursor from a previous catalog batch. */
+  cursor?: string;
+}
+
+export interface DaemonSessionCatalogRequest {
+  /** 1–20 entries; `all` excludes internal workspaces. */
+  workspaces: 'all' | DaemonSessionCatalogWorkspace[];
+  /** Shared filters; pageSize is 1–100, default 20. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  includeGroups?: boolean;
+}
+
+export interface DaemonSessionCatalogPage extends DaemonSessionListPage {
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+  groups?: DaemonSessionGroupCatalog;
+}
+
+export interface DaemonSessionCatalogError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonSessionCatalogResult {
+  /** One page or explicit error per selected workspace, in selection order. */
+  workspaces: Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>;
+}
+
 /** One content-search hit: the matching session plus an excerpt of the match. */
 export interface DaemonSessionSearchMatch {
   session: DaemonSessionSummary;

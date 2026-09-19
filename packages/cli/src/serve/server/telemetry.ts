@@ -580,6 +580,12 @@ export function resolveDaemonTelemetryRoute(
   const legacyRoute = matchLegacySessionTelemetryRoute(req.method, req.path);
   if (legacyRoute) return legacyRoute;
   const path = req.path.replace(/\/$/, '') || '/';
+  if (req.method === 'POST' && /^\/sessions\/catalog$/i.test(path)) {
+    return {
+      route: 'POST /sessions/catalog',
+      attribution: 'handler_resolved',
+    };
+  }
   if (req.method === 'GET' && path === '/daemon/status') {
     return { route: 'GET /daemon/status' };
   }

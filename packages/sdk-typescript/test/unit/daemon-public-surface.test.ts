@@ -106,6 +106,11 @@ import type {
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
   DaemonSessionCatalogVersion,
+  DaemonSessionCatalogWorkspace,
+  DaemonSessionCatalogRequest,
+  DaemonSessionCatalogPage,
+  DaemonSessionCatalogError,
+  DaemonSessionCatalogResult,
   DaemonSessionLiveState,
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
@@ -606,6 +611,28 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSection>().not.toBeNever();
     expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
+  });
+
+  it('exposes batched session catalogs at the public entry', () => {
+    expect(typeof Public.DaemonClient.prototype.listSessionsCatalog).toBe(
+      'function',
+    );
+    expectTypeOf<DaemonSessionCatalogWorkspace>().toEqualTypeOf<{
+      workspace: string;
+      cursor?: string;
+    }>();
+    expectTypeOf<DaemonSessionCatalogRequest['workspaces']>().toEqualTypeOf<
+      'all' | DaemonSessionCatalogWorkspace[]
+    >();
+    expectTypeOf<DaemonSessionCatalogPage>().toMatchTypeOf<Public.DaemonSessionListPage>();
+    expectTypeOf<DaemonSessionCatalogResult['workspaces']>().toEqualTypeOf<
+      Array<DaemonSessionCatalogPage | DaemonSessionCatalogError>
+    >();
+    expectTypeOf<DaemonClient['listSessionsCatalog']>().toEqualTypeOf<
+      (
+        request: DaemonSessionCatalogRequest,
+      ) => Promise<DaemonSessionCatalogResult>
+    >();
   });
 
   it('exposes the workspace session live-state surface at the public entry', () => {
