@@ -803,6 +803,11 @@ function normalizeLaunch(
     ...raw,
     schemaVersion: 1,
     sessionId,
+    // Validated like every other text field: this value is promoted to a
+    // row's reported session id and to the key the `sessions ps` merge
+    // dedupes on, so a non-string or empty spelling must not survive
+    // normalization.
+    resumeSessionId: stringValue(raw['resumeSessionId']),
     argv: stringArrayValue(raw['argv']),
     env: stringMapValue(raw['env']),
     entrypoint,

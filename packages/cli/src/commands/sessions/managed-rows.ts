@@ -131,7 +131,10 @@ export function managedSessionRows(
       // an id that cannot resume the session. Store keying stays
       // untouched; only the reported value changes.
       const sessionId =
-        snapshot.launch?.resumeSessionId ?? snapshot.state.sessionId;
+        // `||`, not `??`: the field's type admits an empty spelling,
+        // which is no more resumable than an absent one, and which the
+        // merge below would canonicalize to the catch-all key '_'.
+        snapshot.launch?.resumeSessionId || snapshot.state.sessionId;
       return {
         // `title` is derived from the roster entry, the activity file
         // and the launch record in that order, so it is the same label

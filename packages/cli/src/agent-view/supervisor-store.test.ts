@@ -536,6 +536,48 @@ describe('agent view supervisor store', () => {
     });
     expect(launch).not.toHaveProperty('initialPrompt');
   });
+
+  it('strips a non-string or empty resumeSessionId from a launch file', async () => {
+    // `sessions ps` promotes this field to the row's reported session id
+    // and to the key the merge dedupes registry records on. A non-string
+    // would reach `sanitizeSessionId` as a TypeError thrown outside every
+    // guard and kill the whole listing; an empty string survives `??`
+    // fallbacks and canonicalizes to '_', a key an unrelated registry
+    // record can share.
+    const paths = getAgentViewSessionPaths('session-1', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.sessionDir, { recursive: true });
+    const launchRecord = {
+      schemaVersion: 1,
+      sessionId: 'session-1',
+      argv: ['qwen'],
+      env: {},
+      entrypoint: '/tmp/qwen',
+      projectCwd: tempDir,
+      activeCwd: tempDir,
+      includeDirectories: [],
+      terminal: { columns: 80, rows: 24 },
+    };
+    fs.writeFileSync(
+      paths.launchPath,
+      JSON.stringify({ ...launchRecord, resumeSessionId: 42 }),
+    );
+    const coerced = await readAgentViewLaunch('session-1', {
+      globalDir: tempDir,
+    });
+    expect(coerced).not.toHaveProperty('resumeSessionId');
+    expect(coerced?.sessionId).toBe('session-1');
+
+    fs.writeFileSync(
+      paths.launchPath,
+      JSON.stringify({ ...launchRecord, resumeSessionId: '' }),
+    );
+    const emptied = await readAgentViewLaunch('session-1', {
+      globalDir: tempDir,
+    });
+    expect(emptied).not.toHaveProperty('resumeSessionId');
+  });
 });
 
 function rosterEntry(

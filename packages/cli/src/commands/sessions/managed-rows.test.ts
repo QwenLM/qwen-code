@@ -446,6 +446,17 @@ describe('managedSessionRows', () => {
     expect(row.sessionId).toBe('managed-1');
   });
 
+  it('falls back to the store id when the recorded resume spelling is empty', () => {
+    // `??` does not fall back on '', and an empty spelling is no more
+    // resumable than an absent one. The store's normalization strips it,
+    // but the field's type admits it, so the fallback holds the line too.
+    const [row] = managedSessionRows(
+      [snapshot({ launch: launchFile({ resumeSessionId: '' }) })],
+      NOW,
+    );
+    expect(row.sessionId).toBe('managed-1');
+  });
+
   it('shows the resumable spelling when the id doubles as the name', () => {
     // The name fallback is what a user reads and acts on in the table;
     // it must match the id the row reports.
@@ -563,6 +574,22 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].sessionId).toBe('Managed-1');
+  });
+
+  it('dedupes on the real id when the recorded resume spelling is empty', () => {
+    // An empty spelling would key managedIds on sanitizeSessionId('') —
+    // the catch-all '_' — so the session's own registry record would
+    // survive the dedupe and the table would list one session twice.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'managed-1', name: 'app-ab' })],
+      managedSessionRows(
+        [snapshot({ launch: launchFile({ resumeSessionId: '' }) })],
+        NOW,
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(true);
+    expect(rows[0].sessionId).toBe('managed-1');
   });
 
   it('carries the deduped record’s verified pid onto a worker-less managed row', () => {
