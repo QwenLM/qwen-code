@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
-import type { Dirent } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
   access,
   chmod,
@@ -21,11 +21,15 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
+  CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
   CHROME_NATIVE_HOST_NAME,
+  CHROME_NATIVE_HOST_REVISION,
 } from './bridge/protocol.js';
+import type { ChromeProfileDescriber } from './bridge/discovery.js';
 
 const LAUNCHER_MARKER = '# qwen-browser-use native host';
+const INSTALLATION_MARKER = '# installation ';
 const MANIFEST_FILE = CHROME_NATIVE_HOST_NAME + '.json';
 const ALLOWED_ORIGIN = 'chrome-extension://' + CHROME_EXTENSION_ID + '/';
 
@@ -42,66 +46,27 @@ export interface NativeHostInstallResult {
   skippedForeignPaths: string[];
 }
 
-export async function isChromeExtensionInstalled(
-  options: NativeHostInstallOptions,
-): Promise<boolean> {
-  for (const manifestPath of resolveOptions(options).manifestPaths) {
-    const browserRoot = dirname(dirname(manifestPath));
-    let profiles: Dirent[];
-    try {
-      profiles = await readdir(browserRoot, { withFileTypes: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
-    }
-    for (const profile of profiles) {
-      if (
-        !profile.isDirectory() ||
-        !/^(Default|Profile \d+)$/.test(profile.name)
-      ) {
-        continue;
-      }
-      const profilePath = join(browserRoot, profile.name);
-      for (const file of ['Secure Preferences', 'Preferences']) {
-        const contents = await readExistingFile(join(profilePath, file));
-        if (contents === null) continue;
-        let preferences: {
-          extensions?: {
-            settings?: Record<string, { path?: unknown }>;
-          };
-        } | null;
-        try {
-          preferences = JSON.parse(contents) as typeof preferences;
-        } catch {
-          continue;
-        }
-        const extension =
-          preferences?.extensions?.settings?.[CHROME_EXTENSION_ID];
-        if (extension === undefined) continue;
-        if (
-          typeof extension?.path === 'string' &&
-          extension.path.length > 0 &&
-          (await pathExists(
-            join(
-              resolve(profilePath, 'Extensions', extension.path),
-              'manifest.json',
-            ),
-          ))
-        ) {
-          return true;
-        }
-        break;
-      }
-    }
-  }
-  return false;
+export interface NativeHostStatus extends NativeHostInstallResult {
+  installedPaths: string[];
+  protocolVersion: number | null;
+  hostRevision: number | null;
+  nativeHostPath: string | null;
+  ready: boolean;
+}
+
+interface InstalledHost {
+  protocolVersion: number;
+  revision: number;
+  nativeHostPath: string;
+  nodePath: string;
 }
 
 export async function installChromeNativeHost(
   options: NativeHostInstallOptions,
-): Promise<NativeHostInstallResult & { installedPaths: string[] }> {
+): Promise<NativeHostStatus> {
   const resolved = resolveOptions(options);
-  await access(resolved.nativeHostPath);
+  const hostContents = await readFile(resolved.nativeHostPath, 'utf8');
+  await access(resolved.nodePath, constants.X_OK);
   const existingLauncher = await readExistingFile(resolved.launcherPath);
   if (existingLauncher !== null && !isOwnedLauncher(existingLauncher)) {
     throw new Error(
@@ -113,15 +78,36 @@ export async function installChromeNativeHost(
     recursive: true,
     mode: 0o700,
   });
+  const installedHostPath = join(
+    dirname(resolved.launcherPath),
+    'hosts',
+    createHash('sha256').update(hostContents).digest('hex'),
+    'native-host.mjs',
+  );
+  await mkdir(dirname(installedHostPath), { recursive: true, mode: 0o700 });
+  const existingHost = await readExistingFile(installedHostPath);
+  if (existingHost !== null && existingHost !== hostContents) {
+    throw new Error(
+      'Installed Native Host content has changed: ' + installedHostPath,
+    );
+  }
+  await atomicWrite(installedHostPath, hostContents, 0o600, existingHost);
+  const installation: InstalledHost = {
+    protocolVersion: CHROME_BRIDGE_PROTOCOL_VERSION,
+    revision: CHROME_NATIVE_HOST_REVISION,
+    nativeHostPath: installedHostPath,
+    nodePath: resolved.nodePath,
+  };
   await atomicWrite(
     resolved.launcherPath,
     [
       '#!/bin/sh',
       LAUNCHER_MARKER,
+      INSTALLATION_MARKER + JSON.stringify(installation),
       'exec ' +
         shellQuote(resolved.nodePath) +
         ' ' +
-        shellQuote(resolved.nativeHostPath) +
+        shellQuote(installedHostPath) +
         ' "$@"',
       '',
     ].join('\n'),
@@ -129,47 +115,46 @@ export async function installChromeNativeHost(
     existingLauncher,
   );
 
-  const manifest =
-    JSON.stringify(
-      {
-        name: CHROME_NATIVE_HOST_NAME,
-        description: 'Qwen Browser Use',
-        path: resolved.launcherPath,
-        type: 'stdio',
-        allowed_origins: [ALLOWED_ORIGIN],
-      },
-      null,
-      2,
-    ) + '\n';
-  const installedPaths: string[] = [];
-  const skippedForeignPaths: string[] = [];
-  for (const manifestPath of resolved.manifestPaths) {
-    const existing = await readExistingFile(manifestPath);
-    if (
-      existing === null &&
-      !(await pathExists(dirname(dirname(manifestPath))))
-    ) {
-      continue;
-    }
-    if (
-      existing !== null &&
-      !isOwnedManifest(existing, resolved.launcherPath)
-    ) {
-      skippedForeignPaths.push(manifestPath);
-      continue;
-    }
-    await mkdir(dirname(manifestPath), { recursive: true });
-    await atomicWrite(manifestPath, manifest, 0o600, existing);
-    installedPaths.push(manifestPath);
+  await writeManifests(resolved);
+  return await statusChromeNativeHost(options);
+}
+
+export class NativeHostNewerError extends Error {
+  constructor(readonly installedProtocolVersion: number) {
+    super(
+      'The installed Browser Use Native Host speaks protocol ' +
+        installedProtocolVersion +
+        ', newer than this Qwen Code (protocol ' +
+        CHROME_BRIDGE_PROTOCOL_VERSION +
+        '). Update Qwen Code; the installed Host was left unchanged.',
+    );
+    this.name = 'NativeHostNewerError';
   }
-  // Same order as statusChromeNativeHost: manifests first, then the launcher.
-  installedPaths.push(resolved.launcherPath);
-  return {
-    launcherPath: resolved.launcherPath,
-    manifestPaths: resolved.manifestPaths,
-    installedPaths,
-    skippedForeignPaths,
-  };
+}
+
+/**
+ * First-use setup. A usable Host of the same protocol and at least this
+ * revision is reused rather than repointed at this CLI's copy, so CLIs from
+ * different checkouts do not take turns replacing it. Never downgrades.
+ */
+export async function ensureChromeNativeHost(
+  options: NativeHostInstallOptions,
+): Promise<NativeHostStatus & { action: 'installed' | 'reused' }> {
+  const status = await statusChromeNativeHost(options);
+  if (
+    status.protocolVersion !== null &&
+    status.protocolVersion > CHROME_BRIDGE_PROTOCOL_VERSION
+  )
+    throw new NativeHostNewerError(status.protocolVersion);
+  if (
+    !status.ready ||
+    status.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
+    (status.hostRevision ?? 0) < CHROME_NATIVE_HOST_REVISION
+  ) {
+    return { ...(await installChromeNativeHost(options)), action: 'installed' };
+  }
+  await writeManifests(resolveOptions(options));
+  return { ...(await statusChromeNativeHost(options)), action: 'reused' };
 }
 
 export async function uninstallChromeNativeHost(
@@ -204,7 +189,7 @@ export async function uninstallChromeNativeHost(
 
 export async function statusChromeNativeHost(
   options: NativeHostInstallOptions,
-): Promise<NativeHostInstallResult & { installedPaths: string[] }> {
+): Promise<NativeHostStatus> {
   const resolved = resolveOptions(options);
   const installedPaths: string[] = [];
   const skippedForeignPaths: string[] = [];
@@ -223,12 +208,125 @@ export async function statusChromeNativeHost(
   } else if (launcher !== null) {
     skippedForeignPaths.push(resolved.launcherPath);
   }
+  const installation = readInstallation(launcher);
   return {
     launcherPath: resolved.launcherPath,
     manifestPaths: resolved.manifestPaths,
     installedPaths,
     skippedForeignPaths,
+    protocolVersion: installation?.protocolVersion ?? null,
+    hostRevision: installation?.revision ?? null,
+    nativeHostPath: installation?.nativeHostPath ?? null,
+    ready:
+      installation !== null &&
+      installedPaths.length > 1 &&
+      (await pathExists(installation.nativeHostPath, constants.R_OK)) &&
+      (await pathExists(resolved.launcherPath, constants.X_OK)) &&
+      (await pathExists(installation.nodePath, constants.X_OK)),
   };
+}
+
+function readInstallation(launcher: string | null): InstalledHost | null {
+  if (launcher === null || !isOwnedLauncher(launcher)) return null;
+  const line = launcher.split('\n')[2];
+  if (!line?.startsWith(INSTALLATION_MARKER)) return null;
+  try {
+    const value = JSON.parse(
+      line.slice(INSTALLATION_MARKER.length),
+    ) as Partial<InstalledHost>;
+    if (
+      Number.isInteger(value.protocolVersion) &&
+      Number.isInteger(value.revision) &&
+      typeof value.nativeHostPath === 'string' &&
+      isAbsolute(value.nativeHostPath) &&
+      typeof value.nodePath === 'string' &&
+      isAbsolute(value.nodePath)
+    )
+      return value as InstalledHost;
+  } catch {
+    // Legacy launchers are upgraded by the explicit installer.
+  }
+  return null;
+}
+
+// Bytes scanned per extension storage file; the instance id is written once.
+const MAX_STORAGE_FILE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Maps extension instance ids to Chrome profiles. The extension keeps its id
+ * in `chrome.storage.local`, which Chrome stores per profile under
+ * `Local Extension Settings/<extension id>`; LevelDB writes the short string
+ * verbatim. Unmatched ids are omitted, so callers keep their fallback.
+ */
+export async function describeChromeProfiles(
+  options: Pick<NativeHostInstallOptions, 'homeDir' | 'platform'>,
+  instanceIds: readonly string[],
+): ReturnType<ChromeProfileDescriber> {
+  const described: Awaited<ReturnType<ChromeProfileDescriber>> = new Map();
+  if (instanceIds.length === 0) return described;
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'darwin' && platform !== 'linux') return described;
+  const { manifestPaths } = resolveOptions({
+    ...options,
+    nativeHostPath: '/unused',
+    nodePath: '/unused',
+  });
+  for (const manifestPath of manifestPaths) {
+    const browserRoot = dirname(dirname(manifestPath));
+    const localState = await readExistingFile(join(browserRoot, 'Local State'))
+      .then((contents) =>
+        contents === null
+          ? null
+          : (JSON.parse(contents) as {
+              profile?: {
+                last_used?: unknown;
+                info_cache?: Record<string, { name?: unknown }>;
+              };
+            }),
+      )
+      .catch(() => null);
+    if (localState === null) continue;
+    const browser = browserLabel(browserRoot);
+    const infoCache = localState.profile?.info_cache ?? {};
+    for (const profileDirectory of Object.keys(infoCache)) {
+      if (!/^(Default|Profile \d+)$/.test(profileDirectory)) continue;
+      const storage = join(
+        browserRoot,
+        profileDirectory,
+        'Local Extension Settings',
+        CHROME_EXTENSION_ID,
+      );
+      const files = await readdir(storage).catch(() => [] as string[]);
+      for (const file of files) {
+        if (!/\.(log|ldb)$/.test(file)) continue;
+        const path = join(storage, file);
+        const info = await stat(path).catch(() => undefined);
+        if (!info?.isFile() || info.size > MAX_STORAGE_FILE_BYTES) continue;
+        const bytes = await readFile(path).catch(() => undefined);
+        if (bytes === undefined) continue;
+        for (const id of instanceIds) {
+          if (described.has(id) || !bytes.includes(id)) continue;
+          const name = infoCache[profileDirectory]?.name;
+          const profileName =
+            typeof name === 'string' && name.trim() !== ''
+              ? name.trim()
+              : profileDirectory;
+          described.set(id, {
+            name: browser + ' · ' + profileName,
+            lastUsed: localState.profile?.last_used === profileDirectory,
+          });
+        }
+      }
+    }
+  }
+  return described;
+}
+
+function browserLabel(browserRoot: string): string {
+  if (/Chrome for Testing|google-chrome-for-testing/.test(browserRoot))
+    return 'Chrome for Testing';
+  if (/chromium/i.test(browserRoot)) return 'Chromium';
+  return 'Chrome';
 }
 
 export function nativeHostInstallHome(
@@ -271,11 +369,40 @@ function resolveOptions(options: NativeHostInstallOptions): {
   return {
     nativeHostPath,
     nodePath,
-    launcherPath: join(homeDir, '.qwen/browser-use/native-host.sh'),
+    // Not `native-host.sh`: protocol 2 installers own and rewrite that path.
+    launcherPath: join(homeDir, '.qwen/browser-use/host.sh'),
     manifestPaths: manifestRoots.map((root) =>
       join(homeDir, root, MANIFEST_FILE),
     ),
   };
+}
+
+async function writeManifests(
+  resolved: ReturnType<typeof resolveOptions>,
+): Promise<void> {
+  const manifest =
+    JSON.stringify(
+      {
+        name: CHROME_NATIVE_HOST_NAME,
+        description: 'Qwen Browser Use',
+        path: resolved.launcherPath,
+        type: 'stdio',
+        allowed_origins: [ALLOWED_ORIGIN],
+      },
+      null,
+      2,
+    ) + '\n';
+  for (const manifestPath of resolved.manifestPaths) {
+    const existing = await readExistingFile(manifestPath);
+    if (
+      existing === null
+        ? !(await pathExists(dirname(dirname(manifestPath))))
+        : !isOwnedManifest(existing, resolved.launcherPath)
+    )
+      continue;
+    await mkdir(dirname(manifestPath), { recursive: true });
+    await atomicWrite(manifestPath, manifest, 0o600, existing);
+  }
 }
 
 function isOwnedManifest(contents: string, launcherPath: string): boolean {
@@ -329,8 +456,11 @@ async function atomicWrite(
   }
 }
 
-async function pathExists(path: string): Promise<boolean> {
-  return await access(path).then(
+async function pathExists(
+  path: string,
+  mode = constants.F_OK,
+): Promise<boolean> {
+  return await access(path, mode).then(
     () => true,
     () => false,
   );
