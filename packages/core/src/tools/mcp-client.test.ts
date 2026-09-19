@@ -1753,7 +1753,11 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       const client = new McpClient(
         'apps',
-        { command: 'test-command' },
+        {
+          command: 'test-command',
+          appResourceMaxBytes: 2_097_152,
+          appResourceTimeoutMs: 30_000,
+        },
         { registerTool: vi.fn() } as unknown as ToolRegistry,
         { registerPrompt: vi.fn() } as unknown as PromptRegistry,
         {} as WorkspaceContext,
@@ -1764,6 +1768,10 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         applyConfigFilters: false,
       });
 
+      expect(snapshot.tools[0]?.appResourceLimits).toEqual({
+        appResourceMaxBytes: 2_097_152,
+        appResourceTimeoutMs: 30_000,
+      });
       expect(snapshot.tools[0]?.appResourceUri).toBe('ui://demo/dash');
       expect(snapshot.tools[0]?.appResourceUi).toEqual({
         csp: { connectDomains: ['https://api.example.com'] },

@@ -1706,6 +1706,11 @@ async function discoverToolsWithMetadata(
             mcpServerConfig.alwaysLoadTools === true,
             invocationContextClients.has(mcpClient),
             appResourceUriMap.get(funcDecl.name!),
+            undefined,
+            {
+              appResourceMaxBytes: mcpServerConfig.appResourceMaxBytes,
+              appResourceTimeoutMs: mcpServerConfig.appResourceTimeoutMs,
+            },
           ),
         );
       } catch (error) {

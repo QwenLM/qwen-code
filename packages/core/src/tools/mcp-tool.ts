@@ -28,7 +28,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
-import type { Config } from '../config/config.js';
+import type { Config, MCPServerConfig } from '../config/config.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
@@ -278,6 +278,22 @@ const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 const MCP_APP_RESOURCE_MAX_BYTES = 1024 * 1024;
 const MCP_APP_RESOURCE_TIMEOUT_MS = 10_000;
 
+type McpAppResourceLimits = Pick<
+  MCPServerConfig,
+  'appResourceMaxBytes' | 'appResourceTimeoutMs'
+>;
+
+function boundedAppLimit(
+  value: number | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(min, Math.min(Math.floor(value), max))
+    : fallback;
+}
+
 // Discriminated union for MCP Content Blocks to ensure type safety.
 type McpTextBlock = {
   type: 'text';
@@ -350,6 +366,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly appResourceUri?: string,
     private readonly appResourceUi?: Record<string, unknown>,
     private readonly retryCount: number = 0,
+    private readonly appResourceLimits?: McpAppResourceLimits,
   ) {
     super(params);
   }
@@ -500,6 +517,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           newTool['appResourceUri'],
           newTool.appResourceUi,
           this.retryCount + 1,
+          newTool.appResourceLimits,
         );
         if (!newInvocation.canSafelyReplay()) {
           throw new Error(
@@ -749,11 +767,26 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<McpAppResultDisplay | undefined> {
     if (!this.appResourceUri || !this.mcpClient?.readResource) return undefined;
 
-    const timeoutMs = Math.min(
-      this.mcpTimeout ?? MCP_APP_RESOURCE_TIMEOUT_MS,
+    const maxBytes = boundedAppLimit(
+      this.appResourceLimits?.appResourceMaxBytes,
+      MCP_APP_RESOURCE_MAX_BYTES,
+      1,
+      // JSON escaping can expand HTML 6x inside the 32 MiB replay envelope.
+      4 * 1024 * 1024,
+    );
+    const defaultTimeoutMs = boundedAppLimit(
+      this.mcpTimeout,
+      MCP_APP_RESOURCE_TIMEOUT_MS,
+      1,
       MCP_APP_RESOURCE_TIMEOUT_MS,
     );
-    const timeoutSignal = AbortSignal.timeout(MCP_APP_RESOURCE_TIMEOUT_MS);
+    const timeoutMs = boundedAppLimit(
+      this.appResourceLimits?.appResourceTimeoutMs,
+      defaultTimeoutMs,
+      100,
+      120_000,
+    );
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     try {
       const resource = await this.mcpClient.readResource(
         { uri: this.appResourceUri },
@@ -783,9 +816,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
             : undefined;
       if (!html) throw new Error('resource did not return HTML content');
       const htmlBytes = Buffer.byteLength(html, 'utf8');
-      if (htmlBytes > MCP_APP_RESOURCE_MAX_BYTES) {
+      if (htmlBytes > maxBytes) {
         throw new Error(
-          `resource HTML is ${htmlBytes} bytes, exceeding the ${MCP_APP_RESOURCE_MAX_BYTES} byte (1 MiB) host limit`,
+          `resource HTML is ${htmlBytes} bytes, exceeding the ${maxBytes} byte host limit (mcpServers.${this.serverName}.appResourceMaxBytes)`,
         );
       }
 
@@ -810,7 +843,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         timeoutSignal.aborted ||
         (error instanceof Error && error.name === 'TimeoutError') ||
         isMcpSdkRequestTimeout(error)
-          ? `resource read timed out (limit: ${timeoutMs} ms)`
+          ? `resource read timed out (limit: ${timeoutMs} ms; mcpServers.${this.serverName}.appResourceTimeoutMs)`
           : cause;
       const warning = `Warning: MCP App '${this.appResourceUri}' from '${this.serverName}' could not be displayed: ${reason}`;
       // On the timeout branch `reason` replaces the underlying message, so
@@ -1016,6 +1049,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly allowInvocationContext: boolean = false,
     readonly appResourceUri?: string,
     readonly appResourceUi?: Record<string, unknown>,
+    readonly appResourceLimits?: McpAppResourceLimits,
   ) {
     super(
       nameOverride ??
@@ -1088,6 +1122,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      this.appResourceLimits,
     );
   }
 
@@ -1112,6 +1147,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       appResourceUi,
+      this.appResourceLimits,
     );
   }
 
@@ -1160,6 +1196,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      this.appResourceLimits,
     );
   }
 
@@ -1183,6 +1220,8 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.allowInvocationContext,
       this.appResourceUri,
       this.appResourceUi,
+      0,
+      this.appResourceLimits,
     );
   }
 }

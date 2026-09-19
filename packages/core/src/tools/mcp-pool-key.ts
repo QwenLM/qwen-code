@@ -111,7 +111,8 @@ function sortedEntries(
  *
  * Hashed fields (transport-defining):
  *   transport, command, args, cwd, env, url, httpUrl, tcp, headers,
- *   timeout, versionNegotiation, oauth, authProviderType, targetAudience,
+ *   timeout, appResourceMaxBytes, appResourceTimeoutMs, versionNegotiation,
+ *   oauth, authProviderType, targetAudience,
  *   targetServiceAccount
  *
  * Excluded fields (per-session filter / metadata; do NOT change the
@@ -138,6 +139,8 @@ export function fingerprint(cfg: MCPServerConfig): PoolKey {
     tcp: cfg.tcp ?? null,
     headers: sortedEntries(cfg.headers),
     timeout: cfg.timeout ?? null,
+    appResourceMaxBytes: cfg.appResourceMaxBytes ?? null,
+    appResourceTimeoutMs: cfg.appResourceTimeoutMs ?? null,
     automaticVersionNegotiation: cfg.versionNegotiation === 'auto',
     oauth: canonicalOAuth(cfg.oauth),
     authProviderType: cfg.authProviderType ?? null,
