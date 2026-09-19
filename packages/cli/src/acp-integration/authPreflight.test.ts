@@ -49,6 +49,12 @@ describe('AUTH_PREFLIGHT_ENV_KEYS drift detection', () => {
     expect(uncovered).toEqual([]);
   });
 
+  it('checks OPENAI_API_KEY for OpenAI Responses auth', () => {
+    expect(AUTH_PREFLIGHT_ENV_KEYS[AuthType.USE_OPENAI_RESPONSES]).toContain(
+      'OPENAI_API_KEY',
+    );
+  });
+
   it('does not list waived auth types as keyed', () => {
     // A misconfiguration where a type is in BOTH maps would mean ambiguity.
     const keyed = Object.keys(AUTH_PREFLIGHT_ENV_KEYS);

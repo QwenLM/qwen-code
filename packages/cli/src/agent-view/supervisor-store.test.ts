@@ -9,6 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  findAgentViewRosterEntry,
   getAgentViewSessionPaths,
   getAgentViewStorePaths,
   listAgentViewSessionSnapshots,
@@ -35,6 +36,7 @@ import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
   AgentViewRosterEntry,
+  AgentViewRosterFile,
   AgentViewSessionStateFile,
   AgentViewSupervisorFile,
   AgentViewWorkerFile,
@@ -572,3 +574,35 @@ function sessionState(
     ...overrides,
   };
 }
+
+describe('findAgentViewRosterEntry', () => {
+  function rosterWith(sessionId: string): AgentViewRosterFile {
+    return {
+      schemaVersion: 1,
+      updatedAt: '2026-09-05T00:00:00.000Z',
+      sessions: [
+        {
+          sessionId,
+          projectCwd: '/w/app',
+          activeCwd: '/w/app',
+          createdAt: '2026-09-05T00:00:00.000Z',
+          updatedAt: '2026-09-05T00:00:00.000Z',
+        },
+      ],
+    };
+  }
+
+  it('sanitizes both sides of the comparison', () => {
+    // A raw, mixed-case lookup must reach the same entry as its
+    // canonical form; sanitizing one side only would let the two
+    // spellings miss each other.
+    const roster = rosterWith('Session-ABC');
+    expect(findAgentViewRosterEntry(roster, 'Session-ABC')?.sessionId).toBe(
+      'Session-ABC',
+    );
+    expect(findAgentViewRosterEntry(roster, 'session-abc')?.sessionId).toBe(
+      'Session-ABC',
+    );
+    expect(findAgentViewRosterEntry(roster, 'other')).toBeUndefined();
+  });
+});

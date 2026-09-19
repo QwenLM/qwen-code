@@ -128,14 +128,18 @@ describe('WorkspaceSelector', () => {
 
     const standaloneEntry = [
       ...document.querySelectorAll('[role="menuitemradio"]'),
-    ].find((entry) => entry.textContent?.includes('No workspace (standalone)'));
+    ].find((entry) => entry.textContent?.includes('No workspace'));
     expect(standaloneEntry).toBeDefined();
     await act(async () => {
+      standaloneEntry?.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
       standaloneEntry?.dispatchEvent(
         new MouseEvent('click', { bubbles: true }),
       );
     });
     expect(onSelectStandalone).toHaveBeenCalledOnce();
+    expect(document.activeElement).not.toBe(trigger);
   });
 
   it('labels the trigger with the projectless target when selected', () => {
@@ -145,7 +149,31 @@ describe('WorkspaceSelector', () => {
       onSelectStandalone: vi.fn(),
     });
     expect(element.querySelector('button')?.textContent).toContain(
-      'No workspace (standalone)',
+      'No workspace',
     );
+  });
+
+  it('keeps the trigger tooltip closed after dismissing the menu', async () => {
+    const element = renderSelector();
+    const trigger = element.querySelector('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('pointerleave', { bubbles: true }));
+      document.body.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      trigger.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    expect(document.activeElement).not.toBe(trigger);
   });
 });

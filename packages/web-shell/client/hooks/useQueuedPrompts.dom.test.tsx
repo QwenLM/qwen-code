@@ -107,16 +107,19 @@ function mount(
     blocked,
     hold,
     cwd,
+    stopped,
   }: {
     state: typeof streamingState;
     activeSessionId: string;
     blocked: boolean;
     hold: boolean;
     cwd: string | null;
+    stopped: boolean;
   }) {
     latest = useQueuedPrompts({
       connected,
-      writeBlocked: blocked,
+      writeBlocked: blocked || stopped,
+      runtimeStopped: stopped,
       sessionId: activeSessionId,
       workspaceCwd: cwd ?? undefined,
       clientId: 'client-1',
@@ -139,6 +142,7 @@ function mount(
   let blocked = writeBlocked;
   let held = holdQueuedPromptsLocally;
   let cwd = workspaceCwd;
+  let stopped = false;
   const render = (
     state: typeof streamingState,
     nextSessionId = activeSessionId,
@@ -146,12 +150,14 @@ function mount(
     nextWriteBlocked = blocked,
     nextHold = held,
     nextCwd: string | null = cwd,
+    nextStopped = stopped,
   ) => {
     if (replaceOwner) sdk.ownerVersion += 1;
     activeSessionId = nextSessionId;
     blocked = nextWriteBlocked;
     held = nextHold;
     cwd = nextCwd;
+    stopped = nextStopped;
     act(() =>
       root.render(
         <Harness
@@ -160,6 +166,7 @@ function mount(
           blocked={blocked}
           hold={held}
           cwd={cwd}
+          stopped={stopped}
         />,
       ),
     );
@@ -201,6 +208,43 @@ afterEach(() => {
 });
 
 describe('useQueuedPrompts default mid-turn insertion', () => {
+  it.each([undefined, ' original question\n'])(
+    'keeps an optional original submission separate from the queued payload: %s',
+    async (submittedPrompt) => {
+      const { actions } = createActions();
+      const { render } = mount(
+        'responding',
+        actions,
+        false,
+        false,
+        false,
+        true,
+      );
+      act(() =>
+        latest.enqueuePrompt(
+          'host-expanded payload',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          submittedPrompt,
+        ),
+      );
+      await act(async () => render('idle', 'session-1', false, false, false));
+      expect(actions.submitPrompt).toHaveBeenCalledWith(
+        'host-expanded payload',
+        expect.objectContaining({ sessionId: 'session-1' }),
+      );
+      const options = vi.mocked(actions.submitPrompt).mock.calls[0]?.[1];
+      if (submittedPrompt === undefined) {
+        expect(options).not.toHaveProperty('submittedPrompt');
+      } else {
+        expect(options).toHaveProperty('submittedPrompt', submittedPrompt);
+      }
+    },
+  );
+
   it('holds Goal follow-ups locally until an explicit insert', async () => {
     const { actions } = createActions();
     vi.mocked(actions.enqueueMidTurnMessage).mockResolvedValue({
@@ -969,6 +1013,35 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(editor.restoreImages).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, 'client-1'])(
+    'retains unmatched started-event identity with originator %s',
+    (originatorClientId) => {
+      const { actions } = createActions();
+      const { render, store } = mount('responding', actions);
+      expect(latest.queuedPrompts).toEqual([]);
+
+      sdk.pendingEvents = [
+        {
+          type: 'pending_prompt_started',
+          originatorClientId,
+          data: {
+            sessionId: 'session-1',
+            promptId: 'server-unmatched',
+            text: 'started without a local queue row',
+          },
+        },
+      ];
+      render('responding');
+
+      expect(store.appendLocalUserMessage).toHaveBeenCalledOnce();
+      expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+        'started without a local queue row',
+        undefined,
+        { promptId: 'server-unmatched' },
+      );
+    },
+  );
+
   it('buffers an image-only started event until its exact response binds', async () => {
     const { actions, pendingSubmit } = createActions();
     const { render, store } = mount('responding', actions);
@@ -998,7 +1071,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'Ym1w', mimeType: 'image/bmp' }],
-      undefined,
+      { promptId: 'server-image' },
       undefined,
     );
     expect(latest.queuedPrompts).toMatchObject([
@@ -1048,7 +1121,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'c2Vjb25k', mimeType: 'image/png' }],
-      undefined,
+      { promptId: 'server-second' },
       undefined,
     );
   });
@@ -1088,7 +1161,7 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
     expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
       '',
       [{ data: 'dGVybWluYWw=', mimeType: 'image/png' }],
-      undefined,
+      { promptId: 'server-terminal' },
       undefined,
     );
   });
@@ -2131,4 +2204,138 @@ describe('useQueuedPrompts default mid-turn insertion', () => {
       { text: '无能力', midTurnState: 'queued' },
     ]);
   });
+});
+
+describe('useQueuedPrompts writer-blocked recovery', () => {
+  it('holds a rejected mid-turn draft until the writer fence clears', async () => {
+    const { actions } = createActions();
+    const enqueue = deferred<{ accepted: boolean }>();
+    vi.mocked(actions.enqueueMidTurnMessage).mockReturnValueOnce(
+      enqueue.promise,
+    );
+    const { render } = mount('responding', actions, true, false, false);
+    act(() => latest.enqueuePrompt('queued follow-up'));
+    render('idle', 'session-1', false, true);
+    await act(async () => enqueue.resolve({ accepted: false }));
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    render('idle', 'session-1', false, true);
+    expect(actions.submitPrompt).not.toHaveBeenCalled();
+    render('idle', 'session-1', true, false);
+    expect(actions.submitPrompt).toHaveBeenCalledOnce();
+  });
+});
+
+it('does not resubmit locally held prompts after an explicit runtime stop and resume', () => {
+  const { actions } = createActions();
+  const { render } = mount('idle', actions, true, true, false, true);
+  act(() => latest.enqueuePrompt('do not silently rerun'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  render('idle', 'session-1', true, false, true, '/workspace', true);
+  expect(latest.queuedPrompts).toHaveLength(0);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(actions.enqueueMidTurnMessage).not.toHaveBeenCalled();
+  expect(actions.removePendingPrompt).not.toHaveBeenCalled();
+});
+
+it('runtime stop fences sibling session stash in same workspace', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'responding',
+    actions,
+    true,
+    true,
+    false,
+    true,
+  );
+  act(() => latest.enqueuePrompt('sibling text from before runtime stop'));
+  render('responding', 'session-2', true, false, true);
+  expect(latest.queuedPrompts).toEqual([]);
+  render('idle', 'session-2', true, false, true, '/workspace', true);
+  render('idle', 'session-2', true, false, false, '/workspace', false);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith(
+    'sibling text from before runtime stop',
+  );
+});
+it('runtime stop returns unaccepted mid-turn text to composer', () => {
+  const { actions } = createActions();
+  vi.mocked(actions.enqueueMidTurnMessage).mockReturnValue(
+    new Promise(() => undefined),
+  );
+  const { editor, render } = mount('responding', actions);
+  act(() => latest.enqueuePrompt('unaccepted before runtime stop'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  render('responding', 'session-1', true, false, false, '/workspace', true);
+  expect(latest.queuedPrompts).toEqual([]);
+  expect(editor.setText).toHaveBeenCalledWith('unaccepted before runtime stop');
+});
+
+it('preserves another workspace held queue when switching into a stopped workspace', async () => {
+  const { actions } = createActions();
+  const { render } = mount('responding', actions, true, true, false, true);
+  act(() => latest.enqueuePrompt('unaffected workspace draft'));
+  render('idle', 'session-2', true, false, false, '/other', true);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {});
+  expect(actions.submitPrompt).toHaveBeenCalledOnce();
+});
+
+it('runtime stop fences a stash written before the workspace cwd resolved', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'idle',
+    actions,
+    true,
+    true,
+    false,
+    true,
+    null,
+  );
+  act(() => latest.enqueuePrompt('queued before stop, cwd unresolved'));
+  expect(latest.queuedPrompts).toHaveLength(1);
+  // Switch away while the cwd is still unresolved: the stash keys as
+  // `\u0000session-1`.
+  render('idle', 'session-2', true, false, true, null);
+  expect(latest.queuedPrompts).toHaveLength(0);
+  // The cwd resolves and the stop is observed; the unresolved-cwd stash
+  // belongs to the stopped workspace and must be fenced with it.
+  render('idle', 'session-2', true, false, true, '/workspace', true);
+  render('idle', 'session-2', true, false, true, '/workspace', false);
+  render('idle', 'session-1', true, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith(
+    'queued before stop, cwd unresolved',
+  );
+});
+
+it('runtime stop fences the live queue stashed while the workspace cwd is unresolved', async () => {
+  const { actions } = createActions();
+  const { editor, render } = mount(
+    'idle',
+    actions,
+    true,
+    true,
+    false,
+    true,
+    null,
+  );
+  act(() => latest.enqueuePrompt('queued before cwd resolved'));
+  // The cwd resolves and the stop is observed in the same owner change: the
+  // departure stash is written under the unresolved-cwd key.
+  render('idle', 'session-1', false, false, true, '/workspace', true);
+  expect(latest.queuedPrompts).toEqual([]);
+  render('idle', 'session-1', false, false, false, '/workspace', false);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(actions.submitPrompt).not.toHaveBeenCalled();
+  expect(editor.setText).toHaveBeenCalledWith('queued before cwd resolved');
 });

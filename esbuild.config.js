@@ -179,7 +179,10 @@ const external = [
 const BUNDLE_CHUNK_DIR = 'chunks';
 
 const mainBuild = esbuild.build({
-  entryPoints: { cli: 'packages/cli/src/cli.ts' },
+  entryPoints: {
+    cli: 'packages/cli/src/cli.ts',
+    'execution-worker': 'packages/core/src/services/execution-worker-main.ts',
+  },
   bundle: true,
   outdir: 'dist',
   entryNames: '[name]',
@@ -276,7 +279,21 @@ const workerBuild = esbuild.build({
   keepNames: true,
 });
 
-Promise.all([mainBuild, workerBuild])
+const codeModeHostBuild = esbuild.build({
+  entryPoints: ['packages/core/src/code-mode/host.ts'],
+  bundle: true,
+  outfile: 'dist/codeModeHost.js',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  packages: 'bundle',
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: { js: `"use strict";` },
+  write: true,
+  keepNames: true,
+});
+
+Promise.all([mainBuild, workerBuild, codeModeHostBuild])
   .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));

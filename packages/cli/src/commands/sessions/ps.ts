@@ -5,28 +5,33 @@
  */
 
 /**
- * `qwen sessions ps` — list the interactive Qwen Code sessions running
- * right now.
+ * `qwen sessions ps` — list the Qwen Code sessions running right now.
  *
  * The sibling `qwen sessions list` walks saved transcripts; this walks the
  * live-process registry, so the two answer different questions: "what have
  * I worked on" versus "what is running on this machine at this moment".
  *
- * Two things can be running: an interactive session, which writes the
+ * Two things can be running: a registered session, which writes the
  * live-process registry, and a managed Agent View session, which is owned
  * by a supervisor and writes no registry record. Both are listed, managed
  * ones first — see `managed-rows.ts` for the merge.
  *
- * "Interactive" is a registration fact, not a filter: only the
- * interactive UI registers sessions, so headless runs (`qwen -p`) never
- * appear here. A managed session appears whether or not it registers.
+ * KIND says what registered each registry row — an interactive terminal, a
+ * daemon-managed session, a program that is not Qwen Code at all. It is a
+ * self-report, like NAME and DIRECTORY: everything here was written by
+ * the process it describes. A managed row has no record behind it, so its
+ * KIND is `managed` — the supervisor is what accounts for it. What does
+ * not appear at all is a one-shot `qwen -p` run, which never registers.
  */
 
 import type { CommandModule, Argv } from 'yargs';
-import { listLiveSessions } from '@qwen-code/qwen-code-core';
+import {
+  describeSessionKind,
+  listLiveSessions,
+} from '@qwen-code/qwen-code-core';
 import stringWidth from 'string-width';
 import {
-  sanitizeTerminalText,
+  sanitizeSingleLineTerminalText,
   truncateToWidth,
 } from '../../ui/utils/textUtils.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -40,27 +45,14 @@ import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 
 /** Fixed column widths for the human-readable table (exported for tests). */
 export const NAME_COL = 22;
+/** Wide enough for the longest kind this build writes (`headless`). */
+export const KIND_COL = 10;
 export const PID_COL = 9;
 export const AGE_COL = 10;
 export const STATE_COL = 13;
 
 interface PsArgs {
   json?: boolean;
-}
-
-/**
- * Sanitize a record field for terminal output.
- *
- * `cwd` and `name` are written by another process, so they are
- * attacker-influenced: an ANSI sequence could repaint the table, a bare
- * control byte could misalign it, and a bidi override (Trojan Source,
- * CVE-2021-42572) could make a directory render as a path that does not
- * exist. `sanitizeTerminalText` is the single source of truth for all
- * three classes; it deliberately preserves TAB and LF for multi-line
- * render sites, so a one-line table cell drops those two on top of it.
- */
-function sanitize(value: string): string {
-  return sanitizeTerminalText(value).replace(/[\t\n]/g, '');
 }
 
 function padDisplay(str: string, width: number): string {
@@ -116,9 +108,19 @@ function stateLabel(row: SessionRow): string {
     : TASK_STATE_LABEL[row.taskState];
 }
 
+/**
+ * What the `KIND` column prints for a row. A registry row defers to the
+ * record's self-report; a managed row has no record behind it — the
+ * supervisor is what accounts for it, so its kind is `managed`.
+ */
+function kindLabel(row: SessionRow): string {
+  return row.managed ? 'managed' : describeSessionKind(row.record?.kind);
+}
+
 function outputHuman(rows: SessionRow[], now: number): void {
   writeStdoutLine(
     padDisplay('NAME', NAME_COL) +
+      padDisplay('KIND', KIND_COL) +
       padDisplay('PID', PID_COL) +
       padDisplay('AGE', AGE_COL) +
       padDisplay('STATE', STATE_COL) +
@@ -126,14 +128,24 @@ function outputHuman(rows: SessionRow[], now: number): void {
   );
   for (const row of rows) {
     writeStdoutLine(
-      padDisplay(truncateToWidth(sanitize(row.name), NAME_COL - 2), NAME_COL) +
+      padDisplay(
+        truncateToWidth(sanitizeSingleLineTerminalText(row.name), NAME_COL - 2),
+        NAME_COL,
+      ) +
+        // Truncated for the same reason NAME is: a newer build may write
+        // a longer kind than any this one knows, and one over-wide cell
+        // would misalign every column after it. Not sanitized — unlike
+        // NAME and DIRECTORY, the read guard already bounds `kind` to
+        // lowercase ASCII, digits and dashes, and the managed label is a
+        // constant of this build.
+        padDisplay(truncateToWidth(kindLabel(row), KIND_COL - 2), KIND_COL) +
         padDisplay(row.pid === undefined ? '-' : String(row.pid), PID_COL) +
         padDisplay(
           row.startedAt === undefined ? '-' : formatAge(now - row.startedAt),
           AGE_COL,
         ) +
         padDisplay(stateLabel(row), STATE_COL) +
-        sanitize(row.cwd),
+        sanitizeSingleLineTerminalText(row.cwd),
     );
   }
 }
@@ -153,7 +165,7 @@ async function readManagedRows(now: number): Promise<SessionRow[]> {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     writeStderrLine(
-      `Managed sessions could not be listed: ${sanitize(reason)}`,
+      `Managed sessions could not be listed: ${sanitizeSingleLineTerminalText(reason)}`,
     );
     return [];
   }

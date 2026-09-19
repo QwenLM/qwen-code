@@ -9,6 +9,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { isValidGitSha, isValidRefName } from './gitDirect.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('GIT_BRANCHES');
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +31,22 @@ export interface GitBranchInfo {
   upstreamGone?: boolean;
   ahead: number;
   behind: number;
+  /**
+   * Where `git push` would push, by git's own resolution
+   * (`branch.<name>.pushRemote` / `remote.pushDefault` / the upstream via
+   * `push.default`). Absent when git cannot resolve a push destination.
+   * Differs from `upstream` in triangular (fork) workflows.
+   */
+  pushTarget?: string;
+  /** Commits ahead of the push target; absent when `pushTarget` is. */
+  pushAhead?: number;
+  /** Commits behind the push target; absent when `pushTarget` is. */
+  pushBehind?: number;
+  /**
+   * Push destination resolves but its ref does not exist yet (`git push`
+   * would create the remote branch). `pushAhead`/`pushBehind` are absent.
+   */
+  pushGone?: boolean;
   /** Unix epoch seconds of the branch tip commit. */
   commitDate: number;
   commitSubject: string;
@@ -76,6 +95,13 @@ const GIT_ENV_VARS_TO_CLEAR = [
 // a clone/push). The index count is unbounded, so strip them by prefix.
 const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
 
+// Transport names git ships helpers for: `ext` is deny-by-default but
+// re-enableable from config files, `fd` is allowed by default and needs no
+// installed binary. The open `git-remote-<name>` space is closed at the
+// write gate (EXECUTING_HELPER_URL in git-remotes.ts), not here — an
+// operator-listed helper name is a deliberate allow and is preserved.
+const HELPER_PROTOCOLS = new Set(['ext', 'fd']);
+
 export function gitEnv(
   base?: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> {
@@ -88,12 +114,27 @@ export function gitEnv(
       delete env[key];
     }
   }
+  // GIT_ALLOW_PROTOCOL is git's only protocol control that OVERRIDES
+  // config-file policy, so deleting it outright would hand a
+  // workspace-controlled `protocol.<name>.allow` the final say: a repo the
+  // user did not author can pair `url = ext::…` with
+  // `protocol.ext.allow = always`, and an operator's restrictive inherited
+  // list is the deny that stops it. Keep an inherited list but strip the
+  // helper-executing entries; a list that filters to empty stays set
+  // (deny-all) rather than becoming undefined (config decides).
+  const inheritedAllow = env['GIT_ALLOW_PROTOCOL'];
+  if (inheritedAllow !== undefined) {
+    env['GIT_ALLOW_PROTOCOL'] = inheritedAllow
+      .split(':')
+      .filter((p) => !HELPER_PROTOCOLS.has(p.trim().toLowerCase()))
+      .join(':');
+  }
   env['LC_ALL'] = 'C';
   env['LANG'] = 'C';
   return env;
 }
 
-function runGit(
+export function runGit(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
@@ -127,7 +168,7 @@ export async function fetchGitBranches(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/heads/',
       ],
       env,
@@ -136,7 +177,7 @@ export async function fetchGitBranches(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/remotes/',
       ],
       env,
@@ -210,6 +251,22 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
         // configured but its ref is missing; ahead/behind are meaningless then.
         const upstreamGone = upstream !== undefined && /\bgone\b/.test(track);
 
+        // Push-side counterpart: `%(push)` is git's own answer to "where
+        // would `git push` go", honoring pushRemote/pushDefault — the same
+        // resolution a plain `git push` uses, so no precedence is re-derived
+        // here. Empty when unresolvable (e.g. `push.default` cannot pick).
+        const pushTarget = parts[7] || undefined;
+        const pushTrack = parts[8] ?? '';
+        const pushGone = pushTarget !== undefined && /\bgone\b/.test(pushTrack);
+        let pushAhead: number | undefined;
+        let pushBehind: number | undefined;
+        if (pushTarget !== undefined && !pushGone) {
+          const pa = /ahead (\d+)/.exec(pushTrack);
+          const pb = /behind (\d+)/.exec(pushTrack);
+          pushAhead = pa ? parseInt(pa[1], 10) : 0;
+          pushBehind = pb ? parseInt(pb[1], 10) : 0;
+        }
+
         return {
           name,
           isHead,
@@ -217,6 +274,10 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
           ...(upstreamGone ? { upstreamGone } : {}),
           ahead,
           behind,
+          ...(pushTarget !== undefined ? { pushTarget } : {}),
+          ...(pushAhead !== undefined ? { pushAhead } : {}),
+          ...(pushBehind !== undefined ? { pushBehind } : {}),
+          ...(pushGone ? { pushGone } : {}),
           commitDate,
           commitSubject,
         };
@@ -400,6 +461,16 @@ export async function gitCreateBranch(
   const originalCommit = originalRef
     ? ''
     : (await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')).trim();
+  // The commit the new branch starts from: the resolved startPoint when given,
+  // otherwise the current HEAD. Used on rollback to detect commits a failing
+  // post-checkout hook may have created on the new branch.
+  const startCommit = (
+    await runGit(
+      cwd,
+      ['rev-parse', '--verify', `${startPoint || 'HEAD'}^{commit}`],
+      env,
+    ).catch(() => '')
+  ).trim();
   try {
     await runGit(cwd, args, env);
   } catch (err) {
@@ -420,7 +491,22 @@ export async function gitCreateBranch(
           env,
         ).catch(() => {});
       }
-      await runGit(cwd, ['branch', '-D', name], env).catch(() => {});
+      // A failing post-checkout hook may have created commits on the new
+      // branch (the ref points at them). Deleting the branch would discard
+      // those commits, so keep the branch when its HEAD has moved past the
+      // start commit instead of force-deleting it.
+      const newHead = (
+        await runGit(cwd, ['rev-parse', `refs/heads/${name}`], env).catch(
+          () => '',
+        )
+      ).trim();
+      if (newHead && newHead !== startCommit) {
+        debugLogger.warn(
+          `gitCreateBranch: keeping branch "${name}" because it contains commits created after checkout (likely by a failing post-checkout hook)`,
+        );
+      } else {
+        await runGit(cwd, ['branch', '-D', name], env).catch(() => {});
+      }
     }
     throw err;
   }

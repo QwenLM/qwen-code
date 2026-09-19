@@ -1,0 +1,508 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// @vitest-environment node
+
+import { readFile } from 'node:fs/promises';
+import { webcrypto } from 'node:crypto';
+import vm from 'node:vm';
+import { afterEach, expect, test, vi } from 'vitest';
+
+const source = await readFile(
+  new URL('./browser-use-bridge.js', import.meta.url),
+  'utf8',
+);
+afterEach(() => vi.useRealTimers());
+
+async function fixture(
+  alarms = new Map<string, chrome.alarms.AlarmCreateInfo>(),
+  localState: Record<string, unknown> = {},
+) {
+  vi.useFakeTimers();
+  const listeners = new Map<string, (...args: unknown[]) => void>();
+  const event = (name: string) => ({
+    addListener: (listener: (...args: unknown[]) => void) =>
+      listeners.set(name, listener),
+  });
+  const emit = (name: string, ...args: unknown[]) =>
+    listeners.get(name)?.(...args);
+  const tabs = new Map<number, Record<string, unknown>>([
+    [1, { id: 1, url: 'https://example.test', windowId: 1, groupId: -1 }],
+  ]);
+  const attached = new Set<number>();
+  const saved: Record<string, unknown> = {};
+  const port = {
+    onMessage: event('message'),
+    onDisconnect: event('disconnect'),
+    postMessage: vi.fn(),
+    disconnect: vi.fn(),
+  };
+  const chromeApi = {
+    runtime: { id: 'extension-id', connectNative: vi.fn(() => port) },
+    alarms: {
+      onAlarm: event('alarm'),
+      create: vi.fn(
+        async (name: string, info: chrome.alarms.AlarmCreateInfo) => {
+          alarms.set(name, info);
+        },
+      ),
+      get: vi.fn(async (name: string) => alarms.get(name)),
+      clear: vi.fn(async (name: string) => alarms.delete(name)),
+    },
+    storage: {
+      local: {
+        get: vi.fn(async () => ({ ...localState })),
+        set: vi.fn(async (value: Record<string, unknown>) => {
+          Object.assign(localState, structuredClone(value));
+        }),
+      },
+      session: {
+        get: vi.fn(async () => saved),
+        set: vi.fn(async (value: Record<string, unknown>) => {
+          Object.assign(saved, structuredClone(value));
+        }),
+      },
+    },
+    tabs: {
+      query: vi.fn(async () => [...tabs.values()]),
+      get: vi.fn(async (id: number) => {
+        if (!tabs.has(id)) throw new Error('No tab');
+        return tabs.get(id);
+      }),
+      create: vi.fn(async () => {
+        const tab = { id: 2, url: 'about:blank', windowId: 1, groupId: -1 };
+        tabs.set(2, tab);
+        return tab;
+      }),
+      remove: vi.fn(async (id: number) => {
+        tabs.delete(id);
+        attached.delete(id);
+        emit('removed', id);
+      }),
+      group: vi.fn(async ({ tabIds }: { tabIds: number[] }) => {
+        for (const id of tabIds) tabs.get(id)!.groupId = 10;
+        return 10;
+      }),
+      ungroup: vi.fn(async (id: number) => {
+        if (tabs.has(id)) tabs.get(id)!.groupId = -1;
+      }),
+      onRemoved: event('removed'),
+      onCreated: event('created'),
+    },
+    tabGroups: {
+      get: vi.fn(async () => ({ title: 'Qwen Browser' })),
+      update: vi.fn(async () => ({})),
+    },
+    debugger: {
+      attach: vi.fn(async ({ tabId }: { tabId: number }) => {
+        if (attached.has(tabId))
+          throw new Error('Another debugger is already attached');
+        attached.add(tabId);
+      }),
+      detach: vi.fn(async ({ tabId }: { tabId: number }) => {
+        attached.delete(tabId);
+      }),
+      sendCommand: vi.fn(async () => ({})),
+      onDetach: event('detached'),
+      onEvent: event('debuggerEvent'),
+    },
+  };
+  const context = vm.createContext({
+    chrome: chromeApi,
+    crypto: webcrypto,
+    setTimeout,
+    clearTimeout,
+    Date,
+    Error,
+    TextDecoder,
+    TextEncoder,
+    Uint8Array,
+    atob,
+  });
+  vm.runInContext(source, context);
+  const api = vm.runInContext(
+    '({dispatch, restoreState, attachedTabs, agentOwnedTabs, derivedTabParents})',
+    context,
+  ) as {
+    restoreState(): Promise<void>;
+    dispatch(
+      method: string,
+      params?: Record<string, unknown>,
+    ): Promise<unknown>;
+    attachedTabs: Set<number>;
+    agentOwnedTabs: Set<number>;
+    derivedTabParents: Map<number, number>;
+  };
+  await vi.advanceTimersByTimeAsync(0);
+  return {
+    ...api,
+    chromeApi,
+    tabs,
+    attached,
+    saved,
+    localState,
+    alarms,
+    emit,
+    port,
+  };
+}
+
+test.each(['group', 'title'])(
+  'persists pruned restored state when %s setup fails',
+  async (stage) => {
+    const f = await fixture();
+    Object.assign(f.saved, {
+      agentOwnedTabs: [1, 99],
+      derivedTabParents: [[99, 1]],
+    });
+    if (stage === 'group')
+      f.chromeApi.tabs.group.mockRejectedValueOnce(new Error('group failed'));
+    else
+      f.chromeApi.tabGroups.update.mockRejectedValueOnce(
+        new Error('title failed'),
+      );
+
+    await expect(f.restoreState()).resolves.toBeUndefined();
+
+    expect(f.saved.agentOwnedTabs).toEqual([1]);
+    expect(f.saved.derivedTabParents).toEqual([]);
+    expect(f.tabs.has(1)).toBe(true);
+  },
+);
+
+test('restores the remaining owned tabs after one grouping failure', async () => {
+  const f = await fixture();
+  f.tabs.set(3, {
+    id: 3,
+    url: 'https://example.test/other',
+    windowId: 2,
+    groupId: -1,
+  });
+  Object.assign(f.saved, { agentOwnedTabs: [1, 3, 99] });
+  f.chromeApi.tabs.group.mockRejectedValueOnce(new Error('group failed'));
+
+  await expect(f.restoreState()).resolves.toBeUndefined();
+
+  expect(f.chromeApi.tabs.group).toHaveBeenCalledWith({ tabIds: [3] });
+  expect(f.tabs.get(3)?.groupId).toBe(10);
+  expect(f.saved.agentOwnedTabs).toEqual([1, 3]);
+});
+
+test('detach and reattach wait for Chrome to actually release its debugger', async () => {
+  const f = await fixture();
+  await f.dispatch('tabs.attach', { tabId: 1 });
+  let finish!: () => void;
+  f.chromeApi.debugger.detach.mockImplementationOnce(async ({ tabId }) => {
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    f.attached.delete(tabId);
+  });
+  let released = false;
+  const release = f.dispatch('tabs.detach', { tabId: 1 }).then(() => {
+    released = true;
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  let reattached = false;
+  const attach = f.dispatch('tabs.attach', { tabId: 1 }).then(() => {
+    reattached = true;
+  });
+  // Observe rejections immediately too, so the red baseline has no unhandled rejection.
+  const result = Promise.allSettled([release, attach]);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(released).toBe(false);
+  expect(reattached).toBe(false);
+  expect(f.chromeApi.debugger.attach).toHaveBeenCalledTimes(1);
+  finish();
+  expect(await result).toEqual([
+    { status: 'fulfilled', value: undefined },
+    { status: 'fulfilled', value: undefined },
+  ]);
+  expect(f.attached.has(1)).toBe(true);
+});
+
+test('failed detach retains attachment and does not report successful release', async () => {
+  const f = await fixture();
+  await f.dispatch('tabs.attach', { tabId: 1 });
+  f.chromeApi.debugger.detach.mockRejectedValueOnce(new Error('detach failed'));
+  await expect(f.dispatch('tabs.detach', { tabId: 1 })).rejects.toThrow(
+    'detach failed',
+  );
+  expect(f.attachedTabs.has(1)).toBe(true);
+  await f.dispatch('tabs.detach', { tabId: 1 });
+  expect(f.attachedTabs.has(1)).toBe(false);
+});
+
+test('a pending advisory overlay does not block debugger release', async () => {
+  const f = await fixture();
+  let finish!: () => void;
+  f.chromeApi.debugger.sendCommand.mockImplementationOnce(async () => {
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return {};
+  });
+  const attaching = f.dispatch('tabs.attach', { tabId: 1 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.attached.has(1)).toBe(true);
+  let released = false;
+  const release = f.dispatch('tabs.detach', { tabId: 1 }).then(() => {
+    released = true;
+  });
+  await vi.advanceTimersByTimeAsync(500);
+  expect(released).toBe(true);
+  expect(f.attached.has(1)).toBe(false);
+  finish();
+  await Promise.all([attaching, release]);
+});
+
+test('a foreign debugger still causes a conflict and is never detached', async () => {
+  const f = await fixture();
+  f.attached.add(1);
+  await expect(f.dispatch('tabs.attach', { tabId: 1 })).rejects.toMatchObject({
+    code: 'TAB_DEBUGGER_CONFLICT',
+  });
+  expect(f.chromeApi.debugger.detach).not.toHaveBeenCalled();
+});
+
+test.each([' ', 'Enter'])(
+  'only Enter input can claim a later popup (key=%j)',
+  async (key) => {
+    const f = await fixture();
+    await f.dispatch('cdp.send', {
+      tabId: 1,
+      method: 'Input.dispatchKeyEvent',
+      params: { type: 'keyDown', key, text: key },
+    });
+    const popup = {
+      id: 3,
+      openerTabId: 1,
+      url: 'https://popup.test',
+      windowId: 1,
+    };
+    f.tabs.set(3, popup);
+    f.emit('created', popup);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.agentOwnedTabs.has(3)).toBe(key === 'Enter');
+    expect(f.derivedTabParents.has(3)).toBe(key === 'Enter');
+  },
+);
+
+test('a popup known only by its pending URL stays controllable', async () => {
+  // `chrome.tabs.onCreated` delivers a cross-origin popup with an empty `url`
+  // and the destination in `pendingUrl`. The claim already keys on
+  // `pendingUrl`; the runtime's immediate `tabs.get` must not then reject the
+  // same tab as unsupported because it only looked at `url`.
+  const f = await fixture();
+  await f.dispatch('cdp.send', {
+    tabId: 1,
+    method: 'Input.dispatchKeyEvent',
+    params: { type: 'keyDown', key: 'Enter', text: 'Enter' },
+  });
+  const popup = {
+    id: 3,
+    openerTabId: 1,
+    url: '',
+    pendingUrl: 'https://popup.test/cart',
+    windowId: 1,
+  };
+  f.tabs.set(3, popup);
+  f.emit('created', popup);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.agentOwnedTabs.has(3)).toBe(true);
+  await expect(f.dispatch('tabs.get', { tabId: 3 })).resolves.toMatchObject({
+    providerTabId: 3,
+  });
+  await expect(f.dispatch('tabs.attach', { tabId: 3 })).resolves.toBeDefined();
+});
+
+test.each(['persist', 'attach'])(
+  'create failure during %s removes only the new tab',
+  async (stage) => {
+    const f = await fixture();
+    if (stage === 'persist')
+      f.chromeApi.storage.session.set.mockRejectedValueOnce(
+        new Error('create failed'),
+      );
+    if (stage === 'attach')
+      f.chromeApi.debugger.attach.mockRejectedValueOnce(
+        new Error('create failed'),
+      );
+    f.chromeApi.tabs.remove.mockImplementationOnce(async (id) => {
+      f.tabs.delete(id);
+      f.attached.delete(id);
+    });
+    await expect(f.dispatch('tabs.create', {})).rejects.toThrow(
+      'create failed',
+    );
+    expect([...f.tabs.keys()]).toEqual([1]);
+    expect(f.agentOwnedTabs.size).toBe(0);
+    expect(f.derivedTabParents.size).toBe(0);
+    expect(f.attached.size).toBe(0);
+    expect(f.saved.agentOwnedTabs).toEqual([]);
+  },
+);
+
+test('user cancellation releases derived ownership, grouping and persisted state', async () => {
+  const f = await fixture();
+  await f.dispatch('cdp.send', {
+    tabId: 1,
+    method: 'Input.dispatchKeyEvent',
+    params: { type: 'keyDown', key: 'Enter' },
+  });
+  const popup = {
+    id: 3,
+    openerTabId: 1,
+    url: 'https://popup.test',
+    windowId: 1,
+  };
+  f.tabs.set(3, popup);
+  f.emit('created', popup);
+  await vi.advanceTimersByTimeAsync(0);
+  await f.dispatch('tabs.attach', { tabId: 3 });
+  f.attached.delete(3);
+  f.emit('detached', { tabId: 3 }, 'canceled_by_user');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.tabs.get(3)?.groupId).toBe(-1);
+  expect(f.agentOwnedTabs.has(3)).toBe(false);
+  expect(f.derivedTabParents.has(3)).toBe(false);
+  expect(f.saved.agentOwnedTabs).toEqual([]);
+  expect(f.saved.derivedTabParents).toEqual([]);
+  expect(await f.dispatch('tabs.queryDerived', {})).toEqual([]);
+  expect(f.port.postMessage).toHaveBeenCalledWith(
+    expect.objectContaining({ method: 'qwenBrowser.detached', tabId: 3 }),
+  );
+});
+
+test('an absent host waits for an alarm without rewriting session state or retrying every second', async () => {
+  const f = await fixture();
+  const writes = f.chromeApi.storage.session.set.mock.calls.length;
+  f.emit('disconnect');
+  await vi.advanceTimersByTimeAsync(29_000);
+  expect(f.chromeApi.runtime.connectNative).toHaveBeenCalledTimes(1);
+  expect(f.chromeApi.storage.session.set).toHaveBeenCalledTimes(writes);
+  expect(f.alarms.size).toBe(1);
+  const [name, info] = [...f.alarms][0]!;
+  expect(info.delayInMinutes).toBe(0.5);
+  f.alarms.delete(name);
+  f.emit('alarm', { name });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.chromeApi.runtime.connectNative).toHaveBeenCalledTimes(2);
+  f.emit('message', {
+    type: 'request',
+    id: 'ping',
+    method: 'ping',
+    params: {},
+  });
+  await vi.advanceTimersByTimeAsync(61_000);
+  expect(f.port.postMessage).toHaveBeenCalledWith(
+    expect.objectContaining({ id: 'ping', ok: true }),
+  );
+  expect(f.chromeApi.runtime.connectNative).toHaveBeenCalledTimes(2);
+  expect(f.port.disconnect).not.toHaveBeenCalled();
+});
+
+test('worker restart preserves the scheduled retry instead of starting another host', async () => {
+  const first = await fixture();
+  first.emit('disconnect');
+  await vi.advanceTimersByTimeAsync(0);
+  const restarted = await fixture(first.alarms, first.localState);
+  expect(restarted.chromeApi.runtime.connectNative).not.toHaveBeenCalled();
+  const name = [...restarted.alarms.keys()][0]!;
+  restarted.alarms.delete(name);
+  restarted.emit('alarm', { name });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(restarted.chromeApi.runtime.connectNative).toHaveBeenCalledTimes(1);
+});
+
+test('user cancellation persists even while grouping another tab is pending', async () => {
+  const f = await fixture();
+  await f.dispatch('tabs.attach', { tabId: 1 });
+  f.agentOwnedTabs.add(1);
+  let finish!: () => void;
+  f.chromeApi.tabs.group.mockImplementationOnce(async () => {
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return 10;
+  });
+  const creating = f.dispatch('tabs.create', {});
+  await vi.advanceTimersByTimeAsync(0);
+  f.emit('detached', { tabId: 1 }, 'canceled_by_user');
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.saved.agentOwnedTabs).not.toContain(1);
+  finish();
+  await creating;
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.chromeApi.tabs.ungroup).toHaveBeenCalledWith(1);
+});
+
+test('a grouping failure during create keeps the new tab owned and attached', async () => {
+  const f = await fixture();
+  f.chromeApi.tabs.group.mockRejectedValueOnce(
+    new Error('Tabs cannot be edited right now (user may be dragging a tab).'),
+  );
+  await expect(f.dispatch('tabs.create', {})).resolves.toMatchObject({
+    providerTabId: 2,
+  });
+  expect(f.chromeApi.tabs.remove).not.toHaveBeenCalled();
+  expect(f.tabs.has(2)).toBe(true);
+  expect(f.attached.has(2)).toBe(true);
+  expect(f.agentOwnedTabs.has(2)).toBe(true);
+  expect(f.saved.agentOwnedTabs).toEqual([2]);
+  await f.dispatch('tabs.release', { tabId: 2 });
+  expect(f.chromeApi.tabs.ungroup).toHaveBeenCalledWith(2);
+  expect(f.saved.agentOwnedTabs).toEqual([]);
+});
+
+test('closing an owned tab that already vanished is not a failure', async () => {
+  const f = await fixture();
+  await f.dispatch('tabs.attach', { tabId: 1 });
+  f.chromeApi.tabs.remove.mockRejectedValueOnce(
+    new Error('No tab with id: 1.'),
+  );
+  await expect(f.dispatch('tabs.close', { tabId: 1 })).resolves.toBeNull();
+  f.chromeApi.tabs.remove.mockRejectedValueOnce(
+    new Error('Tabs cannot be edited right now.'),
+  );
+  await expect(f.dispatch('tabs.close', { tabId: 1 })).rejects.toThrow(
+    'cannot be edited',
+  );
+});
+
+test('a tab vanishing before the debugger attaches is reported as stale', async () => {
+  const f = await fixture();
+  f.chromeApi.debugger.attach.mockRejectedValueOnce(
+    new Error('No tab with id: 1.'),
+  );
+  await expect(f.dispatch('tabs.attach', { tabId: 1 })).rejects.toMatchObject({
+    code: 'STALE_TAB',
+  });
+  expect(f.attachedTabs.has(1)).toBe(false);
+});
+
+test('listed tab titles and urls stay within the SDK schema bound', async () => {
+  const f = await fixture();
+  f.tabs.set(4, {
+    id: 4,
+    title: 't'.repeat(30_000),
+    url: `https://example.test/?q=${'u'.repeat(30_000)}`,
+    windowId: 1,
+    groupId: -1,
+  });
+  const listed = (await f.dispatch('tabs.queryOpen', {})) as Array<{
+    providerTabId: number;
+    title: string | null;
+    url: string | null;
+  }>;
+  const long = listed.find((tab) => tab.providerTabId === 4);
+  expect(long?.url?.length).toBe(20_000);
+  expect(long?.url?.startsWith('https://example.test/?q=u')).toBe(true);
+  expect(long?.title?.length).toBe(20_000);
+  const short = listed.find((tab) => tab.providerTabId === 1);
+  expect(short?.url).toBe('https://example.test');
+  expect(short?.title).toBeNull();
+});

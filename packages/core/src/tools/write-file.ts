@@ -632,6 +632,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       const displayResult: FileDiff = {
         fileDiff,
         fileName,
+        filePath: file_path,
         originalContent,
         newContent: content,
         diffStat,
@@ -784,6 +785,9 @@ function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
   );
 }
 
+export const WRITE_FILE_ARTIFACT_DESCRIPTION =
+  'Artifact-like files such as HTML, PDF, images, notebooks, and office documents are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.';
+
 /**
  * Implementation of the WriteFile tool logic
  */
@@ -799,7 +803,7 @@ export class WriteFileTool
       ToolDisplayNames.WRITE_FILE,
       `Writes content to a specified file in the local filesystem. A request to create or generate a file does not establish that the target path is new. Unless the target's absence or current text contents have already been established in this session, you MUST use the ${ToolNames.READ_FILE} tool first; if the file does not exist, then create it. With prior-read enforcement enabled, blind overwrites are rejected. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
-Artifact-like files such as HTML, PDF, images, notebooks, and office documents are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.
+${WRITE_FILE_ARTIFACT_DESCRIPTION}
 
 The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,

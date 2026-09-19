@@ -6,6 +6,19 @@ This document describes the `todo_write` tool for Qwen Code.
 
 Use `todo_write` to create and manage a structured task list for your current coding session. This tool helps the AI assistant track progress and organize complex tasks, providing you with visibility into what work is being performed.
 
+The tool is disabled by default. Enable it in `settings.json` and restart Qwen
+Code:
+
+```json
+{
+  "tools": {
+    "todoWrite": {
+      "enabled": true
+    }
+  }
+}
+```
+
 ### Arguments
 
 `todo_write` takes one argument:
@@ -17,7 +30,7 @@ Use `todo_write` to create and manage a structured task list for your current co
 
 ## How to use `todo_write` with Qwen Code
 
-The AI assistant will automatically use this tool when working on complex, multi-step tasks. You don't need to explicitly request it, but you can ask the assistant to create a todo list if you want to see the planned approach for your request.
+When the tool is enabled, the AI assistant may use it for complex, multi-step tasks. You can also ask the assistant to create a todo list if you want to see the planned approach for your request.
 
 The tool stores todo lists in your home directory (`~/.qwen/todos/`) with session-specific files, so each coding session maintains its own task list.
 
@@ -58,6 +71,7 @@ todo_write(todos=[
 
 ## Important notes
 
-- **Automatic usage:** The AI assistant manages todo lists automatically during complex tasks.
+- **Opt-in:** Set `tools.todoWrite.enabled` to `true` and restart Qwen Code before using the tool.
+- **Automatic usage when enabled:** The AI assistant manages todo lists during complex tasks.
 - **Progress visibility:** You'll see todo lists updated in real-time as work progresses.
 - **Session isolation:** Each coding session has its own todo list that doesn't interfere with others.

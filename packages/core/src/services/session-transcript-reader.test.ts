@@ -13,6 +13,7 @@ const { mockDebugLogger, mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockDebugLogger: {
     debug: vi.fn(),
     warn: vi.fn(),
+    error: vi.fn(),
   },
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
@@ -45,7 +46,18 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 import { Storage } from '../config/storage.js';
-import type { ChatRecord } from './chatRecordingService.js';
+import type { Config } from '../config/config.js';
+import { CompressionStatus } from '../core/turn.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
+import {
+  SessionSourceService,
+  type SessionSourcesSnapshot,
+} from './session-sources.js';
+import {
+  ChatRecordingService,
+  type ChatRecord,
+} from './chatRecordingService.js';
+import { buildSessionHistoryFromConversation } from './session-api-history.js';
 import {
   buildApiHistoryFromConversation,
   getResumeTokenCounts,
@@ -54,7 +66,6 @@ import {
 import { collectSessionTurnState } from './session-turn-state.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
-import { buildGoalEvidenceCheckpointWindow } from '../goals/goal-evidence.js';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
@@ -77,6 +88,30 @@ import {
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptReader,
 } from './session-transcript-reader.js';
+
+/** A v2 goal_state payload with the given objective, as the runtime journals it. */
+function goalStatePayload(objective: string, recordId = 'cursor') {
+  return {
+    v: 2 as const,
+    cause: 'create' as const,
+    snapshot: {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: `goal-${objective.replace(/\W+/g, '-')}`,
+        revision: 1,
+        objective,
+        status: 'active' as const,
+        evidenceCursor: { recordId },
+        turnCount: 0,
+        activeTimeMs: 0,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    },
+  };
+}
 
 describe('SessionTranscriptReader', () => {
   let runtimeDir: string;
@@ -117,6 +152,455 @@ describe('SessionTranscriptReader', () => {
     );
     return filePath;
   }
+
+  it.each([false, true])(
+    'restores completed slash commands consistently with compression=%s',
+    async (compressed) => {
+      const answer = record('a1', null, 'previous answer');
+      const prefix: ChatRecord = compressed
+        ? {
+            ...answer,
+            type: 'system',
+            subtype: 'chat_compression',
+            message: undefined,
+            systemPayload: {
+              info: {
+                originalTokenCount: 100,
+                newTokenCount: 50,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+              compressedHistory: [answer.message!],
+            },
+          }
+        : answer;
+      const user = record('u1', 'a1', '/docs');
+      const output: ChatRecord = {
+        ...record('output', 'u1', ''),
+        type: 'system',
+        subtype: 'slash_command',
+        message: undefined,
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/docs',
+          outputHistoryItems: [
+            { type: 'assistant', text: 'Documentation URL' },
+          ],
+        },
+      };
+      await writeRecords([prefix, user, output]);
+      const service = new SessionService(workspaceDir, {
+        runtimeBaseDir: runtimeDir,
+      });
+      const loaded = await service.loadSession(sessionId);
+      const history = buildApiHistoryFromConversation(loaded!.conversation);
+      expect(history).toEqual([answer.message]);
+      expect(detectTurnInterruption(history).kind).toBe('none');
+      for (const replay of [
+        { kind: 'none' },
+        { kind: 'all', hideInheritedHistory: false },
+      ] as const) {
+        const projection = await service.readRestoreProjection(sessionId, {
+          replay,
+        });
+        expect(projection?.runtime.apiHistory).toEqual(history);
+        if (replay.kind === 'all') {
+          expect(projection?.replay?.records).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ uuid: 'u1', message: user.message }),
+              expect.objectContaining({
+                uuid: 'output',
+                systemPayload: output.systemPayload,
+              }),
+            ]),
+          );
+        }
+      }
+
+      const invocation: ChatRecord = {
+        ...output,
+        uuid: 'invocation',
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/docs',
+          sentToModel: true,
+        },
+      };
+      await writeRecords([
+        prefix,
+        user,
+        invocation,
+        { ...output, parentUuid: 'invocation' },
+      ]);
+      const custom = await service.readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      });
+      expect(custom?.runtime.apiHistory).toEqual([
+        answer.message,
+        user.message,
+      ]);
+      expect(detectTurnInterruption(custom!.runtime.apiHistory).kind).toBe(
+        'interrupted_prompt',
+      );
+    },
+  );
+
+  it('round-trips a recorded Goal turn end through selective restore, fork, and rewind', async () => {
+    const config = {
+      storage: new Storage(workspaceDir),
+      getSessionId: () => sessionId,
+      getProjectRoot: () => workspaceDir,
+      getCliVersion: () => 'test',
+      getResumedSessionData: () => undefined,
+    } as unknown as Config;
+    const recorder = new ChatRecordingService(config, undefined, false);
+    const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
+    recorder.recordUserMessage([{ text: 'complete the Goal' }]);
+    recorder.recordAssistantTurn({
+      model: 'test',
+      goalContext: permit,
+      message: [{ functionCall: { id: 'finish', name: 'update_goal' } }],
+    });
+    recorder.recordToolResult(
+      [
+        {
+          functionResponse: {
+            id: 'finish',
+            name: 'update_goal',
+            response: { readyForVerification: true },
+          },
+        },
+      ],
+      undefined,
+      { goalContext: permit, provenance: 'goal_runtime' },
+    );
+    await recorder.recordGoalTurnEnd('finish', permit);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const loaded = await service.loadSession(sessionId);
+    const legacy = buildSessionHistoryFromConversation(loaded!.conversation);
+    const projection = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(projection?.runtime.completedToolCallIds).toEqual(['finish']);
+    expect(projection?.runtime.apiHistory).toEqual(legacy.apiHistory);
+    expect(legacy.completedToolCallIds).toEqual(['finish']);
+    expect(legacy.apiHistory).toHaveLength(3);
+    expect(legacy.apiHistory.at(-1)?.parts?.[0]?.functionResponse?.id).toBe(
+      'finish',
+    );
+
+    const secondPermit = { ...permit, turnId: 'second-turn' };
+    recorder.recordUserMessage([{ text: 'another Goal turn' }]);
+    recorder.recordAssistantTurn({
+      model: 'test',
+      goalContext: secondPermit,
+      message: [{ functionCall: { id: 'finish-2', name: 'update_goal' } }],
+    });
+    recorder.recordToolResult(
+      [
+        {
+          functionResponse: {
+            id: 'finish-2',
+            name: 'update_goal',
+            response: { readyForVerification: true },
+          },
+        },
+      ],
+      undefined,
+      { goalContext: secondPermit, provenance: 'goal_runtime' },
+    );
+    await recorder.recordGoalTurnEnd('finish-2', secondPermit);
+
+    const forkId = '660e8400-e29b-41d4-a716-446655440001';
+    await service.forkSession(sessionId, forkId);
+    const fork = await service.readRestoreProjection(forkId, {
+      replay: { kind: 'none' },
+    });
+    expect(fork?.runtime.completedToolCallIds).toEqual(['finish', 'finish-2']);
+
+    recorder.recordMidTurnUserMessage(
+      [{ text: 'next request' }],
+      'next request',
+    );
+    await recorder.flush();
+    const next = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(next?.runtime.completedToolCallIds).toEqual(['finish', 'finish-2']);
+    expect(next?.runtime.apiHistory).toHaveLength(7);
+    expect(next?.runtime.apiHistory.at(-1)).toEqual({
+      role: 'user',
+      parts: [{ text: 'next request' }],
+    });
+
+    recorder.rewindRecording(1, { truncatedCount: 4 });
+    await recorder.flush();
+    const earlier = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(earlier?.runtime.completedToolCallIds).toEqual(['finish']);
+    expect(earlier?.runtime.apiHistory).toEqual(legacy.apiHistory);
+
+    recorder.rewindRecording(0, { truncatedCount: 3 });
+    await recorder.flush();
+    const rewound = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(rewound?.runtime.completedToolCallIds).toBeUndefined();
+    expect(rewound?.runtime.apiHistory).toEqual([]);
+  });
+
+  it('restores the latest session sources across rewind and compression without changing model history', async () => {
+    const persisted: SessionSourcesSnapshot[] = [];
+    const sources = new SessionSourceService({
+      sessionId,
+      workspaceCwd: () => workspaceDir,
+      load: async () => ({}),
+      persist: async (snapshot) => {
+        persisted.push(snapshot);
+      },
+    });
+    const added = await sources.upsert({
+      title: 'Requirements',
+      locator: { type: 'workspace_file', workspacePath: 'requirements.md' },
+    });
+    await sources.remove(added.source.id);
+    const first = record('u1', null, 'original prompt');
+    const answer = record('a1', 'u1', 'answer');
+    const metadata = (
+      snapshot: SessionSourcesSnapshot,
+      index: number,
+    ): ChatRecord => ({
+      ...record(`sources-${index}`, 'a1', ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: snapshot,
+    });
+    const rewind: ChatRecord = {
+      ...record('rewind', null, ''),
+      type: 'system',
+      subtype: 'rewind',
+      message: undefined,
+      systemPayload: { truncatedCount: 2 },
+    };
+    const current = record('u2', 'rewind', 'replacement prompt');
+    const compression: ChatRecord = {
+      ...record('compression', 'u2', ''),
+      type: 'system',
+      subtype: 'chat_compression',
+      message: undefined,
+      systemPayload: {
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 10,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+      },
+    };
+    const records = [
+      first,
+      answer,
+      metadata(persisted[0]!, 0),
+      metadata(persisted[1]!, 1),
+      rewind,
+      current,
+      compression,
+    ];
+    await writeRecords(records);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const loaded = await service.loadSession(sessionId);
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [loaded, restored?.runtime, live])
+      expect(state?.sourcesSnapshot).toEqual({
+        version: 1,
+        revision: 2,
+        sources: [],
+      });
+    expect(buildApiHistoryFromConversation(loaded!.conversation)).toEqual(
+      restored?.runtime.apiHistory,
+    );
+    expect(JSON.stringify(restored?.runtime.apiHistory)).not.toContain(
+      'Requirements',
+    );
+    expect(loaded?.lastCompletedUuid).toBe('compression');
+  });
+
+  it('reads source metadata before the first conversation turn and never treats read failures as an empty list', async () => {
+    const metadata: ChatRecord = {
+      ...record('sources-only', null, ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: { version: 1, revision: 1, sources: [] },
+    };
+    const filePath = await writeRecords([metadata]);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    expect(await service.readSessionSources(sessionId)).toEqual({
+      sourcesSnapshot: { version: 1, revision: 1, sources: [] },
+    });
+    await fs.appendFile(
+      filePath,
+      JSON.stringify(record('first-turn', null, 'prompt')) + '\n',
+    );
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    expect(restored?.runtime.sourcesSnapshot).toEqual(metadata.systemPayload);
+    expect(live?.sourcesSnapshot).toEqual(metadata.systemPayload);
+    await fs.unlink(filePath);
+    await fs.mkdir(filePath);
+    await expect(service.readSessionSources(sessionId)).resolves.toEqual({
+      sourcesUnavailable: true,
+    });
+  });
+
+  it('marks source projections unavailable after an identity-invalid physical record', async () => {
+    const filePath = await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('sources', 'u1', ''),
+        type: 'system',
+        subtype: 'session_sources_snapshot',
+        message: undefined,
+        systemPayload: { version: 1, revision: 1, sources: [] },
+      },
+    ]);
+    await fs.appendFile(
+      filePath,
+      JSON.stringify({
+        type: 'system',
+        subtype: 'session_sources_snapshot',
+        sessionId,
+        cwd: workspaceDir,
+        systemPayload: { version: 1, revision: 2, sources: [] },
+      }) + '\n',
+    );
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [restored?.runtime, live]) {
+      expect(state?.sourcesUnavailable).toBe(true);
+      expect(state?.sourcesSnapshot).toBeUndefined();
+    }
+    expect(
+      (await service.loadSession(sessionId))?.conversation.messages.map(
+        ({ uuid }) => uuid,
+      ),
+    ).toEqual(['u1']);
+  });
+
+  it('never resurrects an earlier source list after a truncated last snapshot', async () => {
+    let snapshot: SessionSourcesSnapshot = {
+      version: 1,
+      revision: 0,
+      sources: [],
+    };
+    const sourceService = new SessionSourceService({
+      sessionId,
+      workspaceCwd: () => workspaceDir,
+      load: async () => ({}),
+      persist: async (next) => {
+        snapshot = next;
+      },
+    });
+    await sourceService.upsert({
+      title: 'Old reference',
+      locator: { type: 'url', url: 'https://example.com/removed' },
+    });
+    const first: ChatRecord = {
+      ...record('source-1', 'a1', ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: snapshot,
+    };
+    const filePath = await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      first,
+    ]);
+    await fs.appendFile(
+      filePath,
+      '{"type":"system","subtype":"session_sources_snapshot","systemPayload":{"version":1,"revision":2,"sources":',
+    );
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const strict = await service.readSessionSources(sessionId);
+    const loaded = await service.loadSession(sessionId);
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [strict, loaded, restored?.runtime, live]) {
+      expect(state?.sourcesUnavailable).toBe(true);
+      expect(state?.sourcesSnapshot).toBeUndefined();
+    }
+    expect(loaded?.conversation.messages.map(({ uuid }) => uuid)).toEqual([
+      'u1',
+      'a1',
+    ]);
+  });
+
+  it('keeps conversation loading available when the last source snapshot is unsupported', async () => {
+    const malformed: ChatRecord = {
+      ...record('sources', 'a1', ''),
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      message: undefined,
+      systemPayload: {
+        version: 9,
+        revision: 2,
+        sources: [],
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      record('a1', 'u1', 'answer'),
+      malformed,
+    ]);
+    const service = new SessionService(workspaceDir, {
+      runtimeBaseDir: runtimeDir,
+    });
+    const loaded = await service.loadSession(sessionId);
+    const restored = await service.readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    const live = await service.readLiveRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+    for (const state of [loaded, restored?.runtime, live]) {
+      expect(state?.sourcesUnavailable).toBe(true);
+      expect(state?.sourcesSnapshot).toBeUndefined();
+    }
+    expect(loaded?.conversation.messages.map(({ uuid }) => uuid)).toEqual([
+      'u1',
+      'a1',
+    ]);
+  });
 
   async function writeRawTranscript(content: string): Promise<string> {
     const chatsDir = path.join(
@@ -1266,20 +1750,10 @@ describe('SessionTranscriptReader', () => {
     const inheritedGoal: ChatRecord = {
       ...record('goal', 'a1', ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
       forkedFrom: { sessionId: 'parent', messageUuid: 'goal' },
-      systemPayload: {
-        rawCommand: '/goal inherited goal',
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'inherited goal',
-          },
-        ],
-      },
+      systemPayload: goalStatePayload('inherited goal'),
     };
     await writeRecords([
       inheritedUser,
@@ -1331,29 +1805,17 @@ describe('SessionTranscriptReader', () => {
     const visibleGoal: ChatRecord = {
       ...record('visible-goal', null, ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
-      systemPayload: {
-        rawCommand: '/goal visible goal',
-        phase: 'result',
-        outputHistoryItems: [
-          { type: 'goal_status', kind: 'set', condition: 'visible goal' },
-        ],
-      },
+      systemPayload: goalStatePayload('visible goal'),
     };
     const hiddenGoal: ChatRecord = {
       ...record('hidden-goal', 'visible-goal', ''),
       type: 'system',
-      subtype: 'slash_command',
+      subtype: 'goal_state',
       message: undefined,
       forkedFrom: { sessionId: 'parent', messageUuid: 'hidden-goal' },
-      systemPayload: {
-        rawCommand: '/goal hidden goal',
-        phase: 'result',
-        outputHistoryItems: [
-          { type: 'goal_status', kind: 'set', condition: 'hidden goal' },
-        ],
-      },
+      systemPayload: goalStatePayload('hidden goal'),
     };
     await writeRecords([
       record('u0', null, 'older prompt'),
@@ -1792,6 +2254,8 @@ describe('SessionTranscriptReader', () => {
         },
       },
     };
+    // A goal_status card from a build before #7895 is history, not a
+    // recovery candidate: it is neither normalized nor carried.
     const legacy: ChatRecord = {
       ...record('legacy', 'u1', ''),
       type: 'system',
@@ -1842,15 +2306,6 @@ describe('SessionTranscriptReader', () => {
     });
     expect(projection?.runtime.goalRecoverySourceUuid).toBe('valid-goal');
     expect(projection?.runtime.goalRecords).toEqual([
-      expect.objectContaining({
-        uuid: 'legacy',
-        systemPayload: {
-          phase: 'result',
-          outputHistoryItems: [
-            { type: 'goal_status', kind: 'set', condition: 'legacy goal' },
-          ],
-        },
-      }),
       expect.objectContaining({ uuid: 'valid-goal', systemPayload: validGoal }),
       expect.objectContaining({ uuid: 'malformed-goal', systemPayload: null }),
     ]);
@@ -1958,202 +2413,6 @@ describe('SessionTranscriptReader', () => {
       'qwen-code.daemon.session_restore.index_cache_state',
       'hit',
     );
-  });
-
-  it('retains the determining legacy Goal candidate for a recent live page', async () => {
-    const legacyGoal: ChatRecord = {
-      ...record('goal', null, ''),
-      type: 'system',
-      subtype: 'slash_command',
-      message: undefined,
-      systemPayload: {
-        rawCommand: '/goal keep the live goal visible',
-        phase: 'result',
-        outputHistoryItems: [
-          {
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'keep the live goal visible',
-            iterations: 0,
-          },
-        ],
-      },
-    };
-    await writeRecords([
-      legacyGoal,
-      record('u1', 'goal', 'one'),
-      record('a1', 'u1', 'one answer'),
-      record('u2', 'a1', 'two'),
-      record('a2', 'u2', 'two answer'),
-    ]);
-
-    const projection = await new SessionTranscriptReader(
-      workspaceDir,
-    ).readLiveRestoreProjection(sessionId, {
-      replay: {
-        kind: 'recent',
-        limit: 2,
-        hideInheritedHistory: false,
-      },
-    });
-
-    expect(projection?.replay?.records.map((item) => item.uuid)).toEqual([
-      'u2',
-      'a2',
-    ]);
-    expect(projection?.goalRecoverySourceUuid).toBe('goal');
-    expect(projection?.goalRecords).toEqual([
-      expect.objectContaining({ uuid: 'goal', subtype: 'slash_command' }),
-    ]);
-  });
-
-  it('projects a pending Goal checkpoint window without a full-loader fallback', async () => {
-    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
-    const cursor: ChatRecord = {
-      ...record('cursor', null, ''),
-      type: 'system',
-      subtype: 'goal_runtime',
-      message: undefined,
-    };
-    const evidence = Array.from({ length: 80 }, (_, index) => ({
-      ...record(
-        `a-evidence-${index}`,
-        index === 0 ? 'cursor' : `a-evidence-${index - 1}`,
-        `evidence ${index}`,
-      ),
-      provenance: 'assistant_output' as const,
-      goalContext: permit,
-    }));
-    const fragmentedEvidence: ChatRecord = {
-      ...evidence[0]!,
-      message: { role: 'model', parts: [{ text: 'fragment tail' }] },
-    };
-    const compression: ChatRecord = {
-      ...record('compression', evidence.at(-1)!.uuid, ''),
-      type: 'system',
-      subtype: 'chat_compression',
-      message: undefined,
-      systemPayload: {
-        compressedHistory: [
-          { role: 'user', parts: [{ text: 'summary' }] },
-          { role: 'model', parts: [{ text: 'summary result' }] },
-        ],
-      } as ChatRecord['systemPayload'],
-    };
-    const goalPayload: GoalStateRecordPayloadV2 = {
-      v: 2,
-      cause: 'turn_finished',
-      snapshot: {
-        v: 2,
-        activity: 'idle',
-        goal: {
-          goalId: permit.goalId,
-          revision: permit.revision,
-          objective: 'verify the result',
-          status: 'active',
-          evidenceCursor: { recordId: 'cursor' },
-          turnCount: 1,
-          activeTimeMs: 0,
-          tokensUsed: 0,
-          createdAt: 1,
-          updatedAt: 2,
-        },
-      },
-      checkpointPending: {
-        permit,
-        recordUuid: evidence.at(-1)!.uuid,
-      },
-    };
-    const goalState: ChatRecord = {
-      ...record('goal-state', 'compression', ''),
-      type: 'system',
-      subtype: 'goal_state',
-      message: undefined,
-      systemPayload: goalPayload,
-    };
-    const filePath = await writeRecords([
-      cursor,
-      evidence[0]!,
-      fragmentedEvidence,
-      ...evidence.slice(1),
-      compression,
-      goalState,
-    ]);
-    let buildCount = 0;
-    setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
-      if (builtPath === filePath) buildCount++;
-    });
-
-    const service = new SessionService(workspaceDir, {
-      runtimeBaseDir: runtimeDir,
-    });
-    const [loaded, projection] = await Promise.all([
-      service.loadSession(sessionId),
-      service.readRestoreProjection(sessionId, {
-        replay: { kind: 'none' },
-      }),
-    ]);
-    const expected = buildGoalEvidenceCheckpointWindow({
-      records: loaded!.conversation.messages,
-      goal: goalPayload.snapshot.goal!,
-      permit,
-    });
-
-    expect(projection?.runtime.goalCheckpointWindow).toEqual(expected);
-    expect(projection?.runtime.goalCheckpointWindow).toMatchObject({
-      shouldCheckpoint: true,
-      truncated: false,
-    });
-    expect(projection?.runtime.goalCheckpointWindow?.evidence).toHaveLength(80);
-    expect(projection?.runtime.goalCheckpointWindow?.evidence[0]?.content).toBe(
-      'evidence 0\nfragment tail',
-    );
-    expect(buildCount).toBe(1);
-  });
-
-  it('defers unavailable pending Goal evidence to runtime recovery', async () => {
-    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
-    const evidence = {
-      ...record('evidence', null, 'result'),
-      provenance: 'assistant_output' as const,
-      goalContext: permit,
-    };
-    const goalState: ChatRecord = {
-      ...record('goal-state', 'evidence', ''),
-      type: 'system',
-      subtype: 'goal_state',
-      message: undefined,
-      systemPayload: {
-        v: 2,
-        cause: 'turn_finished',
-        snapshot: {
-          v: 2,
-          activity: 'idle',
-          goal: {
-            goalId: permit.goalId,
-            revision: permit.revision,
-            objective: 'verify the result',
-            status: 'active',
-            evidenceCursor: { recordId: 'missing-cursor' },
-            turnCount: 1,
-            activeTimeMs: 0,
-            tokensUsed: 0,
-            createdAt: 1,
-            updatedAt: 2,
-          },
-        },
-        checkpointPending: { permit, recordUuid: evidence.uuid },
-      } satisfies GoalStateRecordPayloadV2,
-    };
-    await writeRecords([evidence, goalState]);
-
-    const projection = await new SessionTranscriptReader(
-      workspaceDir,
-    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
-
-    expect(projection?.runtime.goalCheckpointWindow).toBeUndefined();
-    expect(projection?.runtime.goalRecords).toHaveLength(1);
-    expect(projection?.runtime.goalRecords[0]?.uuid).toBe('goal-state');
   });
 
   it('keeps backward pages within a normal user turn boundary', async () => {
@@ -3062,7 +3321,13 @@ describe('SessionTranscriptReader', () => {
     await reader.readPage(longSessionId);
     const longEstimate = getSessionTranscriptIndexCacheStatsForTest().byteSize;
 
-    expect(longEstimate - shortEstimate).toBeGreaterThan(80 * 1024);
+    // The background task id is retained per record and counted. The Goal
+    // context on the same records is not: the index kept a Goal evidence hint
+    // only to pre-build checkpoint windows, which no longer exist, so an
+    // 8 KB goal id and turn id must not grow the cache.
+    const growth = longEstimate - shortEstimate;
+    expect(growth).toBeGreaterThan(8 * 1024);
+    expect(growth).toBeLessThan(40 * 1024);
   });
 
   it('does not let an evicted pending build overwrite a newer cache entry', async () => {
@@ -4100,6 +4365,548 @@ describe('SessionTranscriptReader', () => {
       expect(page.records.at(0)?.type).toBe('tool_result');
       expect(page.records.at(-1)?.uuid).toBe('ar399');
       expect(page.hasMore).toBe(true);
+    });
+  });
+
+  describe('turn navigation', () => {
+    function turnResult(
+      uuid: string,
+      parentUuid: string,
+      promptId: string,
+    ): ChatRecord {
+      return {
+        ...record(uuid, parentUuid, ''),
+        type: 'system',
+        subtype: 'turn_result',
+        message: undefined,
+        systemPayload: {
+          promptId,
+          state: 'completed',
+          endedAt: RECORD_BASE_MS,
+        },
+      };
+    }
+
+    function scheduledTurn(): ChatRecord {
+      return {
+        ...record('uc1', 'a1', 'model schedule payload'),
+        subtype: 'cron',
+        systemPayload: { displayText: 'Scheduled review' },
+      } as ChatRecord;
+    }
+
+    it('builds stable sparse pages and projects only public previews', async () => {
+      const attachmentToken = '@attachment:///file-1';
+      const user = {
+        ...record('u1', null, 'model-facing prompt'),
+        systemPayload: {
+          displayText: `Visible prompt\n\n${attachmentToken}`,
+          hookContext: 'private hook context',
+          attachmentReferences: [{ type: 'resource', attachmentId: 'file-1' }],
+        },
+      } as ChatRecord;
+      const realtime = {
+        ...record('ur1', 'u1', 'spoken update'),
+        subtype: 'realtime_message',
+      } as ChatRecord;
+      const realtimeAssistant = {
+        ...record('art1', 'ur1', 'realtime reply'),
+        subtype: 'realtime_message',
+      } as ChatRecord;
+      const assistant = {
+        ...record('a1', 'art1', ''),
+        message: {
+          role: 'model',
+          parts: [
+            null,
+            { text: 'private reasoning', thought: true },
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'run_shell_command',
+                args: { command: 'secret' },
+              },
+            },
+            { text: 'Public answer' },
+          ],
+        },
+      } as unknown as ChatRecord;
+      const notification = {
+        ...record('un1', 'um1', 'background notice'),
+        subtype: 'notification',
+      } as ChatRecord;
+      const goalRuntime = {
+        ...record('ug1', 'tr1', 'private goal runtime'),
+        subtype: 'goal_runtime',
+      } as ChatRecord;
+      const midTurn = {
+        ...record('um1', 'ug1', 'steering message'),
+        subtype: 'mid_turn_user_message',
+      } as ChatRecord;
+      const scheduled = {
+        ...record('uc1', 'un1', 'model schedule payload'),
+        subtype: 'cron',
+        systemPayload: { displayText: 'Scheduled review' },
+      } as ChatRecord;
+      const scheduledAssistant = record('a2', 'uc1', 'Scheduled result');
+      const empty = {
+        ...record('u2', 'tr2', ''),
+        message: { role: 'user', parts: [] },
+      } as ChatRecord;
+      const attachmentOnly = {
+        ...record('u3', 'u2', ''),
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'AA==' },
+            },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([
+        user,
+        realtime,
+        realtimeAssistant,
+        assistant,
+        turnResult('tr1', 'a1', 'prompt-1'),
+        goalRuntime,
+        midTurn,
+        notification,
+        scheduled,
+        scheduledAssistant,
+        turnResult('tr2', 'a2', 'prompt-2'),
+        empty,
+        attachmentOnly,
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const tail = await reader.readTurnIndexPage(sessionId, { limit: 2 });
+
+      expect(tail.totalTurns).toBe(4);
+      expect(tail.start).toBe(2);
+      expect(tail.turns).toEqual([
+        expect.objectContaining({
+          ordinal: 2,
+          turnId: 'uc1',
+          kind: 'scheduled',
+          promptId: 'prompt-2',
+          label: 'Scheduled review',
+          detail: 'Scheduled result',
+        }),
+        expect.objectContaining({
+          ordinal: 3,
+          turnId: 'u3',
+          kind: 'prompt',
+          label: 'Prompt',
+        }),
+      ]);
+
+      const head = await reader.readTurnIndexPage(sessionId, {
+        snapshot: tail.snapshot,
+        start: 0,
+        limit: 2,
+      });
+      expect(head.turns).toEqual([
+        expect.objectContaining({
+          ordinal: 0,
+          turnId: 'u1',
+          kind: 'prompt',
+          promptId: 'prompt-1',
+          label: 'Visible prompt',
+          detail: 'Public answer',
+        }),
+        expect.objectContaining({
+          ordinal: 1,
+          turnId: 'ur1',
+          kind: 'realtime',
+          label: 'spoken update',
+          detail: 'realtime reply',
+        }),
+      ]);
+      expect(JSON.stringify(head.turns)).not.toContain('secret');
+      expect(JSON.stringify(head.turns)).not.toContain('private');
+      expect(JSON.stringify(head.turns)).not.toContain(attachmentToken);
+      expect(head.turns[1]).not.toHaveProperty('promptId');
+    });
+
+    it('keeps snapshots stable after append and a cold-cache rebuild', async () => {
+      const filePath = await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+        record('a2', 'u2', 'answer two'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readTurnIndexPage(sessionId);
+      await fs.appendFile(
+        filePath,
+        `${JSON.stringify(record('u3', 'a2', 'third'))}\n`,
+      );
+      resetSessionTranscriptIndexCacheForTest();
+
+      const frozen = await reader.readTurnIndexPage(sessionId, {
+        snapshot: first.snapshot,
+        start: 0,
+      });
+      const latest = await reader.readTurnIndexPage(sessionId);
+      expect(frozen.totalTurns).toBe(2);
+      expect(latest.totalTurns).toBe(3);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'u2',
+        snapshot: first.snapshot,
+        limit: 2,
+      });
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+      expect(anchored.targetRecordId).toBe('u2');
+      expect(anchored.hasOlder).toBe(true);
+      expect(anchored.hasMore).toBe(false);
+
+      await expect(
+        reader.readPage(sessionId, {
+          atRecordId: 'a1',
+          snapshot: first.snapshot,
+        }),
+      ).rejects.toMatchObject({
+        name: 'InvalidSessionTranscriptTurnAnchorError',
+      });
+      await expect(
+        reader.readPage(sessionId, { atRecordId: 'u1' }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('continues forward from an anchored page inside the frozen snapshot', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+        record('a2', 'u2', 'answer two'),
+        record('u3', 'a2', 'third'),
+        record('a3', 'u3', 'answer three'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'u2',
+        snapshot: index.snapshot,
+        limit: 2,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+      expect(anchored.hasMore).toBe(true);
+      expect(anchored.nextCursorState).toBeDefined();
+
+      const continued = await reader.readPage(sessionId, {
+        cursor: encodeCursor(anchored.nextCursorState!),
+        limit: 2,
+      });
+      expect(continued.records.map((item) => item.uuid)).toEqual(['u3', 'a3']);
+      expect(continued.hasMore).toBe(false);
+    });
+
+    it('rejects conflicting snapshot-bound transcript anchors', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const cursor = encodeCursor(first.nextCursorState!);
+
+      await expect(
+        reader.readPage(sessionId, {
+          cursor,
+          atRecordId: 'u2',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(sessionId, {
+          atRecordId: 'u2',
+          beforeRecordId: 'u1',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(sessionId, { snapshot: index.snapshot }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('rejects snapshots minted for another session', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+      const otherSessionId = '550e8400-e29b-41d4-a716-446655440001';
+      await writeRecords(
+        [
+          record('other-u1', null, 'other first'),
+          record('other-a1', 'other-u1', 'other answer'),
+        ],
+        otherSessionId,
+      );
+
+      await expect(
+        reader.readTurnIndexPage(otherSessionId, {
+          snapshot: index.snapshot,
+          start: 0,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(otherSessionId, {
+          atRecordId: 'other-u1',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('expands an anchored scheduled turn to a safe replay boundary', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        toolCallRecord('a1', 'u1', 'call-1'),
+        scheduledTurn(),
+        toolResultRecord('r1', 'uc1', 'call-1'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'uc1',
+        snapshot: index.snapshot,
+        limit: 2,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual([
+        'a1',
+        'uc1',
+        'r1',
+      ]);
+      expect(anchored.targetRecordId).toBe('uc1');
+      expect(anchored.hasOlder).toBe(true);
+    });
+
+    it('keeps an anchored page bounded when safe expansion exceeds its budget', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        toolCallRecord('a1', 'u1', 'call-1'),
+        scheduledTurn(),
+        toolResultRecord('r1', 'uc1', 'call-1'),
+      ]);
+      setSessionTranscriptExpandedPageBytesForTest(1);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'uc1',
+        snapshot: index.snapshot,
+        limit: 2,
+        maxBytes: 1024,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['uc1', 'r1']);
+      expect(anchored.targetRecordId).toBe('uc1');
+      expect(anchored.hasOlder).toBe(true);
+    });
+
+    it('reports no older records when boundary expansion reaches file head', async () => {
+      await writeRecords([
+        toolCallRecord('a1', 'u0', 'call-1'),
+        scheduledTurn(),
+        toolResultRecord('r1', 'uc1', 'call-1'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'uc1',
+        snapshot: index.snapshot,
+        limit: 1,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['a1', 'uc1']);
+      expect(anchored.hasOlder).toBe(false);
+    });
+
+    it('supports an empty frozen snapshot and rejects tampering', async () => {
+      await writeRawTranscript('');
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readTurnIndexPage(sessionId);
+
+      expect(page).toMatchObject({ totalTurns: 0, start: 0, turns: [] });
+      const tampered = `${page.snapshot[0] === 'A' ? 'B' : 'A'}${page.snapshot.slice(1)}`;
+      await expect(
+        reader.readTurnIndexPage(sessionId, { snapshot: tampered }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      const decoded = JSON.parse(
+        Buffer.from(page.snapshot, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      decoded['snapshotSize'] = (decoded['snapshotSize'] as number) + 1;
+      const forged = Buffer.from(JSON.stringify(decoded), 'utf8').toString(
+        'base64url',
+      );
+      await expect(
+        reader.readTurnIndexPage(sessionId, { snapshot: forged }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readTurnIndexPage(sessionId, { start: 0 }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readTurnIndexPage(sessionId, {
+          snapshot: page.snapshot,
+          start: 1,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('rejects a frozen turn-index snapshot after its leaf is replaced', async () => {
+      const filePath = await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readTurnIndexPage(sessionId);
+      const original = await fs.readFile(filePath, 'utf8');
+      await fs.writeFile(
+        filePath,
+        original.replace('"uuid":"a1"', '"uuid":"a2"'),
+        'utf8',
+      );
+      resetSessionTranscriptIndexCacheForTest();
+
+      await expect(
+        reader.readTurnIndexPage(sessionId, {
+          snapshot: page.snapshot,
+          start: 0,
+        }),
+      ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+    });
+
+    it('caps navigation labels and details by Unicode code points', async () => {
+      await writeRecords([
+        record('u1', null, '🧭'.repeat(200)),
+        record('a1', 'u1', '🧩'.repeat(300)),
+      ]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+      const turn = page.turns[0]!;
+
+      expect(Array.from(turn.label)).toHaveLength(160);
+      expect(turn.label.endsWith('…')).toBe(true);
+      expect(Array.from(turn.detail ?? '')).toHaveLength(240);
+      expect(turn.detail?.endsWith('…')).toBe(true);
+    });
+
+    it('does not turn a fragmented control-only user record into navigation', async () => {
+      const first = {
+        ...record('u1', null, ''),
+        message: { role: 'user', parts: [] },
+      } as ChatRecord;
+      const contextOnly = {
+        ...record('u1', null, ''),
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: '<qwen:user-prompt-submit-context>\nprivate\n</qwen:user-prompt-submit-context>',
+            },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([
+        first,
+        contextOnly,
+        record('u2', 'u1', 'visible prompt'),
+      ]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.totalTurns).toBe(1);
+      expect(page.turns).toEqual([
+        expect.objectContaining({ turnId: 'u2', label: 'visible prompt' }),
+      ]);
+    });
+
+    it('omits control-context parts from a mixed visible label', async () => {
+      const mixed = {
+        ...record('u1', null, ''),
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: '<qwen:user-prompt-submit-context>\nprivate context\n</qwen:user-prompt-submit-context>',
+            },
+            { text: 'visible prompt' },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([mixed]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.turns).toEqual([
+        expect.objectContaining({ turnId: 'u1', label: 'visible prompt' }),
+      ]);
+      expect(JSON.stringify(page.turns)).not.toContain('private context');
+    });
+
+    it('does not use control-only display text as navigation', async () => {
+      const context =
+        '<qwen:user-prompt-submit-context>\nprivate context\n</qwen:user-prompt-submit-context>';
+      const ordinary = {
+        ...record('u1', null, context),
+        systemPayload: { displayText: context },
+      } as ChatRecord;
+      const scheduled = {
+        ...record('u2', 'u1', context),
+        subtype: 'cron',
+        systemPayload: { displayText: context },
+      } as ChatRecord;
+      await writeRecords([ordinary, scheduled]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.turns).toEqual([]);
+    });
+
+    it('omits generated attachment tokens without display metadata', async () => {
+      const token = '@attachment:///file-1';
+      const attachment = {
+        ...record('u1', null, token),
+        systemPayload: {
+          attachmentReferences: [
+            {
+              type: 'resource',
+              attachmentId: 'file-1',
+              mimeType: 'text/plain',
+              size: 10,
+            },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([attachment]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.turns).toEqual([
+        expect.objectContaining({ turnId: 'u1', label: 'Prompt' }),
+      ]);
+      expect(JSON.stringify(page.turns)).not.toContain(token);
     });
   });
 });

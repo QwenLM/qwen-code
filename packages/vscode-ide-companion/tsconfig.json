@@ -10,6 +10,7 @@
     "sourceMap": true,
     "strict": true,
     "skipLibCheck": true,
+    "resolveJsonModule": true,
     "paths": {
       "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"],
       "@qwen-code/qwen-code/export": ["../cli/src/export/index.ts"]

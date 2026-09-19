@@ -12,6 +12,7 @@ export { isActiveToolStatus } from '../../adapters/toolClassification';
  * write, …) are web-shell-only conveniences with no core equivalent.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  exec: 'Exec',
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',
@@ -60,9 +61,25 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
+  record_source: 'RecordSource',
   report_findings: 'ReportFindings',
   web_search: 'WebSearch',
   image_gen: 'ImageGen',
+  omni_downsample_image: 'DownsampleImage',
+  omni_downscale_video: 'DownscaleVideo',
+  omni_downsample_audio: 'DownsampleAudio',
+  omni_extract_keyframes: 'ExtractKeyframes',
+  omni_extract_audio: 'ExtractAudio',
+  omni_clip_video: 'ClipVideo',
+  omni_convert_image: 'ConvertImage',
+  omni_transcribe_audio: 'TranscribeAudio',
+  omni_clip_image: 'ClipImage',
+  omni_clip_audio: 'ClipAudio',
+  omni_caption_image: 'CaptionImage',
+  omni_caption_audio: 'CaptionAudio',
+  omni_ocr_image: 'OcrImage',
+  omni_understand_video_segments: 'UnderstandVideoSegments',
+  omni_recall_media_memory: 'RecallMediaMemory',
   display_image: 'DisplayImage',
   bash: 'Shell',
   shell: 'Shell Command',
@@ -140,6 +157,41 @@ export function localizeToolDisplayName(
 export function isAskUserQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+}
+
+export function isCompletedAskUserQuestion(tool: ACPToolCall): boolean {
+  return (
+    tool.status === 'completed' && isAskUserQuestionToolName(tool.toolName)
+  );
+}
+
+export function getQuestionAnswerResult(tool: ACPToolCall): {
+  text: string;
+  answers: Array<{ question: string; answer: string }>;
+} | null {
+  const output = tool.rawOutput;
+  if (
+    !output ||
+    typeof output !== 'object' ||
+    !('type' in output) ||
+    output.type !== 'ask_user_question_answers' ||
+    !('text' in output) ||
+    typeof output.text !== 'string' ||
+    !('answers' in output) ||
+    !Array.isArray(output.answers) ||
+    !output.answers.every(
+      (entry: unknown): entry is { question: string; answer: string } =>
+        !!entry &&
+        typeof entry === 'object' &&
+        'question' in entry &&
+        typeof entry.question === 'string' &&
+        'answer' in entry &&
+        typeof entry.answer === 'string',
+    )
+  ) {
+    return null;
+  }
+  return { text: output.text, answers: output.answers };
 }
 
 export function truncateText(text: string, max: number): string {
@@ -425,8 +477,10 @@ function formatDescriptionPaths(
     return pathForDisplay(trimmed, workspaceCwd);
   }
 
-  return trimmed.replace(/(?:[A-Za-z]:)?\/[^\s'")]+/g, (match) =>
-    pathForDisplay(match, workspaceCwd),
+  return trimmed.replace(
+    /(^|[\s'"(])((?:[A-Za-z]:)?\/[^\s'")]+)/g,
+    (_match, prefix: string, filePath: string) =>
+      prefix + pathForDisplay(filePath, workspaceCwd),
   );
 }
 
@@ -498,6 +552,33 @@ export function isAgentCancelled(agent: ACPToolCall): boolean {
     status === 'canceled' ||
     reason.toLowerCase().includes('cancel')
   );
+}
+
+export function getSubagentDetailsUnavailableReason(
+  agent: ACPToolCall,
+): string | undefined {
+  if (agent.subagentSessionReady !== false) return undefined;
+  const rawStatus =
+    agent.rawOutput && typeof agent.rawOutput === 'object'
+      ? (agent.rawOutput as Record<string, unknown>)['status']
+      : undefined;
+  // Safe projections can map cancellation to failed while retaining this flag.
+  if (
+    agent.wasCancelled ||
+    (typeof rawStatus === 'string' &&
+      ['cancelled', 'canceled'].includes(rawStatus.toLowerCase()))
+  )
+    return 'subagent.cancelled';
+  if (
+    agent.status === 'failed' ||
+    getTaskExecutionRecord(agent.rawOutput)?.['status'] === 'failed'
+  )
+    return 'subagent.failed';
+  if (isAgentCancelled(agent)) return 'subagent.cancelled';
+  // Successful teammate launches use a different session mechanism and may
+  // complete without publishing readiness.
+  if (agent.status === 'completed') return undefined;
+  return 'subagent.creating';
 }
 
 export function getAgentDisplayStatus(

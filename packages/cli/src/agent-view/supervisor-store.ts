@@ -7,7 +7,8 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { atomicWriteFile, Storage } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { atomicWriteFile } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
@@ -352,20 +353,34 @@ export async function listAgentViewSessionStates(
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
+/**
+ * The roster entry for a session, under the store's one matching rule:
+ * ids compared after `sanitizeSessionId` on both sides. Every surface
+ * that names "the roster entry for this session" goes through this
+ * owner of the rule, so `sessions ps` and `sessions peek` cannot name
+ * the same session two different ways.
+ */
+export function findAgentViewRosterEntry(
+  roster: AgentViewRosterFile,
+  sessionId: string,
+): AgentViewRosterEntry | undefined {
+  const key = sanitizeSessionId(sessionId);
+  return roster.sessions.find(
+    (entry) => sanitizeSessionId(entry.sessionId) === key,
+  );
+}
+
 export async function listAgentViewSessionSnapshots(
   options: StoreOptions = {},
 ): Promise<AgentViewSessionSnapshot[]> {
   const states = await listAgentViewSessionStates(options);
   const roster = await readAgentViewRoster(options);
-  const rosterEntries = new Map(
-    roster.sessions.map((entry) => [sanitizeSessionId(entry.sessionId), entry]),
-  );
   const snapshots = await Promise.all(
     states.map(async (state) => {
       const snapshot = {
         sessionId: state.sessionId,
         state,
-        rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
+        rosterEntry: findAgentViewRosterEntry(roster, state.sessionId),
       };
       if (state.ownership === 'unmanaged') {
         return snapshot;
@@ -696,8 +711,9 @@ async function writeJsonFile(
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // noFollow: these files carry the supervisor and worker auth tokens;
-  // refuse to write through a pre-placed symlink at the store path, matching
-  // the other credential write sites (trustedHooks, file-token-storage).
+  // refuse to write through a pre-placed symlink at the store path, like the
+  // other credential writers (the MCP and Qwen token stores and extension git
+  // credentials).
   await atomicWriteFile(filePath, `${JSON.stringify(value, null, 2)}\n`, {
     mode: 0o600,
     forceMode: true,
@@ -817,7 +833,7 @@ function normalizeLaunch(
   }) as AgentViewLaunchFile;
 }
 
-function redactAgentViewLaunch(
+export function redactAgentViewLaunch(
   launch: AgentViewLaunchFile | undefined,
 ): AgentViewLaunchFile | undefined {
   if (!launch) return undefined;

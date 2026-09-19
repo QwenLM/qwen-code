@@ -41,6 +41,54 @@ describe('daemon transcript rewind', () => {
     expect(state.activeAssistantBlockId).toBeUndefined();
   });
 
+  it('preserves earlier background notifications and replies when rewinding a user turn', () => {
+    const retainedEvents: DaemonUiEvent[] = [
+      { type: 'user.text.delta', text: 'review' },
+      { type: 'assistant.text.delta', text: 'review conclusion' },
+      { type: 'assistant.done' },
+      {
+        type: 'user.text.delta',
+        text: 'typecheck completed',
+        meta: { source: 'background_notification', qwenDiscreteMessage: true },
+      },
+      { type: 'assistant.text.delta', text: 'typecheck confirmed' },
+      { type: 'assistant.done' },
+      {
+        type: 'user.text.delta',
+        text: 'tests completed',
+        meta: { source: 'background_notification', qwenDiscreteMessage: true },
+      },
+      { type: 'assistant.text.delta', text: '943 tests passed' },
+      { type: 'assistant.done' },
+    ];
+    const replayed = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      retainedEvents,
+      { now: 1 },
+    );
+    expect(replayed.blocks).toHaveLength(6);
+
+    const rewound = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...retainedEvents,
+        { type: 'user.text.delta', text: 'hello' },
+        { type: 'assistant.text.delta', text: 'hello answer' },
+        { type: 'assistant.done' },
+        {
+          type: 'session.rewound',
+          promptId: 'session########1',
+          targetTurnIndex: 1,
+        },
+      ],
+      { now: 1 },
+    );
+
+    expect(rewound.blocks).toEqual(replayed.blocks);
+    expect(rewound.activeUserBlockId).toBeUndefined();
+    expect(rewound.activeAssistantBlockId).toBeUndefined();
+  });
+
   it('preserves the unrecognized diagnostics sidechannel on rewind (#8823)', () => {
     // Diagnostics have no per-turn association to prune by. Keep the bounded
     // sidechannel intact instead of dropping retained-turn forward-compat

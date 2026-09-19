@@ -12,12 +12,16 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import {
   toSnapshot,
+  readWorkflowSnapshot,
   writeWorkflowSnapshot,
   listWorkflowSnapshots,
   deleteWorkflowSnapshot,
   MAX_RETAINED_SNAPSHOTS,
 } from './workflow-snapshot.js';
-import type { WorkflowTask } from './workflow-run-registry.js';
+import {
+  markWorkflowRunPersistenceActive,
+  type WorkflowTask,
+} from './workflow-run-registry.js';
 
 function fakeConfig(projectDir: string): Config {
   return { storage: new Storage(projectDir) } as unknown as Config;
@@ -196,6 +200,57 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     ]);
   });
 
+  // A resume after a restart has a run id and no registry entry, and the
+  // snapshot is what still says what the run recorded about itself.
+  it('reads one run back by id, its source reference included', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({
+        runId: 'wf_one',
+        sourceRef: { id: 'definition-7', revision: 'rev-3' },
+      }),
+    );
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_other' }));
+
+    const snapshot = await readWorkflowSnapshot(config, 'wf_one');
+    expect(snapshot?.runId).toBe('wf_one');
+    expect(snapshot?.sourceRef).toEqual({
+      id: 'definition-7',
+      revision: 'rev-3',
+    });
+    expect(
+      (await readWorkflowSnapshot(config, 'wf_other'))?.sourceRef,
+    ).toBeUndefined();
+  });
+
+  it('reads nothing for a run with no snapshot, an unparseable one, or a file that is not one', async () => {
+    const config = fakeConfig(projectDir);
+    await expect(
+      readWorkflowSnapshot(config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+
+    const broken = config.storage.getWorkflowRunSnapshotPath('wf_broken');
+    await fs.mkdir(path.dirname(broken), { recursive: true });
+    await fs.writeFile(broken, '{not json', 'utf8');
+    await expect(
+      readWorkflowSnapshot(config, 'wf_broken'),
+    ).resolves.toBeUndefined();
+
+    await fs.writeFile(
+      config.storage.getWorkflowRunSnapshotPath('wf_other_shape'),
+      JSON.stringify({ sourceRef: { id: 'a', revision: 'b' } }),
+      'utf8',
+    );
+    await expect(
+      readWorkflowSnapshot(config, 'wf_other_shape'),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      readWorkflowSnapshot({} as Config, 'wf_absent'),
+    ).resolves.toBeUndefined();
+  });
+
   it('loads a legacy snapshot without an event ledger', async () => {
     const config = fakeConfig(projectDir);
     await writeWorkflowSnapshot(config, task({ runId: 'wf_legacy' }));
@@ -213,6 +268,87 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
 
     expect(list).toHaveLength(1);
     expect(list[0].events).toBeUndefined();
+  });
+
+  // Snapshots written before resume respawns were counted have no field for
+  // it. An old run's history is worth more than a uniform shape, so the
+  // validator accepts its absence rather than discarding the run.
+  it('loads a snapshot written before respawns were counted', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_prerespawn' }));
+    const snapshotPath =
+      config.storage.getWorkflowRunSnapshotPath('wf_prerespawn');
+    const parsed = JSON.parse(
+      await fs.readFile(snapshotPath, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(parsed['agentsRespawned']).toBe(0);
+    delete parsed['agentsRespawned'];
+    await fs.writeFile(snapshotPath, JSON.stringify(parsed), 'utf8');
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list).toHaveLength(1);
+    expect(list[0].agentsRespawned).toBeUndefined();
+  });
+
+  // The large-run flag is history worth keeping: a run's snapshot is what the
+  // user reads after the fact to see why it was big. Older snapshots have no
+  // flag and still load; a malformed one is not trusted.
+  it('keeps the large-run flag, and loads snapshots without one', async () => {
+    const config = fakeConfig(projectDir);
+    const sizeWarning = {
+      axis: 'agents' as const,
+      scheduledAgents: 16,
+      totalTokens: 0,
+      projectedTokens: 1_120_000,
+      agentCap: 15,
+      tokenCap: 1_500_000,
+      capFromGuideline: true,
+      at: 1_700_000_000_500,
+    };
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_sized', sizeWarning }),
+    );
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_unsized', startTime: 1_700_000_000_001 }),
+    );
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list.find((s) => s.runId === 'wf_sized')?.sizeWarning).toEqual(
+      sizeWarning,
+    );
+    expect(
+      list.find((s) => s.runId === 'wf_unsized')?.sizeWarning,
+    ).toBeUndefined();
+  });
+
+  it('discards a snapshot whose size warning is malformed', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(config, task({ runId: 'wf_badsize' }));
+    const snapshotPath =
+      config.storage.getWorkflowRunSnapshotPath('wf_badsize');
+    const parsed = JSON.parse(
+      await fs.readFile(snapshotPath, 'utf8'),
+    ) as Record<string, unknown>;
+    parsed['sizeWarning'] = { axis: 'time' };
+    await fs.writeFile(snapshotPath, JSON.stringify(parsed), 'utf8');
+
+    expect(await listWorkflowSnapshots(config)).toHaveLength(0);
+  });
+
+  it('records the respawn count it was given', async () => {
+    const config = fakeConfig(projectDir);
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_respawned', agentsRespawned: 2 }),
+    );
+
+    const list = await listWorkflowSnapshots(config);
+
+    expect(list[0].agentsRespawned).toBe(2);
   });
 
   it('freezes the snapshot projection before the first fs await', async () => {
@@ -291,6 +427,9 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     const journalPath = config.storage.getWorkflowRunJournalPath(runId);
     await fs.mkdir(path.dirname(journalPath), { recursive: true });
     await fs.writeFile(journalPath, '{}\n', 'utf8');
+    const inlinePath = config.storage.getInlineWorkflowScriptPath(runId);
+    await fs.mkdir(path.dirname(inlinePath), { recursive: true });
+    await fs.writeFile(inlinePath, 'return 1', 'utf8');
 
     await expect(deleteWorkflowSnapshot(config, runId)).resolves.toBe(true);
 
@@ -298,6 +437,7 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       fs.access(config.storage.getWorkflowRunSnapshotPath(runId)),
     ).rejects.toThrow();
     await expect(fs.access(path.dirname(journalPath))).rejects.toThrow();
+    await expect(fs.access(inlinePath)).rejects.toThrow();
     await expect(listWorkflowSnapshots(config)).resolves.toEqual([]);
   });
 
@@ -322,6 +462,29 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
       fs.access(config.storage.getWorkflowRunSnapshotPath(runId)),
     ).resolves.toBeUndefined();
     await expect(fs.access(path.dirname(journalPath))).resolves.toBeUndefined();
+  });
+
+  it('keeps the snapshot when inline script deletion fails', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_dead';
+    await writeWorkflowSnapshot(config, task({ runId }));
+    const inlinePath = config.storage.getInlineWorkflowScriptPath(runId);
+    await fs.mkdir(path.dirname(inlinePath), { recursive: true });
+    await fs.writeFile(inlinePath, 'return 1', 'utf8');
+    const rmSpy = vi
+      .spyOn(fs, 'rm')
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(
+        Object.assign(new Error('busy'), { code: 'EBUSY' }),
+      );
+
+    await expect(deleteWorkflowSnapshot(config, runId)).resolves.toBe(false);
+
+    rmSpy.mockRestore();
+    await expect(
+      fs.access(config.storage.getWorkflowRunSnapshotPath(runId)),
+    ).resolves.toBeUndefined();
+    await expect(fs.access(inlinePath)).resolves.toBeUndefined();
   });
 
   it('rejects traversal-shaped run ids without touching project files', async () => {
@@ -376,6 +539,137 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(files.length).toBe(MAX_RETAINED_SNAPSHOTS);
     // The pruned runs' journal directories are gone too (no orphan leak).
     expect(journalDirs.length).toBe(MAX_RETAINED_SNAPSHOTS);
+  });
+
+  // An inline run leaves a third artifact — its persisted source. Retiring
+  // the snapshot and the journal while the script stays would let those
+  // accumulate for runs nothing can name any more.
+  it('prunes the persisted inline script alongside the snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const inlineDir = path.dirname(
+      config.storage.getInlineWorkflowScriptPath('wf_0'),
+    );
+    await fs.mkdir(inlineDir, { recursive: true });
+    // A file whose stem is not a well-formed run id must survive: prune only
+    // removes what the `wf_<hex>` gate admits.
+    const stranger = path.join(inlineDir, 'notarun.js');
+    await fs.writeFile(stranger, 'keep', 'utf8');
+
+    const total = MAX_RETAINED_SNAPSHOTS + 2;
+    for (let i = 0; i < total; i++) {
+      const runId = `wf_${i.toString(16)}`;
+      await fs.writeFile(
+        path.join(inlineDir, `${runId}.js`),
+        'return 1',
+        'utf8',
+      );
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId, startTime: 1_000 + i }),
+      );
+    }
+
+    const scripts = (await fs.readdir(inlineDir)).filter((f) =>
+      f.startsWith('wf_'),
+    );
+    expect(scripts.length).toBe(MAX_RETAINED_SNAPSHOTS);
+    // The oldest two runs lost their scripts with their snapshots.
+    expect(scripts).not.toContain('wf_0.js');
+    expect(scripts).not.toContain('wf_1.js');
+    await expect(fs.readFile(stranger, 'utf8')).resolves.toBe('keep');
+  });
+
+  it('keeps live run artifacts while pruning its stale snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const liveRunId = 'wf_a0';
+    const snapshotPath = config.storage.getWorkflowRunSnapshotPath(liveRunId);
+    const journalPath = config.storage.getWorkflowRunJournalPath(liveRunId);
+    const inlinePath = config.storage.getInlineWorkflowScriptPath(liveRunId);
+    await writeWorkflowSnapshot(config, task({ runId: liveRunId }));
+    await fs.mkdir(path.dirname(journalPath), { recursive: true });
+    await fs.writeFile(journalPath, '{}\n', 'utf8');
+    await fs.mkdir(path.dirname(inlinePath), { recursive: true });
+    await fs.writeFile(inlinePath, 'return 1', 'utf8');
+    await fs.utimes(snapshotPath, new Date(0), new Date(0));
+    Object.assign(config, {
+      getWorkflowRunRegistry: () => ({
+        list: () => [task({ runId: liveRunId, status: 'running' })],
+        listStartingRunIds: () => [],
+      }),
+    });
+
+    for (let i = 0; i < MAX_RETAINED_SNAPSHOTS; i++) {
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId: `wf_b${i.toString(16)}`, startTime: 2_000 + i }),
+      );
+    }
+
+    await expect(fs.access(snapshotPath)).rejects.toThrow();
+    await expect(fs.access(journalPath)).resolves.toBeUndefined();
+    await expect(fs.access(inlinePath)).resolves.toBeUndefined();
+  });
+
+  it('keeps starting run artifacts while pruning its stale snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const runId = 'wf_a1';
+    const snapshotPath = config.storage.getWorkflowRunSnapshotPath(runId);
+    const journalPath = config.storage.getWorkflowRunJournalPath(runId);
+    const inlinePath = config.storage.getInlineWorkflowScriptPath(runId);
+    await writeWorkflowSnapshot(config, task({ runId }));
+    await fs.mkdir(path.dirname(journalPath), { recursive: true });
+    await fs.writeFile(journalPath, '{}\n', 'utf8');
+    await fs.mkdir(path.dirname(inlinePath), { recursive: true });
+    await fs.writeFile(inlinePath, 'return 1', 'utf8');
+    await fs.utimes(snapshotPath, new Date(0), new Date(0));
+    Object.assign(config, {
+      getWorkflowRunRegistry: () => ({
+        list: () => [],
+        listStartingRunIds: () => [runId],
+      }),
+    });
+
+    for (let i = 0; i < MAX_RETAINED_SNAPSHOTS; i++) {
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId: `wf_c${i.toString(16)}`, startTime: 3_000 + i }),
+      );
+    }
+
+    await expect(fs.access(snapshotPath)).rejects.toThrow();
+    await expect(fs.access(journalPath)).resolves.toBeUndefined();
+    await expect(fs.access(inlinePath)).resolves.toBeUndefined();
+  });
+
+  it('keeps sibling-session live artifacts while pruning', async () => {
+    const ownerConfig = fakeConfig(projectDir);
+    const pruningConfig = fakeConfig(projectDir);
+    const runId = 'wf_a2';
+    const snapshotPath = ownerConfig.storage.getWorkflowRunSnapshotPath(runId);
+    const journalPath = ownerConfig.storage.getWorkflowRunJournalPath(runId);
+    const inlinePath = ownerConfig.storage.getInlineWorkflowScriptPath(runId);
+    await writeWorkflowSnapshot(ownerConfig, task({ runId }));
+    await fs.mkdir(path.dirname(journalPath), { recursive: true });
+    await fs.writeFile(journalPath, '{}\n', 'utf8');
+    await fs.mkdir(path.dirname(inlinePath), { recursive: true });
+    await fs.writeFile(inlinePath, 'return 1', 'utf8');
+    await fs.utimes(snapshotPath, new Date(0), new Date(0));
+    const release = markWorkflowRunPersistenceActive(ownerConfig, runId);
+
+    try {
+      for (let i = 0; i < MAX_RETAINED_SNAPSHOTS; i++) {
+        await writeWorkflowSnapshot(
+          pruningConfig,
+          task({ runId: `wf_d${i.toString(16)}`, startTime: 4_000 + i }),
+        );
+      }
+    } finally {
+      release();
+    }
+
+    await expect(fs.access(snapshotPath)).rejects.toThrow();
+    await expect(fs.access(journalPath)).resolves.toBeUndefined();
+    await expect(fs.access(inlinePath)).resolves.toBeUndefined();
   });
 
   // Security: prune derives `runId` from the snapshot filename and feeds it to
