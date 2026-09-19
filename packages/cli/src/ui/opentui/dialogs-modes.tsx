@@ -20,8 +20,10 @@ import {
   type ReactNode,
 } from 'react';
 import { useRenderer, useKeyboard } from '@opentui/react';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import {
+  APPROVAL_MODES,
+  ApprovalMode,
+} from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
 import {
@@ -146,16 +148,20 @@ export function OpenTuiApprovalModeDialog(props: {
       return;
     }
     try {
-      // Let the trust gate rule before anything reaches disk — persisting
-      // first would leave a refused privileged mode at User scope, where it
-      // applies in every workspace the user has trusted. The runtime then
-      // applies the merged setting (useApprovalModeCommand parity).
-      config?.setApprovalMode?.(mode);
+      // Do not persist a privileged mode that this workspace cannot use;
+      // User scope would make it active in other trusted workspaces.
+      if (
+        config?.isTrustedFolder() === false &&
+        mode !== ApprovalMode.DEFAULT &&
+        mode !== ApprovalMode.PLAN
+      ) {
+        throw new Error(
+          'Cannot enable privileged approval modes in an untrusted folder.',
+        );
+      }
       settings.setValue(SettingScope.User, 'tools.approvalMode', mode);
       const effectiveMode = settings.merged.tools?.approvalMode ?? mode;
-      if (effectiveMode !== mode) {
-        config?.setApprovalMode?.(effectiveMode);
-      }
+      config?.setApprovalMode?.(effectiveMode);
       onApprovalModeChanged(effectiveMode);
     } catch (e) {
       // Keep the dialog open and show the refusal: an empty catch here made a

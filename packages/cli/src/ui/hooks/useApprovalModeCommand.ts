@@ -5,7 +5,8 @@
  */
 
 import { useState, useCallback } from 'react';
-import type { ApprovalMode, Config } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 
@@ -40,20 +41,23 @@ export const useApprovalModeCommand = (
         }
 
         try {
-          // Let the trust gate rule before anything reaches disk. Persisting
-          // first would leave a refused privileged mode in settings.json (User
-          // scope by default), where it silently applies in every workspace the
-          // user has trusted — a later headless run there would start in YOLO.
-          config.setApprovalMode(mode);
+          // Do not persist a privileged mode that this workspace cannot use;
+          // User scope would make it active in other trusted workspaces.
+          if (
+            !config.isTrustedFolder() &&
+            mode !== ApprovalMode.DEFAULT &&
+            mode !== ApprovalMode.PLAN
+          ) {
+            throw new Error(
+              'Cannot enable privileged approval modes in an untrusted folder.',
+            );
+          }
           loadedSettings.setValue(scope, 'tools.approvalMode', mode);
           // A higher-precedence scope can shadow the value just written (the
           // dialog warns about this); keep the session on the effective mode.
-          // Re-applying is a no-op transition when nothing shadows it.
           const effectiveMode =
             loadedSettings.merged.tools?.approvalMode ?? mode;
-          if (effectiveMode !== mode) {
-            config.setApprovalMode(effectiveMode);
-          }
+          config.setApprovalMode(effectiveMode);
         } catch (e) {
           // Say so instead of closing silently: the refusal is otherwise
           // invisible, because the dialog is dismissed either way.
