@@ -245,6 +245,44 @@ describe('GoalStatusStrip', () => {
     ).toBe('2.5M / 30.0M tokens');
   });
 
+  it('shows active time against its ceiling when the Goal has one', () => {
+    render('paused', { activeTimeMs: 723_000, activeTimeBudgetMs: 1_800_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s / 30m 0s');
+  });
+
+  it('shows active time alone when the Goal has no time ceiling', () => {
+    render('paused', { activeTimeMs: 723_000 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-elapsed"]')
+        ?.textContent,
+    ).toBe('12m 3s');
+  });
+
+  it('shows finished turns against the turn ceiling', () => {
+    render('active', { turnCount: 3, turnBudget: 20 });
+
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]')?.textContent,
+    ).toBe('3 / 20 turns');
+  });
+
+  it('shows no turn figure without a turn ceiling, or before a turn finishes', () => {
+    render('active', { turnCount: 3 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+
+    render('active', { turnCount: 0, turnBudget: 20 });
+    expect(
+      container.querySelector('[data-testid="goal-active-turns"]'),
+    ).toBeNull();
+  });
+
   it('shows no checkpoint streak, even for a snapshot an older daemon filled in', () => {
     render('active', {
       checkpointStalls: 2,

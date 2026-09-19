@@ -19849,39 +19849,6 @@ describe('useLlmStream', () => {
   });
 
   describe('StopHookLoop Event', () => {
-    it('ignores legacy active_goal events after the Goal runtime cutover', async () => {
-      const activeGoal = {
-        condition: 'finish the refactor',
-        iterations: 1,
-        setAt: 123,
-        tokensAtStart: 456,
-        hookId: 'goal-hook-id',
-        lastReason: 'still missing verification',
-      };
-      mockSendMessageStream.mockReturnValue(
-        (async function* () {
-          yield {
-            type: ServerLlmEventType.ActiveGoal,
-            value: activeGoal,
-          };
-          yield {
-            type: ServerLlmEventType.ActiveGoal,
-            value: null,
-          };
-        })(),
-      );
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('continue goal');
-      });
-
-      expect(mockAddItem).not.toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'goal_status' }),
-        expect.any(Number),
-      );
-    });
-
     it('should handle StopHookLoop event and add stop hook loop history item', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {

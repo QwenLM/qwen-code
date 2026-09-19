@@ -1772,6 +1772,7 @@ describe('package scripts', () => {
       'packages/mobile-mcp',
       'packages/node-repl',
       'packages/sdk-typescript',
+      'packages/web-shell',
     ]) {
       const packageJson = JSON.parse(
         readFileSync(path.join(root, packageDirectory, 'package.json'), 'utf8'),
