@@ -20,8 +20,13 @@
  * persists the workload dimensions alongside the timings, and a later run
  * whose fixture no longer matches refuses to compare.
  *
+ * `--manifest-only` benchmarks `refreshCatalogSnapshot` against the same
+ * fixture: only manifest headers load, no skills / commands / agents scans
+ * (the `GET /extensions` catalog path). Baselines record which mode ran, so
+ * a manifest-only run never compares against a full-load baseline.
+ *
  * Usage:
- *   npx tsx packages/core/scripts/bench-extension-load.ts [--baseline] [--runs 10]
+ *   npx tsx packages/core/scripts/bench-extension-load.ts [--manifest-only] [--baseline] [--runs 10]
  *
  * `--baseline` stores the result in .qwen/bench-baseline.json at the repo
  * root; a later run without the flag loads that file (if present) and
@@ -34,7 +39,10 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
-import { ExtensionManager } from '../src/extension/extensionManager.js';
+import {
+  ExtensionManager,
+  type Extension,
+} from '../src/extension/extensionManager.js';
 import { ExtensionStore } from '../src/extension/extension-store.js';
 
 const EXTENSION_COUNT = 100;
@@ -44,9 +52,9 @@ const AGENTS_PER_EXTENSION = 5;
 const EXPECTED_EXTENSIONS = EXTENSION_COUNT;
 const EXPECTED_SKILLS = EXTENSION_COUNT * SKILLS_PER_EXTENSION;
 
-// import.meta.url is packages/core/scripts/bench-extension-load.ts, so three
-// dirname hops land on the repo root.
-const REPO_ROOT = path.resolve(fileURLToPath(import.meta.url), '../../..');
+// import.meta.url is packages/core/scripts/bench-extension-load.ts, so four
+// dirname hops land on the repo root (scripts -> core -> packages -> repo).
+const REPO_ROOT = path.resolve(fileURLToPath(import.meta.url), '../../../..');
 const BASELINE_PATH = path.join(REPO_ROOT, '.qwen', 'bench-baseline.json');
 
 interface RunResult {
@@ -57,6 +65,7 @@ interface RunResult {
   runs: number;
   extensionCount: number;
   skillCount: number;
+  mode: 'full' | 'manifest-only';
 }
 
 interface BaselineFile {
@@ -68,6 +77,7 @@ interface BaselineFile {
   runs: number;
   extensionCount: number;
   skillCount: number;
+  mode: 'full' | 'manifest-only';
 }
 
 function createFixture(): string {
@@ -138,7 +148,10 @@ function percentile(sorted: number[], p: number): number {
   return sorted[Math.max(0, index)]!;
 }
 
-async function runOnce(extensionsDir: string): Promise<{
+async function runOnce(
+  extensionsDir: string,
+  mode: 'full' | 'manifest-only',
+): Promise<{
   elapsedMs: number;
   extensionCount: number;
   skillCount: number;
@@ -154,13 +167,18 @@ async function runOnce(extensionsDir: string): Promise<{
     }),
   });
   const start = performance.now();
-  await manager.refreshCacheWithSnapshot();
+  let loaded: Extension[];
+  if (mode === 'manifest-only') {
+    loaded = (await manager.refreshCatalogSnapshot()).extensions;
+  } else {
+    await manager.refreshCacheWithSnapshot();
+    loaded = manager.getLoadedExtensions();
+  }
   const elapsedMs = performance.now() - start;
-  const extensions = manager.getLoadedExtensions();
   return {
     elapsedMs,
-    extensionCount: extensions.length,
-    skillCount: extensions.reduce(
+    extensionCount: loaded.length,
+    skillCount: loaded.reduce(
       (sum, extension) => sum + (extension.skills?.length ?? 0),
       0,
     ),
@@ -183,6 +201,9 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const isBaseline = args.includes('--baseline');
   const runs = parseRuns(args);
+  const mode = args.includes('--manifest-only')
+    ? ('manifest-only' as const)
+    : ('full' as const);
 
   const fixtureRoot = createFixture();
   const extensionsDir = path.join(fixtureRoot, 'extensions');
@@ -192,14 +213,16 @@ async function main(): Promise<void> {
   let skillCount = 0;
   try {
     for (let i = 0; i < runs; i += 1) {
-      const result = await runOnce(extensionsDir);
+      const result = await runOnce(extensionsDir, mode);
+      // The manifest-only mode never loads skills, so its skill count is
+      // expected to be zero; only the extension count is workload-validated.
       if (
         result.extensionCount !== EXPECTED_EXTENSIONS ||
-        result.skillCount !== EXPECTED_SKILLS
+        (mode === 'full' && result.skillCount !== EXPECTED_SKILLS)
       ) {
         throw new Error(
           `run ${i}: loaded ${result.extensionCount}/${EXPECTED_EXTENSIONS} extensions, ` +
-            `${result.skillCount}/${EXPECTED_SKILLS} skills — refusing to record a truncated sample`,
+            `${result.skillCount}/${mode === 'full' ? EXPECTED_SKILLS : 0} skills — refusing to record a truncated sample`,
         );
       }
       samples.push(result.elapsedMs);
@@ -219,8 +242,10 @@ async function main(): Promise<void> {
     runs,
     extensionCount,
     skillCount,
+    mode,
   };
 
+  console.log(`mode: ${result.mode}`);
   console.log(
     `fixture: ${result.extensionCount} extensions, ${result.skillCount} skills`,
   );
@@ -241,6 +266,7 @@ async function main(): Promise<void> {
       runs: result.runs,
       extensionCount: result.extensionCount,
       skillCount: result.skillCount,
+      mode: result.mode,
     };
     fs.writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2));
     console.log(
@@ -256,11 +282,12 @@ async function main(): Promise<void> {
     console.log('\n--- vs baseline ---');
     console.log(`baseline date: ${baseline.date}`);
     if (
+      baseline.mode !== result.mode ||
       baseline.extensionCount !== result.extensionCount ||
       baseline.skillCount !== result.skillCount
     ) {
       console.log(
-        `workload changed (baseline: ${baseline.extensionCount} extensions / ${baseline.skillCount} skills), baseline not comparable`,
+        `workload changed (baseline: ${baseline.mode}, ${baseline.extensionCount} extensions / ${baseline.skillCount} skills), baseline not comparable`,
       );
       return;
     }

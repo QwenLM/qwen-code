@@ -34,17 +34,9 @@ import {
   normalizeGoalMaxTurns,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-  normalizeGoalCheckpointTimeoutSeconds,
-  isValidGoalCheckpointTimeoutSeconds,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
-import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -468,16 +460,6 @@ function mockAutoMemoryIndexRead(content: string) {
 }
 
 vi.mock('../core/baseLlmClient.js');
-vi.mock('../goals/goal-checkpoint-verifier.js', async (importOriginal) => {
-  const original =
-    await importOriginal<
-      typeof import('../goals/goal-checkpoint-verifier.js')
-    >();
-  return {
-    ...original,
-    createGoalCheckpointVerifier: vi.fn(original.createGoalCheckpointVerifier),
-  };
-});
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
@@ -986,14 +968,21 @@ describe('Server Config (config.ts)', () => {
       expect(config.getProjectHooks()).toBeUndefined();
     });
 
-    it('keeps the folder trust gate for project hooks after replacing hooks', () => {
-      const config = new Config({ ...baseParams, trustedFolder: false });
+    it.each([false, undefined])(
+      'keeps the project hook gate when folder trust is %s',
+      (trustedFolder) => {
+        const config = new Config({
+          ...baseParams,
+          folderTrust: true,
+          trustedFolder,
+        });
 
-      config.setHooksFromSettings({ userHooks, projectHooks });
+        config.setHooksFromSettings({ userHooks, projectHooks });
 
-      expect(config.getProjectHooks()).toBeUndefined();
-      expect(config.getUserHooks()).toBe(userHooks);
-    });
+        expect(config.getProjectHooks()).toBeUndefined();
+        expect(config.getUserHooks()).toBe(userHooks);
+      },
+    );
 
     it('replaces system hooks together with the other fields', () => {
       const config = new Config({ ...baseParams, systemHooks });
@@ -4227,25 +4216,39 @@ describe('Server Config (config.ts)', () => {
       };
     };
 
-    // A pre-canonical transcript whose newest Goal record is a legacy
-    // `goal_status` card. Recovering it is the one restore path that has to
-    // *write*: it journals a migrated `goal_state` record.
-    const legacyGoalSession = (): ResumedSessionData => {
+    // A transcript whose newest Goal record is a paused Goal. Restoring it
+    // reads the record and writes nothing; what the deferred restore has to
+    // get right is the ordering against the session writer.
+    const pausedGoalSession = (): ResumedSessionData => {
       const record = {
-        uuid: 'legacy-goal',
+        uuid: 'paused-goal',
         parentUuid: null,
         sessionId: 'resumed-session',
         timestamp: new Date(0).toISOString(),
         type: 'system',
-        subtype: 'slash_command',
+        subtype: 'goal_state',
         provenance: 'goal_control',
         cwd: '/tmp',
         version: 'test',
         systemPayload: {
-          phase: 'result',
-          outputHistoryItems: [
-            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
-          ],
+          v: 2,
+          cause: 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'ship the thing',
+              status: 'paused',
+              evidenceCursor: { recordId: 'paused-goal' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          },
         },
       } as unknown as ChatRecord;
       return {
@@ -4262,19 +4265,19 @@ describe('Server Config (config.ts)', () => {
     };
 
     // Under a writer lease the recorder is `inactive` until it is handed the
-    // lease, and rejects every write until then. Kicking the legacy
-    // migration off from the constructor drove that write into the guard,
-    // and `restore()` latches the failure as `recoveryError` permanently:
-    // the migrated goal was dropped and the whole resumed session lost goal
-    // persistence. Ordering is the deciding variable, so this asserts the
-    // deferred restore lands the goal rather than bricking the runtime.
-    it('waits for the session writer before migrating a legacy Goal', async () => {
+    // lease, and rejects every write until then. Restore waits for the
+    // lease so that the first Goal turn a restored active Goal starts does
+    // not write into that guard, and so that `restore()` cannot latch a
+    // lease-timing failure as `recoveryError` for the whole session.
+    // Ordering is the deciding variable, so this asserts the deferred
+    // restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before restoring a Goal', async () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const recorder = config.getChatRecordingService();
       if (!recorder) throw new Error('expected a chat recording service');
@@ -4306,7 +4309,8 @@ describe('Server Config (config.ts)', () => {
       ).startPendingGoalRestore();
 
       const runtime = await ready;
-      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      // Restoring reads the journal and writes nothing to it.
+      expect(recordGoalState).not.toHaveBeenCalled();
       expect(runtime.getSnapshot().goal).toMatchObject({
         objective: 'ship the thing',
         status: 'paused',
@@ -4323,7 +4327,7 @@ describe('Server Config (config.ts)', () => {
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const ready = config.getGoalRuntimeReady();
       config.startNewSession('replacement-session');
@@ -4815,76 +4819,6 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('arms the checkpoint verifier with the configured timeout', () => {
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalCheckpointTimeoutSeconds: 45,
-      });
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
-
-      config.getGoalRuntime();
-
-      // Assert the call, not only the getter: the options argument is the
-      // one line that carries the setting into the verifier, and the
-      // getter-only checks above stay green if it is dropped.
-      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.[0]).toBe(config);
-      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
-    });
-
-    it('caps the checkpoint ceiling at a wait the default wire honours', () => {
-      // The checkpoint call is streamed, so past the stream lifetime guard it
-      // is the guard that ends the call and the verifier's own timer never
-      // fires. A cap above it would let the setting validate, and the getter
-      // report, a ceiling no default deployment can reach.
-      expect(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000).toBeLessThanOrEqual(
-        DEFAULT_STREAM_MAX_LIFETIME_MS,
-      );
-    });
-
-    it('normalizes the goalCheckpointTimeoutSeconds setting', () => {
-      expect(normalizeGoalCheckpointTimeoutSeconds(undefined)).toBe(
-        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-      );
-      expect(normalizeGoalCheckpointTimeoutSeconds(1)).toBe(1_000);
-      // The cap is a typo guard, accepted itself and refused one past.
-      expect(
-        normalizeGoalCheckpointTimeoutSeconds(
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-        ),
-      ).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000);
-      expect(
-        isValidGoalCheckpointTimeoutSeconds(
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-        ),
-      ).toBe(false);
-      for (const invalid of [
-        0,
-        -1,
-        1.5,
-        Number.NaN,
-        Number.POSITIVE_INFINITY,
-        '30',
-        null,
-        GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-      ]) {
-        expect(isValidGoalCheckpointTimeoutSeconds(invalid)).toBe(false);
-        expect(
-          normalizeGoalCheckpointTimeoutSeconds(invalid as number | undefined),
-        ).toBe(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS);
-      }
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalCheckpointTimeoutSeconds: 0,
-      });
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(
-        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-      );
-    });
-
     it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
       // The fallback notice lives in the debug log file (enabled via
       // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
@@ -4957,115 +4891,6 @@ describe('Server Config (config.ts)', () => {
           expect(appendFileSpy).toHaveBeenCalledWith(
             Storage.getDebugLogPath(sessionId),
             expect.stringContaining('Ignoring invalid goalTokenBudget -5'),
-            'utf8',
-          ),
-        );
-      } finally {
-        mkdirSpy.mockRestore();
-        appendFileSpy.mockRestore();
-        resetDebugLoggingState();
-        setDebugLogSession(null);
-        if (previousDebugLogFileEnv === undefined) {
-          delete process.env['QWEN_DEBUG_LOG_FILE'];
-        } else {
-          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-        }
-      }
-    });
-
-    it('records the invalid-goalCheckpointTimeoutSeconds fallback in the debug log', async () => {
-      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
-      const sessionId = 'goal-checkpoint-warning-session';
-      const mkdirSpy = vi
-        .spyOn(fs.promises, 'mkdir')
-        .mockResolvedValue(undefined);
-      const appendFileSpy = vi
-        .spyOn(fs.promises, 'appendFile')
-        .mockResolvedValue(undefined);
-
-      try {
-        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-        resetDebugLoggingState();
-
-        new Config({
-          ...baseParams,
-          sessionId,
-          goalCheckpointTimeoutSeconds: 0,
-        });
-
-        await vi.waitFor(() =>
-          expect(appendFileSpy).toHaveBeenCalledWith(
-            Storage.getDebugLogPath(sessionId),
-            expect.stringMatching(
-              new RegExp(
-                `Ignoring invalid goalCheckpointTimeoutSeconds 0:.*using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}\\.`,
-              ),
-            ),
-            'utf8',
-          ),
-        );
-      } finally {
-        mkdirSpy.mockRestore();
-        appendFileSpy.mockRestore();
-        resetDebugLoggingState();
-        setDebugLogSession(null);
-        if (previousDebugLogFileEnv === undefined) {
-          delete process.env['QWEN_DEBUG_LOG_FILE'];
-        } else {
-          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-        }
-      }
-    });
-
-    it('keeps the goalCheckpointTimeoutSeconds debug warning silent for absent and valid values', async () => {
-      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
-      const sessionId = 'goal-checkpoint-warning-session';
-      const mkdirSpy = vi
-        .spyOn(fs.promises, 'mkdir')
-        .mockResolvedValue(undefined);
-      const appendFileSpy = vi
-        .spyOn(fs.promises, 'appendFile')
-        .mockResolvedValue(undefined);
-
-      try {
-        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-        resetDebugLoggingState();
-
-        for (const goalCheckpointTimeoutSeconds of [
-          undefined,
-          1,
-          180,
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-        ]) {
-          new Config({
-            ...baseParams,
-            sessionId,
-            goalCheckpointTimeoutSeconds,
-          });
-          // Let any fire-and-forget debug write settle before the next case.
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-        expect(
-          appendFileSpy.mock.calls.filter((call) =>
-            String(call[1]).includes(
-              'Ignoring invalid goalCheckpointTimeoutSeconds',
-            ),
-          ),
-        ).toHaveLength(0);
-
-        // Control case: the channel is live in this test, so the silence
-        // above is meaningful.
-        new Config({
-          ...baseParams,
-          sessionId,
-          goalCheckpointTimeoutSeconds: 0,
-        });
-        await vi.waitFor(() =>
-          expect(appendFileSpy).toHaveBeenCalledWith(
-            Storage.getDebugLogPath(sessionId),
-            expect.stringContaining(
-              'Ignoring invalid goalCheckpointTimeoutSeconds 0',
-            ),
             'utf8',
           ),
         );
@@ -5472,6 +5297,8 @@ describe('Server Config (config.ts)', () => {
           abortController: new AbortController(),
           isBackgrounded: true,
           scriptPath: '/runtime/workflows/generated/inline/wf_lock.js',
+          // A resume call is offered only beside a journal to replay.
+          journalPath: '/runtime/workflows/wf_lock/journal.jsonl',
         } as never);
         registry.fail(entry.runId, 'boom', 2);
         const text = completion.mock.calls[0][1] as string;
@@ -13200,13 +13027,19 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
-  it('should NOT throw an error when setting any mode if trustedFolder is undefined', () => {
+  it('allows privileged modes when folder trust is disabled and no decision is supplied', () => {
     const config = new Config(baseParams);
-    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true); // isTrustedFolder defaults to true
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
+  it('rejects privileged modes before an enabled folder trust decision', () => {
+    const config = new Config({ ...baseParams, folderTrust: true });
+    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
+      TrustGateError,
+    );
   });
 
   describe('DAC plan workflow', () => {

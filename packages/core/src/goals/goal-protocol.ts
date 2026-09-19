@@ -4,179 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  stripDisplayControlChars,
-  stripTerminalControlSequences,
-} from '../utils/terminalSafe.js';
-
 export const GOAL_STATE_VERSION = 2 as const;
 export const GOAL_PROPOSAL_REASON_MAX_CHARACTERS = 8_000;
 export const GOAL_PROPOSAL_REASON_MAX_BYTES = 16_000;
-export const GOAL_CHECKPOINT_CLAIM_LIMIT = 32;
-export const GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS = 2_000;
-export const GOAL_CHECKPOINT_CLAIM_MAX_BYTES = 16_000;
-export const GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT = 32;
+/**
+ * The two stops below can no longer happen: the verifier reads the transcript
+ * tail, so there is no evidence catalog to exhaust and no checkpoint request
+ * to overflow. Their reasons stay because a record an earlier build stopped
+ * carries them, and `goalLimitKindForReason` recognises such a record by its
+ * reason when it predates the `limitKind` field.
+ */
 export const GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON =
   'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
   'The current Goal revision exceeded the checkpoint verifier request limit. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 /**
- * How many consecutive stalled checkpoints a Goal may run before it stops.
- * Three matches the thrash bounds elsewhere in this family of runtimes: one
- * stalled checkpoint is a busy turn, two is a pattern, three is the loop.
- */
-export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
-
-/**
  * How many consecutive autonomous turns a Goal may make no progress on before
- * it stops. Same three as the checkpoint stall bound, and for the same
- * reason: one quiet turn is a pause for thought, two is a pattern, three is
+ * it stops. Three matches the thrash bounds elsewhere in this family of
+ * runtimes: one quiet turn is a pause for thought, two is a pattern, three is
  * the loop.
  */
 export const GOAL_NO_PROGRESS_TURN_LIMIT = 3;
-/**
- * The stall stop for a Goal whose last stalled check could not fit the window
- * inside the checkpoint's claim bounds: a full claim list that still left
- * evidence behind, or well-formed claims over the claim count, the byte budget
- * or the per-claim length. Compaction itself cannot keep up -- the objective produces more
- * evidence than one window holds -- so narrowing it is the remedy.
- */
-export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check could not fit it within the checkpoint claim bounds, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
-
-/**
- * The stall stop for a Goal whose last stalled check answered with output that
- * is not usable claims at all. The objective may not be too wide -- the
- * checkpoint model is returning output the runtime cannot accept -- so the
- * capacity advice to narrow it would send the user to rewrite a Goal that was
- * never the problem.
- */
-export const GOAL_CHECKPOINT_UNUSABLE_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check answered with output that could not be folded into claims. Narrowing the objective does not fix this. Check that the checkpoint model returns the structured JSON it is asked for, or switch models, then resume the Goal; resuming starts a fresh evidence window.';
-
-/**
- * The stall stop for a Goal whose last stalled check produced no answer to
- * judge. The runtime cannot tell why from here: the provider may be
- * unreachable or rate-limited, the check may have run past its own ceiling on
- * a window too large to verify in time, or the check itself may have failed.
- * The recorded failure says which, so this names every remedy that can apply
- * rather than blaming the provider.
- */
-export const GOAL_CHECKPOINT_UNREACHABLE_REASON =
-  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and the last check failed before the checkpoint verifier returned an answer. The recorded checkpoint failure says why: an unreachable or rate-limited provider, a check that did not finish within model.goalCheckpointTimeoutSeconds, or an error in the check itself. Fix the provider, raise that timeout, or narrow the objective so the window checkpoints in time, then resume the Goal; resuming starts a fresh evidence window.';
-
-/**
- * What the last stalled checkpoint check ran into, which decides the advice
- * the stop carries. `capacity`: the check could not fit the window within the
- * claim bounds (a full claim list that left evidence behind, or claims over
- * the count, byte or length bound). `unusable`: it answered with output that is not
- * usable claims. `unreachable`: no answer arrived to judge.
- */
-export type GoalCheckpointFailureShape =
-  | 'capacity'
-  | 'unusable'
-  | 'unreachable';
-
-/** The `lastReason` a checkpoint stall stop records for its last failure. */
-export function goalCheckpointStalledReason(
-  shape: GoalCheckpointFailureShape,
-): string {
-  switch (shape) {
-    case 'capacity':
-      return GOAL_CHECKPOINT_STALLED_REASON;
-    case 'unusable':
-      return GOAL_CHECKPOINT_UNUSABLE_REASON;
-    case 'unreachable':
-      return GOAL_CHECKPOINT_UNREACHABLE_REASON;
-    default: {
-      const exhaustive: never = shape;
-      return exhaustive;
-    }
-  }
-}
-
-/**
- * Longest `lastCheckpointFailure` a record keeps. A provider error can carry a
- * whole response body, and the record is journaled on every checkpoint check.
- */
-export const GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS = 500;
-
-/**
- * Makes a checkpoint failure safe to keep as a one-line diagnostic: terminal
- * control sequences and bidi overrides removed, every run of whitespace (line
- * breaks included) collapsed to one space, and the result capped by code
- * point. Collapsing runs before the cap, so the bound spends its code points
- * on the message rather than on a response body's indentation. The value is
- * journaled, handed to the model, and rendered on every Goal surface, so it is
- * cleaned once where it is written rather than trusted to each reader.
- */
-export function capGoalCheckpointFailure(text: string): string {
-  const oneLine = stripDisplayControlChars(stripTerminalControlSequences(text))
-    .replace(/\s+/g, ' ')
-    .trim();
-  const codePoints = [...oneLine];
-  return codePoints.length <= GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS
-    ? oneLine
-    : `${codePoints.slice(0, GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS - 1).join('')}…`;
-}
-
-/**
- * Whether a Goal surface should show checkpoint health, decided once so every
- * card and summary agrees. A completed Goal never does: its checkpoints no
- * longer matter, and the terminal snapshot keeps whatever the record carried.
- * A running stall streak always does, whatever the status, because it is
- * still the truth about the evidence window a resume re-enters. A Goal stopped
- * because its checkpoint request was too large to send shows the failure that
- * stopped it, since that failure is the stop. Any other failure that spent no
- * stall shows only while the Goal is active: once the Goal stops or pauses for
- * another reason, that diagnostic explains nothing about the stop and would
- * read as though it did.
- */
-export function goalCheckpointHealthVisible(goal: {
-  status?: string;
-  checkpointStalls?: number;
-  lastCheckpointFailure?: string;
-  limitKind?: string;
-}): boolean {
-  if (goal.status === 'complete') return false;
-  if ((goal.checkpointStalls ?? 0) > 0) return true;
-  const failed = Boolean(goal.lastCheckpointFailure?.trim());
-  if (goal.limitKind === 'checkpoint_request') return failed;
-  return (goal.status ?? 'active') === 'active' && failed;
-}
-
-/**
- * The checkpoint health a text surface prints -- the stall count, or the
- * stall-free label, then the diagnostic -- or undefined when
- * `goalCheckpointHealthVisible` hides it. Worded once so every terminal
- * surface says the same thing. `clean` runs on the diagnostic before it is
- * trimmed and joined, for a caller that writes straight to a terminal; a
- * caller that sanitizes the rendered line itself passes nothing, so the text
- * is not escaped twice.
- */
-export function goalCheckpointHealthLine(
-  goal: Parameters<typeof goalCheckpointHealthVisible>[0],
-  clean: (text: string) => string = (text) => text,
-): string | undefined {
-  if (!goalCheckpointHealthVisible(goal)) return undefined;
-  const stalls = goal.checkpointStalls ?? 0;
-  return [
-    stalls > 0
-      ? `${stalls}/${GOAL_CHECKPOINT_STALL_LIMIT} stalled`
-      : 'last check failed',
-    clean(goal.lastCheckpointFailure ?? '').trim(),
-  ]
-    .filter(Boolean)
-    .join(' · ');
-}
-
 /**
  * Default autonomous spend window armed on a newly created Goal, in model
  * tokens on the `tokensUsed` metric (`totalTokenCount` summed per model call,
  * so a call's full input context counts every time it is sent).
  *
  * The meter includes Goal-turn model calls, direct foreground subagents, and
- * the Goal's verifier and checkpoint checks. Nested/background agents and
+ * the Goal's verifier checks. Nested/background agents and
  * unrelated side queries, cron and notification turns are not included.
  *
  * This is an authorization quantum, not a cost estimate: it bounds how much
@@ -268,8 +123,10 @@ export function isGoalActiveTimeBudgetSpent(
  * Which bound a `usage_limited` Goal ran into.
  *
  * Only the enumerated bounds are typed: they are the ones a caller has to
- * branch on. The evidence kinds mark a window a plain resume cannot simply
- * re-enter; the budget kinds mark a spent authorization that a resume re-arms.
+ * branch on. The budget kinds mark a spent authorization that a resume
+ * re-arms. The two evidence kinds are legacy values: nothing writes them any
+ * more, and they stay in the union so a record an earlier build stopped still
+ * parses and still resumes from a fresh evidence window.
  * Every other route to `usage_limited` is an operational failure that carries
  * prose in `lastReason` and nothing to key off.
  */
@@ -357,19 +214,6 @@ export function isGoalEvidenceProofKind(
   );
 }
 
-export interface GoalEvidenceCheckpointClaim {
-  id: string;
-  proofKind: GoalEvidenceProofKind;
-  claim: string;
-  sourceRefs: string[];
-}
-
-export interface GoalEvidenceCheckpoint {
-  checkpointId: string;
-  createdAt: number;
-  claims: GoalEvidenceCheckpointClaim[];
-}
-
 export interface GoalRecord {
   goalId: string;
   revision: number;
@@ -382,7 +226,7 @@ export interface GoalRecord {
    * Model tokens billed to this Goal so far, summed across its turn windows.
    *
    * Includes Goal-turn model calls, direct foreground subagents, and the Goal's
-   * verifier and checkpoint checks. Nested/background agents, other side
+   * verifier checks. Nested/background agents, other side
    * queries, cron and notification turns are excluded.
    * Zero on Goals recovered from a transcript written before the field existed.
    */
@@ -423,42 +267,11 @@ export interface GoalRecord {
   windDownTurnId?: string;
   createdAt: number;
   updatedAt: number;
-  evidenceCheckpoint?: GoalEvidenceCheckpoint;
-  /**
-   * Consecutive checkpoint checks that failed to relieve an overflowing
-   * evidence window: the checkpoint came back full (see
-   * `isGoalCheckpointStalled`), the verifier result could not be folded
-   * into claims at all, or the check itself failed -- a provider error or
-   * a verifier that never answered before its timeout. Persisted on the
-   * record rather than held in memory so a daemon restart or session
-   * resume cannot launder the count; absent means zero. Reset by any
-   * checkpoint check that finds room, and by every control action that
-   * starts a different evidence window: edit, replace, and the resume of
-   * an evidence-limited Goal.
-   */
-  checkpointStalls?: number;
-  /**
-   * What the most recent checkpoint check that gave no relief ran into, as a
-   * one-line diagnostic: `ErrorName: message` for a check that failed, or the
-   * runtime's own phrase for one that answered with a full claim list while
-   * the window overflowed -- so it does not always mean the check threw.
-   * Capped at GOAL_CHECKPOINT_FAILURE_MAX_CHARACTERS. Set by every such check,
-   * whether or not it spends a stall, and kept on the record the stall breaker
-   * stops, so the stop can be diagnosed from the record alone. Cleared by a
-   * check that finds room or writes a checkpoint without stalling, by every
-   * control action that clears `checkpointStalls`, and by a checkpoint stop
-   * whose cause is not itself a check (missing recovery dependencies, an
-   * exhausted catalog, an unreadable transcript), so it can be absent while
-   * `checkpointStalls` is still non-zero. A check that proves nothing either
-   * way (a turn that recorded no evidence) leaves it as it was.
-   */
-  lastCheckpointFailure?: string;
   /**
    * Consecutive autonomous turns that recorded neither a tool result nor a
    * terminal proposal. A model that only restates status never reaches the
-   * verifier and never spends a checkpoint, so nothing else bounds it short
-   * of the token budget. Persisted like `checkpointStalls` so a restart
-   * cannot launder the count; absent means zero. Reset by any turn that
+   * verifier, so nothing else bounds it short of the token budget. Persisted
+   * on the record so a restart cannot launder the count; absent means zero. Reset by any turn that
    * records a tool result or a proposal, by a turn the user's own text
    * drove, and by edit, replace, and resume.
    */
@@ -566,7 +379,12 @@ export type GoalBlockerKind =
 export interface GoalTerminalProposal {
   status: 'complete' | 'blocked';
   reason: string;
-  evidenceRefs: string[];
+  /**
+   * @deprecated The verifier judges a proposal from the tail of the Goal's
+   * transcript, not from references the model cites. Accepted and ignored so
+   * a model still following the older contract is not refused.
+   */
+  evidenceRefs?: string[];
   blockerKind?: GoalBlockerKind;
 }
 
@@ -687,6 +505,19 @@ export function goalPauseReasonForFailure(message: string): string {
 }
 
 /**
+ * The pause reason for a terminal proposal the verifier gave no verdict on:
+ * it timed out, the side query failed, or its answer was not a verdict.
+ */
+export function goalPauseReasonForVerifierFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The Goal verifier could not judge the proposal: ${detail}. Run /goal resume to continue.`
+      : 'The Goal verifier could not judge the proposal. Run /goal resume to continue.',
+  );
+}
+
+/**
  * The pause reason for a headless Goal turn that died with an error. Same
  * register as `GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED` -- it names the failure
  * without claiming the run ended cleanly, and without pointing at a slash
@@ -718,6 +549,11 @@ export type GoalStateCause =
   | 'pause'
   | 'resume'
   | 'turn_finished'
+  /**
+   * @deprecated Legacy value: written by builds that compressed evidence into
+   * checkpoints. Nothing writes it any more; it stays so their records parse
+   * and so replay can still fold their bookkeeping rewrites away.
+   */
   | 'checkpoint'
   | 'verifier_accept'
   | 'verifier_reject'
@@ -744,10 +580,6 @@ export interface GoalStateRecordPayloadV2 {
   v: typeof GOAL_STATE_VERSION;
   cause: GoalStateCause;
   snapshot: GoalSnapshotV2;
-  checkpointPending?: {
-    permit: GoalTurnPermit;
-    recordUuid: string;
-  };
   blockedAudit?: {
     fingerprint: string;
     count: number;

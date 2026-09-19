@@ -154,10 +154,11 @@ describe('useReactToolScheduler', () => {
       .mockRejectedValueOnce(new Error('Tool call cancelled while in queue.'));
     const abortController = new AbortController();
     abortController.abort();
+    const onComplete = vi.fn();
 
     const { result } = renderHook(() =>
       useReactToolScheduler(
-        vi.fn(),
+        onComplete,
         { getToolRegistry: () => ({}) } as unknown as Config,
         () => undefined,
         vi.fn(),
@@ -181,6 +182,18 @@ describe('useReactToolScheduler', () => {
     });
 
     expect(scheduleSpy).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledOnce();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'cancelled',
+        request: expect.objectContaining({ callId: 'queued-call' }),
+        response: expect.objectContaining({
+          error: undefined,
+          errorType: undefined,
+          executionStatus: 'not_started',
+        }),
+      }),
+    ]);
     scheduleSpy.mockRestore();
   });
 });

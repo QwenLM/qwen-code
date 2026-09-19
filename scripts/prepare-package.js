@@ -68,6 +68,7 @@ function isDirectRun() {
 function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
+    path.join(distDir, 'execution-worker.js'),
     path.join(distDir, 'vendor'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
     // The Web Shell ships with the published package ("Web Shell out of the
@@ -78,6 +79,8 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
+    path.join(distDir, 'web-shell', 'manifest.webmanifest'),
+    path.join(distDir, 'web-shell', 'sw.js'),
     path.join(distDir, 'export-transcript-document.js'),
     path.join(distDir, 'export-transcript-document.css'),
   ];
@@ -329,12 +332,15 @@ function writeDistPackageJson(rootDir, distDir) {
     files: [
       'cli-entry.js',
       'cli.js',
+      'execution-worker.js',
       // Worker thread entry loaded by FzfWorkerHandle at runtime via
       // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
       'codeModeHost.js',
+      'sandboxBwrapRelay.js',
+      'sandboxFileWorker.js',
       'chunks',
       'vendor',
       '*.sb',
