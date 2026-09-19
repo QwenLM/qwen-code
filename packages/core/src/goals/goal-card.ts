@@ -11,7 +11,13 @@ import type {
   GoalStateRecordPayloadV2,
 } from './goal-protocol.js';
 
-export type LegacyGoalStatusKind =
+/**
+ * The Goal card ACP clients render as history: the Web Shell shows one per
+ * transition it admits, and a pre-#7895 transcript replays the cards it
+ * recorded in this same shape. The wire key is `_meta.goalStatus`; the live
+ * Goal is never derived from it (clients read `_meta.goalState`).
+ */
+export type GoalCardKind =
   | 'set'
   | 'achieved'
   | 'cleared'
@@ -20,9 +26,8 @@ export type LegacyGoalStatusKind =
   | 'paused'
   | 'checking';
 
-export interface LegacyGoalStatus {
-  type: 'goal_status';
-  kind: LegacyGoalStatusKind;
+export interface GoalCard {
+  kind: GoalCardKind;
   condition: string;
   iterations?: number;
   setAt?: number;
@@ -30,39 +35,19 @@ export interface LegacyGoalStatus {
   lastReason?: string;
 }
 
-export interface LegacyActiveGoal {
-  readonly condition: string;
-  readonly iterations: number;
-  readonly setAt: number;
-  readonly tokensAtStart?: number;
-  readonly hookId?: string;
-  readonly lastReason?: string;
-}
-
-export interface LegacyGoalTerminal {
-  kind: 'achieved' | 'failed' | 'aborted';
-  condition: string;
-  iterations: number;
-  durationMs: number;
-  lastReason?: string;
-}
-
-export interface LegacyGoalProjection {
-  activeGoal: LegacyActiveGoal | null;
-  goalStatus: LegacyGoalStatus;
-  goalTerminal: LegacyGoalTerminal | null;
-}
-
-export function projectGoalStateToLegacy(
+/**
+ * The card for one `goal_state` transition. `previousGoal` names the Goal a
+ * `clear` transition cleared, since its snapshot holds no Goal: a replay
+ * passes the Goal from the record before, a live session the one it last
+ * published.
+ */
+export function projectGoalCard(
   payload: GoalStateRecordPayloadV2,
   previousGoal: GoalRecord | null = null,
-): LegacyGoalProjection {
-  const snapshotGoal = payload.snapshot.goal;
-  const displayGoal = snapshotGoal ?? previousGoal;
-  const kind = legacyStatusKind(payload);
-  const goalStatus: LegacyGoalStatus = {
-    type: 'goal_status',
-    kind,
+): GoalCard {
+  const displayGoal = payload.snapshot.goal ?? previousGoal;
+  return {
+    kind: cardKind(payload),
     condition: displayGoal?.objective ?? '',
     ...(displayGoal ? { iterations: displayGoal.turnCount } : {}),
     ...(displayGoal ? { setAt: displayGoal.createdAt } : {}),
@@ -70,37 +55,6 @@ export function projectGoalStateToLegacy(
     ...(displayGoal?.lastReason === undefined
       ? {}
       : { lastReason: displayGoal.lastReason }),
-  };
-  const terminalKind =
-    kind === 'achieved' || kind === 'failed' || kind === 'aborted'
-      ? kind
-      : undefined;
-
-  return {
-    activeGoal:
-      snapshotGoal?.status === 'active'
-        ? {
-            condition: snapshotGoal.objective,
-            iterations: snapshotGoal.turnCount,
-            setAt: snapshotGoal.createdAt,
-            ...(snapshotGoal.lastReason === undefined
-              ? {}
-              : { lastReason: snapshotGoal.lastReason }),
-          }
-        : null,
-    goalStatus,
-    goalTerminal:
-      terminalKind && displayGoal
-        ? {
-            kind: terminalKind,
-            condition: displayGoal.objective,
-            iterations: displayGoal.turnCount,
-            durationMs: displayGoal.activeTimeMs,
-            ...(displayGoal.lastReason === undefined
-              ? {}
-              : { lastReason: displayGoal.lastReason }),
-          }
-        : null,
   };
 }
 
@@ -153,9 +107,7 @@ export function isGoalCheckpointBookkeepingRecord(input: {
   );
 }
 
-function legacyStatusKind(
-  payload: GoalStateRecordPayloadV2,
-): LegacyGoalStatusKind {
+function cardKind(payload: GoalStateRecordPayloadV2): GoalCardKind {
   switch (payload.cause) {
     case 'create':
     case 'replace':
@@ -166,9 +118,9 @@ function legacyStatusKind(
       return 'achieved';
     case 'clear':
       return 'cleared';
-    // `migrated` is what builds between #7895 and the retirement of legacy
-    // recovery wrote when they lifted a pre-#7895 card into state: always a
-    // paused Goal, which nothing drives, so it projects as one.
+    // `migrated` is what builds between #7895 and #12155 wrote when they
+    // lifted a pre-#7895 card into state: always a paused Goal, which
+    // nothing drives, so it shows as one.
     case 'migrated':
     case 'pause':
       return 'paused';

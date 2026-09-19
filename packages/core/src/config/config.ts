@@ -2707,6 +2707,12 @@ export class Config {
   private staticSystemPrefix: string | undefined;
 
   /**
+   * Tool names declared to the model when this session's system prompt was
+   * built. See {@link getPromptToolSnapshot}.
+   */
+  private promptToolSnapshot: ReadonlySet<string> | undefined;
+
+  /**
    * Volatile system-prompt layer: the managed auto-memory section
    * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
    * (context files, stable in-session) because it is rewritten on every
@@ -7881,6 +7887,25 @@ export class Config {
 
   setStaticSystemPrefix(prefix: string | undefined): void {
     this.staticSystemPrefix = prefix;
+  }
+
+  /**
+   * The tool names declared to the model when this session's system prompt was
+   * built. The prompt gates its tool-specific text on this set (#12032), and
+   * `/context` reads the same set so its system-prompt row describes the text
+   * the request actually carries rather than what the registry holds now — the
+   * two genuinely diverge after a mid-session ToolSearch reveal, because a
+   * reveal rewrites the declarations without rebuilding the prompt.
+   *
+   * `undefined` until `startChat` records it, which the prompt builder reads as
+   * "every tool is declared" and renders exactly as it did before gating.
+   */
+  getPromptToolSnapshot(): ReadonlySet<string> | undefined {
+    return this.promptToolSnapshot;
+  }
+
+  setPromptToolSnapshot(names: ReadonlySet<string> | undefined): void {
+    this.promptToolSnapshot = names;
   }
 
   /**
