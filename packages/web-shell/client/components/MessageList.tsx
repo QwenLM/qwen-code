@@ -2767,17 +2767,7 @@ const SessionTimeline = memo(function SessionTimeline({
     );
   }, [tooltip]);
 
-  if (hidden || entries.length === 0)
-    return action ? (
-      <div className={styles.sessionTimelineLayer}>
-        <nav
-          className={styles.sessionTimelinePanel}
-          aria-label={t('timeline.sessionTimeline')}
-        >
-          {action}
-        </nav>
-      </div>
-    ) : null;
+  if (hidden || entries.length === 0) return null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">

@@ -8,7 +8,7 @@ Issue #12231 requests a search dialog beside the scroll-to-bottom button, with d
 
 ## Design
 
-Expose `conversationSearchThreshold` on `WebShellProps`, defaulting to 10. The search icon appears when the user/assistant message count strictly exceeds this threshold, independently of whether the scroll-to-bottom button is visible. Position a compact 14px search icon below the left session timeline, with a 20px-wide button that fits the navigation gutter. On narrow layouts the search entry remains available even when timeline ticks are hidden. Embedding entry points inherit the option.
+Expose `conversationSearchThreshold` on `WebShellProps`, defaulting to 10. The search icon appears when the user/assistant message count strictly exceeds this threshold, independently of whether the scroll-to-bottom button is visible. Position a compact 14px search icon below the left session timeline, with a 20px-wide button that fits the navigation gutter. The search entry is hidden whenever the timeline ticks are hidden. Embedding entry points inherit the option.
 
 Reuse `DialogShell`, localized labels, semantic colors, and the portal root. Focus the input on opening. Debounce text queries, show highlighted snippets, support result selection and previous/next result controls, and close with Escape. Keep the composer draft and running response untouched.
 

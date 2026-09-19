@@ -245,14 +245,17 @@ export function ConversationSearch({
             setOpen(false);
           }}
         >
-          <div className="flex min-h-0 flex-col gap-3" data-conversation-search>
+          <div
+            className="flex h-[min(480px,60dvh)] min-h-0 flex-col gap-3 overflow-hidden"
+            data-conversation-search
+          >
             <Input
               autoFocus
               type="search"
               value={query}
               aria-label={t('chat.searchConversation')}
               placeholder={t('chat.searchConversationPlaceholder')}
-              className="min-h-11"
+              className="min-h-11 shrink-0"
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.nativeEvent.isComposing) return;
@@ -282,7 +285,7 @@ export function ConversationSearch({
                 {t('chat.searchLoadedOnly')}
               </p>
             )}
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex min-h-11 shrink-0 items-center justify-between gap-2">
               <p
                 role="status"
                 className="min-w-0 text-sm text-muted-foreground"
@@ -363,7 +366,7 @@ export function ConversationSearch({
               </p>
             )}
             <ol
-              className="max-h-[min(50vh,400px)] min-h-0 overflow-y-auto"
+              className="min-h-0 flex-1 overflow-y-auto"
               aria-label={t('chat.searchResults')}
             >
               {results.map((result, index) => (

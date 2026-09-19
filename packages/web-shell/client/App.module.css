@@ -1244,7 +1244,7 @@
   justify-content: center;
   width: 20px;
   height: 24px;
-  max-width: 100%;
+  margin-left: -5px;
   flex-shrink: 0;
   margin-top: 8px;
   padding: 0;

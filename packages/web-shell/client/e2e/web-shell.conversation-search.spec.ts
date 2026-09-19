@@ -210,6 +210,10 @@ for (const theme of ['light', 'dark']) {
         });
         await setup(page, baseURL, { theme, language });
         const button = searchButton(page);
+        if (width === 390) {
+          await expect(button).toBeHidden();
+          return;
+        }
         const scroll = page.locator('[data-web-shell-message-list]');
         await scroll.hover();
         await page.mouse.wheel(0, -100000);
@@ -230,11 +234,44 @@ for (const theme of ['light', 'dark']) {
         ).toBeVisible();
         expect(searchBox!.width).toBeLessThanOrEqual(20);
         expect(searchBox!.height).toBe(24);
+        if (width === 1440) {
+          const tick = await timeline
+            .locator('li button span')
+            .first()
+            .boundingBox();
+          expect(
+            Math.abs(
+              searchBox!.x + searchBox!.width / 2 - (tick!.x + tick!.width / 2),
+            ),
+          ).toBeLessThan(1);
+        }
+        await page.screenshot({
+          path: `/tmp/qwen-12231-entry-${theme}-${language}-${width}.png`,
+        });
         await button.click();
         const dialog = page.locator('[data-conversation-search]');
         const input = dialog.locator('input');
+        const shell = page.getByRole('dialog', {
+          name: /Search this conversation|搜索当前会话/,
+          exact: true,
+        });
+        await shell.evaluate(async (element) => {
+          await Promise.all(
+            element.getAnimations().map((animation) => animation.finished),
+          );
+        });
+        const initialBox = await shell.boundingBox();
         await input.fill('中文检索');
         await expect(dialog.locator('mark')).toHaveText('中文检索');
+        expect((await shell.boundingBox())!.height).toBe(initialBox!.height);
+        expect((await shell.boundingBox())!.y).toBe(initialBox!.y);
+        await input.fill('sampleNeedle');
+        await expect(dialog.locator('mark')).toHaveText('sampleNeedle');
+        expect((await shell.boundingBox())!.height).toBe(initialBox!.height);
+        await input.fill('NO-SUCH-KEYWORD');
+        await expect(dialog.locator('mark')).toHaveCount(0);
+        expect((await shell.boundingBox())!.height).toBe(initialBox!.height);
+        expect((await shell.boundingBox())!.y).toBe(initialBox!.y);
         await input.fill('sampleNeedle');
         await expect(dialog.locator('mark')).toHaveText('sampleNeedle');
         const box = await dialog.boundingBox();
