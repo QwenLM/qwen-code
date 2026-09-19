@@ -230,4 +230,28 @@ describe('main CI failure issue workflow', () => {
     });
     expect(privilegedJobs[0][1].needs).toBe('analyze');
   });
+
+  it('binds the marker lookup to bot-authored, marker-carrying issues', () => {
+    // The workflow bridge is a static, published, human-writable token, so
+    // the lookup cannot grant on marker shape alone (R1-4): the search is
+    // scoped to the bot's own issues and pinned to the newest carrier
+    // (R1-5), the downloaded body must actually carry the marker before
+    // `issue_number` is emitted, and the privileged job re-checks authorship
+    // before overwriting any body with machine output.
+    const planStep = jobs.analyze.steps.find((step) => step.id === 'plan');
+    const plan = oneLine(planStep.run);
+    expect(planStep.env.AUTOFIX_BOT).toContain('vars.AUTOFIX_BOT_LOGIN');
+    expect(plan).toContain(
+      '--search "${marker} in:body author:${AUTOFIX_BOT} sort:created-desc"',
+    );
+    const verify = plan.indexOf('grep -qF "<!-- ${marker} -->"');
+    const emit = plan.indexOf('issue_number=${existing_issue}');
+    expect(verify).toBeGreaterThanOrEqual(0);
+    expect(emit).toBeGreaterThan(verify);
+
+    const fileIssue = oneLine(jobs.file_issue.steps.at(-1).run);
+    expect(fileIssue).toContain("--jq '.author.login'");
+    expect(fileIssue).toContain('!= "${AUTOFIX_BOT}"');
+    expect(fileIssue).toContain('gh issue create');
+  });
 });
