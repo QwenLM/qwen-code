@@ -492,21 +492,28 @@ test('refuses a capture whose walk never reached every declared leg', () => {
   assert.match(verdict.reason, /walk is incomplete/);
   assert.deepEqual(verdict.missingLegs, [SHELL]);
 
-  // And the same capture with the missing leg's banner present is tolerated
-  // again, so the refusal is about the walk and not about the fixture.
-  assert.equal(
-    classify({
-      logText: `${truncated}\n${banner(SHELL)}`,
-      readJunit,
-      expectedLegs: [CLI, CORE, SHELL],
-    }).tolerated,
-    true,
-  );
+  // The same capture with the missing leg's banner present is still refused:
+  // a banner only proves npm *started* the leg, and the spans after core's and
+  // web-shell's banners carry no vitest summary and no npm error block — those
+  // legs never reported, which is exactly the shape a producer killed mid-leg
+  // leaves once every banner made it out.
+  const silent = classify({
+    logText: `${truncated}\n${banner(SHELL)}`,
+    readJunit,
+    expectedLegs: [CLI, CORE, SHELL],
+  });
+  assert.equal(silent.tolerated, false);
+  assert.match(silent.reason, /never reported/);
+  assert.match(silent.reason, /@qwen-code\/qwen-code-core/);
 });
 
-test('keeps the tolerance alive on a complete walk of the declared legs', () => {
-  // The direction the completeness gate must not break: a run where every
-  // declared leg announced itself is still tolerated, banners and all. Uses the
+test('refuses a walk whose declared legs started but never reported', () => {
+  // The other direction of the completeness gate: 22 banners with evidence for
+  // only the two blamed legs is NOT a complete walk — the other 20 legs printed
+  // a banner and nothing after it, which is exactly what the OOM killer leaves
+  // when it takes the producer mid-leg. A genuinely complete walk carries a
+  // vitest summary (or an npm error block) in every started leg's own span; the
+  // process-boundary test below keeps the tolerated arm of that shape. Uses the
   // expectation derived from this repo, not a hand-written one, so the two
   // halves of the gate are pinned against the same source of truth.
   const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
@@ -519,8 +526,41 @@ test('keeps the tolerance alive on a complete walk of the declared legs', () => 
     runnerName: 'ecs-qwen-hk5-2',
     expectedLegs: expected,
   });
-  assert.equal(verdict.tolerated, true, verdict.reason);
-  assert.deepEqual(verdict.workspaces, ['packages/cli', 'packages/core']);
+  assert.equal(verdict.tolerated, false);
+  assert.match(verdict.reason, /never reported/);
+});
+
+test('refuses a capture whose final started leg never reported', () => {
+  // R2-2: every one of the 22 banners is present, so the started-vs-expected
+  // comparison is empty — but the final leg printed its banner and nothing
+  // after it: the OOM killer took the producer mid-leg, and no other gate can
+  // see that (TEE_RC is 0, the equality gate stays balanced because the killed
+  // leg printed no tally, and the per-leg attribution loop only visits blamed
+  // workspaces). Deleting the span check turns this verdict tolerated.
+  const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
+  const expected = expectedLegNames(repoRoot);
+  assert.ok(Array.isArray(expected) && expected.length >= 20);
+  const banner = (name) => `${TS}> ${name}@0.20.0 test:ci`;
+  const cliLeg = ALL_GREEN_RPC_LOG.split(
+    `${TS}npm error path /_work/qwen-code/qwen-code/packages/core`,
+  )[0];
+  const parts = [banner(expected[0]), cliLeg];
+  for (const name of expected.slice(1, -1)) {
+    parts.push(banner(name), `${TS} Test Files  3 passed (3)`);
+  }
+  parts.push(banner(expected.at(-1)));
+  const verdict = classify({
+    logText: parts.join('\n'),
+    readJunit: junitFor(['packages/cli/junit.xml']),
+    expectedLegs: expected,
+  });
+  assert.equal(verdict.tolerated, false);
+  assert.match(verdict.reason, /never reported/);
+  assert.ok(
+    verdict.reason.includes(expected.at(-1)),
+    `the refusal names the unreported final leg: ${verdict.reason}`,
+  );
+  assert.deepEqual(verdict.unreportedLegs, [expected.at(-1)]);
 });
 
 test('normalizes ANSI escapes and Actions timestamps', () => {
@@ -771,6 +811,116 @@ test('attributes each blamed workspace the section npm printed for it', () => {
   assert.equal(countRpcTimeouts(sections.get('packages/core')), 1);
 });
 
+// R6-1: the whole-log equality is balanced (3 signatures, a tally of 3), but
+// per leg the two counts are imbalanced in *opposite* directions — cli
+// presents two signatures against one tally (the SHORT_TALLY shape above), and
+// core one signature plus a real `write after end` against a tally of two (its
+// mirror image). The cancellation is exactly what the per-leg comparison
+// refuses; every line of the trigger is genuine runner output.
+const CANCELLING_SECTIONS_LOG = [
+  `${TS}Vitest caught 1 unhandled error during the test run.`,
+  `${TS}Error: ${RPC_TIMEOUT_SIGNATURE}`,
+  `${TS}Error: ${RPC_TIMEOUT_SIGNATURE}`,
+  `${TS} Test Files  1014 passed (1014)`,
+  `${TS}      Tests  28582 passed (28582)`,
+  `${TS}npm error code 1`,
+  `${TS}npm error path /_work/qwen-code/qwen-code/packages/cli`,
+  `${TS}Vitest caught 2 unhandled errors during the test run.`,
+  `${TS}Error: ${RPC_TIMEOUT_SIGNATURE}`,
+  `${TS}Error: write after end`,
+  `${TS} Test Files  643 passed (644)`,
+  `${TS}      Tests  23521 passed (23521)`,
+  `${TS}npm error code 1`,
+  `${TS}npm error path /_work/qwen-code/qwen-code/packages/core`,
+].join('\n');
+
+test('refuses when two legs imbalance the counts in opposite directions', () => {
+  // The preconditions: whole-log balanced, no FAIL line, both junits clean —
+  // without the per-section comparison this is tolerated.
+  assert.equal(countRpcTimeouts(CANCELLING_SECTIONS_LOG), 3);
+  assert.equal(countCaughtUnhandled(CANCELLING_SECTIONS_LOG), 3);
+  const verdict = classify({
+    logText: CANCELLING_SECTIONS_LOG,
+    readJunit: junitFor(['packages/cli/junit.xml', 'packages/core/junit.xml']),
+  });
+  assert.equal(verdict.tolerated, false);
+  // The refusal names the first blamed workspace whose own section is
+  // imbalanced — packages/cli (2 signatures against a tally of 1), not the leg
+  // holding the escaping error, because the first section is the log prefix.
+  assert.match(verdict.reason, /packages\/cli/);
+  assert.match(verdict.reason, /something else escaped/);
+  // Each leg fed alone is already refused by the whole-log gate, so the
+  // cancellation is precisely what carried the false green.
+  const cliOnly = CANCELLING_SECTIONS_LOG.split(
+    `${TS}Vitest caught 2 unhandled errors during the test run.`,
+  )[0];
+  const coreOnly = CANCELLING_SECTIONS_LOG.slice(
+    CANCELLING_SECTIONS_LOG.indexOf(
+      `${TS}Vitest caught 2 unhandled errors during the test run.`,
+    ),
+  );
+  for (const [leg, junitPath] of [
+    [cliOnly, 'packages/cli/junit.xml'],
+    [coreOnly, 'packages/core/junit.xml'],
+  ]) {
+    const single = classify({ logText: leg, readJunit: junitFor([junitPath]) });
+    assert.equal(single.tolerated, false, `${junitPath}: ${single.reason}`);
+    assert.match(single.reason, /something else escaped/);
+  }
+});
+
+// R8-1: core starved one RPC, flushed a complete green junit, and was then
+// SIGKILLed in the post-reporter window — npm reports its leg as
+// `npm error code 137`. The lane's shell gate is narrowed to `[ "$RC" -eq 1 ]`
+// precisely to keep signal deaths out of the classifier; without the
+// equivalent per-leg check, a killed leg carrying one signature in its own
+// section is certified as RPC starvation and the required Test check greens.
+const SIGNAL_DEATH_OWN_SECTION_LOG = [
+  `${TS}Vitest caught 1 unhandled error during the test run.`,
+  `${TS}Error: ${RPC_TIMEOUT_SIGNATURE}`,
+  `${TS} Test Files  643 passed (644)`,
+  `${TS}      Tests  23521 passed (23521)`,
+  `${TS}JUNIT report written to /_work/qwen-code/qwen-code/packages/core/junit.xml`,
+  `${TS}npm error code 137`,
+  `${TS}npm error path /_work/qwen-code/qwen-code/packages/core`,
+  `${TS}Vitest caught 1 unhandled error during the test run.`,
+  `${TS}Error: ${RPC_TIMEOUT_SIGNATURE}`,
+  `${TS} Test Files  1014 passed (1014)`,
+  `${TS}      Tests  28582 passed (28582)`,
+  `${TS}npm error code 1`,
+  `${TS}npm error path /_work/qwen-code/qwen-code/packages/cli`,
+].join('\n');
+
+test('refuses a leg whose own npm section carries a signal-exit code', () => {
+  // Whole-log and per-leg counts are both balanced and both junits are clean:
+  // only the exit-code gate sees the 137.
+  assert.equal(countRpcTimeouts(SIGNAL_DEATH_OWN_SECTION_LOG), 2);
+  assert.equal(countCaughtUnhandled(SIGNAL_DEATH_OWN_SECTION_LOG), 2);
+  const verdict = classify({
+    logText: SIGNAL_DEATH_OWN_SECTION_LOG,
+    readJunit: junitFor(['packages/core/junit.xml', 'packages/cli/junit.xml']),
+  });
+  assert.equal(verdict.tolerated, false);
+  assert.match(verdict.reason, /packages\/core/);
+  assert.match(verdict.reason, /137|signal/);
+  // The same log with vitest's own exit 1 in both sections is the tolerated
+  // shape, so the refusal is about the code and not about the fixture.
+  const exitOne = SIGNAL_DEATH_OWN_SECTION_LOG.replace(
+    'npm error code 137',
+    'npm error code 1',
+  );
+  assert.equal(
+    classify({
+      logText: exitOne,
+      readJunit: junitFor([
+        'packages/core/junit.xml',
+        'packages/cli/junit.xml',
+      ]),
+    }).tolerated,
+    true,
+  );
+});
+
 // The log being classified is the code under test's own stdout, so text a test
 // prints is PR-controlled. Vitest attributes printed output to a `stdout |`
 // region; counting inside one lets a leg's real non-RPC unhandled error be
@@ -960,15 +1110,20 @@ test('carries the verdict across the process boundary the lane spawns', () => {
     );
     assert.match(incomplete.stdout, /^::error title=/m);
 
-    // The same capture with the third banner is tolerated again, so the
-    // refusal above is about the walk and not about the new package.json files.
+    // The same capture with every declared leg started AND reported is
+    // tolerated again, so the refusal above is about the walk and not about
+    // the new package.json files. Each leg's span needs a vitest summary: a
+    // banner alone only proves npm started the leg, and a bare one is refused
+    // as never-reported.
     writeFileSync(
       logPath,
       [
         banner('cli-pkg'),
         ALL_GREEN_RPC_LOG,
         banner('core-pkg'),
+        ' Test Files  1 passed (1)',
         banner('web-shell-pkg'),
+        ' Test Files  1 passed (1)',
       ].join('\n'),
     );
     const complete = spawn();

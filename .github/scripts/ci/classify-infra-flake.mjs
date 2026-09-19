@@ -73,7 +73,10 @@ import {
  * no marker at all when the walk ends — an ordinary lifecycle failure just
  * stops after the last leg — so the started set compared against the legs the
  * root `package.json` declares is the only completeness evidence the capture
- * carries. A missing leg refuses; see `expectedLegNames`.
+ * carries. A missing leg refuses, and so does a leg that started but never
+ * reported — banner, then no vitest summary and no npm error block — because
+ * that is the shape the OOM killer leaves when it takes the producer mid-leg;
+ * see `expectedLegNames`.
  *
  * The verdict is a warning, never silence: the pool being over capacity is the
  * actual defect, and a green job that hides it would remove the only pressure
@@ -412,6 +415,36 @@ export function classify(options = {}) {
         { missingLegs: missing },
       );
     }
+    // A banner only proves npm *started* the leg. The OOM killer taking the
+    // producer mid-leg leaves exactly that shape — banner, then nothing — and
+    // every gate above reads only legs that reported, so the kill is invisible
+    // without this check: no summary, no blame line, no junit, and the
+    // equality gate stays balanced because the killed leg printed no tally.
+    // Require each started leg's own span (its banner to the next banner) to
+    // carry a vitest summary or an npm error path line. The evidence has to
+    // come from the log rather than junit: only a few of the walked legs write
+    // a junit report, so demanding one here would refuse every run.
+    const spans = stripCapturedOutput(log).split(NPM_LEG_BANNER_PATTERN);
+    // String.split keeps the capture group: [preamble, name, span, name, span, …]
+    const unreported = [];
+    for (let index = 1; index < spans.length; index += 2) {
+      const span = spans[index + 1] ?? '';
+      if (
+        !/^\s*(?:Test Files|Tests)\s/m.test(span) &&
+        !/^npm error path /m.test(span)
+      ) {
+        unreported.push(spans[index]);
+      }
+    }
+    if (unreported.length > 0) {
+      return refuse(
+        `the workspace walk is incomplete — ${unreported.length} leg(s) npm started never reported ` +
+          `(${unreported.slice(0, 3).join(', ')}${unreported.length > 3 ? ', …' : ''}): ` +
+          `no vitest summary and no npm error block in their span, ` +
+          `so this capture ends mid-leg`,
+        { unreportedLegs: unreported },
+      );
+    }
   }
 
   const sections = workspaceSections(log);
@@ -458,10 +491,45 @@ export function classify(options = {}) {
     // strength of a different leg's timeout, and `warningLine` would then name
     // it as a leg whose "worker IPC starv[ed] on CPU". So require the
     // signature in the section npm printed for this workspace.
-    const ownSignatures = countRpcTimeouts(sections.get(workspace) ?? '');
+    const section = sections.get(workspace) ?? '';
+    const ownSignatures = countRpcTimeouts(section);
     if (ownSignatures === 0) {
       return refuse(
         `${workspace} exited nonzero with no "${RPC_TIMEOUT_SIGNATURE}" in its own npm section`,
+        { workspaces },
+      );
+    }
+    // The lane's shell gate only hands the classifier RC=1 runs precisely so a
+    // signal death never reaches here; apply the same narrowing one level
+    // down, per leg. npm reports a leg the OOM killer or a signal took as
+    // `npm error code 137` (128+SIGKILL, or the segfault/abort neighbours) in
+    // that leg's own section, and an untallied death in the post-reporter
+    // window is invisible to the equality gate — so any exit code here other
+    // than vitest's own 1 refuses. A section carrying no code line at all is
+    // accepted: npm emits exactly that for a leg of the all-green shape this
+    // tolerance exists for, and refusing on absence would kill it.
+    const signalExit = [...section.matchAll(/^npm error code (\S+)/gm)]
+      .map((match) => match[1])
+      .find((code) => code !== '1');
+    if (signalExit !== undefined) {
+      return refuse(
+        `${workspace} exited with npm error code ${signalExit} — a signal kill, ` +
+          `not vitest's own exit 1, so the RPC starvation attribution does not hold`,
+        { workspaces },
+      );
+    }
+    // The whole-log equality above is necessary but not sufficient: two legs
+    // imbalanced in opposite directions cancel in the sums, so compare the two
+    // counts per leg as well — the leg's own tally against its own signatures.
+    // (The tail after the last blame line needs no gate of its own: both
+    // counters are additive over the sections/tail partition of the same
+    // stripped log, so whole-log equality plus per-section equality already
+    // forces the tail to balance.)
+    const ownCaught = countCaughtUnhandled(section);
+    if (ownCaught !== ownSignatures) {
+      return refuse(
+        `${workspace}: vitest counted ${ownCaught} unhandled error(s) in its own npm section ` +
+          `but only ${ownSignatures} are "${RPC_TIMEOUT_SIGNATURE}" — something else escaped`,
         { workspaces },
       );
     }
