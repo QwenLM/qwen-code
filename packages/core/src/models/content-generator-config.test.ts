@@ -441,7 +441,7 @@ describe('buildAgentContentGeneratorConfig', () => {
         {
           ...resolvedModel,
           authType: 'openai' as ResolvedModelConfig['authType'],
-          baseUrl: parentConfig.baseUrl,
+          baseUrl: 'https://parent.example.com',
         },
       );
 

@@ -976,6 +976,55 @@ describe('modelConfigResolver', () => {
     });
   });
 
+  describe('toolParametersMandatory reaches the provider through configuration', () => {
+    // The request path reads toolParametersMandatory off the resolved
+    // ContentGeneratorConfig. If the field is missing from
+    // MODEL_GENERATION_CONFIG_FIELDS the resolver drops it silently, so the option is
+    // readable in the provider but unsettable by a user. These go through
+    // resolveModelConfig rather than injecting the getter, which is the path that was
+    // broken.
+    it('carries a settings generationConfig value onto the resolved config', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { toolParametersMandatory: true },
+        },
+        env: {
+          OPENAI_API_KEY: 'key',
+          OPENAI_BASE_URL: 'http://localhost:5000/v1',
+          OPENAI_MODEL: 'qwen-max',
+        },
+      });
+
+      expect(result.config.toolParametersMandatory).toBe(true);
+      expect(result.sources['toolParametersMandatory'].kind).toBe('settings');
+    });
+
+    it('lets a modelProvider generationConfig win over settings, like every other field', () => {
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {
+          apiKey: 'key',
+          generationConfig: { toolParametersMandatory: false },
+        },
+        env: {},
+        modelProvider: {
+          id: 'tabby-qwen',
+          baseUrl: 'http://localhost:5000/v1',
+          generationConfig: { toolParametersMandatory: true },
+        },
+      });
+
+      expect(result.config.toolParametersMandatory).toBe(true);
+      expect(result.sources['toolParametersMandatory'].kind).toBe(
+        'modelProviders',
+      );
+    });
+  });
+
   describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
     it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
       // REPRODUCES issue-4219:
