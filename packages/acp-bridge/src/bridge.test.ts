@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -467,6 +467,17 @@ describe('createAcpSessionBridge', () => {
           hasRunningBackgroundTasks: true,
         },
       ]);
+      // R1-10/R1-11 pinning (#11768): seq 3 is the headline state — background
+      // tasks running while the session holds nothing. Background activity is
+      // reported through `hasRunningBackgroundTasks` alone; it must not fold
+      // into the holds-derived active-work predicates, the active-work state,
+      // or the busy surface. A guard that suppressed a reported `true` when
+      // `holds` is empty, or a fold of the flag into `entryHasActiveWork` /
+      // `entryHasLocalWork`, would flip these.
+      expect(summary().hasRunningBackgroundTasks).toBe(true);
+      expect(summary().hasActivePrompt).toBe(false);
+      expect(summary().activeWorkState).toBe('idle');
+      expect(bridge.activeWork).toBe(false);
       await sendActiveWorkSnapshot(handle, 4, []);
       expect(summary().hasRunningBackgroundTasks).toBe(false);
       await sendActiveWorkSnapshot(handle, 5, [
@@ -40559,6 +40570,11 @@ describe('background notification admission', () => {
           bridge.setSessionResetPending!(session.sessionId);
         }
         const admission = vi.spyOn(BridgeClient.prototype, 'extMethod');
+        // The prototype spy must not outlive this test: without a restore it
+        // keeps recording every later child→bridge extMethod call into
+        // `admission.mock.calls` for the rest of this 40k-line file (#11768
+        // R1-12).
+        onTestFinished(() => admission.mockRestore());
         const start = handle.agentConnection.extMethod('_qwencode/start_turn', {
           sessionId: session.sessionId,
           source: 'background_notification',
@@ -41215,6 +41231,7 @@ describe('background admission ownership boundaries', () => {
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const startHandler = vi.spyOn(BridgeClient.prototype, 'extMethod');
+    onTestFinished(() => startHandler.mockRestore());
     let rpc: Promise<unknown> | undefined;
     try {
       rpc = bridge.sendPrompt(
