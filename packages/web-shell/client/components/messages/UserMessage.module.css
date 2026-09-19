@@ -230,7 +230,8 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-width: min(420px, 60vw);
+  width: min(420px, 60vw);
+  max-width: 100%;
 }
 
 .editInput {

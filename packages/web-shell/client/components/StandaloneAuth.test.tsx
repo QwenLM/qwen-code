@@ -35,8 +35,7 @@ async function mount(
     daemonOrigin: string,
     token?: string,
     options?: {
-      continueRemoteWorkspaceAdd?: boolean;
-      continueRemoteConnectionAdd?: boolean;
+      continueFlow?: 'workspace' | 'connection';
     },
   ) => boolean | void,
 ) {
@@ -106,7 +105,7 @@ async function submitForm() {
     .querySelector('form')!
     .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
 }
-it('retries an invalid token and stores the accepted token per tab', async () => {
+it('retries with the typed token, stores it per tab, and creates no connection', async () => {
   const fetch = vi
     .fn()
     .mockResolvedValueOnce(stubResponse({ status: 401 }))
@@ -129,9 +128,7 @@ it('retries an invalid token and stores the accepted token per tab', async () =>
   expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
     'good',
   );
-  expect(
-    JSON.parse(localStorage.getItem('qwen-remote-connections') || 'null'),
-  ).toEqual(['http://daemon.test']);
+  expect(localStorage.getItem('qwen-remote-connections')).toBeNull();
   expect(fetch.mock.calls[1][1].headers).toEqual({
     Authorization: 'Bearer good',
   });
@@ -212,7 +209,7 @@ it('preserves remote-add continuation when correcting the daemon target', async 
   expect(onChangeTarget).toHaveBeenCalledWith(
     'http://replacement.example:4170',
     undefined,
-    { continueRemoteWorkspaceAdd: true },
+    { continueFlow: 'workspace' },
   );
 });
 it('preserves connection-add verification when correcting the daemon target', async () => {
@@ -233,7 +230,7 @@ it('preserves connection-add verification when correcting the daemon target', as
   expect(onChangeTarget).toHaveBeenCalledWith(
     'http://replacement.example:4170',
     undefined,
-    { continueRemoteConnectionAdd: true },
+    { continueFlow: 'connection' },
   );
 });
 it('asks before probing a daemon this browser has not connected to', async () => {
