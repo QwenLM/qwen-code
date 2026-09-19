@@ -61,7 +61,7 @@ retain the daemon's [origin requirements](../../docs/users/qwen-serve.md#securit
 
 Existing Web Shell dictation can request audio capture from its connected daemon origin. A native prompt names that origin and asks for explicit consent before Android recording permission. Camera, mixed audio/video, unknown permissions and requests from other origins are denied. Permission is not requested on startup; denying it leaves text chat available. A compatible daemon with voice configured and a secure web context are still required.
 
-A microphone-enabled connection closes when the app leaves the foreground, even if dictation already stopped. This also applies when another full-screen app, including a document picker, opens. Unsent page state may be lost; the prompt explains this before consent, and returning offers manual reconnection. Text-only connections remain open. This conservative development-client behavior prevents background capture without a new JavaScript bridge. See the [microphone design](../../docs/design/mobile-microphone-permission.md).
+A microphone-enabled connection closes when the app leaves the foreground, even if dictation already stopped. This also applies when another full-screen app opens. Unsent page state may be lost; the prompt explains this before consent, and returning offers manual reconnection. Document Open/Save is intercepted before launching the chooser: keep editing the current page, or reconnect explicitly and retry the file operation. A blocked Save does not create a destination. Text-only connections remain open. This conservative development-client behavior prevents background capture without a new JavaScript bridge. See the [microphone design](../../docs/design/mobile-microphone-permission.md).
 
 ## Limitations
 
