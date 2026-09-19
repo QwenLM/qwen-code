@@ -147,6 +147,7 @@ function splitCommandForRules(command: string, toolName: string): string[] {
  * PermissionManager therefore only needs these three getters.
  */
 export interface PermissionManagerConfig {
+  getShellExecutionSandbox?(): unknown;
   /** Merged allow-rules (settings + coreTools + allowedTools). */
   getPermissionsAllow(): string[] | undefined;
   /** Merged ask-rules (settings only). */
@@ -687,6 +688,7 @@ export class PermissionManager {
     command: string,
     cwd?: string,
   ): Promise<'allow' | 'ask'> {
+    if (this.config.getShellExecutionSandbox?.()) return 'ask';
     try {
       const isReadOnly = cwd
         ? await isShellCommandReadOnlyASTInDirectory(command, cwd)
