@@ -70,6 +70,11 @@ import {
   isTopLevelSession,
 } from '../agents/runtime/agent-context.js';
 import type { ExternalAgentExecutor } from '../agents/runtime/subagent-executor.js';
+import type {
+  ExecutionEnvironment,
+  ExecutionEnvironmentFactory,
+} from '../services/execution-environment.js';
+import { ExecutionCleanupError } from '../services/execution-environment.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
   DashScopeOpenAICompatibleProvider,
@@ -933,6 +938,8 @@ export interface SessionWorkflowPlanRevision {
 export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
 
 export interface ConfigParameters {
+  agentExecutionBackend?: 'container';
+  executionEnvironmentFactory?: ExecutionEnvironmentFactory;
   sessionId?: string;
   sessionData?: ResumedSessionData;
   sessionRestoreProjection?: SessionRestoreProjection;
@@ -2214,6 +2221,8 @@ export type DerivedConfigOverrides = Partial<
   Pick<
     Config,
     | 'getTargetDir'
+    | 'getExecutionEnvironment'
+    | 'getExecutionEnvironmentFactory'
     | 'getCwd'
     | 'getWorkingDir'
     | 'getProjectRoot'
@@ -2698,6 +2707,12 @@ export class Config {
   private staticSystemPrefix: string | undefined;
 
   /**
+   * Tool names declared to the model when this session's system prompt was
+   * built. See {@link getPromptToolSnapshot}.
+   */
+  private promptToolSnapshot: ReadonlySet<string> | undefined;
+
+  /**
    * Volatile system-prompt layer: the managed auto-memory section
    * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
    * (context files, stable in-session) because it is rewritten on every
@@ -2871,6 +2886,11 @@ export class Config {
    * host package. See `ExternalAgentExecutor` and `setExternalAgentExecutor`.
    */
   private externalAgentExecutor?: ExternalAgentExecutor;
+  private readonly agentExecutionBackend?: 'container';
+  private readonly executionEnvironmentFactory?: ExecutionEnvironmentFactory;
+  private executionEnvironments?: Set<Promise<ExecutionEnvironment>>;
+  private readonly executionShutdown = new AbortController();
+  private executionCleanupPromise?: Promise<void>;
   private readonly modelProposedGoals: ModelProposedGoalsMode;
   private goalProposalHostSupported = false;
   private goalProposalTurnKey: string | undefined;
@@ -2996,6 +3016,15 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.agentExecutionBackend = params.agentExecutionBackend;
+    const executionFactory = params.executionEnvironmentFactory;
+    this.executionEnvironmentFactory = executionFactory
+      ? (config, signal) =>
+          executionFactory(
+            config,
+            AbortSignal.any([signal, this.executionShutdown.signal]),
+          )
+      : undefined;
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.provisionalWorkspace = params.provisionalWorkspace === true;
     this.sessionId = params.sessionId ?? randomUUID();
@@ -6848,6 +6877,7 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     const closeWriter = () =>
       this.closeSessionWriter().catch((error) => {
@@ -6942,6 +6972,7 @@ export class Config {
   }
 
   private async shutdownResourcesOnce(): Promise<void> {
+    let resourceError: unknown;
     try {
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
@@ -6975,26 +7006,42 @@ export class Config {
         this.goalRuntime?.dispose();
       }
 
-      if (!this.initialized) {
-        // Nothing else to clean up if not initialized.
-        return;
+      if (this.initialized) {
+        this.skillManager?.stopWatching();
+
+        if (this.toolRegistry) {
+          await this.toolRegistry.stop();
+        }
+
+        this.backgroundTaskRegistry.abortAll();
+        this.monitorRegistry.abortAll({ notify: false });
+        this.backgroundShellRegistry.abortAll();
+        this.workflowRunRegistry.abortAll();
       }
-
-      this.skillManager?.stopWatching();
-
-      if (this.toolRegistry) {
-        await this.toolRegistry.stop();
-      }
-
-      this.backgroundTaskRegistry.abortAll();
-      this.monitorRegistry.abortAll({ notify: false });
-      this.backgroundShellRegistry.abortAll();
-      this.workflowRunRegistry.abortAll();
-
+    } catch (error) {
+      resourceError = error;
+      this.debugLogger.error('Error during Config shutdown:', error);
+    }
+    try {
+      await this.shutdownExecutionEnvironments();
+    } catch (cleanupError) {
+      const errors =
+        cleanupError instanceof AggregateError
+          ? ([...cleanupError.errors] as unknown[])
+          : [cleanupError];
+      if (resourceError !== undefined) errors.unshift(resourceError);
+      throw new AggregateError(
+        errors,
+        'Container execution cleanup failed during session shutdown.',
+      );
+    }
+    if (resourceError !== undefined) throw resourceError;
+    if (!this.initialized) return;
+    try {
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();
     } catch (error) {
-      this.debugLogger.error('Error during Config shutdown:', error);
+      this.debugLogger.error('Error during session runtime cleanup:', error);
       throw error;
     }
   }
@@ -7840,6 +7887,25 @@ export class Config {
 
   setStaticSystemPrefix(prefix: string | undefined): void {
     this.staticSystemPrefix = prefix;
+  }
+
+  /**
+   * The tool names declared to the model when this session's system prompt was
+   * built. The prompt gates its tool-specific text on this set (#12032), and
+   * `/context` reads the same set so its system-prompt row describes the text
+   * the request actually carries rather than what the registry holds now — the
+   * two genuinely diverge after a mid-session ToolSearch reveal, because a
+   * reveal rewrites the declarations without rebuilding the prompt.
+   *
+   * `undefined` until `startChat` records it, which the prompt builder reads as
+   * "every tool is declared" and renders exactly as it did before gating.
+   */
+  getPromptToolSnapshot(): ReadonlySet<string> | undefined {
+    return this.promptToolSnapshot;
+  }
+
+  setPromptToolSnapshot(names: ReadonlySet<string> | undefined): void {
+    this.promptToolSnapshot = names;
   }
 
   /**
@@ -9091,6 +9157,94 @@ export class Config {
     return this.externalAgentExecutor;
   }
 
+  getAgentExecutionBackend(): 'container' | undefined {
+    return this.agentExecutionBackend;
+  }
+
+  getExecutionEnvironmentFactory(): ExecutionEnvironmentFactory | undefined {
+    return this.shutdownRequested || this.executionShutdown.signal.aborted
+      ? undefined
+      : this.executionEnvironmentFactory;
+  }
+
+  getExecutionEnvironment(): ExecutionEnvironment | undefined {
+    return undefined;
+  }
+
+  shutdownExecutionEnvironments(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      return (
+        Object.getPrototypeOf(this) as Config
+      ).shutdownExecutionEnvironments();
+    }
+    this.executionShutdown.abort();
+    if (this.executionCleanupPromise) return this.executionCleanupPromise;
+    const cleanup = Promise.allSettled(
+      [...(this.executionEnvironments ?? [])].map(async (pending) => {
+        let environment: ExecutionEnvironment;
+        try {
+          environment = await pending;
+        } catch (error) {
+          if (error instanceof ExecutionCleanupError) {
+            if (!error.retryCleanup) throw error;
+            await error.retryCleanup();
+          }
+          this.executionEnvironments?.delete(pending);
+          return;
+        }
+        await environment.dispose();
+        this.executionEnvironments?.delete(pending);
+      }),
+    ).then((results) => {
+      const errors = results.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason as unknown] : [],
+      );
+      if (errors.length)
+        throw new AggregateError(errors, errors.map(String).join('; '));
+    });
+    let timer: ReturnType<typeof setTimeout>;
+    // Finish or report before the CLI's 2-second per-cleanup exit deadline.
+    this.executionCleanupPromise = new Promise<void>((resolve, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new ExecutionCleanupError(
+              `Container cleanup is still pending for workspace ${this.getWorkingDir()}. Keep its workspace and inspect qwen-agent-* containers and qwen-agent-executor-* temporary directories before manual removal.`,
+            ),
+          ),
+        1_000,
+      );
+      cleanup.then(resolve, reject);
+    })
+      .catch((error: unknown) => {
+        // eslint-disable-next-line no-console -- exit cleanup errors must survive debug-only and best-effort callers
+        console.warn(
+          `Container execution cleanup incomplete: ${String(error)}`,
+        );
+        throw error;
+      })
+      .finally(() => clearTimeout(timer));
+    // Keep a timed-out attempt shared until its underlying work settles.
+    const clear = () => {
+      this.executionCleanupPromise = undefined;
+    };
+    void cleanup.then(clear, clear);
+    return this.executionCleanupPromise;
+  }
+
+  registerExecutionEnvironment(
+    pending: Promise<ExecutionEnvironment>,
+  ): () => void {
+    if (isDerivedConfig(this)) {
+      return (
+        Object.getPrototypeOf(this) as Config
+      ).registerExecutionEnvironment(pending);
+    }
+    this.executionEnvironments ??= new Set();
+    this.executionEnvironments.add(pending);
+    return () => this.executionEnvironments?.delete(pending);
+  }
+
   getSessionWorkflowPlanRevision(): SessionWorkflowPlanRevision | undefined {
     if (!this.isSessionWorkflowEnabled()) return undefined;
     return this.sessionWorkflowPlanRevision;
@@ -10209,11 +10363,11 @@ export class Config {
     }
     // Under a session-writer lease the recorder starts `inactive` and
     // rejects every write until `activateChatRecording()` hands it the
-    // lease. Restoring now would push the legacy-migration journal write
-    // straight into that guard, and `restore()` latches the resulting
-    // failure as `recoveryError` for the life of the runtime — the
-    // migrated goal is dropped and goal persistence is bricked for the
-    // whole resumed session. Wait for the writer instead.
+    // lease. A restore itself writes nothing, but it is not only a read:
+    // activation replaces `sessionData` with the transcript loaded under
+    // the lease, so a restore run now would work from the constructor's
+    // possibly stale records, and a restored active Goal resumes its turn,
+    // whose first transition would hit that guard. Wait for the writer.
     if (restoreRuntime) {
       const preparation = runtime.prepareRestore(records ?? []);
       let resolveActivation!: () => void;
@@ -10872,6 +11026,31 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => this.registerLazyTool(registry, toolName, factory);
+
+    const environment = this.getExecutionEnvironment();
+    if (environment) {
+      if (this.getCodeModeOnly()) {
+        throw new Error(
+          'Container execution cannot be combined with tools.codeModeOnly.',
+        );
+      }
+      const [{ createExecutionTools }, { wrapExecutionTool }] =
+        await Promise.all([
+          import('../services/local-execution-environment.js'),
+          import('../tools/execution-tool.js'),
+        ]);
+      for (const [name, tool] of createExecutionTools(this)) {
+        if (name === ToolNames.LS && !this.isLsToolEnabled()) continue;
+        await registerLazy(name as ToolName, async () =>
+          wrapExecutionTool(tool, environment, this),
+        );
+      }
+      await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+        const { ToolSearchTool } = await import('../tools/tool-search.js');
+        return new ToolSearchTool(this);
+      });
+      return registry;
+    }
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
