@@ -14,9 +14,7 @@ function escapeRegExp(value: string): string {
 }
 
 function packageImport(dependency: string): RegExp {
-  return new RegExp(
-    `from\\s*["']${escapeRegExp(dependency)}(?:/[^"']*)?["']`,
-  );
+  return new RegExp(`from\\s*["']${escapeRegExp(dependency)}(?:/[^"']*)?["']`);
 }
 
 function readInjectedCss(bundle: string): string {
@@ -50,17 +48,15 @@ describe('build artifact — manifest-derived externals', () => {
 
   it('ships xterm styles in the interactive entry and scopes them', () => {
     const selectors: string[] = [];
-    postcss.parse(readInjectedCss(readPackageEntry('index.js'))).walkRules(
-      (rule) => {
+    postcss
+      .parse(readInjectedCss(readPackageEntry('index.js')))
+      .walkRules((rule) => {
         if (rule.selector.includes('.xterm')) selectors.push(rule.selector);
-      },
-    );
+      });
 
     expect(selectors.length).toBeGreaterThan(0);
     for (const selector of selectors) {
-      expect(selector).toMatch(
-        /\[data-web-shell-(?:root|portal-root)\]/,
-      );
+      expect(selector).toMatch(/\[data-web-shell-(?:root|portal-root)\]/);
     }
   });
 
