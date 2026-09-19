@@ -43,6 +43,15 @@ const CMD_TYPES = {
   YANK_WORD_FORWARD: 'yw',
   YANK_WORD_BACKWARD: 'yb',
   YANK_WORD_END: 'ye',
+  DELETE_TO_EOL_MOTION: 'd$',
+  CHANGE_TO_EOL_MOTION: 'c$',
+  YANK_TO_EOL: 'y$',
+  DELETE_TO_LINE_START: 'd0',
+  CHANGE_TO_LINE_START: 'c0',
+  YANK_TO_LINE_START: 'y0',
+  DELETE_TO_FIRST_NONBLANK: 'd^',
+  CHANGE_TO_FIRST_NONBLANK: 'c^',
+  YANK_TO_FIRST_NONBLANK: 'y^',
   REPLACE_CHAR: 'r',
   TOGGLE_CASE: '~',
   JOIN_LINES: 'J',
@@ -67,6 +76,42 @@ const CMD_TYPES = {
     RIGHT: 'yl',
   },
 } as const;
+
+type OperatorChar = 'd' | 'c' | 'y';
+type FindType = 'f' | 'F' | 't' | 'T';
+type LineMotion = '$' | '0' | '^';
+
+/**
+ * Dot-repeat identity for operator+find (e.g. `dt`): the command type is
+ * `<operator><find>` and the target character rides on `lastCommand.char`.
+ */
+const OPERATOR_FIND_COMMANDS = new Map<
+  string,
+  { operator: OperatorChar; find: FindType }
+>();
+for (const operator of ['d', 'c', 'y'] as const) {
+  for (const find of ['f', 'F', 't', 'T'] as const) {
+    OPERATOR_FIND_COMMANDS.set(`${operator}${find}`, { operator, find });
+  }
+}
+
+const LINE_MOTION_COMMANDS: Record<LineMotion, Record<OperatorChar, string>> = {
+  $: {
+    d: CMD_TYPES.DELETE_TO_EOL_MOTION,
+    c: CMD_TYPES.CHANGE_TO_EOL_MOTION,
+    y: CMD_TYPES.YANK_TO_EOL,
+  },
+  '0': {
+    d: CMD_TYPES.DELETE_TO_LINE_START,
+    c: CMD_TYPES.CHANGE_TO_LINE_START,
+    y: CMD_TYPES.YANK_TO_LINE_START,
+  },
+  '^': {
+    d: CMD_TYPES.DELETE_TO_FIRST_NONBLANK,
+    c: CMD_TYPES.CHANGE_TO_FIRST_NONBLANK,
+    y: CMD_TYPES.YANK_TO_FIRST_NONBLANK,
+  },
+};
 
 type PendingOperator = 'g' | 'd' | 'c' | 'y' | '>' | '<' | null;
 type PendingCharRead = 'r' | 'f' | 'F' | 't' | 'T' | null;
@@ -311,6 +356,85 @@ function findCharInLineReverse(
   return -1;
 }
 
+/** Column of the count-th occurrence of char from col, or -1 if fewer remain. */
+function findRawCharCol(
+  line: string,
+  findType: FindType,
+  char: string,
+  fromCol: number,
+  count: number,
+): number {
+  const forward = findType === 'f' || findType === 't';
+  let currentCol = fromCol;
+  for (let i = 0; i < count; i++) {
+    const targetCol = forward
+      ? findCharInLine(line, char, currentCol)
+      : findCharInLineReverse(line, char, currentCol);
+    if (targetCol < 0) return -1;
+    currentCol = targetCol;
+  }
+  return currentCol;
+}
+
+/** Column of the first non-whitespace character, or the line length when blank. */
+function firstNonBlankCol(line: string): number {
+  const cps = [...line];
+  const index = cps.findIndex((ch) => !/\s/.test(ch));
+  return index < 0 ? cps.length : index;
+}
+
+/**
+ * Half-open [startCol, endCol) an operator covers for a line motion, or null
+ * when the motion spans nothing. `$` runs through the line's last character.
+ * `0` and `^` run backwards and include the position they land on; `^` with
+ * the cursor inside the indentation runs forwards and stops before it.
+ */
+function lineMotionRange(
+  line: string,
+  col: number,
+  motion: LineMotion,
+): [number, number] | null {
+  switch (motion) {
+    case '$': {
+      const len = cpLen(line);
+      return col < len ? [col, len] : null;
+    }
+    case '0':
+      return col > 0 ? [0, col] : null;
+    case '^': {
+      const target = firstNonBlankCol(line);
+      if (col > target) return [target, col];
+      return col < target ? [col, target] : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Half-open [startCol, endCol) an operator covers for a find motion. `t`/`T`
+ * exclude the found character, `f`/`F` include it.
+ */
+function findMotionRange(
+  col: number,
+  findType: FindType,
+  foundCol: number,
+): [number, number] | null {
+  if (foundCol < 0) return null;
+  switch (findType) {
+    case 'f':
+      return [col, foundCol + 1];
+    case 't':
+      return foundCol > col ? [col, foundCol] : null;
+    case 'F':
+      return foundCol < col ? [foundCol, col] : null;
+    case 'T':
+      return foundCol < col ? [foundCol + 1, col] : null;
+    default:
+      return null;
+  }
+}
+
 // ── Hook ──
 
 export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
@@ -367,10 +491,100 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
     [],
   );
 
+  /**
+   * The buffer leaves the cursor at the start of the removed range, which is
+   * where vim lands — except when the delete ate the line's end, which needs
+   * one step back. Returning false keeps empty motions out of dot-repeat.
+   */
+  const applyCharOperator = useCallback(
+    (
+      operator: OperatorChar,
+      row: number,
+      startCol: number,
+      endCol: number,
+    ): boolean => {
+      if (endCol <= startCol) {
+        // An empty change still lands in insert mode, as `C` does at end of
+        // line; returning false keeps it out of dot-repeat.
+        if (operator === 'c') {
+          updateMode('INSERT');
+        }
+        return false;
+      }
+      const line = bufferRef.current.lines[row] ?? '';
+      yankRange(row, startCol, row, endCol, false);
+      if (operator === 'y') return true;
+      buffer.replaceRange(row, startCol, row, endCol, '');
+      if (operator === 'c') {
+        updateMode('INSERT');
+        return true;
+      }
+      // Both bounds are code-point columns, so the new length is arithmetic.
+      const remaining = startCol + cpLen(line) - endCol;
+      if (startCol >= remaining) {
+        buffer.vimMoveLeft(1);
+      }
+      return true;
+    },
+    [yankRange, buffer, updateMode],
+  );
+
+  const applyLineMotion = useCallback(
+    (operator: OperatorChar, motion: LineMotion): boolean => {
+      const [row, col] = bufferRef.current.cursor;
+      const range = lineMotionRange(
+        bufferRef.current.lines[row] ?? '',
+        col,
+        motion,
+      );
+      return applyCharOperator(
+        operator,
+        row,
+        range?.[0] ?? col,
+        range?.[1] ?? col,
+      );
+    },
+    [applyCharOperator],
+  );
+
+  const applyFindMotion = useCallback(
+    (
+      operator: OperatorChar,
+      findType: FindType,
+      char: string,
+      count: number,
+    ): boolean => {
+      const [row, col] = bufferRef.current.cursor;
+      const line = bufferRef.current.lines[row] ?? '';
+      const foundCol = findRawCharCol(line, findType, char, col, count);
+      const range = findMotionRange(col, findType, foundCol);
+      return applyCharOperator(
+        operator,
+        row,
+        range?.[0] ?? col,
+        range?.[1] ?? col,
+      );
+    },
+    [applyCharOperator],
+  );
+
   // ── Execute command (for dot-repeat) ──
 
   const executeCommand = useCallback(
     (cmdType: string, count: number) => {
+      const operatorFind = OPERATOR_FIND_COMMANDS.get(cmdType);
+      if (operatorFind) {
+        const char = stateRef.current.lastCommand?.char;
+        if (char != null) {
+          applyFindMotion(
+            operatorFind.operator,
+            operatorFind.find,
+            char,
+            count,
+          );
+        }
+        return true;
+      }
       switch (cmdType) {
         case CMD_TYPES.DELETE_WORD_FORWARD:
           buffer.vimDeleteWordForward(count);
@@ -462,6 +676,24 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           updateMode('INSERT');
           break;
         }
+        case CMD_TYPES.DELETE_TO_EOL_MOTION:
+          return applyLineMotion('d', '$');
+        case CMD_TYPES.CHANGE_TO_EOL_MOTION:
+          return applyLineMotion('c', '$');
+        case CMD_TYPES.YANK_TO_EOL:
+          return applyLineMotion('y', '$');
+        case CMD_TYPES.DELETE_TO_LINE_START:
+          return applyLineMotion('d', '0');
+        case CMD_TYPES.CHANGE_TO_LINE_START:
+          return applyLineMotion('c', '0');
+        case CMD_TYPES.YANK_TO_LINE_START:
+          return applyLineMotion('y', '0');
+        case CMD_TYPES.DELETE_TO_FIRST_NONBLANK:
+          return applyLineMotion('d', '^');
+        case CMD_TYPES.CHANGE_TO_FIRST_NONBLANK:
+          return applyLineMotion('c', '^');
+        case CMD_TYPES.YANK_TO_FIRST_NONBLANK:
+          return applyLineMotion('y', '^');
         case CMD_TYPES.YANK_LINE: {
           const lines = bufferRef.current.lines;
           const [row] = bufferRef.current.cursor;
@@ -671,7 +903,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       }
       return true;
     },
-    [buffer, updateMode, yankRange],
+    [buffer, updateMode, yankRange, applyLineMotion, applyFindMotion],
   );
 
   // ── Word boundary helpers (for yank) ──
@@ -887,6 +1119,19 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             type: 'SET_LAST_FIND',
             find: { type: readType, char },
           });
+          const operator = stateRef.current.pendingOperator;
+          if (operator === 'd' || operator === 'c' || operator === 'y') {
+            const count = stateRef.current.count || 1;
+            if (applyFindMotion(operator, readType, char, count)) {
+              dispatch({
+                type: 'SET_LAST_COMMAND',
+                command: { type: `${operator}${readType}`, count, char },
+              });
+            }
+            dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            return true;
+          }
           executeFind(readType, char, stateRef.current.count || 1);
           return true;
         }
@@ -894,7 +1139,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           return false;
       }
     },
-    [state.pendingCharRead, buffer, dispatch, executeFind],
+    [state.pendingCharRead, buffer, dispatch, executeFind, applyFindMotion],
   );
 
   // ── Handle INSERT mode ──
@@ -1101,6 +1346,37 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
     [getCurrentCount, executeCommand, dispatch],
   );
 
+  /**
+   * Consumes a pending d/c/y with a line motion; false when none is pending.
+   * An operator this motion cannot serve must still be dropped, otherwise it
+   * survives to the next keystroke and fires later.
+   */
+  const applyPendingLineMotion = useCallback(
+    (motion: LineMotion): boolean => {
+      const operator = stateRef.current.pendingOperator;
+      if (operator !== 'd' && operator !== 'c' && operator !== 'y') {
+        if (operator) {
+          dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+        }
+        return false;
+      }
+      const count = getCurrentCount();
+      const cmdType = LINE_MOTION_COMMANDS[motion][operator];
+      // The command owns the emptiness rule, so an empty range cannot yank and
+      // is not recorded for dot-repeat.
+      if (executeCommand(cmdType, count)) {
+        dispatch({
+          type: 'SET_LAST_COMMAND',
+          command: { type: cmdType, count },
+        });
+      }
+      dispatch({ type: 'CLEAR_COUNT' });
+      dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+      return true;
+    },
+    [getCurrentCount, executeCommand, dispatch],
+  );
+
   // ── Main key handler ──
 
   const handleInput = useCallback(
@@ -1136,6 +1412,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           normalizedKey.sequence.charCodeAt(0) >= 32
         ) {
           return handleCharRead(normalizedKey.sequence);
+        }
+        // Keeping the read armed would apply the operator to whatever printable
+        // key comes next, so drop the whole sequence instead.
+        if (s.pendingOperator) {
+          dispatch({ type: 'CLEAR_PENDING_STATES' });
         }
         return true;
       }
@@ -1413,11 +1694,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           case 'F':
           case 't':
           case 'T':
-            // TODO: support operator+find (e.g. dfa = delete to 'a').
-            // Currently clears operator to prevent stale state; operator+find
-            // should capture the operator, execute the find, then apply the
-            // operator over the range from original cursor to found char.
-            if (s.pendingOperator) {
+            // d/c/y carry into the char read, where the operator is applied
+            // over [cursor, found]; other pending operators cannot.
+            if (
+              s.pendingOperator &&
+              s.pendingOperator !== 'd' &&
+              s.pendingOperator !== 'c' &&
+              s.pendingOperator !== 'y'
+            ) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             dispatch({
@@ -1545,25 +1829,19 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Line navigation ──
           case '0': {
-            if (s.pendingOperator) {
-              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
-            }
+            if (applyPendingLineMotion('0')) return true;
             buffer.vimMoveToLineStart();
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
           case '$': {
-            if (s.pendingOperator) {
-              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
-            }
+            if (applyPendingLineMotion('$')) return true;
             buffer.vimMoveToLineEnd();
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
           case '^': {
-            if (s.pendingOperator) {
-              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
-            }
+            if (applyPendingLineMotion('^')) return true;
             buffer.vimMoveToFirstNonWhitespace();
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -1883,6 +2161,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       executeCommand,
       updateMode,
       executeFind,
+      applyPendingLineMotion,
       onSubmit,
     ],
   );

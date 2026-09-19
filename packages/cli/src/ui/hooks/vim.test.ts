@@ -2551,4 +2551,448 @@ describe('useVim hook', () => {
       expect(buffer.vimDeleteMovement).not.toHaveBeenCalled();
     });
   });
+
+  // Operators composed with line and find motions. This buffer applies range
+  // replacements for real so the assertions are about the resulting text.
+  describe('Operator motions: d$/d0/d^ and operator+find', () => {
+    const createApplyingBuffer = (
+      text: string,
+      cursor: [number, number] = [0, 0],
+    ) => {
+      const lines = text.split('\n');
+      const cursorState = { pos: cursor };
+      const write = (
+        row: number,
+        startCol: number,
+        endCol: number,
+        into: string,
+      ) => {
+        const cps = [...(lines[row] ?? '')];
+        lines[row] =
+          cps.slice(0, startCol).join('') + into + cps.slice(endCol).join('');
+        const newLen = [...lines[row]].length;
+        cursorState.pos = [row, Math.min(startCol + [...into].length, newLen)];
+      };
+      const buffer = {
+        lines,
+        get cursor() {
+          return cursorState.pos;
+        },
+        get text() {
+          return lines.join('\n');
+        },
+        replaceRange: vi.fn(
+          (
+            row: number,
+            startCol: number,
+            endRow: number,
+            endCol: number,
+            into: string,
+          ) => {
+            write(row, startCol, endCol, into);
+          },
+        ),
+        vimDeleteToEndOfLine: vi.fn(() => {
+          const [row, col] = cursorState.pos;
+          write(row, col, [...(lines[row] ?? '')].length, '');
+        }),
+        vimChangeToEndOfLine: vi.fn(() => {
+          const [row, col] = cursorState.pos;
+          write(row, col, [...(lines[row] ?? '')].length, '');
+        }),
+        vimMoveToLineStart: vi.fn(() => {
+          cursorState.pos = [cursorState.pos[0], 0];
+        }),
+        vimMoveToLineEnd: vi.fn(() => {
+          const [row] = cursorState.pos;
+          cursorState.pos = [
+            row,
+            Math.max(0, [...(lines[row] ?? '')].length - 1),
+          ];
+        }),
+        vimMoveToFirstNonWhitespace: vi.fn(() => {
+          const [row] = cursorState.pos;
+          const idx = [...(lines[row] ?? '')].findIndex((ch) => !/\s/.test(ch));
+          cursorState.pos = [row, idx < 0 ? 0 : idx];
+        }),
+        vimMoveRight: vi.fn((count = 1) => {
+          const [row, col] = cursorState.pos;
+          const len = [...(lines[row] ?? '')].length;
+          cursorState.pos = [
+            row,
+            len === 0 ? 0 : Math.min(col + count, len - 1),
+          ];
+        }),
+        setText: vi.fn(),
+        handleInput: vi.fn(),
+        undo: vi.fn(),
+        redo: vi.fn(),
+        vimMoveLeft: vi.fn((count = 1) => {
+          const [row, col] = cursorState.pos;
+          cursorState.pos = [row, Math.max(0, col - count)];
+        }),
+        vimMoveUp: vi.fn(),
+        vimMoveDown: vi.fn(),
+        vimMoveWordForward: vi.fn(() => {
+          const [row, col] = cursorState.pos;
+          const cps = [...(lines[row] ?? '')];
+          let next = col;
+          while (next < cps.length && !/\s/.test(cps[next])) next++;
+          while (next < cps.length && /\s/.test(cps[next])) next++;
+          cursorState.pos = [row, next];
+        }),
+        vimMoveWordBackward: vi.fn(),
+        vimMoveWordEnd: vi.fn(),
+        vimDeleteWordForward: vi.fn(),
+        vimChangeWordForward: vi.fn(),
+        vimDeleteLine: vi.fn(),
+        vimChangeLine: vi.fn(),
+        vimDeleteChar: vi.fn((count = 1) => {
+          const [row, col] = cursorState.pos;
+          write(row, col, col + count, '');
+        }),
+        vimEscapeInsertMode: vi.fn(),
+      };
+      return buffer as unknown as Omit<TextBuffer, 'replaceRange'> &
+        Record<'replaceRange', Mock>;
+    };
+
+    const press = (
+      result: { current: { handleInput: (input: Key) => boolean } },
+      keys: string,
+    ) => {
+      for (const key of keys) {
+        act(() => result.current.handleInput(makeKey(key)));
+      }
+    };
+
+    const renderApplying = (
+      text: string,
+      cursor: [number, number] = [0, 0],
+    ) => {
+      const buffer = createApplyingBuffer(text, cursor);
+      const { result } = renderHook(() =>
+        useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+      );
+      return { buffer, result };
+    };
+
+    it('deletes to end of line with d$', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 5]);
+      press(result, 'd$');
+      expect(buffer.lines).toEqual(['hello']);
+      expect(buffer.cursor).toEqual([0, 4]);
+    });
+
+    it('puts the cursor on the last remaining character when d$ ate the line', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 0]);
+      press(result, 'd$');
+      expect(buffer.lines).toEqual(['']);
+      expect(buffer.cursor).toEqual([0, 0]);
+    });
+
+    it('leaves the yank register alone when d$ deletes nothing', () => {
+      const { buffer, result } = renderApplying('keep', [0, 0]);
+      press(result, 'd$');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(0, 0, 0, 4, '');
+      buffer.replaceRange.mockClear();
+
+      // The line is empty now, so this d$ spans nothing and must not
+      // overwrite what the first one yanked.
+      press(result, 'd$');
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+      press(result, 'p');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        'keep',
+      );
+    });
+
+    it('keeps the yank register when an empty d$ is repeated with dot', () => {
+      const { buffer, result } = renderApplying('keep', [0, 0]);
+      press(result, 'd$');
+      buffer.replaceRange.mockClear();
+
+      // Dot-repeat takes the same command the keystroke did, so it has to hit
+      // the same empty-range guard.
+      press(result, '.');
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+      press(result, 'p');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        'keep',
+      );
+    });
+
+    it.each(['c$', 'c0', 'c^'])(
+      'enters insert mode when %s has nothing to change',
+      (keys) => {
+        const text = keys === 'c^' ? '  hello' : 'hello';
+        const cursor: [number, number] =
+          keys === 'c0' ? [0, 0] : keys === 'c$' ? [0, 5] : [0, 2];
+        const { buffer, result } = renderApplying(text, cursor);
+        press(result, keys);
+        expect(buffer.lines).toEqual([text]);
+        expect(result.current.mode).toBe('INSERT');
+      },
+    );
+
+    it('changes to end of line with c$ and enters INSERT', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 5]);
+      press(result, 'c$');
+      expect(buffer.lines).toEqual(['hello']);
+      expect(result.current.mode).toBe('INSERT');
+    });
+
+    it('yanks to end of line with y$ for a later paste', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 5]);
+      press(result, 'y$');
+      expect(buffer.lines).toEqual(['hello world']);
+      press(result, 'p');
+      expect(buffer.replaceRange).toHaveBeenCalledWith(0, 6, 0, 6, ' world');
+    });
+
+    it.each([
+      ['y0', 'hello world', [0, 6] as [number, number], 'hello '],
+      ['y^', '  hello', [0, 4] as [number, number], 'he'],
+      ['yt ', 'hello world', [0, 0] as [number, number], 'hello'],
+    ])('yanks with %s for a later paste', (keys, text, cursor, yanked) => {
+      const { buffer, result } = renderApplying(text, cursor);
+      press(result, keys);
+      expect(buffer.lines).toEqual([text]);
+      buffer.replaceRange.mockClear();
+      press(result, 'p');
+      expect(buffer.replaceRange).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        expect.any(Number),
+        yanked,
+      );
+    });
+
+    it('does not make a line motion that deleted nothing repeatable', () => {
+      const { buffer, result } = renderApplying('hello', [0, 0]);
+      press(result, 'd0');
+      expect(buffer.lines).toEqual(['hello']);
+      press(result, 'll');
+      press(result, '.');
+      expect(buffer.lines).toEqual(['hello']);
+    });
+
+    it('cancels operator+find when a non-printable key answers the read', () => {
+      const { buffer, result } = renderApplying('axbc', [0, 0]);
+      press(result, 'df');
+      act(() => result.current.handleInput(makeKey('\r', 'return')));
+      press(result, 'x');
+      expect(buffer.lines).toEqual(['xbc']);
+    });
+
+    it('deletes to start of line with d0, leaving the cursor on the text', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 6]);
+      press(result, 'd0');
+      expect(buffer.lines).toEqual(['world']);
+      expect(buffer.cursor).toEqual([0, 0]);
+    });
+
+    it('deletes to first non-blank with d^, keeping indentation', () => {
+      const { buffer, result } = renderApplying('   hello world', [0, 9]);
+      press(result, 'd^');
+      expect(buffer.lines).toEqual(['   world']);
+    });
+
+    it('deletes up to but not including the found char with dt', () => {
+      const { buffer, result } = renderApplying('hello world');
+      press(result, 'dtw');
+      expect(buffer.lines).toEqual(['world']);
+      expect(buffer.cursor).toEqual([0, 0]);
+    });
+
+    it('includes the found char with df', () => {
+      const { buffer, result } = renderApplying('hello world');
+      press(result, 'dfw');
+      expect(buffer.lines).toEqual(['orld']);
+    });
+
+    it('deletes backwards through the found char with dF', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 9]);
+      press(result, 'dFh');
+      expect(buffer.lines).toEqual(['ld']);
+    });
+
+    it('excludes the found char backwards with dT', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 9]);
+      press(result, 'dTh');
+      expect(buffer.lines).toEqual(['hld']);
+    });
+
+    it('changes up to and including a char with cf and enters INSERT', () => {
+      const { buffer, result } = renderApplying('hello world');
+      press(result, 'cf ');
+      expect(buffer.lines).toEqual(['world']);
+      expect(result.current.mode).toBe('INSERT');
+    });
+
+    it('repeats a find with a count before the motion', () => {
+      const { buffer, result } = renderApplying('abcabcabc');
+      press(result, 'd2tc');
+      expect(buffer.lines).toEqual(['cabc']);
+    });
+
+    it('repeats operator+find with dot', () => {
+      const { buffer, result } = renderApplying('hello world world');
+      press(result, 'dtw');
+      expect(buffer.lines).toEqual(['world world']);
+      press(result, '.');
+      expect(buffer.lines).toEqual(['world']);
+    });
+
+    it('repeats d0 with dot', () => {
+      const { buffer, result } = renderApplying('hello world', [0, 6]);
+      press(result, 'd0');
+      expect(buffer.lines).toEqual(['world']);
+      press(result, 'll');
+      press(result, '.');
+      expect(buffer.lines).toEqual(['rld']);
+    });
+
+    it('does not delete when the find count cannot be satisfied', () => {
+      const { buffer, result } = renderApplying('abc');
+      press(result, 'd2fc');
+      expect(buffer.lines).toEqual(['abc']);
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+    });
+
+    it('steps the cursor back onto the line when a delete eats its end', () => {
+      const { buffer, result } = renderApplying('abc', [0, 1]);
+      press(result, 'dfc');
+      expect(buffer.lines).toEqual(['a']);
+      expect(buffer.cursor).toEqual([0, 0]);
+
+      act(() => {
+        result.current.handleInput(makeKey('x'));
+      });
+      expect(buffer.lines).toEqual(['']);
+    });
+
+    it('deletes indentation with d^ from inside it', () => {
+      const { buffer, result } = renderApplying(' abc');
+      press(result, 'd^');
+      expect(buffer.lines).toEqual(['abc']);
+    });
+
+    it('drops an operator a line motion cannot serve', () => {
+      const { buffer, result } = renderApplying('abc', [0, 1]);
+      press(result, '>$>');
+      expect(buffer.lines).toEqual(['abc']);
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+    });
+
+    it('keeps the last real change repeatable after a motion that did nothing', () => {
+      const { buffer, result } = renderApplying('abcabc');
+      press(result, 'dfb');
+      expect(buffer.lines).toEqual(['cabc']);
+      press(result, 'dtz');
+      expect(buffer.lines).toEqual(['cabc']);
+      press(result, '.');
+      expect(buffer.lines).toEqual(['c']);
+    });
+
+    it('steps back one character rather than jumping to a computed column', () => {
+      // 'a' + combining acute, so the surviving last character spans two code
+      // points and a count-based column jump would overshoot it.
+      const acute = String.fromCodePoint(0x0301);
+      const { buffer, result } = renderApplying(`a${acute}bxc\nnext`, [0, 3]);
+      press(result, 'dfc');
+      expect(buffer.lines).toEqual([`a${acute}b`, 'next']);
+      expect(buffer.vimMoveLeft).toHaveBeenCalledWith(1);
+      expect(buffer.vimMoveToLineStart).not.toHaveBeenCalled();
+      expect(buffer.vimMoveRight).not.toHaveBeenCalled();
+    });
+
+    it('leaves the buffer alone when the found char is absent', () => {
+      const { buffer, result } = renderApplying('hello world');
+      press(result, 'dtz');
+      expect(buffer.lines).toEqual(['hello world']);
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+    });
+
+    it('waits for the target char before deleting on an incomplete df', () => {
+      const { buffer, result } = renderApplying('hello world');
+      press(result, 'df');
+      expect(buffer.lines).toEqual(['hello world']);
+      expect(buffer.replaceRange).not.toHaveBeenCalled();
+    });
+
+    it('cancels operator+find with Escape before the target char', () => {
+      const { buffer, result } = renderApplying('hello world');
+      press(result, 'dt');
+      act(() => {
+        result.current.handleInput(makeKey('\u001b', 'escape'));
+      });
+      press(result, 'w');
+      expect(buffer.lines).toEqual(['hello world']);
+    });
+
+    it('still moves with a bare f motion', () => {
+      const { buffer, result } = renderApplying('hello world');
+      press(result, 'fw');
+      expect(buffer.lines).toEqual(['hello world']);
+      expect(buffer.cursor).toEqual([0, 6]);
+    });
+
+    it('uses the real reducer to land the cursor at the start of a deleted range', () => {
+      const initialState = {
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 0,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+        viewportWidth: 80,
+        viewportHeight: 24,
+        visualLayout: {
+          visualLines: [],
+          logicalToVisualMap: [],
+          visualToLogicalMap: [],
+        },
+      };
+
+      // dt<w> on 'hello world' removes [0, 6)
+      const afterDt = textBufferReducer(initialState, {
+        type: 'replace_range',
+        payload: { startRow: 0, startCol: 0, endRow: 0, endCol: 6, text: '' },
+      });
+      expect(afterDt.lines).toEqual(['world']);
+      expect(afterDt.cursorRow).toBe(0);
+      expect(afterDt.cursorCol).toBe(0);
+
+      // d$ on 'hello world' from col 2 removes [2, 11). The reducer leaves the
+      // cursor at the start column, which is now past the last character —
+      // precisely the case the operator has to step back for.
+      const afterDollar = textBufferReducer(initialState, {
+        type: 'replace_range',
+        payload: { startRow: 0, startCol: 2, endRow: 0, endCol: 11, text: '' },
+      });
+      expect(afterDollar.lines).toEqual(['he']);
+      expect(afterDollar.cursorCol).toBe(2);
+
+      // Deleting the whole line leaves the cursor at column 0, where no
+      // step back is due.
+      const afterWholeLine = textBufferReducer(initialState, {
+        type: 'replace_range',
+        payload: { startRow: 0, startCol: 0, endRow: 0, endCol: 11, text: '' },
+      });
+      expect(afterWholeLine.lines).toEqual(['']);
+      expect(afterWholeLine.cursorCol).toBe(0);
+    });
+  });
 });
