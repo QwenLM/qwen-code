@@ -617,6 +617,105 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&', 'b']);
   });
 
+  // Rows starting with a plain `'c\'` are split only by bash's reading, so
+  // they pin the ANSI-C tracking.
+  it.each([
+    ["echo 'a\\' ; touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo 'a\\' && touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo 'a\\' | sh", ["echo 'a\\'", 'sh']],
+    ["echo 'a\\' & touch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo 'a\\'\ntouch /tmp/x", ["echo 'a\\'", 'touch /tmp/x']],
+    ["echo $'a\\'' ; touch /tmp/x", ["echo $'a\\''", 'touch /tmp/x']],
+    [
+      "echo 'c\\' $'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $'a\\'' && touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    ["echo 'c\\' $'a\\'' | sh", ["echo 'c\\' $'a\\''", 'sh']],
+    [
+      "echo 'c\\' $'a\\'' & touch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $'a\\''\ntouch /tmp/x",
+      ["echo 'c\\' $'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' \\\\$'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' \\\\$'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\'' ; touch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\'' & touch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    [
+      "echo 'c\\' $\\\n'a\\''\ntouch /tmp/x",
+      ["echo 'c\\' $\\\n'a\\''", 'touch /tmp/x'],
+    ],
+    ["echo \\$'a\\' ; touch /tmp/x", ["echo \\$'a\\'", 'touch /tmp/x']],
+    ["echo $$'a\\' ; touch /tmp/x", ["echo $$'a\\'", 'touch /tmp/x']],
+    // A `$` opens ANSI-C only when the quote follows it directly.
+    ["echo $x'a\\' ; touch /tmp/x", ["echo $x'a\\'", 'touch /tmp/x']],
+    ['echo "$"\'a\\\' ; touch /tmp/x', ['echo "$"\'a\\\'', 'touch /tmp/x']],
+  ])('splits after the quoted word in %s', async (command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  it('keeps an escaped quote inside double quotes and a line continuation', async () => {
+    expect(splitCompoundCommand('echo "a\\" ; touch /tmp/x"')).toEqual([
+      'echo "a\\" ; touch /tmp/x"',
+    ]);
+    expect(splitCompoundCommand('echo a\\\nb')).toEqual(['echo a\\\nb']);
+  });
+
+  // The `echo 'a\'' ; rm x'` row is one command to bash but stays split, as on
+  // main.
+  it.each([
+    [
+      "echo done # note 'a\\''\nrm -rf /tmp/x",
+      ["echo done # note 'a\\''", 'rm -rf /tmp/x'],
+    ],
+    [
+      "echo `echo 'a\\''` ; rm -rf /tmp/x",
+      ["echo `echo 'a\\''`", 'rm -rf /tmp/x'],
+    ],
+    [
+      "cat <<EOF\necho safe 'a\\''\nEOF\nrm -rf /tmp/x",
+      ['cat <<EOF', "echo safe 'a\\''", 'EOF', 'rm -rf /tmp/x'],
+    ],
+    ["echo 'a\\'' ; rm x'", ["echo 'a\\''", "rm x'"]],
+    // Two carriers in a row: the newline before `touch` is found by the
+    // escape-everywhere reading alone and comes after a bash-reading boundary,
+    // so merging the scans unsorted drops it as an overlap and `touch` joins
+    // the `echo` segment. bash runs four commands here.
+    [
+      "echo done # note 'a\\''\ntouch /tmp/x # it's\necho z ; echo w",
+      ["echo done # note 'a\\''", "touch /tmp/x # it's", 'echo z', 'echo w'],
+    ],
+  ])('keeps the boundaries main found in %s', async (command, parts) => {
+    expect(splitCompoundCommand(command)).toEqual(parts);
+  });
+
+  // The #11851 rows below put the target in a segment that ends at an operator;
+  // the last segment is trimmed separately.
+  it('keeps a redirection target bash does not treat as whitespace in the last segment', async () => {
+    expect(splitCompoundCommand('cat f & echo x >\u00a0')).toEqual([
+      'cat f',
+      'echo x >\u00a0',
+    ]);
+    expect(splitCompoundCommand('cat f & echo x >\v')).toEqual([
+      'cat f',
+      'echo x >\v',
+    ]);
+  });
+
   it('trims whitespace around sub-commands', async () => {
     expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
       'git status',
@@ -802,6 +901,24 @@ describe('splitCompoundCommandSegments', () => {
   it('keeps the async terminator on a trailing background command', async () => {
     expect(splitCompoundCommandSegments('npm test &')).toEqual([
       { command: 'npm test', terminator: '&' },
+    ]);
+  });
+
+  it('reports the terminator across a quote the two readings disagree on', async () => {
+    // shell-semantics reads `&` as backgrounded, so the `cd` must not move the
+    // cwd the write is attributed to — `&&` must, and the merge loop is what
+    // decides which operator a boundary carries.
+    expect(
+      splitCompoundCommandSegments("cd 'a\\' & echo {} > settings.json"),
+    ).toEqual([
+      { command: "cd 'a\\'", terminator: '&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+    expect(
+      splitCompoundCommandSegments("cd 'a\\' && echo {} > settings.json"),
+    ).toEqual([
+      { command: "cd 'a\\'", terminator: '&&' },
+      { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });
 });
@@ -2420,6 +2537,52 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it.each<[string, string[], string]>([
+      ["echo 'a\\' ; rm -rf /tmp/x", [], 'ask'],
+      ["echo 'a\\' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo $'a\\'' ; rm -rf /tmp/x", [], 'ask'],
+      ["echo $'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo 'c\\' $'a\\'' ; rm -rf /tmp/x", [], 'ask'],
+      ["echo 'c\\' $'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo $\\\n'a\\'' ; rm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      ["echo done # note 'a\\''\nrm -rf /tmp/x", ['Bash(rm *)'], 'deny'],
+      [
+        "cat <<EOF\necho safe 'a\\''\nEOF\nrm -rf /tmp/x",
+        ['Bash(rm *)'],
+        'deny',
+      ],
+      [
+        "echo done # note 'a\\''\necho {} > .qwen/settings.json",
+        ['Write(.qwen/settings.json)'],
+        'deny',
+      ],
+      // bash backgrounds the `cd`, so the write lands in the cwd — the
+      // permissions file itself. main sees one segment and no write at all.
+      [
+        "cd 'a\\' & echo {} > .qwen/settings.json",
+        ['Write(.qwen/settings.json)'],
+        'deny',
+      ],
+      ["echo 'a\\'' ; rm x'", ['Bash(rm *)'], 'deny'],
+    ])('%j with deny %j is %s', async (command, deny, expected) => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(echo *)', 'Bash(cat *)'],
+          permissionsDeny: deny,
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command,
+          cwd: '/repo',
+        }),
+      ).toBe(expected);
+    });
+
     it('|| compound: all allowed → allow', async () => {
       pm = new PermissionManager(
         makeConfig({
@@ -2510,12 +2673,14 @@ describe('PermissionManager', () => {
       // cross-check latches a quote, never sees the `#`, and bails at the `;`.
       ['bash', `echo "don't" # c ; rm -rf /tmp/x`, 'allow'],
       ['bash', `echo 'a"b' # c ; rm -rf /tmp/x`, 'allow'],
-      // Characterization rows for #11815's measured table: these reach `allow`
-      // only because the unterminated quote masks the in-comment separator, so
-      // they are expected to go red when #11765 changes the splitter.
-      ['bash', "echo 'a\\' # note: use ; carefully", 'allow'],
-      ['bash', "echo 'a\\' # trailing && touch /tmp/x", 'allow'],
-      ['bash', "echo 'a\\' # trailing | touch /tmp/x", 'allow'],
+      // Characterization rows for #11815's measured table. Bash runs only the
+      // `echo`, but the `\` bails the fast path, and the splitter (which does
+      // not model comments) closes `'a\'` as bash does and splits at the
+      // in-comment separator: a fail-closed `ask` where `main` read the quote as
+      // unterminated and returned `allow`.
+      ['bash', "echo 'a\\' # note: use ; carefully", 'ask'],
+      ['bash', "echo 'a\\' # trailing && touch /tmp/x", 'ask'],
+      ['bash', "echo 'a\\' # trailing | touch /tmp/x", 'ask'],
     ] as const)(
       'handles comments conservatively for %s: %s',
       async (shell, command, expected) => {
