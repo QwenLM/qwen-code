@@ -26,9 +26,8 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
-  escapeShellArg,
   getShellConfiguration,
-  type ShellType,
+  resolveCommandPath,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
@@ -41,11 +40,92 @@ import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
+// PowerShell probe: pwsh preferred, powershell (5.1) fallback. Hits are
+// cached per-process; a miss is re-probed on the next call.
+let cachedPowerShell: string | undefined;
+export function __resetPowerShellCacheForTests(): void {
+  cachedPowerShell = undefined;
+}
+export function resolvePowerShellExecutable(): string {
+  if (cachedPowerShell !== undefined) {
+    return cachedPowerShell;
+  }
+  let probeError: Error | undefined;
+  for (const name of ['pwsh', 'powershell']) {
+    // `where` searches the cwd before PATH: probe from a neutral directory and
+    // spawn the absolute hit, never a bare name. Only POSIX reports an error.
+    const { path, error } = resolveCommandPath(name, { cwd: tmpdir() });
+    if (error) probeError ??= error;
+    const resolved = path?.split(/\r?\n/)[0]?.trim();
+    if (resolved) {
+      cachedPowerShell = resolved;
+      debugLogger.debug(`PowerShell probe: ${name} resolved to ${resolved}`);
+      return resolved;
+    }
+    debugLogger.debug(
+      `PowerShell probe: ${name} ${error ? 'lookup failed' : 'not found'}`,
+    );
+  }
+  throw new Error(
+    'Could not resolve a PowerShell executable (looked for pwsh, powershell)' +
+      (probeError ? `: ${probeError.message}` : ''),
+  );
+}
+
 /**
  * Maximum length for stdout/stderr output (1MB)
  * Prevents memory issues from unbounded output
  */
 const MAX_OUTPUT_LENGTH = 1024 * 1024;
+
+/** Strip escapes line-wise so newlines survive. */
+function stripPromotedText(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => stripAnsiAndControl(line))
+    .join('\n');
+}
+
+/** Strip escapes from every text field a hook can promote to the model or
+ * transcript; terminalSequence is an escape channel by contract */
+function stripPromotedFields(out: HookOutput): HookOutput {
+  const cleaned: HookOutput = { ...out };
+  if (typeof cleaned.reason === 'string') {
+    cleaned.reason = stripPromotedText(cleaned.reason);
+  }
+  if (typeof cleaned.systemMessage === 'string') {
+    cleaned.systemMessage = stripPromotedText(cleaned.systemMessage);
+  }
+  if (typeof cleaned.stopReason === 'string') {
+    cleaned.stopReason = stripPromotedText(cleaned.stopReason);
+  }
+  const specific = cleaned.hookSpecificOutput;
+  if (specific) {
+    const next = { ...specific };
+    if (typeof next['additionalContext'] === 'string') {
+      next['additionalContext'] = stripPromotedText(
+        next['additionalContext'] as string,
+      );
+    }
+    if (typeof next['permissionDecisionReason'] === 'string') {
+      next['permissionDecisionReason'] = stripPromotedText(
+        next['permissionDecisionReason'] as string,
+      );
+    }
+    // PermissionRequest deny messages reach the model and the terminal; copy
+    // before mutating so the parsed object the aggregator reads is untouched.
+    const decision = next['decision'];
+    if (decision && typeof decision === 'object' && !Array.isArray(decision)) {
+      const copied = { ...(decision as Record<string, unknown>) };
+      if (typeof copied['message'] === 'string') {
+        copied['message'] = stripPromotedText(copied['message'] as string);
+      }
+      next['decision'] = copied;
+    }
+    cleaned.hookSpecificOutput = next;
+  }
+  return cleaned;
+}
 
 const HOOK_TERMINATE_GRACE_MS = 2000;
 const HOOK_PROCESS_GROUP_POLL_MS = 50;
@@ -786,18 +866,18 @@ export class HookRunner {
   ): ShellConfiguration {
     const globalConfig = getShellConfiguration();
 
+    // Shared by the explicit-shell and cmd-fallback branches so both stay in
+    // sync; the closure defers the PATH probe until powershell is needed.
+    const powershellConfig = (): ShellConfiguration => ({
+      shell: 'powershell',
+      executable: resolvePowerShellExecutable(),
+      argsPrefix: ['-NoProfile', '-Command'],
+    });
+
     // If hook specifies a shell, use it
     if (hookConfig.shell) {
-      const shellType: ShellType =
-        hookConfig.shell === 'powershell' ? 'powershell' : 'bash';
-
-      // Return configuration for the specified shell type
-      if (shellType === 'powershell') {
-        return {
-          shell: 'powershell',
-          executable: 'powershell',
-          argsPrefix: ['-Command'],
-        };
+      if (hookConfig.shell === 'powershell') {
+        return powershellConfig();
       }
 
       // For bash, use global config's executable path or fallback
@@ -809,7 +889,11 @@ export class HookRunner {
       };
     }
 
-    // Use global configuration
+    // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
+    // quoted path fails; powershell strips them natively.
+    if (globalConfig.shell === 'cmd') {
+      return powershellConfig();
+    }
     return globalConfig;
   }
 
@@ -1208,11 +1292,60 @@ export class HookRunner {
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
-      const command = this.expandCommand(
-        hookConfig.command,
-        input,
-        shellConfig.shell,
-      );
+      // Set-StrictMode makes undefined $VAR throw; ErrorActionPreference=Stop
+      // turns that non-terminating error into a script abort, so a later
+      // statement cannot mask the failure with exit 0.
+      if (
+        shellConfig.shell === 'powershell' &&
+        // Narrow by design: multi-line commands, names that merely contain an
+        // extension, and a quoted path piped as input are legitimate usages.
+        /^(?!&)\s*["'][^"'\n]*\.(?:cmd|bat|exe|ps1)(?![\w.\n])(?![ \t]*["']\s*\|)(?![\s\S]*\n)/i.test(
+          hookConfig.command,
+        )
+      ) {
+        const errorMessage =
+          `PowerShell command contains a bare-quoted Windows program or script path; ` +
+          `if you intend to invoke it, prefix with the call operator '& '. ` +
+          `Example: & ${stripAnsiAndControl(hookConfig.command)}`;
+        debugLogger.warn(
+          `Hook configuration error (non-fatal): ${errorMessage}`,
+        );
+        // Fail open like any other hook failure. The reason rides on `error`
+        // only: it reaches the debug log and this hook's progress event, while
+        // an `output` here would take the tool-event consumers down their
+        // success path (they gate on output presence) and drop the failure
+        // marker the tool-call span carries.
+        resolve({
+          hookConfig,
+          eventName,
+          success: false,
+          error: new Error(errorMessage),
+          duration: Date.now() - startTime,
+        });
+        return;
+      }
+      // Propagate a failed last native command; $? is read before Test-Path resets
+      // it. The blank line stops a trailing backtick from swallowing the tail.
+      const exitCodeTail =
+        shellConfig.shell === 'powershell'
+          ? `\n\n$__s = $?\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE) -and $LASTEXITCODE -ne 0 -and -not $__s) { exit $LASTEXITCODE }`
+          : '';
+      // Windows PowerShell 5.1 writes through the console code page unless the
+      // output encoding is forced, which would mangle non-ASCII before the
+      // UTF-8 decode on the read side. The statement is the shell tool's own,
+      // including its platform guard: a POSIX pwsh lane has no code page to
+      // fix and must not take new work here.
+      // LASTEXITCODE is undefined until a native command runs, and StrictMode
+      // turns a bare read of it into a terminating error; seed $null (not 0) so
+      // the author's own `$LASTEXITCODE -ne 0` check stays fail-closed.
+      const utf8Prefix =
+        process.platform === 'win32'
+          ? '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
+          : '';
+      const command =
+        shellConfig.shell === 'powershell'
+          ? `${utf8Prefix}Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; ${hookConfig.command}${exitCodeTail}`
+          : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
@@ -1491,14 +1624,15 @@ export class HookRunner {
         }
 
         // Parse output
-        // Exit code 2 is a blocking error - ignore stdout, use stderr only
         let output: HookOutput | undefined;
         const isBlockingError = exitCode === 2;
 
-        // For exit code 2, only use stderr (ignore stdout)
+        // Exit 2 carries its reason on stderr; falling back to stdout keeps a
+        // deny payload written there from being discarded. The blocking
+        // outcome itself is enforced as a deny in HookAggregator.
         const stdoutText = stdout.trim();
         const textToParse = isBlockingError
-          ? stderr.trim()
+          ? stderr.trim() || stdoutText
           : stdoutText || stderr.trim();
         // Only stdout is promoted as plain-text context; the stderr fallback
         // stays a system message. JSON on stderr is still parsed as structured
@@ -1525,7 +1659,7 @@ export class HookRunner {
             typeof parsed === 'object' &&
             !Array.isArray(parsed)
           ) {
-            output = parsed as HookOutput;
+            output = stripPromotedFields(parsed as HookOutput);
           } else if (
             parseFailed &&
             !isBlockingError &&
@@ -1609,35 +1743,6 @@ export class HookRunner {
   }
 
   /**
-   * Resolve project directory variables in a command string before launch.
-   *
-   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
-   * always exported in the hook's environment. Bash expands exported
-   * variables itself, so a bash command is passed through unchanged: a text
-   * substitution would put shell quotes inside a double-quoted
-   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
-   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
-   * for those shells each variable is replaced with the quoted project
-   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
-   * left for the shell to read.
-   */
-  private expandCommand(
-    command: string,
-    input: HookInput,
-    shellType: ShellType,
-  ): string {
-    if (shellType === 'bash') {
-      return command;
-    }
-    debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    const escapedCwd = escapeShellArg(input.cwd, shellType);
-    return command
-      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
-      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
-  }
-
-  /**
    * Convert plain text output to structured HookOutput.
    *
    * @param stdoutEvent The firing event, passed only when `text` is the
@@ -1649,6 +1754,9 @@ export class HookRunner {
     exitCode: number,
     stdoutEvent?: HookEventName,
   ): HookOutput {
+    // Terminal escapes must not reach the model or transcript through any
+    // promoted field.
+    const cleanText = stripPromotedText(text);
     if (exitCode === EXIT_CODE_SUCCESS) {
       if (stdoutEvent && PLAIN_TEXT_CONTEXT_EVENTS.has(stdoutEvent)) {
         return {
@@ -1656,32 +1764,27 @@ export class HookRunner {
           reason: 'Hook executed successfully',
           hookSpecificOutput: {
             hookEventName: stdoutEvent,
-            // Terminal escapes from colored tool output must not reach the
-            // model; strip per line so newlines survive.
-            additionalContext: text
-              .split('\n')
-              .map((line) => stripAnsiAndControl(line))
-              .join('\n'),
+            additionalContext: cleanText,
           },
         };
       }
       return {
         decision: 'allow',
         reason: 'Hook executed successfully',
-        systemMessage: text,
+        systemMessage: cleanText,
       };
     } else if (exitCode === EXIT_CODE_NON_BLOCKING_ERROR) {
       // Non-blocking error (EXIT_CODE_NON_BLOCKING_ERROR = 1)
       return {
         decision: 'allow',
-        reason: `Non-blocking error: ${text}`,
-        systemMessage: `Warning: ${text}`,
+        reason: `Non-blocking error: ${cleanText}`,
+        systemMessage: `Warning: ${cleanText}`,
       };
     } else {
       // All other non-zero exit codes (including 2) are blocking
       return {
         decision: 'deny',
-        reason: text,
+        reason: cleanText,
       };
     }
   }

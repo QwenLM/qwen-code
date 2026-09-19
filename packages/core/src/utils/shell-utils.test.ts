@@ -21,6 +21,7 @@ import {
   isCommandAllowed,
   isCommandNeedsPermission,
   normalizeMonitorCommand,
+  resolveCommandPath,
   splitCommands,
   stripTrailingBackgroundAmp,
   stripShellWrapper,
@@ -1557,6 +1558,27 @@ describe('splitCommands', () => {
       ['a && b || c ; d | e', ['a', 'b', 'c', 'd', 'e']],
     ])('splits %s', (command, expected) => {
       expect(splitCommands(command)).toEqual(expected);
+    });
+  });
+});
+
+describe('resolveCommandPath', () => {
+  // Pinned: capturing the lookup's streams still returns the hit path, and a miss
+  // still reports no path and no error. That a miss no longer prints is a
+  // descriptor-level effect, verified with a redirected stderr, not assertable here.
+  it('returns a path for a command that exists', () => {
+    const { path, error } = resolveCommandPath(
+      process.platform === 'win32' ? 'cmd.exe' : 'sh',
+    );
+    expect(error).toBeUndefined();
+    expect(typeof path).toBe('string');
+    expect(path).toContain(process.platform === 'win32' ? 'cmd.exe' : 'sh');
+  });
+
+  it('reports a miss as no path and no error', () => {
+    expect(resolveCommandPath('qwen-definitely-not-a-command-xyzzy')).toEqual({
+      path: null,
+      error: undefined,
     });
   });
 });
