@@ -1239,18 +1239,30 @@
 }
 
 .conversationSearchButton {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: calc(50% + 23px);
-  z-index: 3;
-  width: 44px;
-  height: 44px;
-  margin-bottom: -5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  max-width: 100%;
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  pointer-events: auto;
 }
 
-.conversationSearchButtonWithTodos {
-  bottom: calc(
-    100% + var(--web-shell-bottom-panel-height, 0px) +
-      var(--web-shell-bottom-panel-gap, 6px) + 8px
-  );
+.conversationSearchButton:hover,
+.conversationSearchButton:focus-visible {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.conversationSearchButton:focus-visible {
+  outline: 1px solid var(--foreground);
+  outline-offset: 2px;
 }

@@ -166,6 +166,7 @@ export interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  timelineAction?: ReactNode;
   hideFirstUserMessage?: boolean;
   firstTurnMetrics?: {
     durationMs?: number;
@@ -2581,7 +2582,9 @@ const SessionTimeline = memo(function SessionTimeline({
   currentRange,
   hidden,
   onSelect,
+  action,
 }: {
+  action?: ReactNode;
   entries: readonly SessionTimelineEntry[];
   currentTurnId: string | null;
   currentRange: SessionTimelineRange | null;
@@ -2764,7 +2767,17 @@ const SessionTimeline = memo(function SessionTimeline({
     );
   }, [tooltip]);
 
-  if (hidden || entries.length === 0) return null;
+  if (hidden || entries.length === 0)
+    return action ? (
+      <div className={styles.sessionTimelineLayer}>
+        <nav
+          className={styles.sessionTimelinePanel}
+          aria-label={t('timeline.sessionTimeline')}
+        >
+          {action}
+        </nav>
+      </div>
+    ) : null;
 
   return (
     <div className={styles.sessionTimelineLayer} aria-hidden="false">
@@ -2851,6 +2864,7 @@ const SessionTimeline = memo(function SessionTimeline({
             })}
           </ol>
         </div>
+        {action}
         {tooltip &&
           typeof document !== 'undefined' &&
           createPortal(
@@ -2973,6 +2987,7 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      timelineAction,
       hideFirstUserMessage = false,
       firstTurnMetrics,
       includeSubagentToolUsageInMetrics = true,
@@ -5948,6 +5963,7 @@ export const MessageList = memo(
             </div>
           )}
         <SessionTimeline
+          action={timelineAction}
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
           currentRange={sessionTimelineRange}

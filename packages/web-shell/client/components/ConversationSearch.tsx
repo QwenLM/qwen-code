@@ -230,7 +230,12 @@ export function ConversationSearch({
         title={t('chat.searchConversation')}
         onClick={() => setOpen(true)}
       >
-        <SearchIcon width={18} height={18} aria-hidden="true" />
+        <SearchIcon
+          width={14}
+          height={14}
+          strokeWidth={1.8}
+          aria-hidden="true"
+        />
       </button>
       {open && (
         <DialogShell

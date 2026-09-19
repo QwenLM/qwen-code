@@ -683,7 +683,7 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 
 `conversationSearchThreshold` 控制搜索入口的消息数阈值，默认 `10`。
 当前会话的用户和助手消息数严格超过阈值时显示入口（默认第 11 条起），
-图标位于置底按钮右侧；即使已在底部，搜索入口仍可使用。
+搜索图标位于左侧会话时间轴下方，采用适配窄栏的小尺寸；窄屏隐藏刻度时仍保留搜索入口。
 `WebShell` 和 `WebShellWithProviders` 均支持此 prop，例如
 `<WebShellWithProviders conversationSearchThreshold={20} {...connectionProps} />`。
 

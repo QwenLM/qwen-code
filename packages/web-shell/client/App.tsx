@@ -19764,6 +19764,15 @@ export function App({
                                       activeTurnStartedAt)
                                 }
                                 workspaceCwd={connection.workspaceCwd || ''}
+                                timelineAction={connection.sessionId ? (
+                                  <ConversationSearch
+                                    key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
+                                    threshold={conversationSearchThreshold}
+                                    registerInteractionBlocker={registerInteractionBlocker}
+                                    messageListRef={messageListRef}
+                                    className={styles.conversationSearchButton}
+                                  />
+                                ) : undefined}
                                 hideSessionTimeline={
                                   effectiveChatWidthMode === 'wide'
                                 }
@@ -19922,19 +19931,6 @@ export function App({
                           : styles.footer
                       }
                     >
-                      {connection.sessionId && (
-                        <ConversationSearch
-                          key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
-                          threshold={conversationSearchThreshold}
-                          registerInteractionBlocker={registerInteractionBlocker}
-                          messageListRef={messageListRef}
-                          className={[
-                            styles.scrollToBottomButton,
-                            styles.conversationSearchButton,
-                            showBottomPanels ? styles.conversationSearchButtonWithTodos : '',
-                          ].join(' ')}
-                        />
-                      )}
                       {canScrollMessageListToBottom && (
                         <div
                           className={

@@ -219,8 +219,17 @@ for (const theme of ['light', 'dark']) {
         });
         await expect(bottom).toBeVisible();
         const searchBox = await button.boundingBox();
-        const bottomBox = await bottom.boundingBox();
-        expect(searchBox!.x).toBeGreaterThan(bottomBox!.x + bottomBox!.width);
+        const timeline = page.getByRole('navigation', {
+          name: /Session timeline|会话时间线/,
+        });
+        await expect(
+          timeline.getByRole('button', {
+            name: /Search this conversation|搜索当前会话/,
+            exact: true,
+          }),
+        ).toBeVisible();
+        expect(searchBox!.width).toBeLessThanOrEqual(20);
+        expect(searchBox!.height).toBe(24);
         await button.click();
         const dialog = page.locator('[data-conversation-search]');
         const input = dialog.locator('input');

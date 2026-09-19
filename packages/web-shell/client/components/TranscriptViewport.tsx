@@ -441,18 +441,31 @@ export const TranscriptViewport = forwardRef<
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {globalNavigation && (
-        <div className={styles.navigation} hidden={!navigationVisible}>
-          <GlobalTurnNavigation
-            state={viewport.navigation}
-            store={viewport.store}
-            follow={navigationVisible ? follow : undefined}
-            onSelect={(ordinal) => {
-              handleScrollIntent();
-              anchor.current = undefined;
-              setFollow(undefined);
-              void viewport.selectOrdinal(ordinal);
-            }}
-          />
+        <div
+          className={styles.navigation}
+          hidden={!navigationVisible && !props.timelineAction}
+        >
+          {navigationVisible ? (
+            <GlobalTurnNavigation
+              action={props.timelineAction}
+              state={viewport.navigation}
+              store={viewport.store}
+              follow={navigationVisible ? follow : undefined}
+              onSelect={(ordinal) => {
+                handleScrollIntent();
+                anchor.current = undefined;
+                setFollow(undefined);
+                void viewport.selectOrdinal(ordinal);
+              }}
+            />
+          ) : (
+            <nav
+              aria-label={t('timeline.sessionTimeline')}
+              className="pointer-events-none flex h-full w-full flex-col justify-center px-1"
+            >
+              {props.timelineAction}
+            </nav>
+          )}
         </div>
       )}
       <div
@@ -512,6 +525,7 @@ export const TranscriptViewport = forwardRef<
             key={viewport.viewKey}
             ref={list}
             messages={viewport.messages}
+            timelineAction={globalNavigation ? undefined : props.timelineAction}
             hideSessionTimeline={
               historical || globalNavigation || props.hideSessionTimeline
             }
