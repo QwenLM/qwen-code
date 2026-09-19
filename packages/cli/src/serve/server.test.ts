@@ -985,6 +985,10 @@ interface FakeBridgeOpts {
   ) => Promise<void>;
   getSessionLastEventIdImpl?: (sessionId: string) => number;
   getSessionEventEpochImpl?: (sessionId: string) => string;
+  getPromptAdmissionWatermarkImpl?: (
+    sessionId: string,
+    promptId: string,
+  ) => { lastEventId: number; eventEpoch: string } | undefined;
   subscribeImpl?: (
     sessionId: string,
     opts?: SubscribeOptions,
@@ -2467,6 +2471,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         return opts.getSessionEventEpochImpl(sessionId);
       }
       return 'fake-epoch';
+    },
+    getPromptAdmissionWatermark(sessionId, promptId) {
+      return opts.getPromptAdmissionWatermarkImpl?.(sessionId, promptId);
     },
     respondToPermission(requestId, response, context) {
       const accepted = respondImpl(requestId, response, context);
@@ -19360,6 +19367,32 @@ describe('createServeApp', () => {
       expect(res.status).toBe(202);
       expect(res.body.lastEventId).toBe(7);
       expect(res.body.eventEpoch).toBe('epoch-abc');
+    });
+
+    it('202 retry preserves the first admission event watermark', async () => {
+      const promptId = '11111111-1111-4111-8111-111111111111';
+      const bridge = fakeBridge({
+        getSessionLastEventIdImpl: () => 19,
+        getSessionEventEpochImpl: () => 'epoch-current',
+        getPromptAdmissionWatermarkImpl: (sessionId, admittedPromptId) => {
+          expect(sessionId).toBe('session-A');
+          expect(admittedPromptId).toBe(promptId);
+          return { lastEventId: 7, eventEpoch: 'epoch-original' };
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          promptId,
+        });
+
+      expect(res.status).toBe(202);
+      expect(res.body.lastEventId).toBe(7);
+      expect(res.body.eventEpoch).toBe('epoch-original');
     });
 
     it('passes client identity and promptId context into bridge.sendPrompt', async () => {

@@ -8003,11 +8003,12 @@ export function registerSessionRoutes(
         const trustedChannelPrompt =
           channelWorkerAuthorized && channelPrompt === true;
 
-        const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
+        const fallbackLastEventId =
+          ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
         // SSE resume position from this 202 must also learn the bus epoch so
         // a daemon restart in between is detected (DAEMON-001).
-        const eventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
+        const fallbackEventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
         addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
         const abort = new AbortController();
@@ -8106,6 +8107,13 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const admissionWatermark = ownerBridge.getPromptAdmissionWatermark?.(
+          sessionId,
+          promptId,
+        );
+        const lastEventId =
+          admissionWatermark?.lastEventId ?? fallbackLastEventId;
+        const eventEpoch = admissionWatermark?.eventEpoch ?? fallbackEventEpoch;
         res.off('close', onResClose);
 
         promptPromise

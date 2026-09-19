@@ -1267,7 +1267,12 @@ interface SessionEntry {
    */
   promptAdmissions: Map<
     string,
-    { fingerprint: string; result: Promise<PromptResponse> }
+    {
+      fingerprint: string;
+      result: Promise<PromptResponse>;
+      lastEventId: number;
+      eventEpoch: string;
+    }
   >;
   /** Recent formal terminals bridge-published before transcript visibility. */
   terminalTurnStatuses: Map<string, BridgeTurnStatus>;
@@ -10475,6 +10480,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         return existingAdmission.result;
       }
+      const admissionLastEventId = entry.events.lastEventId;
+      const admissionEventEpoch = entry.events.epoch;
       if (isClosingOrAuthorizingClose(entry)) {
         return Promise.reject(
           new SessionNotFoundError(
@@ -11207,7 +11214,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           schedulePromptSettledClose(entry);
         })
         .catch(() => {});
-      entry.promptAdmissions.set(promptId, { fingerprint, result });
+      entry.promptAdmissions.set(promptId, {
+        fingerprint,
+        result,
+        lastEventId: admissionLastEventId,
+        eventEpoch: admissionEventEpoch,
+      });
       return result;
     },
 
@@ -11374,6 +11386,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.epoch;
+    },
+
+    getPromptAdmissionWatermark(sessionId, promptId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const admission = entry.promptAdmissions.get(promptId);
+      if (!admission) return undefined;
+      return {
+        lastEventId: admission.lastEventId,
+        eventEpoch: admission.eventEpoch,
+      };
     },
 
     getSessionCurrentCwd(sessionId) {

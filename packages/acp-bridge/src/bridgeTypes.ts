@@ -886,6 +886,12 @@ export interface BridgeSessionSummary {
   prs?: SessionPrInfo[];
 }
 
+/** Original event-bus cursor captured when a prompt id was first admitted. */
+export interface BridgePromptAdmissionWatermark {
+  lastEventId: number;
+  eventEpoch: string;
+}
+
 /**
  * In-memory equality token for daemon-observed session-catalog changes.
  * `generation` is unique to a bridge instance; `revision` increases
@@ -1784,6 +1790,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * `SessionNotFoundError` when the id is unknown.
    */
   getSessionEventEpoch(sessionId: string): string;
+
+  /**
+   * Return the original event cursor for an admitted prompt. Retries must use
+   * this cursor instead of the bus tail observed at retry time, otherwise
+   * events emitted after the first admission can be skipped.
+   */
+  getPromptAdmissionWatermark?(
+    sessionId: string,
+    promptId: string,
+  ): BridgePromptAdmissionWatermark | undefined;
 
   /**
    * Return the daemon's current effective cwd for a live session without
