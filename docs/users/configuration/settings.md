@@ -11,7 +11,7 @@
 
 ## Tool execution sandbox
 
-`tools.executionSandbox` is an operator-only Linux policy with required `filesystem: "read-only" | "workspace-write"` and `network: "open" | "closed"`, plus optional `backend: "auto" | "bwrap"`. System policy replaces the complete User/SystemDefaults object; Workspace values are ignored. Bare/safe modes retain the policy and changing it requires restart. See [Sandbox](../features/sandbox.md#linux-tool-execution-sandbox) for configuration, scope, unsupported integrations, verification and migration from whole-CLI bwrap.
+`tools.executionSandbox` is an operator-only Linux policy with required `filesystem: "read-only" | "workspace-write"` and `network: "open" | "closed"`, plus optional `backend: "auto" | "bwrap" | "landlock"`. `auto` prefers bwrap and can fall back to partial Landlock filesystem enforcement only when command networking is open. System policy replaces the complete User/SystemDefaults object; Workspace values are ignored. Bare/safe modes retain the policy and changing it requires restart. See [Sandbox](../features/sandbox.md#linux-tool-execution-sandbox) for configuration, scope, unsupported integrations, verification and migration from whole-CLI bwrap.
 
 ## Configuration layers
 

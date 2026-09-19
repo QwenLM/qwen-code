@@ -14,7 +14,7 @@ import {
 } from './storage-paths-lite.js';
 
 export interface ExecutionSandboxSettings {
-  backend?: 'auto' | 'bwrap';
+  backend?: 'auto' | 'bwrap' | 'landlock';
   filesystem: 'read-only' | 'workspace-write';
   network: 'open' | 'closed';
 }
@@ -41,12 +41,13 @@ export function parseExecutionSandboxSettings(
     !['open', 'closed'].includes(String(value.network)) ||
     ('backend' in value &&
       value.backend !== 'auto' &&
-      value.backend !== 'bwrap') ||
+      value.backend !== 'bwrap' &&
+      value.backend !== 'landlock') ||
     typeof value.filesystem !== 'string' ||
     typeof value.network !== 'string'
   ) {
     throw new InvalidExecutionSandboxConfigError(
-      'tools.executionSandbox requires literal filesystem (read-only | workspace-write), network (open | closed), and optional backend (auto | bwrap). Unknown fields and environment interpolation are not supported.',
+      'tools.executionSandbox requires literal filesystem (read-only | workspace-write), network (open | closed), and optional backend (auto | bwrap | landlock). Unknown fields and environment interpolation are not supported.',
     );
   }
   return { ...(value as ExecutionSandboxSettings) };

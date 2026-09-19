@@ -6,13 +6,16 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { writeSandboxFile } from './file-worker-client.js';
-import { executeBwrap } from './bwrap-execution.js';
-import type { BwrapExecutionResult } from './bwrap-execution.js';
+import { executeSandbox } from './execute-sandbox.js';
+import type { SandboxExecutionResult } from './sandbox-execution.js';
 import { readSandboxWriteRequest } from './file-worker-protocol.js';
 import { Readable } from 'node:stream';
 
-vi.mock('./bwrap-execution.js', () => ({
-  executeBwrap: vi.fn(),
+vi.mock('./execute-sandbox.js', () => ({
+  executeSandbox: vi.fn(),
+}));
+vi.mock('./sandbox-execution.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./sandbox-execution.js')>()),
   sandboxAsset: () => '/installed/file-worker.js',
 }));
 const policy = {
@@ -21,6 +24,8 @@ const policy = {
   state: '/state',
   filesystem: 'workspace-write' as const,
   network: 'closed' as const,
+  effectiveBackend: 'bwrap' as const,
+  enforcement: 'full' as const,
 };
 const request = {
   operation: 'write' as const,
@@ -29,11 +34,11 @@ const request = {
   content: Buffer.from([0, 0xff, 10]),
 };
 function result(
-  overrides: Partial<BwrapExecutionResult> = {},
+  overrides: Partial<SandboxExecutionResult> = {},
   reply = '{"ok":true}',
   diagnostics = '',
 ) {
-  vi.mocked(executeBwrap).mockImplementation(async (...args) => {
+  vi.mocked(executeSandbox).mockImplementation(async (...args) => {
     args[2]({ type: 'data', chunk: reply, stream: 'stdout' });
     if (diagnostics)
       args[2]({ type: 'data', chunk: diagnostics, stream: 'stderr' });
@@ -50,7 +55,7 @@ function result(
         executionMethod: 'child_process',
         sandboxStatus: { state: 'confirmed', exitCode: 0 },
         ...overrides,
-      } as BwrapExecutionResult),
+      } as SandboxExecutionResult),
     };
   });
 }
@@ -61,10 +66,10 @@ describe('sandbox file worker client', () => {
   });
   it('uses only pipe stdin and accepts a confirmed successful reply', async () => {
     await writeSandboxFile(policy, request, new AbortController().signal);
-    const launch = vi.mocked(executeBwrap).mock.calls[0][1];
+    const launch = vi.mocked(executeSandbox).mock.calls[0][1];
     expect(launch.args).toEqual(['/installed/file-worker.js']);
     expect(launch.env).toEqual({ PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' });
-    expect(vi.mocked(executeBwrap).mock.calls[0][6]).toEqual({
+    expect(vi.mocked(executeSandbox).mock.calls[0][6]).toEqual({
       streamStdout: true,
     });
     expect(
@@ -108,7 +113,7 @@ describe('sandbox file worker client', () => {
   it('forwards the caller abort signal and stays on the pipe transport', async () => {
     const signal = new AbortController().signal;
     await writeSandboxFile(policy, request, signal);
-    const call = vi.mocked(executeBwrap).mock.calls[0];
+    const call = vi.mocked(executeSandbox).mock.calls[0];
     // The caller's signal is the only cancellation path for a sandboxed
     // write; swapping it for a fresh controller lets a cancelled write run
     // to completion and commit after the caller gave up (PR #12067 review).
@@ -132,7 +137,7 @@ describe('sandbox file worker client', () => {
       await expect(
         writeSandboxFile(policy, request, new AbortController().signal),
       ).rejects.toMatchObject({ code });
-      expect(executeBwrap).toHaveBeenCalledTimes(1);
+      expect(executeSandbox).toHaveBeenCalledTimes(1);
     },
   );
   it.each([
@@ -149,7 +154,7 @@ describe('sandbox file worker client', () => {
       await expect(
         writeSandboxFile(policy, request, new AbortController().signal),
       ).rejects.toThrow();
-      expect(executeBwrap).toHaveBeenCalledTimes(1);
+      expect(executeSandbox).toHaveBeenCalledTimes(1);
     },
   );
   it('rejects read-only and pre-aborted requests before launching', async () => {
@@ -165,6 +170,6 @@ describe('sandbox file worker client', () => {
     await expect(writeSandboxFile(policy, request, ac.signal)).rejects.toThrow(
       'stopped',
     );
-    expect(executeBwrap).not.toHaveBeenCalled();
+    expect(executeSandbox).not.toHaveBeenCalled();
   });
 });

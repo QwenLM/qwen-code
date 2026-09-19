@@ -22,7 +22,9 @@ import {
 } from './runtime-shell-policy.js';
 
 const executeBwrap = vi.hoisted(() => vi.fn());
+const probeLandlock = vi.hoisted(() => vi.fn());
 vi.mock('./bwrap-execution.js', () => ({ executeBwrap }));
+vi.mock('./landlock-execution.js', () => ({ probeLandlock }));
 
 describe('runtime shell policy admission', () => {
   let root: string;
@@ -179,7 +181,12 @@ describe('runtime shell policy admission', () => {
         sandboxStatus: { state: 'confirmed', exitCode: 0 },
       }),
     });
-    await probeShellSandbox(admit(params, root)!);
+    const resolved = await probeShellSandbox(admit(params, root)!);
+    expect(resolved).toMatchObject({
+      effectiveBackend: 'bwrap',
+      enforcement: 'full',
+    });
+    expect(Object.isFrozen(resolved)).toBe(true);
     expect(executeBwrap).toHaveBeenCalledWith(
       expect.anything(),
       {
@@ -198,6 +205,100 @@ describe('runtime shell policy admission', () => {
       'capability probe failed',
     );
     expect(executeBwrap).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back from bwrap to Landlock only for an open-network policy', async () => {
+    vi.stubGlobal(
+      'process',
+      Object.create(process, { platform: { value: 'linux' } }),
+    );
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      network: 'open',
+    };
+    executeBwrap.mockRejectedValue(new Error('user namespaces unavailable'));
+    probeLandlock.mockResolvedValue({ abi: 6, enforcement: 'partial' });
+
+    const resolved = await probeShellSandbox(admit(params, root)!);
+
+    expect(resolved).toMatchObject({
+      effectiveBackend: 'landlock',
+      enforcement: 'partial',
+      landlockAbi: 6,
+    });
+    expect(resolved).not.toHaveProperty('requestedBackend');
+    expect(probeLandlock).toHaveBeenCalledOnce();
+  });
+
+  it('does not weaken an explicit backend or closed-network policy', async () => {
+    vi.stubGlobal(
+      'process',
+      Object.create(process, { platform: { value: 'linux' } }),
+    );
+    executeBwrap.mockRejectedValue(new Error('bwrap unavailable'));
+
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      requestedBackend: 'bwrap',
+      network: 'open',
+    };
+    await expect(probeShellSandbox(admit(params, root)!)).rejects.toThrow(
+      'bwrap unavailable',
+    );
+    expect(probeLandlock).not.toHaveBeenCalled();
+
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      requestedBackend: 'landlock',
+      network: 'closed',
+    };
+    await expect(probeShellSandbox(admit(params, root)!)).rejects.toThrow(
+      'cannot enforce network: closed',
+    );
+    expect(probeLandlock).not.toHaveBeenCalled();
+  });
+
+  it('uses an explicit Landlock backend without probing bwrap', async () => {
+    vi.stubGlobal(
+      'process',
+      Object.create(process, { platform: { value: 'linux' } }),
+    );
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      requestedBackend: 'landlock',
+      network: 'open',
+    };
+    probeLandlock.mockResolvedValue({ abi: 3, enforcement: 'partial' });
+
+    await expect(
+      probeShellSandbox(admit(params, root)!),
+    ).resolves.toMatchObject({
+      effectiveBackend: 'landlock',
+      enforcement: 'partial',
+      landlockAbi: 3,
+    });
+    expect(executeBwrap).not.toHaveBeenCalled();
+  });
+
+  it('propagates caller cancellation without trying another backend', async () => {
+    vi.stubGlobal(
+      'process',
+      Object.create(process, { platform: { value: 'linux' } }),
+    );
+    params.shellExecutionSandbox = {
+      ...params.shellExecutionSandbox!,
+      network: 'open',
+    };
+    const controller = new AbortController();
+    executeBwrap.mockImplementation(async () => {
+      controller.abort(new Error('caller stopped'));
+      throw new Error('bwrap stopped');
+    });
+
+    await expect(
+      probeShellSandbox(admit(params, root)!, controller.signal),
+    ).rejects.toThrow('caller stopped');
+    expect(probeLandlock).not.toHaveBeenCalled();
   });
 
   it('aborts a hung capability probe after ten seconds', async () => {

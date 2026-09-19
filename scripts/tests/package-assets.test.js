@@ -704,35 +704,38 @@ describe('package asset scripts', () => {
     ).toBe(false);
   });
 
-  it.each(['execution-worker.js', 'export-transcript-document.css'])(
-    'fails packaging when the published %s is missing',
-    (missingArtifact) => {
-      const rootDir = createFixtureRoot();
-      createBundleArtifacts(rootDir);
-      rmSync(path.join(rootDir, 'dist', missingArtifact));
-      stubConsole();
-      vi.spyOn(console, 'error').mockImplementation(() => {});
-      // verifyBundleArtifacts reports with console.error + process.exit(1), not a
-      // throw, so the exit has to become one to keep the rest of the suite alive.
-      const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit(1)');
-      });
+  it.each([
+    'execution-worker.js',
+    'sandboxBwrapRelay.js',
+    'sandboxLandlockRelay.js',
+    'sandboxFileWorker.js',
+    'export-transcript-document.css',
+  ])('fails packaging when the published %s is missing', (missingArtifact) => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    rmSync(path.join(rootDir, 'dist', missingArtifact));
+    stubConsole();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // verifyBundleArtifacts reports with console.error + process.exit(1), not a
+    // throw, so the exit has to become one to keep the rest of the suite alive.
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit(1)');
+    });
 
-      expect(() =>
-        preparePackage({ rootDir, requireNativeAudioCapture: false }),
-      ).toThrow('process.exit(1)');
-      expect(exit).toHaveBeenCalledWith(1);
-      expect(
-        console.error.mock.calls
-          .map(([message]) => String(message))
-          .some(
-            (message) =>
-              message.includes('Required package artifact not found') &&
-              message.includes(missingArtifact),
-          ),
-      ).toBe(true);
-    },
-  );
+    expect(() =>
+      preparePackage({ rootDir, requireNativeAudioCapture: false }),
+    ).toThrow('process.exit(1)');
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(
+      console.error.mock.calls
+        .map(([message]) => String(message))
+        .some(
+          (message) =>
+            message.includes('Required package artifact not found') &&
+            message.includes(missingArtifact),
+        ),
+    ).toBe(true);
+  });
 
   it.each(['manifest.webmanifest', 'sw.js'])(
     'rejects a published shell missing %s',
@@ -1573,6 +1576,9 @@ describe('package asset scripts', () => {
   function createBundleArtifacts(rootDir) {
     writeFile(rootDir, 'dist/cli.js', '');
     writeFile(rootDir, 'dist/execution-worker.js', '');
+    writeFile(rootDir, 'dist/sandboxBwrapRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxLandlockRelay.js', '');
+    writeFile(rootDir, 'dist/sandboxFileWorker.js', '');
     mkdirSync(path.join(rootDir, 'dist', 'vendor'), { recursive: true });
     mkdirSync(path.join(rootDir, 'dist', 'bundled', 'qc-helper', 'docs'), {
       recursive: true,

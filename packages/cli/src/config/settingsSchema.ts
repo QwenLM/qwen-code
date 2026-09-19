@@ -2740,7 +2740,10 @@ const SETTINGS_SCHEMA = {
           required: ['filesystem', 'network'],
           additionalProperties: false,
           properties: {
-            backend: { type: 'string', enum: ['auto', 'bwrap'] },
+            backend: {
+              type: 'string',
+              enum: ['auto', 'bwrap', 'landlock'],
+            },
             filesystem: {
               type: 'string',
               enum: ['read-only', 'workspace-write'],

@@ -226,12 +226,14 @@ describe('systemInfo', () => {
         .fn()
         .mockReturnValue({
           requestedBackend: 'bwrap',
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
           filesystem: 'read-only',
           network: 'closed',
         });
       const info = await getExtendedSystemInfo(mockContext);
       expect(info.sandboxEnv).toBe(
-        'tools / bwrap → bwrap / read-only / command network: closed',
+        'tools / bwrap → bwrap (full) / read-only / command network: closed',
       );
       expect(mockedExecFile).not.toHaveBeenCalled();
     });

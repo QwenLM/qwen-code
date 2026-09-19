@@ -271,15 +271,18 @@ describe('OpenTuiFooter', () => {
   it('shows the current runtime tool policy without an environment marker', () => {
     const config = fakeConfig({
       getShellExecutionSandbox: () =>
-        ({ filesystem: 'read-only', network: 'closed' }) as ReturnType<
-          Config['getShellExecutionSandbox']
-        >,
+        ({
+          filesystem: 'read-only',
+          network: 'closed',
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+        }) as ReturnType<Config['getShellExecutionSandbox']>,
     });
     const { container } = render(
       <OpenTuiFooter config={config} streaming={false} />,
     );
     expect(container.textContent).toContain(
-      'tools / auto → bwrap / read-only / command network: closed',
+      'tools / auto → bwrap (full) / read-only / command network: closed',
     );
   });
 

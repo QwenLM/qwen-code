@@ -16,7 +16,7 @@ import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
-import { executeBwrap } from './bwrap-execution.js';
+import { executeSandbox } from './execute-sandbox.js';
 import { assertShellSandboxCwd } from './runtime-shell-policy.js';
 
 export function executeRuntimeShell(
@@ -61,7 +61,7 @@ export function executeRuntimeShell(
         (entry): entry is [string, string] => typeof entry[1] === 'string',
       ),
     );
-    return executeBwrap(
+    return executeSandbox(
       policy,
       { executable: '/bin/bash', args: ['-c', command], cwd, env },
       onOutput,

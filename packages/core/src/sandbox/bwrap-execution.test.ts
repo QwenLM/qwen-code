@@ -165,6 +165,31 @@ describe('bwrap execution adapter', () => {
     expect(existsSync(path.join(process.cwd(), 'relative-tmp'))).toBe(false);
   });
 
+  it('snapshots the admitted policy and payload before asynchronous setup', async () => {
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    const admitted = policy();
+    const command = payload();
+    const pending = executeBwrap(
+      admitted,
+      command,
+      () => {},
+      new AbortController().signal,
+    );
+    Object.assign(admitted, { filesystem: 'read-only', network: 'open' });
+    command.executable = '/bin/false';
+    Object.assign(command, { args: ['--mutated'] });
+
+    const handle = await pending;
+    await handle.result;
+    const argv = launch.mock.calls[0][0].args;
+    expect(argv).toContain('--unshare-net');
+    expect(argv).toContain(realpathSync(workspace));
+    expect(argv).toContain(process.execPath);
+    expect(argv).toContain('--version');
+    expect(argv).not.toContain('/bin/false');
+    expect(argv).not.toContain('--mutated');
+  });
+
   it('rejects an overlapping temporary root before launching or leaking control state', async () => {
     process.env['TMPDIR'] = state;
     const launch = vi.spyOn(ShellExecutionService, 'executeLaunch');

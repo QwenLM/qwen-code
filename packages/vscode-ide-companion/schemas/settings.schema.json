@@ -1288,7 +1288,8 @@
               "type": "string",
               "enum": [
                 "auto",
-                "bwrap"
+                "bwrap",
+                "landlock"
               ]
             },
             "filesystem": {

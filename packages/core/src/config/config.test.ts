@@ -3021,20 +3021,24 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('keeps pure skill reads and registers only admitted tools after a successful probe', async () => {
+      const resolvedPolicy = {
+        ...parameters().shellExecutionSandbox,
+        effectiveBackend: 'bwrap' as const,
+        enforcement: 'full' as const,
+      };
       const probe = vi
         .spyOn(sandboxPolicy, 'probeShellSandbox')
-        .mockResolvedValue();
+        .mockResolvedValue(resolvedPolicy);
       try {
         const config = new Config(parameters());
+        const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
           'refreshCache',
         );
         await config.initialize();
-        expect(probe).toHaveBeenCalledWith(
-          config.getShellExecutionSandbox(),
-          undefined,
-        );
+        expect(probe).toHaveBeenCalledWith(admittedPolicy, undefined);
+        expect(config.getShellExecutionSandbox()).toBe(resolvedPolicy);
         expect(HookSystem).not.toHaveBeenCalled();
         expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
         expect(refreshExtensions).not.toHaveBeenCalled();

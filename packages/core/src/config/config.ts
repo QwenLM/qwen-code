@@ -239,7 +239,10 @@ import type { GoalRecoveryRecord } from '../goals/goal-persistence.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { createGoalVerifier } from '../goals/goal-verifier.js';
 import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
-import type { BwrapPolicy } from '../sandbox/bwrap-execution.js';
+import type {
+  ExecutionSandboxPolicy,
+  ResolvedExecutionSandboxPolicy,
+} from '../sandbox/sandbox-execution.js';
 import {
   admitShellSandbox,
   probeShellSandbox,
@@ -1527,9 +1530,7 @@ export interface ConfigParameters {
   settingsWatcher?: { stopWatching(): void };
 }
 
-export interface ShellExecutionSandboxPolicy extends BwrapPolicy {
-  requestedBackend?: 'auto' | 'bwrap';
-}
+export type ShellExecutionSandboxPolicy = ExecutionSandboxPolicy;
 
 export type TerminalImageRenderSupport =
   | { available: true }
@@ -2530,8 +2531,9 @@ export function deriveConfig(
 }
 
 export class Config {
-  private readonly shellExecutionSandbox:
+  private shellExecutionSandbox:
     | Readonly<ShellExecutionSandboxPolicy>
+    | Readonly<ResolvedExecutionSandboxPolicy>
     | undefined;
   private sessionId: string;
   private sessionSourceType?: string;
@@ -3735,7 +3737,10 @@ export class Config {
   ): Promise<void> {
     try {
       if (this.shellExecutionSandbox)
-        await probeShellSandbox(this.shellExecutionSandbox, options?.signal);
+        this.shellExecutionSandbox = await probeShellSandbox(
+          this.shellExecutionSandbox,
+          options?.signal,
+        );
       const activation = this.activateChatRecording();
       this.sessionWriterActivationPromise = activation;
       try {

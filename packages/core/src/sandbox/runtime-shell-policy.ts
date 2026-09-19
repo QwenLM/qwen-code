@@ -10,6 +10,7 @@ import path from 'node:path';
 import type { ConfigParameters } from '../config/config.js';
 import type { ShellExecutionSandboxPolicy } from '../config/config.js';
 import { realpathNearestExisting } from '../utils/paths.js';
+import type { ResolvedExecutionSandboxPolicy } from './sandbox-execution.js';
 
 const contains = (parent: string, child: string) => {
   const relative = path.relative(parent, child);
@@ -84,13 +85,16 @@ export function admitShellSandbox(
     !['read-only', 'workspace-write'].includes(policy.filesystem) ||
     !['open', 'closed'].includes(policy.network) ||
     (policy.requestedBackend !== undefined &&
-      !['auto', 'bwrap'].includes(policy.requestedBackend))
+      !['auto', 'bwrap', 'landlock'].includes(policy.requestedBackend))
   ) {
     throw new Error('Unsupported shell sandbox policy.');
   }
   if (
-    policy.bwrapPath !== undefined &&
-    (typeof policy.bwrapPath !== 'string' || !path.isAbsolute(policy.bwrapPath))
+    [policy.bwrapPath, policy.landlockPath].some(
+      (value) =>
+        value !== undefined &&
+        (typeof value !== 'string' || !path.isAbsolute(value)),
+    )
   ) {
     throw new Error('Invalid tool execution sandbox paths.');
   }
@@ -124,6 +128,7 @@ export function admitShellSandbox(
       ? { requestedBackend: policy.requestedBackend }
       : {}),
     ...(policy.bwrapPath ? { bwrapPath: policy.bwrapPath } : {}),
+    ...(policy.landlockPath ? { landlockPath: policy.landlockPath } : {}),
   });
   assertShellSandboxCwd(admitted, params.targetDir);
   assertShellSandboxCwd(admitted, params.cwd ?? process.cwd());
@@ -133,36 +138,81 @@ export function admitShellSandbox(
 export async function probeShellSandbox(
   policy: Readonly<ShellExecutionSandboxPolicy>,
   signal: AbortSignal = new AbortController().signal,
-): Promise<void> {
+): Promise<Readonly<ResolvedExecutionSandboxPolicy>> {
   signal.throwIfAborted();
   if (process.platform !== 'linux')
-    throw new Error('bwrap execution requires Linux.');
+    throw new Error('Tool execution sandbox requires Linux.');
   if (realpathNearestExisting(policy.state) !== policy.state)
     throw new Error('Sandbox state directory changed after admission.');
   await mkdir(policy.state, { recursive: true, mode: 0o700 });
   if (realpathSync(policy.state) !== policy.state)
     throw new Error('Sandbox state directory changed after admission.');
-  const { executeBwrap } = await import('./bwrap-execution.js');
-  const handle = await executeBwrap(
-    policy,
-    {
-      executable: '/usr/bin/true',
-      args: [],
-      cwd: policy.workspace,
-      env: { PATH: '/usr/bin:/bin' },
-    },
-    () => {},
-    AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
-  );
-  const result = await handle.result;
-  if (
-    result.sandboxStatus.state !== 'confirmed' ||
-    result.sandboxStatus.exitCode !== 0 ||
-    result.error ||
-    result.aborted
-  ) {
-    throw new Error(
-      `Sandbox capability probe failed: ${result.error?.message ?? (result.output || result.sandboxStatus.state)}`,
-    );
+  const requested = policy.requestedBackend ?? 'auto';
+  const failures: string[] = [];
+  if (requested === 'auto' || requested === 'bwrap') {
+    try {
+      const { executeBwrap } = await import('./bwrap-execution.js');
+      const handle = await executeBwrap(
+        policy,
+        {
+          executable: '/usr/bin/true',
+          args: [],
+          cwd: policy.workspace,
+          env: { PATH: '/usr/bin:/bin' },
+        },
+        () => {},
+        AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      );
+      const result = await handle.result;
+      if (
+        result.sandboxStatus.state !== 'confirmed' ||
+        result.sandboxStatus.exitCode !== 0 ||
+        result.error ||
+        result.aborted
+      ) {
+        throw new Error(
+          result.error?.message || result.output || result.sandboxStatus.state,
+        );
+      }
+      return Object.freeze({
+        ...policy,
+        effectiveBackend: 'bwrap',
+        enforcement: 'full',
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      failures.push(
+        `bwrap: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      if (requested === 'bwrap') {
+        throw new Error(`Sandbox capability probe failed: ${failures[0]}`);
+      }
+    }
   }
+
+  if (requested === 'auto' || requested === 'landlock') {
+    if (policy.network === 'closed') {
+      failures.push('landlock: cannot enforce network: closed');
+    } else {
+      try {
+        const { probeLandlock } = await import('./landlock-execution.js');
+        const result = await probeLandlock(
+          policy,
+          AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        );
+        return Object.freeze({
+          ...policy,
+          effectiveBackend: 'landlock',
+          enforcement: result.enforcement,
+          landlockAbi: result.abi,
+        });
+      } catch (error) {
+        signal.throwIfAborted();
+        failures.push(
+          `landlock: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+  throw new Error(`Sandbox capability probe failed: ${failures.join('; ')}`);
 }

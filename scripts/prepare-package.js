@@ -69,6 +69,9 @@ function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
     path.join(distDir, 'execution-worker.js'),
+    path.join(distDir, 'sandboxBwrapRelay.js'),
+    path.join(distDir, 'sandboxLandlockRelay.js'),
+    path.join(distDir, 'sandboxFileWorker.js'),
     path.join(distDir, 'vendor'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
     // The Web Shell ships with the published package ("Web Shell out of the
@@ -340,6 +343,7 @@ function writeDistPackageJson(rootDir, distDir) {
       'fzfWorker.js',
       'codeModeHost.js',
       'sandboxBwrapRelay.js',
+      'sandboxLandlockRelay.js',
       'sandboxFileWorker.js',
       'chunks',
       'vendor',

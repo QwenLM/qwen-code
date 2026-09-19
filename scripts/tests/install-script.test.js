@@ -784,7 +784,11 @@ describe('standalone release packaging', () => {
       packageScript,
     );
     expect(requiredBlock).not.toBeNull();
-    for (const asset of ['sandboxBwrapRelay.js', 'sandboxFileWorker.js']) {
+    for (const asset of [
+      'sandboxBwrapRelay.js',
+      'sandboxLandlockRelay.js',
+      'sandboxFileWorker.js',
+    ]) {
       expect(allowedBlock[1]).toContain(`'${asset}'`);
       expect(npmOnlyBlock[1]).not.toContain(`'${asset}'`);
       expect(requiredBlock[1]).toContain(`'${asset}'`);
@@ -4746,6 +4750,7 @@ function ensureMinimalDist({
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
   writeFileSync(path.join(distPath, 'codeModeHost.js'), 'export {};\n');
   writeFileSync(path.join(distPath, 'sandboxBwrapRelay.js'), 'export {};\n');
+  writeFileSync(path.join(distPath, 'sandboxLandlockRelay.js'), 'export {};\n');
   writeFileSync(path.join(distPath, 'sandboxFileWorker.js'), 'export {};\n');
   if (includeCliEntry) {
     writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');

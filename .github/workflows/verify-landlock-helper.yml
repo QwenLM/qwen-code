@@ -1,0 +1,125 @@
+name: 'Verify Landlock helper'
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/verify-landlock-helper.yml'
+      - 'packages/core/vendor/landlock-run/**'
+      - 'scripts/build_landlock_run.mjs'
+  push:
+    branches:
+      - 'main'
+    paths:
+      - '.github/workflows/verify-landlock-helper.yml'
+      - 'packages/core/vendor/landlock-run/**'
+      - 'scripts/build_landlock_run.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+jobs:
+  verify:
+    name: '${{ matrix.arch }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: 'x64'
+            runner: 'ubuntu-24.04'
+            zig_target: 'x86_64'
+            zig_sha256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
+          - arch: 'arm64'
+            runner: 'ubuntu-24.04-arm'
+            zig_target: 'aarch64'
+            zig_sha256: 'ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17'
+    runs-on: '${{ matrix.runner }}'
+    timeout-minutes: 10
+    steps:
+      - uses: 'actions/checkout@v4'
+
+      - name: 'Install pinned Zig compiler'
+        env:
+          ZIG_SHA256: '${{ matrix.zig_sha256 }}'
+          ZIG_TARGET: '${{ matrix.zig_target }}'
+          ZIG_VERSION: '0.16.0'
+        run: |-
+          archive="zig-${ZIG_TARGET}-linux-${ZIG_VERSION}.tar.xz"
+          curl --fail --location --silent --show-error --output "${RUNNER_TEMP}/${archive}" "https://ziglang.org/download/${ZIG_VERSION}/${archive}"
+          echo "${ZIG_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+          tar --extract --xz --file "${RUNNER_TEMP}/${archive}" --directory "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/zig-${ZIG_TARGET}-linux-${ZIG_VERSION}" >> "${GITHUB_PATH}"
+
+      - name: 'Rebuild committed helper'
+        env:
+          CC: 'zig'
+        run: |-
+          committed="packages/core/vendor/landlock-run/${{ matrix.arch }}-linux/qwen-landlock-run"
+          cp "${committed}" "${RUNNER_TEMP}/committed-helper"
+          node scripts/build_landlock_run.mjs '${{ matrix.arch }}'
+          cmp "${RUNNER_TEMP}/committed-helper" "${committed}"
+          file "${committed}"
+
+      - name: 'Verify kernel enforcement and inheritance'
+        env:
+          ARCH: '${{ matrix.arch }}'
+        run: |-
+          helper="packages/core/vendor/landlock-run/${ARCH}-linux/qwen-landlock-run"
+          root="$(mktemp -d)"
+          trap 'rm -rf "${root}"' EXIT
+          workspace="${root}/workspace"
+          scratch="${root}/scratch"
+          outside="${root}/outside"
+          mkdir -p "${workspace}" "${scratch}" "${outside}"
+          printf 'unchanged\n' > "${outside}/marker"
+
+          "${helper}" --probe | grep -E '^\{"abi":([3-9]|[1-9][0-9]+),"enforcement":"partial"\}$'
+          # shellcheck disable=SC2016
+          "${helper}" --ro / --rw /dev/null --rw "${scratch}" --rw "${workspace}" -- /bin/sh -c 'printf allowed > "$1"' sh "${workspace}/created"
+          test "$(cat "${workspace}/created")" = 'allowed'
+
+          # shellcheck disable=SC2016
+          if "${helper}" --ro / --rw /dev/null --rw "${scratch}" --rw "${workspace}" -- /bin/sh -c 'printf denied > "$1"' sh "${outside}/marker"; then
+            echo 'outside write unexpectedly succeeded' >&2
+            exit 1
+          fi
+          test "$(cat "${outside}/marker")" = 'unchanged'
+
+          # shellcheck disable=SC2016
+          if "${helper}" --ro / --rw /dev/null --rw "${scratch}" -- /bin/sh -c 'printf denied > "$1"' sh "${workspace}/read-only"; then
+            echo 'read-only workspace write unexpectedly succeeded' >&2
+            exit 1
+          fi
+
+          cat > "${workspace}/descendant.sh" <<'EOF'
+          #!/bin/sh
+          printf denied > "$1"
+          EOF
+          chmod 755 "${workspace}/descendant.sh"
+          # shellcheck disable=SC2016
+          if "${helper}" --ro / --rw /dev/null --rw "${scratch}" --rw "${workspace}" -- /bin/sh -c '"$1" "$2"' sh "${workspace}/descendant.sh" "${outside}/descendant"; then
+            echo 'descendant outside write unexpectedly succeeded' >&2
+            exit 1
+          fi
+          test ! -e "${outside}/descendant"
+
+          set +e
+          diagnostic="$(${helper} --ro / -- /does/not/exist 2>&1)"
+          status=$?
+          set -e
+          test "${status}" -eq 125
+          case "${diagnostic}" in
+            qwen-landlock-run:\ exec\ failed:*) ;;
+            *) echo "unexpected launcher diagnostic: ${diagnostic}" >&2; exit 1 ;;
+          esac
+
+          status_wire="${root}/status-wire"
+          "${helper}" --status-fd 3 --ro / -- /bin/true 3> "${status_wire}"
+          grep -E '^\{"state":"prepared","abi":([3-9]|[1-9][0-9]+)\}$' "${status_wire}"
+          set +e
+          "${helper}" --status-fd 3 --ro / -- /does/not/exist 3> "${status_wire}" 2> /dev/null
+          status=$?
+          set -e
+          test "${status}" -eq 125
+          test "$(grep -c '^{' "${status_wire}")" -eq 2
+          tail -n 1 "${status_wire}" | grep -E '^\{"state":"exec-failed","abi":([3-9]|[1-9][0-9]+)\}$'
