@@ -1738,7 +1738,6 @@ const EN: Messages = {
   'sidebar.reloadWorkspace': 'Reload runtime',
   'sidebar.reloadWorkspaceFailed': 'Failed to reload workspace runtime',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} workspaces`,
-  'sidebar.workspacesOnHost': (v) => `Workspaces on ${v?.host}`,
   'sidebar.sessionsRunning': (v) =>
     `${v?.count ?? 0} running session${v?.count === 1 ? '' : 's'}`,
   'sidebar.sessionsAttention': (v) =>
@@ -5620,7 +5619,6 @@ const ZH: Messages = {
   'sidebar.reloadWorkspace': '重新加载运行时',
   'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
-  'sidebar.workspacesOnHost': (v) => `${v?.host} 上的工作区`,
   'sidebar.sessionsRunning': (v) => `${v?.count ?? 0} 个会话运行中`,
   'sidebar.sessionsAttention': (v) => `${v?.count ?? 0} 个会话等待处理`,
   'sidebar.sessionsTotal': (v) =>
