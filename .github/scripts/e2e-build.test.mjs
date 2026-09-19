@@ -638,9 +638,11 @@ describe('e2e workflow timeboxing (e2e.yml)', () => {
   // ineffective value. The bound keeps accepting the current 10/30/60
   // values and must not move e2e-test-linux's 60 (run-e2e-tests.sh gates
   // the shard retry on 3600s minus a 25-minute reserve, which comes from
-  // that timeout).
+  // that timeout). The upper end is strict: a job ceiling of exactly 360
+  // admits the GitHub default itself, which is behaviourally the unbounded
+  // state this contract exists to reject (R1-2).
   const boundedCeiling = (value) =>
-    Number.isInteger(value) && value >= 1 && value <= 360;
+    Number.isInteger(value) && value >= 1 && value < 360;
 
   it('time-boxes every artifact download leg below its own job ceiling', () => {
     assert.ok(
@@ -651,7 +653,7 @@ describe('e2e workflow timeboxing (e2e.yml)', () => {
       const jobCeiling = e2eDoc.jobs[leg.job]['timeout-minutes'];
       assert.ok(
         boundedCeiling(leg.step['timeout-minutes']),
-        `step "${leg.step.name}" (${leg.job}) must carry a step-level timeout-minutes between 1 and 360; got ${leg.step['timeout-minutes']}`,
+        `step "${leg.step.name}" (${leg.job}) must carry a step-level timeout-minutes of at least 1 and below the 360-minute GitHub default; got ${leg.step['timeout-minutes']}`,
       );
       assert.ok(
         leg.step['timeout-minutes'] < jobCeiling,
@@ -661,14 +663,47 @@ describe('e2e workflow timeboxing (e2e.yml)', () => {
   });
 
   it('gives every job in the workflow a job-level ceiling', () => {
+    // R2-1: the shape bound cannot judge adequacy — and e2e.yml has no
+    // PR-time run (push/schedule/dispatch only, deliberately outside the
+    // merge queue), so a ceiling lowered below the real workload would not
+    // red until main cancels runs inside a coalesced signal that has to be
+    // bisected afterwards. Floor every job at its shipped value, with the
+    // workload each number must cover recorded beside it: a future change
+    // has to edit the value and its justification in the same commit.
+    const jobFloors = {
+      // builds and uploads the artifact every needs: ['build'] leg downloads
+      build: 30,
+      // run-e2e-tests.sh gates its shard retry at 2100s inside this 60-minute
+      // budget (the reserve math comes from the 60); pinned exactly by
+      // scripts/tests/e2e-workflow.test.js
+      'e2e-test-linux': 60,
+      // install + artifact download + unpack + a full integration shard, on
+      // the lane this workflow documents as the slowest to install and build
+      'e2e-test-macos': 60,
+      // install + artifact download + the interactive OpenTUI pass
+      'e2e-interactive-opentui': 60,
+      // nightly matrix install + artifact download + the isolated run
+      'isolated-nightly': 60,
+      // browser install/launch + the web-shell regression pass (no download
+      // leg of its own)
+      'web-shell-browser-regression': 60,
+    };
     for (const [jobName, job] of Object.entries(e2eDoc.jobs)) {
       // A reusable-workflow call cannot carry timeout-minutes: actionlint
       // rejects the key on that job shape, and the callee's own jobs bound
       // the run instead.
       if (job.uses) continue;
       assert.ok(
+        jobName in jobFloors,
+        `job "${jobName}" needs a workload-floor entry; add the value with the workload the ceiling must cover`,
+      );
+      assert.ok(
         boundedCeiling(job['timeout-minutes']),
-        `job "${jobName}" must carry a job-level timeout-minutes between 1 and 360 (the GitHub default is 360 minutes); got ${job['timeout-minutes']}`,
+        `job "${jobName}" must carry a job-level timeout-minutes of at least 1 and below the 360-minute GitHub default (360 is the default and never fires); got ${job['timeout-minutes']}`,
+      );
+      assert.ok(
+        job['timeout-minutes'] >= jobFloors[jobName],
+        `job "${jobName}" ceiling must not fall below its workload floor (${jobFloors[jobName]}); got ${job['timeout-minutes']}`,
       );
     }
   });
