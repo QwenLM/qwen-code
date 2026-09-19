@@ -96,8 +96,10 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
 - provider 持有其构建时的 `ContentGeneratorConfig`，因此该开关在下一次模型切换
   或重启后生效，而不是作用于正在进行的请求。`qwen-oauth`
   的热更新路径只复制固定的字段集合且不重建 provider，也不是该开关能服务的路由。
-- 该开关按模型路由生效。把多条路由指向要求相反的服务器时，
-  只在需要它的那条路由上设置该键。
+- 该开关按路由生效，不会被其它路由继承。子 agent、fork 或 `baseLlmClient` 目标
+  这类侧模型，只要其 `baseUrl` 与父级不同就会失去父级的取值，共用同一 `baseUrl`
+  时则保留。侧模型自身条目上的 `generationConfig.toolParametersMandatory`
+  总是优先，包括显式 `false`。
 - 只新增字段，从不删除。服务器会拒绝存在的 `parameters` 对象的路由不会开启该开关，
   因而不受影响。
 - 注入的 `properties` 对象发生在转换之后，因此它不会被
@@ -132,11 +134,16 @@ LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路�
   `400 litellm.BadRequestError: ... tools[5].function: missing field parameters` ——
   正是过去被遮蔽的那一支。回环 baseUrl 上使用 `deepseek` 模型 id 的单元测试用例
   已将其固定；针对该网关的线上重跑仍待完成。
-- 已在真实 TabbyAPI 路由（`http://localhost:5000/v1`）上验证：请求体 A/B 显示，
-  省略该字段时返回 HTTP 422，错误为
+- 2026-09-19 在同一条真实 TabbyAPI 路由（`http://localhost:5000/v1`）上重跑，
+  三个请求体只在该字段上不同：省略 → HTTP 422，错误为
   `{"type":"missing","loc":["body","tools",0,"function","parameters"],"msg":"Field required"}`；
-  带 `"parameters": { "type": "object" }` 时返回 HTTP 200。CLI 在该路由上默认失败为
+  `{ "type": "object" }` → HTTP 200；线上采用的
+  `{ "type": "object", "properties": {} }` → HTTP 200。CLI 在该路由上默认失败为
   `422 status code (no body)`，在对应的 `modelProviders` 条目上设置该键后可正常完成。
-  该次运行早于上面的形状对齐：HTTP 200 记录的是裸 `{ "type": "object" }`，
-  空对象形状尚未在该端点上重新验证。
-  运行记录：`.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`。
+  运行记录：`.qwen/e2e-tests/2026-09-19-tool-parameters-shape-ab.md`。
+  2026-09-17 在同一路由上的较早运行以裸形状记录到 HTTP 200，见
+  `.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`。
+- 属于他人报告、并非本机实测：另有两个严格 Rust/serde 网关
+  （`api-inference.modelscope.cn`、`apihub.agnes-ai.com`）的评论称带 `properties`
+  的形状作为本地补丁被接受。这些报告都早于本次形状改动，
+  因此只能佐证该选择，不能替代验证。

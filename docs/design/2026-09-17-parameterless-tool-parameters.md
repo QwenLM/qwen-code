@@ -106,8 +106,11 @@ hostname-gated, so it applies wherever the user opted in.
   opt-in takes effect on the next model switch or restart, not on the request in
   flight. The `qwen-oauth` hot-update path copies a fixed field set without
   rebuilding the provider, and is not a route this opt-in can serve.
-- The opt-in is per model route. A user who points several routes at servers with
-  opposite requirements must set the key only on the route that needs it.
+- The opt-in is scoped to a route, not inherited by one. A side model — a
+  subagent, a fork, or a `baseLlmClient` target — whose `baseUrl` differs from
+  the parent's loses the parent's value, and one that shares it keeps it. An
+  explicit `generationConfig.toolParametersMandatory` on the side model's own
+  entry always wins, including `false`.
 - The field is added, never removed. A route whose server rejects a present
   `parameters` object stays out of the opt-in and is unaffected.
 - The injected `properties` object is added after conversion, so it survives the
@@ -148,12 +151,18 @@ hostname-gated, so it applies wherever the user opted in.
 missing field parameters` — which is the arm that used to be shadowed. The unit
   case for a `deepseek` id at a loopback baseUrl pins it; a live re-run against
   that gateway is still outstanding.
-- Checked against a live TabbyAPI route (`http://localhost:5000/v1`): a payload
-  A/B showed HTTP 422 with `{"type":"missing","loc":["body","tools",0,"function",
-"parameters"],"msg":"Field required"}` when the field is omitted, and HTTP 200
-  with `"parameters": { "type": "object" }`. The CLI on that route fails with
-  `422 status code (no body)` by default and completes normally once the key is
-  set on the matching `modelProviders` entry. That run predates the shape
-  alignment above: the HTTP 200 was recorded with the bare `{ "type": "object" }`,
-  and the empty-object schema has not been re-checked against that endpoint. Run
-  record: `.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`.
+- Re-checked on the same live TabbyAPI route (`http://localhost:5000/v1`) on
+  2026-09-19 with three payloads differing only in that field: omitted → HTTP 422
+  with `{"type":"missing","loc":["body","tools",0,"function","parameters"],
+"msg":"Field required"}`, `{ "type": "object" }` → HTTP 200, and the shipped
+  `{ "type": "object", "properties": {} }` → HTTP 200. The CLI on that route
+  fails with `422 status code (no body)` by default and completes normally once
+  the key is set on the matching `modelProviders` entry. Run record:
+  `.qwen/e2e-tests/2026-09-19-tool-parameters-shape-ab.md`. The earlier 2026-09-17
+  run on the same route recorded HTTP 200 with the bare shape and is
+  `.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`.
+- Reported, not measured here: comments on two other strict Rust/serde gateways
+  (`api-inference.modelscope.cn`, `apihub.agnes-ai.com`) say the
+  properties-bearing shape was accepted there as a local patch. Every one of
+  those reports predates the shape change, so they corroborate the choice rather
+  than verify it.
