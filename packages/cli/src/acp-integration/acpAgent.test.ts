@@ -30126,6 +30126,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockArgv.experimentalLsp = undefined;
     vi.mocked(resolveOutputLanguageOrPreserveAuto).mockImplementation(
       (v: string | null | undefined) => v ?? 'auto',
     );
@@ -30451,6 +30452,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings);
     vi.mocked(loadCliConfig).mockResolvedValue(discoveryConfig);
+    mockArgv.experimentalLsp = true;
 
     const { agent, agentPromise } = await getAgent();
     await expect(
@@ -30757,6 +30759,16 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       expect(
         discoveryManager.discoverAllMcpToolsIncremental,
       ).toHaveBeenCalled(),
+    );
+    const discoveryLoad = vi
+      .mocked(loadCliConfig)
+      .mock.calls.find(
+        ([, argv]) =>
+          (argv as CliArgs | undefined)?.sessionId ===
+          'workspace-mcp-discovery',
+      );
+    expect(discoveryLoad?.[1]).toEqual(
+      expect.objectContaining({ experimentalLsp: false }),
     );
     vi.mocked(getMCPServerStatus).mockReturnValue(MCPServerStatus.CONNECTED);
     await expect(
