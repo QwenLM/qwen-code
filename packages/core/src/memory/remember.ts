@@ -251,6 +251,11 @@ export async function runManagedRememberByAgent(params: {
       maxTimeMinutes: params.config.getMemoryAgentTimeoutMinutes() ?? 5,
       extraHistory: params.contextMode === 'clean' ? [] : undefined,
       preserveEmptyExtraHistory: params.contextMode === 'clean',
+      // GREP stays unconditional: unlike the dream and extraction planners,
+      // this agent is deliberately built without `allowShell`, so the Bash
+      // search surface is unreachable from here and dropping GREP would leave
+      // it unable to find the conflicting record its own rules tell it to
+      // update.
       tools: [
         ToolNames.READ_FILE,
         ToolNames.GREP,

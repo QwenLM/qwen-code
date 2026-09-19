@@ -32,6 +32,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { QWEN_DIR } from '../config/storage.js';
+import { isBashSearchAvailable } from '../utils/bash-search-tools.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));
@@ -51,11 +52,16 @@ vi.mock('../tools/write-file', () => ({
 vi.mock('../utils/gitUtils', () => ({
   isGitRepository: vi.fn(),
 }));
+vi.mock('../utils/bash-search-tools.js', () => ({
+  isBashSearchAvailable: vi.fn(),
+}));
 vi.mock('node:fs');
 
 describe('Core System Prompt (prompts.ts)', () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     vi.resetAllMocks();
+    vi.mocked(isBashSearchAvailable).mockReturnValue(false);
     vi.stubEnv('QWEN_SYSTEM_MD', undefined);
     vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
     vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
@@ -186,6 +192,36 @@ describe('Core System Prompt (prompts.ts)', () => {
       'Do not use broad staging commands such as `git add -A` when unrelated changes are present',
     );
   });
+
+  it('uses Shell search guidance when Bash search is available', () => {
+    vi.mocked(isBashSearchAvailable).mockReturnValue(true);
+
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain("use 'run_shell_command' with `rg`");
+    expect(prompt).toContain('`rg --files`');
+    expect(prompt).toContain('rg --files | rg');
+    expect(prompt).toContain('Qwen ignore files');
+    expect(prompt).toContain("use 'grep_search' or 'glob'");
+    expect(prompt).not.toContain("use 'glob' instead of find");
+    expect(prompt).not.toContain("Reserve using the 'run_shell_command'");
+  });
+
+  it.each(['qwen-coder', 'qwen-vl', 'gemma4', 'general'])(
+    'replaces %s Glob examples with Shell pipelines',
+    (style) => {
+      vi.mocked(isBashSearchAvailable).mockReturnValue(true);
+      vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', style);
+
+      const prompt = getCoreSystemPrompt();
+
+      expect(prompt).toContain('rg --files | rg');
+      expect(prompt).not.toContain('[tool_call: glob');
+      expect(prompt).not.toContain('<function=glob>');
+      expect(prompt).not.toContain('"name": "glob"');
+      expect(prompt).not.toContain('call:glob{');
+    },
+  );
 
   it('does not tell the model to enter plan mode without user opt-in', () => {
     vi.stubEnv('SANDBOX', undefined);
@@ -1264,6 +1300,7 @@ describe('resident tool gating (#12032)', () => {
       undefined,
       'interactive',
       undefined,
+      undefined,
       false,
       false,
       declaredTools ? { declaredTools } : undefined,
@@ -1420,6 +1457,7 @@ describe('resident tool gating (#12032)', () => {
         undefined,
         'interactive',
         undefined,
+        undefined,
         false,
         false,
         declaredTools ? { declaredTools } : undefined,
@@ -1471,6 +1509,26 @@ describe('resident tool gating (#12032)', () => {
     expect(leaked).toEqual([]);
   });
 
+  it('gates bash-search guidance against the declared tool surface', () => {
+    vi.mocked(isBashSearchAvailable).mockReturnValue(true);
+
+    const [shellGuidance] = gatedParts(promptFor(new Set([ToolNames.SHELL])));
+    expect(shellGuidance).toContain(
+      `To search for files, use '${ToolNames.SHELL}'`,
+    );
+    expect(shellGuidance).toContain(
+      `To search file contents, use '${ToolNames.SHELL}'`,
+    );
+    expect(shellGuidance).not.toContain(`'${ToolNames.GREP}'`);
+    expect(shellGuidance).not.toContain(`'${ToolNames.GLOB}'`);
+    expect(shellGuidance).not.toContain('- **Codebase Search:**');
+
+    const [delegatingGuidance] = gatedParts(
+      promptFor(new Set([ToolNames.SHELL, ToolNames.AGENT])),
+    );
+    expect(delegatingGuidance).toContain('- **Codebase Search:**');
+  });
+
   it('gates every tool name the gated sections can mention, on every example set', () => {
     const everyTool = new Set<string>(Object.values(ToolNames));
     const modelPrompt = (model: string, declaredTools: ReadonlySet<string>) =>
@@ -1479,6 +1537,7 @@ describe('resident tool gating (#12032)', () => {
         model,
         undefined,
         'interactive',
+        undefined,
         undefined,
         false,
         false,
@@ -1516,6 +1575,7 @@ describe('resident tool gating (#12032)', () => {
         'gpt-4',
         undefined,
         'interactive',
+        undefined,
         undefined,
         false,
         true,
@@ -1721,6 +1781,16 @@ describe('getPlanModeSystemReminder', () => {
     expect(result).not.toContain('list_directory');
     expect(result).toContain('does not approve the plan');
     expect(result).toContain('exit Plan mode');
+  });
+
+  it('uses Bash search guidance throughout the plan reminder', () => {
+    vi.mocked(isBashSearchAvailable).mockReturnValue(true);
+
+    const result = getPlanModeSystemReminder();
+
+    expect(result).toContain('run_shell_command with `rg`/`rg --files`');
+    expect(result).not.toContain('grep_search');
+    expect(result).not.toContain('glob, agents');
   });
 
   it('should be deterministic', () => {

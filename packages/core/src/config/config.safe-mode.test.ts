@@ -175,6 +175,7 @@ vi.mock('../core/toolHookTriggers.js', () => ({
 
 vi.mock('../utils/ripgrepUtils.js', () => ({
   canUseRipgrep: vi.fn().mockResolvedValue(true),
+  resolveHealthyBuiltinRipgrep: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../utils/startupEventSink.js', () => ({
