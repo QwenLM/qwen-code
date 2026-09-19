@@ -57,8 +57,15 @@ function findMetaBlockBounds(source: string): {
   // corrupting the script. Leading line and block comments are tolerated,
   // because model-authored scripts commonly start with an explanatory
   // header that the user did not strip by hand (issue #12217).
+  //
+  // The comment-skipping loop is deliberately ambiguity-free: `\s`,
+  // `//...\n` and `/*...*/` are prefix-disjoint, and `[^\n]*` is bounded
+  // by the literal `\n` that follows it. A looser form like
+  // `\/\/[^\n]*\s*` lets `[^\n]*` and `\s*` compete over trailing
+  // whitespace, giving (K+1)^N backtrack paths on K-space × N-comment
+  // input — a ReDoS vector.
   const re =
-    /^\s*(?:\/\/[^\n]*\s*|\/\*[\s\S]*?\*\/\s*)*export\s+const\s+meta\s*=\s*\{/;
+    /^(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*export\s+const\s+meta\s*=\s*\{/;
   const match = re.exec(source);
   if (!match) return null;
   const exportIdx = match.index;

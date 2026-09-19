@@ -146,20 +146,31 @@ return x;`;
   // Issue #12217: model-authored scripts commonly start with a header
   // comment that the user did not strip by hand. The regex must allow
   // leading line and block comments without re-introducing the T33 risk
-  // (no `/m`, no inner-of-template-literal false match).
-  it('strips export const meta preceded by a single-line comment (#12217)', () => {
-    const src = `// note\nexport const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
-    expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
+  // (no `/m`, no inner-of-template-literal false match). Exercised through
+  // `compileWorkflowScript` — the production entry — so a regression
+  // surfaces as a V8 syntax error, not just a wrong string.
+  it('compiles a workflow whose meta is preceded by a single-line comment (#12217)', () => {
+    const src = `// note\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toEqual({ name: 'x', description: 'd' });
   });
 
-  it('strips export const meta preceded by a block comment (#12217)', () => {
-    const src = `/* note */\nexport const meta = { name: 'x' }\nphase("plan")\nreturn 1`;
-    expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
+  it('compiles a workflow whose meta is preceded by a block comment (#12217)', () => {
+    const src = `/* note */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toEqual({ name: 'x', description: 'd' });
   });
 
-  it('strips export const meta preceded by multiple comments (#12217)', () => {
-    const src = `// first\n// second\n/* third */\nexport const meta = { name: 'x' }\nphase("plan")`;
-    expect(stripExportMeta(src).trim()).toBe('phase("plan")');
+  it('compiles a workflow whose meta is preceded by mixed comments (#12217)', () => {
+    const src = `// first\n// second\n/* third */\nexport const meta = { name: 'x', description: 'd' }\nreturn 1;`;
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toEqual({ name: 'x', description: 'd' });
+  });
+
+  it('does not match meta inside a template literal even with a leading comment (#12217 × T33)', () => {
+    const src = `// header\nconst banner = \`\nexport const meta = { name: 'fake' }\n\`;\nreturn banner;`;
+    const { meta } = compileWorkflowScript(src);
+    expect(meta).toBeNull();
   });
 });
 
