@@ -1,14 +1,16 @@
 # Managed Agent P3 Java Prompt 服务接入执行方案
 
-状态：P3a、P3b 已实现并验证；产品 Java P3c-0 已完成，P3c-1 等待 SDK 发布到内部 Maven 仓库
+状态：P3a、P3b 已实现并验证；产品 Java P3c-0～P3c-3 核心代码和本地完整进程 E2E 已完成，WebShell 冻结采用 `JavaAgentProvider` 接入 Java；真实产品 Java + DataAgent/ACS、双 JVM/MySQL 和部署验证仍待完成
 
 日期：2026-09-18
 
-实施进度：Hosted Harness 私有协议 v1、进程代际 fencing、能力协商、Java Hosted Harness Client 和 Prompt payload digest 校验已经落地；产品 Java 仓已完成 runtime kind、默认关闭配置、Hosted binding fencing 字段和 Managed Event Store 基线。`com.alibaba:qwencode-sdk:0.1.0-alpha` 尚不能从内部 Maven 仓库解析，因此真实 Gateway 继续保持未装配、生产开关关闭。
+实施进度：Hosted Harness 私有协议 v1、进程代际 fencing、能力协商、Java Hosted Harness Client、Prompt payload digest 和首次 admission watermark 已经落地；产品 Java 仓已完成 runtime kind、默认关闭配置、Hosted binding fencing、Managed Event Store、真实 Gateway、Session create/load 对账、DB sticky routing、Prompt Connector、事件投影、submit outcome unknown 即时对账、Managed cancel、后台 `ManagedTurnReconciler`、Managed load durable replay、`_meta.managedSequence` 输出、删除入口的远端 close 与 outcome-unknown 对账、permission fail-closed、attachment detach，以及 Runtime warm、durable Repository、DataAgent 幂等 provision 和 UNKNOWN 门禁。前端已有 Managed SSE cursor 基础，但 qwen WebShell 的 `JavaAgentProvider` 尚未实现。本地 Hosted Harness + Java Broker fixture + 冷 Runtime 完整进程 E2E 已验证首个模型事件早于 Runtime ready、Tool 物理执行一次且 execution 响应丢失可恢复；产品 Java + 真实 DataAgent/ACS、双 JVM/MySQL、内部 Maven 发布和干净部署仍是门禁，生产开关保持关闭。
 
 上游方案：[Managed Agent Hosted Runtime 可执行技术方案](./2026-09-17-managed-agent-hosted-runtime-execution.md)
 
 后续方案：[Managed Agent 公共 Agent API 适配层执行方案](./2026-09-18-managed-agent-public-api-adapter.md)
+
+P3c-3 细化执行稿：[Managed Agent 产品 Tool Runtime 接入执行方案](./2026-09-18-managed-agent-product-tool-runtime-integration.md)
 
 产品 Java 的实际代码落点、schema、阶段验收和当前进度以 DataWorks 仓
 `app/lsp-server/docs/design/managed-agent-hosted-harness-execution-plan.md` 为准；本文继续作为 qwen-code
@@ -19,9 +21,9 @@
 P3 不先实现 OpenAI、Claude 或 Responses 公网 API，也不把模型循环迁入 Java。它只完成一条真实产品链路：
 
 ```text
-现有 DataAgent API / 后续 Agent API
-                |
-                v
+WebShell -> JavaAgentProvider ─┐
+现有 DataAgent API ────────────┼─>
+后续 Agent API ────────────────┘
 Java Prompt 服务
   - 鉴权与租户隔离
   - Session / Turn 权威状态
@@ -44,6 +46,8 @@ Java Runtime Broker
 ```
 
 用户第一条 Prompt 到达时，Hosted Harness 已经常驻。Java 在提交 Harness Prompt 的同时异步调用 `RuntimeBrokerService.warm()`，模型输出不等待 Tool Runtime。只有模型真的产生 Tool Call 时，Harness 才等待该 Session 已绑定的 Runtime。
+
+WebShell 不直接连接 Hosted Harness、Runtime Broker 或 Tool Runtime，也不把 Java 地址传给现有 daemon Provider。产品模式显式装配 `JavaAgentProvider`，通过 Java 的 Session create/load、Prompt submit、Managed SSE replay 和 cancel 接口工作；本地 `qwen serve` 继续使用原 Daemon Provider。
 
 P3 的目标不是一次性完成整套 Managed Agents 平台，而是证明下面四件事能够在真实 Java 产品服务成立：
 
@@ -68,18 +72,16 @@ qwen-code 当前已经具备：
 - 冷启动、响应丢失、取消、多 Session 隔离和 Runtime 故障的真实进程 E2E；
 - Java `DaemonClient` / `DaemonSessionClient`，可以 create、prompt、observe、cancel、detach 和 destroy。
 
-### 2.2 必须补齐的缺口
+### 2.2 当前剩余门禁
 
-| 缺口                                                    | 当前风险                                          | P3 处理方式                                                  |
-| ------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------ |
-| Hosted Harness 没有独立的私有协议握手                   | Java 可能连接到普通 daemon 或不兼容版本           | 增加 Hosted Harness contract v1 capability 和请求头          |
-| Java 不校验 Harness 进程代际                            | 活动 Session 可能被路由到重启后的新进程或错误实例 | capability 返回 `bootId`，每个 Session 请求携带并校验        |
-| Java SDK 不能传 caller `promptId`                       | admission 响应丢失后无法用同一键安全重试          | 给 `PromptRequest` 增加 caller-supplied UUID，并校验响应 ID  |
-| Java SDK 没有 load/status/transcript 抽象               | create outcome unknown 和 Java 重启后不能重新附着 | 增加 Hosted Harness 专用 transport API                       |
-| 现有 `startPrompt` 把 submit 和观察绑在一个进程内对象中 | 不适合作为产品 Repository 和恢复边界              | 产品 `HarnessClient` 拆成 submit、stream、snapshot、cancel   |
-| 产品 Java 还没有 Coordinator                            | warm、submit、事件、取消缺少单一所有者            | 增加 `ManagedAgentCoordinator`                               |
-| Java SDK 尚未发布到内部 Maven 仓库                      | 产品 CI 无法解析真实 Hosted Harness transport     | 发布 `com.alibaba:qwencode-sdk:0.1.0-alpha` 后才装配 Gateway |
-| Harness 事件不是公共事件                                | 对外序号、权限和重连会泄漏实现细节                | Java 投影为公共事件并分配自己的 sequence                     |
+| 门禁                                      | 当前风险                                         | 下一步                                                        |
+| ----------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| Java SDK 尚未发布到内部 Maven 仓库        | 产品干净 CI 和部署无法稳定解析 Hosted transport  | 发布不可变 SDK 坐标并完成干净构建                             |
+| 产品 Java + Hosted Harness 真实部署未验收 | 本地 fixture 不能证明服务发现、鉴权和滚动重启    | 跑 create/submit/SSE/cancel/reconcile/close 的产品进程 E2E    |
+| DataAgent/ACS 真实底座未验收              | DNS/VPC、冷启动和 provision 崩溃窗口仍有不确定性 | 完成网络探针和三个 provision crash point                      |
+| 双 JVM + MySQL 未验收                     | H2 双 Context 不能代替真实跨进程 claim 竞争      | 经负载均衡交替请求并注入 owner crash、DB/Runtime 短暂不可用   |
+| WebShell 尚无 `JavaAgentProvider`         | 完整 WebShell 仍只理解 daemon API                | 实现 create/load、submit、Managed SSE replay、cancel 最小闭环 |
+| 公共 Agent View/Adapter 尚未实现          | 还不能提供供应商无关公共 Agent API               | 建立 Read Facade，完成影子一致性后再开放公共 Adapter          |
 
 P3c-3 只补齐本方案所需的 Runtime binding、lease、epoch 和 executionCallId 幂等；更完整的跨版本迁移、规模化调度和长周期恢复仍属于 P6。产品 Java 复用现有 `chat_session`、`chat_history`、`agent_cli_runtime_session`，并新增 `agent_managed_event`，不假设产品已有 durable Outbox。
 
@@ -88,11 +90,14 @@ P3c-3 只补齐本方案所需的 Runtime binding、lease、epoch 和 executionC
 | 对象                                          | 唯一所有者          | 不允许承担的职责                           |
 | --------------------------------------------- | ------------------- | ------------------------------------------ |
 | 公共 Session、Turn、Item、Event、租户权限     | Java Prompt 服务    | 不保存 Runtime token、endpoint 或进程句柄  |
+| WebShell 会话/事件适配                        | `JavaAgentProvider` | 不实现 daemon 协议，不持有内部服务凭证     |
 | 模型循环、对话 Context、Tool Call 编排        | Hosted Harness      | 不鉴权公共 tenant/workspace，不分配公共 ID |
 | Runtime binding、lease、epoch、execution 幂等 | Java Runtime Broker | 不生成模型内容，不投影公共事件             |
 | 文件、MCP、Skill、Shell 等本地副作用          | Tool Runtime        | 不主动连接 Java，不访问公共数据库          |
 
 Tool Runtime 的请求和结果不经过 Java Prompt Controller。Harness 直接访问 Runtime Broker；Broker 再访问 Runtime。Java Prompt 服务只观察环境状态和公共事件，避免成为工具数据转发瓶颈。
+
+浏览器只访问 Java/BFF 公共入口。Harness bearer、Broker bearer、Runtime bearer、lease、endpoint、Pod 和本地路径均不得返回 WebShell。
 
 活动 Session 一旦写入 `executionEngine=MANAGED`，直到关闭都不能切换到 Legacy。灰度或故障回滚只影响尚未创建的新 Session。
 
@@ -629,7 +634,7 @@ Java Prompt fixture
 2. `feat(java): add hosted harness transport`
 3. 产品 Java P3c-0：配置、Hosted binding fencing、Managed Event Store
 4. 发布 `com.alibaba:qwencode-sdk:0.1.0-alpha` 到内部 Maven 仓库
-5. 产品 Java P3c-1～P3c-3：Gateway、Coordinator、Connector、Runtime Broker
+5. 产品 Java P3c-2～P3c-3：Prompt Connector、事件恢复、Runtime Broker
 6. 联合 E2E：`test(managed): verify product hosted runtime flow`
 7. 产品灰度和观测
 8. P3 稳定后进入 P6 规模化恢复与调度
@@ -696,8 +701,7 @@ AND product feature flag enabled
 产品 Java 仓只需补充以下事实，不再重新讨论总体架构：
 
 - Prompt admission 的事务入口和现有 Session 表；
-- 现有 SSE event store 是否支持单 Session 单调 sequence；
-- RUNNING Managed Turn 扫描任务与分布式锁复用入口；
+- attachment reaper 的生产 TTL、调度开关和告警阈值；
 - tenant/workspace 鉴权入口；
 - Harness endpoint 的部署和服务 token 注入方式；
 - 首批允许的 tenant、workspace、模型和 Tool 白名单；
@@ -709,8 +713,6 @@ AND product feature flag enabled
 
 ## 17. 下一步
 
-当前 qwen-code 侧 P3a、P3b 已完成，产品 Java P3c-0 也已完成并通过 Java 21 测试。下一步先把
-`com.alibaba:qwencode-sdk:0.1.0-alpha` 发布到内部 Maven 仓库，再实现真实 `HostedHarnessGateway` 和
-Session binding；不要复制第二套私有协议客户端，也不要提前实现 OpenAI Controller。
+当前 P3c-0～P3c-3 核心代码和本地完整进程 E2E 已完成。下一步按依赖顺序执行：发布不可变 SDK 并完成产品仓干净构建；跑产品 Java + Hosted Harness 真实部署 E2E；完成 DataAgent/ACS 网络与崩溃探针；完成双 JVM + MySQL 故障注入；随后建立供应商无关 Read Facade，并实现 WebShell `JavaAgentProvider` 最小闭环。影子一致性通过后再开放公共 Agent API Adapter。不要复制第二套私有协议客户端，不要实现 Java daemon-compatible 网关，也不要提前开放 OpenAI 写 Controller。
 
 P3a + P3b 当前已达到该判断：Java 能用一个版本化、带 Harness generation fencing、caller prompt ID 可重试的私有客户端完整操作现有 `/session` 链路。
