@@ -4,21 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
 import { configDefaults, defineConfig } from 'vitest/config';
-
-// The log-download execution suite spawns the workflow's real download step,
-// whose `mapfile` needs bash >= 4.0 and whose jobs projection needs jq; on a
-// host without them (the nightly macOS lane ships bash 3.2) the step dies
-// before any assertion runs. Probe the capability here, at collection time:
-// an excluded file runs no ungated case, hook, modifier spelling, or
-// appended construct, which no pin over the suite's source text can
-// guarantee. The suite keeps its own describe.skipIf so the skip stays
-// visible wherever the file is collected.
-const canRunBashSteps =
-  spawnSync('bash', ['-c', 'mapfile -t x <<< y'], { stdio: 'ignore' })
-    .status === 0 &&
-  spawnSync('jq', ['--version'], { stdio: 'ignore' }).status === 0;
 
 export default defineConfig({
   test: {
@@ -28,11 +14,11 @@ export default defineConfig({
     // Script tests that drive Linux-only CI (ubuntu-latest workflow jobs, or
     // bash/shell fixtures Windows cannot express) fail on a Windows runner.
     // Linux CI remains their authoritative coverage.
-    exclude: [
-      ...(process.platform === 'win32'
+    exclude:
+      process.platform === 'win32'
         ? [
+            ...configDefaults.exclude,
             'scripts/tests/e2e-shard-retry.test.js',
-            'scripts/tests/main-ci-failure-log-download.test.js',
             'scripts/tests/security-checks-audit-retry.test.js',
             'scripts/tests/pr-self-report-label.test.js',
             // Bash-driven workflow suites cannot run on Windows; pure
@@ -40,16 +26,7 @@ export default defineConfig({
             'scripts/tests/qwen-*-workflow.test.js',
             'scripts/tests/serve-ab-workflow.test.js',
           ]
-        : []),
-      // The capability arm sits alongside the win32 ternary, not inside it:
-      // a Windows host whose Git Bash satisfies the probe still needs the
-      // unconditional entry above (the suite's harness joins PATH with ':'
-      // and spawns an extension-less gh stub).
-      ...(canRunBashSteps
-        ? []
-        : ['scripts/tests/main-ci-failure-log-download.test.js']),
-      ...configDefaults.exclude,
-    ],
+        : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
     // Several tests in install-script.test.js shell out to `node` to run
     // create-standalone-package.js, which on Windows runs a full

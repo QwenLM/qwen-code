@@ -86,14 +86,12 @@ jobs:
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
 
-          # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a raw response
-          # carrying terminal escape sequences unless passed
-          # --allow-escape-sequences, and the colourised vitest/pytest logs
-          # always carry them: without the flag every download fails
-          # deterministically — a retry hits the identical refusal — and the
-          # plan below falls back to a per-commit issue naming no failing
-          # test. The analyzer strips ANSI before matching, so the escapes
-          # never reach an issue body.
+          # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a response
+          # carrying terminal escape sequences unless opted in, and the
+          # colourised vitest/pytest logs always carry them: without the flag
+          # every download fails and the plan below falls back to a
+          # per-commit issue naming no failing test. The analyzer strips ANSI
+          # before matching, so none of it reaches an issue body.
           for job_id in "${job_ids[@]}"; do
             if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
               --allow-escape-sequences > "${log_dir}/${job_id}.log"; then
