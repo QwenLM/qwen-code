@@ -57,7 +57,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         block.match(
           /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
         ),
-      ).toHaveLength(name === 'test' ? 4 : 1);
+      ).toHaveLength(name === 'test' ? 6 : 1);
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },

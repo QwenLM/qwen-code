@@ -106,7 +106,9 @@ jobs:
           distribution: 'temurin'
           java-version: '${{ matrix.java }}'
           cache: 'maven'
-          cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+          cache-dependency-path: |-
+            packages/sdk-java/qwencode/pom.xml
+            packages/sdk-java/runtime-broker/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Set up Maven (self-hosted)'
@@ -131,6 +133,8 @@ jobs:
             exit 1
           fi
           mvn --batch-mode --no-transfer-progress clean test
+          cd ../runtime-broker
+          mvn --batch-mode --no-transfer-progress clean test
 
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -139,9 +143,23 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress clean test'
 
+      - name: 'Run Runtime Broker state tests'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        working-directory: 'packages/sdk-java/runtime-broker'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'mvn --batch-mode --no-transfer-progress clean test'
+
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
         working-directory: 'packages/sdk-java/qwencode'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
+
+      - name: 'Run Runtime Broker state Checkstyle'
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
+        working-directory: 'packages/sdk-java/runtime-broker'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
