@@ -19,6 +19,8 @@ import {
   runCli,
   shortenForTitle,
   testKey,
+  workflowBridgeMarker,
+  WORKFLOW_MARKER_PREFIX,
 } from './main-failure-signature.mjs';
 
 const ESC = '\u001B';
@@ -278,13 +280,25 @@ test('falls back to a per-commit issue when no test can be identified', () => {
   assert.ok(!body.includes(OCCURRENCE_MARKER));
 });
 
-test('the per-commit path leaves an already-filed body untouched', () => {
+test('the per-commit path leaves an already-recorded run untouched', () => {
   const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
-  const existingBody = 'whatever the previous run wrote\n';
-  assert.equal(
-    renderIssueBody({ analysis, occurrence: OCCURRENCE, existingBody }),
-    existingBody,
-  );
+  // First plan against the bare stub: the workflow bridge can match it even
+  // though its commit differs, so the run gets recorded on the stub body.
+  const stub = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  const recorded = renderIssueBody({
+    analysis,
+    occurrence: OCCURRENCE,
+    existingBody: stub,
+  });
+  assert.ok(recorded.includes('[run 301]'));
+  // Re-planning the same run against the recorded body is a no-op: the
+  // occurrence line is deduped and both dedupe markers are already present.
+  const replanned = renderIssueBody({
+    analysis,
+    occurrence: OCCURRENCE,
+    existingBody: recorded,
+  });
+  assert.equal(replanned, recorded);
 });
 
 test('a title for identified tests names the test, not the commit', () => {
@@ -540,6 +554,11 @@ const WINDOWS_JOB = {
   steps: ['Run tests and generate reports'],
 };
 
+const MACOS_JOB = {
+  name: 'Test (macos-latest, Node 20.x)',
+  steps: ['Install dependencies'],
+};
+
 function captureStdout(argv) {
   let output = '';
   const original = process.stdout.write;
@@ -716,7 +735,367 @@ test('runCli plan renders the named job into the filed body', () => {
   );
 
   assert.ok(planned.body.includes('`Test (windows-latest, Node 22.x)`'));
+  // The workflow-scoped bridge marker rides as the last search marker so a
+  // per-commit stub stays reachable from both search arms (#12133).
   assert.deepEqual(planned.searchMarkers, [
     `${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha}`,
+    workflowBridgeMarker('Qwen Code CI'),
   ]);
+  assert.ok(
+    planned.body.includes(`<!-- ${workflowBridgeMarker('Qwen Code CI')} -->`),
+  );
+});
+
+// The workflow-scoped bridge marker is the last search marker in both arms
+// (per-test and per-commit): restoring the body download re-activated a dedupe
+// class disjoint from the per-commit stubs filed since gh 2.97, so a search
+// must be able to reach the most recent failure issue of the same workflow
+// regardless of which marker class it was filed under (#12133).
+test('plan appends a workflow-scoped bridge marker to both search arms', () => {
+  const BRIDGE = workflowBridgeMarker('E2E Tests');
+
+  // Per-test arm: the bridge is the last marker inside the search budget
+  // (the VITEST_LOG fixture has one failing test, so one test marker remains
+  // ahead of it).
+  const analysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  assert.equal(analysis.searchMarkers.length, 2);
+  assert.equal(analysis.searchMarkers[0], analysis.markers[0]);
+  assert.equal(analysis.searchMarkers[1], BRIDGE);
+  assert.ok(
+    analysis.searchMarkers
+      .slice(0, 1)
+      .every((marker) => marker.startsWith('qwen-main-ci-failure-test:')),
+  );
+  // R1-6: every marker must be a single space-free token — the consumer
+  // interpolates it unquoted into `--search "${marker} in:body"`, and every
+  // watched workflow name contains spaces.
+  assert.ok(analysis.searchMarkers.every((marker) => !/\s/.test(marker)));
+  // R1-1: searched, but never written — a per-test body must not become
+  // reachable by the bridge search, or every later distinct failure of the
+  // workflow would be absorbed into it instead of filing its own issue.
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  assert.ok(!body.includes(`<!-- ${BRIDGE} -->`));
+
+  // Per-commit arm: the bridge rides alongside the legacy per-commit marker.
+  const dir = mkdtempSync(join(tmpdir(), 'sig-bridge-'));
+  const analysisPath = join(dir, 'analysis.json');
+  writeFileSync(
+    analysisPath,
+    JSON.stringify(
+      analyzeLogs('E2E Tests', ['npm error code ERESOLVE'], [WINDOWS_JOB]),
+    ),
+  );
+  const planned = JSON.parse(
+    captureStdout([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--sha',
+      OCCURRENCE.sha,
+      '--run-url',
+      OCCURRENCE.runUrl,
+      '--run-id',
+      OCCURRENCE.runId,
+      '--at',
+      OCCURRENCE.at,
+    ]),
+  );
+  const workflowBridge = workflowBridgeMarker('E2E Tests');
+  assert.deepEqual(planned.searchMarkers, [
+    `qwen-main-ci-failure:${OCCURRENCE.sha}`,
+    workflowBridge,
+  ]);
+  assert.ok(planned.searchMarkers.every((marker) => !/\s/.test(marker)));
+  assert.ok(planned.body.includes(`<!-- ${workflowBridge} -->`));
+});
+
+// R1-1: the bridge carries workflow identity only, so a body filed for one
+// failing test must never carry the last search marker of a disjoint failure
+// of the same workflow — otherwise that failure would be absorbed into this
+// issue instead of filing its own.
+test('a body for one failing test never carries a disjoint failure’s last search marker', () => {
+  const analysisA = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const bodyA = renderIssueBody({
+    analysis: analysisA,
+    occurrence: OCCURRENCE,
+  });
+  const disjointLog = VITEST_LOG.replaceAll(
+    'Tool Control Parameters (E2E)',
+    'Sandbox Control (E2E)',
+  );
+  const analysisB = analyzeLogs('E2E Tests', [disjointLog]);
+  assert.notEqual(analysisB.markers[0], analysisA.markers[0]);
+  const lastSearchMarker = analysisB.searchMarkers.at(-1);
+  assert.equal(lastSearchMarker, workflowBridgeMarker('E2E Tests'));
+  assert.ok(!bodyA.includes(`<!-- ${lastSearchMarker} -->`));
+});
+
+// A workflow-scoped bridge marker can land a per-commit run on an issue
+// filed under a DIFFERENT commit (the per-commit stub of the same workflow).
+// The new run must then be recorded on that issue — run link, failed job and
+// the new per-commit marker — instead of the body being returned verbatim
+// while the log claims it was recorded (#12133 Critical).
+test('runCli plan records a bridge-matched run on the per-commit stub body', () => {
+  const earlier = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const existingBody = renderIssueBody({
+    analysis: earlier,
+    occurrence: OCCURRENCE,
+  });
+  // R1-2: the merged run must carry a different failed job from the stub's,
+  // so the header refresh is observable at all.
+  const latest = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [MACOS_JOB],
+  );
+
+  const dir = mkdtempSync(join(tmpdir(), 'sig-bridge-merge-'));
+  const analysisPath = join(dir, 'analysis.json');
+  const existingPath = join(dir, 'existing.md');
+  writeFileSync(analysisPath, JSON.stringify(latest));
+  writeFileSync(existingPath, existingBody);
+
+  const planned = JSON.parse(
+    captureStdout([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--existing',
+      existingPath,
+      '--sha',
+      'b0ce7dc51999',
+      '--run-url',
+      'https://github.com/QwenLM/qwen-code/actions/runs/302',
+      '--run-id',
+      '302',
+      '--at',
+      '2026-07-27T03:20:00Z',
+    ]),
+  );
+
+  // The new run must be visible on the issue, and both dedupe markers for
+  // future searches must be present.
+  assert.ok(planned.body.includes('[run 302]'));
+  assert.ok(planned.body.includes('b0ce7dc51999'));
+  assert.ok(
+    planned.body.includes('<!-- qwen-main-ci-failure:b0ce7dc51999 -->'),
+  );
+  assert.ok(
+    planned.body.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`),
+  );
+  // The original stub's own marker survives the merge.
+  assert.ok(
+    planned.body.includes(`<!-- qwen-main-ci-failure:${OCCURRENCE.sha} -->`),
+  );
+  // R1-2: the single-valued header fields must describe the newest run —
+  // its lane and step rendered into the head, the stale ones gone.
+  assert.ok(planned.body.includes('Test (macos-latest, Node 20.x)'));
+  assert.ok(planned.body.includes('Install dependencies'));
+  assert.ok(planned.body.includes('- Run ID: 302'));
+  assert.ok(planned.body.includes('- Commit: b0ce7dc51999'));
+  assert.ok(!planned.body.includes('- Run ID: 301'));
+  assert.ok(!planned.body.includes('windows-latest'));
+  // R1-2: the stub never emitted a bullet for its own occurrence, so the
+  // merge must promote its recorded run before the header is re-rendered.
+  assert.ok(planned.body.includes('[run 301]'));
+});
+
+// R1-3: the legacy per-commit marker is workflow-agnostic, so one push sha
+// can fail two watched workflows and both reporters land on the same issue.
+// The merge records the occurrence but must never add a second bridge: a
+// body carrying two workflows' bridges becomes a permanent cross-workflow
+// sink that nothing under .github/ ever closes.
+test('a foreign-workflow merge records the run but never adds its bridge', () => {
+  const stubAnalysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const stub = renderIssueBody({
+    analysis: stubAnalysis,
+    occurrence: OCCURRENCE,
+  });
+  const foreign = analyzeLogs(
+    'Qwen Code CI',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const merged = renderIssueBody({
+    analysis: foreign,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: stub,
+  });
+  const bridgeComments =
+    merged.match(new RegExp(`<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->`, 'g')) ??
+    [];
+  assert.equal(bridgeComments.length, 1);
+  assert.equal(
+    bridgeComments[0],
+    `<!-- ${workflowBridgeMarker('E2E Tests')} -->`,
+  );
+  assert.ok(merged.includes('[run 302]'));
+  // the same merge again stays single-valued
+  const remergd = renderIssueBody({
+    analysis: foreign,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: merged,
+  });
+  assert.equal(
+    (
+      remergd.match(
+        new RegExp(`<!-- ${WORKFLOW_MARKER_PREFIX}\\S+ -->`, 'g'),
+      ) ?? []
+    ).length,
+    1,
+  );
+});
+
+// R1-8: the bridge funnels every unidentifiable failure of a workflow onto
+// one open issue, so the per-commit sha markers must stay capped — keeping
+// the newest, never the bridge — or the body crosses GitHub's 65,536-char
+// limit and `gh issue edit --body-file` stops recording recurrences at all.
+test('per-commit sha markers stay capped at MAX_OCCURRENCES, newest kept', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  let body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  for (let run = 302; run <= 331; run += 1) {
+    body = renderIssueBody({
+      analysis,
+      existingBody: body,
+      occurrence: {
+        ...OCCURRENCE,
+        sha: `b0ce7dc51999${String(run).padStart(4, '0')}`,
+        runId: String(run),
+        runUrl: `https://github.com/QwenLM/qwen-code/actions/runs/${run}`,
+      },
+    });
+  }
+  const shaMarkerLines = body
+    .split('\n')
+    .filter((line) =>
+      /^<!-- qwen-main-ci-failure:[0-9a-f]+ -->$/.test(line.trim()),
+    );
+  assert.equal(shaMarkerLines.length, MAX_OCCURRENCES);
+  assert.ok(body.includes('<!-- qwen-main-ci-failure:b0ce7dc519990331 -->'));
+  assert.ok(!body.includes('<!-- qwen-main-ci-failure:af7a9ec12722ab34 -->'));
+  assert.ok(body.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+});
+
+// R1-9: the shared recurrence tail must keep the per-test arm's guard — run
+// 301 and run 3010 are distinct runs even though one id is the other's URL
+// prefix — on the per-commit arm too.
+test('a per-commit merge keeps runs whose ids are prefixes of each other', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const stub = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+  let body = renderIssueBody({
+    analysis,
+    existingBody: stub,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '3010',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/3010',
+    },
+  });
+  body = renderIssueBody({
+    analysis,
+    existingBody: body,
+    occurrence: OCCURRENCE,
+  });
+  assert.ok(body.includes('[run 301]'));
+  assert.ok(body.includes('[run 3010]'));
+});
+
+// R1-9: the per-commit arm's recurrence list must be capped with exactly one
+// trim note, like the per-test arm's.
+test('a per-commit merge caps the recurrence list and emits one trim note', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  let body = renderIssueBody({
+    analysis,
+    occurrence: OCCURRENCE,
+    maxOccurrences: 2,
+  });
+  for (const runId of ['302', '303']) {
+    body = renderIssueBody({
+      analysis,
+      existingBody: body,
+      occurrence: { ...OCCURRENCE, runId },
+      maxOccurrences: 2,
+    });
+  }
+  assert.equal((body.match(/_Older recurrences trimmed\._/g) ?? []).length, 1);
+  assert.ok(body.includes('[run 303]'));
+  assert.ok(body.includes('[run 302]'));
+});
+
+// R1-10: a per-test run reaching a per-commit stub must rewrite the adopted
+// head — the stub's "no test result was reported" prose and identity block
+// contradict an issue that now tracks an identified test.
+test('a per-test run adopting a per-commit stub rewrites the stub head', () => {
+  const stubAnalysis = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const stub = renderIssueBody({
+    analysis: stubAnalysis,
+    occurrence: OCCURRENCE,
+  });
+  const testRun = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const merged = renderIssueBody({
+    analysis: testRun,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: stub,
+  });
+  assert.ok(!merged.includes('before any test result was'));
+  assert.ok(merged.includes('## Failing tests'));
+  assert.ok(merged.includes(`- \`${testRun.tests[0].id}\``));
+  assert.ok(merged.includes('[run 301]'));
+  assert.ok(merged.includes('[run 302]'));
+  // R1-1: the adopted issue is a per-test issue now — it must not stay
+  // reachable by the bridge search.
+  assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
+});
+
+// R1-10 mirror: a per-commit run landing on a per-test body keeps the
+// per-test head — the identified test's section survives.
+test('a per-test body keeps its shape under a per-commit merge', () => {
+  const testAnalysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const perTestBody = renderIssueBody({
+    analysis: testAnalysis,
+    occurrence: OCCURRENCE,
+  });
+  const commitRun = analyzeLogs(
+    'E2E Tests',
+    ['npm error code ERESOLVE'],
+    [WINDOWS_JOB],
+  );
+  const merged = renderIssueBody({
+    analysis: commitRun,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '302',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/302',
+    },
+    existingBody: perTestBody,
+  });
+  assert.ok(merged.includes('## Failing tests'));
+  assert.ok(merged.includes(`- \`${testAnalysis.tests[0].id}\``));
+  assert.ok(merged.includes('[run 302]'));
+  // R1-1: the per-test body must not gain the bridge from this merge.
+  assert.ok(!merged.includes(`<!-- ${workflowBridgeMarker('E2E Tests')} -->`));
 });
