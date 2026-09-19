@@ -12,6 +12,7 @@ import {
   type AcpRelayOptions,
   type RelaySocketHandlers,
 } from './acp-relay.js';
+import { DESKTOP_RELAY_SERVER_NAME } from './constants.js';
 
 interface Harness {
   relay: AcpRelay;
@@ -78,7 +79,7 @@ async function connect(h: Harness): Promise<void> {
   });
   await h.deliver({
     type: 'mcp_registered',
-    server: 'node-repl',
+    server: DESKTOP_RELAY_SERVER_NAME,
     toolCount: 5,
   });
 }
@@ -123,10 +124,13 @@ describe('AcpRelay', () => {
     });
     expect(h.sent[1]).toEqual({
       type: 'mcp_register',
-      server: 'node-repl',
+      server: 'desktop-node-repl',
       sessionId: 'session-1',
     });
-    await h.deliver({ type: 'mcp_registered', server: 'node-repl' });
+    await h.deliver({
+      type: 'mcp_registered',
+      server: DESKTOP_RELAY_SERVER_NAME,
+    });
     expect(phases).toEqual(['connecting', 'registering', 'connected']);
   });
 
@@ -142,7 +146,7 @@ describe('AcpRelay', () => {
     await h.deliver({
       type: 'mcp_message',
       id: 'corr-1',
-      server: 'node-repl',
+      server: DESKTOP_RELAY_SERVER_NAME,
       payload: { jsonrpc: '2.0', id: 4, method: 'tools/list' },
     });
     expect(handle).toHaveBeenCalledWith({
@@ -153,7 +157,7 @@ describe('AcpRelay', () => {
     expect(h.sent.at(-1)).toEqual({
       type: 'mcp_message',
       id: 'corr-1',
-      server: 'node-repl',
+      server: DESKTOP_RELAY_SERVER_NAME,
       payload: { jsonrpc: '2.0', id: 4, result: { ok: true } },
     });
   });
@@ -224,7 +228,7 @@ describe('AcpRelay', () => {
     h.relay.stop();
     expect(h.sent.at(-1)).toEqual({
       type: 'mcp_unregister',
-      server: 'node-repl',
+      server: DESKTOP_RELAY_SERVER_NAME,
     });
     await expect(ended).resolves.toEqual({ reason: 'stopped' });
     expect(h.closed()).toBe(true);

@@ -45,10 +45,6 @@ function isRequestId(value: unknown): value is JsonRpcId {
   return typeof value === 'string' || typeof value === 'number';
 }
 
-function idKey(id: JsonRpcId): string {
-  return `${typeof id}:${String(id)}`;
-}
-
 interface Pending {
   originalId: JsonRpcId;
   resolve: (reply: JsonRpcMessage) => void;
@@ -67,7 +63,6 @@ interface Pending {
  */
 export class McpChildRelay {
   private readonly pending = new Map<number, Pending>();
-  private readonly latestByOriginal = new Map<string, number>();
   private nextId = 1;
   private initialize: Promise<JsonRpcMessage> | undefined;
   private initializedForwarded = false;
@@ -126,17 +121,9 @@ export class McpChildRelay {
       if (this.initializedForwarded) return;
       this.initializedForwarded = true;
     } else if (message.method === 'notifications/cancelled') {
-      const params = message.params;
-      if (params === null || typeof params !== 'object') return;
-      const requestId = (params as { requestId?: unknown }).requestId;
-      const relayId = isRequestId(requestId)
-        ? this.latestByOriginal.get(idKey(requestId))
-        : undefined;
-      if (relayId === undefined) return;
-      this.child.send({
-        ...message,
-        params: { ...params, requestId: relayId },
-      });
+      // The reverse channel does not identify which multiplexed MCP client sent
+      // a notification. Different clients reuse request ids, so forwarding a
+      // cancellation could cancel another client's request.
       return;
     }
     this.child.send(message);
@@ -149,7 +136,6 @@ export class McpChildRelay {
     const relayId = this.nextId++;
     return new Promise((resolve) => {
       this.pending.set(relayId, { originalId, resolve });
-      this.latestByOriginal.set(idKey(originalId), relayId);
       try {
         this.child.send({ ...message, id: relayId });
       } catch (error) {
@@ -198,10 +184,6 @@ export class McpChildRelay {
     const entry = this.pending.get(relayId);
     if (entry === undefined) return;
     this.pending.delete(relayId);
-    const key = idKey(entry.originalId);
-    if (this.latestByOriginal.get(key) === relayId) {
-      this.latestByOriginal.delete(key);
-    }
     entry.resolve(reply);
   }
 

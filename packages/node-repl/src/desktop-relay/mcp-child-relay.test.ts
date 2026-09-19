@@ -102,21 +102,17 @@ describe('McpChildRelay', () => {
     expect(child.sent).toEqual([note]);
   });
 
-  it('rewrites a cancellation to the id the child saw', async () => {
+  it('does not forward ambiguous cancellations from multiplexed clients', async () => {
     const child = new FakeChild();
     const relay = new McpChildRelay(child);
     void relay.handle({ jsonrpc: '2.0', id: 'abc', method: 'tools/call' });
-    const forwardedId = child.last().id;
     await relay.handle({
       jsonrpc: '2.0',
       method: 'notifications/cancelled',
       params: { requestId: 'abc', reason: 'user' },
     });
-    expect(child.last()).toEqual({
-      jsonrpc: '2.0',
-      method: 'notifications/cancelled',
-      params: { requestId: forwardedId, reason: 'user' },
-    });
+    expect(child.sent).toHaveLength(1);
+    expect(child.last().method).toBe('tools/call');
   });
 
   it('replaces a reply above the frame budget with an error', async () => {

@@ -1,7 +1,7 @@
 # 远程 Qwen Code 使用本地桌面机：launchd 按需拉起的 node_repl 中继
 
-> 状态：v3，已实现（本 PR），未在真机上跑过。v1（中继驱动守护进程）和 v2（`qwen bridge` 子命令）都被替换，原因见 §1、§2。
-> 基线：`origin/main` @ `87437db784`（2026-09-14）。代码结论读自这个版本；真机验证步骤见 `docs/verification/remote-computer-use/README.md`。
+> 状态：v3，已实现（本 PR），全量 build、typecheck 和相关单元测试已通过，未在真机上跑过。v1（中继驱动守护进程）和 v2（`qwen bridge` 子命令）都被替换，原因见 §1、§2。
+> 基线：`origin/main` @ `42f9d13cda`（2026-09-19）。真机验证步骤见 `docs/verification/remote-computer-use/README.md`。
 > 关联：#5626（反向工具通道）、#10962（本地文件桥）、#11548（Web Shell 连接远程 daemon）、#11475（远程 daemon 工作流）、`docs/users/features/computer-use.md`
 
 ## 0. 结论
@@ -46,7 +46,7 @@ launchd（inetd 模式）拉起：node-repl-mcp desktop-relay agent
    ├─ 原生确认框（osascript）
    ├─ 拉起 node_repl（stdio，cwd = ~/.qwen/desktop-relay）
    └─ (2) WebSocket /acp ────────────────────────────►  qwen serve（QWEN_SERVE_CLIENT_MCP_OVER_WS=1）
-         ACP initialize → mcp_register {server:'node-repl', sessionId}
+         ACP initialize → mcp_register {server:'desktop-node-repl', sessionId}
          mcp_message ⇄ node_repl                         该会话里出现 node_repl 工具
 ```
 
@@ -80,7 +80,7 @@ launchd 的 inetd 模式把接受的连接作为新进程的 stdin/stdout。进�
 daemon 为每个活跃会话加一个用于发现的 MCP 客户端，经同一个注册接入，每个客户端的请求 id 都从 0 开始；而 `node_repl` 是只服务一个客户端的 stdio server。所以：
 
 - 第一个 `initialize` 转发给子进程，之后的用缓存结果应答；`notifications/initialized` 只转发一次；
-- 请求 id 改写成中继自己的编号，回复时还原；`notifications/cancelled` 的 `requestId` 同样改写；
+- 请求 id 改写成中继自己的编号，回复时还原；反向通道没有携带来源客户端身份，无法安全区分不同客户端复用的请求 id，因此丢弃 `notifications/cancelled`；
 - 子进程发起的请求一律回 -32601（反向通道只承载 daemon 发起的请求），通知丢弃；
 - 回复超过 9 MB 时换成错误（daemon 的 `/acp` 单帧上限 10 MB），提示模型减少输出，比如缩小截图；
 - 子进程退出后，挂起的和之后的请求都返回错误。
@@ -131,17 +131,17 @@ qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@latest \
 
 ## 5. 已核实的事实
 
-| #   | 事实                                                                                                  | 证据                                                                                      |
-| --- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| 1   | skill 的常规路径 `ComputerUse.create()` 使用 `DriverBackend::Embedded`，驱动在 `node_repl` 进程内运行 | `typescript/computer-use/index.js:438-446`；`cua-driver-sdk/src/lib.rs`                   |
-| 2   | standalone 守护进程拒绝非嵌入宿主的 `trusted_session_begin`（错误码 77）                              | `cua-driver-sdk/src/service_session.rs:38`；`cua-driver/src/serve.rs:787`                 |
-| 3   | `node_repl` 的裸包从 `<cwd>/node_modules` 解析                                                        | `packages/node-repl/src/runtime/module-loader.mjs:123`                                    |
-| 4   | skill 只在 `node_repl` 不可用时 bootstrap；参考文档读不到时用 `read_file`，并写明文档不在被控桌面上   | `SKILL.md`（`origin/main` @ `87437db784`）                                                |
-| 5   | `/acp` 升级优先读 `Authorization: Bearer`；跨站检查只在请求带 `Origin` 时生效；单帧上限 10 MB         | `cli/src/serve/acp-http/index.ts:270-300`、`:1568`                                        |
-| 6   | 会话级注册带 `alwaysLoadTools: true`；运行时注册的同名 server 遮蔽设置里的那一项                      | `client-mcp-sender-registry.ts:309`；`core/src/tools/mcp-client-manager.ts`               |
-| 7   | 预热路由：`POST /workspace/acp/preheat`、`POST /workspaces/:workspace/runtime/ensure`                 | `cli/src/serve/routes/workspace-status.ts:150`；`sdk-typescript/.../DaemonClient.ts:6545` |
-| 8   | server 名称只允许 `[A-Za-z0-9_-]`，`node-repl` 合法                                                   | `cli/src/runtime/validate-server-name.ts:7`                                               |
-| 9   | MCP SDK 1.30 的 server 用一个 handler 处理 `initialize`；中继不依赖它能否重复初始化，自己缓存         | `@modelcontextprotocol/sdk/dist/esm/server/index.js:52`                                   |
+| #   | 事实                                                                                                                          | 证据                                                                                      |
+| --- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 1   | skill 的常规路径 `ComputerUse.create()` 使用 `DriverBackend::Embedded`，驱动在 `node_repl` 进程内运行                         | `typescript/computer-use/index.js:438-446`；`cua-driver-sdk/src/lib.rs`                   |
+| 2   | standalone 守护进程拒绝非嵌入宿主的 `trusted_session_begin`（错误码 77）                                                      | `cua-driver-sdk/src/service_session.rs:38`；`cua-driver/src/serve.rs:787`                 |
+| 3   | `node_repl` 的裸包从 `<cwd>/node_modules` 解析                                                                                | `packages/node-repl/src/runtime/module-loader.mjs:123`                                    |
+| 4   | skill 只在 `node_repl` 不可用时 bootstrap；平台参考文档始终由托管 skill 的主机用 `read_file` 读取，不让远端 REPL 读取本机路径 | `packages/core/src/skills/bundled/computer-use/SKILL.md`                                  |
+| 5   | `/acp` 升级优先读 `Authorization: Bearer`；跨站检查只在请求带 `Origin` 时生效；单帧上限 10 MB                                 | `cli/src/serve/acp-http/index.ts:270-300`、`:1568`                                        |
+| 6   | 会话级注册带 `alwaysLoadTools: true`；client MCP 不允许遮蔽设置里的同名 server，因此 Web 路径使用独立名称 `desktop-node-repl` | `client-mcp-sender-registry.ts`；`core/src/tools/mcp-client-manager.ts`                   |
+| 7   | 预热路由：`POST /workspace/acp/preheat`、`POST /workspaces/:workspace/runtime/ensure`                                         | `cli/src/serve/routes/workspace-status.ts:150`；`sdk-typescript/.../DaemonClient.ts:6545` |
+| 8   | server 名称只允许 `[A-Za-z0-9_-]`，`desktop-node-repl` 合法                                                                   | `cli/src/runtime/validate-server-name.ts:7`                                               |
+| 9   | MCP SDK 1.30 的 server 用一个 handler 处理 `initialize`；中继不依赖它能否重复初始化，自己缓存                                 | `@modelcontextprotocol/sdk/dist/esm/server/index.js:52`                                   |
 
 ## 6. 未验证（需要真机）
 

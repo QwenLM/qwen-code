@@ -1,7 +1,7 @@
 # 交接：远程 Qwen Code 使用本地桌面机（PR #11799）
 
 > 写给接手的 session 或 agent。按顺序阅读：本文 → 方案 `docs/plans/2026-09-14-remote-computer-use-desktop-relay.md` → 真机验证说明 `docs/verification/remote-computer-use/README.md`。
-> 状态（2026-09-14，第四次修订）：**代码已实现并推到本 PR**，没有在任何机器上构建、测试或运行过。CI 是第一道验证；真机行为要按验证说明跑。
+> 状态（2026-09-19，第五次修订）：**代码已实现并推到本 PR**。全量 build、typecheck，以及桌面 relay、computer-use skill 和 Web Shell 的定向单元测试已通过；真机行为仍要按验证说明跑。
 
 ## 1. 现在在哪
 
@@ -11,7 +11,9 @@
   - `packages/node-repl/src/index.ts`：`desktop-relay` 参数动态加载上面的模块；
   - `packages/node-repl/package.json`、`package-lock.json`：新增 `ws` 和 `@types/ws`（根目录已有同版本，锁文件只加了两行依赖声明）；
   - `packages/web-shell/client/desktop-relay/`、`components/DesktopRelayControl.tsx`：“使用这台电脑”入口和测试；侧边栏底部新增 `desktopRelay` 项；中英文文案；
+  - `packages/core/src/skills/bundled/computer-use/SKILL.md`：Web 路径优先使用独立的 `desktop-node-repl` server，平台参考文档由远端 skill 主机读取；
   - 文档：`docs/users/features/computer-use.md` 新增一节；`packages/node-repl/README.md` 新增 Desktop relay 一节；本目录下的方案、交接和验证说明。
+- 2026-09-19 修订关闭了五个代码问题：client MCP 与 settings 中的 `node-repl` 同名冲突、多客户端取消消息串线、SDK pin 漂移、`uninstall --purge --home` 可递归删除任意目录，以及交互侧文案被打进只读 transcript 后超过 bundle 上限。
 - 用户原始诉求：远程 Linux 开发机（无图形界面）上的 Qwen Code，能通过 computer use 操作用户面前那台有图形界面的机器。
 
 ## 2. 用户的工作约定（必须遵守）
@@ -41,7 +43,7 @@
 
 ## 5. 下一步
 
-1. 看 CI：`packages/node-repl` 和 `packages/web-shell` 的单元测试、lint、typecheck。本 PR 的代码没有在本机跑过任何一项。
+1. 看 2026-09-19 修订后的 CI；本地 Node 22 已通过全量 build 和 typecheck，以及桌面 relay 44 项测试、computer-use skill 7 项测试和 Web Shell 14 项测试。
 2. 真机验证：按 `docs/verification/remote-computer-use/README.md` 执行，结果写到同目录的 `results.md` 推到本分支。重点是方案 §6 列出的未验证项。
 3. 根据验证结果修订；Linux 桌面（systemd socket 激活）和 Windows 的安装方式放到后续。
 

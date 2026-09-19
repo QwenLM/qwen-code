@@ -53,6 +53,24 @@ function currentUid(): number {
   return process.getuid?.() ?? os.userInfo().uid;
 }
 
+export function isRelayHome(home: string): boolean {
+  if (home === path.parse(home).root || home === os.homedir()) return false;
+  try {
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(home, 'package.json'), 'utf8'),
+    ) as { name?: unknown };
+    return manifest.name === 'qwen-desktop-relay-runtime';
+  } catch {
+    return false;
+  }
+}
+
+export function purgeRelayHome(home: string): boolean {
+  if (!isRelayHome(home)) return false;
+  fs.rmSync(home, { recursive: true, force: true });
+  return true;
+}
+
 function npmInvocation(): { command: string; args: string[] } {
   const npmCli = process.env['npm_execpath'];
   // Under npx this is npm's own CLI script; run it with the same Node.
@@ -171,7 +189,13 @@ function uninstall(args: string[]): number {
     });
   }
   if (args.includes('--purge')) {
-    fs.rmSync(homeFrom(args), { recursive: true, force: true });
+    const home = homeFrom(args);
+    if (!purgeRelayHome(home)) {
+      process.stderr.write(
+        `Refusing to purge ${home}: it is not a desktop relay runtime directory.\n`,
+      );
+      return 1;
+    }
   }
   process.stdout.write('The desktop relay is no longer registered.\n');
   return 0;

@@ -43,13 +43,99 @@ export type DesktopRelayBlocker =
   | 'workspace-ineligible'
   | 'workspace-resolving';
 
+const COPY = {
+  en: {
+    'desktopRelay.title': 'This computer',
+    'desktopRelay.trigger': 'Use this computer',
+    'desktopRelay.hint':
+      'Lets this session run code on this computer and see and control its screen, for Computer Use. You approve each connection in a dialog on this computer.',
+    'desktopRelay.connect': 'Connect this computer',
+    'desktopRelay.disconnect': 'Disconnect',
+    'desktopRelay.checkAgain': 'Check again',
+    'desktopRelay.copy': 'Copy command',
+    'desktopRelay.copied': 'Copied',
+    'desktopRelay.setupHint':
+      'Set up once: run this in a terminal on this computer, then check again. It registers a macOS launchd socket; nothing keeps running in the background.',
+    'desktopRelay.approveHint':
+      'Approve the request in the dialog that opened on this computer.',
+    'desktopRelay.otherSessionHint':
+      'This computer is connected to another session. Connecting here replaces that connection.',
+    'desktopRelay.needsSessionHint':
+      'Start a session first. The connection binds to exactly one session.',
+    'desktopRelay.status.checking': 'Checking…',
+    'desktopRelay.status.missing': 'Not set up',
+    'desktopRelay.status.idle': 'Not connected',
+    'desktopRelay.status.awaitingApproval': 'Waiting for approval',
+    'desktopRelay.status.connecting': 'Connecting…',
+    'desktopRelay.status.connected': 'Connected',
+    'desktopRelay.status.otherSession': 'In use by another session',
+    'desktopRelay.status.failed': 'Failed',
+    'desktopRelay.status.unavailable': 'Unavailable here',
+    'desktopRelay.status.needsSession': 'Waiting for a session',
+    'desktopRelay.blocker.insecureContext':
+      'Browsers only let a secure page reach this computer. Open the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
+    'desktopRelay.blocker.unsupportedDaemon':
+      'This daemon does not advertise the reverse tool channel (client_mcp_over_ws). Start it with QWEN_SERVE_CLIENT_MCP_OVER_WS=1.',
+    'desktopRelay.blocker.workspaceIneligible':
+      "This conversation's workspace cannot use this computer (untrusted or live workspace).",
+    'desktopRelay.blocker.workspaceResolving':
+      'Which workspace this conversation belongs to is not known yet.',
+    'desktopRelay.error.denied': 'The request was declined on this computer.',
+    'desktopRelay.error.unreachable':
+      'Could not reach the desktop relay on this computer.',
+  },
+  'zh-CN': {
+    'desktopRelay.title': '这台电脑',
+    'desktopRelay.trigger': '使用这台电脑',
+    'desktopRelay.hint':
+      '让当前会话在这台电脑上运行代码、查看并操作屏幕，用于 Computer Use。每次连接都要在这台电脑弹出的对话框里确认。',
+    'desktopRelay.connect': '连接这台电脑',
+    'desktopRelay.disconnect': '断开',
+    'desktopRelay.checkAgain': '重新检测',
+    'desktopRelay.copy': '复制命令',
+    'desktopRelay.copied': '已复制',
+    'desktopRelay.setupHint':
+      '只需设置一次：在这台电脑的终端里运行下面的命令，然后重新检测。它注册一个 macOS launchd socket，平时没有进程在后台运行。',
+    'desktopRelay.approveHint': '请在这台电脑弹出的对话框里确认。',
+    'desktopRelay.otherSessionHint':
+      '这台电脑已连接到另一个会话。在这里连接会替换那个连接。',
+    'desktopRelay.needsSessionHint': '请先创建一个会话。连接只绑定一个会话。',
+    'desktopRelay.status.checking': '检测中…',
+    'desktopRelay.status.missing': '未设置',
+    'desktopRelay.status.idle': '未连接',
+    'desktopRelay.status.awaitingApproval': '等待确认',
+    'desktopRelay.status.connecting': '连接中…',
+    'desktopRelay.status.connected': '已连接',
+    'desktopRelay.status.otherSession': '被其他会话使用中',
+    'desktopRelay.status.failed': '连接失败',
+    'desktopRelay.status.unavailable': '当前环境不可用',
+    'desktopRelay.status.needsSession': '等待会话',
+    'desktopRelay.blocker.insecureContext':
+      '浏览器只允许安全页面访问这台电脑。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
+    'desktopRelay.blocker.unsupportedDaemon':
+      '该 daemon 未启用反向工具通道（client_mcp_over_ws）。请以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动它。',
+    'desktopRelay.blocker.workspaceIneligible':
+      '该会话的工作区不能使用这台电脑（不受信任或 live 工作区）。',
+    'desktopRelay.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
+    'desktopRelay.error.denied': '请求在这台电脑上被拒绝。',
+    'desktopRelay.error.unreachable': '无法连接到这台电脑上的桌面中继。',
+  },
+} as const;
+
+type CopyKey = keyof (typeof COPY)['en'];
+
+function useDesktopRelayCopy(): (key: CopyKey) => string {
+  const { language } = useI18n();
+  return useCallback((key: CopyKey) => COPY[language][key], [language]);
+}
+
 export interface DesktopRelayStatus {
   phase: DesktopRelayPhase;
   blocker?: DesktopRelayBlocker;
   message?: string;
 }
 
-const STATUS_KEY: Record<DesktopRelayPhase, string> = {
+const STATUS_KEY: Record<DesktopRelayPhase, CopyKey> = {
   unavailable: 'desktopRelay.status.unavailable',
   'needs-session': 'desktopRelay.status.needsSession',
   checking: 'desktopRelay.status.checking',
@@ -62,7 +148,7 @@ const STATUS_KEY: Record<DesktopRelayPhase, string> = {
   failed: 'desktopRelay.status.failed',
 };
 
-const BLOCKER_KEY: Record<DesktopRelayBlocker, string> = {
+const BLOCKER_KEY: Record<DesktopRelayBlocker, CopyKey> = {
   'insecure-context': 'desktopRelay.blocker.insecureContext',
   'unsupported-daemon': 'desktopRelay.blocker.unsupportedDaemon',
   'workspace-ineligible': 'desktopRelay.blocker.workspaceIneligible',
@@ -153,7 +239,7 @@ export function DesktopRelayPanel({
   onCheckAgain,
   onCopyCommand,
 }: DesktopRelayPanelProps) {
-  const { t } = useI18n();
+  const t = useDesktopRelayCopy();
   const { phase } = status;
 
   return (
@@ -269,7 +355,7 @@ export function DesktopRelayControl({
   triggerClassName,
   workspaces,
 }: DesktopRelayControlProps) {
-  const { t } = useI18n();
+  const t = useDesktopRelayCopy();
   const { baseUrl, token, capabilities } = useWorkspace();
   const { sessionId, workspaceCwd } = useConnection();
   const [open, setOpen] = useState(false);

@@ -25,7 +25,7 @@ ls packages/node-repl/qwen-code-node-repl-mcp-*.tgz
 
 ```bash
 node packages/node-repl/dist/index.js desktop-relay install \
-  --package "$(pwd)/packages/node-repl/qwen-code-node-repl-mcp-0.1.4.tgz"
+  --package "$(ls -t "$PWD"/packages/node-repl/qwen-code-node-repl-mcp-*.tgz | head -1)"
 ```
 
 预期：npm 把两个包装到 `~/.qwen/desktop-relay`；打印 “registered on 127.0.0.1:47821”。然后：
@@ -42,7 +42,7 @@ node packages/node-repl/dist/index.js desktop-relay status
 ```bash
 # 1. /status：任何来源都能看到已安装，但看不到连接详情
 curl -s -H 'Host: 127.0.0.1:47821' -H 'Origin: https://example.com' http://127.0.0.1:47821/status
-# 预期：{"ok":true,"version":"0.1.4"}
+# 预期：`ok` 为 `true`，`version` 与刚打包的版本一致
 
 # 2. 外来 Host（模拟 DNS rebinding）
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: evil.example:47821' http://127.0.0.1:47821/status

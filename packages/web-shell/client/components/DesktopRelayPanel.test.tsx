@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
+import type { WebShellLanguage } from '../i18n';
 import {
   DesktopRelayPanel,
   deriveDesktopRelayStatus,
@@ -21,7 +22,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-function mount(status: DesktopRelayStatus) {
+function mount(status: DesktopRelayStatus, language: WebShellLanguage = 'en') {
   const handlers = {
     onConnect: vi.fn(),
     onDisconnect: vi.fn(),
@@ -33,7 +34,7 @@ function mount(status: DesktopRelayStatus) {
   root = createRoot(container);
   act(() => {
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <DesktopRelayPanel
           status={status}
           installCommand="npx -y @qwen-code/node-repl-mcp@latest desktop-relay install"
@@ -93,6 +94,11 @@ describe('DesktopRelayPanel', () => {
   it('explains why the entry is unavailable', () => {
     mount({ phase: 'unavailable', blocker: 'unsupported-daemon' });
     expect(text()).toContain('QWEN_SERVE_CLIENT_MCP_OVER_WS=1');
+  });
+
+  it('uses the current Web Shell language', () => {
+    mount({ phase: 'idle' }, 'zh-CN');
+    expect(button('连接这台电脑')).toBeDefined();
   });
 });
 

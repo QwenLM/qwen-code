@@ -6,6 +6,8 @@ description: Control local desktop applications through Computer Use for tasks t
 ## node_repl + @qwen-code/cua-sdk (Computer Use)
 
 - Use `node_repl` (JavaScript) for all Computer Use actions.
+- If both servers are available, use `node_repl` from the
+  `desktop-node-repl` MCP server; the regular server runs on the Qwen Code host.
 - Do not use other technologies besides `node_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, synthesized input).
 - Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
 - `node_repl` state is persistent across calls.
@@ -17,10 +19,16 @@ description: Control local desktop applications through Computer Use for tasks t
 When calling `node_repl` through `tools.*` inside Codex's outer `functions.exec`,
 forward each returned `content` block by its type. `nodeRepl.emitImage(...)`
 produces an MCP image block; the outer script must pass that block to `image()`
-for the model to receive an image. Use the tool name exposed by your MCP server:
+for the model to receive an image. Prefer the desktop relay tool when it is
+present; otherwise use the regular `node-repl` server:
 
 ```js
-const result = await tools.mcp__node_repl__node_repl({ code });
+const nodeReplTool = ALL_TOOLS.some(
+  ({ jsName }) => jsName === 'mcp__desktop_node_repl__node_repl',
+)
+  ? tools.mcp__desktop_node_repl__node_repl
+  : tools.mcp__node_repl__node_repl;
+const result = await nodeReplTool({ code });
 for (const block of result.content ?? []) {
   if (block.type === 'text') {
     text(block.text);
@@ -55,37 +63,27 @@ run the second command and retry.
 
 Reuse an existing `computer` connected to the intended desktop. Otherwise import
 the `ComputerUse` API once per fresh `node_repl` session. Combine initialization
-and connected-platform discovery in one call. Linux uses the complete workflow below
-in this file. macOS and Windows also read their selected resource in that call;
-set `skillBase` to the absolute Skill base directory shown by the skill loader
-or the file you just read:
+and connected-platform discovery in one call. Linux uses the complete workflow
+below in this file:
 
 ```js
 globalThis.computer = await (
   await import('@qwen-code/cua-sdk/computer-use')
 ).ComputerUse.create();
 var platform = await computer.getPlatform();
-var reference = {
-  macos: 'macos.md',
-  windows: 'windows-linux.md',
-}[platform];
-if (!reference && platform !== 'linux') {
+if (!['linux', 'macos', 'windows'].includes(platform)) {
   throw new Error('Unsupported connected platform');
 }
 nodeRepl.write(`Connected platform: ${platform}`);
-if (reference) {
-  var skillBase = '/absolute/path/to/computer-use';
-  nodeRepl.write(
-    await (
-      await import('node:fs/promises')
-    ).readFile(`${skillBase}/references/${reference}`, 'utf8'),
-  );
-}
 ```
 
+For macOS or Windows, read the selected resource with the host `read_file` tool
+before the next `node_repl` call. The relayed REPL may run on another computer
+and cannot read files from the machine hosting this Skill.
+
 If the returned platform is `macos` and the task already identifies an
-unambiguous app, append its initial observation to that same initialization
-call, after printing the resource:
+unambiguous app, bind it and read its initial state in the next call, after
+reading the resource:
 
 ```js
 if (platform === 'macos') {
@@ -96,7 +94,7 @@ if (platform === 'macos') {
 
 Replace the example app name with the task's app. This only binds the app and
 reads its current state; `getState()` can open that app if stopped. Read both
-the returned platform workflow and initial state before any editing or input.
+the platform workflow and initial state before any editing or input.
 If the app is unknown or ambiguous, omit this block and follow the selected
 resource's discovery steps. Do not guess an app or use the host platform.
 
@@ -107,16 +105,15 @@ driver may control a different machine. If the platform cannot be determined,
 resolve the reported driver/SDK error before continuing; do not guess a platform.
 
 For Linux, use the workflow below directly; no additional skill file is needed.
-For macOS or Windows, initialization reads exactly one resource. If filesystem
-imports are unavailable, use the following fallback before any UI work.
-Read exactly one resource with `read_file`, resolving its absolute path from the
-Skill base directory shown above:
+For macOS or Windows, read exactly one resource with `read_file` before any UI
+work, resolving its absolute path from the Skill base directory shown by the
+skill loader:
 
 - `macos`: read `references/macos.md` for the App workflow and text operations.
 - `windows`: read `references/windows-linux.md` for the exact-window workflow.
 
-On macOS and Windows, read the selected resource before taking actions. Once it
-has been printed in the initialization result, do not read it again. After
+On macOS and Windows, read the selected resource before taking actions. Do not
+read it again in the same session. After
 changing the connected desktop, query its platform again and follow that
 platform’s workflow. Resource files remain on the machine hosting this Skill;
 do not look for them on the controlled desktop.
