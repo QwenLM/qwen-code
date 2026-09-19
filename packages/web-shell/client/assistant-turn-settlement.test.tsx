@@ -45,7 +45,7 @@ function assistantBlock(
     promptId?: string;
     parentToolCallId?: string;
     streaming?: boolean;
-    meta?: { source?: string };
+    meta?: Record<string, unknown>;
   } = {},
 ): DaemonTranscriptBlock {
   return {
@@ -58,6 +58,23 @@ function assistantBlock(
     streaming: false,
     ...init,
   } as unknown as DaemonTranscriptBlock;
+}
+
+/**
+ * The meta of a `/compress` result block: `source` stays `slash_command`, and
+ * the renderer decides it is a system row from the payload keys (#12141).
+ */
+function compressionMeta(): Record<string, unknown> {
+  return {
+    source: 'slash_command',
+    contextCompression: {
+      phase: 'done',
+      originalTokenCount: 2123,
+      newTokenCount: 58,
+      originalTokenCountIsEstimated: true,
+      newTokenCountIsEstimated: true,
+    },
+  };
 }
 
 function toolBlock(id: string, toolCallId: string): DaemonTranscriptBlock {
@@ -268,6 +285,57 @@ describe('assistant turn settlement projection', () => {
       isStreaming: false,
       timestamp: 1,
     });
+  });
+
+  it('does not publish a prompt-stamped compression line as the turn answer', () => {
+    // `/compress` stamps its result block with the foreground prompt's id, and
+    // the renderer shows it as a `role: 'system'` row. Its `meta.source` is
+    // `slash_command`, so a `meta.source` exclusion list cannot see it — the
+    // guard has to ask the adapter. Reverting it to that list turns this red.
+    harness.blocks = [
+      assistantBlock('assistant-1', 'Real answer text.', {
+        promptId: 'prompt-live',
+      }),
+      assistantBlock('assistant-5', 'Context compressed (~2123 -> ~58).', {
+        promptId: 'prompt-live',
+        meta: compressionMeta(),
+      }),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled.message).toEqual({
+      id: 'assistant-1',
+      content: 'Real answer text.',
+      isStreaming: false,
+      timestamp: 1,
+    });
+  });
+
+  it('publishes no message when a compression line is the only stamped block', () => {
+    // A turn that ends on the compression itself (cancel or `turn_error` right
+    // after it) leaves no answer to publish. Certifying the system row as one
+    // is unrecoverable: `publishPromptSettlement` burns the key first.
+    harness.blocks = [
+      assistantBlock('assistant-5', 'Context compressed (~2123 -> ~58).', {
+        promptId: 'prompt-live',
+        meta: compressionMeta(),
+      }),
+    ];
+
+    const settled = mountAndSettle({
+      sessionId: 'session-1',
+      promptId: 'prompt-live',
+      outcome: 'completed',
+      stopReason: 'end_turn',
+    });
+
+    expect(settled).not.toHaveProperty('message');
   });
 
   it('skips a whitespace-only assistant block after a tool boundary', () => {

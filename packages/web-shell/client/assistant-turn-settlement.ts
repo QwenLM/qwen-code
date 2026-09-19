@@ -15,7 +15,10 @@ import type {
   WebShellAssistantMessageInfo,
   WebShellAssistantTurnSettledEvent,
 } from './customization.js';
-import { assistantVisibleTextOf } from './adapters/transcriptToMessages.js';
+import {
+  assistantBlockRendersAsSystemNotice,
+  assistantVisibleTextOf,
+} from './adapters/transcriptToMessages.js';
 
 type AssistantTurnSettledHandler = (
   event: WebShellAssistantTurnSettledEvent,
@@ -48,16 +51,16 @@ function getSettledAssistantMessage(
     // id belongs to that prompt. A notice this package renders as
     // `role: 'system'` is not an answer either, even though the bridge stamps
     // it with the foreground prompt's id: an inline background-notification
-    // drain and the pre-model vision-bridge notice both are. That exclusion set
-    // is the sibling implementation's, not the SDK's — the SDK's
-    // `findFinalVisibleAssistantForPrompt` has no `meta.source` term
-    // (`turn-notification-context.ts` does). None is this answer.
+    // drain, the pre-model vision-bridge notice and a `/compress` line all are.
+    // The adapter is asked which those are rather than a `meta.source` list
+    // consulted, because the renderer does not decide it that way: the
+    // compression notice is recognised by payload keys while its `meta.source`
+    // is `slash_command`. None is this answer.
     if (
       block?.kind !== 'assistant' ||
       block.parentToolCallId !== undefined ||
       block.promptId !== promptId ||
-      block.meta?.source === 'background_notification' ||
-      block.meta?.source === 'vision_bridge_notice'
+      assistantBlockRendersAsSystemNotice(block)
     ) {
       continue;
     }

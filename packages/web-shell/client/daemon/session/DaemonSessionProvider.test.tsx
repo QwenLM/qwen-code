@@ -11943,6 +11943,9 @@ describe('DaemonSessionProvider', () => {
       );
       await flushPromises();
     });
+    // Current behavior, not desired, pinned deliberately: the replay publish is
+    // gated on local admission and this prompt was never admitted, so the
+    // settlement the live path withheld is never re-published (#12230).
     expect(settlements).toEqual([]);
   });
 
