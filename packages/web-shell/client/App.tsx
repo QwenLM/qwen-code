@@ -187,7 +187,10 @@ import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
-import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
+import {
+  DaemonConnectionsSettings,
+  DaemonStatusDialog,
+} from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
@@ -258,6 +261,23 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
+import { StandaloneContext } from './config/standalone';
+import {
+  clearRemoteWorkspaceAddStep,
+  completeRemoteWorkspaceAdd,
+  discardAbandonedRemoteWorkspaceAdd,
+  getRemoteWorkspaceAddStep,
+  leaveRemoteWorkspaceAdd,
+  selectRemoteWorkspaceLocation,
+} from './config/remote-workspace-add';
+import {
+  clearInitialConnectionsSettingsCategory,
+  formatOriginHost,
+  getInitialConnectionsSettingsCategory,
+  listRemoteComputers,
+} from './config/remote-connections';
+import { getDaemonToken, isPageOriginDaemon } from './config/daemon';
 import { Button } from './components/ui/button';
 import {
   isPluginShadowPanel,
@@ -443,8 +463,10 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
+  type WebShellAssistantTurnSettledEvent,
   type WebShellSessionArtifactsChange,
 } from './customization';
+import { useAssistantTurnSettlementProjection } from './assistant-turn-settlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
@@ -1429,6 +1451,12 @@ export interface WebShellProps {
   composerInputVersion?: number;
   /** Called when a session-level event occurs (rename, submit, turn complete). */
   onSessionChange?: (event: SessionChangeEvent) => void;
+  /**
+   * Called for authoritative terminals observed live, or replayed for a prompt
+   * this provider admitted. Multiple mounted providers can report the same
+   * `(sessionId, promptId)`, so hosts should deduplicate by that key.
+   */
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Prepare the immutable payload for a daemon submission. Called once for a
    * direct or queued logical submit, after local command routing and before
@@ -3123,6 +3151,7 @@ export function App({
   composerInput,
   composerInputVersion,
   onSessionChange,
+  onAssistantTurnSettled,
   prepareSubmit,
   onSubmitBefore,
   restartSseOnPrompt,
@@ -3131,6 +3160,7 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -3404,6 +3434,7 @@ export function App({
     structuralOnly: true,
   });
   const connection = useConnection();
+  const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,
@@ -3638,7 +3669,25 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [initialRemoteWorkspaceAddStep] = useState(() =>
+    standalone ? getRemoteWorkspaceAddStep() : undefined,
+  );
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
+    initialRemoteWorkspaceAddStep === 'browse',
+  );
+  // Browsing the daemon's folders, whether this tab navigated here for it or
+  // opened the browser in place.
+  const workspaceBrowseActiveRef = useRef(
+    initialRemoteWorkspaceAddStep === 'browse',
+  );
+  useEffect(() => {
+    // No marker on a standalone boot means the hand-over that wrote the return
+    // location was abandoned (reload or Back), not resumed. Dropping it here
+    // keeps a later Cancel in an unrelated Add-workspace dialog from consuming
+    // the stale location and navigating the shell away.
+    if (initialRemoteWorkspaceAddStep) clearRemoteWorkspaceAddStep();
+    else if (standalone) discardAbandonedRemoteWorkspaceAdd();
+  }, [initialRemoteWorkspaceAddStep, standalone]);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -8722,6 +8771,9 @@ export function App({
   ]);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
+  const [initialConnectionsSettingsCategory] = useState(() =>
+    standalone ? getInitialConnectionsSettingsCategory() : undefined,
+  );
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
@@ -8737,7 +8789,7 @@ export function App({
     | 'channels'
     | 'workspaces'
     | null
-  >(null);
+  >(initialConnectionsSettingsCategory ? 'settings' : null);
   const activePanelRef = useRef(activePanel);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
@@ -8745,7 +8797,12 @@ export function App({
   // overlay auto-close, openScheduledTasks, openSplitView, ...).
   const [settingsInitialCategory, setSettingsInitialCategory] = useState<
     string | undefined
-  >();
+  >(initialConnectionsSettingsCategory);
+  useEffect(() => {
+    if (initialConnectionsSettingsCategory) {
+      clearInitialConnectionsSettingsCategory();
+    }
+  }, [initialConnectionsSettingsCategory]);
   useEffect(() => {
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
@@ -8763,14 +8820,20 @@ export function App({
     if (workspaceContextActive) return;
     splitClassificationGenerationRef.current += 1;
     if (!projectFeaturesAvailable) setSplitSessionIds([]);
-    if (!projectFeaturesAvailable && activePanel !== 'status') {
+    if (
+      !projectFeaturesAvailable &&
+      activePanel !== 'status' &&
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+    ) {
       setActivePanel(null);
     }
     setShowResumeDialog(false);
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
     if (!projectFeaturesAvailable) setShowMemoryDialog(false);
-    setShowAddWorkspaceDialog(false);
+    if (!workspaceBrowseActiveRef.current) {
+      setShowAddWorkspaceDialog(false);
+    }
     setGitDialog(undefined);
     if (
       !projectFeaturesAvailable &&
@@ -8794,6 +8857,7 @@ export function App({
     mainView,
     modelDialogMode,
     projectFeaturesAvailable,
+    initialConnectionsSettingsCategory,
     workspaceContextActive,
   ]);
   const handleUseSkill = useCallback(
@@ -13186,6 +13250,50 @@ export function App({
       workspaceActions,
     ],
   );
+  const handleAddRemoteWorkspace = useCallback(
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      await handleAddWorkspace(cwd, persist, displayName);
+      workspaceBrowseActiveRef.current = false;
+      completeRemoteWorkspaceAdd();
+    },
+    [handleAddWorkspace],
+  );
+
+  const closeAddWorkspaceDialog = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    if (!workspaceBrowseActiveRef.current) return;
+    workspaceBrowseActiveRef.current = false;
+    leaveRemoteWorkspaceAdd();
+  }, []);
+
+  const workspaceAddSelectedLocation =
+    workspace.baseUrl || window.location.origin;
+  const workspaceAddLocations = standalone
+    ? [
+        {
+          origin: window.location.origin,
+          label: t('workspaceHost.thisComputer'),
+          remote: false,
+        },
+        ...listRemoteComputers().map((origin) => ({
+          origin,
+          label: formatOriginHost(origin),
+          remote: true,
+        })),
+      ]
+    : undefined;
+  const hasRemoteWorkspaceLocation = (workspaceAddLocations?.length ?? 0) > 1;
+  const changeWorkspaceAddLocation = useCallback((origin: string) => {
+    return selectRemoteWorkspaceLocation(origin, getDaemonToken(origin));
+  }, []);
+
+  // Which computer the folder step is reading, for loading and error states.
+  const workspaceAddRemoteHost = isPageOriginDaemon(workspace.baseUrl)
+    ? undefined
+    : formatOriginHost(workspace.baseUrl);
+  const workspaceAddLocationSubtitle = workspaceAddRemoteHost
+    ? t('workspaceHost.folderOn', { address: workspaceAddRemoteHost })
+    : t('workspaceHost.folderOnThisComputer');
 
   /**
    * Reconciles either a known committed cwd or an unknown POST outcome. Known
@@ -13295,8 +13403,9 @@ export function App({
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
   const handleOpenExistingWorkspace = useCallback(() => {
+    workspaceBrowseActiveRef.current = standalone;
     setShowAddWorkspaceDialog(true);
-  }, []);
+  }, [standalone]);
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -18464,29 +18573,66 @@ export function App({
               />
             </DialogShell>
           )}
-          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
-            <AddWorkspaceDialog
-              onClose={() => setShowAddWorkspaceDialog(false)}
-              onAdd={handleAddWorkspace}
-              onSuggest={workspaceActions.suggestWorkspacePaths}
-              onPick={
-                nativeDirectoryPickerSupported &&
-                (!workspace.baseUrl ||
-                  new URL(workspace.baseUrl, window.location.origin).origin ===
-                    window.location.origin)
-                  ? async () => {
-                      const result =
-                        await workspaceActions.pickWorkspaceDirectory();
-                      return result.selected ? result.path : undefined;
-                    }
-                  : undefined
-              }
-              persistenceSupported={
-                persistentWorkspaceRegistrationSupported
-              }
-              displayNameEnabled={workspaceDisplayNameSupported}
-            />
-          )}
+          {!lockedWorkspaceCwd &&
+            showAddWorkspaceDialog &&
+            (workspaceBrowseActiveRef.current && !workspaceCapabilitiesReady ? (
+              <WorkspaceAddStatusDialog
+                message={t(
+                  workspace.status === 'error'
+                    ? 'workspaceHost.connectionError'
+                    : 'workspaceHost.loadingFolders',
+                )}
+                tone={workspace.status === 'error' ? 'alert' : 'status'}
+                subtitle={workspaceAddLocationSubtitle}
+                onClose={closeAddWorkspaceDialog}
+              />
+            ) : workspaceBrowseActiveRef.current &&
+              !dynamicWorkspaceRegistrationSupported ? (
+              <WorkspaceAddStatusDialog
+                message={t('workspaceHost.unsupported')}
+                tone="alert"
+                subtitle={workspaceAddLocationSubtitle}
+                onClose={closeAddWorkspaceDialog}
+              />
+            ) : (
+              <AddWorkspaceDialog
+                browseDirectories={workspaceBrowseActiveRef.current}
+                initialPath={
+                  workspaceBrowseActiveRef.current
+                    ? workspace.capabilities?.workspaceCwd?.replace(
+                        /[^\\/]+[\\/]?$/,
+                        '',
+                      ) ||
+                      workspace.capabilities?.workspaceCwd ||
+                      '/'
+                    : undefined
+                }
+                locations={workspaceAddLocations}
+                selectedLocation={workspaceAddSelectedLocation}
+                onLocationChange={changeWorkspaceAddLocation}
+                onClose={closeAddWorkspaceDialog}
+                onAdd={
+                  workspaceBrowseActiveRef.current
+                    ? handleAddRemoteWorkspace
+                    : handleAddWorkspace
+                }
+                onSuggest={workspaceActions.suggestWorkspacePaths}
+                onPick={
+                  nativeDirectoryPickerSupported &&
+                  (!workspace.baseUrl ||
+                    new URL(workspace.baseUrl, window.location.origin)
+                      .origin === window.location.origin)
+                    ? async () => {
+                        const result =
+                          await workspaceActions.pickWorkspaceDirectory();
+                        return result.selected ? result.path : undefined;
+                      }
+                    : undefined
+                }
+                persistenceSupported={persistentWorkspaceRegistrationSupported}
+                displayNameEnabled={workspaceDisplayNameSupported}
+              />
+            ))}
           {scratchOutcomeUnknown !== 'clear' && (
             <DialogShell
               title={t('sidebar.scratchOutcomeUnknownTitle')}
@@ -18697,8 +18843,9 @@ export function App({
                       : undefined
                   }
                   onOpenAddWorkspace={
-                    dynamicWorkspaceRegistrationSupported
-                      ? () => setShowAddWorkspaceDialog(true)
+                    dynamicWorkspaceRegistrationSupported ||
+                    hasRemoteWorkspaceLocation
+                      ? handleOpenExistingWorkspace
                       : undefined
                   }
                   workspaces={workspaces}
@@ -19104,6 +19251,9 @@ export function App({
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
+                        connections={
+                          standalone ? <DaemonConnectionsSettings /> : undefined
+                        }
                         modelManagement={{
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
@@ -19208,8 +19358,9 @@ export function App({
                         // createNewSession's default (no keepPanel) does that.
                         onNewSession={handlePanelNewSession}
                         onAddWorkspace={
-                          dynamicWorkspaceRegistrationSupported
-                            ? () => setShowAddWorkspaceDialog(true)
+                          dynamicWorkspaceRegistrationSupported ||
+                          hasRemoteWorkspaceLocation
+                            ? handleOpenExistingWorkspace
                             : undefined
                         }
                         onError={reportError}
@@ -19595,6 +19746,7 @@ export function App({
                       <SplitView
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
+                        onAssistantTurnSettled={onAssistantTurnSettled}
                         showSessionDetails={
                           (sidebarOptions.sessionActions?.items ??
                             DEFAULT_SESSION_ACTION_ITEMS).includes('details')
