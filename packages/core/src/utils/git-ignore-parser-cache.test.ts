@@ -36,6 +36,10 @@ describe('GitIgnoreParser cache retention', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it('keeps the matcher cache reset interval within the retention budget', () => {
+    expect(MATCHER_CACHE_RESET_INTERVAL).toBeLessThanOrEqual(10_000);
+  });
+
   it('shares compiled rules between directories with the same ignore chain', async () => {
     for (let i = 0; i < 100; i++) {
       const dir = `scratch-${i}`;

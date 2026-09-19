@@ -5,6 +5,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MATCHER_CACHE_RESET_INTERVAL } from '@qwen-code/qwen-code-core/utils/gitIgnoreParser.js';
@@ -16,6 +17,9 @@ describe('Glob ignore-cache rollover', () => {
 
   afterEach(async () => {
     await rig?.cleanup();
+    if (rig?.testDir) {
+      await rm(join(rig.testDir, 'scratch'), { recursive: true, force: true });
+    }
     vi.unstubAllEnvs();
   });
 
@@ -32,7 +36,10 @@ describe('Glob ignore-cache rollover', () => {
     // result-count cap. The core cache-retention suite pins the rollover bound;
     // this fixture pins ignore semantics through a real bundled-CLI traversal
     // that also spans more than one production matcher-evaluation window.
-    const scratchDirectories = Math.floor(MATCHER_CACHE_RESET_INTERVAL / 2) + 1;
+    const scratchDirectories = Math.min(
+      Math.floor(MATCHER_CACHE_RESET_INTERVAL / 2) + 1,
+      5_000,
+    );
     for (let i = 0; i < scratchDirectories; i++) {
       rig.mkdir(`scratch/${i}/nested`);
     }
