@@ -1,0 +1,1826 @@
+{
+  "version": 1,
+  "protocol": "extended-heap-v3-v3b-v3c",
+  "status": "completed-profile-pairs-with-two-excluded-attempts",
+  "batchId": "extended-v3c-20260914T122158Z",
+  "sourceCommit": "df864bea6a930d31faf8b35fc5e57bac98a25e20",
+  "model": "qwen3.8-flash",
+  "providerBaseUrlSha256": "6f941ca230f6988b523fb7c2c4ec0dd200613170f28b05176857eaa587b045bc",
+  "nodeVersion": "v22.23.2",
+  "host": {
+    "kind": "original authorized Linux 4-vCPU calibration host",
+    "physicalMemoryBytes": 7618281472,
+    "arch": "x64",
+    "kernel": "7.0.0-29-generic"
+  },
+  "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+  "frozenHashesByProtocol": {
+    "extended-heap-v3": {
+      "collector": "04d053aa17f16527cb72288844d90c14a45470caa33b48dfd2c47561f760e530",
+      "cli": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+      "sdk": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+      "preload": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+      "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+      "driver": "803ad1a35bf5e50e30d403d571a03f3c6205e7fdee737aa94b9e62b7f2306a36",
+      "counter": "c9db59bba4d7697e161980919ffceb4959368a21f8dea7b9d5a1d936a2cf3795",
+      "tap": "8146f0f142d096fa5bb58428cfd30eb164c37f11175ed0c03ab414adc0134b36",
+      "mcpFixture": "eb1a44878d3e48e133c8d094e331572fb42495efef3b8b557350e13d5bd52801"
+    },
+    "extended-heap-v3b": {
+      "collector": "6e29d58c874cda6d55c1d22978381c2a6854f73f1150c5d6b983c536fc470249",
+      "cli": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+      "sdk": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+      "preload": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+      "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+      "driver": "1bfbf23a7d5cb4c32c141587a5f45cd08c1223976dbcf159d44e1ec363bf6f17",
+      "counter": "c9db59bba4d7697e161980919ffceb4959368a21f8dea7b9d5a1d936a2cf3795",
+      "tap": "8146f0f142d096fa5bb58428cfd30eb164c37f11175ed0c03ab414adc0134b36",
+      "mcpFixture": "eb1a44878d3e48e133c8d094e331572fb42495efef3b8b557350e13d5bd52801"
+    },
+    "extended-heap-v3c": {
+      "collector": "1f45ce8affab0cce063f2e3ff97fb7a69934041b6aa55d93242b36eb25e6adca",
+      "cli": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+      "sdk": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+      "preload": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+      "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+      "driver": "ef2d7524ea047be10345d7725dc891d9e1707677d7d8995cf791995975f1f993",
+      "counter": "c9db59bba4d7697e161980919ffceb4959368a21f8dea7b9d5a1d936a2cf3795",
+      "tap": "8146f0f142d096fa5bb58428cfd30eb164c37f11175ed0c03ab414adc0134b36",
+      "mcpFixture": "eb1a44878d3e48e133c8d094e331572fb42495efef3b8b557350e13d5bd52801"
+    }
+  },
+  "evidenceSets": [
+    {
+      "protocol": "extended-heap-v3",
+      "batchId": "extended-v3-20260914T114300Z",
+      "matrixState": "failed",
+      "includedRuns": [1, 2],
+      "includedProfile": "long",
+      "excludedRun": 3,
+      "remainingOriginalRunsNotStarted": 5
+    },
+    {
+      "protocol": "extended-heap-v3b",
+      "batchId": "extended-v3b-20260914T120020Z",
+      "matrixState": "failed",
+      "includedRuns": [1, 2, 3, 4],
+      "excludedRun": 5,
+      "remainingOriginalRunsNotStarted": 1
+    },
+    {
+      "protocol": "extended-heap-v3c",
+      "batchId": "extended-v3c-20260914T122158Z",
+      "matrixState": "complete",
+      "includedRuns": [1, 2]
+    }
+  ],
+  "matrix": {
+    "profiles": ["long", "mcp", "multi", "concurrent"],
+    "scope": "Four independently reported profile pairs across three frozen protocols; neither the original v3 eight-run nor v3b six-run matrix completed",
+    "pairsPerProfile": 1,
+    "runs": 8,
+    "turns": 88,
+    "tools": 144,
+    "plannedTurns": 88,
+    "plannedTools": 144,
+    "orders": ["AB", "AB", "BA", "BA"],
+    "A": "legacy 3632 MiB",
+    "B": "experimental 544 MiB"
+  },
+  "runs": [
+    {
+      "ordinal": 1,
+      "sourceOrdinal": 1,
+      "sourceProtocol": "extended-heap-v3",
+      "sourceBatchId": "extended-v3-20260914T114300Z",
+      "profile": "long",
+      "arm": "baseline",
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 12,
+      "completedTools": 24,
+      "deliveredToolBytes": 307020,
+      "oldGenerationPeakMiB": 130.02734375,
+      "observedOldSpaceHeadroomMiB": 3501.97265625,
+      "liveSetUpperBoundMiB": 108.75169372558594,
+      "children": [
+        {
+          "pid": 229252,
+          "startTimeTicks": "34147421",
+          "oldGenerationPeakMiB": 130.02734375,
+          "liveSetUpperBoundMiB": 108.75169372558594,
+          "totalHeapPeakMiB": 157.8125,
+          "windowMajorGcCount": 6,
+          "windowMajorGcMs": 28.343075037002563,
+          "windowStartRequestMs": 1789386193092,
+          "windowEndRequestMs": 1789386478099,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=3632"]
+        }
+      ],
+      "peakTreeRssMiB": 464.875,
+      "minMemAvailableMiB": 6000.3671875,
+      "promptWallSumMs": 232811,
+      "promptIntervalWallMs": 275278,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 15,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "b3a07266-a321-4097-8f75-1ec9d1a34f67",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 18668,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 2284,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 27219,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4691,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 35367,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3623,
+              "mcpTools": 0
+            },
+            {
+              "round": 4,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 41783,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4919,
+              "mcpTools": 0
+            },
+            {
+              "round": 5,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 51217,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 5137,
+              "mcpTools": 0
+            },
+            {
+              "round": 6,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 56743,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 1447,
+              "mcpTools": 0
+            },
+            {
+              "round": 7,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 65028,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4612,
+              "mcpTools": 0
+            },
+            {
+              "round": 8,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 73651,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4019,
+              "mcpTools": 0
+            },
+            {
+              "round": 9,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 82348,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4140,
+              "mcpTools": 0
+            },
+            {
+              "round": 10,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 90345,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3817,
+              "mcpTools": 0
+            },
+            {
+              "round": 11,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 99126,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3894,
+              "mcpTools": 0
+            },
+            {
+              "round": 12,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 105903,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 2479,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 1,
+        "session_update": 2911,
+        "turn_complete": 12,
+        "followup_suggestion": 5
+      },
+      "updateCounts": {
+        "available_commands_update": 1,
+        "user_message_chunk": 12,
+        "agent_thought_chunk": 1811,
+        "agent_message_chunk": 980,
+        "tool_call": 24,
+        "usage_update": 35,
+        "tool_call_update": 48
+      },
+      "concurrentOverlap": [],
+      "mcp": null,
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 229239,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "2a67eb60a6a39eca602e1408bab2db1e4a4b512f94d76b0df198a9b994b0d28e",
+      "resourceTapSha256": "76f40b623f372aee90cd0d484d30e2173bf81201f373f13250c6931cd6aabf52",
+      "toolEventsSha256": "b57d78ea4b1db353897efe09e449d8a5a2a0f1f47bb8b0c3768c643c1e82e83e",
+      "samplesSha256": "318b4b0f30ba49fe4d5d34b28b69d52e8c401a0b272f57c7eec4524932a3419b"
+    },
+    {
+      "ordinal": 2,
+      "sourceOrdinal": 2,
+      "sourceProtocol": "extended-heap-v3",
+      "sourceBatchId": "extended-v3-20260914T114300Z",
+      "profile": "long",
+      "arm": "544",
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 12,
+      "completedTools": 24,
+      "deliveredToolBytes": 307020,
+      "oldGenerationPeakMiB": 119.81640625,
+      "observedOldSpaceHeadroomMiB": 424.18359375,
+      "liveSetUpperBoundMiB": 107.1669921875,
+      "children": [
+        {
+          "pid": 232004,
+          "startTimeTicks": "34177597",
+          "oldGenerationPeakMiB": 119.81640625,
+          "liveSetUpperBoundMiB": 107.1669921875,
+          "totalHeapPeakMiB": 139.18359375,
+          "windowMajorGcCount": 6,
+          "windowMajorGcMs": 27.18683898448944,
+          "windowStartRequestMs": 1789386494851,
+          "windowEndRequestMs": 1789386699852,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=544"]
+        }
+      ],
+      "peakTreeRssMiB": 443.68359375,
+      "minMemAvailableMiB": 6018.7734375,
+      "promptWallSumMs": 156303,
+      "promptIntervalWallMs": 196713,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 15,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "cc154fd3-5bfd-4a0d-a352-208d109e6a5f",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 18696,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 2312,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 27069,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 8637,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 34884,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 8260,
+              "mcpTools": 0
+            },
+            {
+              "round": 4,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 41032,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6088,
+              "mcpTools": 0
+            },
+            {
+              "round": 5,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 50102,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 9142,
+              "mcpTools": 0
+            },
+            {
+              "round": 6,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 55253,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 5077,
+              "mcpTools": 0
+            },
+            {
+              "round": 7,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 63151,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 7855,
+              "mcpTools": 0
+            },
+            {
+              "round": 8,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 71619,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 8131,
+              "mcpTools": 0
+            },
+            {
+              "round": 9,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 80145,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 8465,
+              "mcpTools": 0
+            },
+            {
+              "round": 10,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 87924,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 7284,
+              "mcpTools": 0
+            },
+            {
+              "round": 11,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 96436,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 8372,
+              "mcpTools": 0
+            },
+            {
+              "round": 12,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 102944,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6176,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 1,
+        "session_update": 2007,
+        "turn_complete": 12,
+        "followup_suggestion": 3
+      },
+      "updateCounts": {
+        "available_commands_update": 1,
+        "user_message_chunk": 12,
+        "agent_thought_chunk": 1038,
+        "agent_message_chunk": 860,
+        "tool_call": 24,
+        "usage_update": 24,
+        "tool_call_update": 48
+      },
+      "concurrentOverlap": [],
+      "mcp": null,
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 231991,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "580b05fd9f72af9d27a19dba895ffcaad77e6eace59cb611671b015d1be5e1de",
+      "resourceTapSha256": "9951e7a5bd27849e71661700c0044771af8a0d2a329ae82cc96d2a3f114b6bce",
+      "toolEventsSha256": "aa7ea80585ff7d5d656f81c9d9c84ba7eae15d823bb85f7beafe4e406ed2314f",
+      "samplesSha256": "908ffed3ff0dbf849fd68711baf03367439dcc409f27eee2d8a964b2d086e2e3"
+    },
+    {
+      "ordinal": 3,
+      "sourceOrdinal": 1,
+      "sourceProtocol": "extended-heap-v3b",
+      "sourceBatchId": "extended-v3b-20260914T120020Z",
+      "profile": "mcp",
+      "arm": "baseline",
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 8,
+      "completedTools": 24,
+      "deliveredToolBytes": 196608,
+      "oldGenerationPeakMiB": 123.7578125,
+      "observedOldSpaceHeadroomMiB": 3508.2421875,
+      "liveSetUpperBoundMiB": 111.84613037109375,
+      "children": [
+        {
+          "pid": 236639,
+          "startTimeTicks": "34251397",
+          "oldGenerationPeakMiB": 123.7578125,
+          "liveSetUpperBoundMiB": 111.84613037109375,
+          "totalHeapPeakMiB": 154.69921875,
+          "windowMajorGcCount": 6,
+          "windowMajorGcMs": 31.39982396364212,
+          "windowStartRequestMs": 1789387232859,
+          "windowEndRequestMs": 1789387402866,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=3632"]
+        }
+      ],
+      "peakTreeRssMiB": 607.6875,
+      "minMemAvailableMiB": 5972.34375,
+      "promptWallSumMs": 136905,
+      "promptIntervalWallMs": 162424,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 11,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "cfcacb0d-582c-4f81-bb3e-eefb8cbb03dd",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 55675,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 17787,
+              "mcpTools": 25344
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 73264,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 17712,
+              "mcpTools": 25344
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 90796,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 17324,
+              "mcpTools": 25344
+            },
+            {
+              "round": 4,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 108182,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 18070,
+              "mcpTools": 25344
+            },
+            {
+              "round": 5,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 125781,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 18261,
+              "mcpTools": 25344
+            },
+            {
+              "round": 6,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 143331,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 17379,
+              "mcpTools": 25344
+            },
+            {
+              "round": 7,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 160940,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 17580,
+              "mcpTools": 25344
+            },
+            {
+              "round": 8,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 178299,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 17531,
+              "mcpTools": 25344
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 1,
+        "session_update": 844,
+        "permission_request": 24,
+        "permission_resolved": 24,
+        "turn_complete": 8,
+        "followup_suggestion": 1
+      },
+      "updateCounts": {
+        "available_commands_update": 1,
+        "user_message_chunk": 8,
+        "agent_thought_chunk": 683,
+        "agent_message_chunk": 88,
+        "tool_call": 24,
+        "usage_update": 16,
+        "tool_call_update": 24
+      },
+      "concurrentOverlap": [],
+      "mcp": {
+        "configuredServers": 3,
+        "registeredTools": 96,
+        "observedFixtureProcesses": 3,
+        "legacyClientCount": 0,
+        "poolEntryCounts": [1, 1, 1],
+        "toolCalls": 24,
+        "payloadBytesPerCall": 8192,
+        "initialProviderRequestSchemasCaptured": false
+      },
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 236626,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "322789a12787f5268e7e30e03a8765b26bd79f8e3029c1bba3b1812b8a394750",
+      "resourceTapSha256": "ea8e0391cebda022bb72837d1090e93d527ebe8f74c6c3a6da66e34790440891",
+      "toolEventsSha256": "2dd4b0b25017dfe4c616fc96ada87ac035c2211d2421580fee927d22ed8c0d58",
+      "samplesSha256": "b8c86838046255c78648da4064e2485a2d65a3e22c963fe99482366b1bbfbd07"
+    },
+    {
+      "ordinal": 4,
+      "sourceOrdinal": 2,
+      "sourceProtocol": "extended-heap-v3b",
+      "sourceBatchId": "extended-v3b-20260914T120020Z",
+      "profile": "mcp",
+      "arm": "544",
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 8,
+      "completedTools": 24,
+      "deliveredToolBytes": 196608,
+      "oldGenerationPeakMiB": 129.29296875,
+      "observedOldSpaceHeadroomMiB": 414.70703125,
+      "liveSetUpperBoundMiB": 111.96441650390625,
+      "children": [
+        {
+          "pid": 238449,
+          "startTimeTicks": "34270073",
+          "oldGenerationPeakMiB": 129.29296875,
+          "liveSetUpperBoundMiB": 111.96441650390625,
+          "totalHeapPeakMiB": 157.19140625,
+          "windowMajorGcCount": 5,
+          "windowMajorGcMs": 20.550742864608765,
+          "windowStartRequestMs": 1789387419602,
+          "windowEndRequestMs": 1789387574606,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=544"]
+        }
+      ],
+      "peakTreeRssMiB": 610.3984375,
+      "minMemAvailableMiB": 5969.640625,
+      "promptWallSumMs": 119762,
+      "promptIntervalWallMs": 145302,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 11,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "77a6b0df-d48a-49c9-ac1a-b0d309a06b44",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 55266,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6114,
+              "mcpTools": 25344
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 72671,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6111,
+              "mcpTools": 25344
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 90231,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6007,
+              "mcpTools": 25344
+            },
+            {
+              "round": 4,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 107620,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6244,
+              "mcpTools": 25344
+            },
+            {
+              "round": 5,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 125021,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6237,
+              "mcpTools": 25344
+            },
+            {
+              "round": 6,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 142587,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6395,
+              "mcpTools": 25344
+            },
+            {
+              "round": 7,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 159930,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 5818,
+              "mcpTools": 25344
+            },
+            {
+              "round": 8,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 177400,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 6392,
+              "mcpTools": 25344
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 1,
+        "session_update": 581,
+        "permission_request": 24,
+        "permission_resolved": 24,
+        "turn_complete": 8
+      },
+      "updateCounts": {
+        "available_commands_update": 1,
+        "user_message_chunk": 8,
+        "agent_thought_chunk": 421,
+        "tool_call": 24,
+        "agent_message_chunk": 71,
+        "usage_update": 32,
+        "tool_call_update": 24
+      },
+      "concurrentOverlap": [],
+      "mcp": {
+        "configuredServers": 3,
+        "registeredTools": 96,
+        "observedFixtureProcesses": 3,
+        "legacyClientCount": 0,
+        "poolEntryCounts": [1, 1, 1],
+        "toolCalls": 24,
+        "payloadBytesPerCall": 8192,
+        "initialProviderRequestSchemasCaptured": false
+      },
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 238436,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "8e3af6849d726386ffaccdf5eae65f370f05eca5c3415a88b858ec61a31ef606",
+      "resourceTapSha256": "2f9bf1366ddb815e5041d72061fae3e471b661e34592d0e32c789317ca8efc47",
+      "toolEventsSha256": "b32ea370c580793064c03273c32e7e69c85b48670260c8d12b82359ef40c9e86",
+      "samplesSha256": "5564b872d7e141c565a461fd1523839ca172082184c190a08223b7289ca843a7"
+    },
+    {
+      "ordinal": 5,
+      "sourceOrdinal": 3,
+      "sourceProtocol": "extended-heap-v3b",
+      "sourceBatchId": "extended-v3b-20260914T120020Z",
+      "profile": "multi",
+      "arm": "544",
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 12,
+      "completedTools": 12,
+      "deliveredToolBytes": 181496,
+      "oldGenerationPeakMiB": 125.5546875,
+      "observedOldSpaceHeadroomMiB": 418.4453125,
+      "liveSetUpperBoundMiB": 113.0221176147461,
+      "children": [
+        {
+          "pid": 240570,
+          "startTimeTicks": "34300423",
+          "oldGenerationPeakMiB": 125.5546875,
+          "liveSetUpperBoundMiB": 113.0221176147461,
+          "totalHeapPeakMiB": 148.46484375,
+          "windowMajorGcCount": 3,
+          "windowMajorGcMs": 9.409673035144806,
+          "windowStartRequestMs": 1789387723112,
+          "windowEndRequestMs": 1789387933116,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=544"]
+        }
+      ],
+      "peakTreeRssMiB": 463.2734375,
+      "minMemAvailableMiB": 6017.82421875,
+      "promptWallSumMs": 192501,
+      "promptIntervalWallMs": 203109,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 6,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "bbbfa6a5-c00f-4977-a50e-adbf4f8b9f09",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19302,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3942,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24380,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4412,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 29173,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4213,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 1,
+          "sessionId": "2d3844f8-504f-491f-9247-f454e7ec1d73",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19305,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3945,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24279,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4311,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 29027,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4067,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 2,
+          "sessionId": "8fe7583d-bc04-43b1-9589-3f4e9b3aa88e",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19325,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3965,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24329,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4361,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 29154,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4194,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 3,
+          "sessionId": "0531c530-c239-4939-990d-ed894fd2de21",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19303,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3943,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24136,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4680,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28841,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4265,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 4,
+        "session_update": 2607,
+        "turn_complete": 12,
+        "followup_suggestion": 9
+      },
+      "updateCounts": {
+        "available_commands_update": 4,
+        "user_message_chunk": 12,
+        "agent_thought_chunk": 1478,
+        "tool_call": 12,
+        "agent_message_chunk": 1053,
+        "usage_update": 24,
+        "tool_call_update": 24
+      },
+      "concurrentOverlap": [],
+      "mcp": null,
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 240557,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "26fc00b35efcf7fb4b8aec7053684d9eeb60d4a3802516758c964e7845ff2de8",
+      "resourceTapSha256": "5ca2cf345b78ea7f07f279eb6ee454d7d3e33269fd673a007bf1433aa70d45cd",
+      "toolEventsSha256": "ddb3c0bb8204a668d1930e4970ee218b26fa9dfe5b70bb84a5a7e4288e6e19d4",
+      "samplesSha256": "ffd6d2914979ecd6d968f2333b3e621fec90e614eb2b9c1015c9ab985e98180a"
+    },
+    {
+      "ordinal": 6,
+      "sourceOrdinal": 4,
+      "sourceProtocol": "extended-heap-v3b",
+      "sourceBatchId": "extended-v3b-20260914T120020Z",
+      "profile": "multi",
+      "arm": "baseline",
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 12,
+      "completedTools": 12,
+      "deliveredToolBytes": 181496,
+      "oldGenerationPeakMiB": 125.3046875,
+      "observedOldSpaceHeadroomMiB": 3506.6953125,
+      "liveSetUpperBoundMiB": 114.30014038085938,
+      "children": [
+        {
+          "pid": 242520,
+          "startTimeTicks": "34323200",
+          "oldGenerationPeakMiB": 125.3046875,
+          "liveSetUpperBoundMiB": 114.30014038085938,
+          "totalHeapPeakMiB": 157.3046875,
+          "windowMajorGcCount": 3,
+          "windowMajorGcMs": 8.752031981945038,
+          "windowStartRequestMs": 1789387950879,
+          "windowEndRequestMs": 1789388130882,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=3632"]
+        }
+      ],
+      "peakTreeRssMiB": 474.109375,
+      "minMemAvailableMiB": 5999.4609375,
+      "promptWallSumMs": 162471,
+      "promptIntervalWallMs": 168931,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 6,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "cc3c2005-b0e0-453f-81c4-65b908e04e48",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19342,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3982,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24240,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4784,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28994,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4418,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 1,
+          "sessionId": "5c4d3375-33ea-49b9-89de-fb7b36a238e0",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19303,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3943,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24193,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4225,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 29062,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4486,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 2,
+          "sessionId": "5bd46932-b9a8-4b3b-b500-75b83f73a128",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19303,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 871,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24211,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4755,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 29026,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4450,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 3,
+          "sessionId": "ac0cfe09-871f-4256-a883-720ecccacd39",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19301,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3941,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24388,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4932,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 29373,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4797,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 4,
+        "session_update": 2691,
+        "turn_complete": 12,
+        "followup_suggestion": 9
+      },
+      "updateCounts": {
+        "available_commands_update": 4,
+        "user_message_chunk": 12,
+        "agent_thought_chunk": 1502,
+        "tool_call": 12,
+        "agent_message_chunk": 1113,
+        "usage_update": 24,
+        "tool_call_update": 24
+      },
+      "concurrentOverlap": [],
+      "mcp": null,
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 242507,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "16276b3a571e1e4425e3326c56952b26599d70f8f6348151fb7b7f6697b7c080",
+      "resourceTapSha256": "b4be19139a8bb4ec52912f684a44f6d9894bb096f191a401ad7f4fc231cf1c66",
+      "toolEventsSha256": "243ed6d36a02dc76c3c13cbef85be3c49abab29d8ad0909264497ab4ce8e8088",
+      "samplesSha256": "b7c7648cd9dd8b8e50c0e906d9c4a7dff9de24a870a59ae33c44e35fef194e0a"
+    },
+    {
+      "ordinal": 7,
+      "sourceOrdinal": 1,
+      "sourceProtocol": "extended-heap-v3c",
+      "sourceBatchId": "extended-v3c-20260914T122158Z",
+      "profile": "concurrent",
+      "arm": "544",
+      "actualOldSpaceMiB": 544,
+      "completedTurns": 12,
+      "completedTools": 12,
+      "deliveredToolBytes": 181496,
+      "oldGenerationPeakMiB": 113.16015625,
+      "observedOldSpaceHeadroomMiB": 430.83984375,
+      "liveSetUpperBoundMiB": 105.8575210571289,
+      "children": [
+        {
+          "pid": 245892,
+          "startTimeTicks": "34381230",
+          "oldGenerationPeakMiB": 112.6640625,
+          "liveSetUpperBoundMiB": 104.80096435546875,
+          "totalHeapPeakMiB": 139.84375,
+          "windowMajorGcCount": 1,
+          "windowMajorGcMs": 2.969754993915558,
+          "windowStartRequestMs": 1789388531056,
+          "windowEndRequestMs": 1789388596057,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=544"]
+        },
+        {
+          "pid": 245937,
+          "startTimeTicks": "34381317",
+          "oldGenerationPeakMiB": 113.16015625,
+          "liveSetUpperBoundMiB": 101.49461364746094,
+          "totalHeapPeakMiB": 139.59375,
+          "windowMajorGcCount": 1,
+          "windowMajorGcMs": 5.678542971611023,
+          "windowStartRequestMs": 1789388531056,
+          "windowEndRequestMs": 1789388596057,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=544"]
+        },
+        {
+          "pid": 245980,
+          "startTimeTicks": "34381403",
+          "oldGenerationPeakMiB": 112.8828125,
+          "liveSetUpperBoundMiB": 105.8575210571289,
+          "totalHeapPeakMiB": 141.31640625,
+          "windowMajorGcCount": 3,
+          "windowMajorGcMs": 19.85099905729294,
+          "windowStartRequestMs": 1789388531057,
+          "windowEndRequestMs": 1789388596057,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=544"]
+        },
+        {
+          "pid": 246034,
+          "startTimeTicks": "34381488",
+          "oldGenerationPeakMiB": 112.17578125,
+          "liveSetUpperBoundMiB": 102.06754302978516,
+          "totalHeapPeakMiB": 141.31640625,
+          "windowMajorGcCount": 2,
+          "windowMajorGcMs": 13.863046944141388,
+          "windowStartRequestMs": 1789388531057,
+          "windowEndRequestMs": 1789388596057,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=544"]
+        }
+      ],
+      "peakTreeRssMiB": 1133.27734375,
+      "minMemAvailableMiB": 5554.62890625,
+      "promptWallSumMs": 157666,
+      "promptIntervalWallMs": 55977,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 6,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "0972bc02-de1d-4833-b916-3d857f7932c6",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19321,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3961,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24152,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4184,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28877,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4301,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 1,
+          "sessionId": "9a5d6a64-aae5-43b7-b3f0-110cba54ff7a",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19299,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3939,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24124,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4668,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28829,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4253,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 2,
+          "sessionId": "98a7afbb-944f-43f4-88b0-11041af67af4",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19310,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3950,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24245,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4277,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 29100,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4524,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 3,
+          "sessionId": "dad407b2-578a-4e9b-a906-b38e57d5afa6",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19298,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3938,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24163,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4707,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28934,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4358,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 4,
+        "session_update": 2380,
+        "turn_complete": 12,
+        "followup_suggestion": 9
+      },
+      "updateCounts": {
+        "available_commands_update": 4,
+        "user_message_chunk": 12,
+        "agent_thought_chunk": 1272,
+        "agent_message_chunk": 1032,
+        "tool_call": 12,
+        "usage_update": 24,
+        "tool_call_update": 24
+      },
+      "concurrentOverlap": [
+        {
+          "round": 1,
+          "overlapMs": 11830,
+          "fourPromptSamples": 6
+        },
+        {
+          "round": 2,
+          "overlapMs": 11125,
+          "fourPromptSamples": 6
+        },
+        {
+          "round": 3,
+          "overlapMs": 11490,
+          "fourPromptSamples": 5
+        }
+      ],
+      "mcp": null,
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 245811,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "848c8f4acd18b89953a58fcacdf3afab61e292355672bf7ca6b54c1a7ce2109b",
+      "resourceTapSha256": "7dee3a1740c30e315a10b93504021d5fd8fc3bf1f084e87d8d924bbdc6a03e22",
+      "toolEventsSha256": "1cee8ed16aa5b4f855e0889dbf5fad49ffff30fe6df5ca729861258211fd1447",
+      "samplesSha256": "9f7207844d3ffedc1acfa154cf6bbe47489c67df61fc6f2a3c75d2087c9e79e9"
+    },
+    {
+      "ordinal": 8,
+      "sourceOrdinal": 2,
+      "sourceProtocol": "extended-heap-v3c",
+      "sourceBatchId": "extended-v3c-20260914T122158Z",
+      "profile": "concurrent",
+      "arm": "baseline",
+      "actualOldSpaceMiB": 3632,
+      "completedTurns": 12,
+      "completedTools": 12,
+      "deliveredToolBytes": 181496,
+      "oldGenerationPeakMiB": 112.9140625,
+      "observedOldSpaceHeadroomMiB": 3519.0859375,
+      "liveSetUpperBoundMiB": 106.55512237548828,
+      "children": [
+        {
+          "pid": 247142,
+          "startTimeTicks": "34389557",
+          "oldGenerationPeakMiB": 112.85546875,
+          "liveSetUpperBoundMiB": 105.15208435058594,
+          "totalHeapPeakMiB": 137.58984375,
+          "windowMajorGcCount": 1,
+          "windowMajorGcMs": 2.1481990218162537,
+          "windowStartRequestMs": 1789388614324,
+          "windowEndRequestMs": 1789388709325,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=3632"]
+        },
+        {
+          "pid": 247187,
+          "startTimeTicks": "34389641",
+          "oldGenerationPeakMiB": 112.87890625,
+          "liveSetUpperBoundMiB": 101.52952575683594,
+          "totalHeapPeakMiB": 138.08984375,
+          "windowMajorGcCount": 1,
+          "windowMajorGcMs": 4.719312012195587,
+          "windowStartRequestMs": 1789388614324,
+          "windowEndRequestMs": 1789388709325,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=3632"]
+        },
+        {
+          "pid": 247229,
+          "startTimeTicks": "34389723",
+          "oldGenerationPeakMiB": 112.9140625,
+          "liveSetUpperBoundMiB": 106.55512237548828,
+          "totalHeapPeakMiB": 138.97265625,
+          "windowMajorGcCount": 3,
+          "windowMajorGcMs": 17.580047965049744,
+          "windowStartRequestMs": 1789388614324,
+          "windowEndRequestMs": 1789388709325,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=3632"]
+        },
+        {
+          "pid": 247283,
+          "startTimeTicks": "34389806",
+          "oldGenerationPeakMiB": 112.5078125,
+          "liveSetUpperBoundMiB": 105.6413345336914,
+          "totalHeapPeakMiB": 139.47265625,
+          "windowMajorGcCount": 3,
+          "windowMajorGcMs": 17.393869996070862,
+          "windowStartRequestMs": 1789388614324,
+          "windowEndRequestMs": 1789388709325,
+          "unclassifiedSpaceNames": [],
+          "actualHeapFlags": ["--max-old-space-size=3632"]
+        }
+      ],
+      "peakTreeRssMiB": 1122.06640625,
+      "minMemAvailableMiB": 5551.51171875,
+      "promptWallSumMs": 187504,
+      "promptIntervalWallMs": 87231,
+      "modelApiErrors": 0,
+      "modelApiRetries": 0,
+      "freshReportBoundaries": 6,
+      "contextUsage": [
+        {
+          "slot": 0,
+          "sessionId": "a5221291-170a-4ecf-b454-d7e0a933e81f",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19323,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3963,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24222,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4766,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28880,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4304,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 1,
+          "sessionId": "1632e5b2-cdb4-4bd2-be3a-f1adf75c072e",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19318,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3958,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 23927,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4471,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28374,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4822,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 2,
+          "sessionId": "e9bd8b44-a79c-4613-bc0c-4b08da835f4c",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19315,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3955,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24197,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4229,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28894,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4318,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        },
+        {
+          "slot": 3,
+          "sessionId": "dd036d4c-7bd3-490c-8c9f-d52517d16e65",
+          "turns": [
+            {
+              "round": 1,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 19341,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 3981,
+              "mcpTools": 0
+            },
+            {
+              "round": 2,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 24237,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4781,
+              "mcpTools": 0
+            },
+            {
+              "round": 3,
+              "modelName": "qwen3.8-flash",
+              "totalTokens": 28987,
+              "contextWindowSize": 1000000,
+              "isEstimated": false,
+              "messages": 4027,
+              "mcpTools": 0
+            }
+          ],
+          "observedTotalTokenDecrease": false
+        }
+      ],
+      "eventCounts": {
+        "replay_complete": 4,
+        "session_update": 2064,
+        "turn_complete": 12,
+        "followup_suggestion": 7
+      },
+      "updateCounts": {
+        "available_commands_update": 4,
+        "user_message_chunk": 12,
+        "agent_thought_chunk": 951,
+        "agent_message_chunk": 1037,
+        "tool_call": 12,
+        "usage_update": 24,
+        "tool_call_update": 24
+      },
+      "concurrentOverlap": [
+        {
+          "round": 1,
+          "overlapMs": 8287,
+          "fourPromptSamples": 4
+        },
+        {
+          "round": 2,
+          "overlapMs": 9426,
+          "fourPromptSamples": 5
+        },
+        {
+          "round": 3,
+          "overlapMs": 11896,
+          "fourPromptSamples": 6
+        }
+      ],
+      "mcp": null,
+      "cleanup": {
+        "residual": [],
+        "signals": [
+          {
+            "pid": 247061,
+            "signal": "SIGTERM"
+          }
+        ],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "929a30c3bd1a35a536ca1982fa0895be6b664a9a2d176c0711acfa3383a4de54",
+      "resourceTapSha256": "14d132758b33885ecb6cec1f614511bf5a387a7cdea2a46329353a5dd75abf7d",
+      "toolEventsSha256": "089e628a2691930b70cf7ba434d174c50312a1383e44160d0ba85536088b4ee9",
+      "samplesSha256": "7af17447da3a0b10b5ead07e383e3b4831506f59ffd136f9f3087564c9ea453a"
+    }
+  ],
+  "verification": {
+    "heapAudit": {
+      "passed": true,
+      "checks": 1138,
+      "sha256": "c53a44dd30174f0cd3bdc7583fa40b84778e4b653d1e4a64da746c8b1649cb4c"
+    },
+    "independentAudit": {
+      "passed": true,
+      "sha256": "b41230b948d4e440ed69d939d6d233df54c6c7af493b3f523780a9d5ab442438"
+    },
+    "download": {
+      "files": 18,
+      "bytes": 7336698,
+      "manifestSha256": "28d4b311fd30eb83c59f08b0cd5b060765a83481918b66623e56137f5ea2e8b3"
+    },
+    "finalHost": {
+      "state": "complete",
+      "bundleFilesVerified": 1072,
+      "frozenFilesVerified": 9,
+      "fixtureFilesVerified": 421,
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "existingWorkspacesVerified": 4,
+      "workspaceTargetHashesVerified": 20,
+      "workspaceConfigPathsVerified": 16,
+      "workspaceUnchanged": true,
+      "residualCalibrationProcesses": [],
+      "temporaryProviderRemoved": true,
+      "verifiedAt": "2026-09-14T12:29:38.283192+00:00"
+    },
+    "v3FinalHost": {
+      "state": "failed",
+      "bundleFilesVerified": 1072,
+      "frozenFilesVerified": 9,
+      "fixtureFilesVerified": 421,
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "workspaceUnchanged": true,
+      "residualCalibrationProcesses": [],
+      "temporaryProviderRemoved": true,
+      "verifiedAt": "2026-09-14T12:29:55.306091+00:00"
+    },
+    "v3bFinalHost": {
+      "state": "failed",
+      "bundleFilesVerified": 1072,
+      "frozenFilesVerified": 9,
+      "fixtureFilesVerified": 421,
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "workspaceUnchanged": true,
+      "residualCalibrationProcesses": [],
+      "temporaryProviderRemoved": true,
+      "verifiedAt": "2026-09-14T12:29:50.099832+00:00"
+    },
+    "v3bSubsetAudits": {
+      "heapSha256": "512a88084f849c2204b20e1e6cae0e72dfbbd632d8072a8a42599d469c3b0c7d",
+      "independentSha256": "7947c0a69c3680321b8508c632d0737057974d01d6a9bac512d9ccb788d23547"
+    },
+    "v3bFailedAttemptAuditSha256": "2e6d87ba34444ea181b8b3eeb1e7785f6a94ce25768548aa72aee2fdcc0bfd4d",
+    "v3bRawDownload": {
+      "files": 49,
+      "bytes": 28898205
+    },
+    "v3LongPilotAudits": {
+      "heapSha256": "acdffd2beaf2e853205423fc1937a08e57c150d3aa32ca7ef485018826cd7402",
+      "independentSha256": "959286835400ca04c5a7f710bf91d235a52bf7c227be25b0981dd91f8a7bb903"
+    },
+    "v3FailedAttemptAuditSha256": "36ae8e60bb495ee512d57fbf44615e5f3a6574cab3a3cc2c07f4eb7596ce253b",
+    "v3RawDownload": {
+      "files": 27,
+      "bytes": 24593396
+    }
+  },
+  "measurementNotes": [
+    "Per-child lifetime peaks include startup. The live-set measure is a post-major-GC observational upper bound, not an exact retained-set measurement.",
+    "Tree RSS is the maximum sampled sum for the daemon and its observed descendants, including ACP children and local MCP processes where present. Shared pages may be counted repeatedly; this is neither unique physical memory nor a continuous peak measurement.",
+    "GC deltas use each PID/start-ticks generation between fresh workload-start and before-teardown responses, including inter-turn waits. Aggregate child maxima are never subtracted.",
+    "The collector also issues full status and per-turn context-usage/session-status diagnostics. Their allocation/CPU overhead is included in the measurements and has not been separately benchmarked.",
+    "The tap observes existing RPC traffic without adding resource requests or forcing GC. Request IDs are paired internally but not serialized; offline framing tests validate pairing while raw audit verifies recorded times and generations.",
+    "File pages and MCP text are independently reconstructed and matched; answer semantics are not graded. Delivered bytes do not prove all history remains resident.",
+    "Context usage is recorded as reported by the daemon, including its estimate marker. Token decreases and explicit events are reported without inferring unrecorded compaction.",
+    "MCP data is deterministic repetitive synthetic text from three local stdio servers. Legacy clientCount=0 coexists with three connected pooled entries; the pool and process evidence supplies the cardinality.",
+    "The accepted v3c concurrent pair uses the four existing full repositories ws000 through ws003, verified identical commit, target files and absent workspace settings with unchanged before/after state. The excluded v3b concurrency attempt used longer temporary copy paths. Four overlapping prompt intervals and active-prompt observations are required.",
+    "The retained v3 long pair, v3b MCP/multi pairs and new v3c concurrency pair have different collector/prompt/workspace protocols and are separately attributed. One pair per profile is screening only. Provider/model variability prevents attributing wall-clock differences to the heap ceiling or defining acceptable regression thresholds.",
+    "These runs do not establish a universal 544 MiB grant, maximum supported concurrency, production RSS safety, multi-hour stability, Node 24 compatibility, or 8/32 GiB deployment capacity."
+  ],
+  "excluded": [
+    "Earlier v1/v2/v2b batches are separate protocols and not pooled into these screens.",
+    "v3 run3 multi/544 ended 10 prompts and 11 tools but only 9 turns passed the frozen contract; the tenth requested page was complete and then an extra Glob caused rejection. No final fresh workload report exists. The attempt and the original incomplete matrix remain excluded; v3b restarts all three missing profile pairs with only read_file exposed and a narrower reading instruction.",
+    "v3b run5 concurrent/544 had four end_turns and five calls: one failed read used a model-mistyped long path (permission provenance), then all four required pages were delivered correctly. Failed/extra call criteria stopped the matrix; no final resource window exists. v3c restarts only the concurrency pair using verified existing short repository paths without changing prompts or weakening body/count validation.",
+    "Linux startup-only preflight batches are excluded. The initial MCP preflight failed an incorrect legacy clientCount expectation, not service discovery or heap exhaustion."
+  ],
+  "decision": {
+    "productionEnforcementEnabled": false,
+    "changeProductionPartition": false,
+    "interpretation": "Keep 544 MiB as an experimental candidate for repeated and broader partition/Node calibration; do not infer production admission readiness from this single-pair screen."
+  },
+  "generatedAt": "2026-09-14T12:32:17.461618+00:00"
+}

@@ -1,0 +1,96 @@
+{
+  "date": "2026-09-14",
+  "kind": "initial real-model collector and fixed-ceiling smoke test",
+  "sourceCommit": "df864bea6a930d31faf8b35fc5e57bac98a25e20",
+  "bundleManifestSha256": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+  "host": {
+    "platform": "linux-x64",
+    "kernel": "7.0.0-29-generic",
+    "physicalMemoryBytes": 7618281472,
+    "swapMiB": 0
+  },
+  "profile": "light with explicit read-only tool configuration",
+  "model": "qwen3.8-flash",
+  "registeredWorkspaces": 1,
+  "sessionsPerRun": 1,
+  "repetitionsPerArm": 1,
+  "results": [
+    {
+      "arm": "baseline",
+      "nodeVersion": "v22.23.2",
+      "collectorSha256": "639b597dcce99e7d414acb21e9f4d90f21d44f0ed287ea5db60d425d6e2a0eb9",
+      "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+      "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+      "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "actualHeapFlags": ["--max-old-space-size=3632"],
+      "turnsCompleted": 2,
+      "completedToolCalls": 6,
+      "promptWallTimeMs": 104521,
+      "heap": {
+        "peakOldGenerationBytes": 121266176,
+        "peakLiveSetBytes": 111548800,
+        "peakTotalHeapBytes": 153112576,
+        "majorGcCount": 3,
+        "majorGcMs": 20.00287503004074,
+        "unclassifiedSpaceNames": [],
+        "reported": 1
+      },
+      "peakTreeRssMiB": 466.24,
+      "minimumMemAvailableMiB": 6036.08,
+      "freshReportCount": 4,
+      "reportedGenerationCount": 1,
+      "cleanup": {
+        "residualProcesses": 0,
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "c5c3c919e999391e60ae0eced567ed514ebc6953c383b9134442a2896cdc4b1f",
+      "samplesSha256": "18b461832cb92e1b8673d019fcd3a3feb27ba818ef061bc31805338a3c8ee581"
+    },
+    {
+      "arm": "544",
+      "nodeVersion": "v22.23.2",
+      "collectorSha256": "639b597dcce99e7d414acb21e9f4d90f21d44f0ed287ea5db60d425d6e2a0eb9",
+      "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+      "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+      "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "actualHeapFlags": ["--max-old-space-size=544"],
+      "turnsCompleted": 2,
+      "completedToolCalls": 13,
+      "promptWallTimeMs": 116438,
+      "heap": {
+        "peakOldGenerationBytes": 122855424,
+        "peakLiveSetBytes": 111345840,
+        "peakTotalHeapBytes": 152854528,
+        "majorGcCount": 3,
+        "majorGcMs": 17.2294060587883,
+        "unclassifiedSpaceNames": [],
+        "reported": 1
+      },
+      "peakTreeRssMiB": 469.18,
+      "minimumMemAvailableMiB": 6039.9,
+      "freshReportCount": 4,
+      "reportedGenerationCount": 1,
+      "cleanup": {
+        "residualProcesses": 0,
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "reportSha256": "94ae2c6947a28641403c51330c64fdddfb3eb36eeae1990af5eac5726d2c609a",
+      "samplesSha256": "2e9ac7149ca6e17e6f397327895fbb478f330db0be29bbb34ea4ca382778dad7"
+    }
+  ],
+  "conclusion": "The collector and experimental 544 MiB grant worked for this initial light workload; full workload calibration remains pending.",
+  "limitations": [
+    "One repetition per arm; not the planned three paired repetitions.",
+    "The same prompts produced different tool-call counts, so wall-time differences do not isolate heap-policy overhead.",
+    "End-turn and completed tool calls are verified; answer semantic correctness was not graded.",
+    "No heavy, long-session, multiple-session, multi-MCP, concurrency or Node 24 workload calibration in this smoke pair.",
+    "No 8 GiB or 32 GiB deployment-capacity claim; the physical host has 7265 MiB.",
+    "No production enforcement or admission behavior was changed."
+  ]
+}

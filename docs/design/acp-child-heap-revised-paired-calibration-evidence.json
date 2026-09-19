@@ -1,0 +1,2581 @@
+{
+  "date": "2026-09-14",
+  "kind": "Revised paired light/heavy heap calibration with verified file delivery",
+  "state": "complete-for-this-matrix-only",
+  "batchId": "matrix-v2b-20260914T095554Z",
+  "sourceCommit": "df864bea6a930d31faf8b35fc5e57bac98a25e20",
+  "frozenHashes": {
+    "collector": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+    "cli": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+    "sdk": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+    "preload": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+    "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+    "driver": "27f103d1fd13f98ba530154f387a1a1c60f4948a32913d0b8d4f616604d7a304",
+    "counter": "c9db59bba4d7697e161980919ffceb4959368a21f8dea7b9d5a1d936a2cf3795"
+  },
+  "host": {
+    "physicalMemoryBytes": 7618281472,
+    "kernel": "7.0.0-29-generic",
+    "vcpus": 4,
+    "swapMiB": 0
+  },
+  "nodeVersion": "v22.23.2",
+  "model": "qwen3.8-flash",
+  "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+  "providerIdentity": {
+    "model": "qwen3.8-flash",
+    "baseUrlSha256": "6f941ca230f6988b523fb7c2c4ec0dd200613170f28b05176857eaa587b045bc"
+  },
+  "expectedRuns": 12,
+  "completedRuns": 12,
+  "expectedTurns": 36,
+  "completedTurns": 36,
+  "rawArtifactDirectory": ".qwen/e2e-tests/8182-matrix-v2b-20260914/matrix-v2b-20260914T095554Z",
+  "auditHashes": {
+    "matrix-audit.json": "7ee29d6bb57d69484db834cd85fc1e0e95a3e9537fdedc213cfbdabc6b4b15d5",
+    "content-audit.json": "04e90fa81757e42cc49c668bb54d3889d3a34c7bb4ee08225ea2765963d54359",
+    "matrix-independent-audit.json": "63389bc9065e12fd60727a19e23c739cc30d25ed384ebb2c20e4c9083847f6bc",
+    "download-manifest.json": "fdaf1ed13c0b662390b47a845802d2e53575d20034a3034ced264ae7712bdcd8"
+  },
+  "auditorHashes": {
+    "8182-audit-paired-heap.py": "59e48fda4814756e12efb7a5ac62ca0773288fadbee7bc2240a16850d49fa6eb",
+    "8182-audit-v2b-content.py": "b0ac2ece6b1f7c789dfe0a2680463a1980db2e3ea4b401fa216688ac34f2503e",
+    "8182-audit-v2b-matrix-independent.py": "6d8ecaa18c7d214b98e405b810a4fc4235491141cca484a194e940d270bb4ea4"
+  },
+  "firstPairGate": {
+    "batchId": "matrix-v2b-20260914T095554Z",
+    "passed": true,
+    "hashes": {
+      "collector": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+      "cli": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+      "sdk": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+      "preload": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+      "bundleManifest": "f6ed0482eabcf0c328531c98b77a6838b65ecb61037787593e16825d34c0bb13",
+      "driver": "27f103d1fd13f98ba530154f387a1a1c60f4948a32913d0b8d4f616604d7a304",
+      "counter": "c9db59bba4d7697e161980919ffceb4959368a21f8dea7b9d5a1d936a2cf3795"
+    },
+    "reports": {
+      "/root/cap-heap-8182-20260914/matrices/matrix-v2b-20260914T095554Z/heap-runs/heavy-baseline-zvK2Tq/repeat-1/report.json": "af70d6aacd5049acb0173d663e652136d911fd982f300fe981f7f4c772360c35",
+      "/root/cap-heap-8182-20260914/matrices/matrix-v2b-20260914T095554Z/heap-runs/heavy-544-E1XEIQ/repeat-1/report.json": "8828f4b7a2e7eeef8be9470e6fbf8909ec1b09bf3791275de8b04a5b7ab50582"
+    },
+    "auditHashes": {
+      "heap": "49a8cab43d66ce87c31fac9f6b3e3627f4432f627024025dbe533907a992a0ce",
+      "content": "7a46c011729b18f1645e18bb1c40f341ff674aee0950e909a41e56208f726060",
+      "independentTestEngineer": "f3f4d8e9924cfc6ed04d1e53728c3f877741df99ee8a2725f07d19df1f5eccb2"
+    },
+    "decision": "Both predeclared heavy runs passed raw-event/fixture/count/heap/freshness/cleanup audit; resume remaining ten jobs with the frozen protocol."
+  },
+  "pilotPreservation": {
+    "passed": true,
+    "filesCompared": [
+      "heap-runs/heavy-baseline-zvK2Tq/summary.json",
+      "heap-runs/heavy-baseline-zvK2Tq/invocation.json",
+      "heap-runs/heavy-544-E1XEIQ/summary.json",
+      "heap-runs/heavy-544-E1XEIQ/invocation.json",
+      "heap-runs/heavy-544-E1XEIQ/repeat-1/samples.ndjson",
+      "heap-runs/heavy-544-E1XEIQ/repeat-1/report.json",
+      "heap-runs/heavy-544-E1XEIQ/repeat-1/daemon-tail.log",
+      "heap-runs/heavy-544-E1XEIQ/repeat-1/tool-events.ndjson",
+      "heap-runs/heavy-baseline-zvK2Tq/repeat-1/samples.ndjson",
+      "heap-runs/heavy-baseline-zvK2Tq/repeat-1/report.json",
+      "heap-runs/heavy-baseline-zvK2Tq/repeat-1/daemon-tail.log",
+      "heap-runs/heavy-baseline-zvK2Tq/repeat-1/tool-events.ndjson"
+    ],
+    "count": 12
+  },
+  "independentCountOracle": {
+    "independentByteCounterMatched": true,
+    "oracle": {
+      "protocol": "heap-count-v2",
+      "term": "workspace",
+      "semantics": "case-sensitive literal occurrences in tracked non-binary files",
+      "searchedFiles": 419,
+      "matchingFiles": 275,
+      "totalOccurrences": 16474,
+      "topFiles": [
+        {
+          "path": "packages/cli/src/serve/server.test.ts",
+          "occurrences": 2447
+        },
+        {
+          "path": "packages/cli/src/serve/run-qwen-serve.test.ts",
+          "occurrences": 600
+        },
+        {
+          "path": "packages/cli/src/serve/run-qwen-serve.ts",
+          "occurrences": 573
+        },
+        {
+          "path": "packages/cli/src/serve/routes/workspace-management.test.ts",
+          "occurrences": 550
+        },
+        {
+          "path": "packages/cli/src/serve/routes/session.ts",
+          "occurrences": 509
+        },
+        {
+          "path": "packages/cli/src/serve/multi-workspace-sessions.test.ts",
+          "occurrences": 378
+        },
+        {
+          "path": "packages/cli/src/serve/server.ts",
+          "occurrences": 326
+        },
+        {
+          "path": "packages/cli/src/serve/workspace-qualified-rest.test.ts",
+          "occurrences": 287
+        },
+        {
+          "path": "packages/cli/src/serve/acp-http/transport.test.ts",
+          "occurrences": 263
+        },
+        {
+          "path": "packages/cli/src/serve/server/session-archive.test.ts",
+          "occurrences": 260
+        }
+      ]
+    },
+    "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+    "counterSha256": "c9db59bba4d7697e161980919ffceb4959368a21f8dea7b9d5a1d936a2cf3795"
+  },
+  "excludedCollectorFailure": {
+    "batchId": "matrix-v2-20260914T095218Z",
+    "status": "failed-collector-validation",
+    "expectedRuns": 12,
+    "startedRuns": 1,
+    "completedRuns": 0,
+    "completedTurns": 1,
+    "promptMs": 10001,
+    "countToolMatchesOracle": true,
+    "answerJsonMatchesOracle": true,
+    "exactCommandApprovedOnce": true,
+    "toolRawInput": {},
+    "cause": "Permission-gated tools omit the full-argument in_progress event; collector failed to associate permission_request arguments by toolCallId. Not a heap or model-count failure.",
+    "correction": "v2b retains permissionRawInput by toolCallId and validates it against the terminal command/directory/output. Restart all twelve planned runs; exclude failed v2 from calibration statistics.",
+    "cleanup": {
+      "residual": [],
+      "signals": [
+        {
+          "pid": 200745,
+          "signal": "SIGTERM"
+        }
+      ],
+      "portReleased": true,
+      "fixtureRemoved": true,
+      "workspaceUnchanged": true
+    },
+    "reportSha256": "ff1c705868582d833c2ebf83e1f54f9142c6586af15a62dd2173f88d04ae4b75"
+  },
+  "groups": [
+    {
+      "profile": "light",
+      "arm": "baseline",
+      "runs": 3,
+      "actualOldSpaceLimitMiB": 3632,
+      "completedTurns": 6,
+      "completedTools": 16,
+      "peakOldGenerationMiB": 113.4609375,
+      "observedOldGenerationMarginMiB": 3518.5390625,
+      "peakLiveSetUpperBoundMiB": 107.46282958984375,
+      "windowMajorGcCountRange": [2, 3],
+      "windowMajorGcMsMedian": 17.856486976146698,
+      "windowMajorGcMsRange": [15.32379400730133, 18.575280010700226],
+      "promptWallMsMedian": 85953,
+      "promptWallMsRange": [56738, 86197],
+      "peakTreeRssMiB": 459.53515625,
+      "minMemAvailableMiB": 6016.19140625
+    },
+    {
+      "profile": "light",
+      "arm": "544",
+      "runs": 3,
+      "actualOldSpaceLimitMiB": 544,
+      "completedTurns": 6,
+      "completedTools": 28,
+      "peakOldGenerationMiB": 116.09765625,
+      "observedOldGenerationMarginMiB": 427.90234375,
+      "peakLiveSetUpperBoundMiB": 107.09947204589844,
+      "windowMajorGcCountRange": [3, 3],
+      "windowMajorGcMsMedian": 16.273785054683685,
+      "windowMajorGcMsRange": [15.364446997642517, 17.26146697998047],
+      "promptWallMsMedian": 122243,
+      "promptWallMsRange": [111146, 128802],
+      "peakTreeRssMiB": 461.3046875,
+      "minMemAvailableMiB": 6000.0703125
+    },
+    {
+      "profile": "heavy",
+      "arm": "baseline",
+      "runs": 3,
+      "actualOldSpaceLimitMiB": 3632,
+      "completedTurns": 12,
+      "completedTools": 79,
+      "peakOldGenerationMiB": 125.8203125,
+      "observedOldGenerationMarginMiB": 3506.1796875,
+      "peakLiveSetUpperBoundMiB": 113.92003631591797,
+      "windowMajorGcCountRange": [6, 8],
+      "windowMajorGcMsMedian": 45.24225997924805,
+      "windowMajorGcMsRange": [30.89984691143036, 45.765625059604645],
+      "promptWallMsMedian": 317158,
+      "promptWallMsRange": [304540, 333125],
+      "peakTreeRssMiB": 508.5234375,
+      "minMemAvailableMiB": 5950.98046875
+    },
+    {
+      "profile": "heavy",
+      "arm": "544",
+      "runs": 3,
+      "actualOldSpaceLimitMiB": 544,
+      "completedTurns": 12,
+      "completedTools": 78,
+      "peakOldGenerationMiB": 127.0703125,
+      "observedOldGenerationMarginMiB": 416.9296875,
+      "peakLiveSetUpperBoundMiB": 114.820556640625,
+      "windowMajorGcCountRange": [5, 9],
+      "windowMajorGcMsMedian": 28.649784982204437,
+      "windowMajorGcMsRange": [18.761105000972748, 40.256060898303986],
+      "promptWallMsMedian": 350939,
+      "promptWallMsRange": [341650, 362794],
+      "peakTreeRssMiB": 507.21484375,
+      "minMemAvailableMiB": 5920.94140625
+    }
+  ],
+  "runs": [
+    {
+      "report": "heap-runs/heavy-baseline-zvK2Tq/repeat-1/report.json",
+      "startedAt": "2026-09-14T09:55:55.274Z",
+      "profile": "heavy",
+      "arm": "baseline",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "af70d6aacd5049acb0173d663e652136d911fd982f300fe981f7f4c772360c35",
+        "samplesSha256": "2cb0824a13dd080ddad39f29270a51ed2b2454a3c23b2f861df81e88342f419e",
+        "invocationSha256": "d4d6474ad326303b2a78362178b677690b5bae58936281f38379fe62c3775cf8"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 23,
+        "completed": 23,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 23
+        }
+      },
+      "expectedTurns": 4,
+      "completedTurns": 4,
+      "promptWallMs": 304540,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 10039,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 54652,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 3,
+          "elapsedMs": 98491,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 4,
+          "elapsedMs": 141358,
+          "stopReason": "end_turn",
+          "toolCallDelta": 12
+        }
+      ],
+      "samples": {
+        "count": 179,
+        "childSampled": 173,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 173
+      },
+      "generationKeys": ["201691:33504805"],
+      "actualHeapFlags": [["--max-old-space-size=3632"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 110718976,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145940480,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 129093632,
+          "peakLiveSetBytes": 119158856,
+          "peakTotalHeapBytes": 149934080,
+          "majorGcCount": 8,
+          "majorGcMs": 45.24225997924805,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 8,
+        "windowMajorGcMs": 45.24225997924805,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 508.5234375,
+      "minMemAvailableMiB": 5950.98046875,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 1,
+      "pair": 1,
+      "contentAudit": {
+        "ordinal": 1,
+        "profile": "heavy",
+        "arm": "baseline",
+        "passed": true,
+        "checksCount": 909,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "countVerified": true,
+            "tools": 1
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/daemon-status.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 3,
+            "file": "packages/core/src/utils/gitDiff.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 4,
+            "file": "packages/cli/src/config/settingsSchema.ts",
+            "pages": 12,
+            "pagesVerified": 12,
+            "tools": 12
+          }
+        ],
+        "toolEventsSha256": "04402846e4cbb07bdaa4db349474cc401641f0637265670d4a89e87a0c4c3f2a",
+        "reportSha256": "af70d6aacd5049acb0173d663e652136d911fd982f300fe981f7f4c772360c35"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 173,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "run_shell_command": 1,
+        "read_file": 22
+      }
+    },
+    {
+      "report": "heap-runs/heavy-544-E1XEIQ/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:01:32.536Z",
+      "profile": "heavy",
+      "arm": "544",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "8828f4b7a2e7eeef8be9470e6fbf8909ec1b09bf3791275de8b04a5b7ab50582",
+        "samplesSha256": "1ff98f2483b8cb57623f8996397d7df5a779789f0ddae3dc6e7271e40510562d",
+        "invocationSha256": "b5d3a772fcb021746805271b7de74c946939b368cb041f75bd096a145f4e636a"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 23,
+        "completed": 23,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 23
+        }
+      },
+      "expectedTurns": 4,
+      "completedTurns": 4,
+      "promptWallMs": 350939,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 8893,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 114534,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 3,
+          "elapsedMs": 89838,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 4,
+          "elapsedMs": 137674,
+          "stopReason": "end_turn",
+          "toolCallDelta": 12
+        }
+      ],
+      "samples": {
+        "count": 195,
+        "childSampled": 189,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 189
+      },
+      "generationKeys": ["204418:33538531"],
+      "actualHeapFlags": [["--max-old-space-size=544"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 109535232,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 146468864,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 132984832,
+          "peakLiveSetBytes": 119396728,
+          "peakTotalHeapBytes": 149762048,
+          "majorGcCount": 6,
+          "majorGcMs": 28.649784982204437,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 6,
+        "windowMajorGcMs": 28.649784982204437,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 505.24609375,
+      "minMemAvailableMiB": 5934.4140625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 2,
+      "pair": 1,
+      "contentAudit": {
+        "ordinal": 2,
+        "profile": "heavy",
+        "arm": "544",
+        "passed": true,
+        "checksCount": 909,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "countVerified": true,
+            "tools": 1
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/daemon-status.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 3,
+            "file": "packages/core/src/utils/gitDiff.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 4,
+            "file": "packages/cli/src/config/settingsSchema.ts",
+            "pages": 12,
+            "pagesVerified": 12,
+            "tools": 12
+          }
+        ],
+        "toolEventsSha256": "4f16304cd585341d1fbad703025dd4157863a5c14c2ab2df2f5374534e1061f8",
+        "reportSha256": "8828f4b7a2e7eeef8be9470e6fbf8909ec1b09bf3791275de8b04a5b7ab50582"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 189,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "run_shell_command": 1,
+        "read_file": 22
+      }
+    },
+    {
+      "report": "heap-runs/light-baseline-9mNRHR/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:12:38.535Z",
+      "profile": "light",
+      "arm": "baseline",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "b6dd96898b9fdeb580a93c1fe29c9a0b427abfa34bcaf9f83c9742bdb2cb50ef",
+        "samplesSha256": "6a422790e322dd1b31f651451c06a0da1652a528ba574e414630bde941e54b38",
+        "invocationSha256": "f5cf31c6f3b717ad537596fa0d72b920cde4c4ba45c6cfba8b4775960f44c10f"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 7,
+        "completed": 7,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 7
+        }
+      },
+      "expectedTurns": 2,
+      "completedTurns": 2,
+      "promptWallMs": 86197,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 53577,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 32620,
+          "stopReason": "end_turn",
+          "toolCallDelta": 2
+        }
+      ],
+      "samples": {
+        "count": 61,
+        "childSampled": 55,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 55
+      },
+      "generationKeys": ["207925:33605131"],
+      "actualHeapFlags": [["--max-old-space-size=3632"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 109670400,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 144891904,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 118779904,
+          "peakLiveSetBytes": 111542872,
+          "peakTotalHeapBytes": 147836928,
+          "majorGcCount": 3,
+          "majorGcMs": 15.32379400730133,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 3,
+        "windowMajorGcMs": 15.32379400730133,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 453.0859375,
+      "minMemAvailableMiB": 6065.6015625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 3,
+      "pair": 1,
+      "contentAudit": {
+        "ordinal": 3,
+        "profile": "light",
+        "arm": "baseline",
+        "passed": true,
+        "checksCount": 287,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "file": "packages/cli/src/serve/workspace-inputs.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 5
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/routes/workspace-runtime.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 2
+          }
+        ],
+        "toolEventsSha256": "3cc2023623d030d710e9b251ead6ecb4033c4e62b41648ae9c4986994e494470",
+        "reportSha256": "b6dd96898b9fdeb580a93c1fe29c9a0b427abfa34bcaf9f83c9742bdb2cb50ef"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 55,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "list_directory": 2,
+        "read_file": 2,
+        "glob": 3
+      }
+    },
+    {
+      "report": "heap-runs/light-544-ai0JQC/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:14:26.892Z",
+      "profile": "light",
+      "arm": "544",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "df825e164cc2cab0839a7dd2b691f3814e25babe8cd11ac9cc28535783353b54",
+        "samplesSha256": "740a5356eefaae9d679a1e4d7e80946dcae74bfd438b37c9d3237d0a69d28128",
+        "invocationSha256": "2194cc3716ea5f71b9b366e9073fd3f47334bb4c70128d4002cdca1b7bcdeab4"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 8,
+        "completed": 8,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 8
+        }
+      },
+      "expectedTurns": 2,
+      "completedTurns": 2,
+      "promptWallMs": 122243,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 85874,
+          "stopReason": "end_turn",
+          "toolCallDelta": 7
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 36369,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        }
+      ],
+      "samples": {
+        "count": 81,
+        "childSampled": 75,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 75
+      },
+      "generationKeys": ["208905:33615967"],
+      "actualHeapFlags": [["--max-old-space-size=544"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 109010944,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145944576,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 120545280,
+          "peakLiveSetBytes": 110991688,
+          "peakTotalHeapBytes": 149676032,
+          "majorGcCount": 3,
+          "majorGcMs": 15.364446997642517,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 3,
+        "windowMajorGcMs": 15.364446997642517,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 458.52734375,
+      "minMemAvailableMiB": 6000.0703125,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 4,
+      "pair": 1,
+      "contentAudit": {
+        "ordinal": 4,
+        "profile": "light",
+        "arm": "544",
+        "passed": true,
+        "checksCount": 326,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "file": "packages/cli/src/serve/workspace-inputs.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 7
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/routes/workspace-runtime.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 1
+          }
+        ],
+        "toolEventsSha256": "99c5f74e6e993222f8a2df8ae76bcfd888719afa4bb09dc104c0d827550b9625",
+        "reportSha256": "df825e164cc2cab0839a7dd2b691f3814e25babe8cd11ac9cc28535783353b54"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 75,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "glob": 5,
+        "read_file": 2,
+        "list_directory": 1
+      }
+    },
+    {
+      "report": "heap-runs/light-544-Di10wa/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:16:53.497Z",
+      "profile": "light",
+      "arm": "544",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "2dd00748ae5e30027c0055dedb8a28394fb8ea2e717c096cfffbdffb0eba6bf5",
+        "samplesSha256": "5ebd4753c20aa013253ef743485040c72577c20b455becc01697ffd4a4bd27e4",
+        "invocationSha256": "f43935ce4174798770241e5ea22d391e3f288e2ee3a1ed84a9a69dd0b2fc0573"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 6,
+        "completed": 6,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 6
+        }
+      },
+      "expectedTurns": 2,
+      "completedTurns": 2,
+      "promptWallMs": 128802,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 103929,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 24873,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        }
+      ],
+      "samples": {
+        "count": 84,
+        "childSampled": 78,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 78
+      },
+      "generationKeys": ["210199:33630628"],
+      "actualHeapFlags": [["--max-old-space-size=544"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 109010944,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145944576,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 120532992,
+          "peakLiveSetBytes": 112197648,
+          "peakTotalHeapBytes": 149151744,
+          "majorGcCount": 3,
+          "majorGcMs": 17.26146697998047,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 3,
+        "windowMajorGcMs": 17.26146697998047,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 460.73828125,
+      "minMemAvailableMiB": 6009.69140625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 5,
+      "pair": 2,
+      "contentAudit": {
+        "ordinal": 5,
+        "profile": "light",
+        "arm": "544",
+        "passed": true,
+        "checksCount": 248,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "file": "packages/cli/src/serve/workspace-inputs.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 5
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/routes/workspace-runtime.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 1
+          }
+        ],
+        "toolEventsSha256": "35b1ea668cc4b3ab185bbfee8396fd3e65891fb49e6bb498633b3a0b7996d3a6",
+        "reportSha256": "2dd00748ae5e30027c0055dedb8a28394fb8ea2e717c096cfffbdffb0eba6bf5"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 78,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "glob": 3,
+        "read_file": 2,
+        "list_directory": 1
+      }
+    },
+    {
+      "report": "heap-runs/light-baseline-NMrvRR/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:19:26.710Z",
+      "profile": "light",
+      "arm": "baseline",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "430d7c4bc2ee6f324bd4d8aa5c6b20aba246a982a76f2bb43c623fb0f6cf7aa7",
+        "samplesSha256": "69dcaad4413408c788a71c53d54170be713a690cd2d26284be42d993fbed501a",
+        "invocationSha256": "a5d6c02248859babbfc22527bb28bd098db8196f84ab46fdf4d8b9538d4c6c46"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 4,
+        "completed": 4,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 4
+        }
+      },
+      "expectedTurns": 2,
+      "completedTurns": 2,
+      "promptWallMs": 56738,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 36417,
+          "stopReason": "end_turn",
+          "toolCallDelta": 3
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 20321,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        }
+      ],
+      "samples": {
+        "count": 51,
+        "childSampled": 45,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 45
+      },
+      "generationKeys": ["211478:33645949"],
+      "actualHeapFlags": [["--max-old-space-size=3632"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 109932544,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145154048,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 118972416,
+          "peakLiveSetBytes": 109305200,
+          "peakTotalHeapBytes": 148885504,
+          "majorGcCount": 2,
+          "majorGcMs": 18.575280010700226,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 2,
+        "windowMajorGcMs": 18.575280010700226,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 459.53515625,
+      "minMemAvailableMiB": 6016.19140625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 6,
+      "pair": 2,
+      "contentAudit": {
+        "ordinal": 6,
+        "profile": "light",
+        "arm": "baseline",
+        "passed": true,
+        "checksCount": 170,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "file": "packages/cli/src/serve/workspace-inputs.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 3
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/routes/workspace-runtime.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 1
+          }
+        ],
+        "toolEventsSha256": "b6789322c60ba9d45100dd689ca0b8c6149d6f7d1507f8497b2db43619ed77f8",
+        "reportSha256": "430d7c4bc2ee6f324bd4d8aa5c6b20aba246a982a76f2bb43c623fb0f6cf7aa7"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 45,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "glob": 1,
+        "read_file": 2,
+        "list_directory": 1
+      }
+    },
+    {
+      "report": "heap-runs/light-baseline-NZfbJm/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:20:49.738Z",
+      "profile": "light",
+      "arm": "baseline",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "f0d1f5ffe0087d275ef4b66d7c192b61d729beab4978f7730558a943bb589364",
+        "samplesSha256": "258786fffa44365fde855c789bf74decd31557316a8934f5de914cc85dd2cc43",
+        "invocationSha256": "bb6a47d4f89c8b92577eccec0d82ee32a87fbdda6d19e0e796d75a1d6089613a"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 5,
+        "completed": 5,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 5
+        }
+      },
+      "expectedTurns": 2,
+      "completedTurns": 2,
+      "promptWallMs": 85953,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 59060,
+          "stopReason": "end_turn",
+          "toolCallDelta": 4
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 26893,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        }
+      ],
+      "samples": {
+        "count": 61,
+        "childSampled": 55,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 55
+      },
+      "generationKeys": ["212235:33654252"],
+      "actualHeapFlags": [["--max-old-space-size=3632"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 110718976,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145940480,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 118910976,
+          "peakLiveSetBytes": 112682944,
+          "peakTotalHeapBytes": 149934080,
+          "majorGcCount": 3,
+          "majorGcMs": 17.856486976146698,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 3,
+        "windowMajorGcMs": 17.856486976146698,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 459.046875,
+      "minMemAvailableMiB": 6017.2265625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 7,
+      "pair": 3,
+      "contentAudit": {
+        "ordinal": 7,
+        "profile": "light",
+        "arm": "baseline",
+        "passed": true,
+        "checksCount": 209,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "file": "packages/cli/src/serve/workspace-inputs.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 4
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/routes/workspace-runtime.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 1
+          }
+        ],
+        "toolEventsSha256": "77584e4c058c3f9d717bb4fd8cd47f603dffab732d3f7f2a2bbf2d2a03731e94",
+        "reportSha256": "f0d1f5ffe0087d275ef4b66d7c192b61d729beab4978f7730558a943bb589364"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 55,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "list_directory": 1,
+        "read_file": 2,
+        "glob": 2
+      }
+    },
+    {
+      "report": "heap-runs/light-544-qw4akf/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:22:37.936Z",
+      "profile": "light",
+      "arm": "544",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "b91edc717bcb6f84f0e8b1309800edac2fb8b384341a7d48ded47bd6c8709fea",
+        "samplesSha256": "15e3855003358241f0731ecc8aee3fecd9e2c6049188b827fe6d36b302c05de3",
+        "invocationSha256": "59b198ea1b502a8347336c2d6c8707c08aa9731b33a8f8ad84d5f5bf1c76f1f5"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 14,
+        "completed": 14,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 14
+        }
+      },
+      "expectedTurns": 2,
+      "completedTurns": 2,
+      "promptWallMs": 111146,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 92949,
+          "stopReason": "end_turn",
+          "toolCallDelta": 13
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 18197,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        }
+      ],
+      "samples": {
+        "count": 73,
+        "childSampled": 67,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 67
+      },
+      "generationKeys": ["213304:33665071"],
+      "actualHeapFlags": [["--max-old-space-size=544"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 109010944,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145944576,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 121737216,
+          "peakLiveSetBytes": 112301936,
+          "peakTotalHeapBytes": 149676032,
+          "majorGcCount": 3,
+          "majorGcMs": 16.273785054683685,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 3,
+        "windowMajorGcMs": 16.273785054683685,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 461.3046875,
+      "minMemAvailableMiB": 6014.6875,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 8,
+      "pair": 3,
+      "contentAudit": {
+        "ordinal": 8,
+        "profile": "light",
+        "arm": "544",
+        "passed": true,
+        "checksCount": 560,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "file": "packages/cli/src/serve/workspace-inputs.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 13
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/routes/workspace-runtime.ts",
+            "pages": 1,
+            "pagesVerified": 1,
+            "tools": 1
+          }
+        ],
+        "toolEventsSha256": "3bdd22223fe2b6542367dae1ed3ec8ac5163d11960da1cad4ec4f0fd1040e722",
+        "reportSha256": "b91edc717bcb6f84f0e8b1309800edac2fb8b384341a7d48ded47bd6c8709fea"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 67,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "glob": 11,
+        "read_file": 2,
+        "list_directory": 1
+      }
+    },
+    {
+      "report": "heap-runs/heavy-544-UQtm6d/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:24:51.433Z",
+      "profile": "heavy",
+      "arm": "544",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "3f4f703288b07ea51d9aaf722f2adbea84251b4e95fa15a825dec51a058bfa85",
+        "samplesSha256": "41ba08a06e829d2126c21800016bacd15277b19c936cca608adcbe9bcb609034",
+        "invocationSha256": "a6dc6cd2a276802f9177989848f17e1ef7d4142e5aaedaee28b8df694266b551"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 29,
+        "completed": 29,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 29
+        }
+      },
+      "expectedTurns": 4,
+      "completedTurns": 4,
+      "promptWallMs": 341650,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 9954,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 55971,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 3,
+          "elapsedMs": 137834,
+          "stopReason": "end_turn",
+          "toolCallDelta": 11
+        },
+        {
+          "turn": 4,
+          "elapsedMs": 137891,
+          "stopReason": "end_turn",
+          "toolCallDelta": 12
+        }
+      ],
+      "samples": {
+        "count": 195,
+        "childSampled": 189,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 189
+      },
+      "generationKeys": ["214454:33678421"],
+      "actualHeapFlags": [["--max-old-space-size=544"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 108748800,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145682432,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 133242880,
+          "peakLiveSetBytes": 120398080,
+          "peakTotalHeapBytes": 149413888,
+          "majorGcCount": 5,
+          "majorGcMs": 18.761105000972748,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 5,
+        "windowMajorGcMs": 18.761105000972748,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 497.5625,
+      "minMemAvailableMiB": 5965.12890625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 9,
+      "pair": 2,
+      "contentAudit": {
+        "ordinal": 9,
+        "profile": "heavy",
+        "arm": "544",
+        "passed": true,
+        "checksCount": 1143,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "countVerified": true,
+            "tools": 1
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/daemon-status.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 3,
+            "file": "packages/core/src/utils/gitDiff.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 11
+          },
+          {
+            "turn": 4,
+            "file": "packages/cli/src/config/settingsSchema.ts",
+            "pages": 12,
+            "pagesVerified": 12,
+            "tools": 12
+          }
+        ],
+        "toolEventsSha256": "d6dca135ceb1bad4781a1e607d82c04b3bea9442599b914ffcec7ddb11122b9c",
+        "reportSha256": "3f4f703288b07ea51d9aaf722f2adbea84251b4e95fa15a825dec51a058bfa85"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 189,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "run_shell_command": 1,
+        "read_file": 23,
+        "grep_search": 5
+      }
+    },
+    {
+      "report": "heap-runs/heavy-baseline-vbZuDq/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:31:03.786Z",
+      "profile": "heavy",
+      "arm": "baseline",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "be713ab132546157cce7005fe0f2cb5da7e167f8614ba7e230a6df2aa0cb5b37",
+        "samplesSha256": "e6cb4dab08cc735f08bc76701943571edbc7e645df4d6948616d615b33021cac",
+        "invocationSha256": "04323b73b754e0ea3060e4e8fc607b98764181ba4d12de50ee477215b5310de8"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 27,
+        "completed": 27,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 27
+        }
+      },
+      "expectedTurns": 4,
+      "completedTurns": 4,
+      "promptWallMs": 333125,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 15762,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 61332,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 3,
+          "elapsedMs": 108472,
+          "stopReason": "end_turn",
+          "toolCallDelta": 9
+        },
+        {
+          "turn": 4,
+          "elapsedMs": 147559,
+          "stopReason": "end_turn",
+          "toolCallDelta": 12
+        }
+      ],
+      "samples": {
+        "count": 188,
+        "childSampled": 182,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 182
+      },
+      "generationKeys": ["217333:33715657"],
+      "actualHeapFlags": [["--max-old-space-size=3632"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 110718976,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145940480,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 127668224,
+          "peakLiveSetBytes": 119375952,
+          "peakTotalHeapBytes": 148361216,
+          "majorGcCount": 8,
+          "majorGcMs": 45.765625059604645,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 8,
+        "windowMajorGcMs": 45.765625059604645,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 492.1640625,
+      "minMemAvailableMiB": 5956.1640625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 10,
+      "pair": 2,
+      "contentAudit": {
+        "ordinal": 10,
+        "profile": "heavy",
+        "arm": "baseline",
+        "passed": true,
+        "checksCount": 1065,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "countVerified": true,
+            "tools": 1
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/daemon-status.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 3,
+            "file": "packages/core/src/utils/gitDiff.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 9
+          },
+          {
+            "turn": 4,
+            "file": "packages/cli/src/config/settingsSchema.ts",
+            "pages": 12,
+            "pagesVerified": 12,
+            "tools": 12
+          }
+        ],
+        "toolEventsSha256": "585890ee6655db9393b41ca9dfdbceab5a2d7b35eae447a22b7bcf89ccdc87d7",
+        "reportSha256": "be713ab132546157cce7005fe0f2cb5da7e167f8614ba7e230a6df2aa0cb5b37"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 182,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "run_shell_command": 1,
+        "read_file": 23,
+        "grep_search": 3
+      }
+    },
+    {
+      "report": "heap-runs/heavy-baseline-1kYbhk/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:37:05.579Z",
+      "profile": "heavy",
+      "arm": "baseline",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "64d4e5b372c9778c65e5716366d5299cc36dec85d0880b6d29c2f47fd5c08cee",
+        "samplesSha256": "8c428564e6d541471fda1e664e12b19e3a379451bbdf4e867fb4634007c38cc5",
+        "invocationSha256": "6003a7008b3a59b6671cedd2830c61ddc9c6545a39694b9ffffcb8b7057154e1"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 29,
+        "completed": 29,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 29
+        }
+      },
+      "expectedTurns": 4,
+      "completedTurns": 4,
+      "promptWallMs": 317158,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 9161,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 47169,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 3,
+          "elapsedMs": 119574,
+          "stopReason": "end_turn",
+          "toolCallDelta": 10
+        },
+        {
+          "turn": 4,
+          "elapsedMs": 141254,
+          "stopReason": "end_turn",
+          "toolCallDelta": 13
+        }
+      ],
+      "samples": {
+        "count": 183,
+        "childSampled": 177,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 177
+      },
+      "generationKeys": ["220157:33751836"],
+      "actualHeapFlags": [["--max-old-space-size=3632"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 110718976,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 145940480,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 131932160,
+          "peakLiveSetBytes": 119453816,
+          "peakTotalHeapBytes": 149934080,
+          "majorGcCount": 6,
+          "majorGcMs": 30.89984691143036,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 6,
+        "windowMajorGcMs": 30.89984691143036,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 491.76953125,
+      "minMemAvailableMiB": 5963.95703125,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 11,
+      "pair": 3,
+      "contentAudit": {
+        "ordinal": 11,
+        "profile": "heavy",
+        "arm": "baseline",
+        "passed": true,
+        "checksCount": 1143,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "countVerified": true,
+            "tools": 1
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/daemon-status.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 3,
+            "file": "packages/core/src/utils/gitDiff.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 10
+          },
+          {
+            "turn": 4,
+            "file": "packages/cli/src/config/settingsSchema.ts",
+            "pages": 12,
+            "pagesVerified": 12,
+            "tools": 13
+          }
+        ],
+        "toolEventsSha256": "46a34f9b18eeb89b7069fb17ad8d450f1ce6012b50cac912fc72d563ef5e9b8b",
+        "reportSha256": "64d4e5b372c9778c65e5716366d5299cc36dec85d0880b6d29c2f47fd5c08cee"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 177,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "run_shell_command": 1,
+        "read_file": 23,
+        "grep_search": 5
+      }
+    },
+    {
+      "report": "heap-runs/heavy-544-HuyGkR/repeat-1/report.json",
+      "startedAt": "2026-09-14T10:42:53.453Z",
+      "profile": "heavy",
+      "arm": "544",
+      "runIndex": 1,
+      "identity": {
+        "collectorSha256": "be9f35c3a6ca5b14f73c858b84ec4c28c9e1bb5e66a97498e53916edb418cec2",
+        "cliSha256": "b62195675a83697060d31ac2550d76ad0ff0a3577adb391dbca020ecfe613447",
+        "sdkSha256": "376e3c5437e3f3169178437744028b0685a3318a2e57a5d10ac44f8f3f26664f",
+        "preloadSha256": "48d3b781a6e3dc60484ca2d521ac40d234beb8781738a9683424823dabeeeff3",
+        "nodeVersion": "v22.23.2",
+        "model": "qwen3.8-flash",
+        "workspace": "/root/cap/repos/ws000",
+        "kernel": "7.0.0-29-generic",
+        "arch": "x64",
+        "physicalMemoryBytes": 7618281472
+      },
+      "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+      "hashes": {
+        "reportSha256": "375c4586a32a309e3673ebe9095b176abbda2589684312274ecaef5af395ca1d",
+        "samplesSha256": "1c8495036af6a547a9e3df05c09e130e6b6c7601045a868e0372fb1422e2444e",
+        "invocationSha256": "cfd8d15ef4907ac9ecc24dfa82e788f058682c34e91f9b3942ca3550cf07e7ca"
+      },
+      "collectionComplete": true,
+      "collectionChecks": {
+        "supported_profile_arm": true,
+        "record_matches_invocation": true,
+        "frozen_identity": true,
+        "collector_matches_archived_file": true,
+        "node_version": true,
+        "physical_host_floor_mib": true,
+        "sample_count": true,
+        "sample_errors_absent": true,
+        "event_stream_error_absent": true,
+        "fixture_commit_matches": true,
+        "workspace_unchanged": true,
+        "cleanup_confirmed": true,
+        "root_exit_clean": true,
+        "no_collection_abort": true,
+        "single_observed_generation": true,
+        "actual_heap_grant": true,
+        "child_environment_isolated": true,
+        "status_scope_single_workspace_child": true,
+        "event_watcher_observed": true,
+        "heap_taxonomy_complete": true,
+        "heap_lifetime_marks_monotonic": true,
+        "rss_summary_matches": true,
+        "fresh_reports_complete": true,
+        "fresh_reports_match_raw_samples": true,
+        "final_fresh_report_matches": true,
+        "observed_cgroup_oom_counters_unchanged": true
+      },
+      "workloadToolsComplete": true,
+      "workloadChecks": {
+        "expected_turn_count": true,
+        "all_end_turn": true,
+        "all_tool_calls_completed": true,
+        "tool_call_count_matches_ids": true,
+        "no_turn_or_run_error": true,
+        "collector_completed": true,
+        "no_cancelled_permission": true
+      },
+      "tools": {
+        "total": 26,
+        "completed": 26,
+        "failed": 0,
+        "nonterminalOrMissing": 0,
+        "statusCounts": {
+          "completed": 26
+        }
+      },
+      "expectedTurns": 4,
+      "completedTurns": 4,
+      "promptWallMs": 362794,
+      "turns": [
+        {
+          "turn": 1,
+          "elapsedMs": 10170,
+          "stopReason": "end_turn",
+          "toolCallDelta": 1
+        },
+        {
+          "turn": 2,
+          "elapsedMs": 62547,
+          "stopReason": "end_turn",
+          "toolCallDelta": 5
+        },
+        {
+          "turn": 3,
+          "elapsedMs": 113865,
+          "stopReason": "end_turn",
+          "toolCallDelta": 8
+        },
+        {
+          "turn": 4,
+          "elapsedMs": 176212,
+          "stopReason": "end_turn",
+          "toolCallDelta": 12
+        }
+      ],
+      "samples": {
+        "count": 209,
+        "childSampled": 203,
+        "activeWithoutSample": 4,
+        "sampledWithoutHeap": 0,
+        "withHeap": 203
+      },
+      "generationKeys": ["222937:33786623"],
+      "actualHeapFlags": [["--max-old-space-size=544"]],
+      "gc": {
+        "beforeFirstTurnLifetimeHeap": {
+          "peakOldGenerationBytes": 113176576,
+          "peakLiveSetBytes": 0,
+          "peakTotalHeapBytes": 146731008,
+          "majorGcCount": 0,
+          "majorGcMs": 0,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "beforeTeardownLifetimeHeap": {
+          "peakOldGenerationBytes": 129277952,
+          "peakLiveSetBytes": 119449688,
+          "peakTotalHeapBytes": 151605248,
+          "majorGcCount": 9,
+          "majorGcMs": 40.256060898303986,
+          "unclassifiedSpaceNames": [],
+          "reported": 1
+        },
+        "windowMajorGcCount": 9,
+        "windowMajorGcMs": 40.256060898303986,
+        "newMajorGcObservedDuringWindow": true,
+        "coverage": "observed-major-gc-in-workload-and-settle-window",
+        "interpretation": "Heap peaks remain lifetime maxima including startup. GC deltas cover the pre-first-turn to pre-teardown window, including between-turn and final settling waits. No forced GC is introduced by this auditor."
+      },
+      "peakTreeRssMiB": 507.21484375,
+      "minMemAvailableMiB": 5920.94140625,
+      "cleanup": {
+        "residual": [],
+        "portReleased": true,
+        "fixtureRemoved": true,
+        "workspaceUnchanged": true
+      },
+      "calibrationObservationComplete": true,
+      "answerSemantics": "Count JSON verified exactly against an independent fixture oracle; prose summaries retained but not semantically graded.",
+      "ordinal": 12,
+      "pair": 3,
+      "contentAudit": {
+        "ordinal": 12,
+        "profile": "heavy",
+        "arm": "544",
+        "passed": true,
+        "checksCount": 1026,
+        "failedChecks": [],
+        "turns": [
+          {
+            "turn": 1,
+            "countVerified": true,
+            "tools": 1
+          },
+          {
+            "turn": 2,
+            "file": "packages/cli/src/serve/daemon-status.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 5
+          },
+          {
+            "turn": 3,
+            "file": "packages/core/src/utils/gitDiff.ts",
+            "pages": 5,
+            "pagesVerified": 5,
+            "tools": 8
+          },
+          {
+            "turn": 4,
+            "file": "packages/cli/src/config/settingsSchema.ts",
+            "pages": 12,
+            "pagesVerified": 12,
+            "tools": 12
+          }
+        ],
+        "toolEventsSha256": "15e6694d5cee731c0903650a30957e6f2e3caef07831ec371a421f1173e6f9dd",
+        "reportSha256": "375c4586a32a309e3673ebe9095b176abbda2589684312274ecaef5af395ca1d"
+      },
+      "observedModelMetrics": {
+        "samplesWithMetrics": 203,
+        "llmApiErrorsMaxRetainedWindow": 0,
+        "llmApiRetriesMaxRetainedWindow": 0
+      },
+      "toolNameCounts": {
+        "run_shell_command": 1,
+        "read_file": 22,
+        "grep_search": 3
+      }
+    }
+  ],
+  "pairs": [
+    {
+      "profile": "light",
+      "pair": 1,
+      "order": "AB",
+      "reports": [
+        "heap-runs/light-baseline-9mNRHR/repeat-1/report.json",
+        "heap-runs/light-544-ai0JQC/repeat-1/report.json"
+      ],
+      "promptWallDeltaFixedMinusBaselineMs": 36046,
+      "toolCallCountBaseline": 7,
+      "toolCallCountFixed": 8,
+      "comparableCollectorObservation": true,
+      "causalHeapOverheadEstimate": false
+    },
+    {
+      "profile": "light",
+      "pair": 2,
+      "order": "BA",
+      "reports": [
+        "heap-runs/light-544-Di10wa/repeat-1/report.json",
+        "heap-runs/light-baseline-NMrvRR/repeat-1/report.json"
+      ],
+      "promptWallDeltaFixedMinusBaselineMs": 72064,
+      "toolCallCountBaseline": 4,
+      "toolCallCountFixed": 6,
+      "comparableCollectorObservation": true,
+      "causalHeapOverheadEstimate": false
+    },
+    {
+      "profile": "light",
+      "pair": 3,
+      "order": "AB",
+      "reports": [
+        "heap-runs/light-baseline-NZfbJm/repeat-1/report.json",
+        "heap-runs/light-544-qw4akf/repeat-1/report.json"
+      ],
+      "promptWallDeltaFixedMinusBaselineMs": 25193,
+      "toolCallCountBaseline": 5,
+      "toolCallCountFixed": 14,
+      "comparableCollectorObservation": true,
+      "causalHeapOverheadEstimate": false
+    },
+    {
+      "profile": "heavy",
+      "pair": 1,
+      "order": "AB",
+      "reports": [
+        "heap-runs/heavy-baseline-zvK2Tq/repeat-1/report.json",
+        "heap-runs/heavy-544-E1XEIQ/repeat-1/report.json"
+      ],
+      "promptWallDeltaFixedMinusBaselineMs": 46399,
+      "toolCallCountBaseline": 23,
+      "toolCallCountFixed": 23,
+      "comparableCollectorObservation": true,
+      "causalHeapOverheadEstimate": false
+    },
+    {
+      "profile": "heavy",
+      "pair": 2,
+      "order": "BA",
+      "reports": [
+        "heap-runs/heavy-544-UQtm6d/repeat-1/report.json",
+        "heap-runs/heavy-baseline-vbZuDq/repeat-1/report.json"
+      ],
+      "promptWallDeltaFixedMinusBaselineMs": 8525,
+      "toolCallCountBaseline": 27,
+      "toolCallCountFixed": 29,
+      "comparableCollectorObservation": true,
+      "causalHeapOverheadEstimate": false
+    },
+    {
+      "profile": "heavy",
+      "pair": 3,
+      "order": "AB",
+      "reports": [
+        "heap-runs/heavy-baseline-1kYbhk/repeat-1/report.json",
+        "heap-runs/heavy-544-HuyGkR/repeat-1/report.json"
+      ],
+      "promptWallDeltaFixedMinusBaselineMs": 45636,
+      "toolCallCountBaseline": 29,
+      "toolCallCountFixed": 26,
+      "comparableCollectorObservation": true,
+      "causalHeapOverheadEstimate": false
+    }
+  ],
+  "postRunVerification": {
+    "state": "complete",
+    "bundleFilesVerified": 1072,
+    "frozenFilesVerified": 7,
+    "fixtureFilesVerified": 421,
+    "fixtureCommit": "0e71c6deb6add388019fa5859963abe7d82ca5b3",
+    "workspaceUnchanged": true,
+    "residualCalibrationProcesses": [],
+    "temporaryProviderRemoved": true,
+    "verifiedAt": "2026-09-14T10:51:24.731387+00:00"
+  },
+  "limitations": [
+    "One registered workspace, one session and one observed ACP child per fresh run; no concurrent-child capacity conclusion.",
+    "The fixed read-only count covers case-sensitive literal occurrences in tracked non-binary files. The execution protocol differs from v1; results are not pooled.",
+    "Every target page was compared with archived fixture text, proving normalized text delivery through ACP. This does not establish understanding or cross-turn retention.",
+    "Count answer JSON is verified. Other final prose is retained but not semantically graded.",
+    "Old-generation/live-set peaks are lifetime maxima including startup. GC deltas span before-first-turn to before-teardown, including settling, without forced GC.",
+    "Paired prompt latency is observational; model output and tool sequences can differ, so it does not isolate heap overhead.",
+    "No claim about long sessions, multi-session, multi-MCP, concurrent children, Node 24, other host partitions, RSS limits or safe production capacity.",
+    "Production enforcement remains unimplemented and must wait for broader calibration."
+  ],
+  "independentFinalAudit": {
+    "passed": true,
+    "checks": 12155,
+    "extraReadOnlyCallsByHeavyRun": {
+      "1": 0,
+      "2": 0,
+      "9": 6,
+      "10": 4,
+      "11": 6,
+      "12": 3
+    },
+    "protocolInterpretation": "Only the heavy counting turn requires exactly one fixed Shell invocation. File turns require every frozen page to match, while extra read-only calls are reported separately. The initial audit mistakenly required exactly 23 tools per heavy run; its failed result is preserved in matrix-independent-audit-strict-first-pass.json.",
+    "correctedAssumptionFirstPassSha256": "1a6507df7559b13a9cb1f18466171b5f7523aada8268e0547853552c8650edd5",
+    "limitations": [
+      "This matrix observes one workspace/session/ACP child per run, not production admission enforcement or concurrent capacity.",
+      "Both light files and three heavy files are compared with frozen fixture payloads when that profile is present; summary semantics are not graded.",
+      "Counter output and answer match the separately archived independent byte-counter oracle; its 419 source files were not all downloaded or independently recounted by this audit.",
+      "Permission evidence is the collector original report record linked by toolCallId, not a second raw permission event stream.",
+      "GC deltas include between-turn and final settling waits; heap maxima cover the complete process lifetime.",
+      "Cleanup is verified from archived owned-process checks and daemon tail, without a new remote process query.",
+      "File turns may perform additional read-only checks beyond the required pages; their varying work precludes attributing paired wall-time differences solely to heap ceiling."
+    ]
+  }
+}
