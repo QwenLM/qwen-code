@@ -383,6 +383,8 @@ Use `tools` and `disallowedTools` to control which tools a subagent can access.
 
 **`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
 
+The allowlist applies both to directly declared tools and to targets invoked through the `tool_search`/`tool_call` deferred-tool bridge. A subagent may discover the schema of a hidden deferred tool, but it cannot invoke that tool unless the target is also present in `tools`. `disallowedTools` and `permissions.deny` remain additional blocklists for tools that must stay unavailable.
+
 ```
 ---
 name: reader
