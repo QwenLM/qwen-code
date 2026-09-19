@@ -42,7 +42,6 @@ export function useMessageNavigation(
       recordId,
       signal,
     }: WebShellMessageNavigationRequest): Promise<WebShellMessageNavigationResult> => {
-      const token = ++generation.current;
       if (
         !mounted.current ||
         currentHistory.current !== history ||
@@ -61,6 +60,8 @@ export function useMessageNavigation(
       )
         return { status: 'not_ready' };
       if (!recordId.trim()) return { status: 'not_found' };
+      // 只有可执行的新定位才取代旧请求；被拒绝的调用不改变当前任务。
+      const token = ++generation.current;
       const isCurrent = () =>
         mounted.current &&
         currentHistory.current === history &&

@@ -145,3 +145,43 @@ for (const theme of ['light', 'dark']) {
     }
   }
 }
+
+test('search keyboard and previous/next controls wrap and Enter locates the selected result', async ({
+  page,
+  baseURL,
+}) => {
+  await setup(page, baseURL, { count: 12 });
+  await searchButton(page).click();
+  const dialog = page.locator('[data-conversation-search]');
+  const input = dialog.locator('input');
+  await input.fill('Synthetic message');
+  const results = dialog.locator('ol button');
+  await expect(results).toHaveCount(10);
+  const active = dialog.locator('ol button[aria-current="true"]');
+  await expect(active).toContainText('Synthetic message 0');
+  await input.press('ArrowUp');
+  await expect(active).toContainText('Synthetic message 10');
+  await input.press('ArrowDown');
+  await expect(active).toContainText('Synthetic message 0');
+  await input.press('ArrowDown');
+  await expect(active).toContainText('Synthetic message 1');
+  await dialog
+    .getByRole('button', { name: 'Previous result', exact: true })
+    .click();
+  await expect(active).toContainText('Synthetic message 0');
+  await dialog
+    .getByRole('button', { name: 'Previous result', exact: true })
+    .click();
+  await expect(active).toContainText('Synthetic message 10');
+  await dialog
+    .getByRole('button', { name: 'Next result', exact: true })
+    .click();
+  await expect(active).toContainText('Synthetic message 0');
+  await input.press('ArrowDown');
+  await expect(active).toContainText('Synthetic message 1');
+  await input.press('Enter');
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.locator('[data-web-shell-message-list] [class*="flash"]'),
+  ).toContainText('Synthetic message 1');
+});

@@ -187,3 +187,52 @@ it('rejects a retained callback after the history provider is replaced', async (
   expect(mocks.resolve).not.toHaveBeenCalled();
   expect(await navigate(request)).toEqual({ status: 'located' });
 });
+
+it('a rejected stale-owner callback does not cancel the current owner navigation', async () => {
+  const oldNavigate = navigate;
+  historyStore = { ...store };
+  await act(async () => root!.render(<Probe />));
+  const pending = deferred<typeof hit>();
+  mocks.resolve.mockReturnValueOnce(pending.promise);
+  const active = navigate(request);
+  const options = mocks.resolve.mock.calls[0][1];
+  expect(await oldNavigate(request)).toEqual({ status: 'cancelled' });
+  expect(options.isCurrent()).toBe(true);
+  pending.resolve(hit);
+  expect(await active).toEqual({ status: 'located' });
+  expect(scroll).toHaveBeenCalledTimes(1);
+});
+
+it('an already-aborted request does not cancel an active navigation', async () => {
+  const pending = deferred<typeof hit>();
+  mocks.resolve.mockReturnValueOnce(pending.promise);
+  const active = navigate(request);
+  const options = mocks.resolve.mock.calls[0][1];
+  const controller = new AbortController();
+  controller.abort();
+  expect(await navigate({ ...request, signal: controller.signal })).toEqual({
+    status: 'cancelled',
+  });
+  expect(options.isCurrent()).toBe(true);
+  pending.resolve(hit);
+  expect(await active).toEqual({ status: 'located' });
+  expect(scroll).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  [{ sessionId: 'other', recordId: 'record' }, 'session_mismatch'],
+  [{ sessionId: 'session', recordId: '  ' }, 'not_found'],
+] as const)(
+  'a rejected request %j does not cancel an active navigation',
+  async (invalid, status) => {
+    const pending = deferred<typeof hit>();
+    mocks.resolve.mockReturnValueOnce(pending.promise);
+    const active = navigate(request);
+    const options = mocks.resolve.mock.calls[0][1];
+    expect(await navigate(invalid)).toEqual({ status });
+    expect(options.isCurrent()).toBe(true);
+    pending.resolve(hit);
+    expect(await active).toEqual({ status: 'located' });
+    expect(scroll).toHaveBeenCalledTimes(1);
+  },
+);
