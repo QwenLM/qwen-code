@@ -93,6 +93,14 @@ export interface DaemonStandaloneConnectionState {
 
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
+  runtimeStopped?: boolean;
+  runtimeStopPersistenceUnconfirmed?: boolean;
+  capacityRecovery?: {
+    error: unknown;
+    sessionId: string;
+    sessionContext?: DaemonProductSessionContext;
+    mode: 'load' | 'resume';
+  };
   sessionId?: string;
   /**
    * Daemon-confirmed client identity bound to this session (the value sent as
@@ -547,6 +555,7 @@ export interface DaemonSessionActions {
    */
   createSession(options?: {
     workspaceCwd?: string;
+    getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
     approvalMode?: DaemonApprovalMode;

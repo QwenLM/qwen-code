@@ -106,6 +106,7 @@ import type {
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitDetail,
   DaemonGitBranchesResult,
   DaemonGitCheckoutResult,
@@ -130,6 +131,9 @@ import type {
   DaemonWorkspaceAcpStatusResult,
   DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceRuntimeStatus,
+  DaemonRuntimeStopRequest,
+  DaemonRuntimeStopOptions,
+  DaemonWorkspaceRuntimeStopResult,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -1500,11 +1504,14 @@ export class DaemonClient {
     limit?: number,
     skip?: number,
     range?: string,
+    options?: DaemonGitLogOptions,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (range) params.set('range', range);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -1670,6 +1677,14 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceAcpStatusResult>(
       '/workspace/acp/status',
       'GET /workspace/acp/status',
+      { mode: 'rest' },
+    );
+  }
+
+  runtimeStopOptions(): Promise<DaemonRuntimeStopOptions> {
+    return this.jsonRequest<DaemonRuntimeStopOptions>(
+      '/workspaces/runtime-stop-options',
+      'GET /workspaces/runtime-stop-options',
       { mode: 'rest' },
     );
   }
@@ -6590,6 +6605,22 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  stopRuntime(
+    confirmation: DaemonRuntimeStopRequest,
+  ): Promise<DaemonWorkspaceRuntimeStopResult> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStopResult>(
+      this.workspaceSelector,
+      '/runtime/stop',
+      'POST /workspaces/:workspace/runtime/stop',
+      {
+        method: 'POST',
+        body: confirmation,
+        timeoutMs: WORKSPACE_RUNTIME_ENSURE_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
     return this.client.workspaceJsonRequest<DaemonWorkspaceRuntimeStatus>(
       this.workspaceSelector,
@@ -6988,14 +7019,16 @@ export class WorkspaceDaemonClient {
     skip?: number,
     cwd?: string,
     range?: string,
-    sessionId?: string,
+    options?: DaemonGitLogOptions & { sessionId?: string },
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (cwd != null) params.set('cwd', cwd);
     if (range) params.set('range', range);
-    if (sessionId != null) params.set('sessionId', sessionId);
+    if (options?.all) params.set('all', '1');
+    if (options?.search) params.set('search', options.search);
+    if (options?.sessionId != null) params.set('sessionId', options.sessionId);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,

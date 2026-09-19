@@ -586,6 +586,7 @@ it('restores the Conversations runtime for a persisted scheduled task', async ()
     .spyOn(scheduledTaskKeepalive, 'startScheduledTaskKeepalive')
     .mockReturnValue({
       stop: vi.fn(),
+      activeWork: false,
       tick: vi.fn().mockResolvedValue(undefined),
     });
   vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
@@ -680,6 +681,7 @@ it('marks only the live-conversation bridge with the Conversations provenance en
     'startScheduledTaskKeepalive',
   ).mockReturnValue({
     stop: vi.fn(),
+    activeWork: false,
     tick: vi.fn().mockResolvedValue(undefined),
   });
   const createBridge = vi

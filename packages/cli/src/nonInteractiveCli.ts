@@ -15,7 +15,6 @@ import type {
   GoalTurnHost,
   GoalContinuationTurn,
   GoalTurnPermit,
-  ActiveGoal,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   RuntimeContentGeneratorView,
@@ -242,19 +241,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {
-  const goal = snapshot.goal;
-  if (goal?.status !== 'active') return null;
-  return {
-    condition: goal.objective,
-    iterations: goal.turnCount,
-    setAt: goal.createdAt,
-    tokensAtStart: 0,
-    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
-    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
-  };
 }
 
 /**
@@ -634,10 +620,6 @@ export async function runNonInteractive(
       adapter.processEvent({
         type: LlmEventType.GoalState,
         value: snapshot,
-      });
-      adapter.processEvent({
-        type: LlmEventType.ActiveGoal,
-        value: projectLegacyActiveGoal(snapshot),
       });
     };
     const observeGoalRuntime = (runtime: GoalRuntime) => {

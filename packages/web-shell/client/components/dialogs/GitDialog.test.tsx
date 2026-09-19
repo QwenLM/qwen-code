@@ -186,13 +186,11 @@ describe('GitDialog', () => {
     ).toHaveLength(1);
     expect(historyTab?.getAttribute('aria-selected')).toBe('true');
     expect(panel?.getAttribute('aria-labelledby')).toBe('git-dialog-tab-log');
-    expect(workspaceGitLog).toHaveBeenCalledWith(
-      50,
-      0,
-      undefined,
-      undefined,
-      undefined,
-    );
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined, undefined, {
+      all: false,
+      search: undefined,
+      sessionId: undefined,
+    });
   });
 
   it('supports arrow-key tab navigation', async () => {
@@ -268,7 +266,7 @@ describe('GitDialog', () => {
       0,
       '/worktrees/feature-x',
       undefined,
-      'session-worktree',
+      { all: false, search: undefined, sessionId: 'session-worktree' },
     );
   });
 

@@ -228,6 +228,7 @@ function mount(
   overrides: Partial<{
     onOpenDiff: () => void;
     onOpenCommit: () => void;
+    onOpenLog: () => void;
     onOpenChange: (open: boolean) => void;
     onBranchChanged: () => void;
     open: boolean;
@@ -252,6 +253,7 @@ function mount(
           onBranchChanged={overrides.onBranchChanged}
           onOpenDiff={overrides.onOpenDiff}
           onOpenCommit={overrides.onOpenCommit}
+          onOpenLog={overrides.onOpenLog}
         >
           <button type="button">trigger</button>
         </BranchPickerPopover>
@@ -439,6 +441,67 @@ describe('BranchPickerPopover actions', () => {
     clickButton('View Changes');
 
     expect(onOpenDiff).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the actions visible while the search matches "History"', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mount({ onOpenLog: vi.fn() });
+    await flush();
+
+    const search = document.body.querySelector(
+      'input[type="text"], input:not([type])',
+    ) as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(search, 'hist');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(
+      document.body.querySelector('[data-testid="branch-picker-history"]'),
+    ).not.toBeNull();
+  });
+
+  it('wires "History" to onOpenLog and closes', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const onOpenLog = vi.fn();
+    const onOpenChange = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({ onOpenLog, onOpenChange });
+    await flush();
+
+    clickButton('History');
+
+    expect(onOpenLog).toHaveBeenCalledTimes(1);
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 

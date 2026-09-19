@@ -1905,6 +1905,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
+    logger,
   });
 
   const [isHelpDialogOpen, setHelpDialogOpen] = useState(false);

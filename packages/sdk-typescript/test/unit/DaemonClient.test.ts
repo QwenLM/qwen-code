@@ -1984,6 +1984,11 @@ describe('DaemonClient', () => {
       await ws.workspaceGitDiffFile('src/a.ts', undefined, cwd);
       await ws.workspaceGitDiffFile('src/a.ts', 'src/old.ts', cwd);
       await ws.workspaceGitLog(50, 0, cwd);
+      await ws.workspaceGitLog(50, 0, cwd, undefined, {
+        all: true,
+        search: 'fix',
+        sessionId: 'session-worktree',
+      });
       await ws.workspaceGitCommitDetail('abc123', cwd);
 
       expect(calls.map((c) => c.url)).toEqual([
@@ -1991,6 +1996,7 @@ describe('DaemonClient', () => {
         'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&cwd=%2Fworktrees%2Ffeature-x',
         'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&oldPath=src%2Fold.ts&cwd=%2Fworktrees%2Ffeature-x',
         'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fworktrees%2Ffeature-x&all=1&search=fix&sessionId=session-worktree',
         'http://daemon/workspaces/%2Fwork%2Fmain/git/log/commit?sha=abc123&cwd=%2Fworktrees%2Ffeature-x',
       ]);
     });
@@ -10875,6 +10881,44 @@ describe('DaemonClient', () => {
 
       expect(JSON.parse(calls[0]!.body!)).toEqual({ action: 'rerun' });
       expect(JSON.parse(calls[1]!.body!)).toEqual({ action: 'run-saved' });
+    });
+  });
+});
+
+describe('workspace runtime stop', () => {
+  it('uses the exact selected workspace and never retries a destructive POST', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { workspaces: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse(503, { code: 'workspace_runtime_stop_in_progress' }),
+      );
+    const client = new DaemonClient({
+      baseUrl: 'http://daemon',
+      token: 'secret',
+      fetch,
+    });
+    await client.runtimeStopOptions();
+    const confirmation = {
+      confirmInterruptions: true as const,
+      expectedChannelId: 'child',
+      expectedRuntimeEpoch: 1,
+      expectedStopToken: 'receipt',
+      expectedSessionIds: ['s1'],
+    };
+    await expect(
+      client.workspaceById('workspace/id').stopRuntime(confirmation),
+    ).rejects.toBeInstanceOf(DaemonHttpError);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(fetch.mock.calls[0][0])).toBe(
+      'http://daemon/workspaces/runtime-stop-options',
+    );
+    expect(String(fetch.mock.calls[1][0])).toBe(
+      'http://daemon/workspaces/workspace%2Fid/runtime/stop',
+    );
+    expect(fetch.mock.calls[1][1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify(confirmation),
     });
   });
 });

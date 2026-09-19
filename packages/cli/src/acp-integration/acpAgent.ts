@@ -157,6 +157,7 @@ import {
   resolveSavedWorkflowScript,
   extractAndStripMeta,
   listWorkflowSnapshots,
+  claimInterruptedWorkflowRuns,
   type TurnResultRecordPayload,
   qualifySkillName,
   sessionIdContext,
@@ -479,10 +480,6 @@ import {
 } from '../ui/commands/contextCommand.js';
 import type { HistoryItemContextUsage } from '../ui/types.js';
 import { fireSessionDeleteHook } from '../hooks/session-delete-hook.js';
-import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-} from '../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   executeGeneration,
@@ -1098,6 +1095,36 @@ function validateLoadReplayEnvelope(
   }
 }
 
+/**
+ * Append the Goal updates a load publishes after its replayed page, unless
+ * that would take the page over the limits it was cut to. Returns whether
+ * they were appended: a page already at a limit ships without them rather
+ * than failing the load, and the caller delivers them another way.
+ */
+function appendGoalUpdatesWithinLimits(
+  sessionId: string,
+  envelope: BridgeLoadReplayEnvelope,
+  goalUpdates: readonly SessionUpdate[],
+  enforceLimits: boolean,
+): boolean {
+  if (goalUpdates.length === 0) return true;
+  const withGoal = {
+    ...envelope,
+    updates: [...envelope.updates, ...goalUpdates],
+  };
+  try {
+    validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
+  } catch (error) {
+    if (!(error instanceof HistoryReplayLimitError)) throw error;
+    debugLogger.debug(
+      `Kept ${goalUpdates.length} Goal update(s) off a full replay page: ${error.message}`,
+    );
+    return false;
+  }
+  envelope.updates = withGoal.updates;
+  return true;
+}
+
 function replayGoalBootstrap(
   projection:
     | SessionRestoreProjection
@@ -1132,19 +1159,7 @@ function replayGoalBootstrap(
         payload?.['cause'],
       );
     }
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(projection.goalRecords ?? []),
-    );
-    return active
-      ? {
-          goalStatus: {
-            kind: active.iterations > 0 ? 'checking' : 'set',
-            condition: active.condition,
-            iterations: active.iterations,
-            ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-          },
-        }
-      : undefined;
+    return undefined;
   }
   const sourceUuid = projection?.replay?.goalRecoverySourceUuid;
   if (!projection?.replay || !sourceUuid) return undefined;
@@ -1164,18 +1179,7 @@ function replayGoalBootstrap(
       payload?.['cause'],
     );
   }
-  const active = findGoalToRestore(
-    collectGoalStatusItemsFromRecords(goalBootstrapRecords),
-  );
-  if (!active) return undefined;
-  return {
-    goalStatus: {
-      kind: active.iterations > 0 ? 'checking' : 'set',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-    },
-  };
+  return undefined;
 }
 
 function replayInitialGoalState(
@@ -1814,7 +1818,7 @@ function resolveExistingProviderApiKey(
   // so a reconnect reads the key of the conversation model being connected and
   // only falls back to service entries when no conversation model matched.
   const conversation = matched.filter(
-    (model) => !model.imageOnly && !model.voiceOnly,
+    (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
   );
   if (
     !conversation.length &&
@@ -5689,6 +5693,30 @@ class QwenAgent implements Agent {
               'qwen-code.daemon.session_restore.partial_replay',
               replay.replayError !== undefined,
             );
+            // A cold load publishes the recovered Goal after the replay; a
+            // live session's Goal is already published, so the only thing
+            // to append is the card that supersedes a running legacy card
+            // the page ended on. Nothing, for any transcript this build
+            // wrote. A partial replay gets nothing either: the page did not
+            // end where the transcript does. The card is presentation, so
+            // failing to render it is logged, never a failed load. Rendered
+            // once the page is delivered, so it reads the Goal as it stands
+            // then, not as it stood before the replay's awaits.
+            const renderGoalUpdates = (): SessionUpdate[] => {
+              if (replay.replayError !== undefined) return [];
+              try {
+                return liveSession.renderLegacyGoalSupersession(
+                  replayPage.records,
+                );
+              } catch (error) {
+                debugLogger.debug(
+                  `Failed to render the legacy Goal supersession: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+                return [];
+              }
+            };
             if (!bulkReplay) {
               try {
                 for (const update of replay.updates) {
@@ -5706,9 +5734,21 @@ class QwenAgent implements Agent {
               if (replay.replayError !== undefined) {
                 throw RequestError.internalError(undefined, replay.replayError);
               }
+              for (const update of renderGoalUpdates()) {
+                try {
+                  await liveSession.sendUpdate(update);
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to send the legacy Goal supersession: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                }
+              }
               return withRestoreHint(liveSession, response);
             }
 
+            const enforceLimits = restoreOptions.replay.kind === 'recent';
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
               updates: replay.updates,
@@ -5723,10 +5763,13 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
-            validateLoadReplayEnvelope(
+            validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
+            // The card is presentation: a full page simply goes without it.
+            appendGoalUpdatesWithinLimits(
               sessionId,
               envelope,
-              restoreOptions.replay.kind === 'recent',
+              renderGoalUpdates(),
+              enforceLimits,
             );
             return withRestoreHint(liveSession, {
               ...response,
@@ -5909,6 +5952,7 @@ class QwenAgent implements Agent {
                     ? { hideRuntimeGoal: true }
                     : {}),
                   ...(goalBootstrap ? { bootstrap: goalBootstrap } : {}),
+                  ...(replayEnvelope?.partial ? { partialReplay: true } : {}),
                 },
               ).catch((error) => {
                 if (suppressRecoveredGoalPresentation) throw error;
@@ -5929,18 +5973,23 @@ class QwenAgent implements Agent {
                 streamGoalUpdates = rendered.updates;
                 return;
               }
-              const goalUpdates = rendered.updates;
-              if (goalUpdates.length > 0) {
+              if (rendered.updates.length > 0) {
                 replayEnvelope ??= {
                   v: LOAD_REPLAY_VERSION,
                   updates: [],
                 };
-                replayEnvelope.updates.push(...goalUpdates);
-                validateLoadReplayEnvelope(
+                const appended = appendGoalUpdatesWithinLimits(
                   sessionId,
                   replayEnvelope,
+                  rendered.updates,
                   restoreOptions.replay.kind === 'recent',
                 );
+                // What a full page cannot carry is the recovered Goal
+                // state, which the client must still get: it is sent as
+                // live updates once the session is up, as a streamed load
+                // sends it. The publication key is primed either way, so
+                // the subscription does not publish the same state twice.
+                if (!appended) streamGoalUpdates = rendered.updates;
               }
             },
             beforeSessionPublish: () => {
@@ -5997,17 +6046,17 @@ class QwenAgent implements Agent {
                     );
                   }
                 });
-                try {
-                  for (const update of streamGoalUpdates) {
-                    await createdSession.sendUpdate(update);
-                  }
-                } catch (error) {
-                  debugLogger.debug(
-                    `Failed to publish recovered Goal state: ${
-                      error instanceof Error ? error.message : String(error)
-                    }`,
-                  );
+              }
+              try {
+                for (const update of streamGoalUpdates) {
+                  await createdSession.sendUpdate(update);
                 }
+              } catch (error) {
+                debugLogger.debug(
+                  `Failed to publish recovered Goal state: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
               }
               await profiler.time('post_replay_services', async () => {
                 if (!provisionalStandalone && !suppressWorktreeContextRestore) {
@@ -8954,9 +9003,13 @@ class QwenAgent implements Agent {
       const workspaceCwd = this.workspaceCwd(config);
       const listing = buildHooksListing(config);
       // The workspace view lists the registry only; session hooks have their
-      // own per-session status method.
+      // own per-session status method. Entries a subagent attached while it
+      // runs sit in the registry too, but they are not workspace
+      // configuration.
       const hooks: ServeHookEntry[] = listing.rows
-        .filter((row) => row.origin === 'registry')
+        .filter(
+          (row) => row.origin === 'registry' && row.agentScope === undefined,
+        )
         .map(
           (row): ServeHookEntry => ({
             kind: 'hook',
@@ -15374,6 +15427,14 @@ class QwenAgent implements Agent {
         `Session ${sessionId} is already active.`,
         { errorKind: 'session_id_conflict', sessionId },
       );
+    }
+    // A run the previous daemon process was running when it exited has no
+    // snapshot until something claims it; claimed here, it joins the history
+    // this session lists as a failed run.
+    try {
+      await claimInterruptedWorkflowRuns(config);
+    } catch (error) {
+      debugLogger.debug(`Claiming interrupted workflow runs failed: ${error}`);
     }
     const workflowHistory = await listWorkflowSnapshots(config);
     const session = new Session(

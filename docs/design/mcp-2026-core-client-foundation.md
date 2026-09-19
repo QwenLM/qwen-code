@@ -71,8 +71,11 @@ the `text/html;profile=mcp-app` resource type. When a server also advertises
 that extension, tool discovery preserves its `ui://` resource URI. After a
 successful call, Qwen Code reads and validates the matching HTML resource and
 stores it in a structured display result while leaving the model-visible result
-unchanged. A missing, oversized, malformed, or unreadable resource falls back
-to the normal text result.
+unchanged. A missing, oversized, malformed, or unreadable resource still
+produces an `mcp_app` display with empty `html`, whose `fallbackText` leads
+with `Warning: MCP App '<uri>' from '<server>' could not be displayed:
+<reason>` ahead of the normal tool text; the model-visible result stays the
+plain tool text.
 
 The daemon serves a static sandbox proxy before bearer authentication. It
 contains no session data or credentials. WebShell loads that proxy in an

@@ -407,7 +407,9 @@ export function GitDialog({
           return;
         }
         return Promise.all([
-          ws.workspaceGitLog(50, 0, gitCwd, `${base}..HEAD`, gitSessionId),
+          ws.workspaceGitLog(50, 0, gitCwd, `${base}..HEAD`, {
+            sessionId: gitSessionId,
+          }),
           ws.workspaceGitDiff(gitCwd, gitSessionId),
         ]).then(([log, diff]) => {
           if (abort.signal.aborted) return;
