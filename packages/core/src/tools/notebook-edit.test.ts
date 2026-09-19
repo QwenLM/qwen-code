@@ -1034,4 +1034,44 @@ describe('NotebookEditTool', () => {
     const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     expect(updated.cells[0].source).toEqual(['x = 100']);
   });
+
+  it('rejects without modifying a notebook when aborted during trackEdit', async () => {
+    const filePath = writeNotebook('abort-during-track-edit.ipynb', {
+      nbformat: 4,
+      nbformat_minor: 5,
+      cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],
+      metadata: {},
+    });
+    seedNotebookRead(filePath);
+
+    const abortController = new AbortController();
+    const abortError = new Error('Abort requested during trackEdit');
+    let releaseTrackEdit!: () => void;
+    let signalTrackEditStarted!: () => void;
+    const trackEditStarted = new Promise<void>((resolve) => {
+      signalTrackEditStarted = resolve;
+    });
+
+    mockFileHistoryService.trackEdit.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseTrackEdit = resolve;
+          signalTrackEditStarted();
+        }),
+    );
+
+    const execution = buildInvocation({
+      notebook_path: filePath,
+      cell_id: 'a',
+      new_source: 'x = 2',
+    }).execute(abortController.signal);
+
+    await trackEditStarted;
+    abortController.abort(abortError);
+    releaseTrackEdit();
+
+    await expect(execution).rejects.toBe(abortError);
+    const updated = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(updated.cells[0].source).toEqual(['x = 1']);
+  });
 });
