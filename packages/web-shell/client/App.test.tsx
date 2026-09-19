@@ -145,7 +145,12 @@ type ChatEditorTestProps = {
     images?: { data: string; media_type: string }[],
     files?: { name: string; media_type: string; text: string }[],
     commitAccepted?: () => void,
-    metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
+    metadata?: {
+      inputAnnotations?: DaemonInputAnnotation[];
+      isCurrentDraft?: (options?: {
+        allowSessionAssignment?: boolean;
+      }) => boolean;
+    },
   ) => boolean | void;
   onCancel?: () => void;
   onAttachmentPreview?: (file: {
@@ -304,6 +309,7 @@ const {
   mockReleaseWebTerminal,
   mockUseWorkspaceSessionLiveState,
   mockUseDaemonSessionActivityBridge,
+  mockUseDaemonActivePromptBridge,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -325,7 +331,9 @@ const {
   const rootWorkspaceVoice = vi.fn();
   const qualifiedWorkspaceVoice = vi.fn();
   const qualifiedSetWorkspaceSetting = vi.fn();
+  const runtimeStop = vi.fn();
   const workspaceClient = {
+    runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
       .fn()
       .mockResolvedValue({ enabled: false, install: { state: 'missing' } }),
@@ -342,6 +350,7 @@ const {
     })),
     workspaceVoice: rootWorkspaceVoice,
     workspaceById: vi.fn(() => ({
+      stopRuntime: runtimeStop,
       workspaceSettings: qualifiedWorkspaceSettings,
       workspaceVoice: qualifiedWorkspaceVoice,
       setWorkspaceSetting: qualifiedSetWorkspaceSetting,
@@ -820,6 +829,7 @@ const {
     mockReleaseDetachedWebTerminal: vi.fn(),
     mockUseWorkspaceSessionLiveState: vi.fn(() => new Map()),
     mockUseDaemonSessionActivityBridge: vi.fn(),
+    mockUseDaemonActivePromptBridge: vi.fn(),
   };
 });
 
@@ -1750,6 +1760,7 @@ vi.mock('./session-catalog/session-catalog-hooks', () => ({
     authoritative: true,
   }),
   useDaemonSessionActivityBridge: mockUseDaemonSessionActivityBridge,
+  useDaemonActivePromptBridge: mockUseDaemonActivePromptBridge,
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
@@ -10631,6 +10642,10 @@ beforeEach(() => {
     hasActivePrompt: testState.sessionHasActivePrompt,
     activeWorkState: undefined,
   }));
+  mockUseDaemonActivePromptBridge.mockReset();
+  mockUseDaemonActivePromptBridge.mockImplementation(
+    () => testState.sessionHasActivePrompt,
+  );
   mockWorkspace.status = 'connected';
   mockWorkspace.brand = undefined;
   mockWorkspace.brandSettled = false;
@@ -20037,6 +20052,57 @@ describe('App session callbacks', () => {
     await openComposerSkills(false);
     await openComposerSkills();
     expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledOnce();
+  });
+
+  it('clears the Skills error and loading state after capacity recovery', async () => {
+    mockConnection.sessionId = undefined;
+    mockRuntimeStopChoice();
+    const retry = deferred<{
+      skills: Array<{ name: string; description: string; status: 'ok' }>;
+    }>();
+    mockWorkspaceActions.loadSkillsStatus
+      .mockResolvedValueOnce({ skills: [] })
+      .mockRejectedValueOnce(
+        new DaemonHttpError(
+          503,
+          { code: 'acp_child_capacity_exhausted' },
+          'full',
+        ),
+      )
+      .mockReturnValueOnce(retry.promise);
+    const { rerender } = renderApp({ language: 'en' });
+    await flush();
+    await openComposerSkills();
+    emitSkillMutation(
+      'capacity-recovery-skills',
+      [{ name: 'review', enabled: true }],
+      'deferred',
+    );
+    rerender();
+    await flush();
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(true);
+    await act(async () =>
+      (document.querySelector('[role="radio"]') as HTMLElement).click(),
+    );
+    await act(async () =>
+      [...document.querySelectorAll('button')]
+        .find(
+          (node) => node.textContent === 'Stop these sessions and continue',
+        )!
+        .click(),
+    );
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(true);
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+    await act(async () =>
+      retry.resolve({
+        skills: [{ name: 'review', description: 'Review', status: 'ok' }],
+      }),
+    );
+    expect(testState.latestChatEditorProps?.skillsLoading).toBe(false);
+    expect(testState.latestChatEditorProps?.skillsLoadError).toBe(false);
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'review', description: 'Review' },
+    ]);
   });
 
   it('retains the Skills catalog across equivalent capability refreshes', async () => {
@@ -38883,6 +38949,87 @@ describe('App /goal command', () => {
     });
   });
 
+  it.each([false, true])(
+    'continues a capacity-rejected prepared draft once (unknown outcome: %s)',
+    async (unknownOutcome) => {
+      const onToast = vi.fn();
+      const isCurrentDraft = vi.fn(() => true);
+      mockSessionActions.sendPrompt.mockImplementationOnce(
+        async (_text, options) => {
+          options?.onAdmissionStarted?.();
+          if (unknownOutcome) throw new TypeError('lost admission response');
+          options?.onAdmitted?.();
+        },
+      );
+      mockConnection.sessionId = undefined;
+      const stopRuntime = mockRuntimeStopChoice();
+      mockSessionActions.createSession.mockRejectedValueOnce(
+        new DaemonHttpError(
+          503,
+          { code: 'acp_child_capacity_exhausted' },
+          'full',
+        ),
+      );
+      const prepareSubmit = vi.fn(async () => ({ prompt: 'prepared hello' }));
+      const onSubmitBefore = vi.fn();
+      renderApp({ language: 'en', prepareSubmit, onSubmitBefore, onToast });
+      await flush();
+      act(() => {
+        testState.latestChatEditorProps?.onSubmit(
+          'hello',
+          undefined,
+          undefined,
+          editorCommit,
+          { isCurrentDraft },
+        );
+      });
+      await flush();
+      expect(
+        document.querySelector('[data-testid="capacity-recovery-dialog"]'),
+      ).not.toBeNull();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      const clears = mockSessionActions.clearSession.mock.calls.length;
+      await act(async () =>
+        window.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'l',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        ),
+      );
+      expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(clears);
+      await act(async () => {
+        (document.querySelector('[role="radio"]') as HTMLElement).click();
+      });
+      await act(async () => {
+        [...document.querySelectorAll('button')]
+          .find(
+            (node) => node.textContent === 'Stop these sessions and continue',
+          )!
+          .click();
+      });
+      await flush();
+      expect(stopRuntime).toHaveBeenCalledTimes(1);
+      expect(mockSessionActions.createSession).toHaveBeenCalledTimes(2);
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      expect(mockSessionActions.sendPrompt.mock.calls[0][0]).toBe(
+        'prepared hello',
+      );
+      expect(prepareSubmit).toHaveBeenCalledTimes(1);
+      expect(onSubmitBefore).toHaveBeenCalledTimes(1);
+      expect(isCurrentDraft).toHaveBeenCalledWith({
+        allowSessionAssignment: true,
+      });
+      expect(editorCommit).toHaveBeenCalledTimes(unknownOutcome ? 0 : 1);
+      if (unknownOutcome)
+        expect(onToast).toHaveBeenCalledWith(
+          'warning',
+          expect.stringContaining('Delivery is uncertain'),
+        );
+    },
+  );
+
   it.each(['/goal set first objective', 'hello', '!pwd'])(
     'preserves a cold-session draft when capacity rejects %s',
     async (prompt) => {
@@ -41301,3 +41448,98 @@ describe('Standalone writer-blocked navigation', () => {
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
   });
 });
+
+it('runtime-stop does not leak shell drain lock', async () => {
+  const onToast = vi.fn();
+  const { rerender } = renderApp({ onToast });
+  await flush();
+  let resolveFirst!: () => void;
+  const firstDone = new Promise<void>((resolve) => {
+    resolveFirst = resolve;
+  });
+  mockSessionActions.sendShellCommand
+    .mockReturnValueOnce(firstDone)
+    .mockResolvedValue(undefined);
+  act(() => {
+    testState.streamingState = 'responding';
+    rerender({ onToast });
+  });
+  await act(async () => {
+    testState.latestChatEditorProps?.onSubmit('!first-before-stop');
+    await Promise.resolve();
+  });
+  act(() => {
+    testState.streamingState = 'idle';
+    rerender({ onToast });
+  });
+  await flush();
+  expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+    'first-before-stop',
+  );
+  act(() => {
+    Object.assign(mockConnection, {
+      runtimeStopped: true,
+      status: 'disconnected',
+    });
+    rerender({ onToast });
+  });
+  await act(async () => {
+    resolveFirst();
+    await Promise.resolve();
+  });
+  act(() => {
+    Object.assign(mockConnection, {
+      runtimeStopped: false,
+      status: 'connected',
+    });
+    testState.streamingState = 'responding';
+    rerender({ onToast });
+  });
+  await act(async () => {
+    testState.latestChatEditorProps?.onSubmit('!second-after-resume');
+    await Promise.resolve();
+  });
+  act(() => {
+    testState.streamingState = 'idle';
+    rerender({ onToast });
+  });
+  await flush();
+  expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+    'second-after-resume',
+  );
+});
+
+function mockRuntimeStopChoice() {
+  mockWorkspace.capabilities = {
+    ...mockWorkspace.capabilities,
+    features: ['workspace_runtime_stop'],
+  };
+  const stopRuntime = mockWorkspace.client.workspaceById('victim').stopRuntime;
+  stopRuntime.mockResolvedValue({
+    state: 'stopped',
+    stopped: true,
+    released: true,
+    closedSessionIds: ['old'],
+    remainingSessionIds: [],
+    interruptedSessionIds: ['old'],
+    affectedSessionIds: ['old'],
+  });
+  mockWorkspace.client.runtimeStopOptions.mockResolvedValue({
+    committedAcpChildren: 1,
+    maxConcurrentChildren: 1,
+    workspaces: [
+      {
+        workspaceId: 'victim',
+        cwd: '/other',
+        canStop: true,
+        blockedReasons: [],
+        channelId: 'child',
+        runtimeEpoch: 1,
+        stopToken: 'token',
+        sessions: [{ sessionId: 'old', queuedPrompts: 0 }],
+      },
+    ],
+  });
+
+  return stopRuntime;
+}

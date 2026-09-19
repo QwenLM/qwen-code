@@ -192,6 +192,43 @@ describe('renderPreparedGoalUpdate', () => {
     ]);
   });
 
+  it('sets the unreadable goal_state records aside when it looks for the running card', async () => {
+    // Recovery is unavailable this way only when no goal_state record
+    // parses. The replay skipped them all, so the card it ended on is the
+    // pre-#7895 one before them, and that is the card to supersede.
+    const unreadable = {
+      uuid: 'state-1',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: new Date(0).toISOString(),
+      type: 'system',
+      subtype: 'goal_state',
+      cwd: '/tmp',
+      version: 'test',
+      systemPayload: { v: 99 },
+    } as unknown as ChatRecord;
+
+    const result = await renderPreparedGoalUpdate(
+      async () => {
+        throw new GoalPersistenceUnavailableError('unsupported record');
+      },
+      { replayedRecords: [legacySetCard('older objective', 2), unreadable] },
+    );
+
+    expect(result.updates).toEqual([
+      expect.objectContaining({
+        _meta: {
+          goalStatus: expect.objectContaining({
+            kind: 'cleared',
+            condition: 'older objective',
+            iterations: 2,
+            lastReason: UNREADABLE_GOAL_REASON,
+          }),
+        },
+      }),
+    ]);
+  });
+
   it('clears a replayed legacy Goal that the runtime did not recover', async () => {
     // A transcript from before Goal state was journaled restores with no
     // Goal and no cause. Its newest card can still be a `set`, which the

@@ -57,6 +57,7 @@ interface RefBox<T> {
 interface UseQueuedPromptsArgs {
   connected: boolean;
   writeBlocked?: boolean;
+  runtimeStopped?: boolean;
   sessionId?: string;
   workspaceCwd?: string;
   clientId?: string;
@@ -500,6 +501,7 @@ export interface UseQueuedPromptsResult {
 export function useQueuedPrompts({
   connected,
   writeBlocked = false,
+  runtimeStopped = false,
   sessionId,
   workspaceCwd,
   clientId,
@@ -524,9 +526,11 @@ export function useQueuedPrompts({
   const ownerTokenRef = useRef({
     sessionId,
     workspaceCwd,
+    runtimeStopped,
     snapshot: sessionOwnerGuard.capture(),
   });
   if (
+    ownerTokenRef.current.runtimeStopped !== runtimeStopped ||
     ownerTokenRef.current.sessionId !== sessionId ||
     ownerTokenRef.current.workspaceCwd !== workspaceCwd ||
     !ownerTokenRef.current.snapshot.isCurrent()
@@ -534,6 +538,7 @@ export function useQueuedPrompts({
     ownerTokenRef.current = {
       sessionId,
       workspaceCwd,
+      runtimeStopped,
       snapshot: sessionOwnerGuard.capture(),
     };
   }
@@ -562,6 +567,7 @@ export function useQueuedPrompts({
     tail: Promise<void>;
   } | null>(null);
   const heldPromptsByOwnerRef = useRef<Map<string, QueuedPrompt[]>>(new Map());
+  const stoppedHeldOwnersRef = useRef(new Set<string>());
   const nextQueuedPromptIdRef = useRef(1);
   const latestSessionIdRef = useRef(sessionId);
   const latestWorkspaceCwdRef = useRef(workspaceCwd);
@@ -1698,6 +1704,45 @@ export function useQueuedPrompts({
       previousOwner.workspaceCwd,
       previousOwner.sessionId,
     );
+    if (runtimeStopped) {
+      for (const key of heldPromptsByOwnerRef.current.keys()) {
+        // Compare the workspace half of the key, not a prefix: a stash
+        // written while its cwd was still unresolved keys as
+        // `\u0000<sessionId>` and can belong to the stopped workspace.
+        // Fencing an empty half degrades to handing those prompts back to
+        // the editor; missing them would re-queue them to auto-run on
+        // resume, which is what this fence exists to prevent.
+        const workspaceHalf = key.slice(0, key.indexOf('\u0000'));
+        if (
+          workspaceHalf === '' ||
+          (workspaceCwd !== undefined && workspaceHalf === workspaceCwd)
+        )
+          stoppedHeldOwnersRef.current.add(key);
+      }
+      if (
+        previousOwner.workspaceCwd === workspaceCwd &&
+        previousOwner.sessionId === sessionId
+      ) {
+        restoreQueuedPromptsToEditorRef.current(
+          queuedPromptsRef.current.filter(
+            (prompt) =>
+              isLocallyHeldPrompt(prompt) ||
+              unreleasedPromptIdsRef.current.has(prompt.id) ||
+              (prompt.midTurnState === 'submitting' &&
+                prompt.midTurnMessageId === undefined) ||
+              prompt.midTurnFailedAction === 'edit',
+          ),
+        );
+        if (previousOwnerKey) {
+          heldPromptsByOwnerRef.current.delete(previousOwnerKey);
+          stoppedHeldOwnersRef.current.delete(previousOwnerKey);
+        }
+        // Nothing queued before an explicit runtime stop may auto-run on resume.
+        queuedPromptsRef.current = [];
+        pendingMidTurnAdmissionsRef.current.clear();
+        clearedUnconfirmedPromptIdsRef.current.clear();
+      }
+    }
     if (previousOwnerKey) {
       const heldPrompts = queuedPromptsRef.current
         .filter(
@@ -1724,6 +1769,14 @@ export function useQueuedPrompts({
         );
       if (heldPrompts.length > 0) {
         heldPromptsByOwnerRef.current.set(previousOwnerKey, heldPrompts);
+        // An unresolved previous-owner cwd can still belong to the stopped
+        // workspace; fence conservatively (see the stash scan above).
+        if (
+          runtimeStopped &&
+          (previousOwner.workspaceCwd === undefined ||
+            previousOwner.workspaceCwd === workspaceCwd)
+        )
+          stoppedHeldOwnersRef.current.add(previousOwnerKey);
       } else {
         heldPromptsByOwnerRef.current.delete(previousOwnerKey);
       }
@@ -1769,6 +1822,8 @@ export function useQueuedPrompts({
       for (const [key, prompts] of [...heldPromptsByOwnerRef.current]) {
         if (key === nextOwnerKey || !key.endsWith(suffix)) continue;
         heldPromptsByOwnerRef.current.delete(key);
+        if (stoppedHeldOwnersRef.current.delete(key))
+          stoppedHeldOwnersRef.current.add(nextOwnerKey);
         relocated.push(...prompts);
       }
       if (relocated.length > 0) {
@@ -1779,6 +1834,11 @@ export function useQueuedPrompts({
         ].sort((a, b) => a.id - b.id);
         heldPromptsByOwnerRef.current.set(nextOwnerKey, heldPrompts);
       }
+    }
+    if (nextOwnerKey && stoppedHeldOwnersRef.current.delete(nextOwnerKey)) {
+      restoreQueuedPromptsToEditorRef.current(heldPrompts);
+      heldPromptsByOwnerRef.current.delete(nextOwnerKey);
+      heldPrompts = [];
     }
     // Daemon-owned rows are re-rendered from the next queue snapshot; only the
     // locally held Goal queue survives an owner change.
@@ -1822,7 +1882,7 @@ export function useQueuedPrompts({
     initialRefreshSessionIdRef.current = undefined;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
-  }, [ownerToken, sessionId, workspaceCwd]);
+  }, [ownerToken, sessionId, workspaceCwd, runtimeStopped]);
 
   const pendingPromptVersion = useSyncExternalStore(
     subscribePendingPromptVersion,

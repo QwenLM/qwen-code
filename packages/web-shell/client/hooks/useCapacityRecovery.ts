@@ -1,0 +1,93 @@
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonConnectionState,
+  DaemonSessionActions,
+} from '../daemon/session/types';
+import { isRecoverableAcpCapacityError } from '../daemon/session/httpErrors';
+import type { CapacityRecoveryIntent } from '../components/workspaces/CapacityRecoveryDialog';
+
+export function useCapacityRecovery(
+  client: DaemonClient | undefined,
+  features: readonly string[] | undefined,
+  connection: DaemonConnectionState,
+  actions: Pick<DaemonSessionActions, 'loadSession' | 'resumeSession'>,
+) {
+  const [intent, setIntent] = useState<CapacityRecoveryIntent>();
+  const intentRef = useRef<CapacityRecoveryIntent | undefined>(undefined);
+  const owner = useRef({ client });
+  if (owner.current.client !== client) owner.current = { client };
+  const renderOwner = owner.current;
+  const mounted = useRef(true);
+  const latest = useRef({ connection, actions });
+  latest.current = { connection, actions };
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const supported = features?.includes('workspace_runtime_stop') === true;
+  const offer = useCallback(
+    (error: unknown, continuation: Omit<CapacityRecoveryIntent, 'client'>) => {
+      if (
+        !client ||
+        intentRef.current !== undefined ||
+        owner.current !== renderOwner ||
+        !supported ||
+        !isRecoverableAcpCapacityError(error) ||
+        !continuation.isCurrent()
+      )
+        return false;
+      const capturedOwner = renderOwner;
+      intentRef.current = {
+        ...continuation,
+        client,
+        isCurrent: () =>
+          mounted.current &&
+          owner.current === capturedOwner &&
+          continuation.isCurrent(),
+      };
+      setIntent(intentRef.current);
+      return true;
+    },
+    [client, supported, renderOwner],
+  );
+  const offered = useRef<DaemonConnectionState['capacityRecovery']>(undefined);
+  useEffect(() => {
+    const recovery = connection.capacityRecovery;
+    if (!recovery || offered.current === recovery) return;
+    const accepted = offer(recovery.error, {
+      requesterCwd:
+        recovery.sessionContext?.kind === 'workspace'
+          ? recovery.sessionContext.cwd
+          : undefined,
+      isCurrent: () =>
+        latest.current.connection.capacityRecovery === recovery &&
+        latest.current.connection.status === 'error',
+      resume: () =>
+        latest.current.actions[
+          recovery.mode === 'load' ? 'loadSession' : 'resumeSession'
+        ](recovery.sessionId, { sessionContext: recovery.sessionContext }),
+    });
+    // A rejection caused by another open intent must be recorded too:
+    // otherwise dismissing that intent re-offers the same recovery and the
+    // chooser re-opens on Cancel forever. Rejections with no intent open
+    // (e.g. the capability arriving late) stay retryable.
+    if (accepted || intentRef.current !== undefined) offered.current = recovery;
+  }, [connection.capacityRecovery, offer, intent]);
+  return {
+    intent,
+    offer,
+    dismiss: () => {
+      intentRef.current = undefined;
+      setIntent(undefined);
+    },
+  };
+}
