@@ -2,7 +2,7 @@
 
 [English](2026-09-18-fleet-shepherd-noop-close.md) | [简体中文](2026-09-18-fleet-shepherd-noop-close.zh-CN.md)
 
-Date: 2026-09-18 (revised 2026-09-19 after review round 1)
+Date: 2026-09-18 (revised 2026-09-19 after review rounds 1–2)
 Status: proposed — implemented in [#12150](https://github.com/QwenLM/qwen-code/pull/12150); awaiting review
 
 ## Problem
@@ -39,10 +39,14 @@ natural home for one more.
 ## Detection: GitHub's own test merge
 
 For every mergeable PR GitHub builds a test merge commit, exposed in GraphQL
-as `potentialMergeCommit`. Its first parent is the base side. If the test
-merge's tree equals that parent's tree, merging the PR adds nothing — that
-`main` already carries every hunk the branch proposes. One GraphQL read per
-mergeable `autofix/*` PR, no checkout.
+as `potentialMergeCommit`. Its first parent is the base side; its second
+parent is the head side, and the probe requires it to equal the fleet
+snapshot's head — anything else reads as `head-moved` — so an equal-tree
+verdict is bound by construction to the head a notice would name, whatever
+GitHub's rebuild timing does. If the test merge's tree equals its base
+parent's tree, merging the PR adds nothing — that `main` already carries
+every hunk the branch proposes. One GraphQL read per mergeable `autofix/*`
+PR, no checkout.
 
 The recipe was checked against the record before being automated:
 
@@ -90,12 +94,12 @@ other levers do not depend on the probe and proceed as for any PR, so a dead
 probe never takes the sync down with it. The probe names which non-answer it
 got, because a dead probe must not look like the benign wait:
 
-| `NOOP_STATE`    | Meaning                                                                                                                                             | Reported as                                             |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `no-test-merge` | GitHub has not built the test merge yet (every head move resets it)                                                                                 | row note only — benign                                  |
-| `head-moved`    | the PR's head is no longer the head of the fleet snapshot, so the test merge is not about the head a notice would name                              | row note only — benign; the next tick sees the new head |
-| `api-failure`   | `gh` exited non-zero: a lost PAT scope, a rate limit, a renamed field                                                                               | row note, counted, warned with `gh`'s own error         |
-| `unparsable`    | the body is not JSON, carries no `pullRequest` node, no head or no close-event count, or the test merge has no tree or no base parent (shape drift) | row note, counted, warned                               |
+| `NOOP_STATE`    | Meaning                                                                                                                                                                                                         | Reported as                                             |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `no-test-merge` | GitHub has not built the test merge yet (every head move resets it)                                                                                                                                             | row note only — benign                                  |
+| `head-moved`    | the PR's head moved since the fleet snapshot, or the test merge was built from an older head (its head-side parent is not the snapshot head) — either way the verdict is not about the head a notice would name | row note only — benign; the next tick sees the new head |
+| `api-failure`   | `gh` exited non-zero: a lost PAT scope, a rate limit, a renamed field                                                                                                                                           | row note, counted, warned with `gh`'s own error         |
+| `unparsable`    | the body is not JSON, carries no `pullRequest` node, no head or no close-event count, or the test merge has no tree or no base parent (shape drift)                                                             | row note, counted, warned                               |
 
 Failures are counted per tick (`no-op probe failures` in the dashboard header,
 `noop_probe_failures` in the tick summary) and raise one `::warning::` per
@@ -112,7 +116,10 @@ The no-op close takes two steps on separate ticks, both posted as the bot:
    moves — no sooner than 10 minutes from the notice, usually within about
    20 — what can postpone it (a live autofix run for the PR, an unreadable
    state, the per-tick close cap), that `autofix/needs-human` parks it for a
-   human, and that `autofix/skip` keeps it open. Marker:
+   human, and that `autofix/skip` keeps it open. `autofix/skip` is the
+   fleet-wide opt-out, not a no-op-lever switch: the PR leaves the shepherd's
+   snapshot entirely — no dashboard row, no conflict dispatch, no stale-base
+   sync — until the label is removed. Marker:
    `<!-- fleet-shepherd noop-notice sha=<head> -->`, deduped per head SHA
    within `NOOP_NOTICE_MAX_AGE_SEC`.
 2. **Close.** On a later tick, if the newest notice for this head is inside
@@ -190,8 +197,11 @@ Rails, identical in kind to the conflict lever's:
 - A live `review-address` job for this PR defers both writes — its push would
   land on a closed PR. The lever finds it by listing the autofix runs that
   _are_ live (status-filtered: in progress, queued, pending, waiting,
-  requested) and reading their jobs, once per tick and only when a flagged PR
-  reaches a write. The statuses are listed out and back before any jobs are
+  requested — through the Runs API, whose status filter is server-side on
+  every gh version; `gh run list --status` rejects `pending` from gh's
+  client-side allow-list before 2.65.0) and reading their jobs, once per tick
+  and only when a flagged PR reaches a write. The set it finds is echoed to
+  the tick log, so a multi-day deferral names what it waits on. The statuses are listed out and back before any jobs are
   read, so a run that changes status once during the sweep — a queued job
   getting its runner, a run re-queuing between two of its jobs — is caught by
   one of the two passes. What the rail cannot see: two changes within those
@@ -206,7 +216,7 @@ Rails, identical in kind to the conflict lever's:
   changes nothing, and the branch stays in place. Any failed or unparsable
   read, a failed de-duplication of the run ids, and any full page of 100 (the cut would drop the oldest
   runs — the long address jobs), is unknown busy-state: it defers, and raises
-  one warning per tick. It deliberately does not reuse the shepherd's shared busy-set, which
+  one warning per tick, naming gh's first error line. It deliberately does not reuse the shepherd's shared busy-set, which
   is built from the newest 50 autofix runs: that workflow starts about 60 runs
   an hour, so a run holding a 1–3 h address job scrolls out of the window
   while the job is still working (observed on 2026-09-18: #11989's job ran
@@ -216,6 +226,10 @@ Rails, identical in kind to the conflict lever's:
   notices are uncapped — and is checked before the live reads. The live
   `autofix/skip` recheck precedes both writes, and an unreadable label state
   or a payload without a labels list fails closed (no write).
+- The notice rides the live label read's payload for a last-moment state
+  and head check: a PR a human closed or pushed to since the fleet snapshot
+  gets no notice (the snapshot can be half a minute old by the time a flagged
+  PR reaches its write).
 - The live head is re-read right before the close; a closed PR or a moved
   head means no close.
 - Every write goes through `act()`: dry-run performs nothing, and a failed
@@ -271,6 +285,12 @@ Rails, identical in kind to the conflict lever's:
   the verdict stands. That is harmless for a true no-op; for a wrong verdict
   it means the human who reopened the PR also has to move its head (or wait
   for GitHub to rebuild the test merge) before the row changes.
+- **`autofix/skip` hides the PR from the whole shepherd, not just this
+  lever.** The label the notice offers drops the PR from the fleet snapshot:
+  no dashboard row, no conflict dispatch, no stale-base sync, no red-CI
+  report. If real work lands on the branch later, the PR carries a live diff
+  invisibly until someone opens the PR page and removes the label. The
+  visible park is `autofix/needs-human`: its row stays on the dashboard.
 - **A non-answer does not pause the other levers.** On a tick where the probe
   gives no answer for a PR that already carries a notice, the stale-base sync
   can still fire and move the head, which voids the notice: one more notice,
@@ -286,10 +306,9 @@ Rails, identical in kind to the conflict lever's:
   minutes) on top of the compare call the walk already makes; comment history
   is read only for PRs the probe flags, the timestamp conversion runs only
   for a flagged PR that already carries a notice, and the live-run listing
-  (nine `gh run list` calls plus one `gh run view` per live run — about two
-  and three HTTP requests each, on the workflow token rather than the PAT —
-  some 40 requests and half a minute today) is spent at most once per tick,
-  only when a flagged PR reaches a write.
+  (nine status-filtered Runs API reads plus one `gh run view` per live
+  run, on the workflow token rather than the PAT) is spent at most once per
+  tick, only when a flagged PR reaches a write.
 - **Workflow size.** The lever grows `qwen-fleet-shepherd.yml` past its
   recorded baseline; the baseline is bumped in the same PR, well under the
   470 KB gate.
@@ -304,7 +323,9 @@ Rails, identical in kind to the conflict lever's:
   base commit), differing, closed before versus never closed, no test merge
   yet, an API failure with and without a message (first non-blank stderr
   line, capped at 200 characters and stripped of CR, even when the body
-  printed is equal-tree), a verdict for another head, twelve unparsable shapes including answers without a
+  printed is equal-tree), a verdict for another head and a test merge
+  built from another head (the head-side parent binding, a missing one
+  included), twelve unparsable shapes including answers without a
   usable close-event count, and the first-cause bookkeeping across two
   failures. For the lever:
   the notice step and its exact promises in both languages (the floor rendered
@@ -323,8 +344,13 @@ Rails, identical in kind to the conflict lever's:
   over runs and statuses with all listings made before any jobs read, the
   workflow token on every run read, the once-per-tick listing, the exhausted budget
   (which spends no live read) with and without a
-  notice, the live skip label on either path, and a failed notice post. The
-  row-note tail is replayed too, on an idle row and on one another lever
+  notice, the live skip label on either path, and a failed notice post.
+  The rail's input contract is pinned against `qwen-autofix.yml` itself — the
+  `review-address` job carries no job-level `name:`, its matrix has the
+  single dimension `target`, and the targets object emits `pr` first — and
+  the rail's fixture job names are built from that key order, so a
+  producer-side drift fails the suite instead of silently disarming the rail.
+  The row-note tail is replayed too, on an idle row and on one another lever
   already wrote on.
 - A mutation matrix over those behaviours — each rail, bound, counter and
   wiring point planted one at a time in the workflow — is killed by the suite.
@@ -346,13 +372,19 @@ Rails, identical in kind to the conflict lever's:
   — if its head has not moved, with both markers present and the dashboard
   reflecting it.
 - No PR with a real diff, a conflicting or still-computing merge state, a
-  failed probe, an in-flight address run, the skip label, the needs-human
-  label or a branch outside `autofix/*` is closed, and no PR is closed as a no-op twice.
+  failed probe, an address run the tick's live-run listing can see (a leg
+  created after the listing, or one already past its own open-check, is an
+  accepted window — see Rails), the skip label, the needs-human label or a
+  branch outside `autofix/*` is closed, and no PR is closed as a no-op twice.
 - A probe that fails is visible as a count and a warning, distinct from the
   benign wait for a test merge.
+- A PR that reads as a no-op is never given a stale-base sync while the
+  verdict stands — whether the lever closes it, defers it, or leaves it to a
+  human (see Constraints and risks).
 - Existing shepherd behaviour (conflict dispatch, sync, liveness, takeover
-  pool, awaiting-human table) is unchanged; the full script test suite is
-  green.
+  pool, awaiting-human table) is unchanged for a PR that does not read as a
+  no-op; a PR that does takes the lever's branch of the walk instead of the
+  stale-base sync. The full script test suite is green.
 
 ## Follow-ups
 

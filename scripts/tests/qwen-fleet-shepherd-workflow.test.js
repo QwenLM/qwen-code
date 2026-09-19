@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync(
   '.github/workflows/qwen-fleet-shepherd.yml',
@@ -24,11 +25,15 @@ const workflow = readFileSync(
 
 // GNU `date -u -d` shim for the behavioral replays — on macOS hosts BSD date
 // lacks `-d`, so route it through node. Shared by every date-shim replay
-// (R7-4): a fix to the shim must land once, not diverge across copies.
-// Answers ONLY the +%s call shape it emulates (R9-9): any other format
-// falls through to the system date, so a format-string mutation cannot
-// hide behind the shim.
-const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
+// (R7-4/R2-10): a fix to the shim must land once, not diverge across copies —
+// so the shim keeps GNU's two traps faithfully: `date -d ""` SUCCEEDS (today
+// 00:00, emulated as NOW_EPOCH - 43200 — inside the lever's age window at the
+// fixtures' noon) and an unparsable date exits NON-zero. A 'NaN'-with-rc-0
+// copy is not a bash number ($(( NOW_EPOCH - NaN )) reads it as 0) and would
+// bless behavior no host produces. Answers ONLY the +%s call shape it
+// emulates (R9-9): any other format falls through to the system date, so a
+// format-string mutation cannot hide behind the shim.
+const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'const a = process.argv[1]; const t = a === "" ? Number(process.env.NOW_EPOCH) - 43200 : Math.floor(new Date(a).getTime() / 1000); if (Number.isNaN(t)) process.exit(1); console.log(t)' "$3"; else command date "$@"; fi; }`;
 
 // The `wedged` predicate is defined once in the workflow and reused by the
 // in-flight count, the census, and the liveness re-dispatch guard; tests
@@ -43,6 +48,31 @@ const inflightProgram = workflow
     /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
   )?.[1]
   ?.replace(/\n {12}/g, '\n');
+
+// The `review-address (<pr>, …)` display-name contract, extracted from the
+// PRODUCER (R2-7): GitHub builds a matrix job's display name from the job id
+// plus the matrix values joined in the target object's key order, so the
+// busy rail's prefix capture stands on (a) no job-level `name:`, (b) exactly
+// one matrix dimension, (c) `pr` emitted first. Extracted once here so the
+// contract test below and the rail's fixture names cannot drift apart.
+const autofixTargetsKeys = [
+  ...(
+    readFileSync('.github/workflows/qwen-autofix.yml', 'utf8').match(
+      /TARGETS="\$\(jq -c \\[\s\S]*?'\. \+ \[\{([^}]*)\}\]'/,
+    )?.[1] ?? ''
+  ).matchAll(/(\w+): \$/g),
+].map((m) => m[1]);
+
+// The rail fixtures' job names are BUILT from the producer's key order: a
+// key reorder (or a renamed first key) on the qwen-autofix.yml side turns
+// the rail replays red here instead of leaving the rail to capture nothing —
+// fail-OPEN — in production.
+const reviewAddressJob = (pr, status = 'in_progress') => ({
+  name: `review-address (${autofixTargetsKeys
+    .map((k) => (k === 'pr' ? pr : 'x'))
+    .join(', ')})`,
+  status,
+});
 
 describe('fleet shepherd workflow', () => {
   it('runs checkout-free — every read goes through the API', () => {
@@ -87,11 +117,12 @@ describe('fleet shepherd workflow', () => {
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
     );
     // Per-PR metadata still rides the list calls — the sole gh pr view is
-    // live_skip's labels-only recheck immediately before a mutation, whose
-    // exported payload the auto-release scope check rides (no second read).
+    // live_skip's recheck immediately before a mutation, whose exported
+    // payload the auto-release scope check and the no-op notice's live
+    // state/head guard ride (no second read).
     expect(workflow.split('gh pr view').length - 1).toBe(1);
     expect(workflow).toContain(
-      'gh pr view "${pr}" --repo "${REPO}" --json labels',
+      'gh pr view "${pr}" --repo "${REPO}" --json labels,state,headRefOid',
     );
     expect(workflow).toContain(
       'index($a) != null) and ([.labels[]?.name] | index($b) != null)\' <<< "${LIVE_LABELS_JSON}"',
@@ -1961,6 +1992,26 @@ exit 1`;
     for (const h of transient) expect(matches(h)).toBe('false');
   });
 
+  it('pins the review-address job-name contract against qwen-autofix.yml — the busy rail’s input (R2-7)', () => {
+    // The rail matches GitHub's generated matrix display name
+    // `review-address (<pr>, …)`. The contract is exactly: no job-level
+    // `name:` (it would replace the generated name), exactly one matrix
+    // dimension (a second would append values), and `pr` FIRST in the
+    // targets object (the rail's capture is prefix-anchored). A drift on the
+    // producer side fails HERE, not silently in production — there the
+    // rail's gh run view SUCCEEDS on a renamed job and captures nothing,
+    // which reads as "nothing live": fail-OPEN onto a close under a working
+    // agent.
+    const autofixDoc = parse(
+      readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+    );
+    const addressJob = autofixDoc.jobs['review-address'];
+    expect(addressJob).toBeTruthy();
+    expect(addressJob.name).toBeUndefined();
+    expect(Object.keys(addressJob.strategy.matrix)).toEqual(['target']);
+    expect(autofixTargetsKeys[0]).toBe('pr');
+  });
+
   it('pins the previously mutation-tested gaps from review round 2', () => {
     // R2-7: days_since() is behaviorally replayed (the /86400 → /3600
     // mutation must fail) — the shared module-scope GNU date shim applies.
@@ -2127,7 +2178,7 @@ exit 1`;
     );
     // R2-20: live_skip exports the payload the scope check rides.
     expect(workflow).toContain(
-      'LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels',
+      'LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels,state,headRefOid',
     );
     // R2-12/R5-9: the labeled-event merge lives in compute_resume_ts with a
     // tie-safe comparison — an event at-or-newer than other evidence wins.
@@ -2372,18 +2423,25 @@ exit 1`;
     expect(workflow).toContain('• no-op merge      → close it.');
     // The probe reads GitHub's OWN test merge (one GraphQL call, no
     // checkout) and compares its tree with its BASE parent's tree —
-    // parents(first: 1) is the base side of a test merge, and its oid names
-    // the main the verdict is against. The same read says whether the PR was
+    // parents.nodes[0] is the base side of a test merge, and its oid names
+    // the main the verdict is against. nodes[1] is the HEAD side: it must
+    // equal the fleet snapshot's head, or the test merge was built from an
+    // older head and its equal tree would be a verdict for a head the notice
+    // does not name (R2-1 — structural, not an observation about GitHub's
+    // rebuild timing). The same read says whether the PR was
     // ever closed, which is what the at-most-once guard stands on.
     expect(workflow).toContain('potentialMergeCommit {');
-    // …and the head the verdict is FOR, so the notice can never name a head
-    // the test merge was not built from.
+    // …and the head the verdict is FOR: both the live headRefOid AND the
+    // head-side parent of the test merge it was built from.
     expect(workflow).toMatch(
       /pullRequest\(number: \$pr\) \{\n\s+headRefOid\n\s+potentialMergeCommit \{/,
     );
     expect(workflow).toContain('elif $p.headRefOid != $head then "head-moved"');
     expect(workflow).toContain(
-      'parents(first: 1) { nodes { oid tree { oid } } }',
+      'elif ($p.potentialMergeCommit.parents.nodes[1].oid // "") != $head then "head-moved"',
+    );
+    expect(workflow).toContain(
+      'parents(first: 2) { nodes { oid tree { oid } } }',
     );
     // filteredCount, NOT totalCount: totalCount ignores itemTypes and counts
     // the whole timeline, which would read every PR as "closed before" and
@@ -2432,8 +2490,12 @@ exit 1`;
     expect(workflow).toMatch(
       /if \[\[ -n "\$\{parked\}" \]\]; then[\s\S]{0,200}if \[\[ "\$\{NOOP_REOPENED\}" != 'false' \]\]; then[\s\S]{0,600}issues\/\$\{pr\}\/comments" --paginate/,
     );
+    // …and the notice rides live_skip's ONE read for a live state+head
+    // guard (R2-4): a PR closed or pushed since the fleet snapshot gets no
+    // notice. The guard sits AFTER live_parked, so an unparsable payload
+    // keeps its truthful note, and BEFORE the write.
     expect(workflow).toMatch(
-      /if noop_must_wait "\$\{pr\}"; then\n\s+:\n\s+elif live_skip "\$\{pr\}"; then\n\s+ACTION_NOTE="\$\(skip_note 'no-op notice'\)"\n\s+elif live_parked; then\n\s+ACTION_NOTE="\$\{LIVE_PARKED_NOTE\}"\n\s+elif act "#\$\{pr\}: post no-op notice"/,
+      /if noop_must_wait "\$\{pr\}"; then\n\s+:\n\s+elif live_skip "\$\{pr\}"; then\n\s+ACTION_NOTE="\$\(skip_note 'no-op notice'\)"\n\s+elif live_parked; then\n\s+ACTION_NOTE="\$\{LIVE_PARKED_NOTE\}"\n\s+elif \[\[ "\$\(jq -r '\.state \/\/ ""' <<< "\$\{LIVE_LABELS_JSON\}"\)" != "OPEN" \|\| "\$\(jq -r '\.headRefOid \/\/ ""' <<< "\$\{LIVE_LABELS_JSON\}"\)" != "\$\{head\}" \]\]; then\n(?:\s+#[^\n]*\n)*\s+ACTION_NOTE='PR no longer open at this head — no notice'\n\s+elif act "#\$\{pr\}: post no-op notice"/,
     );
     expect(workflow).toMatch(
       /CLOSES\}" -ge "\$\{MAX_NOOP_CLOSES_PER_TICK\}" \]\]; then\n\s+ACTION_NOTE='close budget reached this tick'\n\s+elif noop_must_wait "\$\{pr\}"; then\n\s+:\n\s+elif live_skip "\$\{pr\}"; then[\s\S]{0,120}elif live_parked; then\n\s+ACTION_NOTE="\$\{LIVE_PARKED_NOTE\}"\n\s+elif ! live="\$\(gh api "repos\/\$\{REPO\}\/pulls\/\$\{pr\}"/,
@@ -2446,8 +2508,12 @@ exit 1`;
     expect(workflow).toContain(
       'for st in in_progress queued pending waiting requested waiting pending queued in_progress; do',
     );
+    // …through the Runs API, not `gh run list --status` (R2-2): gh's
+    // client-side status allow-list rejects 'pending' before 2.65.0, and the
+    // API filter is server-side on every gh version. The REST envelope's run
+    // id field is `id`, NOT the gh CLI's `databaseId`.
     expect(workflow).toMatch(
-      /env GITHUB_TOKEN="\$\{ACTIONS_TOKEN\}" gh run list --repo "\$\{REPO\}" --workflow qwen-autofix\.yml \\\n\s+--status "\$\{st\}" --limit 100 --json databaseId/,
+      /env GITHUB_TOKEN="\$\{ACTIONS_TOKEN\}" gh api \\\n\s+"repos\/\$\{REPO\}\/actions\/workflows\/qwen-autofix\.yml\/runs\?status=\$\{st\}&per_page=100" \\\n\s+--jq '\.workflow_runs\[\]\.id' 2>> \/tmp\/noop-live-err/,
     );
     expect(workflow).toMatch(
       /address_runs_live\(\) \{[\s\S]{0,200}NOOP_LIVE_PRS='unknown'\n(?:\s+#[^\n]*\n)*\s+for st in/,
@@ -2459,9 +2525,12 @@ exit 1`;
     expect(workflow).toMatch(
       /for st in in_progress queued [^\n]* queued in_progress; do[\s\S]*?-ge 100 \]\]; then\n\s+return 0\n[\s\S]*?\n {12}done\n {12}ids="\$\(sort -u <<< "\$\{ids\}"\)" \|\| return 0\n {12}while IFS= read -r id; do[\s\S]*?gh run view "\$\{id\}"/,
     );
-    // A rail that cannot be read is annotated once per tick, like the probe.
+    // A rail that cannot be read is annotated once per tick, like the probe
+    // — and names gh's first stderr line, so a dead rail never reads as the
+    // benign full-page case (R2-3). Both rail reads keep stderr in that file.
+    expect(workflow.match(/2>> \/tmp\/noop-live-err/g)).toHaveLength(2);
     expect(workflow).toMatch(
-      /if \[\[ "\$\{NOOP_LIVE_PRS\}" == 'unknown' \]\]; then\n\s+echo "::warning::live autofix runs could not be read this tick/,
+      /if \[\[ "\$\{NOOP_LIVE_PRS\}" == 'unknown' \]\]; then\n\s+RAIL_ERR="\$\(grep -m 1 '\[\^\[:space:\]\]' \/tmp\/noop-live-err 2> \/dev\/null \| tr -d '\\r' \|\| true\)"\n\s+RAIL_ERR="\$\{RAIL_ERR:0:200\}"\n\s+echo "::warning::live autofix runs could not be read this tick \(a failed or full run listing, a failed jobs read, or a failed de-duplication step\)\$\{RAIL_ERR:\+ — last error: \$\{RAIL_ERR\}\}/,
     );
     const leverFn = workflow.match(
       /noop_close_lever\(\) \{[\s\S]*?\n {10}\}/,
@@ -2593,9 +2662,13 @@ exit 1`;
         },
       },
     });
+    // nodes[0] is the BASE side of a test merge, nodes[1] the HEAD side —
+    // the binding the R2-1 check stands on.
     const merge = (mtree, btree) => ({
       tree: { oid: mtree },
-      parents: { nodes: [{ oid: BASE_OID, tree: { oid: btree } }] },
+      parents: {
+        nodes: [{ oid: BASE_OID, tree: { oid: btree } }, { oid: HEAD_OID }],
+      },
     });
     const equal = probe({ body: pr(merge('t1', 't1')) });
     expect(equal).toMatchObject({
@@ -2608,10 +2681,12 @@ exit 1`;
       reopened: 'false',
     });
     // ONE GraphQL read with a numeric PR variable, asking for the test
-    // merge's tree, its base parent's oid and tree, and the close-event count.
+    // merge's tree, its base parent's oid and tree, its head-side parent's
+    // oid (the verdict's binding to the noticed head), and the close-event
+    // count.
     expect(equal.log.trim().split('\n')).toHaveLength(1);
     expect(equal.log).toMatch(
-      /^api graphql .*-F pr=7 .*potentialMergeCommit[\s\S]*parents\(first: 1\)[\s\S]*CLOSED_EVENT/,
+      /^api graphql .*-F pr=7 .*potentialMergeCommit[\s\S]*parents\(first: 2\)[\s\S]*CLOSED_EVENT/,
     );
     expect(probe({ body: pr(merge('t1', 't2')) })).toMatchObject({
       rc: '1',
@@ -2638,6 +2713,32 @@ exit 1`;
       state: 'head-moved',
       fails: '0',
     });
+    // The binding is STRUCTURAL (R2-1): a test merge whose HEAD-side parent
+    // is not the snapshot head was built from an older head — defer, even
+    // when its tree answers equal. Removing the jq elif turns this red.
+    expect(
+      probe({
+        body: pr({
+          tree: { oid: 't1' },
+          parents: {
+            nodes: [
+              { oid: BASE_OID, tree: { oid: 't1' } },
+              { oid: 'c'.repeat(40) },
+            ],
+          },
+        }),
+      }),
+    ).toMatchObject({ rc: '1', state: 'head-moved', fails: '0', first: '' });
+    // …and a MISSING head-side parent fails closed the same way — a
+    // deferral, never a verdict.
+    expect(
+      probe({
+        body: pr({
+          tree: { oid: 't1' },
+          parents: { nodes: [{ oid: BASE_OID, tree: { oid: 't1' } }] },
+        }),
+      }),
+    ).toMatchObject({ rc: '1', state: 'head-moved', fails: '0' });
     // The BENIGN non-answer — GitHub has not built the test merge yet —
     // defers without counting as a failure.
     expect(probe({ body: pr(null) })).toMatchObject({
@@ -2685,14 +2786,16 @@ exit 1`;
     const noTimeline = pr(merge('t1', 't1'));
     delete noTimeline.data.repository.pullRequest.timelineItems;
     for (const body of [
-      pr({ tree: { oid: 't1' }, parents: { nodes: [] } }),
+      pr({ tree: { oid: 't1' }, parents: { nodes: [{}, { oid: HEAD_OID }] } }),
       pr({
         tree: null,
-        parents: { nodes: [{ oid: BASE_OID, tree: { oid: 't1' } }] },
+        parents: {
+          nodes: [{ oid: BASE_OID, tree: { oid: 't1' } }, { oid: HEAD_OID }],
+        },
       }),
       pr({
         tree: { oid: 't1' },
-        parents: { nodes: [{ tree: { oid: 't1' } }] },
+        parents: { nodes: [{ tree: { oid: 't1' } }, { oid: HEAD_OID }] },
       }),
       // An equal-tree answer WITHOUT a usable close-event count is not an
       // answer: the at-most-once guard would have nothing to stand on.
@@ -2745,6 +2848,10 @@ exit 1`;
       'noop_close_lever',
     ].map(grab);
     for (const p of parts) expect(p).toBeTruthy();
+    const railWarning = workflow.match(
+      / {10}if \[\[ "\$\{NOOP_LIVE_PRS\}" == 'unknown' \]\]; then\n {12}RAIL_ERR=[\s\S]*?\n {10}fi/,
+    )?.[0];
+    expect(railWarning).toBeTruthy();
     const HEAD = 'a'.repeat(40);
     const NOTICE = `<!-- fleet-shepherd noop-notice sha=${HEAD} -->`;
     const CLOSED = `<!-- fleet-shepherd noop-close sha=${HEAD} -->`;
@@ -2761,11 +2868,6 @@ exit 1`;
       created_at,
       body,
     });
-    // GNU date, faithfully — including its trap: `date -d ""` SUCCEEDS
-    // (today 00:00, which sits inside the age window at the fixture's noon),
-    // so only the lever's own emptiness test keeps an undated notice from
-    // reading as old enough. An unparsable string fails, as GNU does.
-    const gnuDateStrict = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'const a = process.argv[1]; const t = a === "" ? Number(process.env.NOW_EPOCH) - 43200 : Math.floor(new Date(a).getTime() / 1000); if (Number.isNaN(t)) process.exit(1); console.log(t)' "$3"; else command date "$@"; fi; }`;
     const run = ({
       comments = [],
       pages,
@@ -2803,7 +2905,10 @@ exit 1`;
         );
         writeFileSync(
           join(dir, 'labels.json'),
-          labelsBody ?? JSON.stringify({ labels }),
+          // state/headRefOid ride the same live_skip read (R2-4): the
+          // notice branch refuses a PR no longer open at the head.
+          labelsBody ??
+            JSON.stringify({ labels, state: 'OPEN', headRefOid: HEAD }),
         );
         for (const [name, runs] of [
           ...Object.entries(liveRuns),
@@ -2812,7 +2917,8 @@ exit 1`;
             [...(liveRuns[st] ?? []), ...rs],
           ]),
         ]) {
-          // What `gh run list … --jq '.[].databaseId'` prints: one id a line.
+          // What the Runs API read `--jq '.workflow_runs[].id'` prints: one
+          // id a line.
           writeFileSync(
             join(dir, `runs-${name}`),
             runs.map((r) => `${r.id}\n`).join(''),
@@ -2834,10 +2940,20 @@ exit 1`;
             'printf \'%s\\n\' "${*//$\'\\n\'/ }" >> "$GH_LOG"',
             'case "$1 $2" in',
             '  "pr view") [[ "$LABELS_FAIL" == true ]] && exit 1; cat "$FIX/labels.json" ;;',
-            '  "pr comment") exit "$COMMENT_RC" ;;',
-            '  "pr close") exit "$CLOSE_RC" ;;',
-            '  "run list") [[ "$GITHUB_TOKEN" == workflow-token ]] || exit 1; st=""; while [[ $# -gt 0 ]]; do [[ "$1" == --status ]] && st="$2"; shift; done; [[ "$RUNS_FAIL" == "$st" ]] && exit 1; n=$(( $(cat "$FIX/calls-$st" 2> /dev/null || echo 0) + 1 )); echo "$n" > "$FIX/calls-$st"; f="$FIX/runs-$st"; [[ "$n" -ge 2 && -f "$f.2" ]] && f="$f.2"; [[ -f "$f" ]] && cat "$f"; exit 0 ;;',
-            '  "run view") [[ "$GITHUB_TOKEN" == workflow-token ]] || exit 1; [[ "$JOBS_FAIL" == true ]] && exit 1; cat "$FIX/jobs-$3.json" ;;',
+            // The two WRITES go out under the bot PAT — the marker dedup
+            // stands on the notice's author being the bot (R2-11). A
+            // "harmonise the credential" edit routing a write through the
+            // workflow token must fail HERE, not silently 403 in production.
+            '  "pr comment") [[ "$GITHUB_TOKEN" == bot-pat ]] || exit 1; exit "$COMMENT_RC" ;;',
+            '  "pr close") [[ "$GITHUB_TOKEN" == bot-pat ]] || exit 1; exit "$CLOSE_RC" ;;',
+            // The sweep rides the Runs API (R2-2): $2 carries
+            // ?status=<st>&per_page=100. Emulate the server's documented
+            // status enum — a value outside it fails the replay the way the
+            // API's 422 fails production, never "no live runs".
+            '  "api repos/QwenLM/qwen-code/actions/workflows/qwen-autofix.yml/runs?status="*) [[ "$GITHUB_TOKEN" == workflow-token ]] || exit 1; st="${2#*status=}"; st="${st%%&*}"; [[ " in_progress queued pending waiting requested completed action_required cancelled failure neutral skipped stale startup_failure success timed_out " == *" $st "* ]] || { echo "gh: invalid status $st" >&2; exit 1; }; [[ "$RUNS_FAIL" == "$st" ]] && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }; n=$(( $(cat "$FIX/calls-$st" 2> /dev/null || echo 0) + 1 )); echo "$n" > "$FIX/calls-$st"; f="$FIX/runs-$st"; [[ "$n" -ge 2 && -f "$f.2" ]] && f="$f.2"; [[ -f "$f" ]] && cat "$f"; exit 0 ;;',
+            // Failure arms carry a stderr line, like gh: the rail keeps it
+            // and the tick warning names its first line (R2-3).
+            '  "run view") [[ "$GITHUB_TOKEN" == workflow-token ]] || exit 1; [[ "$JOBS_FAIL" == true ]] && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }; cat "$FIX/jobs-$3.json" ;;',
             '  "api repos/QwenLM/qwen-code/issues/7/comments") [[ "$COMMENTS_FAIL" == true ]] && exit 1; cat "$FIX/comments.json" ;;',
             '  "api repos/QwenLM/qwen-code/pulls/7") [[ "$LIVE_FAIL" == true ]] && exit 1; printf \'%s\\n\' "$LIVE_OUT" ;;',
             '  *) echo "unexpected gh $*" >&2; exit 99 ;;',
@@ -2855,13 +2971,22 @@ exit 1`;
         const fns = parts
           .map((f) => f.replace(/\n {10}/g, '\n'))
           .join('\n')
-          .replaceAll('/tmp/noop-ic.json', join(dir, 'noop-ic.json'));
+          .replaceAll('/tmp/noop-ic.json', join(dir, 'noop-ic.json'))
+          .replaceAll('/tmp/noop-live-err', join(dir, 'noop-live-err'));
         expect(fns).not.toContain('/tmp/noop-ic.json');
+        expect(fns).not.toContain('/tmp/noop-live-err');
+        // The tick-level rail warning replays too (R2-3): a rail that failed
+        // must name gh's first stderr line, so a dead rail never reads as
+        // the benign full-page case.
+        const railWarn = railWarning
+          .trimStart()
+          .replace(/\n {10}/g, '\n')
+          .replaceAll('/tmp/noop-live-err', join(dir, 'noop-live-err'));
         const out = execFileSync(
           'bash',
           [
             '-c',
-            `set -eo pipefail\n${gnuDateStrict}\n${fns}\nNOOP_LIVE_PRS=''\nCLOSES=${closes}\nNOTICES=0\nNOOP_REOPENED='${reopened}'\nNOOP_BASE='abc123456'\nnoop_close_lever 7 ${HEAD} '${parked}'\n${after}\necho "NOTE=$ACTION_NOTE"\necho "NOTICES=$NOTICES CLOSES=$CLOSES"`,
+            `set -eo pipefail\n${gnuDateShim}\n${fns}\nNOOP_LIVE_PRS=''\nCLOSES=${closes}\nNOTICES=0\nNOOP_REOPENED='${reopened}'\nNOOP_BASE='abc123456'\nnoop_close_lever 7 ${HEAD} '${parked}'\n${after}\n${railWarn}\necho "NOTE=$ACTION_NOTE"\necho "NOTICES=$NOTICES CLOSES=$CLOSES"`,
           ],
           {
             env: {
@@ -2876,6 +3001,7 @@ exit 1`;
               NOOP_NOTICE_MAX_AGE_SEC: '86400',
               NOW_EPOCH: String(NOW),
               ACTIONS_TOKEN: 'workflow-token',
+              GITHUB_TOKEN: 'bot-pat',
               RUNS_FAIL: runsFail,
               JOBS_FAIL: String(jobsFail),
               DRY_RUN: dryRun,
@@ -2903,10 +3029,22 @@ exit 1`;
           writes: log.filter((l) => /^pr (comment|close) /.test(l)),
           calls: log.filter(Boolean).length,
           views: log.filter((l) => l.startsWith('pr view ')).length,
-          runReads: log.filter((l) => /^run (list|view) /.test(l)).length,
+          out,
+          warnings: [...out.matchAll(/^::warning::(.*)$/gm)].map((m) => m[1]),
+          // The listings ride the Runs API (R2-2); the jobs reads stay
+          // gh run view.
+          runReads: log.filter(
+            (l) =>
+              /^run view /.test(l) ||
+              l.startsWith('api repos/QwenLM/qwen-code/actions/workflows/'),
+          ).length,
           runOrder: log
-            .filter((l) => /^run (list|view) /.test(l))
-            .map((l) => l.split(' ')[1])
+            .filter(
+              (l) =>
+                /^run view /.test(l) ||
+                l.startsWith('api repos/QwenLM/qwen-code/actions/workflows/'),
+            )
+            .map((l) => (l.startsWith('run view ') ? 'view' : 'list'))
             .join(','),
           liveReads: log.filter((l) =>
             l.startsWith('api repos/QwenLM/qwen-code/pulls/7 '),
@@ -2954,10 +3092,10 @@ exit 1`;
       'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 20.',
     );
     expect(r.writes[0]).toContain(
-      'or the per-tick close cap postpones it, and the `autofix/needs-human` label parks it for a human. To keep it open, add the `autofix/skip` label.',
+      'or the per-tick close cap postpones it, and the `autofix/needs-human` label parks it for a human. To keep it open, add the `autofix/skip` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.',
     );
     expect(r.writes[0]).toContain(
-      '带有 `autofix/needs-human` 标签则交由人工处理。如需保留，请添加 `autofix/skip` 标签。',
+      '带有 `autofix/needs-human` 标签则交由人工处理。如需保留，请添加 `autofix/skip` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。',
     );
     expect(r.writes[0]).toContain(
       '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 20 分钟内。',
@@ -3130,20 +3268,20 @@ exit 1`;
               {
                 id: 901,
                 jobs: [
-                  job('review-address (7, autofix/issue-1, x)', status),
-                  job('review-address (12117, autofix/issue-2, x)', status),
-                  job('review-address (11679, autofix/issue-3, x)', status),
+                  reviewAddressJob(7, status),
+                  reviewAddressJob(12117, status),
+                  reviewAddressJob(11679, status),
                 ],
               },
               {
                 id: 906,
-                jobs: [job('review-address (11989, autofix/issue-4, x)')],
+                jobs: [reviewAddressJob(11989)],
               },
             ],
             requested: [
               {
                 id: 907,
-                jobs: [job('review-address (5, autofix/issue-5, x)', 'queued')],
+                jobs: [reviewAddressJob(5, 'queued')],
               },
             ],
           },
@@ -3166,9 +3304,9 @@ exit 1`;
           {
             id: 908,
             jobs: [
-              job('review-address (12117, autofix/issue-2, x)'),
-              job('review-address (11679, autofix/issue-3, x)'),
-              job('review-address (7, autofix/issue-1, x)'),
+              reviewAddressJob(12117),
+              reviewAddressJob(11679),
+              reviewAddressJob(7),
             ],
           },
         ],
@@ -3184,15 +3322,27 @@ exit 1`;
         in_progress: [
           {
             id: 902,
-            jobs: [
-              job('review-address (17, autofix/issue-2, x)'),
-              job('review-address (7, autofix/issue-1, x)', 'completed'),
-            ],
+            jobs: [reviewAddressJob(17), reviewAddressJob(7, 'completed')],
           },
         ],
       },
     });
     expect(r.note).toBe('closed as no-op');
+    // …and the rail's SUCCESSFUL answer is loud (R2-5): the tick log names
+    // the PRs it defers for, like the sibling busy line — a deferral that
+    // lasts days must not leave "which run holds it?" unanswerable.
+    r = run({
+      comments: [bot(NOTICE)],
+      liveRuns: {
+        in_progress: [
+          { id: 911, jobs: [reviewAddressJob(7), reviewAddressJob(12)] },
+        ],
+      },
+    });
+    expect(r.note).toBe(BUSY);
+    expect(r.out).toContain(
+      '🫥 no-op rail: live review-address for PR(s): 7 12 ',
+    );
     // A run that was nowhere on the way out — it changed status between two
     // listings — is caught on the way back.
     r = run({
@@ -3201,7 +3351,7 @@ exit 1`;
         in_progress: [
           {
             id: 909,
-            jobs: [job('review-address (7, autofix/issue-1, x)')],
+            jobs: [reviewAddressJob(7)],
           },
         ],
       },
@@ -3228,7 +3378,7 @@ exit 1`;
           in_progress: [
             {
               id: 910,
-              jobs: [job('review-address (7, autofix/issue-1, x)')],
+              jobs: [reviewAddressJob(7)],
             },
           ],
         },
@@ -3249,6 +3399,17 @@ exit 1`;
         expect(r.views).toBe(0);
       }
     }
+    // …and the tick-level warning names the rail's own stderr (R2-3): a
+    // token that lost Actions scope must not read as the benign full-page
+    // case.
+    r = run({ comments: [bot(NOTICE)], runsFail: 'queued' });
+    expect(r.note).toBe(UNKNOWN);
+    expect(r.warnings.join('\n')).toContain(
+      'live autofix runs could not be read this tick',
+    );
+    expect(r.warnings.join('\n')).toContain(
+      'last error: gh: Resource not accessible by integration (HTTP 403)',
+    );
   });
 
   it('behaviorally proves a full page of live runs is unknown busy-state, and one short of full is read through', () => {
@@ -3322,6 +3483,30 @@ exit 1`;
     // failure through the jq merge).
     r = run({ comments: [bot(NOTICE)], liveFail: true });
     expect(r.note).toBe('live head unreadable — fail closed, no close');
+    expect(r.writes).toHaveLength(0);
+    // The NOTICE also guards on the live state and head riding live_skip's
+    // one read (R2-4): a PR a human closed or pushed to since the fleet
+    // snapshot must not get a comment promising a close that will never
+    // come — and no second live read is spent.
+    r = run({
+      labelsBody: JSON.stringify({
+        labels: [],
+        state: 'CLOSED',
+        headRefOid: HEAD,
+      }),
+    });
+    expect(r.note).toBe('PR no longer open at this head — no notice');
+    expect(r.writes).toHaveLength(0);
+    expect(r.views).toBe(1);
+    expect(r.liveReads).toBe(0);
+    r = run({
+      labelsBody: JSON.stringify({
+        labels: [],
+        state: 'OPEN',
+        headRefOid: 'b'.repeat(40),
+      }),
+    });
+    expect(r.note).toBe('PR no longer open at this head — no notice');
     expect(r.writes).toHaveLength(0);
     r = run({ comments: [bot(NOTICE)], commentsFail: true });
     expect(r.note).toBe('marker read failed — deferring the no-op lever');

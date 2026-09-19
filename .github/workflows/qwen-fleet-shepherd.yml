@@ -434,8 +434,9 @@ jobs:
           # dispatch, a branch sync, or a no-op notice or close. Fail closed:
           # an unreadable label state counts as skipped.
           # The fetched payload is exported as LIVE_LABELS_JSON so a caller
-          # with follow-up label checks (the auto-release scope condition,
-          # the no-op lever's live_parked) rides the SAME read instead of
+          # with follow-up checks on the same live state (the auto-release
+          # scope condition, the no-op lever's live_parked, the no-op
+          # notice's state/head guard) rides the SAME read instead of
           # spending a second one.
           # Returns 0 when the mutation must NOT proceed, with the reason in
           # LIVE_SKIP_REASON: 'label' (consent withdrawn) vs 'unreadable'
@@ -446,7 +447,7 @@ jobs:
             local pr="$1"
             LIVE_SKIP_REASON=''
             LIVE_LABELS_JSON=''
-            if ! LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels 2> /dev/null)"; then
+            if ! LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels,state,headRefOid 2> /dev/null)"; then
               LIVE_SKIP_REASON='unreadable'
               return 0
             fi
@@ -615,7 +616,11 @@ jobs:
           # were rebuilt within two minutes of a main push, the other nine not at
           # all; a day earlier 15 of 16 lagged main, by up to 21 commits and
           # some 60 ticks of reads). NOOP_BASE names the commit the verdict
-          # is against and both comments quote it. A PR born as a no-op is
+          # is against and both comments quote it. The test merge's head-side
+          # parent (parents.nodes[1]) must BE the snapshot head — anything
+          # else reads as head-moved — so the equal-tree verdict is bound to
+          # the head a notice would name by construction, whatever GitHub's
+          # rebuild timing does. A PR born as a no-op is
           # seen at once; one that became a no-op because a twin landed later
           # is seen once GitHub next rebuilds its test merge, at the latest
           # when its head next moves (the loop's merge of main, a conflict
@@ -633,9 +638,11 @@ jobs:
           #   no-test-merge  GitHub has not built the test merge yet (every
           #                  head move resets it) — benign, row note only
           #   head-moved     the PR's head is no longer the fleet snapshot's
-          #                  head: whatever the test merge says, it is not
-          #                  about the head the notice would name — benign,
-          #                  row note only; the next tick sees the new head
+          #                  head, or the test merge was built from an older
+          #                  head (its head-side parent is not the snapshot
+          #                  head): either way the verdict is not about the
+          #                  head the notice would name — benign, row note
+          #                  only; the next tick sees the new head
           #   api-failure    gh exited non-zero (lost PAT scope, rate limit, a
           #                  renamed field) — counted, warned with gh's stderr
           #   unparsable     a body without the pullRequest node, its head or
@@ -661,7 +668,7 @@ jobs:
                     headRefOid
                     potentialMergeCommit {
                       tree { oid }
-                      parents(first: 1) { nodes { oid tree { oid } } }
+                      parents(first: 2) { nodes { oid tree { oid } } }
                     }
                     timelineItems(itemTypes: [CLOSED_EVENT], last: 1) {
                       filteredCount
@@ -679,6 +686,7 @@ jobs:
               | if ($p | type) != "object" or ($p.headRefOid | type) != "string" then "unparsable"
                 elif $p.headRefOid != $head then "head-moved"
                 elif $p.potentialMergeCommit == null then "no-test-merge"
+                elif ($p.potentialMergeCommit.parents.nodes[1].oid // "") != $head then "head-moved"
                 elif ($p.timelineItems.filteredCount | type) != "number" then "unparsable"
                 else "\($p.potentialMergeCommit.tree.oid // "-") \($p.potentialMergeCommit.parents.nodes[0].tree.oid // "-") \($p.potentialMergeCommit.parents.nodes[0].oid // "-") \($p.timelineItems.filteredCount > 0)"
                 end' <<< "${pmc}" 2> /dev/null)" || shape='unparsable'
@@ -753,7 +761,8 @@ jobs:
           # notice counts, unreadable history / live runs / labels / live
           # head / timestamps defer (fail closed), a live review-address run
           # for the PR defers both writes (its push would land on a closed
-          # PR), the live label recheck precedes every write, closes are
+          # PR), the live label recheck precedes every write — the notice
+          # also checks that payload's live state and head — closes are
           # capped per tick (notices are not), and the budget is checked
           # BEFORE the live reads. The outcome lands in ACTION_NOTE.
           #
@@ -769,7 +778,7 @@ jobs:
           # their jobs. Built once per tick, on first need, into
           # NOOP_LIVE_PRS (' 7 12 ', or 'unknown' on any failed read, a failed
           # de-duplication, or a full page — fail closed, and warned once per
-          # tick below). The handful
+          # tick below, naming gh's first error line). The handful
           # of jobless runs wedged in `queued` since
           # 2026-08-19 cost one jobs read each; their age cannot rule them
           # out, because an offline runner pool keeps live jobs queued too.
@@ -798,9 +807,18 @@ jobs:
             # A FULL page is unknown too — the cut drops the oldest runs,
             # which are exactly the ones holding the long address jobs (a
             # runner-pool outage is what could queue that many).
+            # The Runs API, not `gh run list --status`: gh validates
+            # --status against a client-side allow-list that rejects
+            # 'pending' before 2.65.0 — the trap qwen-autofix.yml's busy
+            # sweep documents — while the API filter is server-side on every
+            # gh version. The REST envelope's run id field is `id` (gh CLI's
+            # --json calls it databaseId). stderr is KEPT (2>>, like the
+            # probe's /tmp/noop-err): the tick warning below names its first
+            # line, so a dead rail never reads as the benign full-page case.
             for st in in_progress queued pending waiting requested waiting pending queued in_progress; do
-              if ! page="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-                --status "${st}" --limit 100 --json databaseId --jq '.[].databaseId' 2> /dev/null)"; then
+              if ! page="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api \
+                "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${st}&per_page=100" \
+                --jq '.workflow_runs[].id' 2>> /tmp/noop-live-err)"; then
                 return 0
               fi
               if [[ "$(grep -c . <<< "${page}" || true)" -ge 100 ]]; then
@@ -813,7 +831,7 @@ jobs:
               if [[ -z "${id}" ]]; then
                 continue
               fi
-              if ! jobs="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${id}" --repo "${REPO}" --json jobs 2> /dev/null)" \
+              if ! jobs="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${id}" --repo "${REPO}" --json jobs 2>> /tmp/noop-live-err)" \
                 || ! prs="$(jq -r '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' <<< "${jobs}" 2> /dev/null)"; then
                 return 0
               fi
@@ -824,6 +842,10 @@ jobs:
               done <<< "${prs}"
             done <<< "${ids}"
             NOOP_LIVE_PRS="${acc}"
+            # Loud on success too, like the SHEP_BUSY line: a deferral that
+            # lasts for days must name what it waits on — a schedule or
+            # dispatch run is not visible from the PR page.
+            [[ "${NOOP_LIVE_PRS}" != ' ' ]] && echo "🫥 no-op rail: live review-address for PR(s):${NOOP_LIVE_PRS}"
           }
           # 0 = a write must wait (ACTION_NOTE says why), 1 = go on.
           noop_must_wait() {
@@ -877,8 +899,15 @@ jobs:
                 ACTION_NOTE="$(skip_note 'no-op notice')"
               elif live_parked; then
                 ACTION_NOTE="${LIVE_PARKED_NOTE}"
+              elif [[ "$(jq -r '.state // ""' <<< "${LIVE_LABELS_JSON}")" != "OPEN" || "$(jq -r '.headRefOid // ""' <<< "${LIVE_LABELS_JSON}")" != "${head}" ]]; then
+                # The notice promises a close: a PR a human closed or pushed
+                # to since the fleet snapshot must not get it (the snapshot
+                # can be half a minute old by the time a flagged PR reaches
+                # its write). The pr view payload's state is UPPERCASE — the
+                # close path's REST read is lowercase; never mix the two.
+                ACTION_NOTE='PR no longer open at this head — no notice'
               elif act "#${pr}: post no-op notice" \
-                gh pr comment "${pr}" --repo "${REPO}" --body "$(printf '🫥 No-op detected: GitHub'"'"'s test merge of head `%s` into `main` (as of `%s`, the `main` it was built against) has the same tree as that `main`, so merging this PR would change nothing — `main` already carries every change it proposes (usually because another PR landed the same fix first). Unless the head moves, the Fleet Shepherd closes this PR on a later tick: no sooner than %s minutes from now, usually within about 20. A live autofix run for this PR, an unreadable state, or the per-tick close cap postpones it, and the `%s` label parks it for a human. To keep it open, add the `%s` label.\n\n<details>\n<summary>中文说明</summary>\n\n🫥 检测到空壳：GitHub 对 head `%s` 与 `main`（以 `%s` 为准，即构建该试合并时的 `main`）的试合并结果和那个 `main` 的树完全相同，合入本 PR 不会改变任何内容 —— `main` 已包含本 PR 提出的全部改动（通常是另一个 PR 先合入了相同的修复）。若 head 不再变动，Fleet Shepherd 会在之后的某个 tick 关闭本 PR：最早在 %s 分钟之后，通常在约 20 分钟内。本 PR 有在飞的 autofix 运行、状态不可读、或触及每 tick 关闭上限时会顺延；带有 `%s` 标签则交由人工处理。如需保留，请添加 `%s` 标签。\n\n</details>\n\n<!-- fleet-shepherd noop-notice sha=%s -->' "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}")"; then
+                gh pr comment "${pr}" --repo "${REPO}" --body "$(printf '🫥 No-op detected: GitHub'"'"'s test merge of head `%s` into `main` (as of `%s`, the `main` it was built against) has the same tree as that `main`, so merging this PR would change nothing — `main` already carries every change it proposes (usually because another PR landed the same fix first). Unless the head moves, the Fleet Shepherd closes this PR on a later tick: no sooner than %s minutes from now, usually within about 20. A live autofix run for this PR, an unreadable state, or the per-tick close cap postpones it, and the `%s` label parks it for a human. To keep it open, add the `%s` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.\n\n<details>\n<summary>中文说明</summary>\n\n🫥 检测到空壳：GitHub 对 head `%s` 与 `main`（以 `%s` 为准，即构建该试合并时的 `main`）的试合并结果和那个 `main` 的树完全相同，合入本 PR 不会改变任何内容 —— `main` 已包含本 PR 提出的全部改动（通常是另一个 PR 先合入了相同的修复）。若 head 不再变动，Fleet Shepherd 会在之后的某个 tick 关闭本 PR：最早在 %s 分钟之后，通常在约 20 分钟内。本 PR 有在飞的 autofix 运行、状态不可读、或触及每 tick 关闭上限时会顺延；带有 `%s` 标签则交由人工处理。如需保留，请添加 `%s` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。\n\n</details>\n\n<!-- fleet-shepherd noop-notice sha=%s -->' "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}")"; then
                 NOTICES=$(( NOTICES + 1 ))
                 ACTION_NOTE='no-op notice posted — closes on a later tick unless the head moves'
               else
@@ -1592,9 +1621,13 @@ jobs:
             echo "::warning::no-op probe failed for ${PROBE_FAILS} PR(s) this tick (first: ${PROBE_FAIL_FIRST}) — the no-op close lever is deferred for them"
           fi
           # Same rule for the lever's busy rail: a rail that cannot be read
-          # defers every write it guards, and must not hide in row notes.
+          # defers every write it guards, and must not hide in row notes — and
+          # it names gh's first error line, so a dead rail never reads as the
+          # benign full-page case.
           if [[ "${NOOP_LIVE_PRS}" == 'unknown' ]]; then
-            echo "::warning::live autofix runs could not be read this tick (a failed or full run listing, a failed jobs read, or a failed de-duplication step) — every no-op notice and close that was reached is deferred"
+            RAIL_ERR="$(grep -m 1 '[^[:space:]]' /tmp/noop-live-err 2> /dev/null | tr -d '\r' || true)"
+            RAIL_ERR="${RAIL_ERR:0:200}"
+            echo "::warning::live autofix runs could not be read this tick (a failed or full run listing, a failed jobs read, or a failed de-duplication step)${RAIL_ERR:+ — last error: ${RAIL_ERR}} — every no-op notice and close that was reached is deferred"
           fi
 
           # ---- dashboard: one issue, edited in place ----------------------
