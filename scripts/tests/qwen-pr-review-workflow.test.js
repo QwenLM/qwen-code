@@ -4679,8 +4679,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     // An earlier revision published review-pr's reviewed head as a job output
     // and read it here. The guard no longer keys on the head at all, so the
     // wiring is gone rather than left as an untested chain whose silent
-    // breakage would restore the fresh-head comparison.
+    // breakage would restore the fresh-head comparison. review-pr publishes
+    // no job outputs, and this job reads none of them.
     expect(doc.jobs['review-pr'].outputs).toBeUndefined();
+    expect(JSON.stringify(doc.jobs['fallback-comment'])).not.toContain(
+      'needs.review-pr.outputs',
+    );
     expect(step.env.REVIEWED_HEAD_SHA).toBeUndefined();
     expect(step.run).not.toContain('REVIEWED_HEAD_SHA');
     expect(inJobStep.run).not.toContain('commit_id ==');
@@ -6990,6 +6994,9 @@ describe('review supersede salvage (#10110)', () => {
         cedeSupersededSource(),
         'PR_NUMBER=1; EXPECTED_HEAD_SHA=head-a',
         `SUPERSEDE_FILE="${supersedeFile}"`,
+        // The real step always has GITHUB_OUTPUT; the cede's planted-output
+        // overwrite (R2-2) writes it last.
+        `GITHUB_OUTPUT="${join(dir, 'gho')}"; : > "$GITHUB_OUTPUT"`,
         `GITHUB_STEP_SUMMARY="${summary}"; : > "$GITHUB_STEP_SUMMARY"`,
         'cede_superseded',
       ].join('\n');
@@ -7095,7 +7102,7 @@ describe('review supersede salvage (#10110)', () => {
       'salvaged=true',
       `salvage_moved_to=${sha}`,
     ]);
-    // No marker: an ordinary run emits neither output (a flipped condition
+    // No marker: an ordinary run emits no output at all (a flipped condition
     // would post the historical-head note on every run).
     expect(runSalvageOutputs({ marker: null })).toEqual([]);
     // Explicit runs (/review, review_requested, dispatch) arm no watcher,
@@ -7413,4 +7420,455 @@ describe('review supersede salvage (#10110)', () => {
       );
     },
   );
+});
+
+describe('qwen pr review unchanged-diff anchor', () => {
+  const anchorDoc = parse(workflow);
+  const skipScript = readFileSync(
+    '.github/scripts/review-unchanged-diff.sh',
+    'utf8',
+  );
+
+  it('stamps reviewed heads from its own job, never from review-pr', () => {
+    const doc = parse(workflow);
+    const reviewPr = doc.jobs['review-pr'];
+    // review-pr's checkout persists its GITHUB_TOKEN where the agent can
+    // read it, so it must not hold statuses: write.
+    expect(reviewPr.permissions.statuses).toBeUndefined();
+    expect(reviewPr.outputs).toBeUndefined();
+    const job = doc.jobs['record-reviewed'];
+    expect(job.needs).toEqual(['review-pr']);
+    expect(job.permissions).toEqual({
+      'pull-requests': 'read',
+      statuses: 'write',
+    });
+    expect(job['runs-on']).toBe('ubuntu-latest');
+    expect(job.if).toContain("github.event_name == 'pull_request_target'");
+    expect(job.if).toContain("needs.review-pr.result == 'success'");
+    expect(job.if).not.toContain('needs.review-pr.outputs');
+    const [step] = job.steps;
+    // The event's head, never an output the agent's step could write.
+    expect(step.env.HEAD_SHA).toBe('${{ github.event.pull_request.head.sha }}');
+    expect(step.env.REVIEW_BOT_TOKEN).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(step.run).toContain("-f context='qwen-review/reviewed'");
+  });
+
+  // R2-6. A prefix-only pin let the call's arguments move with every lane
+  // green: hardcoding the base to `main` computes the fingerprint from the
+  // wrong merge base (the comment above the call calls that "a FALSE SKIP"),
+  // swapping the last two arguments makes the script reject `main` at its
+  // head-sha guard so the feature dies silently, and dropping the `||` arm
+  // turns a degradable check failure into a dead step under the caller's
+  // `set -euo pipefail`. Pin the four arguments in the order the script's own
+  // `# Usage:` line documents, pin that line so a fifth argument cannot
+  // arrive unpinned, and pin the arm that degrades to a full review.
+  it('checks for an unchanged diff on automatic synchronize runs only', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    const usageArgs =
+      skipScript.match(/^# Usage: review-unchanged-diff\.sh (.+)$/m)?.[1] ?? '';
+    expect(usageArgs.split(/\s+/)).toEqual([
+      '<owner/repo>',
+      '<pr-number>',
+      '<head-sha>',
+      '<base-ref>',
+    ]);
+    expect(run).toContain(
+      'bash .github/scripts/review-unchanged-diff.sh "$REPO" "$PR_NUMBER"' +
+        ' "$EXPECTED_HEAD_SHA" "$BASE_REF_NAME")"' +
+        ' || skip_verdict="changed check-failed"',
+    );
+    expect(run).toContain('[ "${EVENT_ACTION:-}" = "synchronize" ]');
+  });
+
+  it('carries the anchor verdict onto an unchanged head before skipping', () => {
+    const reviewPr = anchorDoc.jobs['review-pr'];
+    const runStep = reviewPr.steps.find((s) => s.name === 'Run review');
+    // Without this env entry EVENT_ACTION is unset in the step and the skip
+    // branch never opens.
+    expect(runStep.env.EVENT_ACTION).toBe("${{ github.event.action || '' }}");
+    expect(runStep.run).toContain(
+      'read -r _ reviewed_anchor anchor_state <<< "$skip_verdict"',
+    );
+    expect(runStep.run).toContain("APPROVED) carry_event='APPROVE'");
+    expect(runStep.run).toContain(
+      "CHANGES_REQUESTED) carry_event='REQUEST_CHANGES'",
+    );
+    expect(runStep.run).toContain("COMMENTED) carry_event='COMMENT'");
+    expect(runStep.run).toContain(
+      '-f commit_id="$EXPECTED_HEAD_SHA" -f event="$carry_event"',
+    );
+    expect(runStep.run.indexOf('-f event="$carry_event"')).toBeLessThan(
+      runStep.run.indexOf('exit 0', runStep.run.indexOf('unchanged\\ *')),
+    );
+  });
+
+  // The skip's ONLY exit sits behind a `gh api --method POST` to
+  // repos/*/pulls/*/reviews, and by that point configure_qwen_network has put
+  // the wrapper `gh` first on PATH. That wrapper routes the POST to
+  // guard_pr_write, which exits 90 while QWEN_CI_REVIEW_REPO /
+  // QWEN_CI_REVIEW_PR_NUMBER are unset. Exporting them after the gate makes
+  // the POST always fail, the `&&` false, and the gate's `exit 0`
+  // unreachable — no unchanged-diff push ever skips and the review this skip
+  // exists to avoid runs in full. Every string pin above stays green under
+  // that ordering, because the call is spelled correctly either way: the
+  // defect is observable only when the real wrapper and the real gate share
+  // one process. So pin the order, not the spelling.
+  it('exports the PR-write guard identity before the skip gate', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    const gate =
+      'if [ "${AUTO_REVIEW:-false}" = "true" ] && ' +
+      '[ "${EVENT_ACTION:-}" = "synchronize" ]; then';
+    const gateAt = run.indexOf(gate);
+    expect(gateAt).toBeGreaterThan(-1);
+    for (const name of [
+      'QWEN_CI_REVIEW_REPO',
+      'QWEN_CI_REVIEW_PR_NUMBER',
+      'QWEN_CI_REVIEW_EXPECTED_HEAD_SHA',
+    ]) {
+      const exportAt = run.indexOf(`export ${name}=`);
+      expect(exportAt, `export ${name} is missing`).toBeGreaterThan(-1);
+      expect(
+        exportAt,
+        `export ${name} must precede the gate that writes through it`,
+      ).toBeLessThan(gateAt);
+      // Exactly one assignment each: a pre-gate export shadowed by a later
+      // one would satisfy the pin above and still leave the POST unguarded.
+      expect(run.indexOf(`export ${name}=`, exportAt + 1)).toBe(-1);
+    }
+    // guard_pr_write compares the live head against the exported pin, so that
+    // pin has to hold its value at the export site — otherwise the POST is
+    // blocked as a moved head and the skip degrades to a full review again.
+    expect(run.indexOf('EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"')).toBeLessThan(
+      run.indexOf('export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA='),
+    );
+  });
+
+  // R1-6. The reader's constants and the writer's identity are one contract
+  // split across two files; pin them to EACH OTHER, not each to itself, so
+  // moving either side alone reddens here instead of silently making every
+  // stamped status invisible to the lookup.
+  it('pins the status writer to the reader that has to find it', () => {
+    const [step] = anchorDoc.jobs['record-reviewed'].steps;
+    const context = skipScript.match(/STATUS_CONTEXT='([^']+)'/)?.[1];
+    const creator = skipScript.match(/STATUS_CREATOR='([^']+)'/)?.[1];
+    expect(context).toBeTruthy();
+    expect(creator).toBeTruthy();
+    expect(step.run).toContain(`-f context='${context}'`);
+    // github-actions[bot] is what the workflow's own GITHUB_TOKEN produces.
+    // A writer that moved to CI_BOT_PAT would stamp statuses the reader can
+    // never see — the skip would go dead without any test noticing.
+    expect(creator).toBe('github-actions[bot]');
+    expect(step.env.GH_TOKEN).toBe('${{ secrets.GITHUB_TOKEN }}');
+    // R2-8. `state` is the third field of the same contract and the one the
+    // reader's jq filter actually requires, yet it was hardcoded on both
+    // sides with nothing joining them: flipping the writer to any other
+    // in-enum value (`pending`, `error`) still POSTs successfully and still
+    // prints "Recorded qwen-review/reviewed", while the reader matches
+    // nothing again — every walk ends at `changed no-reviewed-ancestor` and
+    // the skip is permanently dead with no lane red. Derive it from the
+    // reader like the other two rather than restating the spelling.
+    const state = skipScript.match(/\.state == "([^"]+)"/)?.[1];
+    expect(state).toBeTruthy();
+    expect(step.run).toContain(`-f state=${state}`);
+    // R7-1. The description IS the whole grant, so pin the writer's format
+    // string to the reader's parser by running the reader's own pattern
+    // against the writer's own output. Either side moving alone reddens here,
+    // instead of silently making every stamped status unreadable — or, worse,
+    // readable as a grant that names neither the PR nor the base it was earned
+    // for, which is what let one PR's stamp anchor another PR's skip.
+    const writerDescription =
+      step.run.match(/-f description="([^"]+)"/)?.[1] ?? '';
+    const readerPattern = skipScript.match(/capture\("\^(.+?)\$"\)/)?.[1] ?? '';
+    expect(writerDescription).not.toBe('');
+    expect(readerPattern).not.toBe('');
+    for (const verdict of ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']) {
+      const stamped = writerDescription
+        .replace('${PR_NUMBER}', '11857')
+        .replace('${BASE_REF}', 'main')
+        .replace('${review_state}', verdict);
+      expect(new RegExp(`^${readerPattern}$`).test(stamped)).toBe(true);
+      expect(stamped).toContain('pr=11857');
+      expect(stamped).toContain('base=main');
+    }
+    // Parsing is not enough: the reader has to compare both fields against
+    // this run's own PR and base, and the writer has to source the base from
+    // the event rather than re-deriving it.
+    expect(skipScript).toContain('[ "$anchor_pr" != "$PR_NUMBER" ]');
+    expect(skipScript).toContain('[ "$anchor_base" != "$BASE_REF" ]');
+    expect(step.env.BASE_REF).toBe('${{ github.event.pull_request.base.ref }}');
+  });
+
+  it('derives the stamp from a current-head server-side review', () => {
+    const job = anchorDoc.jobs['record-reviewed'];
+    const [step] = job.steps;
+    expect(job.if).not.toContain('needs.review-pr.outputs');
+    expect(step.run).toContain(
+      'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate --slurp',
+    );
+    expect(step.run).toContain('.commit_id == $sha');
+    expect(step.run).toContain('.user.login == $who');
+    expect(step.run).toContain(
+      'select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")',
+    );
+    expect(step.run).toContain(
+      'select(.state == "COMMENTED" and ((.body // "") | length) > 0)',
+    );
+    expect(
+      step.run.indexOf(
+        'select(.state == "COMMENTED" and ((.body // "") | length) > 0)',
+      ),
+    ).toBeGreaterThan(
+      step.run.indexOf(
+        'select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")',
+      ),
+    );
+    expect(step.run.match(/\.head\.sha/g)).toHaveLength(2);
+    expect(step.run.indexOf('reviews?per_page=100')).toBeLessThan(
+      step.run.indexOf('statuses/${HEAD_SHA}'),
+    );
+  });
+
+  // R5-1. `record-reviewed` reads its verdict off a review, and CI_BOT_PAT is
+  // not this pipeline's alone — qwen-triage-finalize.yml and
+  // finalize-release.yml post approvals under it — so the witness is bound to
+  // this run and to the attribution footer every composed review carries.
+  // These helpers drive the step's real jq program over fixtures.
+  const FOOTER = '_— qwen3.8-max via Qwen Code /review (v0.24.0)_';
+  const RUN_CREATED = '2026-01-01T00:00:00Z';
+  const stampArgs = [
+    '-r',
+    '--arg',
+    'sha',
+    'head',
+    '--arg',
+    'who',
+    'review-bot',
+    '--arg',
+    'run_created',
+    RUN_CREATED,
+  ];
+
+  function stampProgram() {
+    const [step] = anchorDoc.jobs['record-reviewed'].steps;
+    const program =
+      step.run.match(
+        /review_state=.*?jq -r --arg sha "\$HEAD_SHA" --arg who "\$bot_login" --arg run_created "\$run_created" '([\s\S]*?)' 2>\/dev\/null/,
+      )?.[1] ?? '';
+    expect(program).not.toBe('');
+    return program;
+  }
+
+  function selectStamp(program, reviews) {
+    return execFileSync('jq', [...stampArgs, program], {
+      input: JSON.stringify([reviews]),
+      encoding: 'utf8',
+    }).trim();
+  }
+
+  function headReview(id, state, submittedAt, body = FOOTER) {
+    return {
+      id,
+      commit_id: 'head',
+      body,
+      submitted_at: submittedAt,
+      state,
+      user: { login: 'review-bot' },
+    };
+  }
+
+  it('does not let a later inline comment downgrade the main verdict', () => {
+    const program = stampProgram();
+    for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+      const reviews = [
+        headReview(1, state, RUN_CREATED, `Findings.\n\n${FOOTER}`),
+        headReview(2, 'COMMENTED', '2026-01-01T00:01:00Z', ''),
+      ];
+      expect(selectStamp(program, reviews)).toBe(state);
+    }
+
+    const inlineOnly = [headReview(3, 'COMMENTED', '2026-01-01T00:02:00Z', '')];
+    expect(selectStamp(program, inlineOnly)).toBe('');
+
+    inlineOnly[0].body = `Deferring pending maintainer input.\n\n${FOOTER}`;
+    expect(selectStamp(program, inlineOnly)).toBe('COMMENTED');
+  });
+
+  it('stamps this pipeline verdict, not a foreign approval under the same login', () => {
+    const program = stampProgram();
+    // The shape observed on this PR's own head b42c916fa4 (review 5214626678,
+    // body "LGTM, looks ready to ship. ✅"): a marker-less approval posted by a
+    // sibling workflow under the credential this job resolves bot_login from.
+    const foreign = headReview(
+      1,
+      'APPROVED',
+      '2026-01-01T00:05:00Z',
+      'LGTM, looks ready to ship. ✅',
+    );
+    const pipeline = headReview(
+      2,
+      'COMMENTED',
+      '2026-01-01T00:20:00Z',
+      `Three suggestions.\n\n${FOOTER}`,
+    );
+    // Alone it must not stamp an anchor at all...
+    expect(selectStamp(program, [foreign])).toBe('');
+    // ...and it must not outrank this pipeline's newer verdict, which is what
+    // the tier preference did whenever the tier-1 candidate was foreign.
+    expect(selectStamp(program, [foreign, pipeline])).toBe('COMMENTED');
+    // A review submitted before this run started is not this run's witness,
+    // footer or not.
+    expect(
+      selectStamp(program, [
+        headReview(3, 'APPROVED', '2025-12-31T23:59:59Z', `Old.\n\n${FOOTER}`),
+      ]),
+    ).toBe('');
+    // Two candidates inside a single tier: the newest qualifying review wins,
+    // so re-reviewing a head overrides its earlier verdict.
+    expect(
+      selectStamp(program, [
+        headReview(4, 'APPROVED', '2026-01-01T00:10:00Z', `A.\n\n${FOOTER}`),
+        headReview(
+          5,
+          'CHANGES_REQUESTED',
+          '2026-01-01T00:30:00Z',
+          `B.\n\n${FOOTER}`,
+        ),
+      ]),
+    ).toBe('CHANGES_REQUESTED');
+  });
+
+  it('fails closed when it cannot bind the witness to this run', () => {
+    const [step] = anchorDoc.jobs['record-reviewed'].steps;
+    // Through the PAT already in this step's env: GITHUB_TOKEN here has no
+    // actions:read, so the workflow-token spelling would fail soft into an
+    // inert guard while the permissions pin above stayed green.
+    expect(step.run).toContain('GH_TOKEN="$REVIEW_BOT_TOKEN" gh run view');
+    expect(step.run).toContain('--json createdAt');
+    expect(step.run).toContain('.submitted_at >= $run_created');
+    expect(step.run).toContain(
+      'contains("via Qwen Code /review") or contains("qwen-review-ledger")',
+    );
+    // No window, no stamp: the guard sits between the lookup and the POST.
+    const guarded = step.run.slice(
+      step.run.indexOf('run_created='),
+      step.run.indexOf('statuses/${HEAD_SHA}'),
+    );
+    expect(guarded).toContain('if [ -z "$run_created" ]; then');
+    expect(guarded).toContain('exit 0');
+  });
+
+  // R7-2. The stamp is a snapshot and nothing rewrites it: a later `/review`
+  // re-verdict runs under issue_comment, so record-reviewed's
+  // pull_request_target gate never re-stamps the head it reviewed, and a
+  // dismissal fires no run at all (pull_request_review.types is
+  // ['submitted']). The caller therefore re-reads the anchor's reviews — only
+  // ever to revoke, never to grant the skip itself.
+  it('drops the carried verdict when the anchor no longer reports it', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    const program =
+      run.match(
+        /carried_state="\$\(gh api[\s\S]*?--arg sha "\$reviewed_anchor" '([\s\S]*?)' 2>\/dev\/null\)"/,
+      )?.[1] ?? '';
+    expect(program).not.toBe('');
+    const anchorReview = (id, state, submittedAt, body = FOOTER) => ({
+      id,
+      commit_id: 'anchor',
+      body,
+      submitted_at: submittedAt,
+      state,
+      user: { login: 'review-bot' },
+    });
+    const live = (reviews) =>
+      execFileSync('jq', ['-r', '--arg', 'sha', 'anchor', program], {
+        input: JSON.stringify([reviews]),
+        encoding: 'utf8',
+      }).trim();
+
+    // A verdict the anchor still reports is carried...
+    expect(live([anchorReview(1, 'APPROVED', '2026-01-01T00:00:00Z')])).toBe(
+      'APPROVED',
+    );
+    // ...a dismissal of that same review is not. DISMISSED is compared rather
+    // than filtered out, so it cannot fall through to the older verdict the
+    // maintainer just overruled.
+    expect(live([anchorReview(1, 'DISMISSED', '2026-01-01T00:00:00Z')])).toBe(
+      'DISMISSED',
+    );
+    // A later re-verdict on the anchor outranks the stamped snapshot.
+    expect(
+      live([
+        anchorReview(1, 'APPROVED', '2026-01-01T00:00:00Z'),
+        anchorReview(2, 'CHANGES_REQUESTED', '2026-01-01T00:30:00Z'),
+      ]),
+    ).toBe('CHANGES_REQUESTED');
+    // A foreign approval under the same login is not this pipeline's verdict,
+    // and an anchor with no attributable review cannot be carried at all.
+    expect(
+      live([
+        anchorReview(
+          1,
+          'APPROVED',
+          '2026-01-01T00:00:00Z',
+          'LGTM, looks ready to ship. ✅',
+        ),
+      ]),
+    ).toBe('');
+    expect(live([])).toBe('');
+
+    // And a disagreement has to DROP the carry, not merely log one: the POST
+    // stays gated on carry_event, which the comparison clears.
+    const revoke = 'if [ "$carried_state" != "$anchor_state" ]; then';
+    expect(run).toContain(revoke);
+    expect(run.indexOf("carry_event=''", run.indexOf(revoke))).toBeGreaterThan(
+      run.indexOf(revoke),
+    );
+    expect(run.indexOf(revoke)).toBeLessThan(
+      run.indexOf('if [ -n "$carry_event" ] && gh api --method POST'),
+    );
+    // The carried body wears the footer, so a chain of unchanged pushes keeps
+    // satisfying the producer filter instead of walking back to LOOKBACK.
+    expect(run).toContain('verdict carried forward. — via Qwen Code /review');
+  });
+
+  // R1-3. The prose is what a reader has to go on, and both sites claimed
+  // more coverage than the comparison has: the fingerprint is the PR's OWN
+  // diff against the base, so main's delta in a file the PR never touches is
+  // excluded and a merge that changes code the PR calls out there is skipped.
+  // Both halves are pinned behaviorally in the skip's own suite ('a merge of
+  // main that leaves the diff identical is unchanged' / 'main editing a file
+  // the PR touches changes the diff even without conflict'); this pins the
+  // words to them, so the wider promise cannot come back unremarked.
+  // R2-7. Both phrases live inside `#`-prefixed comment blocks hard-wrapped
+  // at ~76 columns, so a word-identical rewrap can move a word onto the next
+  // line and leave a `#` standing inside the phrase. Strip the per-line
+  // comment marker and collapse whitespace before matching, the way the
+  // `if`-gate assertion above normalizes: the wrap is formatting, not the
+  // contract, and reddening `test:scripts` on it would force an author to
+  // edit a test to land a comment edit. Normalizing must not weaken the
+  // negative halves — the wider promise still has to redden here.
+  it('describes the skip as the PR own diff, never as the merged tree', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    const prose = (s) =>
+      s
+        .split('\n')
+        .map((line) => line.replace(/^\s*#\s?/, ''))
+        .join(' ')
+        .replace(/\s+/g, ' ');
+    expect(prose(run)).not.toContain('has nothing new to review');
+    expect(prose(run)).toContain('has nothing new IN THAT DIFF to review');
+    expect(prose(skipScript)).not.toContain(
+      'that is the case a merge can break',
+    );
+    expect(prose(skipScript)).toContain(
+      "main's delta in a file the PR never touches is excluded",
+    );
+  });
 });

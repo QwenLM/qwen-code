@@ -1065,6 +1065,7 @@ jobs:
           # workflow-expression-length test in
           # scripts/tests/qwen-pr-review-workflow.test.js.
           EVENT_NAME: '${{ github.event_name }}'
+          EVENT_ACTION: "${{ github.event.action || '' }}"
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
           # Supersede-salvage tunable (#10110): percentage of the size-aware
@@ -1528,10 +1529,10 @@ jobs:
           fi
           echo "docs_only_medium=$DOCS_ONLY_MEDIUM" >> "$GITHUB_OUTPUT"
 
-          if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
+          if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid,baseRefName --jq '[.state, .headRefOid, .baseRefName] | @tsv')"; then
             fail "Failed to determine state for PR #${PR_NUMBER}."
           fi
-          IFS=$'\t' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"
+          IFS=$'\t' read -r PR_STATE CURRENT_HEAD_SHA BASE_REF_NAME <<< "$PR_DATA"
           if [ "$PR_STATE" != "OPEN" ]; then
             echo "Skipping: PR #${PR_NUMBER} is ${PR_STATE}." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -1544,9 +1545,81 @@ jobs:
             fi
             EXPECTED_HEAD_SHA="$EVENT_HEAD_SHA"
           fi
+          # The wrapper `gh` on PATH refuses any repos/*/pulls/*/reviews write
+          # while these are unset (guard_pr_write, exit 90), and the skip gate
+          # below issues exactly such a write for its carry-forward POST. So
+          # they are exported BEFORE the gate: exported after it, that POST
+          # always dies, the `&&` is false, the gate's early return becomes
+          # unreachable, and the skip can never fire — every unchanged-diff
+          # push then runs the full review it was built to avoid.
+          # EXPECTED_HEAD_SHA is assigned above, so the guard's head-currency
+          # check reads the right pin here too.
           export QWEN_CI_REVIEW_REPO="$REPO"
           export QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"
           export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"
+          # Unchanged-diff skip: a synchronize whose OWN diff against the base
+          # is byte-identical to an already-reviewed head (an update-branch
+          # merge of main — 32% of automatic reviews, measured 2026-09-08/09)
+          # has nothing new IN THAT DIFF to review. The merged tree is still
+          # new: a merge that changes code the PR calls in a file it never
+          # touches leaves this diff identical, and the criterion here is the
+          # PR's own diff, never the merged tree. The anchor is the
+          # qwen-review/reviewed commit status stamped by "Record reviewed
+          # head", never a bot comment (R13-1). Any failure in the check runs
+          # the full review.
+          # Design and hole analysis: .github/scripts/review-unchanged-diff.sh.
+          # The base is the one the state lookup above already read, and it is
+          # passed through verbatim: a re-derivation that failed would swallow
+          # its own error and hand the script a substituted base, and a wrong
+          # base can hash two different heads equal — a FALSE SKIP. An empty
+          # base ref is refused by the script's own argument guards, so "no
+          # base" runs the review instead of picking one.
+          if [ "${AUTO_REVIEW:-false}" = "true" ] && [ "${EVENT_ACTION:-}" = "synchronize" ]; then
+            skip_verdict="$(bash .github/scripts/review-unchanged-diff.sh "$REPO" "$PR_NUMBER" "$EXPECTED_HEAD_SHA" "$BASE_REF_NAME")" || skip_verdict="changed check-failed"
+            case "$skip_verdict" in
+              unchanged\ *)
+                read -r _ reviewed_anchor anchor_state <<< "$skip_verdict"
+                case "$anchor_state" in
+                  APPROVED) carry_event='APPROVE' ;;
+                  CHANGES_REQUESTED) carry_event='REQUEST_CHANGES' ;;
+                  COMMENTED) carry_event='COMMENT' ;;
+                  *) carry_event='' ;;
+                esac
+                # R7-2: the stamp is a snapshot nothing rewrites. A later
+                # `/review` re-verdict runs under issue_comment, so
+                # record-reviewed never re-stamps it, and a dismissal fires no
+                # run at all (pull_request_review.types is ['submitted']) — yet
+                # the POST below would re-cast that stale verdict and, GitHub
+                # keeping the latest review per user, supersede the newer one.
+                # So the anchor's reviews are read here ONLY to revoke: the
+                # status stays the sole grant for WHETHER to skip (R13-1), and
+                # a dead lookup, no attributable review, or a disagreement all
+                # drop the carry into a full review. DISMISSED is compared
+                # rather than filtered out, so it cannot fall through to the
+                # older verdict a maintainer just overruled.
+                carried_state="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate --slurp 2>/dev/null \
+                  | jq -r --arg sha "$reviewed_anchor" '[.[][]? | select(.commit_id == $sha and ((.body // "") | contains("via Qwen Code /review") or contains("qwen-review-ledger")))] | sort_by(.submitted_at, .id) | last | .state // ""' 2>/dev/null)" || carried_state=''
+                if [ "$carried_state" != "$anchor_state" ]; then
+                  echo "::warning::Reviewed anchor ${reviewed_anchor} now reports ${carried_state:-no attributable review}, not the stamped ${anchor_state}; not carrying its verdict."
+                  carry_event=''
+                fi
+                # The carried body wears the footer too, so a chain of
+                # unchanged pushes keeps satisfying record-reviewed's producer
+                # filter instead of walking back until LOOKBACK runs out.
+                if [ -n "$carry_event" ] && gh api --method POST "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+                    -f commit_id="$EXPECTED_HEAD_SHA" -f event="$carry_event" \
+                    -f body="Diff byte-identical to reviewed ${reviewed_anchor}; verdict carried forward. — via Qwen Code /review" >/dev/null; then
+                  echo "Skipping review: PR #${PR_NUMBER} head ${EXPECTED_HEAD_SHA} has the same diff against ${BASE_REF_NAME} as already-reviewed ${reviewed_anchor}; carried its ${anchor_state} verdict forward." | tee -a "$GITHUB_STEP_SUMMARY"
+                  echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+                echo "::warning::Could not carry a ${anchor_state:-missing} bot verdict from reviewed anchor ${reviewed_anchor}; running the review in full."
+                ;;
+              *)
+                echo "Unchanged-diff check: ${skip_verdict:-no verdict}; running the review."
+                ;;
+            esac
+          fi
           {
             echo "expected_head_sha=$EXPECTED_HEAD_SHA"
             echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"
@@ -2178,6 +2251,11 @@ jobs:
           }
           cede_superseded() {
             echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(read_head_signal "${SUPERSEDE_FILE:-}") before the salvage threshold; ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
+            # Later in-job reporting reads review_completed from this step.
+            # Retract any planted true value before a clean cede: the review
+            # did not complete, and the server-side anchor job deliberately
+            # ignores this output.
+            echo "review_completed=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
           # SUPERSEDE_FILE's premise against an unforgeable witness. The
@@ -2336,6 +2414,9 @@ jobs:
               # marker and no queued replacement to cede to, so there the
               # forgeable marker must fail loudly, not exit green.
               echo "Salvage-armed review attempt did not complete (${REASON:-unknown}); PR #${PR_NUMBER:-} head already moved — ceding to the replacement run (#10110)." | "${QWEN_CI_REAL_TEE:-tee}" -a "$GITHUB_STEP_SUMMARY"
+              # Same planted-output window as the shared supersede cede:
+              # retract review_completed before later in-job reporting.
+              echo "review_completed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             if [ "$OUTCOME" = "success" ]; then
@@ -2488,11 +2569,11 @@ jobs:
           BODY="$(printf '%s\n' \
             "<!-- qwen-review-salvaged ${EXPECTED_HEAD_SHA} -->" \
             '' \
-            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor. Full log in the [workflow run](${RUN_URL})." \
+            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor and always runs in full — a salvaged head is deliberately not recorded as an unchanged-diff skip anchor, so nothing suppresses that review. Full log in the [workflow run](${RUN_URL})." \
             '' \
             '<details><summary>中文说明</summary>' \
             '' \
-            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量。完整日志见 [workflow 运行](${RUN_URL})。" \
+            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量，且始终完整运行 —— 被 salvage 的 head 有意不被记录为 unchanged-diff 跳过锚点，因此那次评审不会被抑制。完整日志见 [workflow 运行](${RUN_URL})。" \
             '' \
             '</details>')"
           gh pr comment "$PR_NUMBER" \
@@ -3098,6 +3179,91 @@ jobs:
             remove_review_tree "$lease"
           done
           echo "review worktrees cleaned"
+
+  # The anchor the unchanged-diff check looks for: a
+  # `qwen-review/reviewed` success status on a head with a server-side review
+  # from the CI bot. This job deliberately ignores every output from the step
+  # that ran the reviewed agent. It reads the PR's current head and reviews
+  # back from GitHub, requires a review THIS RUN posted under the CI_BOT_PAT
+  # credential on the event head — bound by the run's creation time and by the
+  # attribution footer, because that credential is shared with other approval
+  # posters — re-checks that the head is still current, and only then stamps
+  # it. The unchanged path re-casts the anchor's verdict before exiting, so it
+  # satisfies the same witness instead of relying on a special output-only
+  # route. The status still uses the workflow token: the lookup accepts only
+  # statuses created by github-actions[bot]. Never fails the workflow.
+  record-reviewed:
+    needs: ['review-pr']
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      needs.review-pr.result == 'success'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      pull-requests: 'read'
+      statuses: 'write'
+    steps:
+      - name: 'Record reviewed head'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REVIEW_BOT_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -uo pipefail
+          bot_login="$(GH_TOKEN="$REVIEW_BOT_TOKEN" gh api user --jq '.login' 2>/dev/null || true)"
+          if [ -z "$bot_login" ]; then
+            echo "::warning::Could not identify the review bot; not recording a reviewed anchor."
+            exit 0
+          fi
+          # CI_BOT_PAT is not this pipeline's alone — qwen-triage-finalize.yml
+          # and finalize-release.yml post approvals under it — so "a review by
+          # this login" is not "a verdict this pipeline reached". Bind the
+          # witness to this run, through the PAT already in this env because
+          # GITHUB_TOKEN here has no actions:read. No creation time, no stamp.
+          run_created="$(GH_TOKEN="$REVIEW_BOT_TOKEN" gh run view "${GITHUB_RUN_ID:?}" --repo "$GITHUB_REPOSITORY" --json createdAt --jq '.createdAt' 2>/dev/null)" || run_created=""
+          if [ -z "$run_created" ]; then
+            echo "::warning::Could not read this run's creation time; not recording a reviewed anchor."
+            exit 0
+          fi
+          live_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+          if [ "$live_head" != "$HEAD_SHA" ]; then
+            echo "::warning::PR head is ${live_head:-unreadable}, not event head ${HEAD_SHA}; not recording a reviewed anchor."
+            exit 0
+          fi
+          reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --paginate --slurp 2>/dev/null || true)"
+          # The window alone does not bind the producer — an in-run review by
+          # the same credential is inside it by construction — so the
+          # attribution footer every composed review carries is required too.
+          review_state="$(printf '%s' "$reviews" | jq -r --arg sha "$HEAD_SHA" --arg who "$bot_login" --arg run_created "$run_created" '
+            [.[][]? | select(.commit_id == $sha and .user.login == $who and .submitted_at >= $run_created and ((.body // "") | contains("via Qwen Code /review") or contains("qwen-review-ledger")))] as $all |
+            (([$all[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")] | sort_by(.submitted_at, .id) | last | .state) //
+             ([$all[] | select(.state == "COMMENTED" and ((.body // "") | length) > 0)] | sort_by(.submitted_at, .id) | last | .state) // empty)' 2>/dev/null || true)"
+          case "$review_state" in
+            APPROVED|CHANGES_REQUESTED|COMMENTED) ;;
+            *)
+              echo "::warning::No ${bot_login} review of this run exists on current head ${HEAD_SHA}; not recording a reviewed anchor."
+              exit 0
+              ;;
+          esac
+          live_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+          if [ "$live_head" != "$HEAD_SHA" ]; then
+            echo "::warning::PR head moved to ${live_head:-unreadable} during review verification; not recording ${HEAD_SHA}."
+            exit 0
+          fi
+          # pr and base ride in the description because a commit status is
+          # repository-scoped: without them the reader cannot tell whose grant
+          # this was. A base long enough to overflow the 140-character
+          # description limit fails the POST into the warning below.
+          if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+              -f state=success -f context='qwen-review/reviewed' \
+              -f target_url="$RUN_URL" -f description="Reviewed by Qwen Code /review; pr=${PR_NUMBER}; base=${BASE_REF}; verdict=${review_state}" >/dev/null; then
+            echo "Recorded qwen-review/reviewed on ${HEAD_SHA}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::Could not record qwen-review/reviewed on ${HEAD_SHA}; the next unchanged push will be reviewed in full."
+          fi
 
   # A review job that dies abnormally — runner crash, host loss, or the
   # FinalizeJob EACCES from the PR #8894 incident — never reaches its in-job
