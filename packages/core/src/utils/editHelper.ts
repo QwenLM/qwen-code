@@ -340,29 +340,6 @@ export function normalizeEditStrings(
 }
 
 /**
- * When deleting text and the on-disk content contains the same substring with a
- * trailing newline, automatically consume that newline so the removal does not
- * leave a blank line behind.
- */
-export function maybeAugmentOldStringForDeletion(
-  fileContent: string | null,
-  oldString: string,
-  newString: string,
-): string {
-  if (
-    fileContent === null ||
-    oldString === '' ||
-    newString !== '' ||
-    oldString.endsWith('\n')
-  ) {
-    return oldString;
-  }
-
-  const candidate = `${oldString}\n`;
-  return fileContent.includes(candidate) ? candidate : oldString;
-}
-
-/**
  * Counts the number of non-overlapping occurrences of {@link substr} inside
  * {@link source}. Returns 0 when the substring is empty.
  */

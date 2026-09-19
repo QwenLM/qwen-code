@@ -51,7 +51,6 @@ import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
   extractEditSnippet,
-  maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
 
@@ -282,12 +281,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         type: ToolErrorType.FILE_NOT_FOUND,
       };
     } else if (currentContent !== null) {
-      finalOldString = maybeAugmentOldStringForDeletion(
-        currentContent,
-        finalOldString,
-        finalNewString,
-      );
-
       occurrences = countOccurrences(currentContent, finalOldString);
       if (params.old_string === '') {
         // Error: Trying to create a file that already exists

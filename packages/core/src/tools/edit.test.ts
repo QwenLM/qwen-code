@@ -887,6 +887,115 @@ describe('EditTool', () => {
       );
     });
 
+    describe.each([
+      ['LF', '\n'],
+      ['CRLF', '\r\n'],
+    ])('deletions with %s line endings', (_name, eol) => {
+      it.each([
+        {
+          name: 'a URL suffix',
+          original: 'BASE_URL=https://example.test/legacy\nRETRIES=3\n',
+          oldString: '/legacy',
+          expected: 'BASE_URL=https://example.test\nRETRIES=3\n',
+        },
+        {
+          name: 'a trailing Python comment',
+          original: 'url = "old"  # remove-me\nretries = 3\n',
+          oldString: '  # remove-me',
+          expected: 'url = "old"\nretries = 3\n',
+        },
+        {
+          name: 'whole-line text without its newline',
+          original: 'before\nremove-me\nafter\n',
+          oldString: 'remove-me',
+          expected: 'before\n\nafter\n',
+        },
+        {
+          name: 'a whole line including its newline',
+          original: 'before\nremove-me\nafter\n',
+          oldString: 'remove-me\n',
+          expected: 'before\nafter\n',
+        },
+        {
+          name: 'a multiline fragment starting mid-line',
+          original:
+            'BASE_URL=https://example.test/legacy\nremove-me\nRETRIES=3\n',
+          oldString: '/legacy\nremove-me',
+          expected: 'BASE_URL=https://example.test\nRETRIES=3\n',
+        },
+        {
+          name: 'a suffix on the last line with a newline',
+          original: 'RETRIES=3\nBASE_URL=https://example.test/legacy\n',
+          oldString: '/legacy',
+          expected: 'RETRIES=3\nBASE_URL=https://example.test\n',
+        },
+        {
+          name: 'a suffix at EOF without a newline',
+          original: 'RETRIES=3\nBASE_URL=https://example.test/legacy',
+          oldString: '/legacy',
+          expected: 'RETRIES=3\nBASE_URL=https://example.test',
+        },
+      ])(
+        'deletes only the requested text: $name',
+        async ({ original, oldString, expected }) => {
+          fs.writeFileSync(filePath, original.replaceAll('\n', eol), 'utf8');
+          seedPriorRead(filePath);
+
+          const result = await tool
+            .build({
+              file_path: filePath,
+              old_string: oldString,
+              new_string: '',
+            })
+            .execute(new AbortController().signal);
+
+          expect(result.error).toBeUndefined();
+          expect(fs.readFileSync(filePath, 'utf8')).toBe(
+            expected.replaceAll('\n', eol),
+          );
+        },
+      );
+
+      it('rejects ambiguous deletions even when only one match ends a line', async () => {
+        const original = 'first/legacy\nsecond/legacy/path\n'.replaceAll(
+          '\n',
+          eol,
+        );
+        fs.writeFileSync(filePath, original, 'utf8');
+        seedPriorRead(filePath);
+
+        const result = await tool
+          .build({ file_path: filePath, old_string: '/legacy', new_string: '' })
+          .execute(new AbortController().signal);
+
+        expect(result.error?.type).toBe(
+          ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+        );
+        expect(fs.readFileSync(filePath, 'utf8')).toBe(original);
+      });
+
+      it('deletes every match with replace_all regardless of its line position', async () => {
+        const original =
+          '/legacy\nfirst/legacy\nsecond/legacy/path\nlast/legacy';
+        fs.writeFileSync(filePath, original.replaceAll('\n', eol), 'utf8');
+        seedPriorRead(filePath);
+
+        const result = await tool
+          .build({
+            file_path: filePath,
+            old_string: '/legacy',
+            new_string: '',
+            replace_all: true,
+          })
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(fs.readFileSync(filePath, 'utf8')).toBe(
+          '\nfirst\nsecond/path\nlast'.replaceAll('\n', eol),
+        );
+      });
+    });
+
     it('should return error if multiple occurrences of old_string are found and replace_all is false', async () => {
       fs.writeFileSync(filePath, 'multiple old old strings', 'utf8');
       seedPriorRead(filePath);
