@@ -12,7 +12,22 @@ const entryPoints = Object.values(pkg.exports).flatMap((entry) =>
   typeof entry === 'string' ? [entry] : Object.values(entry),
 );
 for (const entry of new Set(entryPoints)) {
-  if (!existsSync(join(root, entry))) problems.push(`missing ${entry}`);
+  const target = join(root, entry);
+  if (!existsSync(target)) {
+    problems.push(`missing ${entry}`);
+    continue;
+  }
+  // The bundles share chunks by relative path, and `files` publishes them by
+  // globbing `dist/*.js`. A chunk emitted into a subdirectory would be
+  // announced by an entry point but never packed.
+  if (!entry.endsWith('.js')) continue;
+  for (const [, specifier] of readFileSync(target, 'utf8').matchAll(
+    /(?:from|import\()\s*['"](\.[^'"]+)['"]/g,
+  )) {
+    if (!existsSync(resolve(dirname(target), specifier))) {
+      problems.push(`${entry} imports ${specifier}, which was not built`);
+    }
+  }
 }
 
 // Declarations ship verbatim, so they must not import through the alias that
