@@ -116,15 +116,15 @@ export const sandboxCommand: CommandModule = {
     const writeReportLine = requestedCmd.length
       ? writeStderrLine
       : writeStdoutLine;
-    const cwd = process.cwd();
-    const bare = isBareMode(args.bare);
-    const settings = bare ? {} : loadSettings(cwd, false).merged;
-    const effectiveSettings =
-      bare || (args.safeMode ?? isSafeModeEnv()) ? {} : settings;
 
     // `SANDBOX` is set inside a confinement, and `loadSandboxConfig` answers
     // "already sandboxed" by returning no command for it. Reporting from in
     // there would describe nothing, so say what is actually true instead.
+    // This check sits above the settings load so a confinement report cannot
+    // be out-shouted by a settings failure — inside a sandbox the handler has
+    // nothing to load for (e.g. a container image or an unmapped-uid namespace
+    // whose homedir() does not resolve), and this branch reads only the
+    // environment and argv.
     if (process.env['SANDBOX']) {
       writeReportLine(`Already inside a sandbox: ${process.env['SANDBOX']}`);
       const enforcement = process.env['SANDBOX_ENFORCEMENT'];
@@ -140,6 +140,25 @@ export const sandboxCommand: CommandModule = {
       }
       return;
     }
+
+    const cwd = process.cwd();
+    const bare = isBareMode(args.bare);
+    let settings;
+    try {
+      settings = bare ? {} : loadSettings(cwd, false).merged;
+    } catch (error) {
+      // Same failure shape as the probe rejections below: a settings problem
+      // (e.g. a missing or unusable HOME) is exactly what someone running this
+      // subcommand needs explained, so report it rather than letting it escape
+      // as a raw stack behind yargs' failure help.
+      writeStderrLine(
+        `Sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const effectiveSettings =
+      bare || (args.safeMode ?? isSafeModeEnv()) ? {} : settings;
 
     let sandboxConfig;
     try {
