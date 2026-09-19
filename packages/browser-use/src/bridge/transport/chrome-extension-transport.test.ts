@@ -415,7 +415,15 @@ it.skipIf(process.platform === 'win32')(
   async () => {
     const root = fs.mkdtempSync('/tmp/qbu-client-');
     roots.push(root);
-    await expect(discovering(root, 200).profiles()).resolves.toEqual([]);
+    const transport = discovering(root, 200);
+    await expect(transport.profiles()).resolves.toEqual([]);
+    await expect(transport.start()).rejects.toMatchObject({
+      code: 'BROWSER_DISCONNECTED',
+      message: expect.stringContaining(
+        'Open Chrome and install or enable the Qwen extension in the profile you want to use (chrome://extensions), then retry.',
+      ),
+    });
+    expect(transport.isConnected()).toBe(false);
   },
 );
 

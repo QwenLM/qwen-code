@@ -11,26 +11,27 @@ start a separate Browser Use MCP server.
 
 ## Setup
 
-The Qwen Code Chrome extension must already be installed. On macOS and Linux,
-the SDK checks for it before automatically registering the local Native
-Messaging host. If it is not detected immediately, the SDK retries for up to
-30 seconds so Chrome can finish saving a new installation. If setup still
-cannot detect it, tell a user who just installed it to wait a few seconds and
-retry; if it is not installed, tell them there is no store listing yet: build
-the extension from `packages/chrome-extension` in the Qwen Code repository (its
-README) and load the built `dist/extension` directory through
-`chrome://extensions` (Developer mode → Load unpacked). Then stop. Do not run
-the Native Host installer to bypass this check.
+Install and enable the Qwen Code Chrome extension in the profile the user wants
+to use. On macOS and Linux, first use of this SDK automatically registers the
+shared Native Messaging host in the user's installation directory. A browser
+task opts into this local setup, which can finish before the extension connects.
+The SDK checks the actual connection and protocol instead of reading Chrome's
+extension preferences.
 
-Installing the Chrome extension opts into this automatic local setup. The
-first use installs the shared Host; later sessions reuse an installed Host of
-the same protocol instead of replacing it. A Host installed by a newer Qwen
+If the extension does not connect, ask the user to open Chrome and check the
+extension in the intended profile. There is no store listing yet: build the
+extension from `packages/chrome-extension` in the Qwen Code repository (its
+README) and load `dist/extension` through `chrome://extensions` (Developer mode
+→ Load unpacked). After installation or enabling it, retry the connection.
+
+A usable Host of the same protocol is reused. A Host installed by a newer Qwen
 Code is never downgraded: if setup reports one, tell the user to update Qwen
 Code and stop. The Host files persist after Qwen exits. The user can inspect or
 remove them with `node <skill-base>/runtime/scripts/native-host-setup.js status`
 or `uninstall`; `install` explicitly switches the Host to this Qwen Code's copy
-from the next time Chrome starts it. Removing the Chrome extension also
-prevents automatic registration on a later Browser Use initialization.
+from the next time Chrome starts it. A later Browser Use initialization can
+register the Host again. If required Host files cannot be read or written,
+report the failing action and path so the user can resolve access and retry.
 
 Multiple Qwen sessions can use the same profile, each controlling its own tabs.
 A tab held by another session reports `TAB_OWNERSHIP_CONFLICT`. Use another tab

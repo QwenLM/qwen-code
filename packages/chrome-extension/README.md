@@ -52,17 +52,18 @@ welcome screen for the chat UI automatically.
 
 Browser Use ships with Qwen Code as a built-in skill and SDK runtime, using
 Qwen's standard Node REPL. No separate Qwen extension installation is needed.
-On macOS and Linux, its first initialization checks that this Chrome extension
-is installed before automatically registering the shared Native Messaging
-host. Installing the extension opts into that local setup. If the extension is
-not found, Browser Use prompts you to install it without writing Native Host
-files. Later sessions reuse an installed Host of the same protocol, and a Host
-installed by a newer Qwen Code is never downgraded. Run
+On macOS and Linux, the first browser task automatically registers the shared
+Native Messaging host in the user's installation directory. The SDK can finish
+this local setup before the extension connects; it verifies the live connection
+and protocol instead of reading Chrome's extension preferences. If it cannot
+connect, open Chrome and install or enable the extension in the intended profile,
+then retry. Later sessions reuse an installed Host of the same protocol, and a
+Host installed by a newer Qwen Code is never downgraded. Run
 `node <skill-base>/runtime/scripts/native-host-setup.js status` to inspect the
 installation, `install` to switch it to this Qwen Code's Host from the next
 Host start, or `uninstall` to remove files owned by Browser Use. `<skill-base>`
-is the base directory shown when loading the Browser Use skill. Uninstall the
-Chrome extension as well to prevent automatic registration on a later use.
+is the base directory shown when loading the Browser Use skill. A later Browser
+Use initialization can register the Host again.
 
 The Chrome-launched Host serves multiple independent Qwen sessions per profile.
 Each session controls its own tabs and groups; claiming another session's tab

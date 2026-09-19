@@ -154,8 +154,9 @@ v3, with actionable version-mismatch errors across CLI, Native Host and
 extension. The wire and installation contracts are specified here.
 
 Host files live in a per-user installation whose lifetime is independent of
-individual CLI installations or worktrees. First use keeps the existing opt-in:
-once the Chrome extension is detected, the SDK installs the bundled Host if none
+individual CLI installations or worktrees. Initiating a Browser Use task opts
+into automatic local setup. Without reading Chrome extension preferences, the
+SDK installs the bundled Host if none
 is installed, if the launcher predates installation records or is unusable, or
 if it speaks an older protocol or carries a lower Host revision. The revision is
 an integer bumped whenever the Host changes without a protocol change; without

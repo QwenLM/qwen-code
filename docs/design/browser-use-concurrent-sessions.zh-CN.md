@@ -76,7 +76,7 @@ Native Messaging 连接关闭后，Host 退出，断开其客户端，并仅移�
 
 本次通过协议 v3 改变连接方向并增加会话路由，在 CLI、Native Host 和扩展之间提供可操作的版本不匹配提示。本文列明具体协议和安装约定。
 
-Host 文件位于每个用户的安装目录中，生命周期独立于单个 CLI 安装目录或 worktree。首次使用沿用既有的授权方式：检测到 Chrome 扩展后，若尚未安装 Host、启动入口早于安装记录或不可用、其协议较旧或 Host 修订号较低，SDK 会安装自带的 Host。修订号是一个整数，每当 Host 在协议不变的情况下发生变化时递增；没有它，Host 的修复将永远无法到达已安装过 Host 的用户。协议相同、修订号不低于自带版本且可用的 Host 直接复用：SDK 只补齐缺失的浏览器注册，不会把启动入口改指向自己自带的副本，因此不同 checkout 的 CLI 不会轮流替换它。由更新版 Qwen Code 安装的 Host 永不降级，较旧的 CLI 会提示需要更新 Qwen Code。
+Host 文件位于每个用户的安装目录中，生命周期独立于单个 CLI 安装目录或 worktree。发起 Browser Use 任务即同意自动完成本机配置。SDK 无需读取 Chrome 扩展配置；若尚未安装 Host、启动入口早于安装记录或不可用、其协议较旧或 Host 修订号较低，SDK 会安装自带的 Host。修订号是一个整数，每当 Host 在协议不变的情况下发生变化时递增；没有它，Host 的修复将永远无法到达已安装过 Host 的用户。协议相同、修订号不低于自带版本且可用的 Host 直接复用：SDK 只补齐缺失的浏览器注册，不会把启动入口改指向自己自带的副本，因此不同 checkout 的 CLI 不会轮流替换它。由更新版 Qwen Code 安装的 Host 永不降级，较旧的 CLI 会提示需要更新 Qwen Code。
 
 协议 3 以 `com.qwen.browser_use` 注册，启动入口为 `~/.qwen/browser-use/host.sh`。已发布的协议 2 CLI 每次首次使用都会重新注册 `com.qwen.browser` 和 `~/.qwen/browser-use/native-host.sh`。若共用该名称，任何较旧的 CLI 都能让 Chrome 重新指向协议 2 的 Host。使用不同名称可使两套注册互不影响；协议 3 的安装器不会读取、改写或删除协议 2 的文件。
 

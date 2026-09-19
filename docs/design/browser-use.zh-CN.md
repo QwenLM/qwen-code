@@ -49,9 +49,13 @@ Browser Use 以内置 skill 及其运行时资源随 Qwen Code 一起发布，�
 
 Browser Use 默认对模型可用，由模型根据用户任务选择。用户可通过 `/skills` 或 `skills.disabled` 禁用，使用与 Computer Use 相同的控制方式。禁用的 skill 不参与模型发现和 skill 调用。这是 Computer Use 也使用的通用 skill 机制，不是浏览器权限边界：禁用 skill 不会移除已有对话中的指令，也不会断开现有 SDK 会话。
 
-Native Host 注册属于本机产品初始化，不由 Chrome 扩展执行。在 macOS 和 Linux 上，Browser runtime 首次初始化时检查 Google Chrome、Chrome for Testing 和 Chromium 的标准 `Default`、`Profile N` profile 中是否安装 Qwen 扩展。它读取 `Secure Preferences` 或 `Preferences` 中的扩展注册信息，并确认 manifest 存在，同时支持打包和解压安装。仅有残留扩展目录不视为已安装。若未找到扩展，初始化会提示安装方式，不写入 Native Host 文件。检测成功后，为已存在的浏览器根目录幂等安装 launcher 和 manifest。配置了 `QWEN_BROWSER_USE_SOCKET_PATH` 时继续使用外部管理的安装。
+Native Host 注册属于本机产品初始化，不由 Chrome 扩展执行。在 macOS 和 Linux 上，发起 Browser Use 任务即同意自动完成本机 Host 配置。初始化为已存在的浏览器根目录幂等安装或复用 launcher 和 manifest，然后由 transport 发现存活的 Host，并验证扩展、协议和 profile 握手。配置了 `QWEN_BROWSER_USE_SOCKET_PATH` 或 `QWEN_BROWSER_USE_DISCOVERY_DIR` 时继续使用外部管理的安装。
 
-安装 Qwen Chrome 扩展即同意首次使用时自动完成上述本机配置。Qwen 退出后，launcher 和 Native Messaging 注册仍然保留。安装器拒绝覆盖其他程序的文件：launcher 冲突会终止初始化，浏览器 manifest 冲突则跳过该 manifest，并在 stderr 上给出指明该文件的警告。运行 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` 可删除 Browser Use 拥有的文件；`status` 检查这些文件，`install` 显式注册。若要阻止后续 Browser Use 初始化时自动注册，还需卸载 Chrome 扩展。只有文件不存在才视为缺失；其他读取失败会终止操作，不覆盖无法读取的文件。Chrome 扩展仅通过 `connectNative()` 打开已注册的 host。
+初始化不通过读取 `Secure Preferences` 或 `Preferences` 检测扩展安装。这些私有配置文件可能无法读取，安装记录也无法证明扩展已启用或连接。Host 注册可以在扩展可用之前完成。若始终没有连接，应提示用户打开 Chrome，在目标 profile 中安装或启用扩展后重试；仅凭超时无法断定扩展未安装。协议不匹配仍提供更新指引。Profile 名称属于可选补充信息，不作为连接前提。
+
+Qwen 退出后，launcher 和 Native Messaging 注册仍然保留。安装器拒绝覆盖其他程序的文件：launcher 冲突会终止初始化，浏览器 manifest 冲突则跳过该 manifest，并在 stderr 上给出指明该文件的警告。运行 `node <skill-base>/runtime/scripts/native-host-setup.js uninstall` 可删除 Browser Use 拥有的文件；`status` 检查这些文件，`install` 显式注册。后续 Browser Use 初始化仍可重新注册 Host。只有必需的 Host 文件不存在才视为缺失；其他读取失败会终止操作，不覆盖无法读取的文件。Chrome 扩展通过 `connectNative()` 打开已注册的 host。
+
+初始化验收覆盖 Chrome 配置文件不可读、扩展尚不可用时完成配置、明确的未连接指引，以及保留 Host 文件访问错误。执行浏览器操作前仍必须通过已有的扩展身份、协议、profile 和 session 归属检查。
 
 ## 职责
 

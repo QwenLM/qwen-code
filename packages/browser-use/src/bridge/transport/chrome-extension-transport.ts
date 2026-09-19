@@ -329,7 +329,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
     } while (Date.now() < deadline);
     if (mismatch !== undefined) throw mismatch;
     throw disconnectedError(
-      `Chrome extension is not connected. Verify the Native Messaging host installation and reload the extension. ${errorMessage(lastError)}`,
+      `Qwen Chrome extension is not connected. Open Chrome and install or enable the Qwen extension in the profile you want to use (chrome://extensions), then retry. ${errorMessage(lastError)}`,
     );
   }
 
