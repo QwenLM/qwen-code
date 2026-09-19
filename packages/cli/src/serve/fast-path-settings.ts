@@ -162,15 +162,25 @@ function findEnvFilesFastPath(
   const found: string[] = [];
   const seen = new Set<string>();
 
+  // Mirror findEnvFiles() in config/environment.ts: decide trust once for the
+  // workspace, then only reject an ancestor that carries its own explicit
+  // untrusted rule. Re-resolving per ancestor would drop every .env above a
+  // TRUST_FOLDER rule — and on this path the value would also never reach the
+  // daemon's frozen base environment.
+  const workspaceIsTrusted =
+    isWorkspaceTrustedFastPath(settings, realStartDir) === true;
+
   const canUseEnvFile = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (userLevelPaths.has(normalized)) return true;
+    if (!workspaceIsTrusted) return false;
     const dirPath = path.dirname(normalized);
     const workspaceDir =
       path.basename(dirPath) === SETTINGS_DIRECTORY_NAME
         ? path.dirname(dirPath)
         : dirPath;
-    return isWorkspaceTrustedFastPath(settings, workspaceDir) === true;
+    if (workspaceDir === realStartDir) return true;
+    return isWorkspaceTrustedFastPath(settings, workspaceDir) !== false;
   };
 
   const pushCandidate = (filePath: string): boolean => {
