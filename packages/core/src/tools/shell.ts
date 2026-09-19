@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { formatShellExitCode } from './shell-exit-code.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   FileDiff,
@@ -1826,6 +1827,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return {
       llmContent: 'Command was cancelled by user before it could complete.',
       returnDisplay: 'Command cancelled by user.',
+      aborted: true,
     };
   }
 
@@ -1926,6 +1928,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return {
         llmContent: message,
         returnDisplay: message,
+        exitCode: 0,
       };
     }
 
@@ -1995,6 +1998,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return {
         llmContent: `sed edit applied to ${edit.filePath}.`,
         returnDisplay: display,
+        exitCode: 0,
       };
     } catch (err) {
       if (err instanceof SedEditCancelledError) {
@@ -2770,7 +2774,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // its full output and exit code — it runs the same binding gate as an
     // uninterrupted foreground run.
     const wasPromoteRefused =
-      result.aborted &&
       getShellAbortReasonKind(combinedSignal.reason) === 'background';
     if ((!result.aborted || wasPromoteRefused) && result.exitCode === 0) {
       this.bindGhPrCreate(
@@ -2789,12 +2792,18 @@ export class ShellToolInvocation extends BaseToolInvocation<
       result.aborted &&
       effectiveTimeout > 0 &&
       abortReasonName === 'TimeoutError';
+    // Cooperative mid-execution interruption: the tool observed the
+    // abort and killed the child, but resolves error-free. Reported
+    // via ToolResult.aborted so the scheduler does not mistake it for
+    // a cancellation that landed after the work completed.
+    const wasUserCancelled =
+      result.aborted && !wasTimeout && !wasPromoteRefused;
     const timeoutSummary = wasTimeout
       ? `Command timed out after ${effectiveTimeout}ms before it could complete.`
       : undefined;
 
     let llmContent = '';
-    if (result.aborted) {
+    if (result.aborted || wasPromoteRefused) {
       if (wasTimeout) {
         llmContent = timeoutSummary!;
         if (result.output.trim()) {
@@ -2835,7 +2844,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Directory: ${this.params.directory || '(root)'}`,
         `Output: ${result.output || '(empty)'}`,
         `Error: ${finalError}`, // Use the cleaned error string.
-        `Exit Code: ${result.exitCode ?? '(none)'}`,
+        formatShellExitCode(result.exitCode),
         `Signal: ${result.signal ?? '(none)'}`,
         `Process Group PGID: ${result.pid ?? '(none)'}`,
       ].join('\n');
@@ -2920,6 +2929,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const shouldAppendLongRunHint =
       longRunThreshold !== null &&
       !result.aborted &&
+      !wasPromoteRefused &&
       !isSignalTermination(result.signal) &&
       elapsedMs >= longRunThreshold;
     // Observability: the hint decision is otherwise invisible. If a
@@ -2955,7 +2965,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           ? `${timeoutSummary}\n${result.output}`
           : result.output;
       } else {
-        if (result.aborted) {
+        if (result.aborted || wasPromoteRefused) {
           returnDisplayMessage = wasTimeout
             ? `${timeoutSummary} There was no output before it timed out.`
             : wasPromoteRefused
@@ -3117,8 +3127,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
               type: ToolErrorType.SHELL_EXECUTE_ERROR,
             },
           }
-        : (!result.aborted && isSignalTermination(result.signal)) ||
-            isShellExitError(this.params.command, result.exitCode)
+        : !result.aborted &&
+            (isSignalTermination(result.signal) ||
+              isShellExitError(this.params.command, result.exitCode))
           ? {
               error: {
                 // Schedulers use error.message as the model-facing response.
@@ -3135,6 +3146,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       llmContent,
       returnDisplay: returnDisplayMessage,
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
+      ...(wasUserCancelled ? { aborted: true } : {}),
+      // Forward the process exit status, including a completed promote refusal.
+      // Sed edits report their own completion code; running background commands
+      // omit it. Never infer completion from model-controlled output text.
+      exitCode: result.exitCode,
       ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
       ...executionError,
     };

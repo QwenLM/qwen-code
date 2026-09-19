@@ -24,6 +24,9 @@ AutoSkill 是一种**程序性记忆自动提炼机制**：当 agent 完成了�
 2. **技能变动检测代替工具计数重置**：参照 memory extract 检测 `memory_tool` 调用的方式，系统检测主会话中是否有任何写操作落在 `.qwen/skills/` 目录下。若有，说明用户本轮已主动操作 skill，session 结束时跳过自动 skill review。
 3. **`auto-skill` 标识保护用户创建的 skill**：review agent 创建的 skill 在 YAML frontmatter 中必须包含 `source: auto-skill` 标记。skill review agent 只能修改带有此标记的 skill，不得触碰用户手工创建的 skill。
 4. **工具调用密度触发**：仅当本次会话内工具调用累计 ≥ 20 次才触发，确保只在真正复杂的任务后提炼。
+
+> **更新（2026-08-13）**：裸计数触发已被经验信号门控取代（试错弧 / 用户 steer 走快速通道，计数仅作为"有实质性工作"时的兜底）。见 `docs/design/2026-08-13-auto-skill-experience-trigger.md`。
+
 5. **写保护边界明确**：review agent 的权限管理器将 `write_file`、`edit` 限制在 `${projectRoot}/.qwen/skills/` 内，不能触碰 user / extension / bundled 层。
 6. **最大保留 Hermes 核心 prompt**：review agent 使用的提示语直接移植自 Hermes `_SKILL_REVIEW_PROMPT`，只做最小化适配。
 

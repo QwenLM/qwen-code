@@ -266,9 +266,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     }
     const { snapshot, targetMode } = approval;
     if (signal.aborted) {
-      return this.noActionResult(
-        'Plan exit was cancelled. Remaining in plan mode.',
-      );
+      return {
+        ...this.noActionResult(
+          'Plan exit was cancelled. Remaining in plan mode.',
+        ),
+        aborted: true,
+      };
     }
     if (
       this.config.getApprovalMode() !== ApprovalMode.PLAN ||
@@ -334,6 +337,19 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         signal,
       });
     } catch (error) {
+      // requestPlanApproval turns every abort into a plain reject (not an
+      // AbortError), so detect the cancellation via signal.aborted and take the
+      // cooperative-cancel contract (error-free + aborted) instead of reporting
+      // it as a leader-approval failure — otherwise the scheduler counts the
+      // user's cancellation as completed work.
+      if (signal.aborted) {
+        return {
+          ...this.noActionResult(
+            'Leader plan approval was cancelled. Remaining in plan mode.',
+          ),
+          aborted: true,
+        };
+      }
       const message = error instanceof Error ? error.message : String(error);
       return this.errorResult(
         `Failed to request leader plan approval: ${message}`,
@@ -341,9 +357,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     }
 
     if (signal.aborted) {
-      return this.noActionResult(
-        'Leader plan approval was cancelled. Remaining in plan mode.',
-      );
+      return {
+        ...this.noActionResult(
+          'Leader plan approval was cancelled. Remaining in plan mode.',
+        ),
+        aborted: true,
+      };
     }
     if (
       this.config.getApprovalMode() !== ApprovalMode.PLAN ||

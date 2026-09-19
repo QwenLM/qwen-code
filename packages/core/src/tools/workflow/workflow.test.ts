@@ -1112,6 +1112,7 @@ await agent('scan package.json')
     expect(result).toEqual({
       llmContent: 'Workflow was cancelled before it could start.',
       returnDisplay: 'Workflow cancelled.',
+      aborted: true,
     });
     expect(registry.list()).toHaveLength(0);
     expect(dispatch).not.toHaveBeenCalled();
@@ -1153,6 +1154,7 @@ await agent('scan package.json')
       expect(result).toEqual({
         llmContent: 'Workflow was cancelled before it could start.',
         returnDisplay: 'Workflow cancelled.',
+        aborted: true,
       });
       expect(registry.list()).toHaveLength(0);
       expect(registry.isStarting('wf_1234abcd')).toBe(false);
@@ -1200,6 +1202,7 @@ await agent('scan package.json')
       expect(result).toEqual({
         llmContent: 'Workflow was cancelled before it could start.',
         returnDisplay: 'Workflow cancelled.',
+        aborted: true,
       });
       expect(registry.list()).toHaveLength(0);
       expect(registry.isStarting('wf_1234abcd')).toBe(false);
@@ -1241,6 +1244,7 @@ await agent('scan package.json')
       expect(result).toEqual({
         llmContent: 'Workflow was cancelled before it could start.',
         returnDisplay: 'Workflow cancelled.',
+        aborted: true,
       });
       expect(registry.list()).toHaveLength(0);
       expect(dispatch).not.toHaveBeenCalled();
@@ -1791,7 +1795,8 @@ await agent('scan package.json')
       `,
     });
     const result = await invocation.execute(new AbortController().signal);
-    expect(result.error).toBeDefined();
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(result.aborted).toBeUndefined();
 
     const entries = registry.list();
     expect(entries).toHaveLength(1);
@@ -1901,7 +1906,9 @@ await agent('scan package.json')
     // before R7 it was silently dropped because the guard rejected
     // 'cancelled'.
     const result = await executePromise;
-    expect(result.error).toBeDefined();
+    expect(outerSignal.aborted).toBe(false);
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(result.aborted).toBe(true);
 
     const final = registry.get(runId)!;
     expect(final.status).toBe('cancelled');

@@ -636,6 +636,22 @@ export interface ToolResult {
   };
 
   /**
+   * Set by abort-aware tools when they observed the abort signal and
+   * stopped mid-execution, but still resolved with an error-free result.
+   * Lets the scheduler tell a cooperative interruption apart from a
+   * cancellation that landed after the work had already completed.
+   */
+  aborted?: boolean;
+
+  /**
+   * Structured foreground shell exit status, or 0 for a completed built-in sed
+   * edit (including a no-op). Null includes a process terminated by a signal;
+   * undefined means no foreground settlement evidence. Background handoffs omit
+   * it. An explicit aborted flag still takes precedence over this evidence.
+   */
+  exitCode?: number | null;
+
+  /**
    * Optional model override propagated from skill execution.
    * When present, the client should use this model for subsequent
    * turns within the same agentic loop.

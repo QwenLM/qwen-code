@@ -5628,11 +5628,19 @@ export class CoreToolScheduler {
             ? ToolErrorType.MCP_TOOL_ERROR
             : ToolErrorType.UNKNOWN))
         : undefined;
-      executionStatus = aborted
-        ? 'cancelled'
-        : toolResult.error
-          ? 'error'
-          : 'success';
+      const settledExecutionStatus: ToolExecutionStatus = toolResult.error
+        ? 'error'
+        : 'success';
+      // Error-only results can report interruption (e.g. web_search). A shell
+      // exit status, including null for signal termination, records settlement;
+      // an explicit cooperative abort still takes precedence.
+      const cancelledSettleStatus: ToolExecutionStatus =
+        toolResult.aborted ||
+        (toolResult.error && toolResult.exitCode === undefined)
+          ? 'cancelled'
+          : settledExecutionStatus;
+      executionStatus =
+        aborted || toolResult.aborted ? 'cancelled' : settledExecutionStatus;
       executionSettled = true;
       if (execSpan) {
         const completedExecSpan = execSpan;
@@ -5653,8 +5661,11 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        // `execute()` returned a result here, so the tool's work did finish.
-        let cancelMessage = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        // Both successful and failed completed work need the AFTER notice.
+        let cancelMessage =
+          cancelledSettleStatus === 'cancelled'
+            ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+            : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
@@ -5688,7 +5699,7 @@ export class CoreToolScheduler {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
           cancelMessage,
-          executionStatus,
+          cancelledSettleStatus,
           failureHookArtifacts,
           toolResult.persistedOutputFiles,
         );
@@ -5710,8 +5721,9 @@ export class CoreToolScheduler {
         }
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
-          // Reached only after `execute()` settled with a result.
-          TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+          toolResult.aborted
+            ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+            : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
           executionStatus,
           artifacts,
           preserved?.persistedOutputFiles,
@@ -6148,6 +6160,9 @@ export class CoreToolScheduler {
           error: undefined,
           errorType: undefined,
           executionStatus,
+          ...(toolResult.exitCode !== undefined
+            ? { exitCode: toolResult.exitCode }
+            : {}),
           contentLength,
           ...(persistedOutputFiles !== undefined
             ? { persistedOutputFiles }

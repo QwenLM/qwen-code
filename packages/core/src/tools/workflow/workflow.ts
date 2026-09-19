@@ -762,6 +762,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
           message: `${failureText}\n${trailer}`,
           type: ToolErrorType.EXECUTION_FAILED,
         },
+        ...(cancelled ? { aborted: true } : {}),
       };
     }
   }
@@ -950,6 +951,7 @@ function startCancelledResult(): WorkflowToolResult {
   return {
     llmContent: 'Workflow was cancelled before it could start.',
     returnDisplay: 'Workflow cancelled.',
+    aborted: true,
   };
 }
 

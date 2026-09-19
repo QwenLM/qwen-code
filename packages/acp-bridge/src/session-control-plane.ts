@@ -13830,7 +13830,10 @@ export function createSessionControlPlane(
         );
 
         const timeoutId = setTimeout(
-          () => abort.abort(),
+          () =>
+            abort.abort(
+              new DOMException('Shell command timed out', 'TimeoutError'),
+            ),
           SHELL_COMMAND_TIMEOUT_MS,
         );
         timeoutId.unref();
