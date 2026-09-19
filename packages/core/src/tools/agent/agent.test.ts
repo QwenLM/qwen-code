@@ -6615,6 +6615,72 @@ describe('AgentTool', () => {
       // The onConfirm callback should have cleared pendingConfirmation
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
     });
+
+    it('rolls the call back out of "executing" when respond rejects', async () => {
+      let capturedOnConfirm:
+        | ((outcome: ToolConfirmationOutcome) => Promise<void>)
+        | undefined;
+      const statuses: Array<string | undefined> = [];
+      // An untrusted folder refuses the privileged approval mode an "always"
+      // outcome needs, so the child scheduler rejects the confirmation.
+      const trustGateError = new Error(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+      trustGateError.name = 'TrustGateError';
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          args: {},
+          description: 'Editing',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          description: 'Editing',
+          timestamp: Date.now(),
+          confirmationDetails: {
+            type: 'edit' as const,
+            title: 'Edit',
+            fileName: 'test.ts',
+            filePath: '/test.ts',
+            fileDiff: '',
+            originalContent: '',
+            newContent: 'new',
+          },
+          respond: vi.fn().mockRejectedValue(trustGateError),
+        } as unknown as AgentApprovalRequestEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        const display = output as AgentResultDisplay;
+        statuses.push(
+          display.toolCalls?.find((tc) => tc.callId === 'call-edit-1')?.status,
+        );
+        if (display.pendingConfirmation?.onConfirm) {
+          capturedOnConfirm = display.pendingConfirmation.onConfirm;
+        }
+      });
+
+      expect(capturedOnConfirm).toBeDefined();
+
+      statuses.length = 0;
+      await expect(
+        capturedOnConfirm!(ToolConfirmationOutcome.ProceedAlways),
+      ).rejects.toThrow('Cannot enable privileged approval modes');
+
+      // The optimistic rewrite is published first, but it must not be the last
+      // thing the panel says: the refused call never executed.
+      expect(statuses).toContain('executing');
+      expect(statuses[statuses.length - 1]).not.toBe('executing');
+    });
   });
 
   describe('Agent-level background: true', () => {

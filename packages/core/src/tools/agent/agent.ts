@@ -1681,11 +1681,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               ToolConfirmationOutcome.ProceedAlwaysUser,
             ]);
 
+            // Status the call had before the optimistic rewrite below, so a
+            // refused confirmation can be rolled back to what the panel showed.
+            let priorStatus:
+              | NonNullable<AgentResultDisplay['toolCalls']>[number]['status']
+              | undefined;
+
             if (proceedOutcomes.has(outcome)) {
               const idx2 = this.currentToolCalls!.findIndex(
                 (c) => c.callId === event.callId,
               );
               if (idx2 >= 0) {
+                priorStatus = this.currentToolCalls![idx2].status;
                 this.currentToolCalls![idx2] = {
                   ...this.currentToolCalls![idx2],
                   status: 'executing',
@@ -1705,7 +1712,37 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               );
             }
 
-            await event.respond(outcome, payload);
+            try {
+              await event.respond(outcome, payload);
+            } catch (error) {
+              // The child scheduler can refuse a proceed outcome — an
+              // untrusted folder rejects the privileged approval mode the
+              // "always" outcomes need — so the optimistic 'executing' above
+              // would keep claiming a call that never ran. The correction the
+              // completion path applies only fires once every call in the
+              // batch is terminal, so with a sister call still awaiting
+              // approval the false claim would persist. Roll back, but only
+              // while the call is still 'executing': the child scheduler owns
+              // the terminal status and may have published it already. The
+              // error is rethrown so the host still sees the refusal.
+              const rollbackIdx = this.currentToolCalls!.findIndex(
+                (c) => c.callId === event.callId,
+              );
+              if (
+                rollbackIdx >= 0 &&
+                this.currentToolCalls![rollbackIdx].status === 'executing'
+              ) {
+                this.currentToolCalls![rollbackIdx] = {
+                  ...this.currentToolCalls![rollbackIdx],
+                  status: priorStatus ?? 'awaiting_approval',
+                };
+                this.updateDisplay(
+                  { toolCalls: [...this.currentToolCalls!] },
+                  updateOutput,
+                );
+              }
+              throw error;
+            }
           },
         } as ToolCallConfirmationDetails;
 
