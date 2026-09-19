@@ -11,6 +11,10 @@ function readPackageJavascript(): string {
     .join('\n');
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 describe('build artifact — manifest-derived externals', () => {
   it('keeps declared runtime dependencies external in the built library', () => {
     const bundle = readPackageJavascript();
@@ -22,8 +26,11 @@ describe('build artifact — manifest-derived externals', () => {
       '@xterm/xterm',
       'fzf',
     ]) {
-      expect(bundle, `${dependency} should remain external`).toContain(
-        `from "${dependency}"`,
+      const packageSpecifier = new RegExp(
+        `from "${escapeRegExp(dependency)}(?:/[^"]*)?"`,
+      );
+      expect(bundle, `${dependency} should remain external`).toMatch(
+        packageSpecifier,
       );
     }
   });
