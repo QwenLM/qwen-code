@@ -50,6 +50,10 @@ export type { RestSseTransport } from './RestSseTransport.js';
 // The `NegotiateTransportOptions` *type* stays available from this barrel
 // for backward compatibility (type-only, no bundle cost).
 export type { NegotiateTransportOptions } from './negotiateTransport.js';
+export {
+  WEB_SHELL_PWA_ASSETS,
+  WEB_SHELL_SERVICE_WORKER_ROUTE,
+} from './pwa-assets.js';
 export type { JsonRpcNotification } from './AcpEventDenormalizer.js';
 export type { TransportFactory } from './AutoReconnectTransport.js';
 export {
@@ -535,6 +539,7 @@ export type {
   DaemonDiffHunk,
   DaemonGitLogEntry,
   DaemonGitLog,
+  DaemonGitLogOptions,
   DaemonGitCommitFileStat,
   DaemonGitCommitDetail,
   DaemonGitBranchInfo,
@@ -544,6 +549,9 @@ export type {
   DaemonGitPushResult,
   DaemonGitPullResult,
   DaemonGitCommitResult,
+  DaemonGitRemoteInfo,
+  DaemonGitRemotesResult,
+  DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestReviewDecision,
   DaemonGitHubPullRequestChecks,
   DaemonGitHubPullRequest,
@@ -551,6 +559,13 @@ export type {
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceRemovalActivity,
   DaemonWorkspaceRemovalResult,
+  DaemonRuntimeStopRequest,
+  DaemonRuntimeStopSession,
+  DaemonRuntimeStopResult,
+  DaemonRuntimeStopSnapshot,
+  DaemonRuntimeStopOption,
+  DaemonRuntimeStopOptions,
+  DaemonWorkspaceRuntimeStopResult,
   DaemonAvailableCommand,
   DaemonArchiveSessionsResult,
   DaemonBrand,

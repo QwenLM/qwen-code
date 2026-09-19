@@ -37,7 +37,6 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
-import type { ActiveGoal } from '../goals/goal-legacy-projection.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
@@ -79,7 +78,6 @@ export enum LlmEventType {
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   GoalState = 'goal_state',
-  ActiveGoal = 'active_goal',
   /** The system switched to a fallback model after the primary (or prior
    *  fallback) exhausted retries on a capacity/availability error. */
   ModelFallback = 'model_fallback',
@@ -579,11 +577,6 @@ export type ServerLlmStopHookLoopEvent = {
   };
 };
 
-export type ServerLlmActiveGoalEvent = {
-  type: LlmEventType.ActiveGoal;
-  value: ActiveGoal | null;
-};
-
 export type ServerLlmGoalStateEvent = {
   type: LlmEventType.GoalState;
   value: GoalSnapshotV2;
@@ -593,7 +586,6 @@ export type ServerLlmGoalStateEvent = {
 // The original union type, now composed of the individual types
 export type ServerLlmStreamEvent =
   | ServerLlmGoalStateEvent
-  | ServerLlmActiveGoalEvent
   | ServerLlmChatCompressedEvent
   | ServerLlmCitationEvent
   | ServerLlmContentEvent
@@ -656,8 +648,6 @@ export type ServerGeminiUserPromptSubmitBlockedEvent =
   ServerLlmUserPromptSubmitBlockedEvent;
 /** @deprecated Use `ServerLlmStopHookLoopEvent`; retained until a future major release. */
 export type ServerGeminiStopHookLoopEvent = ServerLlmStopHookLoopEvent;
-/** @deprecated Use `ServerLlmActiveGoalEvent`; retained until a future major release. */
-export type ServerGeminiActiveGoalEvent = ServerLlmActiveGoalEvent;
 /** @deprecated Use `ServerLlmGoalStateEvent`; retained until a future major release. */
 export type ServerGeminiGoalStateEvent = ServerLlmGoalStateEvent;
 /** @deprecated Use `ServerLlmStreamEvent`; retained until a future major release. */

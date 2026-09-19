@@ -45,6 +45,7 @@ const SETTING_KEYS = {
   'setting:interactive-shell': 'tools.shell.enableInteractiveShell',
   'setting:workflows': 'tools.workflowsEnabled',
   'setting:workflow-size': 'tools.workflowSizeGuideline',
+  'setting:workflow-name-only': 'tools.workflowNameOnly',
   'setting:permission-strategy': 'policy.permissionStrategy',
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
@@ -64,6 +65,7 @@ const BUILTIN_IDS = [
   'builtin:browser-notifications',
   'builtin:live-setup',
   'builtin:local-control',
+  'builtin:connections',
   'builtin:model-management',
 ] as const;
 

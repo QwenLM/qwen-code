@@ -432,6 +432,12 @@ export default {
   active: 'activa',
   disabled: 'desactivada',
   enabled: 'activada',
+  'disabled (bare mode)': 'desactivada (mode mínim)',
+  'disabled (safe mode)': 'desactivada (mode segur)',
+  'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
+  'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
+  'disabled (turned off for this session)':
+    'desactivada (apagada en aquesta sessió)',
   'View Details': 'Visualitza els detalls',
   'Update failed:': "Error en l'actualització:",
   'Updating {{name}}...': 'Actualitzant {{name}}...',
@@ -1901,6 +1907,9 @@ export default {
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
+  'Startup context': "Context d'inici",
+  Unattributed: 'No atribuït',
+  'Cached prefix': 'Prefix en memòria cau',
   'Run /context detail for per-item breakdown.':
     'Executeu /context detail per a un desglossament per element.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':

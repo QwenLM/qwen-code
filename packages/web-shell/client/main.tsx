@@ -1,8 +1,10 @@
 // Load resets before any component can import CSS modules.
 import './styles/globals.css';
 import React from 'react';
+import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { StandaloneContext } from './config/standalone';
 import { isKnownDaemonTarget } from './config/daemon';
+import { isRemoteConnectionKnown } from './config/remote-connections';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -36,7 +38,9 @@ const INVALID_DAEMON_TARGET =
 // A `?daemon=` link can name any origin; one this browser has never connected
 // to is shown for confirmation instead of being probed on load.
 const UNCONFIRMED_DAEMON_TARGET =
-  Boolean(DAEMON_BASE_URL) && !isKnownDaemonTarget(DAEMON_BASE_URL);
+  Boolean(DAEMON_BASE_URL) &&
+  !isKnownDaemonTarget(DAEMON_BASE_URL) &&
+  !isRemoteConnectionKnown(DAEMON_BASE_URL);
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
@@ -423,11 +427,6 @@ async function main() {
   const storedToken = INVALID_DAEMON_TARGET
     ? undefined
     : getDaemonToken(baseUrl);
-  const daemonToken =
-    storedToken ??
-    (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
-      ? await waitForDaemonTokenMessage()
-      : undefined);
   if (INVALID_DAEMON_TARGET) {
     // Keep a fragment token for recovery, but never leave a server-visible
     // query token in the address bar or history.
@@ -439,6 +438,18 @@ async function main() {
   } else {
     removeDaemonTokenFromUrl();
   }
+  // The native bootstrap may declare the WebView unsupported. Scrub a URL
+  // token first, but leave its update message in place instead of mounting
+  // React or waiting for the daemon-token handshake.
+  if (
+    document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
+  )
+    return;
+  const daemonToken =
+    storedToken ??
+    (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
+      ? await waitForDaemonTokenMessage()
+      : undefined);
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -469,3 +480,7 @@ async function main() {
 }
 
 void main();
+
+// Deferred to `load` so registration does not compete with the initial module
+// graph. The helper also guards secure-context and service-worker support.
+scheduleServiceWorkerRegistration({ production: import.meta.env.PROD });

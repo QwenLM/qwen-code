@@ -3045,8 +3045,6 @@ export const useLlmStream = (
               llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerLlmEventType.ActiveGoal:
-              break;
             case ServerLlmEventType.GoalState:
               if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
                 flushBufferedStreamEvents();
