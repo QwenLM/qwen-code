@@ -99,7 +99,7 @@ test('message editor stays inside its bubble while resizing @smoke', async ({
       expectEditorWidth: (viewport) =>
         expect
           .poll(measureEditorWidth)
-          .toBeCloseTo(viewport * EDITOR_VIEWPORT_FRACTION, -1),
+          .toBeCloseTo(viewport * EDITOR_VIEWPORT_FRACTION, 0),
     },
     {
       viewport: 1440,
