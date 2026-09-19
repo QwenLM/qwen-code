@@ -41,13 +41,13 @@ export function admitShellSandbox(
   runtimeRoot: string,
   globalConfigRoot: string,
 ): Readonly<BwrapPolicy> | undefined {
+  const policy = params.shellExecutionSandbox;
+  if (!policy) return undefined;
   if (params.sandbox?.command === 'bwrap') {
     throw new Error(
       'Whole-CLI bwrap is no longer supported. Use tools.executionSandbox instead.',
     );
   }
-  const policy = params.shellExecutionSandbox;
-  if (!policy) return undefined;
   const legacySelection = process.env['QWEN_SANDBOX']?.trim().toLowerCase();
   if (
     process.env['SANDBOX'] ||

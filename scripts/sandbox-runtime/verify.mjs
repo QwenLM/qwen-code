@@ -11,11 +11,17 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { verifySourceManifest } from './source-manifest.mjs';
 
 const installation = process.argv[2];
 const output = process.argv[3];
-if (!installation || !output)
-  throw new Error('Usage: verify.mjs INSTALLATION OUTPUT');
+const sourceRoot = process.argv[4];
+if (!installation || !output || !sourceRoot)
+  throw new Error('Usage: verify.mjs INSTALLATION OUTPUT SOURCE_ROOT');
+const manifest = JSON.parse(
+  await fs.readFile(path.join(installation, 'manifest.json'), 'utf8'),
+);
+const source = await verifySourceManifest(sourceRoot, manifest);
 const root = await fs.mkdtemp('/tmp/qwen-runtime-shell-candidate-');
 const results = [];
 const allRequests = [];
@@ -1077,17 +1083,33 @@ try {
 } finally {
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
-  const manifest = JSON.parse(
-    await read(path.join(installation, 'manifest.json')),
-  );
   const actualHashes = {};
-  for (const name of Object.keys(manifest.artifacts))
-    actualHashes[name] = await hash(path.join(installation, name));
-  assert.deepEqual(
-    actualHashes,
-    manifest.artifacts,
-    'Tested artifact changed during verification',
-  );
+  const artifactErrors = [];
+  for (const name of Object.keys(manifest.artifacts)) {
+    try {
+      actualHashes[name] = await hash(path.join(installation, name));
+    } catch (error) {
+      artifactErrors.push(`${name}: ${error.message}`);
+    }
+  }
+  for (const [name, expected] of Object.entries(manifest.artifacts)) {
+    if (actualHashes[name] !== expected) {
+      artifactErrors.push(`${name}: hash differs from the candidate build`);
+    }
+  }
+  results.push({
+    name: 'artifact integrity after verification',
+    passed: artifactErrors.length === 0,
+    errors: artifactErrors,
+  });
+  let bwrap;
+  try {
+    bwrap = execFileSync('/usr/bin/bwrap', ['--version'], {
+      encoding: 'utf8',
+    }).trim();
+  } catch (error) {
+    bwrap = `unavailable: ${error.code ?? error.message}`;
+  }
   await fs.writeFile(
     output,
     JSON.stringify(
@@ -1098,9 +1120,9 @@ try {
         hostNs,
         node: process.version,
         kernel: execFileSync('uname', ['-r'], { encoding: 'utf8' }).trim(),
-        bwrap: execFileSync('/usr/bin/bwrap', ['--version'], {
-          encoding: 'utf8',
-        }).trim(),
+        bwrap,
+        source,
+        expectedArtifactHashes: manifest.artifacts,
         actualHashes,
         results,
         requests: allRequests,
