@@ -106,8 +106,9 @@ export async function removeGitWorktree(
 ): Promise<void> {
   // A worktree's own repository chooses `core.fsmonitor`, and git refreshes
   // the index — running it — on the status check the non-forced removal
-  // makes. Every other helper in core scrubs those keys; these are the last
-  // that did not.
+  // makes. The shared `runGit` these go through does not scrub those keys,
+  // so every git call in this file passes them itself; closing it in
+  // `runGit` would cover the branch and remote helpers too.
   await runGit(
     cwd,
     [
@@ -187,7 +188,7 @@ export async function worktreeHoldsSubmodules(
 export async function dryRunGitWorktreePrune(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
-): Promise<string[]> {
+): Promise<Array<{ id: string; worktreePath: string | null }>> {
   // `-v` reports on stderr, so reading stdout alone would answer "nothing".
   const { stdout, stderr } = await runGitCapture(
     cwd,
@@ -198,7 +199,7 @@ export async function dryRunGitWorktreePrune(
     .split('\n')
     .map((line) => /^Removing worktrees\/([^:]+):/.exec(line.trim())?.[1])
     .filter((id): id is string => id !== undefined);
-  if (named.length === 0) return named;
+  if (named.length === 0) return [];
   // Anything in that directory which is not a directory is a stray file —
   // a `.DS_Store`, a half-written temporary — and prune names it too. It
   // holds no registration and no commits, so counting it would fail a
@@ -207,13 +208,40 @@ export async function dryRunGitWorktreePrune(
     await runGit(cwd, [...NO_EXEC_CONFIG, 'rev-parse', '--git-common-dir'], env)
   ).trim();
   const admin = path.resolve(cwd, commonDir, 'worktrees');
-  return named.filter((id) => {
+  const entries: Array<{ id: string; worktreePath: string | null }> = [];
+  for (const id of named) {
+    let dir;
     try {
-      return fs.statSync(path.join(admin, id)).isDirectory();
+      dir = fs.statSync(path.join(admin, id));
     } catch {
-      return true;
+      entries.push({ id, worktreePath: null });
+      continue;
     }
-  });
+    if (!dir.isDirectory()) continue;
+    // An entry with nothing in it holds no back-pointer, no HEAD and no
+    // reflog, so it is litter in the same sense a stray file is. One that has
+    // lost only its `gitdir` still holds the commits this exists to protect.
+    try {
+      if (fs.readdirSync(path.join(admin, id)).length === 0) continue;
+    } catch {
+      // Unreadable: treated as a registration, which fails closed.
+    }
+    // The admin side records the worktree it belongs to, and keeps doing so
+    // after the worktree's own gitfile is gone — which is the whole shape
+    // this fallback exists for. A caller can therefore tell whether the one
+    // entry prune would drop is the one it asked about, rather than trusting
+    // that a count of one means the right one.
+    let worktreePath: string | null = null;
+    try {
+      const back = fs.readFileSync(path.join(admin, id, 'gitdir'), 'utf8');
+      const gitfile = back.trim();
+      if (gitfile) worktreePath = path.dirname(path.resolve(cwd, gitfile));
+    } catch {
+      // No back-pointer to read; the caller treats that as "not mine".
+    }
+    entries.push({ id, worktreePath });
+  }
+  return entries;
 }
 
 /** Take git's own lock on a worktree, which prune then skips. */

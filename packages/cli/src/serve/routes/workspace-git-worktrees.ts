@@ -63,6 +63,26 @@ function isOwnGuardLock(entry: GitWorktreeEntry): boolean {
   return entry.locked === PRUNE_GUARD_REASON;
 }
 
+/**
+ * One prune fallback at a time per repository.
+ *
+ * The shield is a lock with a fixed reason, so a second overlapping removal
+ * would read a live shield as litter left by a dead one and release it — and
+ * the dry run that proves the shield is a separate process from the prune it
+ * authorises. Serialising within the daemon removes both windows for the case
+ * that can actually happen here; two daemons on one repository still race.
+ */
+const pruneTurns = new Map<string, Promise<unknown>>();
+
+function takePruneTurn<T>(repo: string, work: () => Promise<T>): Promise<T> {
+  const queued = (pruneTurns.get(repo) ?? Promise.resolve()).then(work, work);
+  pruneTurns.set(
+    repo,
+    queued.catch(() => {}),
+  );
+  return queued;
+}
+
 function samePath(a: string, b: string): boolean {
   return realpathOrSelf(a) === realpathOrSelf(b);
 }
@@ -428,10 +448,23 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
         );
         return;
       }
+      // At or under: a workspace rooted in a subdirectory of this worktree
+      // goes with it just as surely as one rooted at its top, and this is the
+      // gate that exists to stop that.
+      const containsWorkspace = (root: string): boolean => {
+        const relative = path.relative(
+          realpathOrSelf(entry.path),
+          realpathOrSelf(root),
+        );
+        return (
+          relative === '' ||
+          (!relative.startsWith('..') && !path.isAbsolute(relative))
+        );
+      };
       if (
         deps.workspaceRegistry
           .listAllEntries()
-          .some((registered) => samePath(registered.workspaceCwd, entry.path))
+          .some((registered) => containsWorkspace(registered.workspaceCwd))
       ) {
         sendError(
           res,
@@ -685,79 +718,93 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
               }
               throw removeError;
             }
-            // `git worktree prune` has no per-path form: it drops every
-            // registration git has marked stale, and with each one the admin
-            // directory holding that worktree's HEAD and reflog — the last
-            // thing pointing at commits nothing else keeps. git skips locked
-            // worktrees, so the others are locked for the duration and this
-            // becomes the per-path removal the rest of the route is.
-            const held: string[] = [];
-            try {
-              // Locking makes an entry stop being prunable, so a listing
-              // that comes back with nothing new means everything it can see
-              // is shielded. Anything that goes stale in between shows up in
-              // the next pass.
-              let covered = false;
-              for (let pass = 0; pass < 3 && !covered; pass += 1) {
-                const exposed = (
-                  await listGitWorktrees(
-                    runtime.workspaceCwd,
-                    runtime.env.effectiveEnv,
-                  )
-                ).filter(
-                  (other) =>
-                    other.prunable !== undefined &&
-                    !samePath(other.path, entry.path),
-                );
-                if (exposed.length === 0) {
-                  covered = true;
-                  break;
-                }
-                for (const other of exposed) {
-                  try {
-                    await lockGitWorktree(
+            // One removal at a time per repository: the shield and the
+            // dry run that proves it only hold if nothing else is
+            // locking, pruning or unlocking underneath them.
+            await takePruneTurn(runtime.workspaceCwd, async () => {
+              // `git worktree prune` has no per-path form: it drops every
+              // registration git has marked stale, and with each one the admin
+              // directory holding that worktree's HEAD and reflog — the last
+              // thing pointing at commits nothing else keeps. git skips locked
+              // worktrees, so the others are locked for the duration and this
+              // becomes the per-path removal the rest of the route is.
+              const held: string[] = [];
+              try {
+                // Locking makes an entry stop being prunable, so a listing
+                // that comes back with nothing new means everything it can see
+                // is shielded. Anything that goes stale in between shows up in
+                // the next pass.
+                let covered = false;
+                for (let pass = 0; pass < 3 && !covered; pass += 1) {
+                  const exposed = (
+                    await listGitWorktrees(
                       runtime.workspaceCwd,
-                      other.path,
-                      PRUNE_GUARD_REASON,
                       runtime.env.effectiveEnv,
-                    );
-                  } catch {
-                    // The user asked about this worktree, not that one.
-                    throw removeError;
+                    )
+                  ).filter(
+                    (other) =>
+                      other.prunable !== undefined &&
+                      !samePath(other.path, entry.path),
+                  );
+                  if (exposed.length === 0) {
+                    covered = true;
+                    break;
                   }
-                  held.push(other.path);
+                  for (const other of exposed) {
+                    try {
+                      await lockGitWorktree(
+                        runtime.workspaceCwd,
+                        other.path,
+                        PRUNE_GUARD_REASON,
+                        runtime.env.effectiveEnv,
+                      );
+                    } catch {
+                      // The user asked about this worktree, not that one.
+                      throw removeError;
+                    }
+                    held.push(other.path);
+                  }
+                }
+                if (!covered) throw removeError;
+                // The listing is not the same set as what prune drops: a
+                // registration whose gitdir file is missing or empty is invisible
+                // to it and cannot be locked either, yet prune takes it — and
+                // with it the last anchor for commits nothing else keeps. git's
+                // own dry run is the complete answer, so the shield is proven
+                // against that: exactly one entry left to drop, and it is the
+                // one that was asked for.
+                const wouldDrop = await dryRunGitWorktreePrune(
+                  runtime.workspaceCwd,
+                  runtime.env.effectiveEnv,
+                );
+                // One entry, and it is this one: a count alone would let a
+                // prune that no longer names the requested worktree take some
+                // bystander instead and report it as this removal.
+                if (
+                  wouldDrop.length !== 1 ||
+                  wouldDrop[0].worktreePath === null ||
+                  !samePath(wouldDrop[0].worktreePath, entry.path)
+                ) {
+                  throw removeError;
+                }
+                await pruneGitWorktrees(
+                  runtime.workspaceCwd,
+                  runtime.env.effectiveEnv,
+                );
+              } finally {
+                for (const path of held) {
+                  await unlockGitWorktree(
+                    runtime.workspaceCwd,
+                    path,
+                    runtime.env.effectiveEnv,
+                  ).catch(() => {
+                    // Left locked with a reason that names this route, which
+                    // the next removal of that entry recognises and releases —
+                    // git itself would refuse it at every force level.
+                  });
                 }
               }
-              if (!covered) throw removeError;
-              // The listing is not the same set as what prune drops: a
-              // registration whose gitdir file is missing or empty is invisible
-              // to it and cannot be locked either, yet prune takes it — and
-              // with it the last anchor for commits nothing else keeps. git's
-              // own dry run is the complete answer, so the shield is proven
-              // against that: exactly one entry left to drop, and it is the
-              // one that was asked for.
-              const wouldDrop = await dryRunGitWorktreePrune(
-                runtime.workspaceCwd,
-                runtime.env.effectiveEnv,
-              );
-              if (wouldDrop.length !== 1) throw removeError;
-              await pruneGitWorktrees(
-                runtime.workspaceCwd,
-                runtime.env.effectiveEnv,
-              );
-            } finally {
-              for (const path of held) {
-                await unlockGitWorktree(
-                  runtime.workspaceCwd,
-                  path,
-                  runtime.env.effectiveEnv,
-                ).catch(() => {
-                  // Left locked with a reason that names this route, which
-                  // the next removal of that entry recognises and releases —
-                  // git itself would refuse it at every force level.
-                });
-              }
-            }
+            });
             // git never marks a locked worktree prunable, so prune clears
             // what the listing showed — but the listing is a snapshot, and a
             // lock taken since then would make prune skip this one silently.
@@ -776,6 +823,11 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
         // which one happened instead of letting that promise stand — and say
         // it whenever the daemon cannot prove otherwise, since the case it
         // cannot see is exactly the one where a whole checkout survives.
+        // Six git subprocesses have run since the guard was last asked, and
+        // the workspace can be replaced in that time. Answering then would
+        // report a deletion to a connection that no longer owns the
+        // repository it happened in.
+        runtime.generationGuard?.assertOpen();
         res.status(200).json({
           removed: true,
           path: entry.path,

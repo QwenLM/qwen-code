@@ -932,6 +932,69 @@ describe('GitWorktreesContent', () => {
     }
   });
 
+  it('reports a refusal whose row the filter has hidden', async () => {
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValue(
+      rejection({ code: 'worktree_dirty', error: 'dirty', changes: 4 }),
+    );
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    // Filter the row away: the panel holding the refusal goes with it.
+    const input = document.body.querySelector(
+      'input[type="search"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(input, 'bold-owl');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    expect(document.body.textContent).not.toContain(
+      '4 uncommitted change(s) would be discarded.',
+    );
+    expect(document.body.textContent).toContain(
+      'was refused while you were looking elsewhere',
+    );
+  });
+
+  it('keeps the keyboard inside the panel when its buttons change', async () => {
+    workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
+    listWorkspaceSessions.mockResolvedValue([]);
+    workspaceGitWorktreeStatus.mockResolvedValue(status('/x'));
+    workspaceGitRemoveWorktree.mockRejectedValue(
+      rejection({ error: 'fatal: cannot remove' }),
+    );
+    mount();
+    await flush();
+
+    await act(async () => {
+      button('Remove worktree swift-fox').click();
+    });
+    await act(async () => {
+      button('Remove').click();
+    });
+    await flush();
+
+    // The panel is still open but its danger button is gone, so whatever the
+    // keyboard was on has been unmounted underneath it.
+    const confirm = document.body.querySelector('[role="alert"]');
+    expect(confirm?.contains(document.activeElement)).toBe(true);
+  });
+
   it('moves the keyboard into the confirmation it replaced the button with', async () => {
     workspaceGitWorktrees.mockResolvedValue(listPayload([MAIN, FEATURE]));
     listWorkspaceSessions.mockResolvedValue([]);

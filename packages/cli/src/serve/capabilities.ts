@@ -267,9 +267,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `worktree_dirty` / `worktree_in_use` / `worktree_locked` /
   // `worktree_operation_in_progress` / `worktree_unmerged_commits` /
   // `worktree_status_unknown`). Any
-  // other refusal git makes on a removal that changed nothing comes back as
-  // 409 `worktree_remove_refused` with git's own sentence in `detail`, so a
-  // refusal `--force --force` would clear is not a dead end. Whichever
+  // other refusal git makes on a non-forced removal that changed nothing,
+  // for a checkout git can still reach, comes back as 409
+  // `worktree_remove_refused` with git's own sentence in `detail`, so a
+  // refusal `--force --force` would clear is not a dead end. A forced
+  // removal's failure, and one git cannot validate, surface as git's error. Whichever
   // refusal answers, it carries everything else the same `force` would take. The session count spans every
   // registered workspace's current runtime, draining ones included, so a
   // worktree holding another workspace's session is refused too. A success

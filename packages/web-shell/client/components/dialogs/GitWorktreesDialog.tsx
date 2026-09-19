@@ -118,12 +118,18 @@ const WorktreeRow = memo(function WorktreeRow({
 }) {
   const { t } = useI18n();
   const confirmRef = useRef<HTMLDivElement | null>(null);
-  const confirmOpen = removal !== null;
+  // Not just open or shut: the panel swaps its own buttons as a confirmation
+  // becomes a refusal and a refusal becomes an error, and the keyboard falls
+  // out of it each time one it was on is unmounted.
+  const confirmShape =
+    removal === null
+      ? null
+      : (removal.error ?? removal.blocked?.code ?? 'confirm');
   useEffect(() => {
-    // The button that opened this panel is unmounted by it, so without this
-    // the keyboard lands back on the dialog container.
-    if (confirmOpen) confirmRef.current?.querySelector('button')?.focus();
-  }, [confirmOpen]);
+    if (confirmShape !== null) {
+      confirmRef.current?.querySelector('button')?.focus();
+    }
+  }, [confirmShape]);
   const removable = !worktree.isMain && !worktree.bare && !worktree.isWorkspace;
   const skipStatus = worktree.prunable !== undefined || worktree.bare;
 
@@ -548,6 +554,7 @@ export function GitWorktreesContent({
         })
         .catch((err: unknown) => {
           finish();
+          if (shownWorkspaceRef.current !== workspaceCwd) return;
           // Even a refusal can leave the repository changed — the daemon's
           // last resort for a stale entry clears every stale registration
           // before it can discover this one survived — so re-read the list
@@ -642,6 +649,15 @@ export function GitWorktreesContent({
     setRemoval(null);
   }, []);
 
+  // A refusal belongs to a row; if the filter has hidden that row, the panel
+  // it would have opened in is not on screen and the answer would be lost.
+  const strandedRemoval =
+    removal && (removal.blocked || removal.error)
+      ? visible.some((w) => w.path === removal.path)
+        ? null
+        : removal.path
+      : null;
+
   let body: ReactNode;
   if (loading && !list) {
     body = (
@@ -704,6 +720,13 @@ export function GitWorktreesContent({
           </button>
         )}
       </div>
+      {strandedRemoval !== null && (
+        <div className={styles.notice} role="status">
+          {t('gitWorktrees.refusedElsewhere', {
+            name: baseName(strandedRemoval),
+          })}
+        </div>
+      )}
       {notice && (
         <div
           className={styles.notice}

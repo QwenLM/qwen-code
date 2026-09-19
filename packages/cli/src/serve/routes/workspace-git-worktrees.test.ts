@@ -184,8 +184,11 @@ describe('workspace git worktree routes', () => {
     // Detached entries are the exception, so the default is "some ref has it".
     reachableMock.mockResolvedValue(true);
     submodulesMock.mockResolvedValue(false);
-    // Shielded, so git says it would drop only the entry that was asked for.
-    dryRunMock.mockResolvedValue(['swift-fox']);
+    // Shielded, so git says it would drop only the entry that was asked for,
+    // and names it as that entry rather than merely counting one.
+    dryRunMock.mockResolvedValue([
+      { id: 'swift-fox', worktreePath: LINKED_PATH },
+    ]);
     pruneMock.mockResolvedValue(undefined);
   });
 
@@ -1072,6 +1075,73 @@ describe('workspace git worktree routes', () => {
       operation: 'rebase',
       unmergedHead: detached.head,
     });
+  });
+
+  it('never prunes when git would take a different worktree', async () => {
+    const stale = {
+      ...LINKED,
+      prunable: 'gitdir file points to non-existent location',
+    };
+    fs.rmSync(path.join(LINKED_PATH, '.git'));
+    listMock.mockResolvedValue([MAIN, stale]);
+    removeMock.mockRejectedValue(new Error('fatal: validation failed'));
+    // One entry, but not this one: a count alone would let the prune take a
+    // bystander and report it as this removal.
+    dryRunMock.mockResolvedValue([
+      { id: 'someone-else', worktreePath: path.join(ROOT, 'someone-else') },
+    ]);
+    const app = mount([runtime('primary', ROOT, true)]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    expect(pruneMock).not.toHaveBeenCalled();
+    expect(response.status).toBeGreaterThanOrEqual(400);
+  });
+
+  it('refuses a worktree a registered workspace sits inside', async () => {
+    // Removing the worktree takes the workspace with it, exactly as it would
+    // if the workspace were the worktree's own root.
+    const inside = path.join(LINKED_PATH, 'nested', 'project');
+    const app = mount([
+      runtime('primary', ROOT, true),
+      runtime('secondary', inside, true),
+    ]);
+
+    const refused = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path, force: true });
+
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('worktree_is_workspace');
+    expect(removeMock).not.toHaveBeenCalled();
+  });
+
+  it('never reports a removal to a generation that closed under it', async () => {
+    // Open when the work starts, closed by the time git is done: six
+    // subprocesses is plenty of time for the workspace to be replaced.
+    const assertOpen = vi
+      .fn()
+      .mockImplementationOnce(() => {})
+      .mockImplementation(() => {
+        throw Object.assign(new Error('generation closed'), {
+          code: 'workspace_generation_closed',
+        });
+      });
+    const guarded = {
+      ...runtime('primary', ROOT, true),
+      generationGuard: { assertOpen },
+    } as unknown as WorkspaceRuntime;
+    const app = mount([guarded]);
+
+    const response = await request(app)
+      .post('/workspaces/primary/git/worktrees/remove')
+      .send({ path: LINKED.path });
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+    expect(response.body.removed).toBeUndefined();
   });
 
   it('never turns a prune it finished into a failure it did not', async () => {
