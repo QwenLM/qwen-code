@@ -45,6 +45,7 @@ import {
 } from '../utils/formatters.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
+import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import { C } from './theme.js';
 
 /**
@@ -196,6 +197,7 @@ export function OpenTuiFooter({
           promptTokenCount / contextWindowSize,
         )}${contextUsageLabel(width)}`
       : '';
+  const sandboxLabel = formatExecutionSandbox(config);
   const footerLine1 =
     `➜ ${nodePath.basename(targetDir)}` +
     (sessionName ? ` · ${sessionName}` : '') +
@@ -264,6 +266,7 @@ export function OpenTuiFooter({
 
   return (
     <box flexDirection="column" paddingLeft={2} paddingRight={2} flexShrink={0}>
+      {sandboxLabel && <text fg={C.dim}>{sandboxLabel}</text>}
       <text fg={C.dim}>{statusLines[0]}</text>
       {statusLines[1] && <text fg={C.dim}>{statusLines[1]}</text>}
       {footerLine2 && (

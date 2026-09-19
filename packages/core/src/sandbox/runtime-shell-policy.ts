@@ -8,8 +8,8 @@ import { realpathSync, statSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { ConfigParameters } from '../config/config.js';
+import type { ShellExecutionSandboxPolicy } from '../config/config.js';
 import { realpathNearestExisting } from '../utils/paths.js';
-import type { BwrapPolicy } from './bwrap-execution.js';
 
 const contains = (parent: string, child: string) => {
   const relative = path.relative(parent, child);
@@ -22,7 +22,7 @@ const contains = (parent: string, child: string) => {
 };
 
 export function assertShellSandboxCwd(
-  policy: Readonly<BwrapPolicy>,
+  policy: Readonly<ShellExecutionSandboxPolicy>,
   cwd: string,
 ): void {
   if (
@@ -40,7 +40,7 @@ export function admitShellSandbox(
   params: ConfigParameters,
   runtimeRoot: string,
   globalConfigRoot: string,
-): Readonly<BwrapPolicy> | undefined {
+): Readonly<ShellExecutionSandboxPolicy> | undefined {
   if (params.sandbox?.command === 'bwrap') {
     throw new Error(
       'Whole-CLI bwrap is no longer supported. Use tools.executionSandbox instead.',
@@ -82,7 +82,9 @@ export function admitShellSandbox(
   }
   if (
     !['read-only', 'workspace-write'].includes(policy.filesystem) ||
-    !['open', 'closed'].includes(policy.network)
+    !['open', 'closed'].includes(policy.network) ||
+    (policy.requestedBackend !== undefined &&
+      !['auto', 'bwrap'].includes(policy.requestedBackend))
   ) {
     throw new Error('Unsupported shell sandbox policy.');
   }
@@ -112,12 +114,15 @@ export function admitShellSandbox(
       'Shell sandbox workspace overlaps protected state or installation.',
     );
   }
-  const admitted: Readonly<BwrapPolicy> = Object.freeze({
+  const admitted: Readonly<ShellExecutionSandboxPolicy> = Object.freeze({
     workspace,
     installation,
     state,
     filesystem: policy.filesystem,
     network: policy.network,
+    ...(policy.requestedBackend
+      ? { requestedBackend: policy.requestedBackend }
+      : {}),
     ...(policy.bwrapPath ? { bwrapPath: policy.bwrapPath } : {}),
   });
   assertShellSandboxCwd(admitted, params.targetDir);
@@ -126,7 +131,7 @@ export function admitShellSandbox(
 }
 
 export async function probeShellSandbox(
-  policy: Readonly<BwrapPolicy>,
+  policy: Readonly<ShellExecutionSandboxPolicy>,
   signal: AbortSignal = new AbortController().signal,
 ): Promise<void> {
   signal.throwIfAborted();

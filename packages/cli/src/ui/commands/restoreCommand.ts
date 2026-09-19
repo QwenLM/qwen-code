@@ -23,6 +23,14 @@ async function restoreAction(
   const { config } = services;
   const { addItem, loadHistory } = ui;
 
+  if (config?.getShellExecutionSandbox?.()) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: 'File restore is unavailable in tool sandbox.',
+    };
+  }
+
   const checkpointDir = config?.storage.getProjectTempCheckpointsDir();
 
   if (!checkpointDir) {

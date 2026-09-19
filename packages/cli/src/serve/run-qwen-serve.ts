@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  assertExecutionSandboxSupported,
+  readOperatorSandboxSettings,
+  InvalidExecutionSandboxConfigError,
+} from '../config/execution-sandbox-settings.js';
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
@@ -3330,6 +3335,14 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
+  assertExecutionSandboxSupported(
+    readOperatorSandboxSettings(),
+    'serve / ACP / web terminals',
+  );
+  assertExecutionSandboxSupported(
+    deps.bootSettings ?? {},
+    'serve / ACP / web terminals',
+  );
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
@@ -4025,7 +4038,10 @@ async function runQwenServeImpl(
   } catch (err) {
     // Invalid policy values must fail startup loudly. Discriminate by
     // error class rather than substring-matching the message.
-    if (err instanceof InvalidPolicyConfigError) {
+    if (
+      err instanceof InvalidPolicyConfigError ||
+      err instanceof InvalidExecutionSandboxConfigError
+    ) {
       throw err;
     }
     // All other settings-read failures (corrupted JSON, transient
@@ -4038,6 +4054,10 @@ async function runQwenServeImpl(
         `to apply context.fileName / policy.* / serve.channels overrides.`,
     );
   }
+  assertExecutionSandboxSupported(
+    bootSettings ?? {},
+    'serve / ACP / web terminals',
+  );
   // Init daemon logger early so all subsequent lifecycle events
   // (bridge spawn diagnostics, shutdown errors) are captured to file.
   const daemonLogBaseDir = await resolveDaemonLogBaseDirForRun({
@@ -4901,11 +4921,16 @@ async function runQwenServeImpl(
         },
       );
     } catch (err) {
+      if (err instanceof InvalidExecutionSandboxConfigError) throw err;
       writeStderrLine(
         `qwen serve: could not read full settings for runtime startup ` +
           `(${err instanceof Error ? err.message : String(err)}); falling back to defaults.`,
       );
     }
+    assertExecutionSandboxSupported(
+      runtimeBootSettings?.merged ?? {},
+      'serve workspace runtimes',
+    );
     if (
       deps.trustedWorkspace === undefined &&
       runtimeBootSettings &&
@@ -6232,6 +6257,10 @@ async function runQwenServeImpl(
     };
 
     for (const workspaceInput of workspaceInputs.slice(1)) {
+      assertExecutionSandboxSupported(
+        readOperatorSandboxSettings(),
+        'serve workspace runtimes',
+      );
       const secondaryDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
         bootTrustSnapshot,
         workspaceInput.cwd,
@@ -6250,12 +6279,17 @@ async function runQwenServeImpl(
           },
         );
       } catch (err) {
+        if (err instanceof InvalidExecutionSandboxConfigError) throw err;
         writeStderrLine(
           `qwen serve: could not read full settings for secondary workspace ` +
             `${workspaceInput.cwd} (${err instanceof Error ? err.message : String(err)}); ` +
             `falling back to defaults.`,
         );
       }
+      assertExecutionSandboxSupported(
+        secondarySettings?.merged ?? {},
+        'serve workspace runtimes',
+      );
       if (!secondaryTrusted) {
         daemonLog.warn('secondary workspace is not trusted', {
           workspace: workspaceInput.cwd,
@@ -6902,6 +6936,10 @@ async function runQwenServeImpl(
         provenance === 'managed-scratch' || provenance === 'live-conversation'
           ? true
           : (buildOptions?.trusted ?? decision.targetTrusted);
+      assertExecutionSandboxSupported(
+        readOperatorSandboxSettings(),
+        'serve workspace runtimes',
+      );
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd, {
@@ -6910,6 +6948,7 @@ async function runQwenServeImpl(
           workspaceTrusted: trusted,
         });
       } catch (err) {
+        if (err instanceof InvalidExecutionSandboxConfigError) throw err;
         // Match the startup secondary-workspace path: surface why full settings
         // couldn't be read instead of silently falling back to defaults.
         writeStderrLine(
@@ -6918,6 +6957,10 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
+      assertExecutionSandboxSupported(
+        wsSettings?.merged ?? {},
+        'serve workspace runtimes',
+      );
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings, trusted);
       const wsCustomIgnoreFiles =
         wsSettings?.merged.context?.fileFiltering?.customIgnoreFiles;

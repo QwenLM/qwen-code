@@ -17055,6 +17055,23 @@ describe('useLlmStream', () => {
       );
     });
 
+    it('does not run host review-worktree cleanup in the tool sandbox', async () => {
+      mockConfig.getShellExecutionSandbox = vi
+        .fn()
+        .mockReturnValue({ network: 'closed' });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'partial' };
+          throw new Error('stream failed in sandbox');
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('sandbox query');
+      });
+      expect(mockCleanupReviewWorktreeLeases).not.toHaveBeenCalled();
+    });
+
     it('should clean up review lease when the stream throws', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
