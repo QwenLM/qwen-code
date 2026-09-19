@@ -36,7 +36,6 @@ import {
   goalPauseReasonForFailure,
   goalRequiresExactPermit,
   PAUSED_GOAL_SYSTEM_REMINDER,
-  type GoalSnapshotV2,
   type GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import {
@@ -291,37 +290,10 @@ function sameGoalPermit(
   );
 }
 
-type ActiveGoalEventValue = Exclude<
-  Extract<ServerLlmStreamEvent, { type: LlmEventType.ActiveGoal }>['value'],
-  null
->;
-
 type GoalStateStreamEvent = Extract<
   ServerLlmStreamEvent,
   { type: LlmEventType.GoalState }
 >;
-
-function projectActiveGoal(
-  snapshot: GoalSnapshotV2 | undefined,
-): ActiveGoalEventValue | undefined {
-  const goal = snapshot?.goal;
-  if (goal?.status !== 'active') return undefined;
-  return {
-    condition: goal.objective,
-    iterations: goal.turnCount,
-    setAt: goal.createdAt,
-    tokensAtStart: 0,
-    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
-    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
-  };
-}
-
-function sameActiveGoalProjection(
-  left: ActiveGoalEventValue | undefined,
-  right: ActiveGoalEventValue | undefined,
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
 
 /**
  * Handle for a non-blocking auto-memory recall prefetch.
@@ -392,7 +364,10 @@ type MainSessionPromptConfig = Pick<
   // the resolver reads the live verdict on this path too. Optional, because
   // the sessionless callers that build this shape by hand have no trust to
   // report and only ever carry built-in styles.
-  Partial<Pick<Config, 'isTrustedFolder'>>;
+  // Optional for the same reason: a hand-built prompt config has no session and
+  // therefore no declared-tool snapshot, which the builder reads as "everything
+  // is declared" (#12032).
+  Partial<Pick<Config, 'isTrustedFolder' | 'getPromptToolSnapshot'>>;
 
 export function getMainSessionBaseSystemPrompt(
   config: MainSessionPromptConfig,
@@ -412,6 +387,7 @@ export function getMainSessionBaseSystemPrompt(
         resolveMainSessionOutputStyle(config),
         config.isTodoWriteEnabled(),
         config.getCodeModeOnly(),
+        { declaredTools: config.getPromptToolSnapshot?.() },
       );
 }
 
@@ -2325,6 +2301,27 @@ export class LlmClient {
       profiler.timeSync('deferred_tool_preload', () => {
         this.preloadDeferredToolsWithinBudget();
       });
+      // Snapshot what this session declares once the registry is warm and the
+      // preload has settled, so the prompt built below can gate its
+      // tool-specific text on it and `/context` can report the same set
+      // (#12032). Mid-session reveals deliberately do not update this: they
+      // change only the tools block, keeping the cached system prefix stable.
+      //
+      // Not wrapped in a profiler stage: it is a map over declarations the
+      // registry has already built, and the startup stage list is asserted in
+      // client.test.ts — a stage here would be noise in that profile.
+      //
+      // Optional call: partial Config stubs (tests, derived agent shims) do not
+      // carry the setter, and a missing snapshot simply leaves the prompt
+      // ungated rather than failing session startup.
+      this.config.setPromptToolSnapshot?.(
+        new Set(
+          toolRegistry
+            .getFunctionDeclarations()
+            .map((declaration) => declaration.name)
+            .filter((name): name is string => Boolean(name)),
+        ),
+      );
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
@@ -3044,8 +3041,6 @@ export class LlmClient {
         value: message,
       });
     };
-    let hasEmittedActiveGoalProjection = false;
-    let lastEmittedActiveGoal: ActiveGoalEventValue | undefined;
     const closeGoalStateEvents = () => {
       const unsubscribe = unsubscribeGoalState;
       unsubscribeGoalState = undefined;
@@ -3070,31 +3065,9 @@ export class LlmClient {
         0,
         pendingGoalSettlementMessages.length,
       );
-      for (const stateEvent of pendingGoalStateEvents.splice(
-        0,
-        pendingGoalStateEvents.length,
-      )) {
-        events.push(stateEvent);
-        const nextActiveGoal = projectActiveGoal(stateEvent.value);
-        if (!hasEmittedActiveGoalProjection) {
-          hasEmittedActiveGoalProjection = true;
-          lastEmittedActiveGoal = nextActiveGoal;
-          if (nextActiveGoal) {
-            events.push({
-              type: LlmEventType.ActiveGoal,
-              value: nextActiveGoal,
-            });
-          }
-        } else if (
-          !sameActiveGoalProjection(lastEmittedActiveGoal, nextActiveGoal)
-        ) {
-          lastEmittedActiveGoal = nextActiveGoal;
-          events.push({
-            type: LlmEventType.ActiveGoal,
-            value: nextActiveGoal ?? null,
-          });
-        }
-      }
+      events.push(
+        ...pendingGoalStateEvents.splice(0, pendingGoalStateEvents.length),
+      );
       return events;
     };
     const loadGoalRuntime = async (

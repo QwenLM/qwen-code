@@ -1817,7 +1817,7 @@ function resolveExistingProviderApiKey(
   // so a reconnect reads the key of the conversation model being connected and
   // only falls back to service entries when no conversation model matched.
   const conversation = matched.filter(
-    (model) => !model.imageOnly && !model.voiceOnly,
+    (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
   );
   if (
     !conversation.length &&
