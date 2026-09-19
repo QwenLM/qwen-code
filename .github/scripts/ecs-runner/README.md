@@ -12,8 +12,12 @@ replace it.
   created more than 24 hours ago.
 - Prunes sandbox-labelled Qwen CI images and dangling images older than 24
   hours.
-- Uses the existing Qwen sandbox daemon lock to avoid concurrent Docker
-  maintenance.
+- Reclaims unused Docker build cache last used more than 24 hours ago, with
+  a 30 GB cache retention budget. Recent and in-use cache is preserved, so
+  this is not a hard disk-usage cap. Failures mark the service as failed.
+- Uses the existing Qwen sandbox daemon lock for labelled image pruning.
+  Build-cache pruning relies on Docker's in-use protection and runs even
+  when that lock is busy or missing.
 - Changes the host `/tmp` retention policy from 30 days to 7 days through
   `systemd-tmpfiles`.
 
@@ -40,6 +44,10 @@ sudo .github/scripts/ecs-runner/install-qwen-docker-cleanup.sh
 The installer copies the cleanup command and systemd units into the host,
 installs the seven-day `/tmp` policy, reloads systemd, and enables the timer.
 Run the same command again after pulling a newer version to update the host.
+Merging changes does not update installed copies. Run the installer on every
+host, including hosts that do not yet have the timer, and check each host's
+timer and journal below. Updating the global Qwen CLI does not install this
+cleanup service.
 
 ## Verify
 
@@ -92,3 +100,27 @@ Removing `/etc/tmpfiles.d/tmp.conf` restores the operating system's packaged
 This cleanup intentionally does not delete runner workspaces, package caches,
 containerd leases, or containerd snapshots directly. Those resources require
 separate disk-pressure monitoring and a host drain before manual cleanup.
+
+The PR review workflow creates a private scratch directory under `RUNNER_TEMP`,
+exports it as `TMPDIR`, and asks the top-level agent to keep verification
+copies there and pass the same requirement to its subagents. An `always()`
+step removes that directory after artifact upload, including on failed or
+cancelled reviews when cleanup steps can run. Cleanup failures are reported in
+the job log.
+
+This is a temporary-directory convention, not filesystem isolation: commands
+that explicitly write elsewhere bypass it. Existing arbitrary copies in `/tmp`
+remain covered only by the seven-day policy. This service does not remove them
+by name because they may belong to an active job. A later review job on the
+same runner registration retries removing stale `qwen-review-scratch.*`
+directories from `RUNNER_TEMP`; residue on an idle registration still requires
+manual cleanup. Build-cache reclamation does not initialize unused data disks.
+
+## Regression check
+
+```bash
+node --test .github/scripts/ecs-runner/*.test.mjs
+```
+
+The check runs the cleanup script with mocked host commands and temporary
+lock files; it does not contact Docker or remove real containers.
