@@ -1158,9 +1158,15 @@ class AgentViewSupervisorProcessHandler
     if (this.hasPendingWorkerInputControl(sessionId)) return false;
     // Soft questions queue through the prompt path, which can reconnect
     // or respawn a worker to deliver; a blocking wait needs a live
-    // process right now.
+    // process right now. The prompt path's own refusals still apply: a
+    // durable queued prompt the in-memory control check cannot see (it
+    // survived a restart or the worker already consumed the control),
+    // or a session that cannot take a follow-up yet (e.g. hibernating).
     if (getAgentViewActivityInputState(activity) === 'soft_question') {
-      return true;
+      return (
+        canAgentViewQueueFollowUp(state, activity) &&
+        !hasPendingPrompt(activity)
+      );
     }
     return this.workers.has(sessionId);
   }

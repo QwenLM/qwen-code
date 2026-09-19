@@ -1521,6 +1521,128 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('refuses answerability in peek while a durable queued prompt awaits delivery', async () => {
+    // The persisted marker outlives the in-memory pending control (a
+    // supervisor restart, or a control the worker already consumed), so
+    // the in-memory check alone re-advertises `qwen sessions answer`
+    // while the answer path still throws "waiting for the previous
+    // response".
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await handler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+    });
+    await handler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'needs_input',
+      inputKind: 'soft',
+    });
+
+    // A queued prompt no in-memory control backs: only the durable
+    // marker records it. The queuedPromptId keeps the stale-marker sweep
+    // from clearing it as undelivered debris.
+    const queuedAt = '2026-07-17T00:00:00.000Z';
+    await writeAgentViewActivity(
+      result.sessionId,
+      {
+        schemaVersion: 1,
+        inputKind: 'soft',
+        queuedPromptCount: 1,
+        queuedPromptPreview: 'deploy it',
+        queuedPromptId: 'prompt-1',
+        queuedPromptText: 'deploy it',
+        lastQueuedPromptAt: queuedAt,
+        lastActivityAt: queuedAt,
+        capabilities: [],
+      },
+      { globalDir },
+    );
+
+    await expect(
+      handler.peek?.({ sessionId: result.sessionId }),
+    ).resolves.toMatchObject({ answerable: false });
+    await expect(
+      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
+    ).rejects.toThrow('waiting for the previous response');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('refuses answerability in peek while the session is hibernating', async () => {
+    // Mid-hibernation the prompt path throws "not ready for follow-up",
+    // so peek must not advertise `qwen sessions answer` for that window.
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const seedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await seedHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await seedHandler.workerEvent?.({
+      type: 'ready',
+      sessionId: result.sessionId,
+      token,
+      cwd: globalDir,
+    });
+    await seedHandler.workerEvent?.({
+      type: 'state',
+      sessionId: result.sessionId,
+      token,
+      sessionState: 'needs_input',
+      inputKind: 'soft',
+    });
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      processState: 'hibernating',
+    });
+    // A live worker pid keeps a supervisor that restarted mid-hibernation
+    // from healing the record to hibernated (or back to alive).
+    const worker = await readAgentViewWorker(result.sessionId, { globalDir });
+    if (!worker) throw new Error('Missing worker state.');
+    await writeAgentViewWorker(
+      result.sessionId,
+      { ...worker, hostPid: process.pid },
+      { globalDir },
+    );
+
+    // Fresh supervisor: no in-memory host, so peek sees the persisted
+    // hibernating state instead of healing it against the seed host.
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    await expect(
+      handler.peek?.({ sessionId: result.sessionId }),
+    ).resolves.toMatchObject({ answerable: false });
+    await expect(
+      handler.answer?.({ sessionId: result.sessionId, text: 'yes' }),
+    ).rejects.toThrow('is not ready for follow-up');
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('clears pending worker controls when a session is killed', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
