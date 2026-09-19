@@ -14,6 +14,10 @@
 
 import type { Config } from '../config/config.js';
 import {
+  resolveReasoningForModel,
+  resolveReasoningCapabilities,
+} from '../core/reasoning-overrides.js';
+import {
   createContentGenerator,
   type AuthType,
   type ContentGeneratorConfig,
@@ -27,7 +31,6 @@ import type { ResolvedModelConfig } from './types.js';
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
-  parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   reasoningEffortsForCapability,
   setGeneratorReasoningEffort,
@@ -145,6 +148,17 @@ function offeredReasoningEfforts(
   base: Config,
   target: Pick<ContentGeneratorConfig, 'authType' | 'model' | 'baseUrl'>,
 ): readonly ReasoningEffort[] {
+  if ('reasoningSnapshot' in target && target.reasoningSnapshot) {
+    const resolved = resolveReasoningForModel(
+      base,
+      target as ContentGeneratorConfig,
+    );
+    if (resolved) return reasoningEffortsForCapability(resolved);
+    return (
+      getGptReasoningCapabilities(target.model)?.efforts ??
+      REASONING_EFFORT_TIERS
+    );
+  }
   if (target.authType && target.model) {
     const models = base.getModelsConfig();
     // Exact id + baseUrl first, then any entry with the same id: a gateway or
@@ -154,7 +168,8 @@ function offeredReasoningEfforts(
       (target.baseUrl !== undefined
         ? models.getResolvedModel(target.authType, target.model, target.baseUrl)
         : undefined) ?? models.getResolvedModel(target.authType, target.model);
-    const declared = parseModelReasoningCapabilities(
+    const declared = resolveReasoningCapabilities(
+      target,
       resolved?.capabilities?.reasoning,
     );
     if (declared) return reasoningEffortsForCapability(declared);
@@ -215,9 +230,13 @@ function buildInheritedAgentContentGeneratorConfig(
       `Model '${modelId}' is no longer configured at the selected endpoint`,
     );
   }
-  if (resolvedModel?.imageOnly || resolvedModel?.voiceOnly) {
+  if (
+    resolvedModel?.imageOnly ||
+    resolvedModel?.voiceOnly ||
+    resolvedModel?.realtimeOnly
+  ) {
     throw new Error(
-      `${resolvedModel.imageOnly ? 'Image' : 'Voice'}-only model '${resolvedModel.id}' cannot be used for content generation`,
+      `${resolvedModel.imageOnly ? 'Image' : resolvedModel.voiceOnly ? 'Voice' : 'Realtime'}-only model '${resolvedModel.id}' cannot be used for content generation`,
     );
   }
 
@@ -256,6 +275,13 @@ function buildInheritedAgentContentGeneratorConfig(
     authOverrides.authType,
     'apiKey',
   );
+  if (
+    !sameProvider ||
+    nextConfig.model !== parentConfig.model ||
+    (authOverrides.baseUrl !== undefined &&
+      authOverrides.baseUrl !== parentConfig.baseUrl)
+  )
+    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
   nextConfig.baseUrl =
     authOverrides.baseUrl ??
     resolveCredentialField(
@@ -321,6 +347,7 @@ function applyResolvedModelConfig(
       (resolvedModel.baseUrl === parentConfig.baseUrl &&
         resolvedModel.envKey === parentConfig.apiKeyEnvKey));
   if (!inheritCredentials) targetConfig.customHeaders = undefined;
+  targetConfig.reasoningRouteBaseUrl = resolvedModel.registryBaseUrl ?? null;
   targetConfig.model = resolvedModel.id;
   targetConfig.authType = resolvedModel.authType;
   targetConfig.baseUrl =
@@ -351,10 +378,16 @@ function applyResolvedModelConfig(
 
   // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
   // Same-provider fields inherit unless the registry overrides them, except
-  // model capabilities such as thinkingMandatory, which must not leak.
+  // model capabilities such as thinkingMandatory, which must not leak, and
+  // enableRequestMetadata, which is a per-model decision: an inherited true
+  // would ship the DashScope tracing object to a vendor-forwarded side model.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
-    if (registryValue !== undefined || field === 'thinkingMandatory') {
+    if (
+      registryValue !== undefined ||
+      field === 'thinkingMandatory' ||
+      field === 'enableRequestMetadata'
+    ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }

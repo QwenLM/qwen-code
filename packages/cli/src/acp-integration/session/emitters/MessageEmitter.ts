@@ -12,7 +12,7 @@ import {
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import {
   apiActivityTracker,
-  projectGoalStateToLegacy,
+  projectGoalCard,
   type GoalRecord,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -52,14 +52,8 @@ export function buildGoalStateUpdate(
   cause?: GoalStateCause,
   previousGoal: GoalRecord | null = null,
 ): SessionUpdate {
-  const projection = cause
-    ? projectGoalStateToLegacy({ v: 2, cause, snapshot }, previousGoal)
-    : undefined;
-  const goalStatus = projection
-    ? (() => {
-        const { type: _type, ...status } = projection.goalStatus;
-        return status;
-      })()
+  const goalStatus = cause
+    ? projectGoalCard({ v: 2, cause, snapshot }, previousGoal)
     : undefined;
   return {
     sessionUpdate: 'agent_message_chunk',
@@ -67,9 +61,6 @@ export function buildGoalStateUpdate(
     _meta: {
       goalState: snapshot,
       ...(goalStatus ? { goalStatus } : {}),
-      ...(projection?.goalTerminal
-        ? { goalTerminal: projection.goalTerminal }
-        : {}),
     },
   };
 }
@@ -222,12 +213,19 @@ export class MessageEmitter extends BaseEmitter {
   async emitSlashCommandOutput(
     text: string,
     timestamp?: string | number,
+    /**
+     * Extra `_meta` keys for clients that render slash-command output
+     * themselves. Spread first, so a payload can never displace `source`, nor
+     * the `timestamp` this emitter adds when the caller supplied one.
+     */
+    extra?: Record<string, unknown>,
   ): Promise<void> {
     const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
       _meta: {
+        ...extra,
         source: 'slash_command',
         ...(epochMs != null ? { timestamp: epochMs } : {}),
       },

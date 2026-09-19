@@ -428,6 +428,65 @@ describe('HookPlanner', () => {
       expect(result).not.toBeNull();
     });
 
+    it.each([
+      ['Bash', 'run_shell_command'],
+      ['Read', 'read_file'],
+      ['Write', 'write_file'],
+      ['Write|Edit', 'write_file'],
+    ])(
+      'matches the Claude Code tool name %s against %s',
+      (matcher, toolName) => {
+        const entry: HookRegistryEntry = {
+          config: { type: HookType.Command, command: 'echo test' },
+          source: HooksConfigSource.Project,
+          eventName: HookEventName.PreToolUse,
+          matcher,
+          enabled: true,
+        };
+        vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+        const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+          toolName,
+        });
+
+        expect(result).not.toBeNull();
+      },
+    );
+
+    it.each([
+      ['Read', 'grep_search'],
+      ['Read', 'list_directory'],
+      ['Edit', 'write_file'],
+      ['Bash', 'monitor'],
+    ])(
+      'does not expand the Claude Code tool name %s to %s',
+      (matcher, toolName) => {
+        const entry: HookRegistryEntry = {
+          config: { type: HookType.Command, command: 'echo test' },
+          source: HooksConfigSource.Project,
+          eventName: HookEventName.PreToolUse,
+          matcher,
+          enabled: true,
+        };
+        vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+        const result = planner.createExecutionPlan(HookEventName.PreToolUse, {
+          toolName,
+        });
+
+        expect(result).toBeNull();
+      },
+    );
+
+    it('lists each tool matcher target once', () => {
+      const targets = getToolMatcherTargets('run_shell_command');
+
+      expect(targets).toEqual(
+        expect.arrayContaining(['run_shell_command', 'Shell', 'Bash']),
+      );
+      expect(new Set(targets).size).toBe(targets.length);
+    });
+
     it('does not match regex against tool aliases', () => {
       const entry: HookRegistryEntry = {
         config: { type: HookType.Command, command: 'echo test' },

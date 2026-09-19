@@ -673,7 +673,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private executeStep(step: CleanupStep): void {
     switch (step) {
       case 'clear_file_cache': {
-        this.coreConfig.getFileReadCache().clear();
+        this.coreConfig.getFileReadCache().dropEntries();
         debugLogger.debug('FileReadCache cleared');
         break;
       }
@@ -735,7 +735,7 @@ export class MemoryPressureMonitor extends EventEmitter {
             },
           );
           if (result.meta) {
-            chat.setHistory(result.history);
+            chat.setHistory(result.history, chat.getCompletedToolCallIds());
             // Explicitly clear fileReadCache here instead of relying on
             // the subsequent clear_file_cache step. This removes the
             // implicit coupling between step ordering.

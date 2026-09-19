@@ -44,6 +44,7 @@ import {
   validateSettingValue,
 } from '../../config/settingsUtils.js';
 import {
+  isNumericSettingType,
   TOGGLE_TYPES,
   type SettingsType,
   type SettingsValue,
@@ -183,7 +184,7 @@ export function parseEditCommit(
   buffer: string,
 ): string | number | null | undefined {
   const trimmed = buffer.trim();
-  if (type === 'number') {
+  if (isNumericSettingType(type)) {
     if (trimmed === '') return null;
     const numParsed = Number(trimmed);
     return Number.isNaN(numParsed) ? null : numParsed;
@@ -564,7 +565,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       const definition = getSettingDefinition(editingKey);
       const ch = original.sequence;
       let isValidChar = false;
-      if (definition?.type === 'number') {
+      if (isNumericSettingType(definition?.type)) {
         isValidChar = /^[0-9\-+.]$/.test(ch);
       } else {
         isValidChar = ch.length === 1 && ch >= ' ' && !ctrl;
@@ -597,7 +598,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         if (name === 'return') onSelect(currentItem.key, selectedScope);
         return;
       }
-      if (currentItem.type === 'number' || currentItem.type === 'string') {
+      if (
+        isNumericSettingType(currentItem.type) ||
+        currentItem.type === 'string'
+      ) {
         startEditing(currentItem.key);
       } else {
         toggleCurrent(currentItem.key);
@@ -609,7 +613,7 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       }
     } else if (/^[0-9]$/.test(original.sequence)) {
       const currentItem = items[activeSettingIndex];
-      if (currentItem?.type === 'number') {
+      if (isNumericSettingType(currentItem?.type)) {
         startEditing(currentItem.key, original.sequence);
       } else {
         setFocusZone('search');
@@ -751,7 +755,10 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
             let displayValue: string;
             if (isEditing) {
               displayValue = edit.buffer;
-            } else if (item.type === 'number' || item.type === 'string') {
+            } else if (
+              isNumericSettingType(item.type) ||
+              item.type === 'string'
+            ) {
               const path = item.key.split('.');
               const currentValue = getNestedValue(pendingSettings, path);
               const defaultValue = getDefaultValue(item.key);

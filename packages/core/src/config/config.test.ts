@@ -34,17 +34,9 @@ import {
   normalizeGoalMaxTurns,
   normalizeGoalTokenBudget,
   isValidGoalTokenBudget,
-  GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-  normalizeGoalCheckpointTimeoutSeconds,
-  isValidGoalCheckpointTimeoutSeconds,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
-import {
-  createGoalCheckpointVerifier,
-  GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-} from '../goals/goal-checkpoint-verifier.js';
-import { DEFAULT_STREAM_MAX_LIFETIME_MS } from '../core/openaiContentGenerator/constants.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
@@ -90,13 +82,14 @@ import {
   resetDebugLoggingState,
   setDebugLogSession,
 } from '../utils/debugLogger.js';
-import { logRipgrepFallback } from '../telemetry/loggers.js';
+import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { applySkillSideEffects } from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
-import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
   type HookExecutionRequest,
@@ -144,6 +137,8 @@ import type { SkillConfig } from '../skills/types.js';
 import { createSkillScopedAgentConfig } from '../memory/skillReviewAgentPlanner.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { createHookOutput, HookSystem } from '../hooks/index.js';
+import { HookRegistry } from '../hooks/hookRegistry.js';
+import { HookPlanner } from '../hooks/hookPlanner.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type {
   ChatRecord,
@@ -392,6 +387,7 @@ vi.mock('../telemetry/loggers.js', async (importOriginal) => {
   return {
     ...actual,
     logRipgrepFallback: vi.fn(),
+    logGoalState: vi.fn(),
     logStartSession: vi.fn(actual.logStartSession),
     logSessionEnd: vi.fn(actual.logSessionEnd),
   };
@@ -464,16 +460,6 @@ function mockAutoMemoryIndexRead(content: string) {
 }
 
 vi.mock('../core/baseLlmClient.js');
-vi.mock('../goals/goal-checkpoint-verifier.js', async (importOriginal) => {
-  const original =
-    await importOriginal<
-      typeof import('../goals/goal-checkpoint-verifier.js')
-    >();
-  return {
-    ...original,
-    createGoalCheckpointVerifier: vi.fn(original.createGoalCheckpointVerifier),
-  };
-});
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
@@ -927,6 +913,363 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('setHooksFromSettings', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
+    const userHooks = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    const projectHooks = {
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'echo project' }] }],
+    };
+
+    it('replaces the user hooks captured at construction', () => {
+      const config = new Config({
+        ...baseParams,
+        userHooks: { Stop: [] },
+      });
+
+      config.setHooksFromSettings({ userHooks });
+
+      expect(config.getUserHooks()).toBe(userHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('replaces project hooks without leaking them into user hooks', () => {
+      const config = new Config({ ...baseParams });
+
+      config.setHooksFromSettings({ projectHooks });
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBeUndefined();
+    });
+
+    it('replaces the legacy merged hooks so a removed hook cannot return through the fallback', () => {
+      const config = new Config({ ...baseParams, hooks: userHooks });
+      expect(config.getUserHooks()).toBe(userHooks);
+
+      config.setHooksFromSettings({});
+
+      expect(config.getUserHooks()).toBeUndefined();
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('keeps the safe mode gate after replacing hooks', () => {
+      const config = new Config({ ...baseParams, safeMode: true });
+
+      config.setHooksFromSettings({
+        userHooks,
+        projectHooks,
+        hooks: userHooks,
+      });
+
+      expect(config.getUserHooks()).toBeUndefined();
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('keeps the folder trust gate for project hooks after replacing hooks', () => {
+      const config = new Config({ ...baseParams, trustedFolder: false });
+
+      config.setHooksFromSettings({ userHooks, projectHooks });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBe(userHooks);
+    });
+
+    it('replaces system hooks together with the other fields', () => {
+      const config = new Config({ ...baseParams, systemHooks });
+
+      config.setHooksFromSettings({ userHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBe(userHooks);
+    });
+  });
+
+  describe('per-scope hooks and the legacy merged fallback', () => {
+    const systemHooks = {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo system' }] }],
+    };
+    const userHooks = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo user' }] }],
+    };
+    const projectHooks = {
+      PostToolUse: [{ hooks: [{ type: 'command', command: 'echo project' }] }],
+    };
+    const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+
+    it('does not read the merged hooks as project hooks when only user hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        userHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getUserHooks()).toBe(userHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('does not read the merged hooks as user hooks when only project hooks are supplied', () => {
+      const config = new Config({
+        ...baseParams,
+        projectHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBeUndefined();
+    });
+
+    it('still serves the merged hooks as user and project hooks when no scope is supplied', () => {
+      const config = new Config({ ...baseParams, hooks: mergedHooks });
+
+      expect(config.getUserHooks()).toBe(mergedHooks);
+      expect(config.getProjectHooks()).toBe(mergedHooks);
+    });
+
+    it('serves system hooks without promoting the merged hooks to system hooks', () => {
+      const withSystem = new Config({
+        ...baseParams,
+        systemHooks,
+        hooks: mergedHooks,
+      });
+
+      expect(withSystem.getSystemHooks()).toBe(systemHooks);
+      expect(withSystem.getUserHooks()).toBeUndefined();
+      expect(withSystem.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['safe mode', { safeMode: true }],
+      ['bare mode', { bareMode: true }],
+    ])('loads no system hooks in %s', (_label, mode) => {
+      const config = new Config({ ...baseParams, ...mode, systemHooks });
+
+      expect(config.getSystemHooks()).toBeUndefined();
+    });
+
+    describe('registration through the hook registry', () => {
+      // What the CLI handed Config before system hooks had their own channel:
+      // a user settings hook, no workspace hooks, and the merged settings
+      // (which then held only that user hook) as the legacy field.
+      const lintHook = {
+        PreToolUse: [
+          {
+            hooks: [{ type: 'command', command: './lint.sh', name: 'lint' }],
+          },
+        ],
+      };
+
+      async function registryFor(params: Partial<ConfigParameters>) {
+        const config = new Config({ ...baseParams, ...params });
+        const registry = new HookRegistry(config);
+        await registry.initialize();
+        return registry;
+      }
+
+      it('registers a user settings hook once, under the user source', async () => {
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        expect(
+          registry.getAllHooks().map(({ eventName, source }) => ({
+            eventName,
+            source,
+          })),
+        ).toEqual([{ eventName: HookEventName.PreToolUse, source: 'user' }]);
+      });
+
+      it('runs that hook once per event, as it did while it was registered twice', async () => {
+        // The planner dedups by hook identity regardless of source, so the
+        // double registration never doubled execution; this pins that the
+        // change above does not alter how many times the hook runs.
+        const registry = await registryFor({
+          userHooks: lintHook,
+          hooks: lintHook,
+        });
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+
+      it('runs a hook registered under two sources once, because the planner dedups by identity', async () => {
+        // A Config built from merged settings alone still registers the hook
+        // under both the user and project sources. The planner is what keeps
+        // that from running it twice.
+        const registry = await registryFor({ hooks: lintHook });
+        expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
+          'user',
+          'project',
+        ]);
+
+        const plan = new HookPlanner(registry).createExecutionPlan(
+          HookEventName.PreToolUse,
+          { toolName: 'read_file' },
+        );
+
+        expect(plan?.hookConfigs).toHaveLength(1);
+      });
+    });
+
+    it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
+      const config = new Config({
+        ...baseParams,
+        trustedFolder: false,
+        systemHooks,
+        projectHooks,
+      });
+
+      expect(config.getSystemHooks()).toBe(systemHooks);
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+  });
+
+  describe('onMessageBusChange', () => {
+    it('calls a listener at once when a bus already exists', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('waits for initialize when no bus exists yet', async () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+
+      config.onMessageBusChange(listener);
+      expect(listener).not.toHaveBeenCalled();
+
+      await config.initialize();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(config.getMessageBus());
+    });
+
+    it('announces the bus only once it can run hooks', async () => {
+      const config = new Config({ ...baseParams });
+      const requestListenerCounts: number[] = [];
+      config.onMessageBusChange((bus) => {
+        requestListenerCounts.push(
+          bus.listenerCount(MessageBusType.HOOK_EXECUTION_REQUEST),
+        );
+      });
+
+      await config.initialize();
+
+      expect(requestListenerCounts).toHaveLength(1);
+      expect(requestListenerCounts[0]).toBeGreaterThanOrEqual(1);
+    });
+
+    it('stops notifying a disposed listener', () => {
+      const config = new Config({ ...baseParams });
+      const listener = vi.fn();
+      const dispose = config.onMessageBusChange(listener);
+
+      dispose();
+      config.setMessageBus(new MessageBus());
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('keeps initializing and notifying others when a listener throws', async () => {
+      const config = new Config({ ...baseParams });
+      config.onMessageBusChange(() => {
+        throw new Error('observer broke');
+      });
+      const other = vi.fn();
+      config.onMessageBusChange(other);
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(other).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles a rejection from an async listener', async () => {
+      const config = new Config({ ...baseParams });
+      let catchSpy: ReturnType<typeof vi.fn> | undefined;
+      config.onMessageBusChange(() => {
+        // Created while notified, so the only chance to handle it is the
+        // caller's: nothing else attaches a handler before it settles.
+        const rejection = Promise.reject(new Error('async observer broke'));
+        catchSpy = vi.spyOn(rejection, 'catch') as unknown as ReturnType<
+          typeof vi.fn
+        >;
+        return rejection;
+      });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(catchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets a listener dispose itself while it is notified', () => {
+      const config = new Config({ ...baseParams });
+      const calls: string[] = [];
+      const dispose = config.onMessageBusChange(() => {
+        calls.push('self-disposing');
+        dispose();
+      });
+      config.onMessageBusChange(() => {
+        calls.push('other');
+      });
+
+      expect(() => config.setMessageBus(new MessageBus())).not.toThrow();
+      config.setMessageBus(new MessageBus());
+
+      expect(calls).toEqual(['self-disposing', 'other', 'other']);
+    });
+
+    it('notifies a listener added during notification exactly once', () => {
+      const config = new Config({ ...baseParams });
+      const late = vi.fn();
+      const dispose = config.onMessageBusChange(() => {
+        dispose();
+        config.onMessageBusChange(late);
+      });
+
+      config.setMessageBus(new MessageBus());
+
+      // Once from its own registration, which sees the bus already set; the
+      // announcement in progress must not reach it a second time.
+      expect(late).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-announce the bus it already has', () => {
+      const config = new Config({ ...baseParams });
+      const bus = new MessageBus();
+      config.setMessageBus(bus);
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      config.setMessageBus(bus);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces nothing when all hooks are disabled', async () => {
+      const config = new Config({ ...baseParams, disableAllHooks: true });
+      const listener = vi.fn();
+      config.onMessageBusChange(listener);
+
+      await config.initialize();
+
+      expect(config.getMessageBus()).toBeUndefined();
+      expect(listener).not.toHaveBeenCalled();
+    });
+  });
+
   describe('skill settings migration warnings at initialize', () => {
     // The pure generators are unit-tested above; these pin the wiring —
     // initialize() must consume the provider and surface its warnings, or a
@@ -1321,6 +1664,82 @@ describe('Server Config (config.ts)', () => {
 
       config.setShellExecutionConfig({ terminalWidth: 120 });
       expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
+  });
+
+  describe('omni quarantine budget getters', () => {
+    it('passes through positive settings', () => {
+      const config = new Config({
+        ...baseParams,
+        omniQuarantineRetentionDays: 3,
+        omniQuarantineMaxBytes: 1024,
+      });
+      expect(config.getOmniQuarantineRetentionDays()).toBe(3);
+      expect(config.getOmniQuarantineMaxBytes()).toBe(1024);
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['zero', 0],
+      ['negative', -1],
+      ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+    ])(
+      'falls back to defaults on a %s setting (a bad value must not expire the whole quarantine)',
+      (_label, bad) => {
+        const config = new Config({
+          ...baseParams,
+          omniQuarantineRetentionDays: bad,
+          omniQuarantineMaxBytes: bad,
+        });
+        expect(config.getOmniQuarantineRetentionDays()).toBe(7);
+        expect(config.getOmniQuarantineMaxBytes()).toBe(5 * 1024 * 1024 * 1024);
+      },
+    );
+  });
+
+  describe('omni storage GC getters (settings → sweep knobs)', () => {
+    it('passes through valid settings', () => {
+      const config = new Config({
+        ...baseParams,
+        omniStorageRetentionDays: 3,
+        omniStorageMaxTotalBytes: 1024,
+      });
+      expect(config.getOmniStorageRetentionDays()).toBe(3);
+      expect(config.getOmniStorageMaxTotalBytes()).toBe(1024);
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['zero', 0],
+      ['negative', -1],
+      ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+      // Sub-day retention would gut the multi-process grace window the
+      // GC's safety argument leans on — the schema promises minimum 1.
+      ['sub-day', 0.5],
+    ])('retentionDays falls back to 14 on a %s setting', (_label, bad) => {
+      const config = new Config({
+        ...baseParams,
+        omniStorageRetentionDays: bad,
+      });
+      expect(config.getOmniStorageRetentionDays()).toBe(14);
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['zero', 0],
+      ['negative', -1],
+      ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+    ])('maxTotalBytes falls back to 20 GiB on a %s setting', (_label, bad) => {
+      const config = new Config({
+        ...baseParams,
+        omniStorageMaxTotalBytes: bad,
+      });
+      expect(config.getOmniStorageMaxTotalBytes()).toBe(
+        20 * 1024 * 1024 * 1024,
+      );
     });
   });
 
@@ -3525,6 +3944,84 @@ describe('Server Config (config.ts)', () => {
       expect(clearLoadedSkills).toHaveBeenCalledOnce();
     });
 
+    it("drops a skill's session allow rules at the session boundary", async () => {
+      // `PermissionManager` outlives the swap, so without the purge a skill's
+      // grant would keep auto-approving in a session that never loaded it.
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipLlmInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const permissionManager = config.getPermissionManager()!;
+      const gitPush = {
+        toolName: ToolNames.SHELL,
+        command: 'git push origin main',
+      };
+
+      await applySkillSideEffects(config, {
+        name: 'gated-skill',
+        description: 'Gated',
+        level: 'user',
+        filePath: '/skills/gated-skill/SKILL.md',
+        body: 'Body.',
+        allowedTools: ['Bash(git *)'],
+      } as unknown as SkillConfig);
+      expect(await permissionManager.evaluate(gitPush)).toBe('allow');
+
+      config.startNewSession('replacement-session');
+
+      expect(await permissionManager.evaluate(gitPush)).toBe('ask');
+    });
+
+    it('resets the web search session budget at the session boundary', async () => {
+      // Subagents and every web_search call share this counter; a new
+      // session starts with the full budget.
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipLlmInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      config.getWebSearchSessionUsage().calls = 7;
+
+      config.startNewSession('replacement-session');
+
+      expect(config.getWebSearchSessionUsage().calls).toBe(0);
+    });
+
+    it('keeps the web search session budget when the same session id restarts', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipLlmInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      config.getWebSearchSessionUsage().calls = 7;
+
+      config.startNewSession(config.getSessionId());
+
+      expect(config.getWebSearchSessionUsage().calls).toBe(7);
+    });
+
+    it('shares the web search session budget with derived configs', () => {
+      // A derived Config is `Object.create(base)`: counting on it must reach
+      // the base counter instead of shadowing it with an own property.
+      const config = new Config({ ...baseParams });
+      const derived = deriveConfig(config);
+
+      derived.getWebSearchSessionUsage().calls++;
+
+      expect(config.getWebSearchSessionUsage().calls).toBe(1);
+      expect(Object.hasOwn(derived, 'webSearchSessionUsage')).toBe(false);
+    });
+
     it('records no lifecycle transition when resuming the current session id', async () => {
       const sessionId = 'same-session-id';
       const config = new Config({ ...baseParams, sessionId });
@@ -3712,25 +4209,39 @@ describe('Server Config (config.ts)', () => {
       };
     };
 
-    // A pre-canonical transcript whose newest Goal record is a legacy
-    // `goal_status` card. Recovering it is the one restore path that has to
-    // *write*: it journals a migrated `goal_state` record.
-    const legacyGoalSession = (): ResumedSessionData => {
+    // A transcript whose newest Goal record is a paused Goal. Restoring it
+    // reads the record and writes nothing; what the deferred restore has to
+    // get right is the ordering against the session writer.
+    const pausedGoalSession = (): ResumedSessionData => {
       const record = {
-        uuid: 'legacy-goal',
+        uuid: 'paused-goal',
         parentUuid: null,
         sessionId: 'resumed-session',
         timestamp: new Date(0).toISOString(),
         type: 'system',
-        subtype: 'slash_command',
+        subtype: 'goal_state',
         provenance: 'goal_control',
         cwd: '/tmp',
         version: 'test',
         systemPayload: {
-          phase: 'result',
-          outputHistoryItems: [
-            { type: 'goal_status', kind: 'set', condition: 'ship the thing' },
-          ],
+          v: 2,
+          cause: 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'ship the thing',
+              status: 'paused',
+              evidenceCursor: { recordId: 'paused-goal' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          },
         },
       } as unknown as ChatRecord;
       return {
@@ -3747,19 +4258,19 @@ describe('Server Config (config.ts)', () => {
     };
 
     // Under a writer lease the recorder is `inactive` until it is handed the
-    // lease, and rejects every write until then. Kicking the legacy
-    // migration off from the constructor drove that write into the guard,
-    // and `restore()` latches the failure as `recoveryError` permanently:
-    // the migrated goal was dropped and the whole resumed session lost goal
-    // persistence. Ordering is the deciding variable, so this asserts the
-    // deferred restore lands the goal rather than bricking the runtime.
-    it('waits for the session writer before migrating a legacy Goal', async () => {
+    // lease, and rejects every write until then. Restore waits for the
+    // lease so that the first Goal turn a restored active Goal starts does
+    // not write into that guard, and so that `restore()` cannot latch a
+    // lease-timing failure as `recoveryError` for the whole session.
+    // Ordering is the deciding variable, so this asserts the deferred
+    // restore lands the goal rather than bricking the runtime.
+    it('waits for the session writer before restoring a Goal', async () => {
       const config = new Config({
         ...baseParams,
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const recorder = config.getChatRecordingService();
       if (!recorder) throw new Error('expected a chat recording service');
@@ -3791,7 +4302,8 @@ describe('Server Config (config.ts)', () => {
       ).startPendingGoalRestore();
 
       const runtime = await ready;
-      expect(recordGoalState).toHaveBeenCalledTimes(1);
+      // Restoring reads the journal and writes nothing to it.
+      expect(recordGoalState).not.toHaveBeenCalled();
       expect(runtime.getSnapshot().goal).toMatchObject({
         objective: 'ship the thing',
         status: 'paused',
@@ -3808,7 +4320,7 @@ describe('Server Config (config.ts)', () => {
         chatRecording: true,
         experimentalZedIntegration: true,
         sessionWriterLeaseEnabled: true,
-        sessionData: legacyGoalSession(),
+        sessionData: pausedGoalSession(),
       });
       const ready = config.getGoalRuntimeReady();
       config.startNewSession('replacement-session');
@@ -3896,6 +4408,61 @@ describe('Server Config (config.ts)', () => {
       const replacement = await config.getGoalRuntimeReady();
       expect(replacement).not.toBe(initial);
       expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('reports a committed Goal transition to telemetry', async () => {
+      vi.mocked(logGoalState).mockClear();
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const runtime = config.getGoalRuntime();
+
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+      expect(logGoalState).toHaveBeenCalledTimes(1);
+      expect(logGoalState).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          cause: 'create',
+          status: 'active',
+          revision: 1,
+        }),
+      );
+    });
+
+    it("does not report a resumed session's recovered Goal again", async () => {
+      // The restore broadcast names the recovered record's cause. Reporting it
+      // would count this paused Goal as paused a second time.
+      vi.mocked(logGoalState).mockClear();
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+
+      const runtime = await config.getGoalRuntimeReady();
+      expect(logGoalState).not.toHaveBeenCalled();
+
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: 'g-resumed',
+        expectedRevision: 1,
+      });
+      expect(logGoalState).toHaveBeenCalledTimes(1);
+      expect(logGoalState).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({ cause: 'resume', goal_id: 'g-resumed' }),
+      );
+
+      expect(runtime.getRecoveryCause?.()).toBe('pause');
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: 'g-resumed',
+        expectedRevision: runtime.getSnapshot().goal!.revision,
+      });
+      expect(logGoalState).toHaveBeenCalledTimes(2);
+      expect(logGoalState).toHaveBeenLastCalledWith(
+        config,
+        expect.objectContaining({ cause: 'pause', goal_id: 'g-resumed' }),
+      );
     });
 
     it('holds selective Goal readiness and autonomous work until finalization', async () => {
@@ -4245,76 +4812,6 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
-    it('arms the checkpoint verifier with the configured timeout', () => {
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalCheckpointTimeoutSeconds: 45,
-      });
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(45_000);
-
-      config.getGoalRuntime();
-
-      // Assert the call, not only the getter: the options argument is the
-      // one line that carries the setting into the verifier, and the
-      // getter-only checks above stay green if it is dropped.
-      const calls = vi.mocked(createGoalCheckpointVerifier).mock.calls;
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.[0]).toBe(config);
-      expect(calls[0]?.[1]).toEqual({ timeoutMs: 45_000 });
-    });
-
-    it('caps the checkpoint ceiling at a wait the default wire honours', () => {
-      // The checkpoint call is streamed, so past the stream lifetime guard it
-      // is the guard that ends the call and the verifier's own timer never
-      // fires. A cap above it would let the setting validate, and the getter
-      // report, a ceiling no default deployment can reach.
-      expect(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000).toBeLessThanOrEqual(
-        DEFAULT_STREAM_MAX_LIFETIME_MS,
-      );
-    });
-
-    it('normalizes the goalCheckpointTimeoutSeconds setting', () => {
-      expect(normalizeGoalCheckpointTimeoutSeconds(undefined)).toBe(
-        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-      );
-      expect(normalizeGoalCheckpointTimeoutSeconds(1)).toBe(1_000);
-      // The cap is a typo guard, accepted itself and refused one past.
-      expect(
-        normalizeGoalCheckpointTimeoutSeconds(
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-        ),
-      ).toBe(GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP * 1000);
-      expect(
-        isValidGoalCheckpointTimeoutSeconds(
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-        ),
-      ).toBe(false);
-      for (const invalid of [
-        0,
-        -1,
-        1.5,
-        Number.NaN,
-        Number.POSITIVE_INFINITY,
-        '30',
-        null,
-        GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP + 1,
-      ]) {
-        expect(isValidGoalCheckpointTimeoutSeconds(invalid)).toBe(false);
-        expect(
-          normalizeGoalCheckpointTimeoutSeconds(invalid as number | undefined),
-        ).toBe(GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS);
-      }
-      const config = new Config({
-        ...baseParams,
-        chatRecording: true,
-        goalCheckpointTimeoutSeconds: 0,
-      });
-      expect(config.getGoalCheckpointTimeoutMs()).toBe(
-        GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS,
-      );
-    });
-
     it('records the invalid-goalTokenBudget fallback in the debug log', async () => {
       // The fallback notice lives in the debug log file (enabled via
       // QWEN_DEBUG_LOG_FILE / --debug), not on a user-visible channel.
@@ -4387,115 +4884,6 @@ describe('Server Config (config.ts)', () => {
           expect(appendFileSpy).toHaveBeenCalledWith(
             Storage.getDebugLogPath(sessionId),
             expect.stringContaining('Ignoring invalid goalTokenBudget -5'),
-            'utf8',
-          ),
-        );
-      } finally {
-        mkdirSpy.mockRestore();
-        appendFileSpy.mockRestore();
-        resetDebugLoggingState();
-        setDebugLogSession(null);
-        if (previousDebugLogFileEnv === undefined) {
-          delete process.env['QWEN_DEBUG_LOG_FILE'];
-        } else {
-          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-        }
-      }
-    });
-
-    it('records the invalid-goalCheckpointTimeoutSeconds fallback in the debug log', async () => {
-      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
-      const sessionId = 'goal-checkpoint-warning-session';
-      const mkdirSpy = vi
-        .spyOn(fs.promises, 'mkdir')
-        .mockResolvedValue(undefined);
-      const appendFileSpy = vi
-        .spyOn(fs.promises, 'appendFile')
-        .mockResolvedValue(undefined);
-
-      try {
-        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-        resetDebugLoggingState();
-
-        new Config({
-          ...baseParams,
-          sessionId,
-          goalCheckpointTimeoutSeconds: 0,
-        });
-
-        await vi.waitFor(() =>
-          expect(appendFileSpy).toHaveBeenCalledWith(
-            Storage.getDebugLogPath(sessionId),
-            expect.stringMatching(
-              new RegExp(
-                `Ignoring invalid goalCheckpointTimeoutSeconds 0:.*using the default of ${GOAL_CHECKPOINT_VERIFIER_DEFAULT_TIMEOUT_MS / 1000}\\.`,
-              ),
-            ),
-            'utf8',
-          ),
-        );
-      } finally {
-        mkdirSpy.mockRestore();
-        appendFileSpy.mockRestore();
-        resetDebugLoggingState();
-        setDebugLogSession(null);
-        if (previousDebugLogFileEnv === undefined) {
-          delete process.env['QWEN_DEBUG_LOG_FILE'];
-        } else {
-          process.env['QWEN_DEBUG_LOG_FILE'] = previousDebugLogFileEnv;
-        }
-      }
-    });
-
-    it('keeps the goalCheckpointTimeoutSeconds debug warning silent for absent and valid values', async () => {
-      const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
-      const sessionId = 'goal-checkpoint-warning-session';
-      const mkdirSpy = vi
-        .spyOn(fs.promises, 'mkdir')
-        .mockResolvedValue(undefined);
-      const appendFileSpy = vi
-        .spyOn(fs.promises, 'appendFile')
-        .mockResolvedValue(undefined);
-
-      try {
-        process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-        resetDebugLoggingState();
-
-        for (const goalCheckpointTimeoutSeconds of [
-          undefined,
-          1,
-          180,
-          GOAL_CHECKPOINT_TIMEOUT_SECONDS_CAP,
-        ]) {
-          new Config({
-            ...baseParams,
-            sessionId,
-            goalCheckpointTimeoutSeconds,
-          });
-          // Let any fire-and-forget debug write settle before the next case.
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-        expect(
-          appendFileSpy.mock.calls.filter((call) =>
-            String(call[1]).includes(
-              'Ignoring invalid goalCheckpointTimeoutSeconds',
-            ),
-          ),
-        ).toHaveLength(0);
-
-        // Control case: the channel is live in this test, so the silence
-        // above is meaningful.
-        new Config({
-          ...baseParams,
-          sessionId,
-          goalCheckpointTimeoutSeconds: 0,
-        });
-        await vi.waitFor(() =>
-          expect(appendFileSpy).toHaveBeenCalledWith(
-            Storage.getDebugLogPath(sessionId),
-            expect.stringContaining(
-              'Ignoring invalid goalCheckpointTimeoutSeconds 0',
-            ),
             'utf8',
           ),
         );
@@ -4855,6 +5243,69 @@ describe('Server Config (config.ts)', () => {
       ],
     });
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  describe('isWorkflowNameOnly', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it('is off by default, and on from the setting or the environment', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: true,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(new Config(baseParams).isWorkflowNameOnly()).toBe(true);
+      // The environment only turns the lock on.
+      expect(
+        new Config({
+          ...baseParams,
+          workflowNameOnly: false,
+        }).isWorkflowNameOnly(),
+      ).toBe(true);
+    });
+
+    // Notifications read the lock from the registry the config owns, so the
+    // two cannot disagree about which resume call to offer.
+    it('hands the lock to its workflow run registry', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      for (const workflowNameOnly of [true, false]) {
+        const registry = new Config({
+          ...baseParams,
+          workflowNameOnly,
+        }).getWorkflowRunRegistry();
+        const completion = vi.fn();
+        registry.setCompletionCallback(completion);
+        const entry = registry.register({
+          runId: 'wf_lock',
+          meta: null,
+          status: 'running',
+          startTime: 1,
+          outputFile: '',
+          abortController: new AbortController(),
+          isBackgrounded: true,
+          scriptPath: '/runtime/workflows/generated/inline/wf_lock.js',
+          // A resume call is offered only beside a journal to replay.
+          journalPath: '/runtime/workflows/wf_lock/journal.jsonl',
+        } as never);
+        registry.fail(entry.runId, 'boom', 2);
+        const text = completion.mock.calls[0][1] as string;
+        expect(text.includes('only whoever started it')).toBe(workflowNameOnly);
+        expect(text.includes('Workflow({ scriptPath')).toBe(!workflowNameOnly);
+      }
+    });
+
+    it('is decided when the session starts', () => {
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '');
+      const config = new Config(baseParams);
+      vi.stubEnv('QWEN_CODE_WORKFLOW_NAME_ONLY', '1');
+      expect(config.isWorkflowNameOnly()).toBe(false);
+    });
   });
 
   it('keeps project-derived features disabled for a provisional workspace', () => {
@@ -7606,6 +8057,148 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('refreshAuth', () => {
+    it('creates the initial generator with the model API resolved from raw OpenAI settings', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'responses-model',
+        modelProvidersConfig: {
+          openai: [{ id: 'responses-model', wireApi: 'responses' }],
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'responses-model', authType },
+          sources: {},
+        }),
+      );
+
+      await config.refreshAuth(AuthType.USE_OPENAI, true);
+
+      expect(resolveContentGeneratorConfigWithSources).toHaveBeenLastCalledWith(
+        config,
+        AuthType.USE_OPENAI_RESPONSES,
+        expect.objectContaining({ model: 'responses-model' }),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(createContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authType: AuthType.USE_OPENAI_RESPONSES }),
+        config,
+        true,
+      );
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+    });
+
+    it.each(['retry', 'install', 'switch', 'invalid-switch'] as const)(
+      'honors %s after initial Responses authentication fails',
+      async (action) => {
+        const baseUrl = 'https://gateway.example/v1';
+        const config = new Config({
+          ...baseParams,
+          authType: AuthType.USE_OPENAI,
+          model: 'same',
+          modelProvidersConfig: {
+            openai: [{ id: 'same', baseUrl, wireApi: 'responses' }],
+          },
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+          (_config, authType, generationConfig) => ({
+            config: { ...generationConfig, model: 'same', authType },
+            sources: {},
+          }),
+        );
+        vi.mocked(createContentGenerator).mockRejectedValueOnce(
+          new Error('missing key'),
+        );
+        await expect(
+          config.refreshAuth(AuthType.USE_OPENAI, true),
+        ).rejects.toThrow('missing key');
+        config.reloadModelProvidersConfig({
+          openai: [
+            { id: 'same', baseUrl },
+            { id: 'same', baseUrl, wireApi: 'responses' },
+          ],
+        });
+        if (action === 'install') {
+          config.syncModelSelection(AuthType.USE_OPENAI, 'same', baseUrl);
+        } else if (action === 'switch') {
+          await config.switchModel(AuthType.USE_OPENAI, 'same', { baseUrl });
+        } else if (action === 'invalid-switch') {
+          await expect(
+            config.switchModel(AuthType.USE_OPENAI, 'missing', { baseUrl }),
+          ).rejects.toThrow();
+        }
+        await config.refreshAuth(AuthType.USE_OPENAI, true);
+        const expectedAuth =
+          action === 'install' || action === 'switch'
+            ? AuthType.USE_OPENAI
+            : AuthType.USE_OPENAI_RESPONSES;
+        expect(createContentGenerator).toHaveBeenLastCalledWith(
+          expect.objectContaining({ model: 'same', authType: expectedAuth }),
+          config,
+          true,
+        );
+        expect(config.getAuthType()).toBe(expectedAuth);
+      },
+    );
+
+    it('does not redirect an OpenAI retry after the first Gemini refresh fails', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'test-model', authType },
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockRejectedValueOnce(
+        new Error('test generator failure'),
+      );
+      await expect(config.refreshAuth(AuthType.USE_GEMINI)).rejects.toThrow(
+        'test generator failure',
+      );
+      await config.refreshAuth(AuthType.USE_OPENAI, true);
+      expect(createContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+        config,
+        true,
+      );
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+    });
+
+    it('requires explicit selection after hot reload removes the selected API route', async () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI_RESPONSES,
+        model: 'shared',
+        modelProvidersConfig: {
+          openai: [{ id: 'shared', wireApi: 'responses' }],
+        },
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: { ...generationConfig, model: 'shared', authType },
+          sources: {},
+        }),
+      );
+      await config.refreshAuth(AuthType.USE_OPENAI_RESPONSES);
+      vi.mocked(createContentGenerator).mockClear();
+      config.reloadModelProvidersConfig({ openai: [{ id: 'shared' }] });
+
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      await expect(
+        config.refreshAuth(AuthType.USE_OPENAI_RESPONSES, true),
+      ).rejects.toThrow('is no longer configured');
+      expect(createContentGenerator).not.toHaveBeenCalled();
+      expect(config.getAuthType()).toBe(AuthType.USE_OPENAI_RESPONSES);
+      expect(config.getModel()).toBe('shared');
+    });
+
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);
       const authType = AuthType.USE_GEMINI;
@@ -12012,6 +12605,61 @@ describe('Server Config (config.ts)', () => {
         expect(wasShellToolRegistered).toBe(true);
       });
     });
+
+    describe('omni media-memory recall exposure (D10)', () => {
+      /** Register a fresh omni-enabled registry and report what it holds.
+       * `createToolRegistry` (not `initialize`) is the unit under test: it
+       * is where the mode decision happens, and it runs before the omni
+       * normalization block in startup. */
+      async function registeredToolNames(
+        omniMemory?: Record<string, unknown>,
+      ): Promise<string[]> {
+        const config = new Config({
+          ...baseParams,
+          omniEnabled: true,
+          ...(omniMemory !== undefined ? { omniMemory } : {}),
+        });
+        await config.createToolRegistry(undefined, { skipDiscovery: true });
+        const registerFactoryMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        return (registerFactoryMock as Mock).mock.calls.map(
+          (call) => call[0] as string,
+        );
+      }
+
+      it('exposes the recall tool in active mode', async () => {
+        const names = await registeredToolNames({ recall: { mode: 'active' } });
+        expect(names).toContain(ToolNames.OMNI_RECALL_MEDIA_MEMORY);
+      });
+
+      it('withholds the recall tool in sideQuery mode', async () => {
+        // The two recall surfaces are mutually exclusive: in sideQuery mode
+        // the harness injects recall itself before every request. Leaving
+        // the tool registered as well would let the model spend a tool call
+        // re-fetching memory it was already handed — and the registration
+        // is decided once, here, so nothing downstream can take it back.
+        const names = await registeredToolNames({
+          recall: { mode: 'sideQuery' },
+        });
+        expect(names).not.toContain(ToolNames.OMNI_RECALL_MEDIA_MEMORY);
+        // The rest of the omni toolset still registered — proof the tool is
+        // missing because of the mode, not because omni was off.
+        expect(names).toContain(ToolNames.OMNI_DOWNSAMPLE_IMAGE);
+      });
+
+      it('aborts startup on an invalid omni.memory setting', async () => {
+        // A rejected `omni.memory` must never degrade to defaults: the
+        // default is `active`, so a typo in the mode would silently hand the
+        // model a recall tool in a session the user configured for passive
+        // injection — the exact silent fallback the normalizer forbids.
+        await expect(
+          registeredToolNames({ recall: { mode: 'passive' } }),
+        ).rejects.toThrow(/omni\.memory\.recall\.mode/);
+      });
+    });
   });
 
   describe('getTruncateToolOutputThreshold', () => {
@@ -13742,6 +14390,61 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
+  });
+
+  it('carries enableRequestMetadata across a qwen-oauth hot model switch', async () => {
+    // The DashScope provider reads enableRequestMetadata off its own
+    // contentGeneratorConfig, which on the main route is this same object. A
+    // hot switch rebuilds it field by field, so a per-model override that is
+    // not copied would leave the gate reading the previous model's value.
+    const config = new Config(baseParams);
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        ['model']: 'qwen3-coder-plus',
+        ['authType']: AuthType.QWEN_OAUTH,
+        ['apiKey']: 'test-key',
+        ['enableRequestMetadata']: false,
+      },
+      sources: {
+        model: { kind: 'settings' },
+        enableRequestMetadata: { kind: 'settings' },
+      },
+    });
+
+    await config.refreshAuth(AuthType.QWEN_OAUTH);
+    expect(config.getContentGeneratorConfig()['enableRequestMetadata']).toBe(
+      false,
+    );
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        ['model']: 'qwen-max',
+        ['authType']: AuthType.QWEN_OAUTH,
+        ['apiKey']: 'test-key',
+        ['enableRequestMetadata']: true,
+      },
+      sources: {
+        model: { kind: 'programmatic', detail: 'user' },
+        enableRequestMetadata: { kind: 'settings', detail: 'model' },
+      },
+    });
+
+    await (
+      config as unknown as {
+        handleModelChange: (
+          authType: AuthType,
+          requiresRefresh: boolean,
+        ) => Promise<void>;
+      }
+    ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
+    expect(config.getContentGeneratorConfig()['enableRequestMetadata']).toBe(
+      true,
+    );
+    const sources = config.getContentGeneratorConfigSources();
+    expect(sources['enableRequestMetadata']?.kind).toBe('settings');
+    expect(sources['enableRequestMetadata']?.detail).toBe('model');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {

@@ -61,9 +61,14 @@
 }
 
 .container:focus-within .content,
-.container:has([aria-expanded='true']) .content,
 .container[data-at-panel-open] .content {
   border-color: var(--chat-editor-accent-color);
+}
+
+@supports (selector(:has(*))) {
+  .container:has([aria-expanded='true']) .content {
+    border-color: var(--chat-editor-accent-color);
+  }
 }
 
 .container[data-image-drag-active] .content {
@@ -892,6 +897,15 @@
   overscroll-behavior: contain;
   pointer-events: auto;
   white-space: normal;
+}
+
+@supports (height: 100dvh) {
+  .tagTooltip {
+    max-height: min(
+      calc(100dvh - 16px),
+      var(--radix-tooltip-content-available-height, calc(100dvh - 16px))
+    );
+  }
 }
 
 .tagLabel,
@@ -1728,6 +1742,9 @@
 }
 
 .contextTooltip {
+  --muted-foreground: var(--chat-editor-text-secondary);
+  --destructive: var(--error-color);
+
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1795,9 +1812,11 @@
   border-top: 1px solid var(--border);
 }
 
-@container (min-width: 521px) {
-  .contextUsagePercentage {
-    display: inline;
+@supports (container-type: inline-size) {
+  @container (min-width: 521px) {
+    .contextUsagePercentage {
+      display: inline;
+    }
   }
 }
 
@@ -2253,6 +2272,111 @@
   gap: 6px;
   padding: 4px 0 0;
   flex-wrap: wrap;
+}
+
+/* Two classes so this wins over `.fileChip`'s fixed width, which is declared
+   later in this file: a text card sizes to its own content. */
+.fileChip.fileChipText {
+  width: auto;
+  min-width: min(264px, 100%);
+  max-width: min(100%, 360px);
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.fileChipIcon {
+  display: flex;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.fileChipBody {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+}
+
+.fileChipTitle {
+  overflow: hidden;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileChipTitle:disabled {
+  cursor: default;
+}
+
+.fileChipTitle:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+.fileChipTitle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  /* The row is nowrap, so at the narrowest panes let the size drop to its own
+     line rather than escaping the card. */
+  flex-wrap: wrap;
+}
+
+.fileChipExpand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.fileChipExpand:not(:disabled):hover {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+
+.fileChipExpand:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.fileChipExpand:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .fileChip {

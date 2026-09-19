@@ -73,12 +73,14 @@ const DIST_REQUIRED_PATHS = [
   'cli.js',
   'cli-entry.js',
   'codeModeHost.js',
+  'execution-worker.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  'execution-worker.js',
   // bin wrapper emitted by prepare-package.js. Standalone shims use it for
   // `qwen serve` so daemon startup gets the same fast path as npm installs.
   'cli-entry.js',
@@ -179,6 +181,11 @@ async function main() {
     copyRuntimeAssets(packageRoot, outDir, args.runtime);
     copyNativeAddon(packageRoot, target);
     copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
+    // getPty() returns null under Bun without touching node-pty, so only the
+    // node runtime needs the PTY packages.
+    if (args.runtime === 'node') {
+      copyNodePtyAddon(packageRoot, target, args.nativeModulesDir);
+    }
     if (args.runtime === 'bun') {
       copyOpenTuiAddon(packageRoot, target, args.opentuiModulesDir);
     }
@@ -318,8 +325,12 @@ Options:
                           renderer (needs bun:ffi) works standalone.
   --node-archive PATH     Downloaded Node.js runtime archive.
   --native-modules-dir DIR
-                          Staged native node_modules directory. Missing
-                          clipboard packages are fatal when this is supplied.
+                          Staged native node_modules directory holding
+                          @teddyzhu/clipboard* packages and, for --runtime
+                          node, @lydell/node-pty* packages. Missing clipboard
+                          packages are fatal when this is supplied; missing
+                          node-pty packages warn unless
+                          QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1.
   --opentui-modules-dir DIR
                           Staged node_modules directory holding @opentui
                           platform packages. Used with --runtime bun; missing
@@ -520,6 +531,77 @@ function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
   assertNoSymlinks(
     modulesDest,
     'Bundled clipboard addon still contains symlinks.',
+  );
+}
+
+// Bundle @lydell/node-pty (the wrapper plus only this target's platform
+// prebuild package) into lib/node_modules so the web terminal can spawn a PTY
+// in standalone installs. getPty() resolves the wrapper via a runtime
+// import('@lydell/node-pty') — esbuild.config.js keeps every node-pty
+// specifier external — and the wrapper in turn requires
+// `@lydell/node-pty-<platform>-<arch>` from node_modules. Without this step
+// the archive declares the packages in optionalDependencies but ships none of
+// them, so every web terminal creation fails with "PTY not available"
+// (#11872). Missing packages warn-and-degrade locally (like the audio-capture
+// step) rather than failing the build: unlike clipboard this set has a known
+// gap (no pinned linux-arm64 package), so --native-modules-dir cannot be the
+// fatal gate. QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD=1 opts in to the fatal
+// gate; nothing sets it today — release.yml exports only
+// QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD for the archive build — and
+// it cannot be wired unconditionally while linux-arm64 has no pinned package.
+function copyNodePtyAddon(packageRoot, target, nativeModulesDir) {
+  const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
+  const nativePackage = `@lydell/node-pty-${prebuildDirName}`;
+  const packageNames = ['@lydell/node-pty', nativePackage];
+  const modulesSrc = path.resolve(
+    nativeModulesDir || path.join(rootDir, 'node_modules'),
+  );
+  const packageSources = packageNames.map((packageName) =>
+    path.join(modulesSrc, packageName),
+  );
+  const hasRequiredFiles =
+    packageSources.every((packageSrc) =>
+      fs.existsSync(path.join(packageSrc, 'package.json')),
+    ) &&
+    hasNativePrebuild(
+      path.join(packageSources[1], 'prebuilds', prebuildDirName),
+    );
+
+  if (!hasRequiredFiles) {
+    const message = `node-pty packages for ${target} are missing from ${modulesSrc}`;
+    if (process.env.QWEN_STANDALONE_REQUIRE_NODE_PTY_PREBUILD === '1') {
+      fail(`Required ${message}`);
+    }
+    console.warn(
+      `[standalone] ${message}; bundling without PTY support ` +
+        '(web terminal will report "PTY not available").',
+    );
+    return;
+  }
+
+  const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+    // The win32-x64 prebuild package ships .pdb debug symbols beside its .node
+    // addons: 10,780,672 B, 86% of its 12,485,696 B prebuild payload and
+    // ~2.05 MiB of the compressed win-x64 archive. Nothing reads them at
+    // runtime (a PDB is only opened by a debugger or crash-dump symbolizer),
+    // so they are dropped at packaging time.
+    filter: (src) => !src.endsWith('.pdb'),
+  };
+  for (let index = 0; index < packageNames.length; index += 1) {
+    fs.cpSync(
+      packageSources[index],
+      path.join(modulesDest, packageNames[index]),
+      copyOpts,
+    );
+  }
+
+  assertNoSymlinks(
+    modulesDest,
+    'Bundled node-pty addon still contains symlinks.',
   );
 }
 

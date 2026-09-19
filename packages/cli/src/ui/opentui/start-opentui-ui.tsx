@@ -238,7 +238,7 @@ function OpenTuiEntryApp({
   // --- seams handed to the shell ---------------------------------------------
   const renderMain = useCallback(
     () => (
-      <box flexDirection="column" flexGrow={1}>
+      <box flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
@@ -246,10 +246,12 @@ function OpenTuiEntryApp({
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
+          showToolCallArgs={settings.merged.ui?.showToolCallArgs === true}
+          awaitingCallId={live.waitingCalls[0]?.callId}
         />
       </box>
     ),
-    [live.items, width, height, thoughtsExpanded],
+    [live.items, live.waitingCalls, width, height, thoughtsExpanded, settings],
   );
 
   const handleRenderError = useCallback(
@@ -307,7 +309,7 @@ function OpenTuiEntryApp({
       isReceivingContent={live.isReceivingContent}
       onInterrupt={interrupt}
       approvalMode={config.getApprovalMode()}
-      queueLength={live.queueLength}
+      messageQueue={live.messageQueue}
       onPopQueue={live.popQueue}
       waitingToolCalls={live.waitingCalls}
       onToolCallSettled={live.settleWaitingCall}
