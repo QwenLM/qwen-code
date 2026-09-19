@@ -200,13 +200,45 @@ export class MonitorDebugStore {
     );
     this.lastCreatedAt = Math.max(this.lastCreatedAt, owned[0]?.createdAt ?? 0);
     for (const entry of owned.slice(10)) {
-      for (const recorder of this.recorders)
-        if (recorder.directory === entry.directory) recorder.evict();
-      await privateDirectory(entry.directory);
-      await rm(entry.directory, { recursive: true, force: true });
-      this.emit('proactive.monitor_debug_pruned', {
-        directory: entry.directory,
-      });
+      try {
+        for (const recorder of this.recorders)
+          if (recorder.directory === entry.directory) recorder.evict();
+        await privateDirectory(entry.directory);
+        // Remove the media subtree first: a removal that fails there leaves
+        // the marker untouched, so the archive stays recognizable and the
+        // next prune retries it instead of orphaning it.
+        await rm(join(entry.directory, 'requests'), {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        });
+        await rm(entry.directory, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+        });
+        this.emit('proactive.monitor_debug_pruned', {
+          directory: entry.directory,
+        });
+      } catch (error) {
+        /* One undeletable archive must not wedge the remaining prune. */
+        const code = (error as NodeJS.ErrnoException).code;
+        // A concurrent pruner on the same root already removed it.
+        if (code === 'ENOENT') continue;
+        // The recursive rm unlinks monitor.json before its final rmdir can
+        // fail, and a marker-less archive is an orphan no later prune
+        // retries. Certify retention only while the marker actually survives.
+        const retained = await lstat(join(entry.directory, 'monitor.json'))
+          .then((stat) => stat.isFile() && !stat.isSymbolicLink())
+          .catch(() => false);
+        this.emit('proactive.monitor_debug_prune_failed', {
+          directory: entry.directory,
+          retained,
+          reason: retained
+            ? (code ?? (error instanceof Error ? error.message : 'unknown'))
+            : 'orphaned_directory',
+        });
+      }
     }
   }
 }
