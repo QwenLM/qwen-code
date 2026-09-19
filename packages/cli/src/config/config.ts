@@ -1681,7 +1681,12 @@ export async function loadCliConfig(
   const ideMode = settings.ide?.enabled ?? false;
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
+  const workspaceTrust = isWorkspaceTrusted(settings);
+  const trustedFolder = workspaceTrust.isTrusted === true;
+  // `undefined` only occurs while folder trust is enabled and no rule has
+  // answered for this folder, which is a state with a remedy the user can
+  // still take; an explicit DO_NOT_TRUST is a decision already made.
+  const workspaceTrustUndecided = workspaceTrust.isTrusted === undefined;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1790,7 +1795,9 @@ export async function loadCliConfig(
   ) {
     if (approvalModeRequested) {
       writeStderrLine(
-        `Approval mode overridden to "default" because the current folder is not trusted.`,
+        workspaceTrustUndecided
+          ? `Approval mode overridden to "default" because this folder's trust has not been decided. Answer the folder trust prompt in an interactive session, or record a decision in trustedFolders.json.`
+          : `Approval mode overridden to "default" because the current folder is not trusted.`,
       );
     }
     approvalMode = ApprovalMode.DEFAULT;
