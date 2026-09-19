@@ -96,12 +96,14 @@ import type {
   AgentExternalInput,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { getAgentProgressTimeout } from './agent-progress-watchdog.js';
 import type {
   AgentRoundEvent,
   AgentRoundTextEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentToolOutputUpdateEvent,
+  AgentToolProgressEvent,
   AgentUsageEvent,
   AgentHooks,
   AgentExternalMessageEvent,
@@ -1044,7 +1046,9 @@ export class AgentCore {
       // Check abort before starting a new round — prevents unnecessary API
       // calls after processFunctionCalls was unblocked by an abort signal.
       if (abortController.signal.aborted) {
-        terminateMode = AgentTerminateMode.CANCELLED;
+        terminateMode = getAgentProgressTimeout(abortController.signal)
+          ? AgentTerminateMode.TIMEOUT
+          : AgentTerminateMode.CANCELLED;
         break;
       }
 
@@ -1091,6 +1095,17 @@ export class AgentCore {
             DEFAULT_QWEN_MODEL,
           messageParams,
           promptId,
+          undefined,
+          {
+            onRetry: (retryDelayMs) =>
+              this.eventEmitter?.emit(AgentEventType.MODEL_RETRY, {
+                subagentId: this.subagentId,
+                round: turnCounter,
+                promptId,
+                retryDelayMs,
+                timestamp: Date.now(),
+              } as AgentRoundEvent),
+          },
         );
         this.eventEmitter?.emit(AgentEventType.ROUND_START, {
           subagentId: this.subagentId,
@@ -1119,7 +1134,11 @@ export class AgentCore {
           if (roundAbortController.signal.aborted) {
             return {
               text: finalText,
-              terminateMode: AgentTerminateMode.CANCELLED,
+              terminateMode: getAgentProgressTimeout(
+                roundAbortController.signal,
+              )
+                ? AgentTerminateMode.TIMEOUT
+                : AgentTerminateMode.CANCELLED,
               turnsUsed: turnCounter,
             };
           }
@@ -1128,6 +1147,13 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            this.eventEmitter?.emit(AgentEventType.MODEL_RETRY, {
+              subagentId: this.subagentId,
+              round: turnCounter,
+              promptId,
+              retryDelayMs: streamEvent.retryInfo?.delayMs,
+              timestamp: Date.now(),
+            } as AgentRoundEvent);
             if (
               checkSubagentLoop({
                 type: LlmEventType.Retry,
@@ -1377,6 +1403,7 @@ export class AgentCore {
               subagentId: this.subagentId,
               round: turnCounter,
               promptId,
+              waitingForExternalInput: true,
               timestamp: Date.now(),
             } as AgentRoundEvent);
 
@@ -1544,7 +1571,12 @@ export class AgentCore {
       }
 
       if (abortController.signal.aborted) {
-        return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+        return {
+          inputs: [],
+          terminateMode: getAgentProgressTimeout(abortController.signal)
+            ? AgentTerminateMode.TIMEOUT
+            : AgentTerminateMode.CANCELLED,
+        };
       }
 
       if (!this.hasTurnBudgetForAnotherRound(options, turnCounter)) {
@@ -1580,7 +1612,12 @@ export class AgentCore {
           waitAbortController.signal,
         );
         if (abortController.signal.aborted) {
-          return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+          return {
+            inputs: [],
+            terminateMode: getAgentProgressTimeout(abortController.signal)
+              ? AgentTerminateMode.TIMEOUT
+              : AgentTerminateMode.CANCELLED,
+          };
         }
         if (timedOut) {
           return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
@@ -1593,7 +1630,12 @@ export class AgentCore {
         }
       } catch (error) {
         if (abortController.signal.aborted) {
-          return { inputs: [], terminateMode: AgentTerminateMode.CANCELLED };
+          return {
+            inputs: [],
+            terminateMode: getAgentProgressTimeout(abortController.signal)
+              ? AgentTerminateMode.TIMEOUT
+              : AgentTerminateMode.CANCELLED,
+          };
         }
         if (timedOut) {
           return { inputs: [], terminateMode: AgentTerminateMode.TIMEOUT };
@@ -2046,6 +2088,7 @@ export class AgentCore {
         );
       }
     };
+    const executingToolCallIds = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
@@ -2054,8 +2097,24 @@ export class AgentCore {
       // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
       outputUpdateHandler: (callId, outputChunk) => {
-        // Shell liveness heartbeats have no subagent consumer; broadcasting
-        // one would overwrite the live output view kept in liveOutputs.
+        const isTaskExecutionChunk =
+          typeof outputChunk === 'object' &&
+          outputChunk !== null &&
+          'type' in outputChunk &&
+          outputChunk.type === 'task_execution';
+        const waitingForExternalInput =
+          isTaskExecutionChunk && outputChunk.waitingForExternalInput === true;
+        const awaitingApproval =
+          isTaskExecutionChunk && outputChunk.awaitingApproval === true;
+        this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
+          subagentId: this.subagentId,
+          round: currentRound,
+          callId,
+          ...(waitingForExternalInput ? { waitingForExternalInput: true } : {}),
+          ...(awaitingApproval ? { awaitingApproval: true } : {}),
+          timestamp: Date.now(),
+        } as AgentToolProgressEvent);
+        // Keep Shell liveness heartbeats out of the live output view.
         if (isShellProgressData(outputChunk)) {
           return;
         }
@@ -2131,6 +2190,41 @@ export class AgentCore {
         resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
+        for (const call of calls) {
+          if (
+            call.status === 'success' ||
+            call.status === 'error' ||
+            call.status === 'cancelled'
+          ) {
+            this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
+              subagentId: this.subagentId,
+              round: currentRound,
+              callId: call.request.callId,
+              settled: true,
+              timestamp: Date.now(),
+            } as AgentToolProgressEvent);
+          }
+        }
+        const started = calls.filter(
+          (call) =>
+            call.status === 'executing' &&
+            !executingToolCallIds.has(call.request.callId),
+        );
+        executingToolCallIds.clear();
+        for (const call of calls) {
+          if (call.status === 'executing') {
+            executingToolCallIds.add(call.request.callId);
+          }
+        }
+        for (const call of started) {
+          this.eventEmitter?.emit(AgentEventType.TOOL_PROGRESS, {
+            subagentId: this.subagentId,
+            round: currentRound,
+            callId: call.request.callId,
+            timestamp: Date.now(),
+          } as AgentToolProgressEvent);
+        }
+
         const awaitingByCallId = new Map(
           calls
             .filter(

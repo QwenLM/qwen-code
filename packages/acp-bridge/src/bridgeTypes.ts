@@ -2652,13 +2652,10 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   readonly sessionCount: number;
 
   /**
-   * Whether an ACP channel is currently live (spawned and not dying).
-   * Distinct from `sessionCount > 0`: a channel can be live with zero
-   * attached sessions during the cold-spawn window, and conversely a
-   * killed channel may briefly retain sessions before reaping. Consumers
-   * that need true channel liveness (e.g. the workspace service's
-   * `acpChannelLive` envelope field) must use this rather than the
-   * session count.
+   * Whether an ACP channel is active and can accept fresh workspace work.
+   * Distinct from `sessionCount > 0`: a channel can be active with zero
+   * attached sessions during the cold-spawn window, while a draining
+   * generation still owns existing sessions but cannot accept new work.
    */
   isChannelLive(): boolean;
 
@@ -2676,6 +2673,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     request: BridgeRuntimeStopRequest,
     timeoutMs?: number,
   ): Promise<BridgeRuntimeStopResult>;
+
+  /**
+   * Stop admitting fresh work to the generation that owns `sessionId` and
+   * prepare a replacement without moving existing Sessions between children.
+   */
+  requestRuntimeRecycle?(sessionId: string): Promise<void>;
 
   getIdleChannelCandidate?(): BridgeIdleChannelCandidate | undefined;
   reclaimIdleChannel?(

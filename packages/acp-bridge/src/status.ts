@@ -191,6 +191,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionLiveConversation: 'qwen/control/session/live-conversation',
   sessionLiveTranscript: 'qwen/control/session/live-transcript',
   sessionBackgroundNotification: 'qwen/control/session/background_notification',
+  /** Private child→daemon request for an abort-ignoring background Agent. */
+  sessionRuntimeRecycle: 'qwen/control/session/runtime/recycle',
   sessionArtifactsPersist: 'qwen/control/session/artifacts/persist',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',

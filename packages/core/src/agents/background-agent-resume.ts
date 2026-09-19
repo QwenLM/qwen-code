@@ -19,6 +19,10 @@ import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import type { SubagentExecutor } from './runtime/subagent-executor.js';
 import {
+  attachAgentProgressWatchdog,
+  getAgentProgressTimeout,
+} from './runtime/agent-progress-watchdog.js';
+import {
   buildAgentTranscriptAttach,
   getAgentJsonlPath,
   getAgentMetaPath,
@@ -1295,7 +1299,11 @@ export class BackgroundAgentResumeService {
               });
             }
 
-            const terminateMode = subagent.getTerminateMode();
+            const terminateMode = getAgentProgressTimeout(
+              turnAbortController.signal,
+            )
+              ? AgentTerminateMode.TIMEOUT
+              : subagent.getTerminateMode();
             const modelVisibleText = toModelVisibleSubagentResult(
               subagent.getFinalText(),
               terminateMode,
@@ -1308,6 +1316,7 @@ export class BackgroundAgentResumeService {
               stopHookWarning,
             );
             const stats = getCompletionStats(subagent, liveToolCallCount);
+            if (registry.get(meta.agentId)?.retainsPhysicalSlot) break;
             if (terminateMode === AgentTerminateMode.GOAL) {
               const pending = registry.drainMessages(meta.agentId);
               if (pending.length > 0) {
@@ -1335,7 +1344,10 @@ export class BackgroundAgentResumeService {
                   : {}),
               });
               registry.complete(meta.agentId, finalText, stats);
-            } else if (terminateMode === AgentTerminateMode.CANCELLED) {
+            } else if (
+              terminateMode === AgentTerminateMode.CANCELLED ||
+              registry.get(meta.agentId)?.status === 'cancelled'
+            ) {
               registry.finalizeCancelled(meta.agentId, finalText, stats);
               persistBackgroundCancellation(
                 metaPath,
@@ -1364,12 +1376,21 @@ export class BackgroundAgentResumeService {
             break;
           }
         } catch (error) {
+          const progressTimeout = getAgentProgressTimeout(
+            turnAbortController.signal,
+          );
           const errorMessage =
-            error instanceof Error ? error.message : String(error);
+            progressTimeout?.message ??
+            (error instanceof Error ? error.message : String(error));
           debugLogger.error(
             `[BackgroundAgentResume] Background agent failed: ${errorMessage}`,
           );
-          if (turnAbortController.signal.aborted) {
+          if (registry.get(meta.agentId)?.retainsPhysicalSlot) return;
+          if (
+            turnAbortController.signal.aborted &&
+            (!progressTimeout ||
+              registry.get(meta.agentId)?.status === 'cancelled')
+          ) {
             const stats = getCompletionStats(subagent, liveToolCallCount);
             registry.finalizeCancelled(meta.agentId, errorMessage, stats);
             persistBackgroundCancellation(
@@ -1409,6 +1430,12 @@ export class BackgroundAgentResumeService {
         turnAbortController: AbortController,
         fireStartHook: boolean,
       ) => {
+        const disposeWatchdog = attachAgentProgressWatchdog(
+          bgEmitter,
+          turnAbortController,
+          () => monitorRegistry.hasRunningForOwner(meta.agentId),
+          (error) => registry.failUnresponsive(meta.agentId, error.message),
+        );
         // Restore the persisted launch depth so a resumed nested agent keeps
         // its original nesting level (and spawn eligibility) instead of
         // recomputing to depth 0 from this top-level resume frame.
@@ -1420,9 +1447,14 @@ export class BackgroundAgentResumeService {
           );
         const invocationRunBody = () =>
           runWithInvocationContext(undefined, framedRunBody);
-        return target.isFork
-          ? runInForkContext(invocationRunBody)
-          : invocationRunBody();
+        return (
+          target.isFork
+            ? runInForkContext(invocationRunBody)
+            : invocationRunBody()
+        ).finally(() => {
+          disposeWatchdog();
+          registry.releaseRetainedPhysicalSlot(meta.agentId);
+        });
       };
 
       const reportUnexpectedBackgroundError = (error: unknown) => {

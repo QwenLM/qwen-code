@@ -281,8 +281,18 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
     // would either hang or land the caller with a sessionId that
     // immediately 404s on every follow-up.
+    //
+    // Also skip one condemned to retire once its sessions drain: that
+    // channel is being recycled precisely because it is no longer fit to
+    // serve, so handing it fresh work would keep it alive and defeat the
+    // recycle. Spawning here is what gives the daemon the replacement
+    // generation fresh work moves onto while the condemned one drains.
     cancelIdleTimer();
-    if (channelLifecycle.current && !channelLifecycle.current.isDying)
+    if (
+      channelLifecycle.current &&
+      !channelLifecycle.current.isDying &&
+      !channelLifecycle.current.retireWhenSessionsDrain
+    )
       return channelLifecycle.current;
     if (channelLifecycle.starting) return await channelLifecycle.starting;
 
@@ -471,5 +481,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         'bridge shutdown',
       );
     },
+    // Get-or-create the channel fresh work is admitted onto. Exposed for the
+    // runtime recycle, which needs the replacement generation to exist before
+    // the condemned one drains.
+    ensureChannel,
   };
 }

@@ -25,6 +25,7 @@ import {
   AcpChildCapacityExceededError,
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
+  BridgeRuntimeRecyclingError,
   BridgeTimeoutError,
   CancelSentinelCollisionError,
   CdWhilePromptActiveError,
@@ -377,6 +378,16 @@ export function sendBridgeError(
       retryable: true,
       reason: err.reason,
       retryAfterSeconds: err.retryAfterSeconds,
+    });
+    return;
+  }
+  if (err instanceof BridgeRuntimeRecyclingError) {
+    recordExpectedBridgeError(err, ctx, daemonLog);
+    res.status(503).json({
+      error: err.message,
+      code: err.code,
+      errorKind: err.code,
+      retryable: true,
     });
     return;
   }

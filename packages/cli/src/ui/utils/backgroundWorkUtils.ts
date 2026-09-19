@@ -75,12 +75,12 @@ export interface BlockingBackgroundWork {
 /**
  * Enumerates the entries that make `hasBlockingBackgroundWork()` true,
  * mirroring its per-registry predicate exactly (background agents:
- * `isBackgrounded` + `running`; monitors: `running`; shells: `running`;
- * workflow runs: `running` or `pausing`, plus the reserved-but-
- * unregistered runs `hasRunningEntries()` counts via `starting`). Returns `undefined`
- * when nothing is enumerated — e.g. an entry settled between the gate check
- * and this call — so callers fall back to their base message instead of
- * rendering an empty list.
+ * `isBackgrounded` + `running` or a retained physical slot; monitors:
+ * `running`; shells: `running`; workflow runs: `running` or `pausing`, plus
+ * the reserved-but-unregistered runs `hasRunningEntries()` counts via
+ * `starting`). Returns `undefined` when nothing is enumerated — e.g. an entry
+ * settled between the gate check and this call — so callers fall back to their
+ * base message instead of rendering an empty list.
  */
 export function describeBlockingBackgroundWork(
   config: Config,
@@ -96,11 +96,16 @@ export function describeBlockingBackgroundWork(
   }> = [];
 
   for (const entry of config.getBackgroundTaskRegistry().getAll()) {
-    if (!entry.isBackgrounded || entry.status !== 'running') continue;
+    if (
+      !entry.isBackgrounded ||
+      (entry.status !== 'running' && !entry.retainsPhysicalSlot)
+    )
+      continue;
+    const label = buildBackgroundEntryLabel(entry);
     entries.push({
       startTime: entry.startTime,
       id: entry.agentId,
-      label: buildBackgroundEntryLabel(entry),
+      label: entry.retainsPhysicalSlot ? `${label} — still stopping` : label,
       status: entry.status,
       isWorkflowRun: false,
     });

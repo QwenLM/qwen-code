@@ -39,6 +39,10 @@ import {
 import type { SubagentExecutor } from '../../agents/runtime/subagent-executor.js';
 import { resolveAgentExecutionBackend } from '../../subagents/execution-backend.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
+import {
+  attachAgentProgressWatchdog,
+  getAgentProgressTimeout,
+} from '../../agents/runtime/agent-progress-watchdog.js';
 import type { Content } from '@google/genai';
 import {
   FORK_AGENT,
@@ -95,6 +99,7 @@ import type {
   AgentFinishEvent,
   AgentErrorEvent,
   AgentApprovalRequestEvent,
+  AgentRoundEvent,
   AgentUsageEvent,
 } from '../../agents/runtime/agent-events.js';
 import {
@@ -1516,9 +1521,42 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): void {
     let pendingConfirmationCallId: string | undefined;
     const preserveProtocolPayloads = !this.config.isInteractive();
+    const waitingForApproval = () =>
+      this.currentToolCalls!.some(
+        (call) => call.status === 'awaiting_approval',
+      ) && !this.currentToolCalls!.some((call) => call.status === 'executing');
 
     eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
+    });
+
+    let lastForwardedProgressAt = 0;
+    const forwardProgress = () => {
+      const now = Date.now();
+      if (now - lastForwardedProgressAt < 1_000) return;
+      lastForwardedProgressAt = now;
+      this.updateDisplay({}, updateOutput);
+    };
+    eventEmitter.on(AgentEventType.STREAM_TEXT, forwardProgress);
+    eventEmitter.on(AgentEventType.MODEL_RETRY, forwardProgress);
+    eventEmitter.on(AgentEventType.TOOL_PROGRESS, forwardProgress);
+
+    eventEmitter.on(AgentEventType.ROUND_END, (...args: unknown[]) => {
+      const event = args[0] as AgentRoundEvent;
+      if (event.waitingForExternalInput) {
+        this.updateDisplay({ waitingForExternalInput: true }, updateOutput);
+      }
+    });
+    eventEmitter.on(AgentEventType.ROUND_START, () => {
+      if (
+        this.currentDisplay?.waitingForExternalInput ||
+        this.currentDisplay?.awaitingApproval
+      ) {
+        this.updateDisplay(
+          { waitingForExternalInput: undefined, awaitingApproval: undefined },
+          updateOutput,
+        );
+      }
     });
 
     eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
@@ -1590,6 +1628,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.updateDisplay(
           {
             toolCalls: [...this.currentToolCalls!],
+            awaitingApproval: waitingForApproval() ? true : undefined,
             ...clearPending,
           },
           updateOutput,
@@ -1695,12 +1734,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 {
                   toolCalls: [...this.currentToolCalls!],
                   pendingConfirmation: undefined,
+                  waitingForExternalInput: undefined,
+                  awaitingApproval: undefined,
                 },
                 updateOutput,
               );
             } else {
               this.updateDisplay(
-                { pendingConfirmation: undefined },
+                {
+                  pendingConfirmation: undefined,
+                  waitingForExternalInput: undefined,
+                  awaitingApproval: undefined,
+                },
                 updateOutput,
               );
             }
@@ -1713,6 +1758,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           {
             toolCalls: [...this.currentToolCalls!],
             pendingConfirmation: details,
+            awaitingApproval: waitingForApproval() ? true : undefined,
           },
           updateOutput,
         );
@@ -3789,14 +3835,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // the parent model (and the UI) don't treat incomplete runs as
               // completed.
               //
-              const terminateMode = bgSubagent.getTerminateMode();
+              const progressTimeout = getAgentProgressTimeout(
+                turnAbortController.signal,
+              );
+              const terminateMode = progressTimeout
+                ? AgentTerminateMode.TIMEOUT
+                : bgSubagent.getTerminateMode();
               const subagentRawText = bgSubagent.getFinalText();
               const hadWorktreeIsolation = worktreeIsolation !== null;
               const recordTerminalOutcome = () =>
                 recordSpanOutcome(
                   deriveSubagentOutcomeMetadata({
                     terminateMode,
-                    signalAborted: turnAbortController.signal.aborted,
+                    signalAborted:
+                      turnAbortController.signal.aborted && !progressTimeout,
                     resultSummaryPresent: Boolean(
                       subagentRawText && subagentRawText.length > 0,
                     ),
@@ -3866,6 +3918,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 recordTerminalOutcome();
               }
 
+              if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) break;
+
               if (terminateMode === AgentTerminateMode.GOAL) {
                 keepResident =
                   residentRegistered && !needsAutoPermissionLease();
@@ -3894,7 +3948,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 );
               } else if (
                 terminateMode === AgentTerminateMode.CANCELLED ||
-                terminateMode === AgentTerminateMode.SHUTDOWN
+                terminateMode === AgentTerminateMode.SHUTDOWN ||
+                registry.get(hookOpts.agentId)?.status === 'cancelled'
               ) {
                 // SHUTDOWN is grouped with CANCELLED in the span taxonomy
                 // (deriveSubagentOutcomeMetadata); align the registry side
@@ -3943,15 +3998,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // so release keepResident here to let the finally block dispose the
             // runtime instead of leaking a zombie resident.
             keepResident = false;
+            const progressTimeout = getAgentProgressTimeout(
+              turnAbortController.signal,
+            );
             // Publish first — same reason as the success path.
             recordSpanOutcome(
-              deriveSubagentExceptionMetadata(
-                error,
-                turnAbortController.signal.aborted,
-              ),
+              progressTimeout
+                ? deriveSubagentOutcomeMetadata({
+                    terminateMode: AgentTerminateMode.TIMEOUT,
+                    signalAborted: false,
+                    resultSummaryPresent: false,
+                  })
+                : deriveSubagentExceptionMetadata(
+                    error,
+                    turnAbortController.signal.aborted,
+                  ),
             );
             const baseErrorMsg =
-              error instanceof Error ? error.message : String(error);
+              progressTimeout?.message ??
+              (error instanceof Error ? error.message : String(error));
             debugLogger.error(
               `[Agent] Background agent failed: ${baseErrorMsg}`,
             );
@@ -3972,10 +4037,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
             const errorMsg = baseErrorMsg + wtSuffix;
 
+            if (registry.get(hookOpts.agentId)?.retainsPhysicalSlot) return;
+
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
-            if (turnAbortController.signal.aborted) {
+            if (
+              turnAbortController.signal.aborted &&
+              (!progressTimeout ||
+                registry.get(hookOpts.agentId)?.status === 'cancelled')
+            ) {
               const completionStats = getCompletionStats();
               registry.finalizeCancelled(
                 hookOpts.agentId,
@@ -4022,6 +4093,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           turnAbortController: AbortController,
           fireStartHook: boolean,
         ) => {
+          const disposeWatchdog = attachAgentProgressWatchdog(
+            bgEmitter,
+            turnAbortController,
+            () =>
+              this.config
+                .getMonitorRegistry()
+                .hasRunningForOwner(hookOpts.agentId),
+            (error) =>
+              registry.failUnresponsive(hookOpts.agentId, error.message),
+          );
           const framedBgBody = () =>
             this.runWithSubagentSpan(
               this.buildSubagentSpanSpec(
@@ -4043,7 +4124,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   launchDepth,
                 ),
             );
-          return isFork ? runInForkContext(framedBgBody) : framedBgBody();
+          return (
+            isFork ? runInForkContext(framedBgBody) : framedBgBody()
+          ).finally(() => {
+            disposeWatchdog();
+            registry.releaseRetainedPhysicalSlot(hookOpts.agentId);
+          });
         };
 
         const reportUnexpectedBackgroundError = (err: unknown) => {

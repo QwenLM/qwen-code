@@ -283,6 +283,14 @@ export interface CompressOptions {
   trigger?: CompactTrigger;
   signal?: AbortSignal;
   /**
+   * Reports each retry backoff (delay in ms) from the compression side
+   * queries to the caller. Threaded down from the send options so a
+   * background agent's watchdog can extend its model deadline while
+   * compression waits out provider-directed backoff. Reporting only —
+   * the side queries keep their `maxAttempts: 1` best-effort budget.
+   */
+  onRetry?: (delayMs: number) => void;
+  /**
    * Pending user message about to be sent. When present, the cheap-gate
    * adds its estimated token count to `originalTokenCount` (which reflects
    * only the prior turn's API usage) so the gate sees the real prompt size.
@@ -774,6 +782,7 @@ export class ChatCompressionService {
         },
         abortSignal,
         promptId,
+        ...(opts.onRetry !== undefined && { onRetry: opts.onRetry }),
       });
     };
 
@@ -883,6 +892,7 @@ export class ChatCompressionService {
           stream: true,
           maxAttempts: 1,
           promptCacheSharing: true,
+          ...(opts.onRetry !== undefined && { onRetry: opts.onRetry }),
         });
         if (!sharedResult.hadToolCall && hasStateSnapshot(sharedResult.text)) {
           summaryResult = sharedResult;

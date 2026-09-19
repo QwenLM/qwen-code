@@ -6341,6 +6341,7 @@ export const useLlmStream = (
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
     registry.setNotificationCallback((displayText, modelText, meta) => {
+      if (meta?.recordOnly) return;
       admitNotification({
         displayText,
         modelText,

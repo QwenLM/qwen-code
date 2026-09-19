@@ -3384,6 +3384,58 @@ export function createSessionControlPlane(
   }
 
   /**
+   * Whether a channel still counts as a fresh-work target.
+   *
+   * A channel condemned to retire once its sessions drain is closed to new
+   * work by definition: every session installed on it pins it open, so a
+   * hand-off that admits fresh work onto the condemned generation can never
+   * complete. Fresh work goes to the replacement `ensureChannel()` spawns.
+   */
+  function channelClosedToFreshWork(channel: HarnessChannel): boolean {
+    return channel.isDying || channel.retireWhenSessionsDrain;
+  }
+
+  /**
+   * Condemn the generation that owns `sessionId` and prepare the replacement
+   * that fresh work moves onto.
+   *
+   * The caller is the Agent watchdog: a background run ignored its cooperative
+   * abort, so the only thing left that can release it is its child dying.
+   * Existing sessions stay pinned to the condemned channel until they drain —
+   * retiring it first is what stops it taking new work — while
+   * `ensureChannel()` spawns the generation fresh admissions then use.
+   */
+  async function requestRuntimeRecycleForSession(
+    sessionId: string,
+  ): Promise<void> {
+    const entry = byId.get(sessionId);
+    if (!entry) throw new SessionNotFoundError(sessionId);
+    const owner = channelInfoForEntry(entry);
+    if (!owner || owner.harness.isDying) {
+      throw new SessionNotFoundError(sessionId);
+    }
+    // `retireWhenSessionsDrain` is sticky and shared by every condemnor of
+    // this channel. Capture it so the rollback below clears only the
+    // condemnation this recycle set, never someone else's.
+    const wasReapPending = owner.harness.retireWhenSessionsDrain;
+    await harness.retireChannelAfterSessionsDrain(
+      owner.harness,
+      `runtime recycle requested by session ${JSON.stringify(sessionId)}`,
+    );
+    if (owner.harness.isDying) return;
+    try {
+      await harness.ensureChannel();
+    } catch (error) {
+      // A condemned owner with no replacement would strand the workspace:
+      // the draining channel never empties while the unresponsive session is
+      // still attached, so nothing would take fresh work. Roll the
+      // condemnation back and let the failure surface to the caller.
+      if (!wasReapPending) owner.harness.retireWhenSessionsDrain = false;
+      throw error;
+    }
+  }
+
+  /**
    * Whether a conditional close on this channel has to ask the child at all.
    *
    * The mirror of `confirmChildUnheld`'s two authorize-locally short-circuits:
@@ -4095,6 +4147,9 @@ export function createSessionControlPlane(
       // nothing else would settle what its last drain missed.
       settleMidTurnQueueAfterAutomaticTurn,
       opts.onCreateCurrentSessionScheduledTask,
+      // Owner-scoped runtime recycle: the child asks the daemon to condemn
+      // its own generation (Agent watchdog: a run that ignored its abort).
+      requestRuntimeRecycleForSession,
       async (sessionId, turn, afterPromptId) => {
         const entry = byId.get(sessionId);
         if (
@@ -4583,7 +4638,7 @@ export function createSessionControlPlane(
         harness.ensure,
       ),
     );
-    if (ci.harness.isDying) {
+    if (channelClosedToFreshWork(ci.harness)) {
       throw new BridgeChannelClosedError('before newSession');
     }
     ci.sessionSpawnsInFlight++;
@@ -4761,7 +4816,7 @@ export function createSessionControlPlane(
       // lifecycle marker before installing a session from a response that was
       // admitted immediately ahead of the fatal frame.
       await Promise.resolve();
-      if (ci.harness.isDying) {
+      if (channelClosedToFreshWork(ci.harness)) {
         throw new BridgeChannelClosedError('after newSession');
       }
 
@@ -7704,7 +7759,7 @@ export function createSessionControlPlane(
     const promise = (async (): Promise<BridgeRestoredSession> => {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       const restoreChannel = getChannelInfo(await harness.ensure());
-      if (restoreChannel.harness.isDying) {
+      if (channelClosedToFreshWork(restoreChannel.harness)) {
         throw new BridgeChannelClosedError(`before session/${action}`);
       }
       ci = restoreChannel;
@@ -7952,7 +8007,7 @@ export function createSessionControlPlane(
         restoreEvents.close();
         throw new Error('AcpSessionBridge is shutting down');
       }
-      if (ci.harness.isDying || !harness.has(ci.harness)) {
+      if (channelClosedToFreshWork(ci.harness) || !harness.has(ci.harness)) {
         restoreEvents.close();
         throw new Error(
           `Session ${req.sessionId} restored on a closed agent channel`,
@@ -14852,6 +14907,8 @@ export function createSessionControlPlane(
     },
 
     preheat: harness.preheat,
+
+    requestRuntimeRecycle: requestRuntimeRecycleForSession,
   };
 
   sendTrackedPrompt.fn = bridgeApi.sendPrompt.bind(bridgeApi);

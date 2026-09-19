@@ -1516,6 +1516,7 @@ export interface BackgroundNotificationQueueItem {
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
   continuesTodoStopGuardWorkChain: boolean;
   persisted?: true;
+  recordOnly?: true;
   turn?: BackgroundNotificationTurn;
   admissionRetries?: number;
 }
@@ -10379,15 +10380,13 @@ export class Session implements SessionContext {
           (entry
             ? buildBackgroundEntryLabel(entry, { includePrefix: false })
             : undefined);
-        this.#enqueueBackgroundNotification({
+        const item: BackgroundNotificationQueueItem = {
           displayText,
           modelText,
           taskId: meta.agentId,
           sourceTurnId: meta.sourceTurnId,
           status: meta.status,
           kind: 'agent',
-          continuesTodoStopGuardWorkChain:
-            this.#agentContinuesTodoStopGuardWorkChain(meta.agentId),
           toolUseId: meta.toolUseId,
           todoWorkChainId: meta.todoWorkChainId,
           label: label ? truncateNotificationLabel(label) : undefined,
@@ -10398,6 +10397,15 @@ export class Session implements SessionContext {
                 ),
               }
             : undefined,
+        };
+        if (meta.recordOnly) {
+          void this.#recordUnresponsiveAgentNotification(item);
+          return;
+        }
+        this.#enqueueBackgroundNotification({
+          ...item,
+          continuesTodoStopGuardWorkChain:
+            this.#agentContinuesTodoStopGuardWorkChain(meta.agentId),
         });
       },
     );
@@ -10621,6 +10629,48 @@ export class Session implements SessionContext {
     void this.#drainNotificationQueue();
   }
 
+  async #recordUnresponsiveAgentNotification(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<void> {
+    this.activeNotificationAcceptances.add(item.taskId);
+    this.#activeWorkChanged();
+    try {
+      const accepted = await this.#persistDaemonBackgroundNotification(
+        item,
+        false,
+      );
+      if (!this.disposed && !this.closing) {
+        this.#enqueueBackgroundNotification({
+          ...item,
+          continuesTodoStopGuardWorkChain:
+            this.#agentContinuesTodoStopGuardWorkChain(item.taskId),
+          ...(accepted ? { persisted: true } : {}),
+          recordOnly: true,
+        });
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `Unresponsive Agent notification failed [session ${this.sessionId}, task ${item.taskId}]: ${this.#formatError(error)}`,
+      );
+    } finally {
+      try {
+        await this.client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.sessionRuntimeRecycle,
+          {
+            sessionId: this.sessionId,
+            reason: 'unresponsive_agent',
+          },
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Unresponsive Agent runtime recycle failed [session ${this.sessionId}, task ${item.taskId}]: ${this.#formatError(error)}`,
+        );
+      }
+      this.activeNotificationAcceptances.delete(item.taskId);
+      this.#activeWorkChanged();
+    }
+  }
+
   async enqueueBackgroundNotification(
     item: BackgroundNotificationQueueItem,
   ): Promise<{ accepted: boolean }> {
@@ -10653,6 +10703,7 @@ export class Session implements SessionContext {
 
   async #persistDaemonBackgroundNotification(
     item: BackgroundNotificationQueueItem,
+    enqueue = true,
   ): Promise<boolean> {
     if (this.disposed || this.closing) return false;
     const recording = this.config.getChatRecordingService();
@@ -10678,7 +10729,7 @@ export class Session implements SessionContext {
     }
 
     this.persistedBackgroundNotificationTaskIds.add(item.taskId);
-    if (!this.disposed && !this.closing) {
+    if (enqueue && !this.disposed && !this.closing) {
       this.#enqueueBackgroundNotification({
         ...item,
         continuesTodoStopGuardWorkChain:
@@ -10875,6 +10926,20 @@ export class Session implements SessionContext {
         this.currentNotificationWorkChainId = item.todoWorkChainId;
         this.#activeWorkChanged();
         try {
+          if (item.recordOnly) {
+            try {
+              await this.#emitBackgroundNotificationDisplay(item).catch(
+                (error) => {
+                  debugLogger.warn(
+                    `Unresponsive Agent notification display failed [session ${this.sessionId}, task ${item.taskId}]: ${this.#formatError(error)}`,
+                  );
+                },
+              );
+            } finally {
+              await this.#emitBackgroundNotificationEndTurn('end_turn');
+            }
+            continue;
+          }
           // A notification fires from async resources created inside the
           // turn that spawned the task, so a Goal permit can reach here by
           // lineage after that turn is long over. This is not a Goal turn:
@@ -11514,6 +11579,10 @@ export class Session implements SessionContext {
 
   async #emitBackgroundNotificationEndTurn(
     reason: PromptResponse['stopReason'],
+    // Omitted by the record-only path, which displays a terminal notification
+    // without running a model turn. There is no background turn to close, so
+    // the bridge settles it as a bare `background_notification_turn_complete`;
+    // a turnId would name no live turn and be dropped.
     turnId?: string,
   ): Promise<void> {
     try {

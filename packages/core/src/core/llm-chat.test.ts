@@ -5880,6 +5880,130 @@ describe('LlmChat', async () => {
       expect(coldSpy).toHaveBeenCalledTimes(1);
     });
 
+    it('threads the send onRetry through compression side queries (R6-6)', async () => {
+      // Reviewer R6-6: the context-compression side query runs inside the
+      // same awaited sendMessageStream, so its retry backoff must reach the
+      // send's onRetry (the background-agent watchdog extends its model
+      // deadline from it) instead of stopping at logApiRetry. Full chain:
+      //   sendMessageStream(options.onRetry) → tryCompress →
+      //   service.compress (REAL) → cache-sharing generateText (stubbed,
+      //   reports one retry) → send onRetry invoked with that delay.
+      const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
+      const inheritedHistory: Content[] = [
+        { role: 'user', parts: [{ text: largeChars }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+        { role: 'user', parts: [{ text: 'follow up' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      chat.setHistory(inheritedHistory);
+      chat.setLastPromptTokenCount(172_000);
+
+      const REPORTED_DELAY_MS = 45_000;
+      const generateText = vi
+        .fn()
+        .mockImplementation(async (opts: { onRetry?: (d: number) => void }) => {
+          // Simulates retryWithBackoff inside generateText reporting one
+          // provider-directed backoff before the call succeeds.
+          opts.onRetry?.(REPORTED_DELAY_MS);
+          return {
+            text: '<state_snapshot>compressed</state_snapshot>',
+            usage: {
+              promptTokenCount: 99_000,
+              candidatesTokenCount: 1500,
+              totalTokenCount: 100_500,
+            },
+          };
+        });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('done'),
+      );
+
+      const sendOnRetry = vi.fn();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'follow-up after restore' },
+        'prompt-r6-6',
+        undefined,
+        { onRetry: sendOnRetry },
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const compressed = events.find(
+        (e) => e.type === StreamEventType.COMPRESSED,
+      );
+      expect(compressed).toBeDefined();
+      expect(generateText).toHaveBeenCalled();
+      // The retry delay reported by the compression side query reached the
+      // send-level onRetry; deleting any forwarding hop turns this red.
+      expect(sendOnRetry).toHaveBeenCalledWith(REPORTED_DELAY_MS);
+    });
+
+    it('threads the send onRetry through the cold compression side query (R6-6)', async () => {
+      // Companion on the cold path (no provider token-count anchor, so the
+      // service skips cache sharing and runs runSideQuery): the same send
+      // onRetry must ride the runSideQuery options down to generateText.
+      const largeChars = 'x'.repeat(688_000); // ~172K estimated tokens
+      const inheritedHistory: Content[] = [
+        { role: 'user', parts: [{ text: largeChars }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+        { role: 'user', parts: [{ text: 'follow up' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      chat.setHistory(inheritedHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      const REPORTED_DELAY_MS = 30_000;
+      const coldSpy = vi
+        .spyOn(sideQueryModule, 'runSideQuery')
+        .mockImplementation(async (_config, opts) => {
+          (opts as { onRetry?: (d: number) => void }).onRetry?.(
+            REPORTED_DELAY_MS,
+          );
+          return {
+            text: '<state_snapshot>compressed</state_snapshot>',
+            usage: {
+              promptTokenCount: 99_000,
+              candidatesTokenCount: 1500,
+              totalTokenCount: 100_500,
+            },
+          } as never;
+        });
+      const generateText = vi.fn();
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('done'),
+      );
+
+      const sendOnRetry = vi.fn();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'follow-up after restore' },
+        'prompt-r6-6-cold',
+        undefined,
+        { onRetry: sendOnRetry },
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const compressed = events.find(
+        (e) => e.type === StreamEventType.COMPRESSED,
+      );
+      expect(compressed).toBeDefined();
+      expect(coldSpy).toHaveBeenCalledTimes(1);
+      expect(generateText).not.toHaveBeenCalled();
+      expect(sendOnRetry).toHaveBeenCalledWith(REPORTED_DELAY_MS);
+    });
+
     it('clears consecutiveFailures after a forced successful compression', async () => {
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
