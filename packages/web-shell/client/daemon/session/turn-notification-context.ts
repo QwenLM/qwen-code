@@ -10,7 +10,10 @@ import {
   MAX_NOTIFICATION_SOURCE_LENGTH,
   notificationTextLines,
 } from '../../notification-text.js';
-import { splitInsightSegments } from '../../adapters/transcriptToMessages.js';
+import {
+  assistantBlockRendersAsSystemNotice,
+  splitInsightSegments,
+} from '../../adapters/transcriptToMessages.js';
 import type {
   DaemonConnectionState,
   DaemonProductSessionContext,
@@ -239,8 +242,11 @@ export function getTurnNotificationContent(
       block?.kind === 'assistant' &&
       block.promptId === promptId &&
       block.parentToolCallId === undefined &&
-      block.meta?.source !== 'background_notification' &&
-      block.meta?.source !== 'vision_bridge_notice' &&
+      // A notice rendered as a `role: 'system'` row is not the turn's response,
+      // so the answer before it is. The adapter decides which those are: the
+      // compression notice carries `meta.source: 'slash_command'` and is
+      // recognised by its payload keys instead (#12141).
+      !assistantBlockRendersAsSystemNotice(block) &&
       block.text.trim()
     ) {
       const segments = splitInsightSegments(block.text);
