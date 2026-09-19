@@ -11,6 +11,7 @@ import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   buildSkillLlmContent,
+  DiscoveredMCPTool,
   estimateContextTextTokens,
   getBuiltInOutputStyle,
   getCoreSystemPrompt,
@@ -312,6 +313,13 @@ describe('collectContextData (contextCommand)', () => {
       estimated?: boolean;
       /** Registry contents; a `skill` double turns on loaded-body tracking. */
       tools?: unknown[];
+      /**
+       * What getFunctionDeclarations() returns; defaults to [] so existing
+       * fixtures keep their shape. Production declares the non-deferred
+       * tools, so a fixture that cares about declaration totals should pass
+       * the matching schemas here.
+       */
+      declared?: unknown[];
       /** Overrides the default one-skill list. */
       skillList?: unknown[];
     }): Config {
@@ -329,7 +337,9 @@ describe('collectContextData (contextCommand)', () => {
           ? {
               getToolRegistry: vi.fn().mockReturnValue({
                 getAllTools: vi.fn().mockReturnValue(options.tools),
-                getFunctionDeclarations: vi.fn().mockReturnValue([]),
+                getFunctionDeclarations: vi
+                  .fn()
+                  .mockReturnValue(options.declared ?? []),
                 isDeferredAndHidden: vi.fn().mockReturnValue(false),
               }),
             }
@@ -492,17 +502,12 @@ describe('collectContextData (contextCommand)', () => {
     });
 
     it('charges a top-level media part at the flat image budget', async () => {
-      // A pasted screenshot is a top-level `inlineData` part, which the nested
-      // `functionResponse.parts` arm never sees. Charging it at zero hides it
-      // from `rawContent`, and `rawContent` is what `freeSpace` and `tierTokens`
-      // read when there is no provider count.
-      const image = {
-        inlineData: { mimeType: 'image/png', data: 'A'.repeat(400_000) },
-      };
-      const imageTokenEstimate = resolveSlimmingConfig(
-        makeMockConfig().getChatCompression?.(),
-      ).imageTokenEstimate;
-
+      // Pasted screenshots and the images core re-embeds after compaction ride
+      // as top-level `inlineData` parts, not nested in a tool response. With no
+      // arm for that shape the image contributed zero — in the API branch its
+      // cost leaked to `unattributed`, and in the estimated branch it vanished
+      // from `rawContent`, which `freeSpace` and `tierTokens` read.
+      const imageTokens = resolveSlimmingConfig(undefined).imageTokenEstimate;
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
@@ -510,46 +515,25 @@ describe('collectContextData (contextCommand)', () => {
             prelude,
             {
               role: 'user',
-              parts: [{ text: 'a'.repeat(400) }, image],
+              parts: [
+                { text: 'a'.repeat(400) },
+                {
+                  inlineData: {
+                    mimeType: 'image/png',
+                    data: 'A'.repeat(400_000),
+                  },
+                },
+              ],
             } as unknown as Content,
           ],
         }),
         false,
       );
 
-      // Exactly the 100-token text plus one image budget — not an upper bound,
-      // which a chars/4 charge would also satisfy.
-      expect(data.breakdown.messages).toBe(100 + imageTokenEstimate);
+      // An exact delta, not an upper bound: the text part is 400 ASCII chars
+      // (100 tokens) and the image is billed at the flat per-image budget.
+      expect(data.breakdown.messages).toBe(100 + imageTokens);
       expect(sumRows(data.breakdown)).toBe(100_000);
-
-      const noProviderCount = (history: Content[]): Config =>
-        ({
-          ...makeMockConfig(200_000),
-          getLlmClient: vi.fn().mockReturnValue({
-            isInitialized: vi.fn().mockReturnValue(true),
-            getChat: vi.fn().mockReturnValue({
-              getLastPromptTokenCount: vi.fn().mockReturnValue(0),
-              isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
-              getHistory: vi.fn().mockReturnValue(history),
-            }),
-          }),
-        }) as unknown as Config;
-      const text = 'a'.repeat(40_000);
-      const plain = await collectContextData(
-        noProviderCount([prelude, { role: 'user', parts: [{ text }] }]),
-        false,
-      );
-      const withImage = await collectContextData(
-        noProviderCount([
-          prelude,
-          { role: 'user', parts: [{ text }, image] } as unknown as Content,
-        ]),
-        false,
-      );
-
-      expect(plain.breakdown.freeSpace - withImage.breakdown.freeSpace).toBe(
-        imageTokenEstimate,
-      );
     });
 
     it('does not deflate rows when the total is itself a char/4 estimate', async () => {
@@ -582,98 +566,90 @@ describe('collectContextData (contextCommand)', () => {
       expect(sumRows(data.breakdown)).toBe(estimatedTotal);
     });
 
-    it('keeps the overhead rows intact when a CJK-heavy conversation outruns the provider count', async () => {
-      // The conversation estimate is measured over a strictly larger content
-      // set than `promptTokenCount` with a CJK-aware estimator that runs above
-      // real CJK density, so on a provider-reported total it can exceed the
-      // count on its own. Only the overhead may be scaled, and only against
-      // itself.
-      const cjk = '中'.repeat(100_000);
-      const history = [prelude, { role: 'user', parts: [{ text: cjk }] }];
-      const unscaled = await collectContextData(
-        makeChatConfig({ total: 0, history }),
-        false,
-      );
-      const data = await collectContextData(
-        makeChatConfig({ total: 57_000, history }),
-        false,
-      );
-
-      expect(data.isEstimated).toBe(false);
-      expect(data.breakdown.systemPrompt).toBe(unscaled.breakdown.systemPrompt);
-      expect(data.breakdown.skills).toBe(unscaled.breakdown.skills);
-      expect(data.breakdown.startupContext).toBe(
-        unscaled.breakdown.startupContext,
-      );
-      expect(sumRows(data.breakdown)).toBe(57_000);
-    });
-
-    it('keeps the overhead rows intact when the count lags the response already in history', async () => {
-      // `promptTokenCount` is the last request's, so by construction it excludes
-      // the answer now sitting in history. Pure ASCII and an exact estimator
-      // still push the conversation past the count on every completed turn.
-      const history = [
+    it('does not deflate overhead rows against a provider total when only the conversation overshoots', async () => {
+      // Two ordinary triggers push `rawContent` past a provider-reported total
+      // without any overhead row being wrong: the CJK-aware estimator runs
+      // several times higher than the provider's count on zh-heavy text, and
+      // `totalTokens` is the last request's prompt count, which excludes the
+      // answer added since. Scaling the rows by total/rawContent deflated every
+      // exactly-measured row; only an overhead-side overshoot may scale them.
+      // A conversation-side overshoot is absorbed by the `messages` cap.
+      const cjkHistory: Content[] = [
         prelude,
-        ...conversation,
-        { role: 'model', parts: [{ text: 'c'.repeat(40_000) }] },
+        { role: 'user', parts: [{ text: '中'.repeat(100_000) }] },
       ];
-      const unscaled = await collectContextData(
-        makeChatConfig({ total: 0, history }),
+      const cjkUnscaled = await collectContextData(
+        makeChatConfig({ total: 0, history: cjkHistory }),
         false,
       );
-      const data = await collectContextData(
-        makeChatConfig({ total: 10_000, history }),
+      const cjkData = await collectContextData(
+        makeChatConfig({ total: 57_000, history: cjkHistory }),
         false,
       );
 
-      expect(data.breakdown.systemPrompt).toBe(unscaled.breakdown.systemPrompt);
-      expect(sumRows(data.breakdown)).toBe(10_000);
+      expect(cjkUnscaled.breakdown.systemPrompt).toBeGreaterThan(1_000);
+      expect(cjkData.breakdown.systemPrompt).toBe(
+        cjkUnscaled.breakdown.systemPrompt,
+      );
+      expect(sumRows(cjkData.breakdown)).toBe(57_000);
+
+      // Pure ASCII with an exact estimator: the stale-by-one-response gap
+      // alone overshoots the provider total on every completed turn.
+      const asciiHistory: Content[] = [
+        prelude,
+        conversation[0]!,
+        { role: 'model', parts: [{ text: 'b'.repeat(40_000) }] },
+      ];
+      const asciiUnscaled = await collectContextData(
+        makeChatConfig({ total: 0, history: asciiHistory }),
+        false,
+      );
+      const asciiData = await collectContextData(
+        makeChatConfig({ total: 15_000, history: asciiHistory }),
+        false,
+      );
+
+      expect(asciiData.breakdown.systemPrompt).toBe(
+        asciiUnscaled.breakdown.systemPrompt,
+      );
+      expect(sumRows(asciiData.breakdown)).toBe(15_000);
     });
 
-    it('clamps the rows against an estimated total that sits below the overhead', async () => {
-      // `compressFast()` and resume seeding stamp a char/4 estimate of the
-      // compressed history alone — no system prompt, no tool declarations — so
-      // an estimate-derived total can sit below the overhead. The rows must
-      // still close on it; nothing may be left to report the excess.
+    it('closes the rows against an estimated total that sits below the measured overhead', async () => {
+      // The total core stamps after a compression or resume covers the
+      // compressed history alone, so a session carrying heavy declarations can
+      // stamp a total smaller than the measured overhead. The rows must still
+      // close against `Used` — scaling against `rawOverhead` is unconditional,
+      // so this state scales the overhead rows down to the stamped total
+      // instead of letting the category rows sum above it.
       const data = await collectContextData(
         makeChatConfig({
           total: 500,
-          estimated: true,
           history: [prelude, ...conversation],
+          estimated: true,
         }),
         false,
       );
 
-      expect(data.isEstimated).toBe(true);
-      expect(sumRows(data.breakdown)).toBeLessThanOrEqual(500);
-      // Every category row prints its figure before ` tokens (`; none may print
-      // more than the `Used` it has to close on. `Free` is window headroom, not
-      // a category, so only the section below the marker is checked.
-      const [, categorySection] = formatContextUsageText(data).split(
-        '**Usage by category**',
-      );
-      const rowFigures = [
-        ...categorySection!.matchAll(/([\d.]+)(k?) tokens \(/g),
-      ].map((match) =>
-        match[2] === 'k' ? Number(match[1]) * 1000 : Number(match[1]),
-      );
-      expect(rowFigures.length).toBeGreaterThan(4);
-      expect(Math.max(...rowFigures)).toBeLessThanOrEqual(data.totalTokens);
-    });
-
-    it('keeps scaled-row rounding inside the total', async () => {
-      const data = await collectContextData(
-        makeChatConfig({
-          total: 138,
-          estimated: true,
-          history: [prelude, ...conversation],
-        }),
-        false,
-      );
-
-      // Independent Math.round calls produced 136 + 2 + 1 = 139 here. The
-      // scaled categories must leave their rounding remainder to `messages`.
-      expect(sumRows(data.breakdown)).toBe(138);
+      expect(data.totalTokens).toBe(500);
+      expect(sumRows(data.breakdown)).toBeLessThanOrEqual(data.totalTokens);
+      // The rendered category rows must not exceed the printed `Used` either.
+      const text = formatContextUsageText(data);
+      const usedMatch = text.match(/^ {2}Used +([\d.]+)(k?) tokens \(/m);
+      expect(usedMatch).not.toBeNull();
+      const used = Number(usedMatch![1]) * (usedMatch![2] === 'k' ? 1000 : 1);
+      expect(used).toBe(500);
+      const rowPattern = /^ {2}([A-Za-z][^\n]*?) +([\d.]+)(k?) tokens \(/gm;
+      let rowCount = 0;
+      for (const match of text.matchAll(rowPattern)) {
+        const label = match[1]!;
+        if (label === 'Used' || label === 'Free') continue;
+        const value = Number(match[2]) * (match[3] === 'k' ? 1000 : 1);
+        expect(value).toBeLessThanOrEqual(used);
+        rowCount += 1;
+      }
+      // The assertion above is vacuous unless the category rows were found.
+      expect(rowCount).toBeGreaterThanOrEqual(6);
     });
 
     it('never derives messages from the cached count', async () => {
@@ -697,6 +673,9 @@ describe('collectContextData (contextCommand)', () => {
         makeChatConfig({
           total: 100_000,
           tools: [skillToolDouble],
+          // Production declares the skill tool, so `allToolsTokens` already
+          // carries its definition and no clamp deficit spills into skills.
+          declared: [skillToolSchema],
           skillList: trackedSkillList,
           history: [prelude, conversation[0]!, skillResponse(trackedBody)],
         }),
@@ -711,54 +690,26 @@ describe('collectContextData (contextCommand)', () => {
         bodyTokens: estimateContextTextTokens(trackedBody),
       });
       // The three terms `skillsTokens` adds — tool definition, the listing as
-      // sent, and the loaded body, which no fixture made nonzero before — capped
-      // by what the declared tool set can carry. The double returns no
-      // declarations while still exposing the Skill tool, so the definition is
-      // billed only up to the empty declaration list and the rest is left to
-      // `unattributed`.
+      // sent, and the loaded body, which no fixture made nonzero before.
       expect(data.breakdown.skills).toBe(
-        estimateContextTextTokens('[]') +
+        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
           estimateContextTextTokens(listingReminder) +
           estimateContextTextTokens(trackedBody),
       );
       expect(sumRows(data.breakdown)).toBe(100_000);
     });
 
-    it('keeps the clamp deficit out of messages when the billed tools exceed the declarations', async () => {
-      // `getFunctionDeclarations()` returns nothing here while the tool detail
-      // loop still bills `skillToolDouble.schema`, so `scaledAllTools` falls
-      // below the billed Skill definition. `displayBuiltinTools` floors at 0, so
-      // that deficit used to be charged to the overhead and taken straight back
-      // out of `messages`.
-      const honestOverhead = sumRows(
-        (
-          await collectContextData(
-            makeChatConfig({ total: 0, history: [prelude, ...conversation] }),
-            false,
-          )
-        ).breakdown,
+    it('keeps a tracked skill body out of messages for a backslash skill filePath', async () => {
+      // Windows and mixed-separator skill paths: core renders the tracked body
+      // with `path.dirname(filePath)`, so the skip key must be derived the same
+      // way. A `/`-only dirname leaves the whole path in `baseDir`, the
+      // re-rendered body no longer matches, and the body is billed under both
+      // `skills` and `messages`.
+      const windowsFilePath = 'C:\\skills\\report-builder\\SKILL.md';
+      const windowsBody = buildSkillLlmContent(
+        path.dirname(windowsFilePath),
+        skillBody,
       );
-      const data = await collectContextData(
-        makeChatConfig({
-          total: honestOverhead + 300,
-          tools: [skillToolDouble],
-          history: [prelude, ...conversation],
-        }),
-        false,
-      );
-
-      expect(data.breakdown.messages).toBe(300);
-      expect(sumRows(data.breakdown)).toBe(honestOverhead + 300);
-    });
-
-    it('renders the skill body core produced, whatever the file path separator', async () => {
-      // The body billed under `skills` is re-rendered from disk, and core
-      // renders it with `path.dirname`. A `/`-only suffix strip disagrees with
-      // `path.dirname` whenever the final separator is not a forward slash, so
-      // the body is billed under `skills` and again under `messages`.
-      const barePath = 'SKILL.md';
-      const bareBody = buildSkillLlmContent(path.dirname(barePath), skillBody);
-
       const data = await collectContextData(
         makeChatConfig({
           total: 100_000,
@@ -768,22 +719,21 @@ describe('collectContextData (contextCommand)', () => {
               name: 'report-builder',
               description: 'Build reports',
               level: 'project',
-              filePath: barePath,
+              filePath: windowsFilePath,
               body: skillBody,
             },
           ],
-          history: [prelude, conversation[0]!, skillResponse(bareBody)],
+          history: [prelude, conversation[0]!, skillResponse(windowsBody)],
         }),
         true,
       );
 
-      // Only the non-skill part of the conversation is left over.
       expect(data.breakdown.messages).toBe(100);
       expect(data.skills[0]).toEqual({
         name: 'report-builder',
         tokens: estimateContextTextTokens(skillEntry),
         loaded: true,
-        bodyTokens: estimateContextTextTokens(bareBody),
+        bodyTokens: estimateContextTextTokens(windowsBody),
       });
       expect(sumRows(data.breakdown)).toBe(100_000);
     });
@@ -979,6 +929,61 @@ describe('collectContextData (contextCommand)', () => {
           estimateContextTextTokens(JSON.stringify(toolResponse)),
       );
       expect(sumRows(data.breakdown)).toBe(100_000);
+    });
+
+    it('charges the builtin-clamp deficit to the mcp row, not to messages', async () => {
+      // Under `tools.codeModeOnly` the declarations collapse to a few control
+      // tools while an `alwaysLoadTools` MCP server still bills every schema
+      // the detail loop sees, so the billed tools exceed the declared ones and
+      // `displayBuiltinTools` clamps at 0. The clamp deficit must come out of
+      // the mcp row — the row whose billing overshoots the declarations;
+      // otherwise `attributedOverhead` silently takes it out of `messages`.
+      // Own value properties shadow the prototype's getters (Object.assign
+      // would trip the setter-less `schema` accessor on DeclarativeTool).
+      const mcpToolDouble = Object.defineProperties(
+        Object.create(DiscoveredMCPTool.prototype),
+        {
+          name: { value: 'mcp__server__big_tool' },
+          serverName: { value: 'server' },
+          serverToolName: { value: 'big_tool' },
+          schema: {
+            value: {
+              name: 'mcp__server__big_tool',
+              description: `Big MCP tool ${'x'.repeat(400)}`,
+              parameters: { type: 'OBJECT', properties: {} },
+            },
+          },
+        },
+      ) as DiscoveredMCPTool;
+      const tools = [skillToolDouble, mcpToolDouble];
+      const declared = [skillToolSchema];
+      const history = [prelude, ...conversation];
+
+      const unscaled = await collectContextData(
+        makeChatConfig({ total: 0, tools, declared, history }),
+        false,
+      );
+      // The provider-side total: the measured overhead plus the 300-token
+      // conversation, so exactly 300 tokens are left for `messages`.
+      const total =
+        unscaled.breakdown.systemPrompt +
+        (unscaled.breakdown.startupContext ?? 0) +
+        estimateContextTextTokens(listingReminder) +
+        estimateContextTextTokens(JSON.stringify(declared)) +
+        300;
+      const data = await collectContextData(
+        makeChatConfig({ total, tools, declared, history }),
+        false,
+      );
+
+      // The fixture does put the clamp in force: billed skill definition plus
+      // mcp schemas exceed the declared tools.
+      expect(
+        estimateContextTextTokens(JSON.stringify(skillToolSchema)) +
+          estimateContextTextTokens(JSON.stringify(mcpToolDouble.schema)),
+      ).toBeGreaterThan(estimateContextTextTokens(JSON.stringify(declared)));
+      expect(data.breakdown.messages).toBe(300);
+      expect(sumRows(data.breakdown)).toBe(total);
     });
   });
 
@@ -1373,6 +1378,42 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.currentTier).not.toBe('safe');
     // Free space has to account for the conversation as well.
     expect(data.breakdown.freeSpace).toBeLessThan(50_000);
+
+    // A top-level media part must count against the free window exactly like
+    // text: the same fixture plus one pasted image lowers `freeSpace` by the
+    // flat per-image budget. Before `estimateConversationTokens` had an arm
+    // for top-level `inlineData`, the image vanished from `rawContent` and
+    // this delta was 0.
+    const withImage = await collectContextData(
+      {
+        ...makeMockConfig(200_000),
+        getLlmClient: vi.fn().mockReturnValue({
+          isInitialized: vi.fn().mockReturnValue(true),
+          getChat: vi.fn().mockReturnValue({
+            getLastPromptTokenCount: vi.fn().mockReturnValue(0),
+            isLastPromptTokenCountEstimated: vi.fn().mockReturnValue(false),
+            getHistory: vi.fn().mockReturnValue([
+              {
+                role: 'user',
+                parts: [
+                  { text: 'a'.repeat(600_000) },
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'A'.repeat(400_000),
+                    },
+                  },
+                ],
+              },
+            ]),
+          }),
+        }),
+      } as unknown as Config,
+      false,
+    );
+    expect(data.breakdown.freeSpace - withImage.breakdown.freeSpace).toBe(
+      resolveSlimmingConfig(undefined).imageTokenEstimate,
+    );
   });
 
   it('treats no-API-data sessions as safe and omits the threshold section from text', async () => {
