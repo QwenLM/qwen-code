@@ -127,6 +127,78 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
   });
 
+  it('does not let the answer payload trigger a bootstrap intercept', () => {
+    // The free-text tail of `sessions answer <session>` must not reach the
+    // interceptors as flag tokens: each of these printed help/version and
+    // exited 0, telling the driving script the answer was delivered when
+    // it was not (issue #11193). The separator fences the payload off, so
+    // the argv routes to the full parser instead.
+    expect(
+      resolveBootstrapRoute([
+        'sessions',
+        'answer',
+        '0f8e1c42',
+        'please',
+        '--help',
+        'me',
+      ]),
+    ).toBe('default');
+    expect(
+      resolveBootstrapRoute([
+        'sessions',
+        'answer',
+        '0f8e1c42',
+        'yes',
+        'please',
+        'help',
+      ]),
+    ).toBe('default');
+    expect(
+      resolveBootstrapRoute([
+        'sessions',
+        'answer',
+        '0f8e1c42',
+        'please',
+        '--version',
+        'now',
+      ]),
+    ).toBe('default');
+    // A user-supplied separator already fenced the payload; the route must
+    // not change (and the separator must not be doubled).
+    expect(
+      resolveBootstrapRoute([
+        'sessions',
+        'answer',
+        '0f8e1c42',
+        '--',
+        'please',
+        '--version',
+        'now',
+      ]),
+    ).toBe('default');
+  });
+
+  it('keeps the intercepts for every other command and shape', () => {
+    // The fence is scoped to the answer payload: version tokens elsewhere
+    // keep the fail-closed intercept (issue #11193's guardrail — demoting
+    // those executes subcommands).
+    expect(resolveBootstrapRoute(['sessions', 'list', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['sessions', 'ps', '--version'])).toBe(
+      'version',
+    );
+    expect(
+      resolveBootstrapRoute(['mcp', 'remove', 'victim', '-v', 'help']),
+    ).toBe('version');
+    // `qwen sessions answer --help` (no id) and a bare `--help` payload
+    // keep routing to the parser, which shows the command's help.
+    expect(resolveBootstrapRoute(['sessions', 'answer', '--help'])).toBe(
+      'default',
+    );
+    expect(
+      resolveBootstrapRoute(['sessions', 'answer', '0f8e1c42', '--help']),
+    ).toBe('default');
+  });
+
   it('keeps bundled entrypoint paths out of the route detection', async () => {
     expect(resolveBootstrapRoute(['/repo/dist/cli.js', '--help'])).toBe('help');
     expect(
