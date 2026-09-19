@@ -9,7 +9,11 @@
  * It deliberately bypasses LlmChat so neither history nor recording is
  * read or mutated.
  */
-import { getResponseText, type Config } from '@qwen-code/qwen-code-core';
+import {
+  getOutputLanguageInstruction,
+  getResponseText,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 
 export const GENERATION_MAX_PROMPT_BYTES = 32 * 1024;
@@ -64,6 +68,10 @@ export async function executeGeneration(
   }
   resolved ??= await client.resolveForModel(mainModel, { failClosed: true });
   const { contentGenerator, model } = resolved;
+  const outputLanguageInstruction = await getOutputLanguageInstruction(config);
+  const systemInstruction = outputLanguageInstruction
+    ? `${outputLanguageInstruction}\n\nFor this request, this preference overrides any conflicting language named in the user prompt.`
+    : undefined;
 
   await emit({ type: 'started', model, modelSource });
 
@@ -74,6 +82,7 @@ export async function executeGeneration(
       config: {
         abortSignal: signal,
         tools: [],
+        ...(systemInstruction ? { systemInstruction } : {}),
         thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
         temperature: 0.2,
       },

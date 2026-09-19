@@ -4,12 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { GenerateContentParameters } from '@google/genai';
+import { writeOutputLanguageFile } from '../i18n/languageUtils.js';
 import { executeGeneration } from './generation.js';
 
-function createConfig(fastModel: string | undefined) {
+function createConfig(
+  fastModel: string | undefined,
+  outputLanguageFilePath?: string,
+) {
   const generateContentStream = vi.fn(async function* (
     _request: GenerateContentParameters,
     _promptId: string,
@@ -32,6 +39,7 @@ function createConfig(fastModel: string | undefined) {
   const config = {
     getFastModel: () => fastModel,
     getModel: () => 'main-model',
+    getOutputLanguageFilePath: () => outputLanguageFilePath,
     getBaseLlmClient: () => ({ resolveForModel }),
   } as unknown as Config;
   return { config, generateContentStream, resolveForModel };
@@ -70,6 +78,9 @@ describe('executeGeneration', () => {
     expect(generateContentStream.mock.calls[0]?.[0].config).not.toHaveProperty(
       'maxOutputTokens',
     );
+    expect(generateContentStream.mock.calls[0]?.[0].config).not.toHaveProperty(
+      'systemInstruction',
+    );
     expect(events).toEqual([
       { type: 'started', model: 'fast-model', modelSource: 'fast' },
       { type: 'thinking' },
@@ -82,6 +93,47 @@ describe('executeGeneration', () => {
       inputTokens: 4,
       outputTokens: 2,
     });
+  });
+
+  it('lets the output-language preference override the prompt language', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'qwen-generation-'));
+    try {
+      const outputLanguagePath = path.join(dir, 'output-language.md');
+      writeOutputLanguageFile('Russian', outputLanguagePath);
+      const { config, generateContentStream } = createConfig(
+        'fast-model',
+        outputLanguagePath,
+      );
+
+      await executeGeneration(
+        config,
+        'request-language',
+        'Explain this command in English.',
+        new AbortController().signal,
+        async () => undefined,
+      );
+
+      const request = generateContentStream.mock.calls[0]?.[0];
+      expect(request?.contents).toEqual([
+        {
+          role: 'user',
+          parts: [{ text: 'Explain this command in English.' }],
+        },
+      ]);
+      expect(request?.config?.systemInstruction).toContain(
+        'You MUST always respond in **Russian**',
+      );
+      const instruction = String(request?.config?.systemInstruction);
+      expect(
+        instruction.indexOf('If the user **explicitly** requests'),
+      ).toBeLessThan(
+        instruction.indexOf(
+          'overrides any conflicting language named in the user prompt',
+        ),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('uses the main model when no valid fast model is available', async () => {
