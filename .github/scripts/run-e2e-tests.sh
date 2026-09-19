@@ -32,7 +32,18 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
   }
 
   if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-    mkdir -p "${HOME}/.cache/qwen-code-ci"
+    # The resolver falls back to a job-private directory when a root-owned
+    # leftover the heal step cannot repair makes the shared lock dir
+    # unwritable (#12006); without it every `exec` below dies on EACCES
+    # before a test runs. The daemon lock resolves on its own so a poisoned
+    # build lock cannot move it: the prune step, the host cleanup timer and
+    # the release lane all coordinate on the shared daemon path, so a
+    # fallback there would cost the prune exclusion, not just the build
+    # mutex. Each call probes only the locks it opens, so an unwritable
+    # lock from another family (sdk-java-tests.lock) cannot veto a shared
+    # dir that is usable for this leg's own files.
+    ci_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-daemon.lock)"
+    ci_build_lock_dir="$(bash .github/scripts/resolve-ci-lock-dir.sh docker-sandbox-build.lock "docker-sandbox-build-e2e-${GITHUB_SHA}.lock")"
     # Host daemon lock, shared for the whole step and never
     # upgraded: it only keeps the age-based prune (which takes it
     # exclusively, non-blocking) off a daemon with Docker work in
@@ -43,14 +54,14 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
     # run 33638984513 held the shared lock through its tests, and
     # shard 2/3 then timed out on the coordinator lock shard 1/3
     # was still holding.
-    exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
+    exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"
     if ! flock --shared --wait 1800 9; then
       echo "::error::docker daemon read lock not acquired within 30 minutes"
       exit 1
     fi
     # Per-commit coordinator: one job builds the image; a concurrent
     # run at the same SHA waits here and then finds it present.
-    exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
+    exec 8>"${ci_build_lock_dir}/docker-sandbox-build-e2e-${GITHUB_SHA}.lock"
     if ! flock --wait 1800 8; then
       echo "::error::docker build coordinator lock not acquired within 30 minutes"
       exit 1
@@ -62,7 +73,7 @@ if [ "$sandbox" = 'sandbox:docker' ]; then
       # Host build mutex: keeps concurrent image builds off one
       # daemon. Held only while an image is prepared, never while
       # tests run, so the wait is bounded by a build.
-      exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"
+      exec 7>"${ci_build_lock_dir}/docker-sandbox-build.lock"
       if ! flock --wait 1800 7; then
         echo "::error::docker build lock not acquired within 30 minutes"
         exit 1
