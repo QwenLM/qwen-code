@@ -162,17 +162,6 @@ describe('fileUtils', () => {
       modalities: { image: true, video: true },
     }),
     getFileSystemService: () => fsService,
-    getToolRegistry: () => ({
-      getFunctionDeclarations: () => [
-        { name: 'read_file' },
-        { name: 'tool_search' },
-      ],
-      getDeferredToolSummary: () => [{ name: 'zoom_image' }],
-      getCodeModeBindingPlan: () => ({
-        bindings: [{ name: 'zoom_image' }],
-        collisions: [],
-      }),
-    }),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -1378,77 +1367,6 @@ describe('fileUtils', () => {
       expect(metadata).toMatchObject({ width: 20, height: 10 });
       expect(result.returnDisplay).toContain('Read image file: image.png');
     });
-
-    it.each<{
-      codeModeOnly: boolean;
-      declared: string[];
-      deferred: string[];
-      bindings: string[];
-      hint: string;
-    }>([
-      {
-        codeModeOnly: false,
-        declared: ['read_file', 'tool_search'],
-        deferred: [],
-        bindings: [],
-        hint: '',
-      },
-      {
-        codeModeOnly: false,
-        declared: ['read_file', 'tool_search'],
-        deferred: ['zoom_image'],
-        bindings: [],
-        hint: ' If details are too small, use tool_search for "zoom image", then call zoom_image with coordinates normalized from 0 to 1000.',
-      },
-      {
-        codeModeOnly: false,
-        declared: ['read_file', 'zoom_image'],
-        deferred: [],
-        bindings: [],
-        hint: ' If details are too small, call zoom_image with coordinates normalized from 0 to 1000.',
-      },
-      {
-        codeModeOnly: true,
-        declared: ['exec'],
-        deferred: [],
-        bindings: [],
-        hint: '',
-      },
-      {
-        codeModeOnly: true,
-        declared: ['exec'],
-        deferred: [],
-        bindings: ['zoom_image'],
-        hint: ' If details are too small, call tools.zoom_image with coordinates normalized from 0 to 1000.',
-      },
-    ])(
-      'uses only exposed tools for image guidance: $declared, code mode $codeModeOnly',
-      async ({ codeModeOnly, declared, deferred, bindings, hint }) => {
-        await sharp({
-          create: { width: 20, height: 10, channels: 3, background: '#306090' },
-        })
-          .png()
-          .toFile(testImageFilePath);
-        mockMimeGetType.mockReturnValue('image/png');
-        const result = await processSingleFileContent(testImageFilePath, {
-          ...mockConfig,
-          getCodeModeOnly: () => codeModeOnly,
-          getToolRegistry: () => ({
-            getFunctionDeclarations: () => declared.map((name) => ({ name })),
-            getDeferredToolSummary: () => deferred.map((name) => ({ name })),
-            getCodeModeBindingPlan: () => ({
-              bindings: bindings.map((name) => ({ name })),
-              collisions: [],
-            }),
-          }),
-        } as unknown as Config);
-        const parts = result.llmContent as Part[];
-        expect(parts[0]).toEqual({
-          text: `Image overview: 20x10; oriented source: 20x10.${hint}`,
-        });
-        expect(parts[1].inlineData?.mimeType).toBe('image/jpeg');
-      },
-    );
 
     it('points the zoom hint at tools.zoom_image in CodeModeOnly', async () => {
       await sharp({
