@@ -2119,6 +2119,31 @@ describe('ChatEditor Plan in the add menu', () => {
     );
   });
 
+  it('does not spend the had-focus flag while the chip is still mounted', () => {
+    const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
+    const container = renderChatEditor({ ...props, planMode: true });
+    act(() => planButton(container)!.focus());
+    composerCoreState.focus.mockClear();
+    // `disabled` is the one dep of the handoff effect that can flip while
+    // Plan is still on — an approval overlay arriving, say — and re-running
+    // the effect must not spend the flag on a chip that has not unmounted.
+    rerenderChatEditor(container, {
+      ...props,
+      planMode: true,
+      disabled: true,
+    });
+    expect(document.activeElement).toBe(planButton(container));
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+    rerenderChatEditor(container, {
+      ...props,
+      planMode: false,
+      disabled: true,
+    });
+    expect(document.activeElement).toBe(
+      container.querySelector('[data-web-shell-mode-button]'),
+    );
+  });
+
   it('does not raise the keyboard by handing focus on where the pointer is coarse', () => {
     const props = { visibleToolbarActions: actions, onTogglePlan: vi.fn() };
     const container = renderChatEditor({ ...props, planMode: true });
@@ -2172,7 +2197,7 @@ describe('ChatEditor Plan in the add menu', () => {
     expect(composerCoreState.focus).not.toHaveBeenCalled();
   });
 
-  it('disables the menu entry and the chip during a plan handoff', async () => {
+  it('makes the menu entry and the chip inert during a plan handoff', async () => {
     const onTogglePlan = vi.fn();
     const props = {
       visibleToolbarActions: actions,

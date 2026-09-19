@@ -75,6 +75,60 @@ test('@smoke hands keyboard focus to the input when Plan ends under a focused ch
   await expect(page.locator(EDITOR)).toBeFocused();
 });
 
+test('@smoke keeps tint, close mark, and focus on the chip while its own request is in flight', async ({
+  page,
+}, testInfo) => {
+  await gotoPlanningSession(page, testInfo);
+  // The busy state lasts exactly as long as the mode change the click starts,
+  // so hold that request: without it the browser would settle before the
+  // assertions below could see the state they exist to pin.
+  let releaseModeChange!: () => void;
+  const modeChangeHeld = new Promise<void>((resolve) => {
+    releaseModeChange = resolve;
+  });
+  await page.route('**/session/*/approval-mode', async (route) => {
+    await modeChangeHeld;
+    await route.fallback();
+  });
+  const chip = page.locator(CHIP);
+  const width = async () => (await chip.boundingBox())!.width;
+  const background = async () =>
+    chip.evaluate((element) => getComputedStyle(element).backgroundColor);
+
+  try {
+    // The click leaves the pointer on the chip and hands focus to the input,
+    // as it does for every composer control. The chip stays reachable while
+    // busy, so a keyboard user can land on it mid-request.
+    await chip.click();
+    await expect(chip).toHaveAttribute('aria-disabled', 'true');
+    // Inert, never natively disabled — toBeDisabled follows aria-disabled,
+    // so the native attribute needs the JS property.
+    await expect(chip).toHaveJSProperty('disabled', false);
+    await chip.focus();
+    await expect(chip).toBeFocused();
+    await expect(page.locator(MARK)).toHaveCSS('opacity', '1');
+    await expect(page.locator(ICON)).toHaveCSS('opacity', '0');
+    const hoveredWidth = await width();
+    const hoveredBackground = await background();
+
+    await page.mouse.move(0, 0);
+    await expect(page.locator(MARK)).toHaveCSS('opacity', '0');
+    expect(await width()).toBe(hoveredWidth);
+    // The tint must not drop under the pointer mid-request: it only survives
+    // because the chip is never natively disabled, so `:not(:disabled):hover`
+    // keeps matching while the request the click started is in flight.
+    const restBackground = await background();
+    expect(restBackground).not.toBe('rgba(0, 0, 0, 0)');
+    expect(hoveredBackground).not.toBe(restBackground);
+
+    await chip.hover();
+    await expect(page.locator(MARK)).toHaveCSS('opacity', '1');
+    expect(await background()).toBe(hoveredBackground);
+  } finally {
+    releaseModeChange();
+  }
+});
+
 async function gotoPlanningSession(
   page: Page,
   testInfo: TestInfo,
