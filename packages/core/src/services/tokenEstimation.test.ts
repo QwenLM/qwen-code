@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type { Content } from '@google/genai';
 import {
   estimateContentTokens,
+  estimateContextContentTokens,
   estimateContextTextTokens,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
@@ -83,6 +84,46 @@ describe('estimateContentTokens', () => {
     };
     const result = estimateContentTokens([c]);
     expect(result).toBeGreaterThan(0);
+  });
+});
+
+describe('estimateContextContentTokens', () => {
+  it('uses the CJK-aware heuristic for message text', () => {
+    expect(estimateContextContentTokens([textContent('abcdefgh')])).toBe(2);
+    expect(estimateContextContentTokens([textContent('abcd中')])).toBe(3);
+  });
+
+  it('keeps inline media on its fixed token estimate', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ inlineData: { mimeType: 'image/png', data: '中文base64' } }],
+    };
+    expect(estimateContextContentTokens([content], 1600)).toBe(1600);
+  });
+
+  it('counts CJK text nested in a function response without counting media data', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'read_file',
+            response: { output: '中文' },
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: '中文base64',
+                },
+              },
+            ],
+          } as unknown as NonNullable<
+            Content['parts']
+          >[number]['functionResponse'],
+        },
+      ],
+    };
+    expect(estimateContextContentTokens([content], 1600)).toBe(1619);
   });
 });
 

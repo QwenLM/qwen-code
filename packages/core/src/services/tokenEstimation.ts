@@ -7,11 +7,13 @@
 import type {
   Content,
   GenerateContentResponseUsageMetadata,
+  Part,
 } from '@google/genai';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   TOKEN_TO_CHAR_RATIO,
   estimateContentChars,
+  getFunctionResponseParts,
 } from './compactionInputSlimming.js';
 
 /**
@@ -67,6 +69,54 @@ export function estimateContentTokens(
     totalChars += estimateContentChars(content, imageTokenEstimate);
   }
   return Math.ceil(totalChars / CHARS_PER_TOKEN);
+}
+
+function countNonAsciiTextChars(part: Part): number {
+  if (part.inlineData || part.fileData) return 0;
+
+  let text: string | undefined;
+  if (typeof part.text === 'string') {
+    text = part.text;
+  } else if (part.functionResponse) {
+    const output = part.functionResponse.response?.['output'];
+    const error = part.functionResponse.response?.['error'];
+    text =
+      typeof output === 'string'
+        ? output
+        : typeof error === 'string'
+          ? error
+          : undefined;
+  } else {
+    text = JSON.stringify(part ?? {});
+  }
+
+  const textValue = text ?? '';
+  let count = 0;
+  for (let index = 0; index < textValue.length; index++) {
+    if (textValue.charCodeAt(index) >= 128) count++;
+  }
+  for (const nested of getFunctionResponseParts(part) ?? []) {
+    count += countNonAsciiTextChars(nested);
+  }
+  return count;
+}
+
+/** Estimate message tokens for `/context` without charging media as text. */
+export function estimateContextContentTokens(
+  contents: Content[],
+  imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+): number {
+  let totalChars = 0;
+  let nonAsciiChars = 0;
+  for (const content of contents) {
+    totalChars += estimateContentChars(content, imageTokenEstimate);
+    for (const part of content.parts ?? []) {
+      nonAsciiChars += countNonAsciiTextChars(part);
+    }
+  }
+  return Math.ceil(
+    totalChars / CHARS_PER_TOKEN + nonAsciiChars * (1.5 - 1 / CHARS_PER_TOKEN),
+  );
 }
 
 /**
