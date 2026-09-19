@@ -1027,11 +1027,16 @@ await agent('scan package.json')
       await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(1));
       const runId = first.workflowRunId;
       expect(runId).toMatch(/^wf_/);
+      // The completion callback fires from fail()/complete() while the
+      // runner's finally block still holds the run's handle; a resume that
+      // lands before releaseHandle is refused with "has not exited yet".
+      await registry.getHandle(runId!)?.completion;
 
       await tool
         .buildSessionOwnedBackground({ script, resumeFromRunId: runId })
         .execute(new AbortController().signal);
       await vi.waitFor(() => expect(completion).toHaveBeenCalledTimes(2));
+      await registry.getHandle(runId!)?.completion;
       const retryText = completion.mock.calls[1][1] as string;
       expect(retryText).toContain(
         'This reads the saved /review-and-fix workflow',

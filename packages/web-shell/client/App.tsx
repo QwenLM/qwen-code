@@ -146,6 +146,7 @@ import {
 import {
   mapRestoredInputAnnotationsAfterTextChange,
   type ComposerSubmitCommit,
+  type ComposerSubmitMetadata,
   type EditorHandle,
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
@@ -186,7 +187,10 @@ import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
-import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
+import {
+  DaemonConnectionsSettings,
+  DaemonStatusDialog,
+} from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
@@ -257,6 +261,23 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
+import { StandaloneContext } from './config/standalone';
+import {
+  clearRemoteWorkspaceAddStep,
+  completeRemoteWorkspaceAdd,
+  discardAbandonedRemoteWorkspaceAdd,
+  isRemoteWorkspaceAddActive,
+  leaveRemoteWorkspaceAdd,
+  selectRemoteWorkspaceLocation,
+} from './config/remote-workspace-add';
+import {
+  clearInitialConnectionsSettingsCategory,
+  formatOriginHost,
+  getInitialConnectionsSettingsCategory,
+  listRemoteComputers,
+} from './config/remote-connections';
+import { getDaemonToken, isPageOriginDaemon } from './config/daemon';
 import { Button } from './components/ui/button';
 import {
   isPluginShadowPanel,
@@ -305,6 +326,8 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from './i18n';
+import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
+import { useCapacityRecovery } from './hooks/useCapacityRecovery';
 import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
@@ -402,6 +425,7 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
   type WebShellMarkdownCustomization,
@@ -439,8 +463,10 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
+  type WebShellAssistantTurnSettledEvent,
   type WebShellSessionArtifactsChange,
 } from './customization';
+import { useAssistantTurnSettlementProjection } from './assistant-turn-settlement';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
@@ -1369,6 +1395,11 @@ export interface WebShellProps {
   onComposerTagClick?: ComposerTagClickHandler;
   /** Custom renderer displayed after the final assistant message of each turn. */
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
+  /**
+   * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
+   * object to leave the answer footer unchanged.
+   */
+  assistantFeedback?: WebShellAssistantFeedbackOptions;
   getAssistantSourcesIcon?: WebShellSourceIconResolver;
   sourceReferences?: readonly WebShellSourceReference[];
   /** Custom renderer inserted before the built-in chat composer toolbar controls. */
@@ -1420,6 +1451,12 @@ export interface WebShellProps {
   composerInputVersion?: number;
   /** Called when a session-level event occurs (rename, submit, turn complete). */
   onSessionChange?: (event: SessionChangeEvent) => void;
+  /**
+   * Called for authoritative terminals observed live, or replayed for a prompt
+   * this provider admitted. Multiple mounted providers can report the same
+   * `(sessionId, promptId)`, so hosts should deduplicate by that key.
+   */
+  onAssistantTurnSettled?: (event: WebShellAssistantTurnSettledEvent) => void;
   /**
    * Prepare the immutable payload for a daemon submission. Called once for a
    * direct or queued logical submit, after local command routing and before
@@ -3059,6 +3096,7 @@ export function App({
   renderComposerTagTooltip,
   onComposerTagClick,
   renderAssistantTurnFooter,
+  assistantFeedback,
   getAssistantSourcesIcon,
   sourceReferences,
   renderComposerToolbarStart,
@@ -3113,6 +3151,7 @@ export function App({
   composerInput,
   composerInputVersion,
   onSessionChange,
+  onAssistantTurnSettled,
   prepareSubmit,
   onSubmitBefore,
   restartSseOnPrompt,
@@ -3121,6 +3160,7 @@ export function App({
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
+  useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
@@ -3330,6 +3370,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      assistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -3362,6 +3403,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
+      assistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -3392,6 +3434,7 @@ export function App({
     structuralOnly: true,
   });
   const connection = useConnection();
+  const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,
@@ -3560,6 +3603,16 @@ export function App({
     [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
   const sessionActions = useActions();
+  const {
+    intent: capacityRecovery,
+    offer: offerCapacityRecovery,
+    dismiss: dismissCapacityRecovery,
+  } = useCapacityRecovery(
+    workspace.client,
+    workspace.capabilities?.features,
+    connection,
+    sessionActions,
+  );
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
@@ -3616,7 +3669,23 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [initialRemoteWorkspaceAddActive] = useState(
+    () => standalone && isRemoteWorkspaceAddActive(),
+  );
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
+    initialRemoteWorkspaceAddActive,
+  );
+  // Browsing the daemon's folders, whether this tab navigated here for it or
+  // opened the browser in place.
+  const workspaceBrowseActiveRef = useRef(initialRemoteWorkspaceAddActive);
+  useEffect(() => {
+    // No marker on a standalone boot means the hand-over that wrote the return
+    // location was abandoned (reload or Back), not resumed. Dropping it here
+    // keeps a later Cancel in an unrelated Add-workspace dialog from consuming
+    // the stale location and navigating the shell away.
+    if (initialRemoteWorkspaceAddActive) clearRemoteWorkspaceAddStep();
+    else if (standalone) discardAbandonedRemoteWorkspaceAdd();
+  }, [initialRemoteWorkspaceAddActive, standalone]);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -7605,6 +7674,15 @@ export function App({
   const drainGenerationRef = useRef(0);
   const shellSubmitInFlightRef = useRef(false);
   const isDrainingRef = useRef(false);
+  useEffect(() => {
+    if (!connection.runtimeStopped) return;
+    const dropped = queuedShellCommandsRef.current.length;
+    queuedShellCommandsRef.current = [];
+    drainGenerationRef.current++;
+    isDrainingRef.current = false;
+    if (dropped > 0)
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+  }, [connection.runtimeStopped, pushToast, t]);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -8026,9 +8104,11 @@ export function App({
         return pending.promise;
       }
       const request = ++loadedSkillsRequestRef.current;
-      setSkillsLoading(true);
-      setSkillsLoadError(false);
-      const load = async () => {
+      const load = async (recovering = false) => {
+        if (request === loadedSkillsRequestRef.current) {
+          setSkillsLoading(true);
+          setSkillsLoadError(false);
+        }
         try {
           if (
             forNewSession &&
@@ -8098,6 +8178,19 @@ export function App({
         } catch (error) {
           if (request === loadedSkillsRequestRef.current)
             setSkillsLoadError(true);
+          if (recovering) throw error;
+          if (
+            (notifyOnError || skillsLoadRef.current?.notifyOnError) &&
+            forNewSession &&
+            offerCapacityRecovery(error, {
+              requesterCwd: workspaceCwd,
+              isCurrent: () =>
+                request === loadedSkillsRequestRef.current &&
+                key === skillsCatalogKeyRef.current,
+              resume: () => load(true),
+            })
+          )
+            return false as const;
           if (
             notifyOnError ||
             (skillsLoadRef.current?.request === request &&
@@ -8109,10 +8202,12 @@ export function App({
             );
           }
           return false as const;
+        } finally {
+          if (request === loadedSkillsRequestRef.current)
+            setSkillsLoading(false);
         }
       };
       const promise = load().finally(() => {
-        if (request === loadedSkillsRequestRef.current) setSkillsLoading(false);
         if (skillsLoadRef.current?.promise === promise)
           skillsLoadRef.current = undefined;
       });
@@ -8127,6 +8222,7 @@ export function App({
       return promise;
     },
     [
+      offerCapacityRecovery,
       pushToast,
       skillsConfigRuntimeSupported,
       skillsAcpPreheatSupported,
@@ -8673,6 +8769,9 @@ export function App({
   ]);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
+  const [initialConnectionsSettingsCategory] = useState(() =>
+    standalone ? getInitialConnectionsSettingsCategory() : undefined,
+  );
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
@@ -8688,7 +8787,7 @@ export function App({
     | 'channels'
     | 'workspaces'
     | null
-  >(null);
+  >(initialConnectionsSettingsCategory ? 'settings' : null);
   const activePanelRef = useRef(activePanel);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
@@ -8696,7 +8795,12 @@ export function App({
   // overlay auto-close, openScheduledTasks, openSplitView, ...).
   const [settingsInitialCategory, setSettingsInitialCategory] = useState<
     string | undefined
-  >();
+  >(initialConnectionsSettingsCategory);
+  useEffect(() => {
+    if (initialConnectionsSettingsCategory) {
+      clearInitialConnectionsSettingsCategory();
+    }
+  }, [initialConnectionsSettingsCategory]);
   useEffect(() => {
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
@@ -8714,14 +8818,20 @@ export function App({
     if (workspaceContextActive) return;
     splitClassificationGenerationRef.current += 1;
     if (!projectFeaturesAvailable) setSplitSessionIds([]);
-    if (!projectFeaturesAvailable && activePanel !== 'status') {
+    if (
+      !projectFeaturesAvailable &&
+      activePanel !== 'status' &&
+      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+    ) {
       setActivePanel(null);
     }
     setShowResumeDialog(false);
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
     if (!projectFeaturesAvailable) setShowMemoryDialog(false);
-    setShowAddWorkspaceDialog(false);
+    if (!workspaceBrowseActiveRef.current) {
+      setShowAddWorkspaceDialog(false);
+    }
     setGitDialog(undefined);
     if (
       !projectFeaturesAvailable &&
@@ -8745,6 +8855,7 @@ export function App({
     mainView,
     modelDialogMode,
     projectFeaturesAvailable,
+    initialConnectionsSettingsCategory,
     workspaceContextActive,
   ]);
   const handleUseSkill = useCallback(
@@ -9758,190 +9869,194 @@ export function App({
       workspacesRef.current.find((entry) => entry.primary)?.cwd
     );
   }, []);
-  const ensureSessionForPrompt = useCallback(() => {
-    const currentSessionId = connectionRef.current.sessionId;
-    if (createSessionPromiseRef.current) {
-      if (
-        !currentSessionId ||
-        currentSessionId === preparingSessionIdRef.current
-      ) {
-        return createSessionPromiseRef.current;
-      }
-      return Promise.resolve(undefined);
-    }
-    if (currentSessionId) return Promise.resolve(undefined);
-    const pendingManualTitle = pendingManualTitleRef.current;
-    const promise = (async () => {
-      let allocatedSessionId: string | undefined;
-      const modelId =
-        currentModelRef.current || connectionRef.current.currentModel;
-      const reasoningIntent = pendingReasoningIntentRef.current;
-      const reasoningPreview = connectionRef.current.models?.find(
-        (model) => model.id === modelId,
-      )?.reasoningPreview;
-      const reasoningEffort =
-        reasoningIntent &&
-        reasoningIntent.modelId === modelId &&
-        reasoningPreview &&
-        reasoningPreviewSupports(reasoningPreview, reasoningIntent.value)
-          ? reasoningIntent.value
-          : undefined;
-      const modeId = executionModeRef.current;
-      const planMode = currentModeRef.current === 'plan';
-      const requestedSessionContext =
-        pendingSessionContextRef.current ??
-        connectionRef.current.sessionContext;
-      const availableWorkspaces = workspacesRef.current;
-      const primaryWorkspaceCwd = availableWorkspaces.find(
-        (entry) => entry.primary && entry.trusted !== false,
-      )?.cwd;
-      const requestedWorkspaceCwd = selectedWorkspaceCwdRef.current;
-      const acceptedWorkspaceCwd = requestedWorkspaceCwd
-        ? availableWorkspaces.find(
-            (entry) =>
-              entry.cwd === requestedWorkspaceCwd && entry.trusted !== false,
-          )?.cwd
-        : undefined;
-      const targetWorkspaceCwd =
-        requestedSessionContext?.kind === 'workspace'
-          ? (availableWorkspaces.find(
-              (entry) =>
-                entry.cwd === requestedSessionContext.cwd &&
-                entry.trusted !== false,
-            )?.cwd ??
-            (requestedSessionContext.cwd ===
-              connectionRef.current.workspaceCwd &&
-            availableWorkspaces.find(
-              (entry) => entry.cwd === requestedSessionContext.cwd,
-            )?.trusted !== false
-              ? requestedSessionContext.cwd
-              : undefined))
-          : requestedSessionContext?.kind === 'standalone'
-            ? undefined
-            : (availableWorkspaces.find(
-                (entry) => entry.cwd === lockedWorkspaceCwd,
-              )?.cwd ??
-              acceptedWorkspaceCwd ??
-              primaryWorkspaceCwd);
-      if (
-        requestedSessionContext?.kind === 'workspace' &&
-        !targetWorkspaceCwd
-      ) {
-        throw new Error('The selected workspace is unavailable or untrusted');
-      }
-      const creationSessionContext: DaemonProductSessionContext | undefined =
-        requestedSessionContext ??
-        (targetWorkspaceCwd
-          ? { kind: 'workspace', cwd: targetWorkspaceCwd }
-          : undefined);
-      const catalogWorkspaceCwd =
-        creationSessionContext?.kind === 'workspace'
-          ? creationSessionContext.cwd
-          : undefined;
-      try {
-        await createAndAttachSessionForPrompt({
-          sessionActions: sessionActions as typeof sessionActions &
-            SessionActionsWithCreate,
-          modelId,
-          reasoningEffort,
-          modeId,
-          planMode,
-          workspaceCwd: targetWorkspaceCwd,
-          sessionContext: creationSessionContext,
-          worktree:
-            creationSessionContext?.kind === 'workspace' &&
-            gitModeIntentRef.current.mode === 'worktree'
-              ? { slug: gitModeIntentRef.current.slug }
-              : undefined,
-          branch:
-            creationSessionContext?.kind === 'workspace' &&
-            gitModeIntentRef.current.mode === 'branch'
-              ? { name: gitModeIntentRef.current.name }
-              : undefined,
-          sessionSourceType: sessionSourceTypeRef.current,
-          onSessionCreated: async (sessionId) => {
-            if (
-              pendingManualTitle &&
-              pendingManualTitleRef.current === pendingManualTitle
-            ) {
-              try {
-                await sessionActions.renameSession(
-                  pendingManualTitle.displayName,
-                );
-              } catch {
-                pendingManualTitleRef.current = undefined;
-              }
-            }
-            await onSessionCreatedRef.current?.(sessionId);
-          },
-          onSessionAllocated: (sessionId) => {
-            preparingSessionIdRef.current = sessionId;
-            allocatedSessionId = sessionId;
-            if (catalogWorkspaceCwd) {
-              allocatedSessionCatalogOwnerRef.current = {
-                sessionId,
-                workspaceCwd: catalogWorkspaceCwd,
-              };
-              sessionCatalogController.sessionCreated(
-                catalogWorkspaceCwd,
-                sessionId,
-              );
-            }
-          },
-          getCurrentSessionId: () => connectionRef.current.sessionId,
-          getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
-        }).then((result) => {
-          if (pendingManualTitleRef.current === pendingManualTitle) {
-            pendingManualTitleRef.current = undefined;
-          }
-          if (result.worktree) {
-            setSessionWorktree(result.worktree);
-          }
-          if (result.branch) {
-            setSessionBranch(result.branch);
-          }
-          // Clear the pending intent only on success. On failure the
-          // composer chip stays in the selected mode so the user knows
-          // the intent was not fulfilled and can retry.
-          setGitModeIntent({ mode: 'current' });
-          if (pendingReasoningIntentRef.current === reasoningIntent) {
-            setPendingReasoningIntent(undefined);
-          }
-          if (pendingSessionContextRef.current === requestedSessionContext) {
-            setPendingSessionContext(undefined);
-          }
-        });
-      } catch (error) {
-        if (allocatedSessionId && catalogWorkspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(catalogWorkspaceCwd);
+  const ensureSessionForPrompt = useCallback(
+    (notify?: (id: string) => void) => {
+      const currentSessionId = connectionRef.current.sessionId;
+      if (createSessionPromiseRef.current) {
+        if (
+          !currentSessionId ||
+          currentSessionId === preparingSessionIdRef.current
+        ) {
+          return createSessionPromiseRef.current;
         }
-        throw error;
+        return Promise.resolve(undefined);
       }
-      // One-shot: the picker targets only the *next* new session, so clear
-      // it after creation. The next new chat defaults back to the primary
-      // workspace unless the user picks one again.
-      if (creationSessionContext?.kind === 'workspace') {
-        setSelectedWorkspaceCwd(undefined);
-      }
-      return allocatedSessionId;
-    })();
-    createSessionPromiseRef.current = promise;
-    const clearPreparation = () => {
-      if (createSessionPromiseRef.current === promise) {
-        createSessionPromiseRef.current = null;
-        preparingSessionIdRef.current = null;
-      }
-    };
-    void promise.then(clearPreparation, clearPreparation);
-    return promise;
-  }, [
-    getComposerWorkspaceCwd,
-    lockedWorkspaceCwd,
-    sessionActions,
-    sessionCatalogController,
-    setPendingSessionContext,
-    setPendingReasoningIntent,
-  ]);
+      if (currentSessionId) return Promise.resolve(undefined);
+      const pendingManualTitle = pendingManualTitleRef.current;
+      const promise = (async () => {
+        let allocatedSessionId: string | undefined;
+        const modelId =
+          currentModelRef.current || connectionRef.current.currentModel;
+        const reasoningIntent = pendingReasoningIntentRef.current;
+        const reasoningPreview = connectionRef.current.models?.find(
+          (model) => model.id === modelId,
+        )?.reasoningPreview;
+        const reasoningEffort =
+          reasoningIntent &&
+          reasoningIntent.modelId === modelId &&
+          reasoningPreview &&
+          reasoningPreviewSupports(reasoningPreview, reasoningIntent.value)
+            ? reasoningIntent.value
+            : undefined;
+        const modeId = executionModeRef.current;
+        const planMode = currentModeRef.current === 'plan';
+        const requestedSessionContext =
+          pendingSessionContextRef.current ??
+          connectionRef.current.sessionContext;
+        const availableWorkspaces = workspacesRef.current;
+        const primaryWorkspaceCwd = availableWorkspaces.find(
+          (entry) => entry.primary && entry.trusted !== false,
+        )?.cwd;
+        const requestedWorkspaceCwd = selectedWorkspaceCwdRef.current;
+        const acceptedWorkspaceCwd = requestedWorkspaceCwd
+          ? availableWorkspaces.find(
+              (entry) =>
+                entry.cwd === requestedWorkspaceCwd && entry.trusted !== false,
+            )?.cwd
+          : undefined;
+        const targetWorkspaceCwd =
+          requestedSessionContext?.kind === 'workspace'
+            ? (availableWorkspaces.find(
+                (entry) =>
+                  entry.cwd === requestedSessionContext.cwd &&
+                  entry.trusted !== false,
+              )?.cwd ??
+              (requestedSessionContext.cwd ===
+                connectionRef.current.workspaceCwd &&
+              availableWorkspaces.find(
+                (entry) => entry.cwd === requestedSessionContext.cwd,
+              )?.trusted !== false
+                ? requestedSessionContext.cwd
+                : undefined))
+            : requestedSessionContext?.kind === 'standalone'
+              ? undefined
+              : (availableWorkspaces.find(
+                  (entry) => entry.cwd === lockedWorkspaceCwd,
+                )?.cwd ??
+                acceptedWorkspaceCwd ??
+                primaryWorkspaceCwd);
+        if (
+          requestedSessionContext?.kind === 'workspace' &&
+          !targetWorkspaceCwd
+        ) {
+          throw new Error('The selected workspace is unavailable or untrusted');
+        }
+        const creationSessionContext: DaemonProductSessionContext | undefined =
+          requestedSessionContext ??
+          (targetWorkspaceCwd
+            ? { kind: 'workspace', cwd: targetWorkspaceCwd }
+            : undefined);
+        const catalogWorkspaceCwd =
+          creationSessionContext?.kind === 'workspace'
+            ? creationSessionContext.cwd
+            : undefined;
+        try {
+          await createAndAttachSessionForPrompt({
+            sessionActions: sessionActions as typeof sessionActions &
+              SessionActionsWithCreate,
+            modelId,
+            reasoningEffort,
+            modeId,
+            planMode,
+            workspaceCwd: targetWorkspaceCwd,
+            sessionContext: creationSessionContext,
+            worktree:
+              creationSessionContext?.kind === 'workspace' &&
+              gitModeIntentRef.current.mode === 'worktree'
+                ? { slug: gitModeIntentRef.current.slug }
+                : undefined,
+            branch:
+              creationSessionContext?.kind === 'workspace' &&
+              gitModeIntentRef.current.mode === 'branch'
+                ? { name: gitModeIntentRef.current.name }
+                : undefined,
+            sessionSourceType: sessionSourceTypeRef.current,
+            onSessionCreated: async (sessionId) => {
+              if (
+                pendingManualTitle &&
+                pendingManualTitleRef.current === pendingManualTitle
+              ) {
+                try {
+                  await sessionActions.renameSession(
+                    pendingManualTitle.displayName,
+                  );
+                } catch {
+                  pendingManualTitleRef.current = undefined;
+                }
+              }
+              await onSessionCreatedRef.current?.(sessionId);
+            },
+            onSessionAllocated: (sessionId) => {
+              notify?.(sessionId);
+              preparingSessionIdRef.current = sessionId;
+              allocatedSessionId = sessionId;
+              if (catalogWorkspaceCwd) {
+                allocatedSessionCatalogOwnerRef.current = {
+                  sessionId,
+                  workspaceCwd: catalogWorkspaceCwd,
+                };
+                sessionCatalogController.sessionCreated(
+                  catalogWorkspaceCwd,
+                  sessionId,
+                );
+              }
+            },
+            getCurrentSessionId: () => connectionRef.current.sessionId,
+            getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
+          }).then((result) => {
+            if (pendingManualTitleRef.current === pendingManualTitle) {
+              pendingManualTitleRef.current = undefined;
+            }
+            if (result.worktree) {
+              setSessionWorktree(result.worktree);
+            }
+            if (result.branch) {
+              setSessionBranch(result.branch);
+            }
+            // Clear the pending intent only on success. On failure the
+            // composer chip stays in the selected mode so the user knows
+            // the intent was not fulfilled and can retry.
+            setGitModeIntent({ mode: 'current' });
+            if (pendingReasoningIntentRef.current === reasoningIntent) {
+              setPendingReasoningIntent(undefined);
+            }
+            if (pendingSessionContextRef.current === requestedSessionContext) {
+              setPendingSessionContext(undefined);
+            }
+          });
+        } catch (error) {
+          if (allocatedSessionId && catalogWorkspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(catalogWorkspaceCwd);
+          }
+          throw error;
+        }
+        // One-shot: the picker targets only the *next* new session, so clear
+        // it after creation. The next new chat defaults back to the primary
+        // workspace unless the user picks one again.
+        if (creationSessionContext?.kind === 'workspace') {
+          setSelectedWorkspaceCwd(undefined);
+        }
+        return allocatedSessionId;
+      })();
+      createSessionPromiseRef.current = promise;
+      const clearPreparation = () => {
+        if (createSessionPromiseRef.current === promise) {
+          createSessionPromiseRef.current = null;
+          preparingSessionIdRef.current = null;
+        }
+      };
+      void promise.then(clearPreparation, clearPreparation);
+      return promise;
+    },
+    [
+      getComposerWorkspaceCwd,
+      lockedWorkspaceCwd,
+      sessionActions,
+      sessionCatalogController,
+      setPendingSessionContext,
+      setPendingReasoningIntent,
+    ],
+  );
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const prepareSubmitRef = useRef(prepareSubmit);
@@ -10003,6 +10118,7 @@ export function App({
         // by the failed-prompt retry, whose user message was never
         // recorded.
         skipPrepareSubmit?: boolean;
+        skipSubmitBefore?: boolean;
         submittedPrompt?: string;
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
@@ -10012,6 +10128,7 @@ export function App({
         onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
+        onSessionAllocated?: (sessionId: string) => void;
         beforeAdmission?: () => Promise<void>;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
@@ -10042,7 +10159,9 @@ export function App({
         opts?.retry || opts?.skipPrepareSubmit
           ? undefined
           : prepareSubmitRef.current;
-      const submitBefore = onSubmitBeforeRef.current;
+      const submitBefore = opts?.skipSubmitBefore
+        ? undefined
+        : onSubmitBeforeRef.current;
       const hasAsyncPreflight = Boolean(
         prepare || submitBefore || opts?.beforeAdmission,
       );
@@ -10149,7 +10268,9 @@ export function App({
       const existingSessionWorkspaceCwd = getComposerWorkspaceCwd();
       let allocatedSessionId: string | undefined;
       try {
-        allocatedSessionId = await ensureSessionForPrompt();
+        allocatedSessionId = await ensureSessionForPrompt(
+          opts?.onSessionAllocated,
+        );
         if (!admissionSourceIsCurrent(allocatedSessionId)) {
           restoreCancelledSubmitState();
           return;
@@ -10489,7 +10610,16 @@ export function App({
       view: 'commit',
     });
   }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
+  const handleOpenLog = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'log',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
+    capacityRecovery !== undefined ||
     showResumeDialog ||
     showDeleteDialog ||
     showReleaseDialog ||
@@ -10748,7 +10878,11 @@ export function App({
     clearQueuedPrompts,
   } = useQueuedPrompts({
     connected,
-    writeBlocked: sessionWriteBlocked || standaloneWriterBlocked,
+    writeBlocked:
+      sessionWriteBlocked ||
+      standaloneWriterBlocked ||
+      connection.runtimeStopped,
+    runtimeStopped: connection.runtimeStopped,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
     clientId: connection.clientId,
@@ -13114,6 +13248,50 @@ export function App({
       workspaceActions,
     ],
   );
+  const handleAddRemoteWorkspace = useCallback(
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      await handleAddWorkspace(cwd, persist, displayName);
+      workspaceBrowseActiveRef.current = false;
+      completeRemoteWorkspaceAdd();
+    },
+    [handleAddWorkspace],
+  );
+
+  const closeAddWorkspaceDialog = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    if (!workspaceBrowseActiveRef.current) return;
+    workspaceBrowseActiveRef.current = false;
+    leaveRemoteWorkspaceAdd();
+  }, []);
+
+  const workspaceAddSelectedLocation =
+    workspace.baseUrl || window.location.origin;
+  const workspaceAddLocations = standalone
+    ? [
+        {
+          origin: window.location.origin,
+          label: t('workspaceHost.thisComputer'),
+          remote: false,
+        },
+        ...listRemoteComputers().map((origin) => ({
+          origin,
+          label: formatOriginHost(origin),
+          remote: true,
+        })),
+      ]
+    : undefined;
+  const hasRemoteWorkspaceLocation = (workspaceAddLocations?.length ?? 0) > 1;
+  const changeWorkspaceAddLocation = useCallback((origin: string) => {
+    return selectRemoteWorkspaceLocation(origin, getDaemonToken(origin));
+  }, []);
+
+  // Which computer the folder step is reading, for loading and error states.
+  const workspaceAddRemoteHost = isPageOriginDaemon(workspace.baseUrl)
+    ? undefined
+    : formatOriginHost(workspace.baseUrl);
+  const workspaceAddLocationSubtitle = workspaceAddRemoteHost
+    ? t('workspaceHost.folderOn', { address: workspaceAddRemoteHost })
+    : t('workspaceHost.folderOnThisComputer');
 
   /**
    * Reconciles either a known committed cwd or an unknown POST outcome. Known
@@ -13223,8 +13401,9 @@ export function App({
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
   const handleOpenExistingWorkspace = useCallback(() => {
+    workspaceBrowseActiveRef.current = standalone;
     setShowAddWorkspaceDialog(true);
-  }, []);
+  }, [standalone]);
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -14902,9 +15081,13 @@ export function App({
       images?: PromptImage[],
       files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
-      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
+      metadata?: ComposerSubmitMetadata,
     ) => {
       if (sessionWriteBlockedRef.current) return false;
+      if (connectionRef.current.runtimeStopped) {
+        pushToast('warning', t('capacityChoice.stopped'));
+        return false;
+      }
       if (
         !composerAttachmentsEnabled &&
         ((images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
@@ -15003,100 +15186,158 @@ export function App({
         let admitted = false;
         let admissionStarted = false;
         let admissionSessionId: string | undefined;
-        sendPrompt(promptText, promptImages, promptFiles, {
-          submittedPrompt: text,
-          ownerRef: admissionAttachment,
-          ...sendOptions,
-          clearComposerOnPromptStart,
-          onPreparedSubmit: (prepared) => {
-            submittedPromptText = prepared.prompt;
-            const annotations = prepared.inputAnnotations ?? [];
-            submittedInputAnnotations =
-              annotations.length > 0 ? [...annotations] : undefined;
-          },
-          commitComposerAccepted: clearComposerOnPromptStart
-            ? commitComposerAccepted
-            : undefined,
-          onAdmissionStarted: (sessionId) => {
-            admissionStarted = true;
-            admissionSessionId = sessionId;
-          },
-          onAdmitted: () => {
-            admitted = true;
-          },
-          ...(trackSendFailure
-            ? {
-                onOptimisticUserMessage: (message: OptimisticUserMessage) => {
-                  optimisticUserMessage = message;
+        const attempt = (
+          recovering = false,
+          onSessionAllocated?: (sessionId: string) => void,
+        ): Promise<unknown> =>
+          sendPrompt(
+            recovering ? submittedPromptText : promptText,
+            promptImages,
+            promptFiles,
+            {
+              submittedPrompt: text,
+              ownerRef: admissionAttachment,
+              ...sendOptions,
+              clearComposerOnPromptStart:
+                !recovering && clearComposerOnPromptStart,
+              ...(recovering
+                ? {
+                    inputAnnotations: submittedInputAnnotations,
+                    skipPrepareSubmit: true,
+                    skipSubmitBefore: true,
+                    onSessionAllocated,
+                    beforeAdmission: async () => {
+                      if (
+                        !metadata?.isCurrentDraft?.({
+                          allowSessionAssignment: startedWithoutSession,
+                        })
+                      )
+                        throw new DOMException(
+                          'Composer draft changed',
+                          'AbortError',
+                        );
+                    },
+                  }
+                : {}),
+              onPreparedSubmit: (prepared) => {
+                submittedPromptText = prepared.prompt;
+                const annotations = prepared.inputAnnotations ?? [];
+                submittedInputAnnotations =
+                  annotations.length > 0 ? [...annotations] : undefined;
+              },
+              commitComposerAccepted:
+                !recovering && clearComposerOnPromptStart
+                  ? commitComposerAccepted
+                  : undefined,
+              onAdmissionStarted: (sessionId) => {
+                admissionStarted = true;
+                admissionSessionId = sessionId;
+              },
+              onAdmitted: () => {
+                admitted = true;
+                if (recovering) commitComposerAccepted?.();
+              },
+              ...(trackSendFailure
+                ? {
+                    onOptimisticUserMessage: (
+                      message: OptimisticUserMessage,
+                    ) => {
+                      optimisticUserMessage = message;
+                    },
+                  }
+                : {}),
+            },
+          ).catch((error: unknown) => {
+            if (!admissionOwnerIsCurrent()) return;
+            if (
+              !recovering &&
+              !admissionStarted &&
+              !admitted &&
+              metadata?.isCurrentDraft &&
+              offerCapacityRecovery(error, {
+                requesterCwd: admissionOwner.workspaceCwd,
+                isCurrent: () =>
+                  admissionOwnerIsCurrent() && metadata.isCurrentDraft!(),
+                resume: () => {
+                  const retry = (
+                    onSessionAllocated?: (sessionId: string) => void,
+                  ) => attempt(true, onSessionAllocated);
+                  return metadata.retainDraftDuringSessionCreation
+                    ? metadata.retainDraftDuringSessionCreation(retry)
+                    : retry();
                 },
+              })
+            )
+              return;
+            const failedMessage = optimisticUserMessage;
+            const definitelyRejected =
+              isDefinitelyRejectedPromptAdmission(error);
+            if (admissionStarted && !admitted && !definitelyRejected) {
+              updateFailedPrompt(null);
+              const uncertainSessionId =
+                failedMessage?.sessionId ??
+                admissionSessionId ??
+                connectionRef.current.sessionId;
+              if (uncertainSessionId) {
+                updateUnknownPromptAdmission({
+                  sessionId: uncertainSessionId,
+                  messageId: failedMessage?.messageId,
+                  text: submittedPromptText,
+                  images: promptImages ? [...promptImages] : undefined,
+                  files: promptFiles ? [...promptFiles] : undefined,
+                  inputAnnotations: submittedInputAnnotations,
+                  payloadAvailable: true,
+                });
               }
-            : {}),
-        }).catch((error: unknown) => {
-          if (!admissionOwnerIsCurrent()) return;
-          const failedMessage = optimisticUserMessage;
-          const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-          if (admissionStarted && !admitted && !definitelyRejected) {
-            updateFailedPrompt(null);
-            const uncertainSessionId =
-              failedMessage?.sessionId ??
-              admissionSessionId ??
-              connectionRef.current.sessionId;
-            if (uncertainSessionId) {
-              updateUnknownPromptAdmission({
-                sessionId: uncertainSessionId,
-                messageId: failedMessage?.messageId,
+              pushToast('warning', t('queue.admissionUnknown'));
+              console.warn(
+                '[WebShell] prompt admission outcome is unknown',
+                error,
+              );
+              return;
+            }
+            if (
+              trackSendFailure &&
+              !admitted &&
+              failedMessage &&
+              failedMessage.sessionId === connectionRef.current.sessionId &&
+              matchesUserMessageIdentity(
+                store
+                  .getSnapshot()
+                  .blocks.find(
+                    (block) =>
+                      block.kind === 'user' &&
+                      block.id === failedMessage.messageId,
+                  ),
+                failedMessage.identity,
+                failedMessage.owner.snapshot.isCurrent(),
+              )
+            ) {
+              updateFailedPrompt({
+                ...failedMessage,
                 text: submittedPromptText,
-                images: promptImages ? [...promptImages] : undefined,
-                files: promptFiles ? [...promptFiles] : undefined,
+                images: promptImages,
+                files: promptFiles,
                 inputAnnotations: submittedInputAnnotations,
-                payloadAvailable: true,
               });
             }
-            pushToast('warning', t('queue.admissionUnknown'));
-            console.warn(
-              '[WebShell] prompt admission outcome is unknown',
-              error,
-            );
-            return;
-          }
-          if (
-            trackSendFailure &&
-            !admitted &&
-            failedMessage &&
-            failedMessage.sessionId === connectionRef.current.sessionId &&
-            matchesUserMessageIdentity(
-              store
-                .getSnapshot()
-                .blocks.find(
-                  (block) =>
-                    block.kind === 'user' &&
-                    block.id === failedMessage.messageId,
-                ),
-              failedMessage.identity,
-              failedMessage.owner.snapshot.isCurrent(),
-            )
-          ) {
-            updateFailedPrompt({
-              ...failedMessage,
-              text: submittedPromptText,
-              images: promptImages,
-              files: promptFiles,
-              inputAnnotations: submittedInputAnnotations,
-            });
-          }
-          if (!admissionStarted && (startedWithoutSession || !failedMessage)) {
-            const editor = editorRef.current;
-            if (editor && !editor.hasInput()) {
-              editor.setText(submittedPromptText);
-              if (promptImages?.length) editor.restoreImages(promptImages);
-              if (promptFiles?.length) editor.restoreFiles(promptFiles);
-              if (submittedInputAnnotations?.length) {
-                editor.restoreInputAnnotations?.(submittedInputAnnotations);
+            if (
+              !admissionStarted &&
+              (startedWithoutSession || !failedMessage)
+            ) {
+              const editor = editorRef.current;
+              if (editor && !editor.hasInput()) {
+                editor.setText(submittedPromptText);
+                if (promptImages?.length) editor.restoreImages(promptImages);
+                if (promptFiles?.length) editor.restoreFiles(promptFiles);
+                if (submittedInputAnnotations?.length) {
+                  editor.restoreInputAnnotations?.(submittedInputAnnotations);
+                }
               }
             }
-          }
-          reportError(error, errorMessage);
-        });
+            reportError(error, errorMessage);
+          });
+        void attempt();
         return clearComposerOnPromptStart ? false : true;
       };
       if (text.startsWith('/')) {
@@ -16145,6 +16386,7 @@ export function App({
       }
     },
     [
+      offerCapacityRecovery,
       beginPromptPreparation,
       sendPrompt,
       sessionActions,
@@ -16214,7 +16456,7 @@ export function App({
       images?: PromptImage[],
       files?: PromptFile[],
       commitComposerAccepted?: ComposerSubmitCommit,
-      metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
+      metadata?: ComposerSubmitMetadata,
     ) => {
       const accepted = handleSubmitRef.current(
         text,
@@ -18044,6 +18286,7 @@ export function App({
           data-web-shell-shadcn
           lang={selectedLanguage}
         >
+          {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
             <ToastHost
               toasts={toasts}
@@ -18328,29 +18571,66 @@ export function App({
               />
             </DialogShell>
           )}
-          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
-            <AddWorkspaceDialog
-              onClose={() => setShowAddWorkspaceDialog(false)}
-              onAdd={handleAddWorkspace}
-              onSuggest={workspaceActions.suggestWorkspacePaths}
-              onPick={
-                nativeDirectoryPickerSupported &&
-                (!workspace.baseUrl ||
-                  new URL(workspace.baseUrl, window.location.origin).origin ===
-                    window.location.origin)
-                  ? async () => {
-                      const result =
-                        await workspaceActions.pickWorkspaceDirectory();
-                      return result.selected ? result.path : undefined;
-                    }
-                  : undefined
-              }
-              persistenceSupported={
-                persistentWorkspaceRegistrationSupported
-              }
-              displayNameEnabled={workspaceDisplayNameSupported}
-            />
-          )}
+          {!lockedWorkspaceCwd &&
+            showAddWorkspaceDialog &&
+            (workspaceBrowseActiveRef.current && !workspaceCapabilitiesReady ? (
+              <WorkspaceAddStatusDialog
+                message={t(
+                  workspace.status === 'error'
+                    ? 'workspaceHost.connectionError'
+                    : 'workspaceHost.loadingFolders',
+                )}
+                tone={workspace.status === 'error' ? 'alert' : 'status'}
+                subtitle={workspaceAddLocationSubtitle}
+                onClose={closeAddWorkspaceDialog}
+              />
+            ) : workspaceBrowseActiveRef.current &&
+              !dynamicWorkspaceRegistrationSupported ? (
+              <WorkspaceAddStatusDialog
+                message={t('workspaceHost.unsupported')}
+                tone="alert"
+                subtitle={workspaceAddLocationSubtitle}
+                onClose={closeAddWorkspaceDialog}
+              />
+            ) : (
+              <AddWorkspaceDialog
+                browseDirectories={workspaceBrowseActiveRef.current}
+                initialPath={
+                  workspaceBrowseActiveRef.current
+                    ? workspace.capabilities?.workspaceCwd?.replace(
+                        /[^\\/]+[\\/]?$/,
+                        '',
+                      ) ||
+                      workspace.capabilities?.workspaceCwd ||
+                      '/'
+                    : undefined
+                }
+                locations={workspaceAddLocations}
+                selectedLocation={workspaceAddSelectedLocation}
+                onLocationChange={changeWorkspaceAddLocation}
+                onClose={closeAddWorkspaceDialog}
+                onAdd={
+                  workspaceBrowseActiveRef.current
+                    ? handleAddRemoteWorkspace
+                    : handleAddWorkspace
+                }
+                onSuggest={workspaceActions.suggestWorkspacePaths}
+                onPick={
+                  nativeDirectoryPickerSupported &&
+                  (!workspace.baseUrl ||
+                    new URL(workspace.baseUrl, window.location.origin)
+                      .origin === window.location.origin)
+                    ? async () => {
+                        const result =
+                          await workspaceActions.pickWorkspaceDirectory();
+                        return result.selected ? result.path : undefined;
+                      }
+                    : undefined
+                }
+                persistenceSupported={persistentWorkspaceRegistrationSupported}
+                displayNameEnabled={workspaceDisplayNameSupported}
+              />
+            ))}
           {scratchOutcomeUnknown !== 'clear' && (
             <DialogShell
               title={t('sidebar.scratchOutcomeUnknownTitle')}
@@ -18561,8 +18841,9 @@ export function App({
                       : undefined
                   }
                   onOpenAddWorkspace={
-                    dynamicWorkspaceRegistrationSupported
-                      ? () => setShowAddWorkspaceDialog(true)
+                    dynamicWorkspaceRegistrationSupported ||
+                    hasRemoteWorkspaceLocation
+                      ? handleOpenExistingWorkspace
                       : undefined
                   }
                   workspaces={workspaces}
@@ -18968,6 +19249,9 @@ export function App({
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
+                        connections={
+                          standalone ? <DaemonConnectionsSettings /> : undefined
+                        }
                         modelManagement={{
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
@@ -19072,8 +19356,9 @@ export function App({
                         // createNewSession's default (no keepPanel) does that.
                         onNewSession={handlePanelNewSession}
                         onAddWorkspace={
-                          dynamicWorkspaceRegistrationSupported
-                            ? () => setShowAddWorkspaceDialog(true)
+                          dynamicWorkspaceRegistrationSupported ||
+                          hasRemoteWorkspaceLocation
+                            ? handleOpenExistingWorkspace
                             : undefined
                         }
                         onError={reportError}
@@ -19459,6 +19744,7 @@ export function App({
                       <SplitView
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
+                        onAssistantTurnSettled={onAssistantTurnSettled}
                         showSessionDetails={
                           (sidebarOptions.sessionActions?.items ??
                             DEFAULT_SESSION_ACTION_ITEMS).includes('details')
@@ -19887,6 +20173,17 @@ export function App({
                             : styles.composer
                         }
                       >
+                        {connection.runtimeStopped && (
+                          <div className={styles.composerActionTip} role="status" data-testid="workspace-runtime-stopped">
+                            <span className={styles.composerActionTipText}>{t('capacityChoice.stopped')}
+                              {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
+                            </span>
+                            <button type="button" className={styles.composerActionTipButton}
+                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                              {t('capacityChoice.resume')}
+                            </button>
+                          </div>
+                        )}
                         {standaloneWriterBlocked && (
                           <div
                             className={styles.composerActionTip}
@@ -20299,6 +20596,11 @@ export function App({
                               ? handleOpenCommit
                               : undefined
                           }
+                          onOpenLog={
+                            gitDiffWorkspaceCwd
+                              ? handleOpenLog
+                              : undefined
+                          }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
                           chatWidthToggleMin={chatWidthToggleMin}
@@ -20606,6 +20908,11 @@ export function App({
                 onOpenGitCommit={
                   workspaceContextActive && gitDiffWorkspaceCwd
                     ? handleOpenCommit
+                    : undefined
+                }
+                onOpenGitLog={
+                  workspaceContextActive && gitDiffWorkspaceCwd
+                    ? handleOpenLog
                     : undefined
                 }
                 onOpenAgent={openEnvironmentAgent}
