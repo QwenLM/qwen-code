@@ -1545,6 +1545,18 @@ jobs:
             fi
             EXPECTED_HEAD_SHA="$EVENT_HEAD_SHA"
           fi
+          # The wrapper `gh` on PATH refuses any repos/*/pulls/*/reviews write
+          # while these are unset (guard_pr_write, exit 90), and the skip gate
+          # below issues exactly such a write for its carry-forward POST. So
+          # they are exported BEFORE the gate: exported after it, that POST
+          # always dies, the `&&` is false, the gate's early return becomes
+          # unreachable, and the skip can never fire — every unchanged-diff
+          # push then runs the full review it was built to avoid.
+          # EXPECTED_HEAD_SHA is assigned above, so the guard's head-currency
+          # check reads the right pin here too.
+          export QWEN_CI_REVIEW_REPO="$REPO"
+          export QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"
+          export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"
           # Unchanged-diff skip: a synchronize whose OWN diff against the base
           # is byte-identical to an already-reviewed head (an update-branch
           # merge of main — 32% of automatic reviews, measured 2026-09-08/09)
@@ -1608,9 +1620,6 @@ jobs:
                 ;;
             esac
           fi
-          export QWEN_CI_REVIEW_REPO="$REPO"
-          export QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"
-          export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"
           {
             echo "expected_head_sha=$EXPECTED_HEAD_SHA"
             echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"

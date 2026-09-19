@@ -7504,6 +7504,49 @@ describe('qwen pr review unchanged-diff anchor', () => {
     );
   });
 
+  // The skip's ONLY exit sits behind a `gh api --method POST` to
+  // repos/*/pulls/*/reviews, and by that point configure_qwen_network has put
+  // the wrapper `gh` first on PATH. That wrapper routes the POST to
+  // guard_pr_write, which exits 90 while QWEN_CI_REVIEW_REPO /
+  // QWEN_CI_REVIEW_PR_NUMBER are unset. Exporting them after the gate makes
+  // the POST always fail, the `&&` false, and the gate's `exit 0`
+  // unreachable — no unchanged-diff push ever skips and the review this skip
+  // exists to avoid runs in full. Every string pin above stays green under
+  // that ordering, because the call is spelled correctly either way: the
+  // defect is observable only when the real wrapper and the real gate share
+  // one process. So pin the order, not the spelling.
+  it('exports the PR-write guard identity before the skip gate', () => {
+    const run = anchorDoc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).run;
+    const gate =
+      'if [ "${AUTO_REVIEW:-false}" = "true" ] && ' +
+      '[ "${EVENT_ACTION:-}" = "synchronize" ]; then';
+    const gateAt = run.indexOf(gate);
+    expect(gateAt).toBeGreaterThan(-1);
+    for (const name of [
+      'QWEN_CI_REVIEW_REPO',
+      'QWEN_CI_REVIEW_PR_NUMBER',
+      'QWEN_CI_REVIEW_EXPECTED_HEAD_SHA',
+    ]) {
+      const exportAt = run.indexOf(`export ${name}=`);
+      expect(exportAt, `export ${name} is missing`).toBeGreaterThan(-1);
+      expect(
+        exportAt,
+        `export ${name} must precede the gate that writes through it`,
+      ).toBeLessThan(gateAt);
+      // Exactly one assignment each: a pre-gate export shadowed by a later
+      // one would satisfy the pin above and still leave the POST unguarded.
+      expect(run.indexOf(`export ${name}=`, exportAt + 1)).toBe(-1);
+    }
+    // guard_pr_write compares the live head against the exported pin, so that
+    // pin has to hold its value at the export site — otherwise the POST is
+    // blocked as a moved head and the skip degrades to a full review again.
+    expect(run.indexOf('EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"')).toBeLessThan(
+      run.indexOf('export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA='),
+    );
+  });
+
   // R1-6. The reader's constants and the writer's identity are one contract
   // split across two files; pin them to EACH OTHER, not each to itself, so
   // moving either side alone reddens here instead of silently making every
