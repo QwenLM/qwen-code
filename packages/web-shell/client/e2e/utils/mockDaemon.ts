@@ -104,6 +104,12 @@ export interface WebShellDaemonScenario {
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
   workspaceFiles: Record<string, string>;
   /**
+   * Directory names `GET /workspace-path-suggestions` lists for a requested
+   * prefix, keyed by that prefix with or without its trailing separator. An
+   * unlisted prefix answers an empty list.
+   */
+  pathSuggestions?: Record<string, string[]>;
+  /**
    * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
    * (non-git workspace), matching the real daemon's graceful degradation.
    */
@@ -446,6 +452,7 @@ export function createWebShellDaemonScenario(
     providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
+    pathSuggestions: overrides.pathSuggestions,
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
@@ -778,6 +785,8 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    path === '/workspace-path-suggestions' ||
+    path === '/workspaces' ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
@@ -837,6 +846,8 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (method === 'GET' && path === '/workspace-path-suggestions') return true;
+  if (method === 'POST' && path === '/workspaces') return true;
   if (
     (method === 'GET' || method === 'POST') &&
     path === '/workspace/settings'
@@ -1116,6 +1127,45 @@ async function handleDaemonRoute(
     // the visual baselines stay valid. A spec that needs a white-label shell
     // should give this a scenario field rather than loosening it here.
     await json(route, {});
+    return;
+  }
+  if (method === 'GET' && path === '/workspace-path-suggestions') {
+    const prefix = searchParams.get('prefix') ?? '';
+    const listed =
+      scenario.pathSuggestions?.[prefix] ??
+      scenario.pathSuggestions?.[prefix.replace(/\/+$/, '')] ??
+      [];
+    const base = !prefix || prefix.endsWith('/') ? prefix : `${prefix}/`;
+    await json(route, {
+      kind: 'workspace-path-suggestions',
+      dir: prefix,
+      sep: '/',
+      suggestions: listed.map((name) => ({ name, path: `${base}${name}` })),
+      truncated: false,
+    });
+    return;
+  }
+  if (method === 'POST' && path === '/workspaces') {
+    const record = isRecord(body) ? body : {};
+    const cwd = typeof record['cwd'] === 'string' ? record['cwd'] : '';
+    const displayName =
+      typeof record['displayName'] === 'string'
+        ? record['displayName']
+        : undefined;
+    const workspace = {
+      id: `e2e-${cwd.replace(/[^a-zA-Z0-9]+/g, '-')}`,
+      cwd,
+      ...(displayName ? { displayName } : {}),
+      primary: false,
+      trusted: true,
+    };
+    // Mutate the capability snapshot so the refresh the app performs right
+    // after registering reports the new workspace, as the real daemon does.
+    scenario.capabilities = {
+      ...scenario.capabilities,
+      workspaces: [...(scenario.capabilities.workspaces ?? []), workspace],
+    };
+    await json(route, { ...workspace, persisted: record['persist'] === true });
     return;
   }
   if (method === 'GET' && path === '/workspace/providers') {
