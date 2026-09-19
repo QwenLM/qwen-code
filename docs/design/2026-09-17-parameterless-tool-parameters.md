@@ -51,11 +51,11 @@ The field is declared on `ContentGeneratorConfig`, added to
 ### Repair one layer down, not in the converter
 
 `ToolParametersMandatoryOpenAICompatibleProvider` overrides `buildRequest` and
-fills `parameters: { "type": "object" }` for any tool whose `parameters` is
-`undefined` after conversion, the same place MiniMax performs its equivalent
-repair. Doing it in the converter instead would mean choosing one shape for
-every OpenAI-compatible route, and `provider/minimax.ts` records that
-constraint explicitly.
+fills `parameters: { "type": "object", "properties": {} }` for any tool whose
+`parameters` is `undefined` after conversion, the same place MiniMax performs
+its equivalent repair. Doing it in the converter instead would mean choosing
+one shape for every OpenAI-compatible route, and `provider/minimax.ts` records
+that constraint explicitly.
 
 Acting on the request rather than the tool list also covers both ways a tool can
 end up without the field: one that declares an empty argument list, which the
@@ -64,15 +64,19 @@ never receives a schema. A converter-side fix only reaches the first.
 
 ### Shape
 
-`{ "type": "object" }`, the shape that the report says the endpoint accepts.
-MiniMax keeps `{ "type": "object", "properties": {} }`, the shape its own
-endpoint accepts. Both satisfy a server that only checks field presence.
+`{ "type": "object", "properties": {} }`, the empty-object schema MiniMax
+already injects for its own endpoint (#11834). Both providers now emit one
+shape, so an opted-in route behaves the same whichever of them owns it. A
+server that only checks field presence accepts this schema. The bare
+`{ "type": "object" }` this provider first shipped with is what #11410 reports
+as an HTTP 400 on llama.cpp, LM Studio and vLLM — routes that must keep the
+omission, and therefore never opt in.
 
 ### Selection order
 
 The opt-in is checked after every vendor hostname check, so a route that matches
-a vendor domain keeps that vendor's provider — MiniMax injects its own shape, and
-must not be displaced by a generic one.
+a vendor domain keeps that vendor's provider — MiniMax injects the same schema
+itself, and must not be displaced by a generic one.
 
 ## Limits and risks
 
@@ -84,6 +88,10 @@ must not be displaced by a generic one.
   opposite requirements must set the key only on the route that needs it.
 - The field is added, never removed. A route whose server rejects a present
   `parameters` object stays on the default provider and is unaffected.
+- The injected `properties` object is added after conversion, so it survives the
+  step where `relaxSchemaForFunctionCalling` strips an empty `properties` from
+  every converted schema. A server that rejects an empty `properties` object
+  must not opt in.
 - Reading `parameters === undefined` tests the value, not key presence: the
   converter emits the key with an `undefined` value, and a key-presence test
   would skip every tool that needs the repair.
@@ -110,5 +118,7 @@ must not be displaced by a generic one.
 "parameters"],"msg":"Field required"}` when the field is omitted, and HTTP 200
   with `"parameters": { "type": "object" }`. The CLI on that route fails with
   `422 status code (no body)` by default and completes normally once the key is
-  set on the matching `modelProviders` entry. Run record:
-  `.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`.
+  set on the matching `modelProviders` entry. That run predates the shape
+  alignment above: the HTTP 200 was recorded with the bare `{ "type": "object" }`,
+  and the empty-object schema has not been re-checked against that endpoint. Run
+  record: `.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`.

@@ -47,9 +47,10 @@
 ### 在下一层修复，而不是在 converter 中
 
 `ToolParametersMandatoryOpenAICompatibleProvider` 覆写 `buildRequest`，为转换后
-`parameters` 为 `undefined` 的任意工具补上 `{ "type": "object" }`，位置与 MiniMax
-执行等价修复的位置相同。若在 converter 中处理，就意味着为所有 OpenAI 兼容路由
-选定同一种形状，而 `provider/minimax.ts` 明确记录了这一约束。
+`parameters` 为 `undefined` 的任意工具补上
+`{ "type": "object", "properties": {} }`，位置与 MiniMax 执行等价修复的位置相同。
+若在 converter 中处理，就意味着为所有 OpenAI 兼容路由选定同一种形状，
+而 `provider/minimax.ts` 明确记录了这一约束。
 
 在请求层而非工具列表层处理，也同时覆盖了工具缺失该字段的两种成因：
 声明了空参数列表的工具（被 converter 归约为 `undefined`），
@@ -58,14 +59,17 @@
 
 ### 形状
 
-采用 `{ "type": "object" }`，即报告中所说该端点可接受的形状。
-MiniMax 保留 `{ "type": "object", "properties": {} }`，即其端点可接受的形状。
-两者都能满足只校验字段是否存在要求的服务器。
+采用 `{ "type": "object", "properties": {} }`，即 MiniMax 已为其自身端点注入的
+空对象 schema（#11834）。两个 provider 现在发出同一形状，因此开启该开关的路由
+无论由哪一个持有，行为都相同。只校验字段是否存在的服务器可以接受这一形状。
+本 provider 最初发出的裸 `{ "type": "object" }` 正是 #11410 在 llama.cpp、
+LM Studio 与 vLLM 上报告的 HTTP 400 —— 那些必须继续省略的路由，
+因此从不开启该开关。
 
 ### 选择顺序
 
 该开关在每一项厂商 hostname 检查之后才判断，因此匹配到厂商域名的路由仍保留该厂商的
-provider —— MiniMax 会注入自己的形状，不能被通用 provider 取代。
+provider —— MiniMax 会自行注入同一形状，不能被通用 provider 取代。
 
 ## 限制与风险
 
@@ -76,6 +80,9 @@ provider —— MiniMax 会注入自己的形状，不能被通用 provider 取�
   只在需要它的那条路由上设置该键。
 - 只新增字段，从不删除。服务器会拒绝存在的 `parameters` 对象的路由仍使用默认
   provider，不受影响。
+- 注入的 `properties` 对象发生在转换之后，因此它不会被
+  `relaxSchemaForFunctionCalling` 在转换中删除空 `properties` 的那一步影响。
+  拒绝空 `properties` 对象的服务器不应开启该开关。
 - 判断条件读取的是 `parameters === undefined` 这个值，而非键是否存在：
   converter 会带着 `undefined` 值发出该键，
   若只判断键是否存在，就会跳过每一个需要修复的工具。
@@ -101,4 +108,6 @@ provider —— MiniMax 会注入自己的形状，不能被通用 provider 取�
   `{"type":"missing","loc":["body","tools",0,"function","parameters"],"msg":"Field required"}`；
   带 `"parameters": { "type": "object" }` 时返回 HTTP 200。CLI 在该路由上默认失败为
   `422 status code (no body)`，在对应的 `modelProviders` 条目上设置该键后可正常完成。
+  该次运行早于上面的形状对齐：HTTP 200 记录的是裸 `{ "type": "object" }`，
+  空对象形状尚未在该端点上重新验证。
   运行记录：`.qwen/e2e-tests/2026-09-17-tool-parameters-mandatory-results.md`。

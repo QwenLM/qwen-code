@@ -16,8 +16,9 @@ import { DefaultOpenAICompatibleProvider } from './default.js';
  * the route is chosen by the user's `generationConfig.toolParametersMandatory`
  * rather than by endpoint sniffing: a self-hosted server shares `localhost`
  * with exactly the endpoints that need the omission, so the URL cannot identify
- * it. MiniMax needs the same repair with a different shape and keeps its own
- * provider; the vendor hostname checks win over this opt-in.
+ * it. MiniMax needs the same repair and keeps its own provider, now emitting
+ * the same empty-object schema; the vendor hostname checks win over this
+ * opt-in.
  */
 export class ToolParametersMandatoryOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   static isToolParametersMandatory(config: ContentGeneratorConfig): boolean {
@@ -35,7 +36,7 @@ export class ToolParametersMandatoryOpenAICompatibleProvider extends DefaultOpen
             ...tool,
             function: {
               ...tool.function,
-              parameters: { type: 'object' },
+              parameters: { type: 'object', properties: {} },
             },
           }
         : tool,

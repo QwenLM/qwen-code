@@ -134,7 +134,7 @@ describe('ToolParametersMandatoryOpenAICompatibleProvider', () => {
           function: {
             name: 'cron_list',
             description: 'desc',
-            parameters: { type: 'object' },
+            parameters: { type: 'object', properties: {} },
           },
         },
       ]);
@@ -161,7 +161,7 @@ describe('ToolParametersMandatoryOpenAICompatibleProvider', () => {
           function: {
             name: 'cron_status',
             description: 'desc',
-            parameters: { type: 'object' },
+            parameters: { type: 'object', properties: {} },
           },
         },
       ]);
