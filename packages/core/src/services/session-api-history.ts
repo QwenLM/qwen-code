@@ -36,11 +36,7 @@ export function getApiHistoryPromptId(content: Content): string | undefined {
  * `promptId`.
  *
  * Returns -1 when no entry carries the identity **and** when more than one
- * does. Identities are minted per entrance (`sessionId########<n>`) and their
- * counters restart independently, so a duplicate is possible; callers treat
- * both cases the same way — the identity does not resolve, so fall back to
- * whatever mapping was used before identities existed rather than guess
- * between two candidates.
+ * does. Callers fail closed in either case rather than guess between entries.
  *
  * Entries before `startIndex` are excluded from the scan entirely. Rewind
  * callers pass the startup-context/compressed-prefix length there: marks
@@ -60,34 +56,6 @@ export function findApiHistoryPromptIndex(
     match = index;
   }
   return match;
-}
-
-const API_HISTORY_NOTIFICATION = Symbol('apiHistoryNotification');
-
-type NotificationMarkedContent = Content & {
-  [API_HISTORY_NOTIFICATION]?: true;
-};
-
-/**
- * Marks a user-role API history entry as the model-facing half of a
- * background-notification-style turn (a drained background-agent notification,
- * a cron fire, a teammate envelope). The UI renders those turns as
- * `notification` items, never as user turns, so the TUI rewind census must
- * pair them against notification items rather than user turns. The rendered
- * text cannot carry that fact: a cron fire submits the raw job prompt with no
- * `<task-notification>` envelope, so provenance has to ride the entry itself
- * (R40-3). The submit path records the subtype on the `ChatRecord`; this mark
- * is its in-memory projection, so it survives nothing the record does not —
- * resume re-attaches it from the record's subtype.
- */
-export function markApiHistoryNotification(content: Content): void {
-  (content as NotificationMarkedContent)[API_HISTORY_NOTIFICATION] = true;
-}
-
-export function isApiHistoryNotification(content: Content): boolean {
-  return (
-    (content as NotificationMarkedContent)[API_HISTORY_NOTIFICATION] === true
-  );
 }
 
 export interface BuildApiHistoryOptions {
@@ -146,10 +114,6 @@ function appendApiHistoryRecord(
   if (record.type === 'user' && !record.subtype) {
     markApiHistoryPrompt(message, record.promptId);
   }
-  if (record.subtype === 'notification' || record.subtype === 'cron') {
-    markApiHistoryNotification(message);
-  }
-
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (
@@ -251,9 +215,6 @@ export class SessionApiHistoryAccumulator {
         ? payload.compressedHistory.map((content, index) => {
             const copy = copyContentForApiHistory(content);
             markApiHistoryPrompt(copy, payload.promptIds?.[index]);
-            if (payload.notificationMarks?.[index]) {
-              markApiHistoryNotification(copy);
-            }
             return copy;
           })
         : [];

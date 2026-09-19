@@ -48,10 +48,7 @@ import type {
 } from '../goals/goal-protocol.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 import { CompressionStatus } from '../core/turn.js';
-import {
-  markApiHistoryNotification,
-  markApiHistoryPrompt,
-} from './session-api-history.js';
+import { markApiHistoryPrompt } from './session-api-history.js';
 
 function branchTestRecord(
   uuid: string,
@@ -333,32 +330,6 @@ describe('ChatRecordingService', () => {
 
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
-    });
-
-    it('preserves notification provenance in compression checkpoints', async () => {
-      // Parallel to promptIds: a cron/notification entry inside the snapshot
-      // must keep its provenance mark through the checkpoint, or the resumed
-      // rewind census cannot pair it with its notification item (R40-3).
-      const content: Content = {
-        role: 'user',
-        parts: [{ text: 'Run the nightly job' }],
-      };
-      markApiHistoryNotification(content);
-
-      chatRecordingService.recordChatCompression({
-        info: {
-          originalTokenCount: 10,
-          newTokenCount: 5,
-          compressionStatus: CompressionStatus.COMPRESSED,
-        },
-        compressedHistory: [content],
-      });
-      await chatRecordingService.flush();
-
-      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
-      expect(record.systemPayload).toMatchObject({
-        notificationMarks: [true],
-      });
     });
 
     it('freezes the compression snapshot array against later live-history mutation (R38-2)', async () => {

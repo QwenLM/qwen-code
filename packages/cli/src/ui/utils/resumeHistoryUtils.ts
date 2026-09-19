@@ -23,7 +23,6 @@ import type {
 import {
   getToolResponseDisplayText,
   isGoalCheckpointBookkeepingRecord,
-  isSystemReminderContent,
   parseGoalStateRecordPayloadV2,
   projectUserTranscriptForDisplay,
   computeInitialTurnFromHistory,
@@ -197,25 +196,6 @@ function convertToHistoryItems(
   let lastGoalStateSnapshot: GoalSnapshotV2 | undefined;
   let lastGoalStateCause: GoalStateCause | undefined;
 
-  // Two turns in one transcript can share a re-minted promptId — a headless
-  // `-p --resume S` mints `S########0` unconditionally, colliding with the
-  // interactive turn that already wore it. Attaching a shared id to both
-  // resumed items hands the file-rewind consumer a key that resolves the
-  // LAST snapshot wearing it — the wrong turn's — while the conversation
-  // truncates at the selected turn (R34-1). Such ids are withheld below, so
-  // an ambiguous turn keeps the loud 'created before file checkpointing'
-  // refusal it had before ids were persisted. Unique ids stay attached —
-  // /restore-style flagging is not wanted here because the ids are the
-  // rewind identity gate's input.
-  const promptIdRecordCount = new Map<string, number>();
-  for (const record of conversation.messages) {
-    if (record.type !== 'user' || record.subtype) continue;
-    const id = record.promptId;
-    if (typeof id === 'string' && id.length > 0) {
-      promptIdRecordCount.set(id, (promptIdRecordCount.get(id) ?? 0) + 1);
-    }
-  }
-
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
     string,
@@ -288,48 +268,9 @@ function convertToHistoryItems(
     });
   };
 
-  // The rewind ownership proof compares the UI item against the model-facing
-  // entry built from this same record, so capture that text whenever the
-  // displayed string differs from it (synthetic placeholders, at-command raw
-  // text). `undefined` when they already agree — no field, no behavior change.
-  const modelFacingText = (record: ChatRecord): string | undefined => {
-    const parts = record.message?.parts;
-    if (!Array.isArray(parts)) return undefined;
-    for (const part of parts) {
-      // Mirror the consumer's prompt-part rule (isApiEntryOwnedByText): a
-      // per-turn reminder prepended as its OWN part is not the prompt, so a
-      // reminder-prefixed record must yield the real prompt text or the
-      // ownership proof never matches the turn's own entry (R48-4).
-      if (
-        typeof part.text === 'string' &&
-        part.text.length > 0 &&
-        !isSystemReminderContent({ role: 'user', parts: [part] })
-      ) {
-        return part.text;
-      }
-    }
-    return undefined;
-  };
-
   for (const record of conversation.messages) {
     const promptId =
-      typeof record.promptId === 'string' &&
-      record.promptId.length > 0 &&
-      promptIdRecordCount.get(record.promptId) === 1
-        ? record.promptId
-        : undefined;
-    // A well-formed id that failed the uniqueness census is withheld from
-    // `promptId` above, but the turn still OWNS its API entry: keep the
-    // ambiguous id here so the rewind gate's claim scans count the entry as
-    // owned by a displayed turn rather than as unowned excess (R45-2). The
-    // census itself is unchanged — `promptId` resolution still refuses a
-    // shared id.
-    const promptIdAmbiguous =
-      record.type === 'user' &&
-      !record.subtype &&
-      typeof record.promptId === 'string' &&
-      record.promptId.length > 0 &&
-      promptId === undefined
+      typeof record.promptId === 'string' && record.promptId.length > 0
         ? record.promptId
         : undefined;
     // A detected history gap begins at this record — surface a visible divider
@@ -485,16 +426,10 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
-            const ownerText = modelFacingText(record);
             items.push({
               type: 'user',
               text,
               ...(promptId ? { promptId } : {}),
-              ...(promptIdAmbiguous ? { promptIdAmbiguous } : {}),
-              ...(ownerText && ownerText !== text
-                ? { promptOwnerText: ownerText }
-                : {}),
-              ...(ownerText === undefined ? { promptHasModelText: false } : {}),
             });
           }
 
@@ -529,16 +464,10 @@ function convertToHistoryItems(
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
         if (text) {
-          const ownerText = modelFacingText(record);
           items.push({
             type: 'user',
             text,
             ...(promptId ? { promptId } : {}),
-            ...(promptIdAmbiguous ? { promptIdAmbiguous } : {}),
-            ...(ownerText && ownerText !== text
-              ? { promptOwnerText: ownerText }
-              : {}),
-            ...(ownerText === undefined ? { promptHasModelText: false } : {}),
           });
         }
         break;

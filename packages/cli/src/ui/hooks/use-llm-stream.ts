@@ -1425,7 +1425,8 @@ export const useLlmStream = (
     config.getArenaAgentClient()?.reportCancelled();
 
     // Log API cancellation
-    const prompt_id = mintLivePromptId(config, getPromptCount);
+    const prompt_id =
+      activeInteractionPromptId ?? mintLivePromptId(config, getPromptCount);
     const cancellationEvent = new ApiCancelEvent(
       modelOverrideRef.current ?? config.getModel(),
       prompt_id,

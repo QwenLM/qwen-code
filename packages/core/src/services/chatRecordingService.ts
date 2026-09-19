@@ -71,10 +71,7 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
-import {
-  getApiHistoryPromptId,
-  isApiHistoryNotification,
-} from './session-api-history.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -532,15 +529,6 @@ export interface ChatCompressionRecordPayload {
   compressedHistory: Content[];
   /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
-  /**
-   * Notification provenance parallel to compressedHistory: true where the
-   * entry is the model-facing half of a background-notification-style turn.
-   * Prompt identities survive a compression checkpoint through
-   * `promptIds`; without this parallel array the same checkpoint drops the
-   * notification mark, and a resumed session's rewind census can no longer
-   * pair the entry with its notification item (R40-3).
-   */
-  notificationMarks?: boolean[];
   completedToolCallIds?: string[];
 }
 
@@ -2554,9 +2542,6 @@ export class ChatRecordingService {
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
-      const notificationMarks = compressedHistory.map((content) =>
-        isApiHistoryNotification(content),
-      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
@@ -2565,7 +2550,6 @@ export class ChatRecordingService {
           ...payload,
           compressedHistory,
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
-          ...(notificationMarks.some(Boolean) ? { notificationMarks } : {}),
         },
       };
 

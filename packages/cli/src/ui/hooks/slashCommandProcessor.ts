@@ -1467,6 +1467,7 @@ export const useSlashCommandProcessor = (
                     new Set(approvedCommands),
                     undefined,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'confirm_action': {
@@ -1499,6 +1500,7 @@ export const useSlashCommandProcessor = (
                     undefined,
                     true,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'stream_messages': {

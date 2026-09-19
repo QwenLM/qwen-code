@@ -224,39 +224,6 @@ export type HistoryItemUser = HistoryItemBase & {
    */
   promptIdFileKeyOnly?: boolean;
   /**
-   * The `promptId` this turn's record carried when the resume builder
-   * withheld it from `promptId` because another record in the same
-   * transcript claims it too. The census removes the resolution key, not
-   * the ownership: the API entry still wears the mark, so the rewind gate's
-   * claim scans read this field to count the entry as owned by a displayed
-   * turn instead of treating it as unowned excess (R45-2).
-   */
-  promptIdAmbiguous?: string;
-  /**
-   * The model-facing text of this turn, when it differs from `text`.
-   *
-   * The rewind ownership proof checks that the entry wearing the target's
-   * `promptId` carries the target's text, which keeps a re-minted twin from
-   * resolving onto the wrong entry. `text` is DISPLAY text, though, and the
-   * resume builder substitutes synthetic strings for it — most visibly
-   * `'[User message with attachments]'` — so the proof compared two strings
-   * that never match and the identity gate silently never fired for those
-   * turns. Set this to the text the model actually received so the proof has
-   * something real to compare, while `text` stays what the UI renders.
-   */
-  promptOwnerText?: string;
-  /**
-   * `false` when this turn's record carried no model-facing text part — a
-   * resumed attachment-only prompt displayed as the synthetic
-   * `'[User message with attachments]'`. The rewind ordinal proof counts
-   * user prompts on both sides of the UI/API boundary and must count the
-   * same population on each: the API side never counts such a turn (its
-   * entry has no text part), so the UI side must not count it either.
-   * Absent on the live path, where a real turn's text is what the model
-   * received.
-   */
-  promptHasModelText?: boolean;
-  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible

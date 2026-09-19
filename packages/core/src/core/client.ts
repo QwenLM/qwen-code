@@ -3986,15 +3986,6 @@ export class LlmClient {
         // Every other send (retry, continuation, tool result, cron) leaves
         // the entry unmarked and stays on the positional rewind path.
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
-        // Notification-style turns (drained background-agent notification,
-        // cron fire, teammate envelope) display as `notification` items, so
-        // their model-facing entry carries the notification provenance the
-        // rewind census pairs against notification items — the rendered text
-        // cannot carry it (a cron fire submits the raw job prompt), and the
-        // recorded subtype restores it on resume (R40-3).
-        messageType === SendMessageType.Notification ||
-          messageType === SendMessageType.Cron ||
-          messageType === SendMessageType.Teammate,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4081,12 +4072,7 @@ export class LlmClient {
           // the very start of the system-reminder block keeps it close to
           // the user prompt. Contrast the ToolResult path below, which
           // must append to avoid splitting functionCall / functionResponse.
-          // The recall prompt is bare markdown (`## Relevant memory…`), so
-          // wrap it like every other reminder: the rewind ownership proof
-          // picks the entry's first NON-reminder text part as the prompt,
-          // and an unwrapped memory block would occupy that slot and
-          // silently disable identity resolution for the turn.
-          systemReminders.unshift(wrapSystemReminder(userQueryMemory.prompt));
+          systemReminders.unshift(userQueryMemory.prompt);
         }
 
         // Omni passive media-memory recall (memory design M §9.3, D10

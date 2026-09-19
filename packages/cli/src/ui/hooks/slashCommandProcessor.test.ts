@@ -2171,7 +2171,13 @@ describe('useSlashCommandProcessor', () => {
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       act(() => {
-        result.current.handleSlashCommand('/shellcmd');
+        result.current.handleSlashCommand(
+          '/shellcmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session########7',
+        );
       });
       await waitFor(() => {
         expect(result.current.shellConfirmationRequest).not.toBeNull();
@@ -2191,7 +2197,10 @@ describe('useSlashCommandProcessor', () => {
         ([item]) => item.type === MessageType.USER && item.text === '/shellcmd',
       );
       expect(userInvocationCalls).toHaveLength(1);
-      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, {
+        sentToModel: true,
+        promptId: 'test-session########7',
+      });
 
       const recorder = mockConfig.getChatRecordingService() as unknown as {
         recordSlashCommand: ReturnType<typeof vi.fn>;
@@ -2226,7 +2235,13 @@ describe('useSlashCommandProcessor', () => {
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       act(() => {
-        result.current.handleSlashCommand('/actioncmd');
+        result.current.handleSlashCommand(
+          '/actioncmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session########8',
+        );
       });
       await waitFor(() => {
         expect(result.current.confirmationRequest).not.toBeNull();
@@ -2244,7 +2259,10 @@ describe('useSlashCommandProcessor', () => {
           item.type === MessageType.USER && item.text === '/actioncmd',
       );
       expect(userInvocationCalls).toHaveLength(1);
-      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, {
+        sentToModel: true,
+        promptId: 'test-session########8',
+      });
 
       const recorder = mockConfig.getChatRecordingService() as unknown as {
         recordSlashCommand: ReturnType<typeof vi.fn>;

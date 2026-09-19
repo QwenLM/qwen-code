@@ -7032,7 +7032,7 @@ hello
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.arrayContaining([
-          '<system-reminder>\n## Relevant memory\n\nUser prefers terse responses.\n</system-reminder>',
+          '## Relevant memory\n\nUser prefers terse responses.',
           'Please answer tersely',
         ]),
         expect.any(AbortSignal),
@@ -7199,7 +7199,7 @@ hello
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.arrayContaining([
-          '<system-reminder>\n## Relevant memory\n\nBounded memory result.\n</system-reminder>',
+          '## Relevant memory\n\nBounded memory result.',
         ]),
         expect.any(AbortSignal),
       );
@@ -7236,9 +7236,7 @@ hello
 
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        expect.arrayContaining([
-          '<system-reminder>\n## Relevant memory\n\nFast memory result.\n</system-reminder>',
-        ]),
+        expect.arrayContaining(['## Relevant memory\n\nFast memory result.']),
         expect.any(AbortSignal),
       );
     });

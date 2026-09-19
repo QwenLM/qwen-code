@@ -2,157 +2,47 @@
 
 ## Problem
 
-TUI rewind currently aligns visible user turns with model-facing history by
-counting and classifying two independent representations. Content changes such
-as cleared-media placeholders can make those classifiers disagree and select
-the wrong truncation boundary.
+TUI rewind aligned visible user turns with model-facing history by counting
+two independent representations. Cleared media and other non-visible entries
+can make those counts disagree and select the wrong truncation boundary.
 
 ## Decision
 
-Use the existing `promptId` as the shared identity of a visible user turn and
+Use `promptId` as the authoritative identity shared by a visible user turn and
 its model-facing prompt.
 
-- Persist `promptId` on the user `ChatRecord`.
-- Attach it to the corresponding in-memory API `Content` as Symbol metadata so
-  it is not sent to providers.
-- Restore both the UI item and API metadata from the persisted record,
-  attaching the id to a resumed UI item only when exactly one user record
-  carries it — a headless `--resume` re-mints `sessionId########0`, and a
-  shared id would hand the file-rewind consumer a key that resolves the wrong
-  turn's snapshot.
-- Resolve identified TUI rewind targets by identity.
-- Keep the current positional mapping for everything else.
+- Persist the id on the user `ChatRecord`.
+- Attach it to the corresponding in-memory API `Content` as Symbol metadata,
+  so it is not sent to providers.
+- Preserve the metadata through recording, compression, resume, branch, and
+  session-switch paths.
+- Resolve an identified rewind target by an exact id lookup that is unique in
+  both retained UI history and model history.
+- Return `-1` when an identified target has no match or a duplicate on either
+  side.
+- Retain the existing positional mapping only for legacy turns without an id
+  and restored checkpoint items whose id is only a file-history key.
 
-Fast-compression checkpoints preserve the Symbol values in parallel metadata
-so resume does not discard identities that remain in model history.
+The first visible turn still resolves to the known startup-context boundary.
+The existing compression guard continues to reject turns that were absorbed
+by a marker-less compressed prefix.
 
-## Fallback contract
+## Identity lifecycle
 
-Identity is an accelerator, never a new failure mode. `promptId` is minted as
-`sessionId########<counter>` by several entrances (ink, OpenTUI, `-p`,
-`stream-json`, ACP) whose counters restart independently, so uniqueness is not
-an invariant this design may rely on. The mapping falls back to the
-pre-existing positional walk whenever identity does not resolve.
+Interactive, headless, OpenTUI, and ACP entry points mint ids in the form
+`sessionId########<counter>`. Resume and fork paths seed the counter after the
+highest retained turn and file snapshot so a new turn does not reuse an
+existing key. Duplicate ids remain possible in older transcripts, so lookup
+requires exactly one matching API entry and fails closed otherwise.
 
-As shipped, the gate demands more than a unique match before it accepts one.
-The conditions accumulated over review rounds 24-30, each closing a way a
-`promptId` can be worn by an entry that does not belong to the rewind target
-(an absorbed turn's re-minted mark, a claimant-less re-send, a twin from
-another entrance). A match is accepted only when **all** hold:
-
-1. the target is a real user turn carrying a `promptId`, and is not
-   `promptIdFileKeyOnly` (a `/restore`d item, whose id is a file-snapshot key
-   only — the checkpoint's `clientHistory` is JSON and carries no marks);
-2. the target carried a model-facing text (`promptHasModelText !== false`) —
-   an attachment-only resumed turn has no text for the proof to match and the
-   walk cannot place it (its entry has no text part), so it refuses loudly
-   rather than landing on the next turn's boundary;
-3. exactly one post-`startIndex` entry carries the id;
-4. that entry's prompt text equals the target's model-facing text (the
-   ownership proof) — compared against `promptOwnerText ?? text`, because a
-   resumed UI item's `text` is a display projection and can be a synthetic
-   string such as `'[User message with attachments]'` that no API entry ever
-   carries. The entry's prompt text is its first non-empty, non-reminder
-   text part (mirroring the record-side `modelFacingText` rule), so an
-   unrelated turn whose cleared media part happens to equal the target's
-   text is not mistaken for it;
-5. if the target's own text is itself a cleared-media placeholder, the match's
-   ordinal also agrees — the entry has exactly as many prompt entries with a
-   model-facing text before it as the target has preceding UI items that own
-   a counted entry: real UI turns that carried one, plus drained notification
-   items paired with a submitted entry (a background-agent/cron completion
-   displays as a notification but submits a real user-role entry the API side
-   counts; the pairing keys on the entry's recorded notification provenance,
-   not its text — a cron fire submits the raw job prompt with no envelope).
-   The resume builder records `promptHasModelText` so the two sides count the
-   same population; see below — AND at least `uiUserTurnCount` plus the paired
-   notification count of user-role, non-tool-result entries _that can own a
-   UI turn_ precede the match: a counted prompt entry, a text-less media
-   entry, or a cleared media-only entry whose mark a real UI turn before the
-   target still claims — that turn remains counted in `uiUserTurnCount`, so
-   its cleared entry must supply the matching position. A wholly-structural
-   reminder entry (the mid-history MCP added-tools notice) and an unclaimed
-   cleared media-only entry carry a text part yet own no turn, so they do not
-   count. The aligned counts can drop together when both sides skip an
-   attachment-only turn, so the absolute-position term keeps the proof from
-   agreeing trivially at an entry that is not the target's own;
-6. the proof is unique — no other real, non-file-key-only UI turn claims the
-   same id with the same text, and at most one post-`startIndex` entry carries
-   the target's text. The census skips entries marked with a different id
-   (provably another turn's own — the user simply sent the same text twice),
-   skips notification-provenance entries (a drained background-agent/cron
-   submission has a notification item as its UI half, never a user turn, so
-   it cannot be the target's own and cannot impostor one — a cron fire whose
-   raw prompt equals the target's text must not veto the proof), and for a
-   placeholder-texted target it counts only the walk's own
-   population (a same-mime cleared media-only sibling never had a UI turn;
-   placeholder-vs-placeholder ambiguity is the ordinal check's job);
-7. the positional walk does not land earlier than the match for a reason the
-   UI cannot account for: the counted entries before the match exceed the UI
-   items that own a counted entry. That owning population is real user turns
-   with a model-facing text plus drained notification items — a
-   background-agent/cron completion displays as a notification but submits a
-   real user-role entry, while a mid-turn steer message owns no counted entry
-   and displays as a `sentToModel: false` user item. Even then the demotion
-   fires only when the cut is safe: dropping [walk, match) must not truncate
-   an entry a still-displayed turn before the target claims — by mark, or,
-   for an entry that carries no mark (a retry's re-push, a pre-identities
-   transcript, a checkpoint restore), by its prompt text equalling that
-   turn's model-facing text (`promptOwnerText ?? text`). When the cut would
-   drop one, the early walk is an unowned excess entry's doing (a Goal
-   continuation, a submit_prompt turn) and the proven match stays;
-8. no entry AFTER the match is owned by a still-displayed turn before the
-   target (by mark, or by text when the entry carries no mark): the match
-   cannot be the target's own in that case — its true entry must follow that
-   turn's. That is the claimant-less re-send wearing the absorbed target's id
-   and text, and the demotion in condition 7 cannot catch it because the
-   absorbed target leaves the walk one short. Identity does not resolve; the
-   gate falls back to the walk, whose loud -1 is the pre-identity answer.
-
-Anything else falls through to the positional walk, whose loud -1 is the safe
-refusal. So the change can only make rewind more accurate than it was, never
-less: it never introduces a refusal on a session that previously rewound.
-
-### Why condition 5 is scoped the way it is
-
-A cleared media-only entry and a genuine prompt whose entire text equals the
-generated placeholder are byte-identical once serialized, so the text proof
-cannot separate them. Their ordinal can: the target's own entry is the n-th
-entry whose prompt carried a model-facing text, where n is the number of
-preceding real UI turns that carried one, while a cleared entry wearing a
-re-minted mark sits elsewhere. The two sides must count the SAME population:
-an unfiltered API count also counts cleared placeholders — a cleared
-media-only entry owns no UI turn, while a microcompaction-cleared
-attachment-only entry's turn survives, so the absolute backstop keeps the
-latter counted for exactly as long as a real UI turn before the target claims
-its mark (condition 5's third disjunct) — and a raw UI count also counts
-resumed attachment-only turns (whose API entry has no text part), so the two
-divergence directions can cancel and admit an impostor. The API side therefore uses the walk's own filtered
-binding and the UI side counts only turns the resume builder did not flag
-`promptHasModelText: false`.
-
-Ordinal agreement is a positional proof, so it stops holding exactly where
-positions desync: a turn absorbed by compression. That is the case identity
-exists to resolve, so the check must not apply to it — and it does not, because
-those targets carry ordinary text and never reach condition 5. Scoping is what
-lets both hold at once; an unconditional ordinal proof resolves the collision
-but breaks absorbed-turn exactness, and an unconditional placeholder refusal
-does the reverse. Both directions are pinned: removing the scope (applying
-the ordinal proof to every target) reds the absorbed-turn exactness pin
-`prefers the ownership-proven identity over a positional walk that lands one
-turn late` — ordinal agreement is positional and breaks exactly where
-positions desync — and removing the ordinal clause reds the re-mint refusal
-pin `refuses (-1) when a placeholder-shaped prompt re-mints a cleared-media
-mark`, where only the ordinal separates the target's own placeholder-texted
-entry from a cleared entry wearing the re-minted mark.
-
-The durable close remains per-entry provenance — ids that cannot be re-minted,
-issued at the mint sites — which would remove the need for any ownership proof.
-Conditions 3-5 are the interim.
+Compression records persist prompt ids in an array parallel to their history
+snapshot. Restoring a compression checkpoint reattaches each id to the same
+entry.
 
 ## Scope
 
-This change does not redesign ACP rewind, edit rollback, recording checkpoints,
-file-history snapshot alignment, retry/continuation handling, automatic turns,
-token-limit cleanup, or fork identity remapping. Those are independent state
-machines and require separate issues if their current behavior is incorrect.
+This change supplies stable turn identity to TUI rewind and the persistence
+paths needed to keep that identity stable. It does not add text ownership,
+notification provenance, ordinal reconciliation, or other alignment
+heuristics; those would recreate the dual-authority problem this design is
+intended to remove.
