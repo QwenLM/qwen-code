@@ -16,6 +16,68 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
+  'capacityChoice.persistenceUnconfirmed':
+    'Saving the last interrupted turn could not be confirmed.',
+  'capacityChoice.title': 'Choose a workspace to stop',
+  'capacityChoice.description':
+    'No ACP capacity is available. Choose a workspace whose sessions you want to stop, or cancel and keep working.',
+  'capacityChoice.warning':
+    'Stopping interrupts all listed sessions and their tools. Files, workspace registration and saved history remain. Unsaved work may be lost. Closing this dialog after confirmation does not undo the stop.',
+  'capacityChoice.outdated':
+    'The draft, session or daemon has changed. Cancel and try the original operation again.',
+  'capacityChoice.inProgress':
+    'The selected stop is still being resolved. Refresh its status before continuing.',
+  'capacityChoice.failedUnreleased':
+    'The stop failed. This workspace remains unavailable until its old processes are confirmed stopped. Capacity is still reserved. Refresh to check cleanup.',
+  'capacityChoice.failedUnknownCleanup':
+    'The stop failed. Cleanup could not be confirmed. Refresh its status before continuing.',
+  'capacityChoice.workspaces': 'Workspace to stop',
+  'capacityChoice.requester':
+    'This workspace owns the operation you are trying to continue.',
+  'capacityChoice.running': 'Running',
+  'capacityChoice.waiting': 'Waiting for your response',
+  'capacityChoice.background': 'Background work running',
+  'capacityChoice.backgroundUnknown': 'Background work status unknown',
+  'capacityChoice.none':
+    'No workspace can currently be stopped here. Review the reasons above, stop the independent work, or cancel.',
+  'capacityChoice.refresh': 'Refresh status',
+  'capacityChoice.continue': 'Continue original operation',
+  'capacityChoice.confirm': 'Stop these sessions and continue',
+  'capacityChoice.stopped':
+    'This workspace was stopped to free ACP capacity. Resume this conversation when needed.',
+  'capacityChoice.resume': 'Resume conversation',
+  'capacityChoice.blocked.stopping': 'Stopping',
+  'capacityChoice.blocked.not_live': 'No live ACP',
+  'capacityChoice.blocked.release_unavailable':
+    'Owned process release cannot be observed',
+  'capacityChoice.blocked.session_start_pending':
+    'Session startup or restore in progress',
+  'capacityChoice.blocked.workspace_control_pending':
+    'Workspace management or MCP work in progress',
+  'capacityChoice.blocked.session_closing':
+    'Session close or reset in progress',
+  'capacityChoice.blocked.runtime_unavailable':
+    'Workspace unavailable or untrusted',
+  'capacityChoice.blocked.special_runtime': 'Special-purpose workspace',
+  'capacityChoice.blocked.unsupported': 'Runtime stop is not supported',
+  'capacityChoice.blocked.activity_unknown': 'Activity could not be observed',
+  'capacityChoice.blocked.pendingSessionStarts': 'Session startup pending',
+  'capacityChoice.blocked.acpConnections': 'An ACP client is connected',
+  'capacityChoice.blocked.memoryTasks': 'Memory task running',
+  'capacityChoice.blocked.channelWorkers': 'Channel worker running',
+  'capacityChoice.blocked.voiceSessions': 'Voice session active',
+  'capacityChoice.blocked.management_pending': 'Workspace management pending',
+  'capacityChoice.blocked.scheduler_pending':
+    'Scheduled session restore in progress',
+  'capacityChoice.blocked.enabled_scheduled_tasks':
+    'Disable enabled scheduled tasks first',
+  'capacityChoice.blocked.scheduled_tasks_unknown':
+    'Scheduled tasks could not be read',
+  'capacityChoice.capacity': (v) => `ACP capacity: ${v?.used} / ${v?.limit}`,
+  'capacityChoice.sessions': (v) => `${v?.count} loaded session(s)`,
+  'capacityChoice.queued': (v) => `${v?.count} queued`,
+  'capacityChoice.outcome': (v) =>
+    `${v?.closed} session(s) closed; ${v?.remaining} remaining.`,
   'footnotes.note': (v) => `Footnote ${v?.number ?? ''}`,
   'footnotes.references': (v) => `View ${v?.count ?? ''} references`,
   'footnotes.preview': 'Reference preview',
@@ -3907,6 +3969,59 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'capacityChoice.persistenceUnconfirmed':
+    '无法确认最后一轮被中断内容是否已保存。',
+  'capacityChoice.title': '选择要停止的工作区',
+  'capacityChoice.description':
+    '当前没有可用的 ACP 容量。选择一个工作区停止其会话，或取消并继续现有工作。',
+  'capacityChoice.warning':
+    '停止将中断列出的所有会话及其工具。文件、工作区注册和已保存历史会保留，未保存工作可能丢失。确认后关闭此弹窗不会撤销停止。',
+  'capacityChoice.outdated':
+    '草稿、会话或 daemon 已变化，请取消后重新执行原操作。',
+  'capacityChoice.inProgress': '所选停止仍在处理，请刷新状态后再继续。',
+  'capacityChoice.failedUnreleased':
+    '停止失败。确认旧进程全部退出前，此工作区暂不可用，容量仍被占用。可刷新查看清理结果。',
+  'capacityChoice.failedUnknownCleanup':
+    '停止失败，清理结果尚未确认。请刷新状态后再继续。',
+  'capacityChoice.workspaces': '要停止的工作区',
+  'capacityChoice.requester': '此工作区属于正在尝试继续的原操作。',
+  'capacityChoice.running': '运行中',
+  'capacityChoice.waiting': '等待你的回复',
+  'capacityChoice.background': '后台工作运行中',
+  'capacityChoice.backgroundUnknown': '后台工作状态未知',
+  'capacityChoice.none':
+    '当前没有可在此停止的工作区。请查看上述原因，先结束独立工作，或取消。',
+  'capacityChoice.refresh': '刷新状态',
+  'capacityChoice.continue': '继续原操作',
+  'capacityChoice.confirm': '停止这些会话并继续',
+  'capacityChoice.stopped':
+    '此工作区已停止，以释放 ACP 容量。需要时可主动恢复此会话。',
+  'capacityChoice.resume': '恢复会话',
+  'capacityChoice.blocked.stopping': '正在停止',
+  'capacityChoice.blocked.not_live': '没有运行中的 ACP',
+  'capacityChoice.blocked.release_unavailable': '无法确认自有进程释放',
+  'capacityChoice.blocked.session_start_pending': '正在启动或恢复会话',
+  'capacityChoice.blocked.workspace_control_pending':
+    '工作区管理或 MCP 操作进行中',
+  'capacityChoice.blocked.session_closing': '会话正在关闭或重置',
+  'capacityChoice.blocked.runtime_unavailable': '工作区不可用或不可信',
+  'capacityChoice.blocked.special_runtime': '特殊用途工作区',
+  'capacityChoice.blocked.unsupported': '不支持停止此运行时',
+  'capacityChoice.blocked.activity_unknown': '无法确认活动状态',
+  'capacityChoice.blocked.pendingSessionStarts': '等待会话启动',
+  'capacityChoice.blocked.acpConnections': '有 ACP 客户端连接',
+  'capacityChoice.blocked.memoryTasks': '记忆任务运行中',
+  'capacityChoice.blocked.channelWorkers': '渠道 worker 运行中',
+  'capacityChoice.blocked.voiceSessions': '语音会话活跃',
+  'capacityChoice.blocked.management_pending': '工作区管理操作待完成',
+  'capacityChoice.blocked.scheduler_pending': '正在恢复定时任务会话',
+  'capacityChoice.blocked.enabled_scheduled_tasks': '请先禁用已启用的定时任务',
+  'capacityChoice.blocked.scheduled_tasks_unknown': '无法读取定时任务',
+  'capacityChoice.capacity': (v) => `ACP 容量：${v?.used} / ${v?.limit}`,
+  'capacityChoice.sessions': (v) => `${v?.count} 个已加载会话`,
+  'capacityChoice.queued': (v) => `${v?.count} 个排队请求`,
+  'capacityChoice.outcome': (v) =>
+    `已关闭 ${v?.closed} 个会话，剩余 ${v?.remaining} 个。`,
   'footnotes.note': (v) => `脚注 ${v?.number ?? ''}`,
   'footnotes.references': (v) => `查看 ${v?.count ?? ''} 条引用`,
   'footnotes.preview': '引用预览',
