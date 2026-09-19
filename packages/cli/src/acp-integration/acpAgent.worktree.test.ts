@@ -165,6 +165,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isOpenRouterHostname: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isOpenRouterHostname,
+  // The real workspace env snapshot (config/environment.ts) needs this.
+  QWEN_DIR: (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
+    .QWEN_DIR,
   // The real parser: `model-configuration` gates every reasoning control on it,
   // and a stand-in would decide capability validity differently from the wire.
   parseModelReasoningCapabilities: (

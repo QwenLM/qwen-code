@@ -9,11 +9,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
-import { hashMcpServerConfig } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, hashMcpServerConfig } from '@qwen-code/qwen-code-core';
 import {
   loadMcpApprovals,
   getPendingGatedMcpServers,
   getPromptableMcpServers,
+  isMcpApprovalGateArmed,
   resetMcpApprovalsForTesting,
   MCP_APPROVALS_FILENAME,
 } from './mcpApprovals.js';
@@ -628,5 +629,26 @@ describe('mcpApprovals (hash-bound approval store)', () => {
         getPromptableMcpServers({ ws: workspaceServer }, projectRoot),
       ).toEqual([]);
     });
+  });
+});
+
+describe('isMcpApprovalGateArmed', () => {
+  it('is armed only outside bare mode, safe mode and YOLO', () => {
+    for (const mode of [
+      ApprovalMode.PLAN,
+      ApprovalMode.DEFAULT,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+    ]) {
+      expect(isMcpApprovalGateArmed(false, false, mode)).toBe(true);
+      expect(isMcpApprovalGateArmed(true, false, mode)).toBe(false);
+      expect(isMcpApprovalGateArmed(false, true, mode)).toBe(false);
+    }
+    expect(isMcpApprovalGateArmed(false, false, ApprovalMode.YOLO)).toBe(false);
+    expect(isMcpApprovalGateArmed(true, true, ApprovalMode.YOLO)).toBe(false);
+  });
+
+  it('treats an unset approval mode as armed', () => {
+    expect(isMcpApprovalGateArmed(false, false, undefined)).toBe(true);
   });
 });
