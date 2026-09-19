@@ -800,15 +800,25 @@ function normalizeLaunch(
   const projectCwd = stringValue(raw['projectCwd']);
   const activeCwd = stringValue(raw['activeCwd']);
   if (!sessionId || !entrypoint || !projectCwd || !activeCwd) return undefined;
+  // Validated like every other text field: this value is promoted to a row's
+  // reported session id and to the key the `sessions ps` merge dedupes on, so
+  // a non-string or empty spelling must not survive normalization. It also has
+  // to be another spelling of *this* session — a launch file naming a
+  // different one would let its row claim that session's registry record, and
+  // the verified pid on it, which is the impersonation the directory-derived
+  // id above exists to stop. Compared against that derived id rather than
+  // `raw['sessionId']`, because adoption writes the raw mixed-case spelling
+  // here and files the directory under its sanitized form.
+  const resumeSessionId = stringValue(raw['resumeSessionId']);
   return stripUndefined({
     ...raw,
     schemaVersion: 1,
     sessionId,
-    // Validated like every other text field: this value is promoted to a
-    // row's reported session id and to the key the `sessions ps` merge
-    // dedupes on, so a non-string or empty spelling must not survive
-    // normalization.
-    resumeSessionId: stringValue(raw['resumeSessionId']),
+    resumeSessionId:
+      resumeSessionId !== undefined &&
+      sanitizeSessionId(resumeSessionId) === sessionId
+        ? resumeSessionId
+        : undefined,
     argv: stringArrayValue(raw['argv']),
     env: stringMapValue(raw['env']),
     entrypoint,

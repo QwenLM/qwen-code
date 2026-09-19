@@ -277,11 +277,17 @@ function registryRow(record: SessionRegistryRecord): SessionRow {
  *   lost: the native session store is case-sensitive, so a row reporting
  *   the sanitized id hands `--resume` an id it cannot act on. The carry
  *   fires only while the row reports the sanitized form, so a launch-file
- *   spelling keeps winning while present;
+ *   spelling keeps winning while present. `name` follows the id when it
+ *   *is* the id, since NAME is the only spelling the table lets a user
+ *   copy; a real title stays;
  * - the record's pid when the row has none, which `listLiveSessions`
  *   verified under the same identity contract every registry row in this
  *   table answers to. The carry only fills a gap: a pid the worker file
- *   still vouches for stays.
+ *   still vouches for stays;
+ * - the record's cwd, which does overwrite: `state.activeCwd` is written
+ *   at dispatch and adoption and nothing refreshes it, while the record
+ *   is patched when a session switches directory mid-flight, so the
+ *   record is the only source that knows where the session is now.
  */
 function carryDedupedRecord(
   row: SessionRow,
@@ -290,6 +296,7 @@ function carryDedupedRecord(
   const sanitized = sanitizeSessionId(row.sessionId);
   let sessionId = row.sessionId;
   let pid = row.pid;
+  let cwd = row.cwd;
   for (const record of records) {
     if (sanitizeSessionId(record.sessionId) !== sanitized) continue;
     // True only while the row reports the sanitized id; once the raw
@@ -299,10 +306,18 @@ function carryDedupedRecord(
       sessionId = record.sessionId;
     }
     pid ??= record.pid;
+    if (record.cwd) cwd = record.cwd;
   }
-  return sessionId === row.sessionId && pid === row.pid
-    ? row
-    : { ...row, sessionId, pid };
+  if (sessionId === row.sessionId && pid === row.pid && cwd === row.cwd) {
+    return row;
+  }
+  return {
+    ...row,
+    sessionId,
+    pid,
+    cwd,
+    name: row.name === row.sessionId ? sessionId : row.name,
+  };
 }
 
 /**

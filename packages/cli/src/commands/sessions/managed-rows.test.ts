@@ -544,7 +544,8 @@ describe('mergeSessionRows', () => {
     // record's raw spelling still survives the dedupe: with no launch
     // file to read it from, the row had degraded to the sanitized store
     // id, and the record is the only carrier left of the spelling the
-    // case-sensitive native store needs for `--resume`.
+    // case-sensitive native store needs for `--resume`. NAME is the only
+    // id the table prints, so it has to move with it.
     const rows = mergeSessionRows(
       [record({ sessionId: 'Managed-1', name: 'app-ab' })],
       managedSessionRows([snapshot({ state: state() })], NOW),
@@ -552,6 +553,7 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].sessionId).toBe('Managed-1');
+    expect(rows[0].name).toBe('Managed-1');
   });
 
   it('keeps the resumable spelling when it dedupes a mixed-case session', () => {
@@ -626,6 +628,37 @@ describe('mergeSessionRows', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].pid).toBe(200);
+  });
+
+  it('keeps a real title when the deduped record carries the id', () => {
+    // Only a name that IS the degraded id follows the carry. A title the
+    // roster gave the session is the row's own and outranks both.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'Managed-1', name: 'app-ab' })],
+      managedSessionRows(
+        [snapshot({ rosterEntry: rosterEntry('release audit') })],
+        NOW,
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sessionId).toBe('Managed-1');
+    expect(rows[0].name).toBe('release audit');
+  });
+
+  it('reports the directory a session switched to mid-flight', () => {
+    // `state.activeCwd` is written at dispatch and adoption and nothing
+    // refreshes it, so a managed worker that ran `/cd` still has the
+    // store's old directory on its row. The deduped record is patched on
+    // a directory switch and is the only source that knows where the
+    // session is now, so here the carry overwrites instead of filling a
+    // gap — the store's cwd is mandatory and never absent.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'managed-1', cwd: '/w/after-cd' })],
+      managedSessionRows([snapshot()], NOW),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(true);
+    expect(rows[0].cwd).toBe('/w/after-cd');
   });
 
   it('lets a live registry record survive the adopting window', () => {

@@ -578,6 +578,71 @@ describe('agent view supervisor store', () => {
     });
     expect(emptied).not.toHaveProperty('resumeSessionId');
   });
+
+  it('strips a resumeSessionId naming a different session', async () => {
+    // The field outranks the directory-derived id in `sessions ps`, and
+    // the merge dedupes registry records on it — so a launch file claiming
+    // another session's id would drop that session's row and hand the
+    // impostor its verified pid. `normalizeLaunch` already forces
+    // `sessionId` to the directory name for exactly this reason.
+    const paths = getAgentViewSessionPaths('session-1', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.sessionDir, { recursive: true });
+    fs.writeFileSync(
+      paths.launchPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        sessionId: 'session-1',
+        resumeSessionId: 'Other-Session',
+        argv: ['qwen'],
+        env: {},
+        entrypoint: '/tmp/qwen',
+        projectCwd: tempDir,
+        activeCwd: tempDir,
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
+      }),
+    );
+    const launch = await readAgentViewLaunch('session-1', {
+      globalDir: tempDir,
+    });
+    expect(launch).not.toHaveProperty('resumeSessionId');
+    expect(launch?.sessionId).toBe('session-1');
+  });
+
+  it('keeps a resumeSessionId that is the directory id in another spelling', async () => {
+    // Adoption files the session under the sanitized id and keeps the raw
+    // one here, because the native session store is case-sensitive and
+    // `--resume` needs that spelling. The identity check compares against
+    // the directory-derived id, not the file's own `sessionId` — both are
+    // mixed-case here, so a comparison against the raw one would reject a
+    // legitimate adoption.
+    const paths = getAgentViewSessionPaths('session-1', {
+      globalDir: tempDir,
+    });
+    fs.mkdirSync(paths.sessionDir, { recursive: true });
+    fs.writeFileSync(
+      paths.launchPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        sessionId: 'Session-1',
+        resumeSessionId: 'Session-1',
+        argv: ['qwen'],
+        env: {},
+        entrypoint: '/tmp/qwen',
+        projectCwd: tempDir,
+        activeCwd: tempDir,
+        includeDirectories: [],
+        terminal: { columns: 80, rows: 24 },
+      }),
+    );
+    const launch = await readAgentViewLaunch('session-1', {
+      globalDir: tempDir,
+    });
+    expect(launch?.sessionId).toBe('session-1');
+    expect(launch?.resumeSessionId).toBe('Session-1');
+  });
 });
 
 function rosterEntry(
