@@ -4,8 +4,10 @@ import { fileURLToPath } from 'node:url';
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const typesRoot = resolve(packageRoot, 'dist/types');
+// tsconfig.lib.json includes only client/**, so TypeScript infers client/ as
+// rootDir and emits an @/x declaration target at dist/types/x.
 const aliasSpecifier =
-  /(\b(?:from|import\s*\(|require\s*\()\s*)(['"])@\/([^'"]+)\2/g;
+  /(\b(?:from\s+|import(?:\s+|\s*\(\s*)|require\s*\(\s*))(['"])@\/([^'"]+)\2/g;
 
 async function* declarationFiles(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
