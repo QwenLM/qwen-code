@@ -661,6 +661,8 @@ describe('splitCompoundCommand', () => {
     ],
     ["echo \\$'a\\' ; touch /tmp/x", ["echo \\$'a\\'", 'touch /tmp/x']],
     ["echo $$'a\\' ; touch /tmp/x", ["echo $$'a\\'", 'touch /tmp/x']],
+    // A `$` opens ANSI-C only when the quote follows it directly.
+    ["echo $x'a\\' ; touch /tmp/x", ["echo $x'a\\'", 'touch /tmp/x']],
     ['echo "$"\'a\\\' ; touch /tmp/x', ['echo "$"\'a\\\'', 'touch /tmp/x']],
   ])('splits after the quoted word in %s', async (command, parts) => {
     expect(splitCompoundCommand(command)).toEqual(parts);
@@ -673,7 +675,8 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('echo a\\\nb')).toEqual(['echo a\\\nb']);
   });
 
-  // The last row is one command to bash but stays split, as on main.
+  // The `echo 'a\'' ; rm x'` row is one command to bash but stays split, as on
+  // main.
   it.each([
     [
       "echo done # note 'a\\''\nrm -rf /tmp/x",
