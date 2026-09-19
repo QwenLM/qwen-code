@@ -59,8 +59,12 @@ button.node {
   cursor: pointer;
 }
 
-button.node:hover,
-button.node:focus-visible {
+button.node[aria-disabled='true'] {
+  cursor: default;
+}
+
+button.node:not(:disabled):hover,
+button.node:not(:disabled):focus-visible {
   border-color: var(--primary);
   outline: none;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent);
@@ -125,6 +129,10 @@ button.node:focus-visible {
 }
 
 .status[data-status='completed'] {
+  color: var(--success-color);
+}
+
+.status[data-status='idle'] {
   color: var(--success-color);
 }
 

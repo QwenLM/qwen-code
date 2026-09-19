@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
-import type { Config } from '@qwen-code/qwen-code-core';
+import { AgentStatus, type Config } from '@qwen-code/qwen-code-core';
 import { LiveAgentPanel } from './LiveAgentPanel.js';
 import {
   BackgroundTaskViewActionsContext,
@@ -19,6 +19,7 @@ import type {
   AgentDialogEntry,
   DialogEntry,
 } from '../../hooks/useBackgroundTaskView.js';
+import type { LiveAgentDialogEntry } from '../../hooks/use-team-agent-roster.js';
 
 function agentEntry(
   overrides: Partial<AgentDialogEntry> = {},
@@ -51,6 +52,7 @@ function shellEntry(overrides: Partial<DialogEntry> = {}): DialogEntry {
 function renderPanel(
   options: {
     entries: readonly DialogEntry[];
+    liveAgentEntries?: readonly LiveAgentDialogEntry[];
     dialogOpen?: boolean;
     width?: number;
     maxRows?: number;
@@ -66,6 +68,7 @@ function renderPanel(
 ) {
   const state = {
     entries: options.entries,
+    liveAgentEntries: options.liveAgentEntries,
     selectedIndex: 0,
     dialogMode: options.dialogOpen ? ('list' as const) : ('closed' as const),
     dialogOpen: Boolean(options.dialogOpen),
@@ -177,6 +180,32 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('scan repo for TODO markers');
     // Latest activity is rendered next to the row, with elapsed time.
     expect(frame).toContain('Glob');
+    expect(frame).toContain('5s');
+  });
+
+  it('renders an idle teammate with its assigned task', () => {
+    const teammate = {
+      ...agentEntry({
+        agentId: 'reviewer@review-team',
+        id: 'reviewer@review-team',
+        subagentType: 'reviewer',
+        description: 'Reviewing authentication flow',
+        status: 'paused',
+        startTime: -5_000,
+      }),
+      teamName: 'review-team',
+      teamStatus: AgentStatus.IDLE,
+      teamColor: '#4ECDC4',
+    };
+    const { lastFrame } = renderPanel({
+      entries: [],
+      liveAgentEntries: [teammate],
+    });
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('reviewer');
+    expect(frame).toContain('Reviewing authentication flow');
+    expect(frame).toContain('idle');
     expect(frame).toContain('5s');
   });
 

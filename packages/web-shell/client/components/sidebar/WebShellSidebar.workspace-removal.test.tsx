@@ -395,6 +395,7 @@ function renderSidebar(
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
     onOpenGoals?: () => void;
+    onOpenAgents?: () => void;
     onOpenWorkflows?: () => void;
     onOpenWorkspaceManagement?: (
       target: WorkspaceManagementTarget,
@@ -427,6 +428,7 @@ function renderSidebar(
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
     };
     showSessionSourceSwitch?: boolean;
+    primaryNav?: Parameters<typeof WebShellSidebar>[0]['primaryNav'];
     showLive?: boolean;
     projectFeaturesEnabled?: boolean;
     sessionActions?: {
@@ -454,6 +456,7 @@ function renderSidebar(
           onOpenScheduledTasks={() => {}}
           onOpenWorkflows={overrides.onOpenWorkflows ?? (() => {})}
           onOpenGoals={overrides.onOpenGoals ?? (() => {})}
+          onOpenAgents={overrides.onOpenAgents}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={overrides.onNewSession ?? (() => false)}
@@ -474,6 +477,7 @@ function renderSidebar(
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
           showSessionSourceSwitch={overrides.showSessionSourceSwitch}
+          primaryNav={overrides.primaryNav}
           showLive={overrides.showLive}
           projectFeaturesEnabled={overrides.projectFeaturesEnabled}
           sessionActions={overrides.sessionActions}
@@ -1652,6 +1656,7 @@ describe('WebShellSidebar workspace removal', () => {
     }));
     renderSidebar({
       projectFeaturesEnabled: false,
+      onOpenAgents: vi.fn(),
       onOpenAddWorkspace: vi.fn(),
       onOpenWorkspacesOverview: vi.fn(),
     });
@@ -1661,6 +1666,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
 
     expect(container.querySelector('button[aria-label="Plugins"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Agents"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Channels"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Settings"]')).toBeNull();
     expect(
@@ -4454,6 +4460,30 @@ describe('WebShellSidebar goals entry', () => {
     expect(button).not.toBeNull();
     click(button!);
     expect(onOpenGoals).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar Agents entry', () => {
+  it('opens Agent management from primary navigation by default', () => {
+    const onOpenAgents = vi.fn();
+    renderSidebar({ onOpenAgents });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Agents"]',
+    );
+    expect(button).not.toBeNull();
+
+    click(button!);
+
+    expect(onOpenAgents).toHaveBeenCalledOnce();
+  });
+
+  it('can be hidden through primary navigation customization', () => {
+    renderSidebar({
+      onOpenAgents: vi.fn(),
+      primaryNav: { items: ['plugins'] },
+    });
+
+    expect(container.querySelector('button[aria-label="Agents"]')).toBeNull();
   });
 });
 

@@ -3386,9 +3386,25 @@ describe('BackgroundAgentResumeService', () => {
           message: { role: 'user', parts: [{ text: 'and another thing' }] },
         }),
         JSON.stringify({
-          uuid: 'nested-call',
-          timestamp: '2026-04-20T00:00:00.600Z',
+          uuid: 'a2',
           parentUuid: 'u2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.600Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'still working' }] },
+        }),
+        JSON.stringify({
+          uuid: 'u3',
+          parentUuid: 'a2',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.700Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'one final constraint' }] },
+        }),
+        JSON.stringify({
+          uuid: 'nested-call',
+          timestamp: '2026-04-20T00:00:00.800Z',
+          parentUuid: 'u3',
           sessionId,
           type: 'assistant',
           message: {
@@ -3400,7 +3416,7 @@ describe('BackgroundAgentResumeService', () => {
         }),
         JSON.stringify({
           uuid: 'nested-state',
-          timestamp: '2026-04-20T00:00:00.700Z',
+          timestamp: '2026-04-20T00:00:00.900Z',
           parentUuid: 'nested-call',
           sessionId,
           type: 'system',
@@ -3487,6 +3503,8 @@ describe('BackgroundAgentResumeService', () => {
             },
             { role: 'model', parts: [{ text: 'working' }] },
             { role: 'user', parts: [{ text: 'and another thing' }] },
+            { role: 'model', parts: [{ text: 'still working' }] },
+            { role: 'user', parts: [{ text: 'one final constraint' }] },
           ],
         },
       }),
@@ -3595,9 +3613,13 @@ describe('BackgroundAgentResumeService', () => {
       oldSessionMtime.getTime(),
     );
 
-    expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
-      true,
-    );
+    expect(
+      registry.continueResidentAgent(
+        agentId,
+        'tighten the summary',
+        'delivery-2',
+      ),
+    ).toBe('continued');
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
@@ -3605,14 +3627,23 @@ describe('BackgroundAgentResumeService', () => {
     });
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
     const hotContextArg = execute.mock.calls[1]?.[0];
-    expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
+    expect(hotContextArg?.get('task_prompt')).toBeUndefined();
+    expect(hotContextArg?.get('external_inputs_override')).toEqual([
+      {
+        kind: 'message',
+        text: 'tighten the summary',
+        deliveryId: 'delivery-2',
+      },
+    ]);
     expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
     expect(dispose).not.toHaveBeenCalled();
 
     registry.reset();
 
     expect(dispose).toHaveBeenCalledTimes(1);
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(
+      'not_completed',
+    );
   });
 
   it("clears the previous incarnation's stats and activities when cold-reviving", async () => {
@@ -3917,7 +3948,7 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe('fallback');
     expect(dispose).toHaveBeenCalledOnce();
   });
 

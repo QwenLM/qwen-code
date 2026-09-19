@@ -31,6 +31,7 @@ import {
 import {
   FolderKanbanIcon,
   ActivityIcon,
+  BotIcon,
   BlocksIcon,
   CalendarClockIcon,
   ChevronDownIcon,
@@ -253,6 +254,7 @@ export interface WebShellSidebarLockedWorkspace {
 
 export type WebShellSidebarPrimaryNavItem =
   | 'newTask'
+  | 'agents'
   | 'plugins'
   | 'channels'
   | 'scheduledTasks'
@@ -293,6 +295,7 @@ const DESKTOP_DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] =
 
 const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'newTask',
+  'agents',
   'plugins',
   'channels',
   'scheduledTasks',
@@ -399,6 +402,7 @@ interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenAgents?: () => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;
@@ -933,6 +937,7 @@ export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
   onOpenDaemonStatus,
@@ -1006,6 +1011,7 @@ export function WebShellSidebar({
   const hasScrollingPrimaryNav =
     (projectFeaturesEnabled &&
       (primaryNavItems.has('plugins') ||
+        (primaryNavItems.has('agents') && Boolean(onOpenAgents)) ||
         primaryNavItems.has('channels') ||
         primaryNavItems.has('scheduledTasks') ||
         primaryNavItems.has('workflows') ||
@@ -5583,6 +5589,22 @@ export function WebShellSidebar({
         >
           {hasScrollingPrimaryNav && (
             <div className={styles.primaryNav}>
+              {projectFeaturesEnabled &&
+                onOpenAgents &&
+                primaryNavItems.has('agents') && (
+                  <button
+                    className={styles.pluginButton}
+                    type="button"
+                    title={t('agents.title')}
+                    aria-label={t('agents.title')}
+                    onClick={onOpenAgents}
+                  >
+                    <span className={styles.navIcon}>
+                      <BotIcon size={16} strokeWidth={1.2} />
+                    </span>
+                    {!collapsed && <span>{t('agents.title')}</span>}
+                  </button>
+                )}
               {projectFeaturesEnabled && primaryNavItems.has('plugins') && (
                 <button
                   className={styles.pluginButton}

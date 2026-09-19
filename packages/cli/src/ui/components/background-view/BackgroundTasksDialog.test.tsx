@@ -191,6 +191,8 @@ function setup(
     }),
     getIdeMode: () => false,
     isTrustedFolder: () => true,
+    getTeamManager: vi.fn(() => null),
+    onTeamManagerChange: vi.fn(),
     resumeBackgroundAgent: resume,
     abandonBackgroundAgent: abandon,
   } as unknown as Config;

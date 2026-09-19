@@ -10,6 +10,7 @@ import {
   type DaemonEvent,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionAgentTaskStatus,
   type DaemonSessionArtifact,
   type DaemonSessionArtifactsEnvelope,
   type DaemonSessionGroup,
@@ -64,6 +65,8 @@ export interface WebShellDaemonScenario {
   supportedCommands?: Record<string, unknown>;
   /** Tasks returned by `GET /session/:id/tasks` (workflow snapshots included). */
   workflowTasks?: unknown[];
+  /** Agents returned by `GET /session/:id/agents`. */
+  agentTasks?: DaemonSessionAgentTaskStatus[];
   /** Definitions served by `GET /session/:id/saved-workflows/:name`, keyed by name. */
   savedWorkflowDetails?: Record<string, Record<string, unknown>>;
   providers: DaemonWorkspaceProvidersStatus;
@@ -442,6 +445,7 @@ export function createWebShellDaemonScenario(
     contextDelayMs: overrides.contextDelayMs,
     supportedCommands: overrides.supportedCommands,
     workflowTasks: overrides.workflowTasks,
+    agentTasks: overrides.agentTasks,
     savedWorkflowDetails: overrides.savedWorkflowDetails,
     providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
@@ -821,6 +825,7 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
     /^\/session\/[^/]+\/status\/?$/.test(path) ||
     /^\/session\/[^/]+\/tasks\/?$/.test(path) ||
+    /^\/session\/[^/]+\/agents\/?$/.test(path) ||
     /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
@@ -1056,6 +1061,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   return (
     (method === 'GET' &&
       /^\/session\/[^/]+\/(context|supported-commands|tasks)\/?$/.test(path)) ||
+    (method === 'GET' && /^\/session\/[^/]+\/agents\/?$/.test(path)) ||
     (method === 'GET' &&
       /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path))
   );
@@ -2116,6 +2122,15 @@ async function handleDaemonRoute(
         sessionId,
         now: Date.now(),
         tasks: scenario.workflowTasks ?? [],
+      });
+      return;
+    }
+    if (action === 'agents') {
+      await json(route, {
+        v: 1,
+        sessionId,
+        now: Date.now(),
+        tasks: scenario.agentTasks ?? [],
       });
       return;
     }

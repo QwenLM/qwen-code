@@ -1434,13 +1434,17 @@ export class BackgroundAgentResumeService {
       };
 
       const residentController: ResidentBackgroundAgent = {
-        continue: (message) => {
+        continue: (input) => {
           if (!canStayResident || disposeRequested || runtimeDisposed) {
-            return false;
+            return 'fallback';
           }
           if (needsAutoPermissionLease()) {
             requestRuntimeDisposal();
-            return false;
+            return 'fallback';
+          }
+
+          if (!registry.canStartBackgroundAgent(meta.model)) {
+            return 'capacity_wait';
           }
 
           const nextAbortController = new AbortController();
@@ -1456,7 +1460,9 @@ export class BackgroundAgentResumeService {
                 meta.agentId
               }: ${error instanceof Error ? error.message : String(error)}`,
             );
-            return false;
+            return registry.canStartBackgroundAgent(meta.model)
+              ? 'fallback'
+              : 'capacity_wait';
           }
           if (
             !restarted ||
@@ -1465,7 +1471,7 @@ export class BackgroundAgentResumeService {
             registry.get(meta.agentId) !== restarted ||
             restarted.status !== 'running'
           ) {
-            return false;
+            return 'fallback';
           }
 
           liveToolCallCount = 0;
@@ -1483,7 +1489,11 @@ export class BackgroundAgentResumeService {
           });
 
           const nextContextState = new ContextState();
-          nextContextState.set('task_prompt', message);
+          if (typeof input === 'string') {
+            nextContextState.set('task_prompt', input);
+          } else {
+            nextContextState.set('external_inputs_override', [input]);
+          }
           nextContextState.set('hook_context', '');
           const previousTurn = currentTurnPromise ?? Promise.resolve();
           currentTurnPromise = previousTurn
@@ -1497,7 +1507,7 @@ export class BackgroundAgentResumeService {
               );
             });
           currentTurnPromise.catch(reportUnexpectedBackgroundError);
-          return true;
+          return 'continued';
         },
         dispose: requestRuntimeDisposal,
       };

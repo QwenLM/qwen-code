@@ -25,6 +25,7 @@ import { ApprovalMode } from '../../config/config.js';
 import type {
   Backend,
   AgentSpawnConfig,
+  InProcessSpawnConfig,
   TeamAgentHandle,
 } from '../backends/types.js';
 import { PermissionMode } from '../../hooks/types.js';
@@ -494,13 +495,14 @@ export class TeamManager {
 
     try {
       // Load specialized subagent config when an agentType is specified.
-      // Copies prompt, model, runConfig, and tools from the subagent
+      // Copies prompt, model, runConfig, tools, and MCP servers from the subagent
       // definition so the teammate behaves like that agent type.
       let subagentPrompt: string | undefined;
       let subagentModel: string | undefined;
       let subagentModelRoute: SubagentModelRoute | undefined;
       let subagentRunConfig: Record<string, unknown> | undefined;
       let toolConfig: ToolConfig | undefined;
+      let mcpServers: InProcessSpawnConfig['mcpServers'];
       if (config.agentType && this.subagentManager) {
         const subagentConfig = await this.subagentManager.loadSubagent(
           config.agentType,
@@ -514,6 +516,9 @@ export class TeamManager {
         subagentModel = runtimeCfg.modelConfig.model;
         subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
         toolConfig = runtimeCfg.toolConfig;
+        mcpServers = subagentConfig.mcpServers as
+          | InProcessSpawnConfig['mcpServers']
+          | undefined;
         // Resolve the definition's model selector with the runtime context,
         // the same way the ordinary-subagent path does (#10071).
         // convertToRuntimeConfig is called without a context, so it keeps
@@ -627,6 +632,7 @@ export class TeamManager {
           authOverrides: dedicatedRoute
             ? { authType: dedicatedRoute.authType }
             : undefined,
+          mcpServers,
           runtimeConfig: {
             promptConfig: {
               systemPrompt,
