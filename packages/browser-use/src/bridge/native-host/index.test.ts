@@ -387,9 +387,20 @@ describe.skipIf(process.platform === 'win32')('Native Host processes', () => {
     const exited = once(owner, 'exit');
     owner.kill('SIGKILL');
     await exited;
-    const oldInode = fs.statSync(socketPath).ino;
     const h = startHost({ socketPath });
-    await waitFor(() => expect(fs.statSync(socketPath).ino).not.toBe(oldInode));
+    // The stale file refuses connections until the Host replaces it; its
+    // inode may be reused, so accepting a connection is the observable signal.
+    await waitFor(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const probe = connect(socketPath);
+          probe.once('connect', () => {
+            probe.destroy();
+            resolve();
+          });
+          probe.once('error', reject);
+        }),
+    );
     const a = await client(h.socketPath);
     await a.hello();
     expect(h.child.exitCode).toBeNull();

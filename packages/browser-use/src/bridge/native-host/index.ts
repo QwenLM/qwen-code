@@ -292,7 +292,9 @@ async function greetLegacyClient(): Promise<void> {
   if (legacySocketPath === undefined || hello === undefined || closing) return;
   const info = await lstat(legacySocketPath).catch(() => undefined);
   if (!info?.isSocket() || info.uid !== process.getuid?.()) return;
-  const key = `${info.dev}:${info.ino}`;
+  // Filesystems reuse a freed inode for the next socket at the same path, so
+  // the creation time is what tells a restarted CLI's listener apart.
+  const key = `${info.dev}:${info.ino}:${info.birthtimeMs || info.ctimeMs}`;
   if (key === greetedLegacySocket) return;
   greetedLegacySocket = key;
   try {
