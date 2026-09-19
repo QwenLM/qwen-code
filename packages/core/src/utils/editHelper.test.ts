@@ -5,11 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  countOccurrences,
-  maybeAugmentOldStringForDeletion,
-  normalizeEditStrings,
-} from './editHelper.js';
+import { countOccurrences, normalizeEditStrings } from './editHelper.js';
 
 describe('normalizeEditStrings', () => {
   const file = `const one = 1;
@@ -170,41 +166,5 @@ describe('countOccurrences', () => {
 
   it('counts non-overlapping occurrences', () => {
     expect(countOccurrences('aaaa', 'aa')).toBe(2);
-  });
-});
-
-describe('maybeAugmentOldStringForDeletion', () => {
-  const file = 'console.log("hi")\nconsole.log("bye")\n';
-
-  it('appends newline when deleting text followed by newline', () => {
-    expect(
-      maybeAugmentOldStringForDeletion(file, 'console.log("hi")', ''),
-    ).toBe('console.log("hi")\n');
-  });
-
-  it('leaves strings untouched when not deleting', () => {
-    expect(
-      maybeAugmentOldStringForDeletion(
-        file,
-        'console.log("hi")',
-        'replacement',
-      ),
-    ).toBe('console.log("hi")');
-  });
-
-  it('does not append newline when file lacks the variant', () => {
-    expect(
-      maybeAugmentOldStringForDeletion(
-        'console.log("hi")',
-        'console.log("hi")',
-        '',
-      ),
-    ).toBe('console.log("hi")');
-  });
-
-  it('no-ops when the old string already ends with a newline', () => {
-    expect(
-      maybeAugmentOldStringForDeletion(file, 'console.log("bye")\n', ''),
-    ).toBe('console.log("bye")\n');
   });
 });
