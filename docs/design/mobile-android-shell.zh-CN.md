@@ -4,6 +4,8 @@
 
 状态：遵循 [issue #11704](https://github.com/QwenLM/qwen-code/issues/11704) 的开发用途技术验证，正在评审。它不是生产级移动客户端。
 
+本文记录 Phase 1 基线。[Phase 2 连接配置设计](mobile-connection-profiles.zh-CN.md) 取代下文关于单配置和原生明文存储的说明，其他生产前置条件仍然适用。
+
 ## 问题与目标
 
 在 Android WebView 中使用 daemon 已提供的 Web Shell，不创建第二套原生会话 UI，也不本地打包 H5。在添加生产凭据和后台连接前，建立可构建的原生启动流程和准确的 origin 边界。
