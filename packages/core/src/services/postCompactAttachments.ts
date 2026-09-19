@@ -543,8 +543,38 @@ const UNCLOSED_REASONING_BLOCK = new RegExp(
   `(?:^|\\n)[ \\t]*<${REASONING_TAG_NAMES}>[\\s\\S]*$`,
   'gi',
 );
+// The summary contract from `getCompressionPrompt()`: when the model emits a
+// closed envelope, the envelope alone is the payload.
+const ENVELOPE_OPEN = '<state_snapshot>';
+const ENVELOPE_CLOSE = '</state_snapshot>';
+const REASONING_TAG_OPEN = new RegExp(`<${REASONING_TAG_NAMES}>`, 'i');
 
 export function stripAnalysisBlock(rawSummary: string): string {
+  // A closed <state_snapshot> envelope IS the summary: anything before it is
+  // drafting scratchpad, anything after it is chatter. Binding the strip to
+  // the envelope keeps the tag patterns outside the payload, so a reasoning
+  // tag quoted inside the snapshot is never a strip candidate.
+  const start = rawSummary.indexOf(ENVELOPE_OPEN);
+  const closeAt =
+    start >= 0
+      ? rawSummary.indexOf(ENVELOPE_CLOSE, start + ENVELOPE_OPEN.length)
+      : -1;
+  if (start >= 0 && closeAt > start) {
+    // The envelope only counts at top level. A state_snapshot quoted inside
+    // the scratchpad is a draft, so refuse the binding while the preamble
+    // still holds an open reasoning block.
+    const preamble = rawSummary
+      .slice(0, start)
+      .replace(CLOSED_REASONING_BLOCK, '');
+    if (!REASONING_TAG_OPEN.test(preamble)) {
+      const end = closeAt + ENVELOPE_CLOSE.length;
+      const suffix = rawSummary
+        .slice(end)
+        .replace(CLOSED_REASONING_BLOCK, '')
+        .replace(UNCLOSED_REASONING_BLOCK, '');
+      return (rawSummary.slice(start, end) + suffix).trim();
+    }
+  }
   // First pass: strip well-formed reasoning blocks (handles multiple via
   // `/g`, newlines via `[\s\S]`, any of the native closer tags above).
   let result = rawSummary.replace(CLOSED_REASONING_BLOCK, '');

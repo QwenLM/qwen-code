@@ -1600,4 +1600,81 @@ describe('stripAnalysisBlock', () => {
       ),
     ).toBe('');
   });
+
+  it('keeps the payload when the snapshot quotes an opener and a later closer', () => {
+    // A summary about reasoning-tag handling legitimately quotes tags in its
+    // body; the strip must not splice sections across the quoted pair.
+    const input =
+      '<state_snapshot>\n' +
+      '<primary_request_and_intent>The user asked why the model still emits <think> when reasoning is disabled.</primary_request_and_intent>\n' +
+      '<files_and_code_sections>\n- the parser saw a bare </think> with no opener and threw.\n</files_and_code_sections>\n' +
+      '<next_step>Land the fix.</next_step>\n' +
+      '</state_snapshot>';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('keeps the envelope when a section quotes an opener at the start of a line', () => {
+    const input =
+      '<state_snapshot>\n' +
+      '<files_and_code_sections>\n- parser.ts:\n```ts\n<think>\nconst OPEN = "...";\n```\n</files_and_code_sections>\n' +
+      '<next_step>x</next_step>\n' +
+      '</state_snapshot>';
+    expect(stripAnalysisBlock(input)).toContain('<next_step>');
+    expect(stripAnalysisBlock(input)).toContain('</state_snapshot>');
+  });
+
+  it('strips the whole instructed block when a native pair sits inside it', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    const input =
+      '<analysis>drafting\n<think>inner</think>\nstill drafting, this tail is scratchpad</analysis>\n\n' +
+      snapshot;
+    expect(stripAnalysisBlock(input)).toBe(snapshot);
+  });
+
+  it('drops drafting prose before a closed envelope', () => {
+    // The prompt contracts the envelope as the whole summary, so pre-envelope
+    // prose is scratchpad, not content.
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock('Let me draft this summary.\n\n' + snapshot),
+    ).toBe(snapshot);
+  });
+
+  it('strips reasoning chatter after the envelope but keeps the envelope', () => {
+    const snapshot =
+      '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>';
+    expect(
+      stripAnalysisBlock(snapshot + '\n<analysis>post-note</analysis>'),
+    ).toBe(snapshot);
+  });
+
+  it('keeps an unclosed envelope on the unchanged tag path', () => {
+    // Output truncated mid-envelope: no closed envelope to bind to, and no
+    // reasoning tag matches, so the partial envelope survives as before.
+    const input = '<state_snapshot><primary_request_and_intent>cut off mid-';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('ignores an envelope quoted inside the scratchpad and binds the real one', () => {
+    // A thinking model can draft the snapshot inside its analysis block; the
+    // draft is scratchpad, only the top-level envelope is the summary.
+    const real =
+      '<state_snapshot><primary_request_and_intent>real</primary_request_and_intent></state_snapshot>';
+    const input =
+      '<analysis>drafting: <state_snapshot><primary_request_and_intent>draft</primary_request_and_intent></state_snapshot> hmm</analysis>\n\n' +
+      real;
+    expect(stripAnalysisBlock(input)).toBe(real);
+  });
+
+  it('keeps failing empty when an unclosed block swallows the envelope', () => {
+    // The model opened a reasoning block and never closed it: everything
+    // after, envelope included, is untrustworthy scratchpad by design.
+    expect(
+      stripAnalysisBlock(
+        '<analysis>never closed\n\n<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>',
+      ),
+    ).toBe('');
+  });
 });
