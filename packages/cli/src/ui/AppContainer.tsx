@@ -4031,7 +4031,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // input text, none of which the deps above track; AgentComposer syncs
     // this key to AgentViewContext whenever they change so the footer is
     // re-measured and the transcript viewport does not stay stale-high
-    // (#9507). Mirrors liveAgentPanelLayoutKey.
+    // (#9507). Mirrors the LiveAgentPanel layout key (#5798).
     agentViewState.agentComposerLayoutKey,
     embeddedShellFocused,
     messageQueue.length,
