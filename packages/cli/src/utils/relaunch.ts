@@ -74,6 +74,11 @@ export async function relaunchAppInChildProcess(
     return env;
   };
 
+  // `afterSpawn` runs once `createChildEnv()` has already snapshotted the
+  // environment, so it only ever scrubbed the *parent's* copy for the next
+  // relaunch iteration or subprocess — never the child's. Process replacement
+  // inherits that same snapshot and leaves no parent behind, so there is
+  // nothing for the hook to protect on this path.
   if (
     options?.replaceProcess &&
     typeof process.execve === 'function' &&
