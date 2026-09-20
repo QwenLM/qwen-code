@@ -1775,7 +1775,7 @@ jobs:
             stop_token="qwen-review-stop-$("${QWEN_CI_REAL_DATE:-date}" +%s%N)-${RANDOM}${RANDOM}"
             echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
-            # PID isolation still passes the full job environment, and
+            # The agent runs no-sandbox with the full job environment, and
             # the runner applies whatever it appends to $GITHUB_PATH /
             # $GITHUB_ENV to every LATER step (prepending the path file,
             # shell lookup included). Point all four runner command files at
@@ -1792,8 +1792,7 @@ jobs:
             GITHUB_ENV="$PROXY_BIN/decoy.github-env" \
             GITHUB_OUTPUT="$PROXY_BIN/decoy.github-output" \
             GITHUB_STEP_SUMMARY="$PROXY_BIN/decoy.github-step-summary" \
-            timeout --kill-after=10s "${attempt_timeout}s" \
-              bash .github/scripts/run-review-isolated.sh qwen \
+            timeout --kill-after=10s "${attempt_timeout}s" qwen \
               --auth-type openai \
               --approval-mode yolo \
               "${MODEL_ARGS[@]}" \
