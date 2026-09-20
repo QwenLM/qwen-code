@@ -92,6 +92,10 @@ import {
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+} from '../tools/tool-call.js';
+import {
   getInvocationContext,
   runWithInvocationContext,
   type InvocationContextV1,
@@ -1341,6 +1345,13 @@ describe('CoreToolScheduler', () => {
       expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
         ToolNames.TOOL_CALL,
       );
+      expect(
+        String(
+          completed.response.responseParts[0]?.functionResponse?.response?.[
+            'error'
+          ],
+        ).startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+      ).toBe(true);
     }
   });
 
@@ -1443,6 +1454,13 @@ describe('CoreToolScheduler', () => {
       expect(completed.response.responseParts[0]?.functionResponse?.name).toBe(
         ToolNames.TOOL_CALL,
       );
+      expect(
+        String(
+          completed.response.responseParts[0]?.functionResponse?.response?.[
+            'error'
+          ],
+        ).startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+      ).toBe(true);
     }
   });
 
@@ -1718,6 +1736,13 @@ describe('CoreToolScheduler', () => {
         ? completed.response.responseParts[0]?.functionResponse?.name
         : undefined,
     ).toBe(ToolNames.TOOL_CALL);
+    expect(
+      completed.status === 'cancelled'
+        ? completed.response.responseParts[0]?.functionResponse?.response?.[
+            'error'
+          ]
+        : undefined,
+    ).toEqual(expect.stringContaining(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX));
   });
 
   it('does not resolve a deferred target when tool_call is aborted during bridge permission lookup', async () => {

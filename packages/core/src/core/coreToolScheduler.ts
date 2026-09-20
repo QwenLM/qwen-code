@@ -58,7 +58,11 @@ import { logToolCall } from '../telemetry/loggers.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { InputFormat } from '../output/types.js';
 import { ToolErrorType } from '../tools/tool-error.js';
-import { resolveDeferredToolCall } from '../tools/tool-call.js';
+import {
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  resolveDeferredToolCall,
+} from '../tools/tool-call.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,
@@ -1111,7 +1115,11 @@ const createCancelledResponse = (
   persistedOutputFiles?: string[],
   visionBridgeNotice?: string,
 ): CoreToolCallResponseInfo => {
-  const errorMessage = `[Operation Cancelled] Reason: ${reason}`;
+  const cancellationPrefix =
+    getModelFacingToolName(request) === ToolNames.TOOL_CALL
+      ? DEFERRED_TOOL_CALL_CANCELLATION_PREFIX
+      : '';
+  const errorMessage = `${cancellationPrefix}[Operation Cancelled] Reason: ${reason}`;
   return {
     callId: request.callId,
     responseParts: [
@@ -2628,10 +2636,11 @@ export class CoreToolScheduler {
         if (signal.aborted) {
           return request;
         }
+        const message = error instanceof Error ? error.message : String(error);
         return {
           ...request,
           bridgeResolutionError: {
-            error: error instanceof Error ? error : new Error(String(error)),
+            error: new Error(`${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`),
             type: ToolErrorType.UNHANDLED_EXCEPTION,
           },
         };
@@ -2645,23 +2654,14 @@ export class CoreToolScheduler {
           canonicalToolName(name).toLowerCase().trim() === ToolNames.TOOL_CALL,
       )
     ) {
-      // Preserve the legacy no-PermissionManager deny path: leave the bridge
-      // wrapped so the normal pre-registry permission check rejects it.
-      // Mirror the loop's legacy-deny normalization exactly
-      // (toLowerCase().trim(), see the getPermissionsDeny fallback in
-      // _schedule): Config stores deny entries verbatim, so an entry like
-      // 'Tool_Call' must deny the bridge here exactly as it would deny a
-      // direct tool_call in the loop — without this the envelope would be
-      // unwrapped and only the resolved TARGET name would be checked against
-      // the deny list, converting a denied call into an executed one (R2-1).
+      // Leave the wrapper intact so the legacy pre-registry deny check sees
+      // the same normalized tool_call name as a direct invocation.
       return request;
     }
 
     const resolution = await runInRequestGoalContext(request, () =>
       resolveDeferredToolCall(this.toolRegistry, request.args, {
-        // Thread the real configured depth so the bridge's exclusion check
-        // mirrors prepareTools()'s depth-gated AgentTool re-admission
-        // instead of failing closed on it (round-5 review, R4-1 follow-up).
+        // Match prepareTools's depth-gated AgentTool policy.
         maxSubagentDepth: this.config.getMaxSubagentDepth(),
       }),
     );
@@ -2675,13 +2675,8 @@ export class CoreToolScheduler {
       };
     }
 
-    // The pre-schedule gates checked the wrapper name (`tool_call`), which is
-    // always declared and allowed; re-check the owner's tool policy against
-    // the resolved target — the execution allowlist AND the per-agent
-    // disallowedTools blocklist, both folded into the owner-supplied
-    // predicate — so the bridge cannot smuggle a call past either (e.g. a
-    // fork whose allowlist lists `tool_call` but not the target, or a
-    // subagent whose disallowedTools blocklists it; round-6 review, R6-8).
+    // The pre-schedule gates saw the wrapper, so apply the owner's policy to
+    // the resolved target before execution.
     if (
       this.isToolExecutionAllowed &&
       !this.isToolExecutionAllowed(resolution.tool.name)
@@ -3020,7 +3015,11 @@ export class CoreToolScheduler {
               request: reqInfo,
               response: createErrorResponse(
                 reqInfo,
-                new Error(permissionErrorMessage),
+                new Error(
+                  canonicalName === ToolNames.TOOL_CALL
+                    ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${permissionErrorMessage}`
+                    : permissionErrorMessage,
+                ),
                 ToolErrorType.EXECUTION_DENIED,
                 'not_started',
               ),
@@ -3046,7 +3045,11 @@ export class CoreToolScheduler {
                   request: reqInfo,
                   response: createErrorResponse(
                     reqInfo,
-                    new Error(permissionErrorMessage),
+                    new Error(
+                      canonicalName === ToolNames.TOOL_CALL
+                        ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${permissionErrorMessage}`
+                        : permissionErrorMessage,
+                    ),
                     ToolErrorType.EXECUTION_DENIED,
                     'not_started',
                   ),

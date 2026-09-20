@@ -45,14 +45,16 @@ export type DeferredToolCallResolution =
     };
 
 export interface DeferredToolCallOptions {
-  /**
-   * The session's configured maximum subagent nesting depth. Threaded from
-   * the scheduler's Config so the exclusion check can mirror
-   * `prepareTools()`'s depth-gated re-admission of AgentTool. When absent,
-   * AgentTool stays excluded (the documented fail-closed floor of the raw
-   * exclusion sets).
-   */
+  /** Omission keeps AgentTool excluded in subagent contexts. */
   maxSubagentDepth?: number;
+}
+
+export const DEFERRED_TOOL_CALL_REFUSAL_PREFIX = '[tool_call bridge refused] ';
+export const DEFERRED_TOOL_CALL_CANCELLATION_PREFIX =
+  '[tool_call bridge cancelled] ';
+
+function bridgeRefusal(message: string): Error {
+  return new Error(`${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`);
 }
 
 export async function resolveDeferredToolCall(
@@ -65,7 +67,7 @@ export async function resolveDeferredToolCall(
     bridge = await registry.ensureTool(ToolNames.TOOL_CALL);
   } catch (error) {
     return {
-      error: new Error(
+      error: bridgeRefusal(
         `tool_call could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
       ),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
@@ -73,7 +75,7 @@ export async function resolveDeferredToolCall(
   }
   if (!bridge) {
     return {
-      error: new Error('tool_call is not registered in this session.'),
+      error: bridgeRefusal('tool_call is not registered in this session.'),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
     };
   }
@@ -86,18 +88,16 @@ export async function resolveDeferredToolCall(
     >;
   } catch (error) {
     return {
-      error: error instanceof Error ? error : new Error(String(error)),
+      error: bridgeRefusal(
+        error instanceof Error ? error.message : String(error),
+      ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
     };
   }
 
   let targetName = canonicalToolName(invocation.params.name);
-  // The discovery half (tool_search's select:) resolves requested names
-  // case-insensitively against the registered names; the invocation half
-  // must agree, otherwise a schema reviewed as e.g. `Read_File` would not be
-  // callable through the bridge (round-5 deferred item). Last match wins,
-  // mirroring the discovery half's lowercase Map even when an earlier tool
-  // exactly matches the requested casing.
+  // Match tool_search's case-insensitive name resolution. Last match wins,
+  // mirroring its lowercase Map.
   const lower = targetName.toLowerCase();
   const registered = registry.getAllToolNames?.() ?? [];
   let match: string | undefined;
@@ -114,7 +114,9 @@ export async function resolveDeferredToolCall(
     targetName === ToolNames.TOOL_SEARCH
   ) {
     return {
-      error: new Error(`tool_call cannot invoke bridge tool "${targetName}".`),
+      error: bridgeRefusal(
+        `tool_call cannot invoke bridge tool "${targetName}".`,
+      ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
       targetName,
     };
@@ -125,7 +127,7 @@ export async function resolveDeferredToolCall(
     target = await registry.ensureTool(targetName);
   } catch (error) {
     return {
-      error: new Error(
+      error: bridgeRefusal(
         `Deferred tool "${invocation.params.name}" could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
       ),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
@@ -139,77 +141,52 @@ export async function resolveDeferredToolCall(
       ? ' Run tool_search again to inspect the available tools.'
       : ' No deferred-tool discovery is available in this session.';
     return {
-      error: new Error(
+      error: bridgeRefusal(
         `Deferred tool "${invocation.params.name}" is not registered in this session.${remedy}`,
       ),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
     };
   }
-  // Policy denials (plan-lifecycle, leader-only, exclusion set) run before
-  // the deferred/hidden gate, keeping their relative order so each keeps its
-  // specific message. Excluded tools are frequently NOT deferred — the real
-  // workflow/team_delete/todo_write default shouldDefer to false, and
-  // enter_plan_mode is constructed shouldDefer=false — so letting the
-  // isDeferredAndHidden gate run first would misroute them into the
-  // factually-wrong "already visible — call it directly" INVALID_TOOL_PARAMS
-  // denial (and the scheduler would miscount that as a malformed-envelope
-  // retry). All three checks are context-gated internally (no-ops outside
-  // subagent-like contexts), so leader resolution order is unchanged.
+  // Policy denials precede the hidden-tool gate because excluded control
+  // tools are often non-deferred and need their specific denial messages.
   if (isPlanLifecycleToolUnavailableInSubagent(target.name)) {
     return {
-      error: new Error(getSubagentPlanToolUnavailableMessage(target.name)),
+      error: bridgeRefusal(getSubagentPlanToolUnavailableMessage(target.name)),
       errorType: ToolErrorType.EXECUTION_DENIED,
     };
   }
   if (isLeaderOnlyToolUnavailableInSubagent(target.name)) {
     return {
-      error: new Error(getLeaderOnlyToolUnavailableMessage(target.name)),
+      error: bridgeRefusal(getLeaderOnlyToolUnavailableMessage(target.name)),
       errorType: ToolErrorType.EXECUTION_DENIED,
     };
   }
-  // R4-1 (+ round-5 review): the bridge must not bypass the
-  // subagent/teammate tool-exclusion set. prepareTools enforces it at
-  // declaration level, but the bridge makes invocation independent of
-  // declaration — without carrying the exclusion set over, a
-  // wildcard/general-purpose subagent (or teammate) could discover
-  // (tool_search) and execute (tool_call) control-plane tools it is supposed
-  // to be unable to reach (team_delete, cron_*, workflow, send_message,
-  // ...). isToolExcludedForCurrentContext is the SAME predicate prepareTools
-  // applies — including AgentTool's depth-gated re-admission while
-  // maxSubagentDepth permits another nesting level — so the two layers
-  // cannot drift. The predicate itself is deliberately ungated (prepareTools
-  // fails closed on a missing frame), so the bridge applies its own context
-  // gate: the top-level leader session is unaffected.
+  // Reuse prepareTools's exclusion predicate so hidden invocation cannot
+  // bypass the subagent/teammate declaration policy.
   if (
     isSubagentLikeExecutionContext() &&
     isToolExcludedForCurrentContext(target.name, options?.maxSubagentDepth)
   ) {
     return {
-      error: new Error(getExcludedToolUnavailableMessage(target.name)),
+      error: bridgeRefusal(getExcludedToolUnavailableMessage(target.name)),
       errorType: ToolErrorType.EXECUTION_DENIED,
     };
   }
 
   if (!registry.isDeferredAndHidden(target.name)) {
     return {
-      error: new Error(
+      error: bridgeRefusal(
         `Tool "${target.name}" is already visible to the model or is not deferred. Call it directly instead of using tool_call.`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
       targetName: target.name,
     };
   }
-  // The registry's capability gate (isToolDeclared — e.g. propose_goal is
-  // registered but undeclared until a turn with a responder) is enforced by
-  // every other reachability reader: getFunctionDeclarations{,Filtered},
-  // getDeferredToolSummary, the scheduler's filter, and tool_search's
-  // select:. The invocation half must agree, or tool_call would execute a
-  // target tool_search refuses to describe (R27-3). Optional-chained:
-  // bridge test registries do not stub the method, and absent means no
-  // capability gate exists to enforce.
+  // Invocation must honor the same capability gate as declaration and
+  // discovery. Test registries without the optional gate remain valid.
   if (registry.isToolDeclared?.(target.name) === false) {
     return {
-      error: new Error(
+      error: bridgeRefusal(
         `Deferred tool "${target.name}" is not declared in this session, so it cannot be invoked via tool_call.`,
       ),
       errorType: ToolErrorType.EXECUTION_DENIED,
@@ -221,7 +198,7 @@ export async function resolveDeferredToolCall(
   // the session — resolution must agree instead of invoking by name.
   if (!registry.getTool(ToolNames.TOOL_SEARCH)) {
     return {
-      error: new Error(
+      error: bridgeRefusal(
         `Deferred tool "${target.name}" is unreachable in this session: tool_search is not registered, so the ToolSearch + ToolCall bridge is incomplete and deferred tools cannot be invoked via tool_call.`,
       ),
       errorType: ToolErrorType.EXECUTION_DENIED,

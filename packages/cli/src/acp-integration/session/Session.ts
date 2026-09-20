@@ -100,6 +100,8 @@ import {
   Kind,
   ToolNames,
   ToolErrorType,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
@@ -12977,6 +12979,15 @@ export class Session implements SessionContext {
       errorType: ToolErrorType | undefined,
     ) => {
       const durationMs = Date.now() - startTime;
+      const modelFacingError =
+        status === 'cancelled' && modelFacingToolName === ToolNames.TOOL_CALL
+          ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${error.message}`
+          : status === 'error' &&
+              modelFacingToolName === ToolNames.TOOL_CALL &&
+              toolName === ToolNames.TOOL_CALL &&
+              !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
+            ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
+            : error.message;
       try {
         logToolCall(this.config, {
           'event.name': 'tool_call',
@@ -13016,7 +13027,7 @@ export class Session implements SessionContext {
           functionResponse: {
             id: callId,
             name: modelFacingToolName,
-            response: { error: error.message },
+            response: { error: modelFacingError },
           },
         },
       ];

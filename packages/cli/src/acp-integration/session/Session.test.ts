@@ -17659,6 +17659,48 @@ describe('Session', () => {
         );
       });
 
+      it('marks a disabled ACP tool_call as a bridge refusal', async () => {
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(false),
+        });
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{ parts: Part[] }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-disabled-tool-call-bridge',
+          [
+            {
+              id: 'disabled-bridge-call',
+              name: core.ToolNames.TOOL_CALL,
+              args: { name: 'web_fetch', arguments: {} },
+            },
+          ],
+          toolLoopState,
+        );
+
+        expect(
+          String(
+            result.parts[0]?.functionResponse?.response?.['error'],
+          ).startsWith(core.DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+        ).toBe(true);
+        expect(mockToolRegistry.ensureTool).not.toHaveBeenCalled();
+      });
+
       it('does not stop disabled tools as repeated invalid parameter calls', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         mockConfig.getPermissionManager = vi.fn().mockReturnValue({

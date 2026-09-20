@@ -109,6 +109,10 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+} from '../tools/tool-call.js';
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -1159,7 +1163,23 @@ describe('Gemini Client (client.ts)', () => {
       expect(resumedClient['recentCompletedToolNames']).toEqual(['web_fetch']);
     });
 
-    it('keeps a refused bridged call under the tool_call envelope on resume', async () => {
+    it.each([
+      [
+        'keeps a bridge refusal under the wrapper name',
+        `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}execution denied`,
+        'tool_call',
+      ],
+      [
+        'credits a target that executed and then errored',
+        'target execution failed',
+        'web_fetch',
+      ],
+      [
+        'skips a cancelled bridge call',
+        `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}cancelled`,
+        undefined,
+      ],
+    ])('%s on resume', async (_name, error, expectedName) => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         conversation: {
           sessionId: 'resumed-session-id',
@@ -1173,11 +1193,11 @@ describe('Gemini Client (client.ts)', () => {
                 parts: [
                   {
                     functionCall: {
-                      id: 'call_refused_bridge',
+                      id: 'call_bridge',
                       name: 'tool_call',
                       args: {
-                        name: 'mcp__refused__tool',
-                        arguments: {},
+                        name: 'web_fetch',
+                        arguments: { url: 'u' },
                       },
                     },
                   },
@@ -1190,9 +1210,9 @@ describe('Gemini Client (client.ts)', () => {
                 parts: [
                   {
                     functionResponse: {
-                      id: 'call_refused_bridge',
+                      id: 'call_bridge',
                       name: 'tool_call',
-                      response: { error: 'execution denied' },
+                      response: { error },
                     },
                   },
                 ],
@@ -1207,9 +1227,8 @@ describe('Gemini Client (client.ts)', () => {
       const resumedClient = new LlmClient(mockConfig);
       await resumedClient.initialize();
 
-      expect(resumedClient['recentCompletedToolNames']).toEqual(['tool_call']);
-      expect(resumedClient['recentCompletedToolNames']).not.toContain(
-        'mcp__refused__tool',
+      expect(resumedClient['recentCompletedToolNames']).toEqual(
+        expectedName ? [expectedName] : [],
       );
     });
 

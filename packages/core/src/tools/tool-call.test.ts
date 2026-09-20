@@ -10,7 +10,11 @@ import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { AnyDeclarativeTool } from './tools.js';
-import { resolveDeferredToolCall, ToolCallTool } from './tool-call.js';
+import {
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  resolveDeferredToolCall,
+  ToolCallTool,
+} from './tool-call.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames } from './tool-names.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
@@ -101,6 +105,9 @@ describe('ToolCallTool', () => {
       // INVALID_TOOL_PARAMS, so asserting on errorType alone would stay
       // green if this guard were deleted (wenshao verification note 2).
       if ('error' in result) {
+        expect(
+          result.error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX),
+        ).toBe(true);
         expect(result.error.message).toContain('cannot invoke bridge tool');
       }
     },

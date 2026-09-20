@@ -92,6 +92,10 @@ import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import {
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+} from '../tools/tool-call.js';
 import { ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
@@ -2845,15 +2849,25 @@ export class LlmClient {
 
   private seedRecentCompletedToolNamesFromHistory(history: Content[]): void {
     const completedCallIds = new Set<string>();
-    const erroredCallIds = new Set<string>();
+    const refusedBridgeCallIds = new Set<string>();
+    const cancelledBridgeCallIds = new Set<string>();
     for (const message of history) {
       for (const part of message.parts ?? []) {
         const response = part.functionResponse;
         const responseId = response?.id;
         if (responseId) {
           completedCallIds.add(responseId);
-          if (response.response?.['error'] !== undefined) {
-            erroredCallIds.add(responseId);
+          const error = response.response?.['error'];
+          if (
+            typeof error === 'string' &&
+            error.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
+          ) {
+            refusedBridgeCallIds.add(responseId);
+          } else if (
+            typeof error === 'string' &&
+            error.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX)
+          ) {
+            cancelledBridgeCallIds.add(responseId);
           }
         }
       }
@@ -2869,6 +2883,9 @@ export class LlmClient {
         if (call.id && !completedCallIds.has(call.id)) {
           continue;
         }
+        if (call.id && cancelledBridgeCallIds.has(call.id)) {
+          continue;
+        }
         // Bridged calls replay from history under the tool_call envelope;
         // seed the resolved target name so resume matches what the live
         // path records (recordCompletedToolCall sees the resolved name).
@@ -2877,7 +2894,7 @@ export class LlmClient {
         this.rememberCompletedToolName(
           call.name === ToolNames.TOOL_CALL &&
             typeof bridgedName === 'string' &&
-            !(call.id && erroredCallIds.has(call.id))
+            !(call.id && refusedBridgeCallIds.has(call.id))
             ? bridgedName
             : call.name,
         );
