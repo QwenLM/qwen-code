@@ -130,7 +130,7 @@ for (const name of (await fs.readdir(source))
 }
 for (const name of [
   'package.json',
-  'package-lock.json',
+  'pnpm-lock.yaml',
   'tsconfig.json',
   'packages/core/package.json',
   'packages/cli/package.json',

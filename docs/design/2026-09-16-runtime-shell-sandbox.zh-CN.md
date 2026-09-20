@@ -14,11 +14,11 @@
 
 内部模式要求 bare、非交互 runtime，并拒绝显式扩展、MCP server、工具发现、LSP、旧的整个 CLI 沙箱和 provisional workspace。工具注册表仅包含 `run_shell_command` 与 `task_stop`。Bare 启动关闭 hook 和环境中的扩展/MCP。不支持的模型工具调用无法进入文件工具、子代理、worktree 或 Exec。这是受限的 headless 集成；任意嵌入方式、slash command、TUI、ACP 和其他副作用入口仍是发布前置条件。
 
-Runtime shell helper 在没有策略时保留旧路径。有策略时构造显式 `/bin/bash -c` 启动描述，使用已有清洗后的 shell 环境和当前 session 上下文，再调用 bwrap。前台、后台和转后台保留现有 registry、输出流、取消、超时及宿主 relay PID 行为。准入或启动失败绝不退回无约束命令。
+Runtime shell helper 在没有策略时保留旧路径。有策略时构造显式 `/bin/bash -c` 启动描述，使用已有清洗后的 shell 环境和当前 session 上下文，再调用 bwrap。Payload 环境通过权限为 0600 的控制文件交给 relay，并作为 bwrap 子进程环境传递，不再出现在进程参数中；relay 在启动 bwrap 前删除该文件。前台、后台和转后台保留现有 registry、输出流、取消、超时及宿主 relay PID 行为。准入或启动失败绝不退回无约束命令。
 
 沙箱回执校验同时覆盖普通完成和转后台后的终结回调。已确认的非零退出仍是命令失败。无法确认的终结产生错误，说明命令可能已经执行，不得自动重放。中断不能变成成功。转后台只是运行中快照；此后仍保留终结校验和资源所有权。
 
-禁用 sed 预览/写入优化，让原始命令在沙箱内执行。内部模式暂停 Git notes、PR 绑定的元数据子进程、纯文本 commit/PR 署名改写和系统提示词的 Git 状态快照，因为即使 `git status` 也能在宿主执行仓库配置的 clean filter。仍可通过受约束的 Shell 工具查看 Git 状态。权限默认保守询问，不执行宿主 Git 配置探测，确认阶段也不进行这些探测。普通批准和 YOLO 都不会扩大 OS 策略。后台启动异常会关闭输出流。在工作区 bind 之后，review worktree lease 目录会被私有 tmpfs 遮蔽，因此受约束进程既不能读取真实 lease，也不能伪造随后可授权宿主清理的记录。
+禁用 sed 预览/写入优化，让原始命令在沙箱内执行。内部模式暂停 Git notes、PR 绑定的元数据子进程、纯文本 commit/PR 署名改写和系统提示词的 Git 状态快照，因为即使 `git status` 也能在宿主执行仓库配置的 clean filter。仍可通过受约束的 Shell 工具查看 Git 状态。权限默认保守询问，不执行宿主 Git 配置探测，确认阶段也不进行这些探测。普通批准和 YOLO 都不会扩大 OS 策略。后台启动异常会关闭输出流。在工作区 bind 之后，review worktree lease 目录会被私有 tmpfs 遮蔽，因此受约束进程既不能读取真实 lease，也不能伪造随后可授权宿主清理的记录。仅在 workspace 可写时由启动方创建缺失的挂载点；只读 workspace 遇到缺失路径时直接跳过，因为此时既没有 lease 需要遮蔽，沙箱也无法创建 lease。
 
 Workspace-write 会有意允许修改仓库元数据，包括 `.git` hook 和配置。后续宿主进程因此必须把整个可写工作区视为沙箱输出；没有单独的信任决策时，不得执行由仓库控制的 hook、filter 或配置。
 

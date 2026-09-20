@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, realpathSync, statSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -194,6 +194,29 @@ export async function executeBwrap(
     checkWritable(scratch);
     if (overlaps(workspace, scratch))
       throw new Error('Workspace and scratch must be disjoint.');
+    const payloadEnv = {
+      ...env,
+      PWD: cwd,
+      TMPDIR: scratch,
+      TMP: scratch,
+      TEMP: scratch,
+      TERM: env['TERM'] || 'xterm-256color',
+    };
+    for (const [key, value] of Object.entries(payloadEnv)) {
+      if (
+        !key ||
+        key.includes('=') ||
+        key.includes('\0') ||
+        value.includes('\0')
+      )
+        throw new Error('Invalid payload environment.');
+    }
+    const payloadEnvPath = path.join(control, 'payload-env.json');
+    await writeFile(payloadEnvPath, JSON.stringify(payloadEnv), {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    });
     const bwrapArgs = [
       '--ro-bind',
       '/',
@@ -204,33 +227,19 @@ export async function executeBwrap(
       '--dev',
       '/dev',
       '--die-with-parent',
-      '--clearenv',
     ];
-    for (const [key, value] of Object.entries({
-      ...env,
-      PWD: cwd,
-      TMPDIR: scratch,
-      TMP: scratch,
-      TEMP: scratch,
-      // `--clearenv` wipes everything before these --setenv apply, so a
-      // payload env without TERM would run with TERM unset (ncurses:
-      // "unknown terminal type"). The relay bootstrap TERM default never
-      // reaches the payload; the default belongs here.
-      TERM: env['TERM'] || 'xterm-256color',
-    })) {
-      if (
-        !key ||
-        key.includes('=') ||
-        key.includes('\0') ||
-        value.includes('\0')
-      )
-        throw new Error('Invalid payload environment.');
-      bwrapArgs.push('--setenv', key, value);
-    }
     bwrapArgs.push('--bind', scratch, scratch);
     if (filesystem === 'workspace-write')
       bwrapArgs.push('--bind', workspace, workspace);
-    for (const maskedPath of maskedPaths) bwrapArgs.push('--tmpfs', maskedPath);
+    for (const maskedPath of maskedPaths) {
+      if (!existsSync(maskedPath)) {
+        if (filesystem === 'read-only') continue;
+        mkdirSync(maskedPath, { recursive: true });
+      }
+      if (!statSync(maskedPath).isDirectory())
+        throw new Error('Sandbox mask paths must be directories.');
+      bwrapArgs.push('--tmpfs', maskedPath);
+    }
     if (network === 'closed') bwrapArgs.push('--unshare-net');
     bwrapArgs.push('--chdir', cwd, '--', executable, ...args);
     const statusPath = path.join(control, 'status.json');
@@ -324,7 +333,14 @@ export async function executeBwrap(
     const handle = await ShellExecutionService.executeLaunch(
       {
         executable: node,
-        args: [relay, String(process.pid), statusPath, bwrap, ...bwrapArgs],
+        args: [
+          relay,
+          String(process.pid),
+          statusPath,
+          payloadEnvPath,
+          bwrap,
+          ...bwrapArgs,
+        ],
         cwd,
         env: {
           PATH: '/usr/bin:/bin',

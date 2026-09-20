@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { executeRuntimeShell } from './runtime-shell.js';
 import { executeBwrap } from './bwrap-execution.js';
@@ -38,6 +38,7 @@ describe('runtime shell dispatch', () => {
   const callback = vi.fn();
   const signal = new AbortController().signal;
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.unstubAllEnvs());
 
   it('preserves the legacy service and all options without policy', async () => {
     const options = { streamStdout: true };
@@ -72,6 +73,7 @@ describe('runtime shell dispatch', () => {
   it.each([false, true])(
     'uses a literal command and owning session environment (pty=%s)',
     async (pty) => {
+      vi.stubEnv('GH_TOKEN', 'expected-user-value');
       const command = 'printf "%s" "$HOME"; echo literal';
       await sessionIdContext.run('different-session', () =>
         executeRuntimeShell(
@@ -100,6 +102,7 @@ describe('runtime shell dispatch', () => {
           QWEN_CODE: '1',
           QWEN_CODE_SESSION_ID: 'runtime-session',
           QWEN_CODE_PROJECT_DIR: '/state/runtime-session',
+          GH_TOKEN: 'expected-user-value',
           TERM: 'xterm-256color',
           PAGER: 'less',
         },

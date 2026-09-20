@@ -13,6 +13,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -56,6 +57,8 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
   let state: string;
   let bwrap: string;
   let originalTmpdir: string | undefined;
+  let capturedPayloadEnv: Record<string, string>;
+  let capturedPayloadEnvMode: number;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -71,6 +74,8 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     writeFileSync(bwrap, 'stub');
     originalTmpdir = process.env['TMPDIR'];
     delete process.env['TMPDIR'];
+    capturedPayloadEnv = {};
+    capturedPayloadEnvMode = 0;
   });
 
   afterEach(() => {
@@ -104,6 +109,11 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
       .spyOn(ShellExecutionService, 'executeLaunch')
       .mockImplementation(async (launch) => {
         const statusPath = launch.args[2];
+        const payloadEnvPath = launch.args[3];
+        capturedPayloadEnv = JSON.parse(
+          readFileSync(payloadEnvPath, 'utf8'),
+        ) as Record<string, string>;
+        capturedPayloadEnvMode = statSync(payloadEnvPath).mode & 0o777;
         if (receipt) writeFileSync(statusPath, JSON.stringify(receipt));
         return {
           pid: 123,
@@ -120,7 +130,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
         };
       });
 
-  it('builds a literal launch, filters internal secrets, and cleans confirmed resources', async () => {
+  it('builds a literal launch, transports the payload env privately, and prepares writable masks', async () => {
     const maskedPath = path.join(workspace, '.qwen', 'review-leases');
     const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await executeBwrap(
@@ -142,11 +152,18 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     );
     expect(argv).toContain('--unshare-pid');
     expect(argv).toContain('--unshare-net');
-    expect(argv).toContain('--clearenv');
-    expect(argv).toContain('GH_TOKEN');
-    expect(argv).toContain('visible-user-value');
+    expect(argv).not.toContain('--clearenv');
+    expect(argv).not.toContain('--setenv');
+    expect(argv).not.toContain('GH_TOKEN');
+    expect(argv).not.toContain('visible-user-value');
     expect(argv).not.toContain('QWEN_SERVER_TOKEN');
     expect(argv).not.toContain('internal-secret');
+    expect(capturedPayloadEnv).toMatchObject({
+      GH_TOKEN: 'visible-user-value',
+      TERM: 'xterm-256color',
+    });
+    expect(capturedPayloadEnv).not.toHaveProperty('QWEN_SERVER_TOKEN');
+    expect(capturedPayloadEnvMode).toBe(0o600);
     const workspaceBind = argv.findIndex(
       (value, index) =>
         value === '--bind' &&
@@ -157,16 +174,29 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     expect(workspaceBind).toBeGreaterThan(-1);
     expect(argv.slice(mask, mask + 2)).toEqual(['--tmpfs', admittedMaskedPath]);
     expect(mask).toBeGreaterThan(workspaceBind);
-    const term = argv.indexOf('TERM');
-    expect(argv.slice(term - 1, term + 2)).toEqual([
-      '--setenv',
-      'TERM',
-      'xterm-256color',
-    ]);
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    expect(existsSync(maskedPath)).toBe(true);
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.isAbsolute(scratch)).toBe(true);
     expect(existsSync(scratch)).toBe(false);
     expect(readdirSync(state)).toEqual([]);
+  });
+
+  it('skips absent masks without mutating a read-only workspace', async () => {
+    const maskedPath = path.join(workspace, '.qwen', 'review-leases');
+    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    const handle = await executeBwrap(
+      {
+        ...policy(),
+        filesystem: 'read-only',
+        maskedPaths: [maskedPath],
+      },
+      payload(),
+      () => {},
+      new AbortController().signal,
+    );
+    await handle.result;
+    expect(launch.mock.calls[0][0].args).not.toContain('--tmpfs');
+    expect(existsSync(maskedPath)).toBe(false);
   });
 
   it('rejects mask paths outside the workspace', async () => {
@@ -182,7 +212,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
 
   it('uses an absolute scratch root for a relative TMPDIR without leaking it', async () => {
     process.env['TMPDIR'] = 'relative-tmp';
-    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await executeBwrap(
       policy(),
       payload(),
@@ -190,8 +220,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
       new AbortController().signal,
     );
     await handle.result;
-    const argv = launch.mock.calls[0][0].args;
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.dirname(scratch)).toBe(realpathSync('/tmp'));
     expect(existsSync(scratch)).toBe(false);
     expect(existsSync(path.join(process.cwd(), 'relative-tmp'))).toBe(false);
@@ -209,7 +238,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
 
   it('allows a temporary root that contains disjoint sandbox roots', async () => {
     process.env['TMPDIR'] = root;
-    const launch = mockLaunch({ state: 'confirmed', exitCode: 0 });
+    mockLaunch({ state: 'confirmed', exitCode: 0 });
     const handle = await executeBwrap(
       policy(),
       payload(),
@@ -217,8 +246,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
       new AbortController().signal,
     );
     await handle.result;
-    const argv = launch.mock.calls[0][0].args;
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(path.dirname(scratch)).toBe(realpathSync(root));
     expect(existsSync(scratch)).toBe(false);
   });
@@ -236,7 +264,7 @@ describe.skipIf(process.platform === 'win32')('bwrap execution adapter', () => {
     });
     const argv = launch.mock.calls[0][0].args;
     const statusPath = argv[2];
-    const scratch = argv[argv.indexOf('TMPDIR') + 1];
+    const scratch = capturedPayloadEnv['TMPDIR'];
     expect(readFileSync(statusPath, 'utf8')).toContain('unconfirmed');
     expect(existsSync(scratch)).toBe(true);
     rmSync(path.dirname(statusPath), { recursive: true, force: true });
