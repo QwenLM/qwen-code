@@ -241,22 +241,64 @@ describe('projectTrajectoryWindow', () => {
   });
 
   describe('page boundaries', () => {
-    const splitAt = (index: number) => [
-      REAL_PAGE.slice(0, index),
-      REAL_PAGE.slice(index),
-    ];
+    // Index 2 is the assistant record whose request frame is the event before
+    // it: the split the in-place-frame contract exists to survive. Index 7
+    // lands between a round's tool calls and the frames that measured them,
+    // and index 11 between a round's frame and the text it produced.
+    const SPLITS = [2, 7, 11];
+    const identify = (entries: readonly TrajectoryEntry[]) =>
+      entries.flatMap((entry) =>
+        entry.kind === 'timing'
+          ? [
+              `${entry.timing.kind}:${entry.timing.responseId ?? entry.timing.callId}`,
+            ]
+          : [],
+      );
 
-    it('sees the same run whether or not the page was split', () => {
-      const whole = projectTrajectoryWindow(REAL_PAGE);
+    it('loses no frame to a split, and invents none', () => {
+      const whole = identify(projectTrajectoryWindow(REAL_PAGE));
+      expect(whole).toHaveLength(5);
 
-      // Index 2 is the assistant record whose request frame is the event
-      // before it — the split this contract exists to survive.
-      for (const index of [2, 5, 9]) {
-        const [older, newer] = splitAt(index);
-        expect(
-          shapeOf(projectTrajectoryWindow([...older!, ...newer!])),
-        ).toEqual(shapeOf(whole));
+      for (const index of SPLITS) {
+        // Each half is projected on its own, the way two fetched pages are
+        // before the panel has both. Their frames together must be the run's.
+        const older = projectTrajectoryWindow(REAL_PAGE.slice(0, index));
+        const newer = projectTrajectoryWindow(REAL_PAGE.slice(index));
+        expect([...identify(older), ...identify(newer)]).toEqual(whole);
       }
+    });
+
+    it('reads a half that lost the frames for what it holds', () => {
+      // The older half keeps the request frame; the newer half keeps the
+      // records it measured. Neither half may mis-pair what it still has.
+      const older = buildTrajectory(
+        projectTrajectoryWindow(REAL_PAGE.slice(0, 2)),
+      );
+      const newer = buildTrajectory(
+        projectTrajectoryWindow(REAL_PAGE.slice(2)),
+      );
+
+      expect(older.rows.map((row) => row.kind)).toEqual(['user', 'request']);
+      expect(older.turns[0]?.requestCount).toBe(1);
+
+      // Orphaned of its frame, the round's text is still a row — with no
+      // request to belong to rather than the next round's.
+      expect(newer.rows[0]).toMatchObject({ kind: 'message' });
+      expect(newer.rows[0]?.requestIndex).toBeUndefined();
+      expect(newer.turns[0]?.partial).toBe(true);
+      // The tool frames are in this half with their calls, so they still pair.
+      const tools = newer.rows.filter((row) => row.kind === 'tool');
+      expect(tools.map((row) => row.timing?.durationMs)).toEqual([35, 20]);
+    });
+
+    it('leaves a tool row unmeasured when its frame is on the next page', () => {
+      const cut = buildTrajectory(
+        projectTrajectoryWindow(REAL_PAGE.slice(0, 7)),
+      );
+      const tools = cut.rows.filter((row) => row.kind === 'tool');
+
+      expect(tools).toHaveLength(2);
+      expect(tools.every((row) => row.timing === undefined)).toBe(true);
     });
   });
 
