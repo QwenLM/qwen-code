@@ -103,13 +103,11 @@ describe('bundled skill runtime inside the node_repl kernel', () => {
     const skillBase = path.join(tmpRootDir, 'skill');
     copyBrowserUseAssets(repoRoot, skillBase);
     const stagedModules = path.join(skillBase, 'runtime/node_modules');
-    // A socket whose grandparent directory does not exist makes the bridge
-    // fail deterministically, after the runtime has already loaded and read
-    // process.env/process.platform, without touching the user's Chrome.
-    vi.stubEnv(
-      'QWEN_BROWSER_USE_SOCKET_PATH',
-      path.join(tmpRootDir, 'missing', 'nested', 'bridge.sock'),
-    );
+    // A regular file in place of a socket fails the private peer check after
+    // the runtime has loaded, without touching the user's Chrome.
+    const invalidSocket = path.join(tmpRootDir, 'bridge.sock');
+    fs.writeFileSync(invalidSocket, 'not a socket');
+    vi.stubEnv('QWEN_BROWSER_USE_SOCKET_PATH', invalidSocket);
     const manager = new NodeReplKernelManager({
       cwd: process.cwd(),
       homeDir: os.homedir(),
@@ -132,7 +130,7 @@ describe('bundled skill runtime inside the node_repl kernel', () => {
         name: 'BrowserRuntimeError',
         code: 'TRANSPORT_UNAVAILABLE',
         message: expect.stringContaining(
-          'Could not start the local Chrome bridge',
+          'Could not connect to the local Chrome Host',
         ),
       });
     } finally {

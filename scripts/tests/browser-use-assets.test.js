@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parse } from 'yaml';
 import { copyBrowserUseAssets } from '../copy-browser-use-assets.js';
 import { copyBundleAssets } from '../copy_bundle_assets.js';
 import { copyFiles } from '../copy_files.js';
@@ -256,22 +257,20 @@ describe('browser-use builtin resources', () => {
         'utf8',
       ),
     );
-    const lock = JSON.parse(
-      fs.readFileSync(
-        new URL('../../package-lock.json', import.meta.url),
-        'utf8',
-      ),
+    const lock = parse(
+      fs.readFileSync(new URL('../../pnpm-lock.yaml', import.meta.url), 'utf8'),
     );
-    const workspace = lock.packages['packages/browser-use'];
     const playwright =
-      lock.packages['packages/browser-use/node_modules/playwright-core'];
+      lock.importers['packages/browser-use'].dependencies['playwright-core'];
 
     expect(manifest.dependencies['playwright-core']).toMatch(/^\d+\.\d+\.\d+$/);
     expect(manifest.bundledDependencies).toBeUndefined();
     expect(manifest.bundleDependencies).toBeUndefined();
-    expect(workspace.bundleDependencies).toBeUndefined();
-    expect(playwright.inBundle).not.toBe(true);
+    expect(playwright.specifier).toBe(manifest.dependencies['playwright-core']);
     expect(playwright.version).toBe(manifest.dependencies['playwright-core']);
+    expect(
+      lock.packages[`playwright-core@${playwright.version}`],
+    ).toBeDefined();
   });
 
   function write(relativePath, contents) {
