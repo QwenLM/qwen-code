@@ -64,11 +64,12 @@ promote 被拒绝但前台命令已完成的结果仍携带真实退出码。渲
 steer 时置位 `userSteer`。评审被调度或已有同类评审在运行时，累计窗口与计数一起清零；
 session reset 还会清除尚未消费的 outcome sidecar。
 
-如果取消发生在 shell 失败结算之后，已提供退出状态且无 `aborted: true` 会保留
-`executionStatus: error` 及“工作已完成”的取消文案。这包含 child_process 命令被信号终止时
-返回的 `null`；`undefined` 才表示工具没有提供前台结算证据。显式 `aborted: true` 优先，
-即使同时携带数字或 null 退出码也仍视为取消；没有完成证据的 error-only 取消结果同样保持取消状态。
-后者在执行结果交付调度器时判定；调度器的两个取消边界都保留已经完成的 shell 失败状态。
+如果取消发生在执行结算之后，没有 `aborted: true` 的结果会在调度器两个取消边界
+保留实际的 `executionStatus`（`success` 或 `error`）及“工作已完成”的取消文案。
+没有退出码的 error 不能作为中断证据。显式 `aborted: true` 优先，即使同时携带
+error 或数字/null 的 shell 退出码也仍视为取消。Web search 将后端观察到调用方取消时
+设置的标志透传到工具结果；普通后端失败和后端自身超时不设置该标志。Web fetch
+对调用方中断造成的失败设置相同标志。
 
 运行中取消的工具必须返回 `aborted: true`，由调度器标记
 `executionStatus: cancelled`，客户端既不计数，也不暂存失败经验。Workflow 的运行前

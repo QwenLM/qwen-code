@@ -673,6 +673,7 @@ ${entry.content}
       return {
         llmContent: `Error: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}${elapsedSuffix()}`,
+        ...(signal.aborted ? { aborted: true } : {}),
         error: {
           message: errorMessage,
           type: ToolErrorType.WEB_FETCH_FALLBACK_FAILED,

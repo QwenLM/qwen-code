@@ -280,8 +280,12 @@ export class DashScopeWebSearchBackend implements WebSearchBackend {
         `Web search timed out after ${formatBudget(backend.timeoutMs)}.`,
         ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
       );
-    const cancelled = () =>
-      failure('Web search cancelled.', ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    const cancelled = (): WebSearchBackendResult => ({
+      ok: false,
+      message: 'Web search cancelled.',
+      errorType: ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+      aborted: true,
+    });
 
     const tools: Array<{ type: string }> = [{ type: 'web_search' }];
     if (backend.webExtractor) {

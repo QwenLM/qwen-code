@@ -45,6 +45,7 @@ import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
+import { didToolCallProduceWork } from '../memory/experience-signals.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
@@ -14040,37 +14041,77 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(call.response.exitCode).toBe(0);
   });
 
-  it('treats an error-shaped cancellation as cancelled, not completed work', async () => {
-    // R21-2: web_search reports a user cancellation as a resolved error result
-    // (WEB_SEARCH_BACKEND_FAILED); exit_plan_mode did the same via its approval
-    // reject. When the parent aborted, the settle must classify as cancelled so
-    // the experience gate does not count it as produced work and the model is
-    // told the call never completed.
-    const abortController = new AbortController();
-    const { completedCalls } = await runSingleTool({
-      abortController,
-      execute: vi.fn().mockImplementation(async () => {
-        abortController.abort();
-        return {
-          llmContent: 'Web search cancelled.',
-          returnDisplay: 'Web search cancelled.',
-          error: {
-            message: 'Web search cancelled.',
-            type: ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
-          },
-        };
-      }),
-    });
+  it.each([
+    { boundary: 'settle', interrupted: true },
+    { boundary: 'postprocessing', interrupted: true },
+    { boundary: 'settle', interrupted: false },
+    { boundary: 'postprocessing', interrupted: false },
+  ])(
+    'classifies search interruption=$interrupted consistently at $boundary cancellation',
+    async ({ boundary, interrupted }) => {
+      const abortController = new AbortController();
+      const messageBus = {
+        request: vi.fn(async (request: { eventName: string }) => {
+          if (
+            boundary === 'postprocessing' &&
+            request.eventName === 'PostToolUseFailure'
+          ) {
+            abortController.abort();
+          }
+          return {
+            type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+            correlationId: `${request.eventName}-hook`,
+            success: true,
+            output:
+              request.eventName === 'PreToolUse' ? { decision: 'allow' } : {},
+          };
+        }),
+      };
+      const { completedCalls } = await runSingleTool({
+        abortController,
+        messageBus,
+        disableHooks: false,
+        execute: vi.fn().mockImplementation(async () => {
+          if (boundary === 'settle') abortController.abort();
+          return {
+            llmContent: interrupted
+              ? 'Web search cancelled.'
+              : 'Search failed.',
+            returnDisplay: 'Search ended',
+            ...(interrupted ? { aborted: true } : {}),
+            error: {
+              message: interrupted ? 'Web search cancelled.' : 'Search failed.',
+              type: ToolErrorType.WEB_SEARCH_BACKEND_FAILED,
+            },
+          };
+        }),
+      });
 
-    const completedCall = completedCalls[0] as CompletedToolCall;
-    expect(completedCall.status).toBe('cancelled');
-    expect(completedCall.response.executionStatus).toBe('cancelled');
-    const responseText = JSON.stringify(completedCall.response.responseParts);
-    expect(responseText).toContain(
-      'User intentionally cancelled this tool call.',
-    );
-    expect(responseText).not.toContain('had already completed');
-  });
+      const completedCall = completedCalls[0] as CompletedToolCall;
+      expect(completedCall.status).toBe('cancelled');
+      expect(completedCall.response.executionStatus).toBe(
+        interrupted ? 'cancelled' : 'error',
+      );
+      expect(
+        didToolCallProduceWork({
+          callId: completedCall.request.callId,
+          status: completedCall.status,
+          executionStatus: completedCall.response.executionStatus,
+        }),
+      ).toBe(!interrupted);
+      const responseText = JSON.stringify(completedCall.response.responseParts);
+      expect(responseText).toContain(
+        interrupted
+          ? 'User intentionally cancelled this tool call.'
+          : 'The tool had already completed',
+      );
+      expect(responseText).not.toContain(
+        interrupted
+          ? 'had already completed'
+          : 'User intentionally cancelled this tool call. Stop',
+      );
+    },
+  );
 
   it('preserves settled work on a post-completion cancellation', async () => {
     const abortController = new AbortController();

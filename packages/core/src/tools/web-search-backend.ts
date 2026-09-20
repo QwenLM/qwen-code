@@ -64,7 +64,12 @@ export interface WebSearchOutcome {
 
 export type WebSearchBackendResult =
   | { ok: true; outcome: WebSearchOutcome }
-  | { ok: false; message: string; errorType: ToolErrorType };
+  | {
+      ok: false;
+      message: string;
+      errorType: ToolErrorType;
+      aborted?: boolean;
+    };
 
 export interface WebSearchBackendRequest {
   query: string;

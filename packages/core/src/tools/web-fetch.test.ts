@@ -160,6 +160,7 @@ describe('WebFetchTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.aborted).not.toBe(true);
     });
 
     it('should fall back to raw content when side-query processing fails', async () => {
@@ -728,6 +729,7 @@ describe('WebFetchTool', () => {
         .execute(controller.signal);
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.aborted).toBe(true);
       expect(result.llmContent).not.toContain('Late success');
       expect(result.llmContent).not.toContain('Test content');
     });
@@ -772,6 +774,7 @@ describe('WebFetchTool', () => {
         .execute(controller.signal);
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.aborted).toBe(true);
       expect(result.llmContent).toContain('qwen:user-cancel');
       expect(result.llmContent).not.toContain('undefined');
       expect(result.llmContent).not.toContain('Late success');
@@ -790,6 +793,7 @@ describe('WebFetchTool', () => {
         .execute(controller.signal);
 
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.aborted).toBe(true);
       expect(result.llmContent).not.toContain('Test content');
     });
   });

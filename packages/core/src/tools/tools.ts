@@ -636,8 +636,8 @@ export interface ToolResult {
   };
 
   /**
-   * Set by abort-aware tools when they observed the abort signal and
-   * stopped mid-execution, but still resolved with an error-free result.
+   * Set by abort-aware tools when cancellation prevented execution from
+   * completing. May accompany an error result.
    * Lets the scheduler tell a cooperative interruption apart from a
    * cancellation that landed after the work had already completed.
    */

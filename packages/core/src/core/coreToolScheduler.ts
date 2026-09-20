@@ -5631,14 +5631,11 @@ export class CoreToolScheduler {
       const settledExecutionStatus: ToolExecutionStatus = toolResult.error
         ? 'error'
         : 'success';
-      // Error-only results can report interruption (e.g. web_search). A shell
-      // exit status, including null for signal termination, records settlement;
-      // an explicit cooperative abort still takes precedence.
-      const cancelledSettleStatus: ToolExecutionStatus =
-        toolResult.aborted ||
-        (toolResult.error && toolResult.exitCode === undefined)
-          ? 'cancelled'
-          : settledExecutionStatus;
+      // A completed failure and an interrupted tool can both return an error.
+      // Only the producer knows whether cancellation prevented completion.
+      const cancelledSettleStatus: ToolExecutionStatus = toolResult.aborted
+        ? 'cancelled'
+        : settledExecutionStatus;
       executionStatus =
         aborted || toolResult.aborted ? 'cancelled' : settledExecutionStatus;
       executionSettled = true;
@@ -5721,10 +5718,10 @@ export class CoreToolScheduler {
         }
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
-          toolResult.aborted
+          cancelledSettleStatus === 'cancelled'
             ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
             : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
-          executionStatus,
+          cancelledSettleStatus,
           artifacts,
           preserved?.persistedOutputFiles,
           preserved?.visionBridgeNotice,

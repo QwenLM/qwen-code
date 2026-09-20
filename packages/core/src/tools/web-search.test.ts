@@ -1667,6 +1667,7 @@ describe('WebSearchTool execute', () => {
     mockCreate.mockRejectedValueOnce(new Error('ENOTFOUND'));
     const result = await runSearch(makeConfig());
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+    expect(result.aborted).not.toBe(true);
   });
 
   it('retries once when no search was performed, then errors with NO_SEARCH_PERFORMED', async () => {
@@ -2152,6 +2153,7 @@ describe('WebSearchTool budget', () => {
     );
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(result.error?.message).toBe('Web search timed out after 0.2s.');
+    expect(result.aborted).not.toBe(true);
     // The SDK's own request timeout follows the same budget.
     expect((mockCtorOpts.current as { timeout: number }).timeout).toBe(200);
   });
@@ -2236,6 +2238,7 @@ describe('WebSearchTool budget', () => {
       .execute(controller.signal);
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(result.error?.message).toBe('Web search cancelled.');
+    expect(result.aborted).toBe(true);
     expect(result.llmContent).not.toContain('[Partial result:');
   });
 });

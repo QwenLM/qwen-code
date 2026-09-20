@@ -77,14 +77,15 @@ they count but contribute neither a successful nor a failed experience. Set
 Reset the signals and count together when review is scheduled or an equivalent
 review is already running. Session reset also clears unconsumed outcome sidecars.
 
-If cancellation arrives after a shell failure settled, a supplied exit status
-without `aborted: true` preserves `executionStatus: error` and the completed-work
-cancellation notice. This includes `null` when a child_process command terminated
-by a signal; `undefined` means the tool supplied no foreground settlement evidence.
-An explicit `aborted: true` takes precedence with either a numeric or null code;
-error-only cancellation results without completion evidence remain
-cancelled at execution settlement. Both scheduler cancellation boundaries
-preserve already-completed shell failures.
+If cancellation arrives after execution settled, a result without
+`aborted: true` preserves its actual `executionStatus` (`success` or `error`) and
+the completed-work cancellation notice at both scheduler cancellation boundaries.
+An error without an exit code is not evidence of interruption. An explicit
+`aborted: true` takes precedence, including when accompanied by an error or a
+numeric/null shell exit code. Web search carries this flag from the backend's
+caller-cancellation result through the tool envelope; ordinary backend failures
+and backend timeouts do not set it. Web fetch marks caller-interrupted failures
+with the same flag.
 
 Tools cancelled during execution must return `aborted: true`. The scheduler sets
 `executionStatus: cancelled`, so the client neither counts the call nor stages a
