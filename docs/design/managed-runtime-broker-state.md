@@ -17,6 +17,12 @@ The main branch has no Managed Runtime Broker module. Runtime placement,
 transport, Hosted Harness integration, and production persistence remain future
 work. This change adds only the state boundary needed by those later layers.
 
+These records are private Java control-plane placement and ownership state.
+They are distinct from both the Harness Session Authority journal and the
+public Agent Event/Item/Snapshot store; a durable adapter may share a database
+deployment with those stores, but it must keep separate schemas and ownership
+contracts.
+
 ## Goals
 
 - Define immutable identities for Runtime scope, placement, lease, and Session.
@@ -90,9 +96,11 @@ be allowed to replace them.
 
 - Compile the module with Java 11.
 - Run repository unit tests covering concurrent create, generation rollover,
-  stale compare-and-set rejection, operation takeover after expiry, and
-  Session accounting, including cross-tenant identity collisions.
+  version-only stale compare-and-set rejection, successful operation renewal,
+  operation takeover after expiry, and Session accounting, including
+  cross-tenant identity collisions and cross-scope replacement rejection.
 - Run Checkstyle against the repository Java conventions.
+- Verify hosted and self-hosted Java CI both execute the Runtime Broker module.
 
 ## Acceptance criteria
 

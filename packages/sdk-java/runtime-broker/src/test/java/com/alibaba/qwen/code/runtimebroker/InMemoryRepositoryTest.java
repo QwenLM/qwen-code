@@ -118,6 +118,44 @@ class InMemoryRepositoryTest {
     }
 
     @Test
+    void bindingCasRejectsStaleVersionWithCurrentOperationClaim() {
+        InMemoryRuntimeBindingRepository repository =
+                new InMemoryRuntimeBindingRepository(
+                        new MutableClock(START), () -> "binding");
+        RuntimeBindingRecord created = repository.findOrCreate(REQUEST);
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), "owner", Duration.ofSeconds(30));
+        RuntimeBindingRecord staleVersion = claimed.withVersion(
+                created.getVersion());
+
+        assertNull(repository.compareAndSet(staleVersion,
+                staleVersion.withDrainRequested(true, START)));
+        assertSame(claimed, repository.findById(created.getBindingId()));
+    }
+
+    @Test
+    void currentOperationOwnerCanRenewItsLease() {
+        MutableClock clock = new MutableClock(START);
+        InMemoryRuntimeBindingRepository repository =
+                new InMemoryRuntimeBindingRepository(clock, () -> "binding");
+        RuntimeBindingRecord created = repository.findOrCreate(REQUEST);
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), "owner", Duration.ofSeconds(30));
+        clock.advance(Duration.ofSeconds(10));
+
+        RuntimeBindingRecord renewed = repository.renewOperation(
+                created.getBindingId(), "owner",
+                claimed.getOperationGeneration(), Duration.ofSeconds(30));
+
+        assertEquals(claimed.getOperationGeneration(),
+                renewed.getOperationGeneration());
+        assertEquals(claimed.getVersion() + 1, renewed.getVersion());
+        assertEquals(clock.instant().plusSeconds(30),
+                renewed.getOperationLeaseUntil());
+        assertSame(renewed, repository.findById(created.getBindingId()));
+    }
+
+    @Test
     void runtimePlacementNeverReusesAcrossTenants() {
         AtomicInteger ids = new AtomicInteger();
         InMemoryRuntimeBindingRepository repository =
@@ -217,6 +255,31 @@ class InMemoryRepositoryTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new RuntimeSession("harness", "session",
                         "bootstrap", null));
+    }
+
+    @Test
+    void runtimeSessionReplacementCannotMoveAcrossScopes() {
+        InMemoryRuntimeSessionRepository repository =
+                new InMemoryRuntimeSessionRepository();
+        RuntimeSessionRecord current = new RuntimeSessionRecord(
+                new RuntimeSession("harness", "session", "bootstrap",
+                        SCOPE),
+                "binding", 1, RuntimeSessionRecord.State.ACQUIRING, 0,
+                START);
+        repository.findOrCreate(current);
+        RuntimeScope otherScope = new RuntimeScope("other-tenant",
+                "workspace", "generation", "/workspace", "capability",
+                "session");
+        RuntimeSessionRecord replacement = new RuntimeSessionRecord(
+                new RuntimeSession("harness", "session", "bootstrap",
+                        otherScope),
+                "binding", 1, RuntimeSessionRecord.State.READY,
+                current.getVersion(), START);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> repository.compareAndSet(current, replacement));
+        assertSame(current, repository.findById(SCOPE, "session"));
+        assertNull(repository.findById(otherScope, "session"));
     }
 
     private static <T> List<T> invokeConcurrently(Callable<T> operation)

@@ -8,6 +8,14 @@ const job = (name) => {
   return workflow.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 
+const step = (block, name) => {
+  const marker = `      - name: '${name}'`;
+  const start = block.indexOf(marker);
+  if (start < 0) throw new Error(`Missing workflow step: ${name}`);
+  const next = block.slice(start + 1).search(/\n {6}- name:/);
+  return block.slice(start, next < 0 ? undefined : start + 1 + next);
+};
+
 describe('SDK Java self-hosted workflow guards', () => {
   it.each(['test', 'daemon-e2e'])('protects the %s job', (name) => {
     const block = job(name);
@@ -43,6 +51,16 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
+    );
+  });
+
+  it('runs Runtime Broker tests from the sibling module on self-hosted', () => {
+    const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
+    expect(block).toContain("working-directory: 'packages/sdk-java/qwencode'");
+    expect(block).toContain(
+      'mvn --batch-mode --no-transfer-progress clean test\n' +
+        '          cd ../runtime-broker\n' +
+        '          mvn --batch-mode --no-transfer-progress clean test',
     );
   });
 

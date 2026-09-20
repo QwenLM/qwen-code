@@ -16,6 +16,10 @@ Runtime 代次或 Session 绑定。
 Harness 集成和生产级持久化仍属于后续工作。本次变更只增加这些后续层所需的
 状态边界。
 
+这些记录是 Java 管控面私有的调度与所有权状态，既不同于 Harness Session
+Authority 日志，也不同于公共 Agent Event/Item/Snapshot 存储。持久化适配器可以
+与这些存储共用同一个数据库部署，但必须保持独立的 schema 和所有权契约。
+
 ## 目标
 
 - 定义 Runtime 范围、调度、租约和 Session 的不可变身份。
@@ -78,9 +82,11 @@ Harness 集成和生产级持久化仍属于后续工作。本次变更只增加
 ## 验证计划
 
 - 使用 Java 11 编译模块。
-- 运行 Repository 单元测试，覆盖并发创建、代次轮换、拒绝过期
-  compare-and-set、租约过期后的操作接管、Session 计数和跨租户身份冲突。
+- 运行 Repository 单元测试，覆盖并发创建、代次轮换、仅版本过期的
+  compare-and-set 拒绝、有效操作续租、租约过期后的操作接管、Session 计数、
+  跨租户身份冲突和跨 scope 替换拒绝。
 - 按仓库 Java 规范运行 Checkstyle。
+- 验证 hosted 与 self-hosted Java CI 都会执行 Runtime Broker 模块。
 
 ## 验收标准
 
