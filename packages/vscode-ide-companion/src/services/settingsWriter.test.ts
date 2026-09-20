@@ -370,6 +370,28 @@ describe('settingsWriter', () => {
   });
 
   describe('clearPersistedAuth', () => {
+    it('clears credentials from settings that start with a UTF-8 BOM', () => {
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const initial = {
+        env: {
+          OPENAI_API_KEY: 'sk-openai',
+          NODE_OPTIONS: '--max-old-space-size=8192',
+        },
+        security: { auth: { selectedType: 'openai' } },
+      };
+      fs.writeFileSync(
+        settingsPath,
+        `\uFEFF${JSON.stringify(initial, null, 2)}`,
+        'utf-8',
+      );
+
+      clearPersistedAuth();
+
+      const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      expect(after.env).toEqual({ NODE_OPTIONS: '--max-old-space-size=8192' });
+      expect(after.security?.auth?.selectedType).toBeUndefined();
+    });
+
     it('wipes preset, custom, and subscription-plan env keys without touching unrelated env', () => {
       fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
       // Pre-populate a settings file representing a user who has used

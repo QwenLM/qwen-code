@@ -4368,6 +4368,28 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('reloadScopeFromDisk', () => {
+    it('reloads a settings file that starts with a UTF-8 BOM', () => {
+      let userSettingsContent = JSON.stringify({ ui: { theme: 'dark' } });
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return userSettingsContent;
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      userSettingsContent =
+        '\uFEFF' + JSON.stringify({ ui: { theme: 'light' } });
+
+      expect(settings.reloadScopeFromDisk(SettingScope.User)).toBe(true);
+      expect(settings.user.settings.ui?.theme).toBe('light');
+      expect(settings.user.rawJson).toBe(userSettingsContent);
+    });
+
     it('reloads a scope from disk and resolves home env vars', () => {
       const homeQwenEnvPath = path.join(
         path.dirname(USER_SETTINGS_PATH),

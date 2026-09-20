@@ -23,6 +23,7 @@ import {
 } from './trustedFolders.js';
 import { arePathsEquivalent } from './path-comparison.js';
 import { v1ToV2Migration } from './migration/versions/v1-to-v2.js';
+import { stripBom } from '../utils/jsonc-editor.js';
 
 const MAX_TRUSTED_FOLDERS_BYTES = 1024 * 1024;
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
@@ -141,7 +142,7 @@ async function readJsonObjectOnce(
 
   try {
     const raw = await fs.readFile(filePath, 'utf8');
-    const parsed: unknown = JSON.parse(stripJsonComments(raw));
+    const parsed: unknown = JSON.parse(stripJsonComments(stripBom(raw)));
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
