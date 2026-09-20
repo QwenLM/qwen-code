@@ -2370,8 +2370,6 @@ export async function loadCliConfig(
       !bareMode && !safeMode && settings.tools?.codeModeOnly === true,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
-    toolSearchMaxPreloadTokens:
-      bareMode || safeMode ? 0 : settings.tools?.toolSearch?.maxPreloadTokens,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,

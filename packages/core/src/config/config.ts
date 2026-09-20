@@ -362,13 +362,6 @@ const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 // mirrors the settings-schema default in packages/cli.
 const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
 
-// Default `tools.toolSearch.maxPreloadTokens`: mirrors the settings-schema
-// default in packages/cli. Chosen so a bundled-only deferred pool (~4.2k
-// tokens in the #12028 sample) still preloads on every window size, while a
-// pool past this size — an MCP-heavy install — goes back to on-demand
-// loading, where it breaks even within roughly twenty turns (#12029).
-const DEFAULT_TOOL_SEARCH_MAX_PRELOAD_TOKENS = 8_000;
-
 import {
   ModelsConfig,
   type ModelProvidersConfig,
@@ -1067,16 +1060,6 @@ export interface ConfigParameters {
    * excluded from this preload. `0` disables preloading.
    */
   toolSearchThreshold?: number;
-  /**
-   * Absolute ceiling, in tokens, on that same preload budget. The effective
-   * budget is the smaller of the percentage and this value, so a large
-   * context window no longer implies a large preload: the trade the
-   * percentage models — carrying deferred schemas every turn versus one
-   * mid-session reveal rebuilding the prompt-cache prefix — depends on the
-   * size of the deferred pool and of the prefix, not on the window (#12029).
-   * `0` disables preloading, like a `0` threshold.
-   */
-  toolSearchMaxPreloadTokens?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -2675,7 +2658,6 @@ export class Config {
   private readonly visibleTools: ReadonlySet<string>;
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
-  private readonly toolSearchMaxPreloadTokens: number;
   private readonly toolMode: ToolModeValue;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
@@ -3136,9 +3118,6 @@ export class Config {
           );
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
-    this.toolSearchMaxPreloadTokens =
-      params.toolSearchMaxPreloadTokens ??
-      DEFAULT_TOOL_SEARCH_MAX_PRELOAD_TOKENS;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -7365,14 +7344,6 @@ export class Config {
    */
   getToolSearchThreshold(): number {
     return this.toolSearchThreshold;
-  }
-
-  /**
-   * Absolute token ceiling on the deferred-tool preload budget. See
-   * {@link ConfigParameters.toolSearchMaxPreloadTokens}.
-   */
-  getToolSearchMaxPreloadTokens(): number {
-    return this.toolSearchMaxPreloadTokens;
   }
 
   getCodeModeOnly(): boolean {

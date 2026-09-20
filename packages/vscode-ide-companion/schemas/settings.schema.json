@@ -1342,12 +1342,6 @@
               "maximum": 100,
               "default": 10,
               "description": "Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand."
-            },
-            "maxPreloadTokens": {
-              "type": "number",
-              "minimum": 0,
-              "default": 8000,
-              "description": "Absolute ceiling, in tokens, on the deferred-tool preload budget. The effective budget is the smaller of this and the threshold percentage, so a large context window no longer implies a large preload: what decides whether preloading is cheaper than on-demand loading is the size of the deferred pool against the prompt prefix a mid-session reveal would rebuild, and neither grows with the window. The default lets a bundled-only pool preload on every window size while an MCP-heavy pool goes back on demand. Set 0 to always load deferred tools on demand, like a threshold of 0."
             }
           }
         },

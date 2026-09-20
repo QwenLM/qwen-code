@@ -2860,23 +2860,6 @@ const SETTINGS_SCHEMA = {
               default: 10,
             },
           },
-          maxPreloadTokens: {
-            type: 'number',
-            label: 'Deferred Tool Preload Cap (tokens)',
-            category: 'Tools',
-            requiresRestart: true,
-            default: 8000,
-            description:
-              'Absolute ceiling, in tokens, on the deferred-tool preload budget. The effective budget is the smaller of this and the threshold percentage, so a large context window no longer implies a large preload: what decides whether preloading is cheaper than on-demand loading is the size of the deferred pool against the prompt prefix a mid-session reveal would rebuild, and neither grows with the window. The default lets a bundled-only pool preload on every window size while an MCP-heavy pool goes back on demand. Set 0 to always load deferred tools on demand, like a threshold of 0.',
-            showInDialog: true,
-            // No maximum: the percentage already bounds the budget by the
-            // window, and a value above the whole window simply never binds.
-            jsonSchemaOverride: {
-              type: 'number',
-              minimum: 0,
-              default: 8000,
-            },
-          },
         },
       },
       listDirectory: {
