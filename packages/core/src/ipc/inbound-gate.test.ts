@@ -853,6 +853,72 @@ describe('receipts', () => {
     expect(statuses).toEqual(['held', 'denied']);
   });
 
+  it('delivers nothing on an address its host could not confirm', () => {
+    // `ownsSessionId` reads live state and can throw mid-teardown. An
+    // unanswered question is not "yes": releasing on it would deliver to
+    // an address nobody confirmed and receipt the sender `delivered`.
+    let owns: (id: string) => boolean = () => true;
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => 'hold',
+      ownsSessionId: (id) => owns(id),
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const parked = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+    expect(gate.admit(parked)).toBe('held');
+
+    owns = () => {
+      throw new Error('the session map is being torn down');
+    };
+    // 'failed', not 'done' and not 'gone': nothing was delivered, and
+    // the message is still there to decide once the host can answer.
+    expect(gate.decide(parked.msgId, 'approve')).toBe('failed');
+    expect(delivered).toEqual([]);
+    expect(gate.getHeld()).toHaveLength(1);
+    expect(statuses).toEqual(['held', 'held']);
+
+    // A re-judge does not settle it on an unanswered question either.
+    expect(gate.reevaluate('settings-changed')).toBe(0);
+    expect(gate.getHeld()).toHaveLength(1);
+
+    // Once the host can answer again, the release goes through.
+    owns = () => true;
+    expect(gate.decide(parked.msgId, 'approve')).toBe('done');
+    expect(delivered).toEqual([parked]);
+  });
+
+  it('releases nothing when the host cannot answer during a re-judge', () => {
+    // The same question on the other release path: a mode change frees a
+    // parked message, and the pin check throws while it is being let out.
+    let owns: (id: string) => boolean = () => true;
+    let mode: ApprovalMode = ApprovalMode.DEFAULT;
+    const delivered: PeerUserFrame[] = [];
+    const statuses: string[] = [];
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      ownsSessionId: (id) => owns(id),
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (_candidate, status) => statuses.push(status),
+    });
+    const parked = frame({ fromMode: 'bypass', toSessionId: 'session-a' });
+    expect(gate.admit(parked)).toBe('held');
+
+    mode = ApprovalMode.YOLO;
+    owns = () => {
+      throw new Error('the session map is being torn down');
+    };
+    expect(gate.reevaluate('approval-mode-changed')).toBe(0);
+    expect(delivered).toEqual([]);
+    expect(gate.getHeld()).toHaveLength(1);
+    expect(statuses).toEqual(['held', 'held']);
+  });
+
   it('judges a parked frame against the sessions a host still holds', () => {
     // The multi-session shape: no single id to compare, so the release
     // path asks whether the frame's addressee is still one of them — a

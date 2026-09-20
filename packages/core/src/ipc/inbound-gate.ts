@@ -470,8 +470,18 @@ export class InboundGate {
   private admissionSessionObserved = false;
   private admissionSessionId: string | undefined;
 
+  /**
+   * Whether this gate answers for more than one session — a host that
+   * tests ids against a set rather than naming its one session. It
+   * decides what a message is judged by, which hold allowance it counts
+   * against, and whether a re-judge settles messages for sessions that
+   * have left.
+   */
+  private readonly answersForSeveralSessions: boolean;
+
   constructor(private readonly options: InboundGateOptions) {
     this.admission = options.admission ?? new PeerAdmission();
+    this.answersForSeveralSessions = options.ownsSessionId !== undefined;
   }
 
   /** Messages currently parked, oldest first. */
@@ -842,7 +852,18 @@ export class InboundGate {
     if (!entry) return 'gone';
 
     if (decision === 'approve') {
-      if (!this.pinStillValid(entry.frame)) {
+      const pin = this.pinStatus(entry.frame);
+      if (pin === 'unknown') {
+        // Parked again, exactly as a delivery that could not land: the
+        // release did not happen, and the user can try it again. The one
+        // thing not to do is deliver to an address nobody confirmed.
+        this.held.splice(index, 0, entry);
+        void this.report(entry.frame, 'held');
+        this.notifyHeldChange();
+        this.rescheduleExpiry();
+        return 'failed';
+      }
+      if (pin === 'gone') {
         // Dropped, not released: the id is tombstoned like every other
         // terminal outcome, and the caller is told the message is gone
         // rather than that it will appear on the next turn.
@@ -906,10 +927,12 @@ export class InboundGate {
     // report a refusal nobody made. A gate that answers for one session
     // is left exactly as it was — a message pinned to the id it had
     // before `/clear` keeps waiting in `/peers`, as it always did.
-    const dropMessagesForSessionsThatLeft =
-      this.options.ownsSessionId !== undefined;
+    const dropMessagesForSessionsThatLeft = this.answersForSeveralSessions;
     for (const entry of this.held) {
-      if (dropMessagesForSessionsThatLeft && !this.pinStillValid(entry.frame)) {
+      if (
+        dropMessagesForSessionsThatLeft &&
+        this.pinStatus(entry.frame) === 'gone'
+      ) {
         misaddressed += 1;
         this.settleMisaddressed(entry);
         continue;
@@ -933,9 +956,16 @@ export class InboundGate {
 
     let released = 0;
     for (const entry of release) {
-      if (!this.pinStillValid(entry.frame)) {
+      const pin = this.pinStatus(entry.frame);
+      if (pin === 'gone') {
         misaddressed += 1;
         this.settleMisaddressed(entry);
+        continue;
+      }
+      if (pin === 'unknown') {
+        // Nobody confirmed the address, so nothing is delivered on it.
+        stillHeld.push(entry);
+        void this.report(entry.frame, 'held');
         continue;
       }
       if (this.tryDeliver(entry.frame, originOf(entry))) {
@@ -1022,21 +1052,17 @@ export class InboundGate {
   }
 
   /**
-   * A frame's pin is judged at arrival, but a session swap can happen
-   * while it sits parked; the release paths re-judge against the id the
-   * session holds now, not the one the frame saw on arrival.
-   */
-  /**
    * The session a held message counts against for the hold cap.
    *
    * One bucket unless this gate answers for several sessions: a session
    * receives frames both pinned to it and unpinned, and counting those
    * apart would hand one session two allowances. Ids are compared
-   * case-insensitively, so respelling one buys no second allowance
-   * either.
+   * case-insensitively. A host that answers to two *different* ids for
+   * one session still gets a bucket for each; resolving those to one
+   * name is the host's, and is not wired yet.
    */
   private heldSessionKey(frame: PeerUserFrame): string {
-    if (!this.options.ownsSessionId) return '';
+    if (!this.answersForSeveralSessions) return '';
     return frame.toSessionId?.toLowerCase() ?? '';
   }
 
@@ -1051,19 +1077,27 @@ export class InboundGate {
     void this.report(entry.frame, 'misaddressed');
   }
 
-  private pinStillValid(frame: PeerUserFrame): boolean {
+  /**
+   * A frame's pin is judged at arrival, but a session swap can happen
+   * while it sits parked; the release paths re-judge against the id the
+   * session holds now, not the one the frame saw on arrival.
+   *
+   * `'unknown'` is for a host that could not answer. It is not `'gone'`:
+   * a release must not deliver to an address nobody confirmed, and a
+   * sweep must not settle a message on a question that went unanswered.
+   * Either way the message stays parked, which is the one outcome that
+   * cannot be wrong.
+   */
+  private pinStatus(frame: PeerUserFrame): 'here' | 'gone' | 'unknown' {
     try {
-      return this.pinValidNow(frame);
+      return this.pinValidNow(frame) ? 'here' : 'gone';
     } catch (error) {
-      // A reader that throws mid-sweep must not strand the entries after
-      // it: they would keep their receipts while leaving the held set.
-      // Treated as still valid, which only leaves the message parked.
       debugLogger.debug(
-        `ownsSessionId threw (keeping the message parked): ${
+        `ownsSessionId threw (leaving the message parked): ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return true;
+      return 'unknown';
     }
   }
 

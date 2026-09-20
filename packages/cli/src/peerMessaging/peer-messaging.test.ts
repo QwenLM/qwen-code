@@ -223,6 +223,7 @@ async function start(
         }
       | undefined;
     reassertSessionRecord?: () => Promise<void>;
+    getApprovalMode?: (sessionId?: string) => ApprovalMode | null;
     getPolicySetting?: (sessionId?: string) => InboundPolicy | undefined;
     getHeldExpiryMs?: (sessionId?: string) => number | null;
     getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
@@ -1378,25 +1379,63 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
 
   it('asks each setting reader about the session a message is addressed to', async () => {
     const sender = await startSenderInbox();
-    const asked: Array<string | undefined> = [];
-    const { submitted } = await start(ApprovalMode.DEFAULT, {
+    const asked: Record<string, Array<string | undefined>> = {
+      policy: [],
+      mode: [],
+      expiry: [],
+      scope: [],
+    };
+    // An explicit setting decides on its own, so it is the path that
+    // reads the scope and arms the expiry; parity is the path that reads
+    // the approval mode. One message each covers all four readers.
+    let policy: InboundPolicy | undefined = 'hold';
+    const { submitted } = await start(null, {
       ownsSessionId: (id) => id === 'hosted-1',
       getPolicySetting: (id) => {
-        asked.push(id);
-        return 'accept';
+        asked['policy']!.push(id);
+        return policy;
+      },
+      getApprovalMode: (id) => {
+        asked['mode']!.push(id);
+        return ApprovalMode.DEFAULT;
+      },
+      getHeldExpiryMs: (id) => {
+        asked['expiry']!.push(id);
+        return 60_000;
+      },
+      getPolicyScope: (id) => {
+        asked['scope']!.push(id);
+        return 'workspace';
       },
     });
     await send(
       messaging!.socketPath!,
       peerFrame({
-        content: 'pinned',
+        content: 'held by the setting',
         from: sender.socketPath,
         toSessionId: 'hosted-1',
       }),
     );
     await settle();
+    policy = undefined;
+    await send(
+      messaging!.socketPath!,
+      peerFrame({
+        content: 'delivered by parity',
+        from: sender.socketPath,
+        toSessionId: 'hosted-1',
+      }),
+    );
+    await settle();
+
     expect(submitted).toHaveLength(1);
-    expect(asked).toContain('hosted-1');
+    expect(messaging!.getHeld()).toHaveLength(1);
+    // Every reader that judges a message is asked about the session it
+    // is addressed to, never about the process.
+    for (const [reader, ids] of Object.entries(asked)) {
+      expect([reader, ids.length > 0]).toEqual([reader, true]);
+      expect([reader, new Set(ids)]).toEqual([reader, new Set(['hosted-1'])]);
+    }
   });
 
   it('settles a partially flushed buffer alongside queued frames at exit', async () => {
