@@ -99,6 +99,7 @@ import {
 } from '../constants.js';
 import { WITTY_LOADING_PHRASES } from '../hooks/usePhraseCycler.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 /** The indicator's first text cell is the spinner's own 2-column box. */
 function spinnerCell(container: HTMLElement): string {
@@ -112,6 +113,16 @@ function fakeConfig(overrides: Partial<Config> = {}): Config {
     getContentGeneratorConfig: () => ({ contextWindowSize: 1_000_000 }),
     ...overrides,
   } as unknown as Config;
+}
+
+function fakeSettings(overrides: Partial<LoadedSettings> = {}): LoadedSettings {
+  return {
+    merged: {
+      ui: {},
+      ...overrides.merged,
+    },
+    ...overrides,
+  } as unknown as LoadedSettings;
 }
 
 describe('OpenTuiLoadingIndicator', () => {
@@ -291,7 +302,7 @@ describe('OpenTuiFooter', () => {
     mocks.state.dimensions = { width: 40, height: 40 };
     mocks.state.gitBranch = 'a-very-long-branch-name-that-cannot-fit';
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />,
     );
     const rows = [...container.querySelectorAll('span')].map(
       (row) => row.textContent ?? '',
@@ -304,7 +315,7 @@ describe('OpenTuiFooter', () => {
 
   it('renders the project name, git branch and model', () => {
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />,
     );
     const text = container.textContent ?? '';
     expect(text).toContain('qwen-code');
@@ -315,14 +326,14 @@ describe('OpenTuiFooter', () => {
   it('omits the git segment outside a repository', () => {
     mocks.state.gitBranch = undefined;
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />,
     );
     expect(container.textContent).not.toContain('git:(');
   });
 
   it('leaves out the hint row when nothing is live to report', () => {
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />,
     );
     expect(container.textContent).not.toContain('Enter to steer');
     expect(container.textContent).not.toContain('queued');
@@ -446,19 +457,19 @@ describe('OpenTuiFooter', () => {
 
   it('shows the context indicator only after tokens are used', () => {
     const { container, rerender } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />,
     );
     expect(container.textContent).not.toContain('% context used');
 
     mocks.state.promptTokens = 50_000;
-    rerender(<OpenTuiFooter config={fakeConfig()} streaming={false} />);
+    rerender(<OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />);
     expect(container.textContent).toContain('5.0% context used');
   });
 
   it('reports over-limit usage as >100 like the ink indicator', () => {
     mocks.state.promptTokens = 1_500_000;
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />,
     );
     expect(container.textContent).toContain('>100% context used');
   });
@@ -467,7 +478,7 @@ describe('OpenTuiFooter', () => {
     mocks.state.dimensions = { width: 90, height: 40 };
     mocks.state.promptTokens = 50_000;
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} />,
     );
     expect(container.textContent).toContain('5.0% used');
     expect(container.textContent).not.toContain('% context used');
@@ -475,7 +486,7 @@ describe('OpenTuiFooter', () => {
 
   it('adds the steer hint and the queue badge while streaming', () => {
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming queueLength={2} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming queueLength={2} />,
     );
     const text = container.textContent ?? '';
     expect(text).toContain('Enter to steer');
@@ -484,7 +495,7 @@ describe('OpenTuiFooter', () => {
 
   it('shows the queue badge on its own when queued but idle', () => {
     const { container } = render(
-      <OpenTuiFooter config={fakeConfig()} streaming={false} queueLength={1} />,
+      <OpenTuiFooter config={fakeConfig()} settings={fakeSettings()} streaming={false} queueLength={1} />,
     );
     const text = container.textContent ?? '';
     expect(text).toContain('1 queued');
@@ -500,5 +511,16 @@ describe('OpenTuiFooter', () => {
       />,
     );
     expect(container.textContent).toContain('my-session');
+  });
+
+  it('hides the footer when ui.hideStatusBar is true', () => {
+    const { container } = render(
+      <OpenTuiFooter
+        config={fakeConfig()}
+        settings={fakeSettings({ merged: { ui: { hideStatusBar: true } } })}
+        streaming={false}
+      />,
+    );
+    expect(container.textContent).toBe('');
   });
 });

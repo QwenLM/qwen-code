@@ -1093,6 +1093,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !showSuggestions) ? (
             <OpenTuiFooter
               config={config}
+              settings={settings}
               streaming={Boolean(streaming)}
               approvalMode={currentApprovalMode}
               queueLength={queueLength}
