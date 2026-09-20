@@ -20,4 +20,6 @@ public interface ToolExecutionRepository {
             long dispatchGeneration, Duration leaseDuration);
 
     boolean hasActiveByRuntimeSession(String runtimeSessionId);
+
+    boolean hasActiveByBinding(String bindingId, long runtimeGeneration);
 }

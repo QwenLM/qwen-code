@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -52,6 +53,12 @@ class RuntimeBrokerServiceTest {
         StaticRuntimeProvisioner provisioner =
                 new StaticRuntimeProvisioner(LEASE);
 
+        assertEquals("static", provisioner.kind());
+        assertNotEquals(provisioner.runtimeTemplateDigest(),
+                new StaticRuntimeProvisioner(new RuntimeLease(
+                        LEASE.getRuntimeInstanceId(), LEASE.getEndpoint(),
+                        "rotated-token", LEASE.getLeaseId(),
+                        LEASE.getEpoch())).runtimeTemplateDigest());
         assertSame(LEASE, provisioner.provision(new RuntimeProvisionRequest(
                 SCOPE, null)).toCompletableFuture().get(1, TimeUnit.SECONDS));
         RuntimeScope sessionScope = new RuntimeScope("tenant", "workspace",
@@ -410,9 +417,9 @@ class RuntimeBrokerServiceTest {
 
             first.close();
             clock.advance(Duration.ofSeconds(2));
-            Map<String, Object> resumed = second.createExecution("key-1",
-                    HARNESS_SESSION, RUNTIME_SESSION, "turn-1", "tool-1",
-                    "args-1", reference("args-1"));
+            Map<String, Object> resumed = second.getExecution(
+                    HARNESS_SESSION, RUNTIME_SESSION,
+                    (String) created.get("executionCallId"), null);
 
             assertEquals(created.get("executionCallId"),
                     resumed.get("executionCallId"));

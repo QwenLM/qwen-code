@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.security.SecureRandom;
 import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -71,6 +73,57 @@ public final class RuntimeProvisionSeed {
 
     public String getToken() {
         return token;
+    }
+
+    byte[] encode() {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("provisionRequestId", provisionRequestId);
+        value.put("provisionalRuntimeId", provisionalRuntimeId);
+        value.put("gatewayIncarnation", gatewayIncarnation);
+        value.put("leaseId", leaseId);
+        value.put("epoch", epoch);
+        value.put("token", token);
+        return JsonCodec.encode(value);
+    }
+
+    static RuntimeProvisionSeed decode(byte[] encoded) {
+        Map<String, Object> value = JsonCodec.parseObject(encoded,
+                "Runtime provision seed");
+        if (value.size() != 6) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        Object rawEpoch = value.get("epoch");
+        if (!(rawEpoch instanceof Number)) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        Number number = (Number) rawEpoch;
+        long parsedEpoch = number.longValue();
+        if (number.doubleValue() != parsedEpoch) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        try {
+            return new RuntimeProvisionSeed(required(value,
+                    "provisionRequestId"), required(value,
+                            "provisionalRuntimeId"), required(value,
+                                    "gatewayIncarnation"), required(value,
+                                            "leaseId"), parsedEpoch,
+                    required(value, "token"));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid", exception);
+        }
+    }
+
+    private static String required(Map<String, Object> value, String field) {
+        Object raw = value.get(field);
+        if (!(raw instanceof String)) {
+            throw new IllegalStateException(
+                    "Runtime provision seed is invalid");
+        }
+        return (String) raw;
     }
 
     boolean matches(RuntimeLease lease) {

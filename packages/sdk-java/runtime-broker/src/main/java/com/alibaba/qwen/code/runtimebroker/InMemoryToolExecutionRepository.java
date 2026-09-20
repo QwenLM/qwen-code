@@ -144,6 +144,21 @@ public final class InMemoryToolExecutionRepository
                 "runtimeSessionId");
         return recordsById.values().stream()
                 .anyMatch(record -> id.equals(record.getRuntimeSessionId())
+                && !record.isSettled());
+    }
+
+    @Override
+    public synchronized boolean hasActiveByBinding(String bindingId,
+            long runtimeGeneration) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (runtimeGeneration <= 0) {
+            throw new IllegalArgumentException(
+                    "runtimeGeneration must be positive");
+        }
+        return recordsById.values().stream().anyMatch(record ->
+                id.equals(record.getBindingId())
+                        && runtimeGeneration
+                                == record.getRuntimeGeneration()
                         && !record.isSettled());
     }
 

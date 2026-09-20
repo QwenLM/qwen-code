@@ -375,11 +375,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 harnessSessionId));
     }
 
-    private static RuntimeProvisionRequest request(RuntimeScope scope,
+    private RuntimeProvisionRequest request(RuntimeScope scope,
             String harnessSessionId) {
         return new RuntimeProvisionRequest(scope,
                 "session".equals(scope.getIsolationClass())
-                        ? harnessSessionId : null);
+                        ? harnessSessionId : null,
+                provisioner.kind(), provisioner.placementDomain(),
+                provisioner.runtimeTemplateDigest());
     }
 
     private void ensureHarnessActive(String harnessSessionId) {
@@ -487,6 +489,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         ExecutionRecord execution = executionsById.computeIfAbsent(
                 executionId, ignored -> new ExecutionRecord(record, session));
         execution.assertSession(session);
+        execution.start(transport);
         return execution;
     }
 
@@ -677,6 +680,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         private final AtomicBoolean started = new AtomicBoolean();
         private final AtomicBoolean provisioning = new AtomicBoolean();
         private final AtomicBoolean draining = new AtomicBoolean();
+        private final AtomicBoolean recoveringLoss = new AtomicBoolean();
         private long lastHealthNanos;
         private ScheduledFuture<?> idleTask;
         private ScheduledFuture<?> operationRenewal;
@@ -684,15 +688,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
         private CompletableFuture<Void> unavailableFuture;
         private boolean drainPollScheduled;
         private boolean unavailablePollScheduled;
-        private CompletableFuture<Boolean> healthCheck;
+        private CompletableFuture<RuntimeLease> healthCheck;
         private Throwable provisioningFailure;
+        private long durableOperationGeneration = -1;
+        private long durableOperationStartedNanos;
+        private int durableRetryCount;
+        private ScheduledFuture<?> durableDeadlineTask;
+        private volatile boolean abandoned;
 
         RuntimeBinding(RuntimeBindingRecord record) {
             bindingId = record.getBindingId();
             request = record.getRequest();
-            if (record.getState() == RuntimeBindingRecord.State.READY) {
+            if (!provisioner.supportsDurableRecovery()
+                    && record.getState()
+                            == RuntimeBindingRecord.State.READY) {
                 ready.complete(record.getLease());
-            } else if (record.getState()
+            } else if (!provisioner.supportsDurableRecovery()
+                    && record.getState()
                     == RuntimeBindingRecord.State.DRAINING) {
                 ready.complete(record.getLease());
             }
@@ -715,11 +727,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
 
         private void driveProvisioning() {
+            if (abandoned) {
+                return;
+            }
             RuntimeBindingRecord current = record();
             if (current == null) {
                 failProvisioning(unavailable(
                         "runtime_broker_provisioning_failed",
                         "Runtime binding disappeared."));
+                return;
+            }
+            if (provisioner.supportsDurableRecovery()) {
+                driveDurableRecovery(current);
                 return;
             }
             if (current.getState() == RuntimeBindingRecord.State.READY) {
@@ -825,7 +844,574 @@ public final class RuntimeBrokerService implements AutoCloseable {
             });
         }
 
+        private void driveDurableRecovery(RuntimeBindingRecord current) {
+            if (current.getState()
+                    == RuntimeBindingRecord.State.DRAINING) {
+                scheduleUnavailablePoll();
+                beginDrain(false);
+                return;
+            }
+            if (current.getState() == RuntimeBindingRecord.State.LOST) {
+                recoverLostBinding(unavailable(
+                        "runtime_broker_runtime_lost",
+                        "Managed Runtime no longer exists."));
+                return;
+            }
+            if (current.getState()
+                            == RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                    || current.getState()
+                            == RuntimeBindingRecord.State.FAILED
+                    || current.getState()
+                            == RuntimeBindingRecord.State.RELEASED) {
+                failDurableRecovery(unavailable(
+                        "runtime_broker_recovery_blocked",
+                        "Managed Runtime recovery is blocked."), null,
+                        null);
+                return;
+            }
+            if (current.getState()
+                            != RuntimeBindingRecord.State.PROVISIONING
+                    && current.getState()
+                            != RuntimeBindingRecord.State.READY) {
+                failDurableRecovery(unavailable(
+                        "runtime_broker_binding_unavailable",
+                        "Managed Runtime binding is unavailable."), null,
+                        null);
+                return;
+            }
+            if (current.getProvisionSeed() == null) {
+                RuntimeBrokerException missing = unavailable(
+                        "runtime_broker_seed_missing",
+                        "Managed Runtime credentials are unavailable.");
+                updateRecord(record -> record.getProvisionSeed() == null
+                        ? record.withState(
+                                RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                                record.getLease(), Instant.now())
+                        : record);
+                failDurableRecovery(missing, null, null);
+                return;
+            }
+            RuntimeBindingRecord claimed = bindingRepository.claimOperation(
+                    bindingId, brokerOwnerId, operationLeaseDuration);
+            if (claimed == null
+                    || !brokerOwnerId.equals(claimed.getOperationOwner())) {
+                scheduleProvisioningPoll();
+                return;
+            }
+            if (!provisioning.compareAndSet(false, true)) {
+                return;
+            }
+            beginDurableOperation(claimed.getOperationGeneration());
+            startOperationRenewal(claimed.getOperationGeneration());
+            if (claimed.getState()
+                    == RuntimeBindingRecord.State.PROVISIONING) {
+                ensureDurableResource(claimed.getOperationGeneration());
+            } else {
+                reconcileDurableResource(claimed.getOperationGeneration());
+            }
+        }
+
+        private void ensureDurableResource(long operationGeneration) {
+            RuntimeBindingRecord current = ownedRecord(operationGeneration);
+            if (current == null) {
+                loseDurableClaim();
+                return;
+            }
+            CompletionStage<RuntimeResourceHandle> ensured;
+            try {
+                ensured = provisioner.ensureResource(request,
+                        current.getProvisionSeed(),
+                        current.getResourceHandle());
+            } catch (RuntimeException exception) {
+                retryOrFailDurable(exception, operationGeneration, true);
+                return;
+            }
+            if (ensured == null) {
+                retryDurable(operationGeneration, true);
+                return;
+            }
+            ensured.whenComplete((handle, error) -> {
+                if (error != null) {
+                    retryOrFailDurable(error, operationGeneration, true);
+                    return;
+                }
+                if (handle == null) {
+                    retryDurable(operationGeneration, true);
+                    return;
+                }
+                if (!request.getProvisionerKind().equals(
+                        handle.getKind())) {
+                    failDurableRecovery(conflict(
+                            "runtime_broker_resource_conflict",
+                            "Managed Runtime resource identity conflicts."),
+                            operationGeneration,
+                            RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                    return;
+                }
+                RuntimeBindingRecord updated = updateRecord(record -> {
+                    if (!owns(record, operationGeneration)
+                            || record.getState()
+                                    != RuntimeBindingRecord.State.PROVISIONING) {
+                        return record;
+                    }
+                    return record.withResourceHandle(handle, Instant.now());
+                });
+                if (!owns(updated, operationGeneration)) {
+                    loseDurableClaim();
+                    return;
+                }
+                reconcileDurableResource(operationGeneration);
+            });
+        }
+
+        private void reconcileDurableResource(long operationGeneration) {
+            RuntimeBindingRecord current = ownedRecord(operationGeneration);
+            if (current == null) {
+                loseDurableClaim();
+                return;
+            }
+            if (current.getResourceHandle() == null) {
+                if (current.getState()
+                        == RuntimeBindingRecord.State.PROVISIONING) {
+                    ensureDurableResource(operationGeneration);
+                } else {
+                    failDurableRecovery(unavailable(
+                            "runtime_broker_resource_identity_missing",
+                            "Managed Runtime resource identity is missing."),
+                            operationGeneration,
+                            RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                }
+                return;
+            }
+            CompletionStage<RuntimeObservation> reconciled;
+            try {
+                reconciled = provisioner.reconcile(request,
+                        current.getProvisionSeed(),
+                        current.getResourceHandle(), current.getLease());
+            } catch (RuntimeException exception) {
+                retryOrFailDurable(exception, operationGeneration, false);
+                return;
+            }
+            if (reconciled == null) {
+                retryDurable(operationGeneration, false);
+                return;
+            }
+            reconciled.whenComplete((observation, error) -> {
+                if (error != null) {
+                    retryOrFailDurable(error, operationGeneration, false);
+                    return;
+                }
+                if (observation == null) {
+                    retryDurable(operationGeneration, false);
+                    return;
+                }
+                acceptObservation(operationGeneration, observation);
+            });
+        }
+
+        private void acceptObservation(long operationGeneration,
+                RuntimeObservation observation) {
+            RuntimeBindingRecord current = ownedRecord(operationGeneration);
+            if (current == null) {
+                loseDurableClaim();
+                return;
+            }
+            RuntimeResourceHandle observedHandle = observation.getHandle();
+            if (observedHandle != null
+                    && !request.getProvisionerKind().equals(
+                            observedHandle.getKind())) {
+                failDurableRecovery(conflict(
+                        "runtime_broker_resource_conflict",
+                        "Managed Runtime resource identity conflicts."),
+                        operationGeneration,
+                        RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                return;
+            }
+            boolean refreshHandle = observation.getOutcome()
+                    == RuntimeObservation.Outcome.READY
+                    || observation.getOutcome()
+                            == RuntimeObservation.Outcome.STARTING;
+            if (refreshHandle && observedHandle != null
+                    && !observedHandle.equals(current.getResourceHandle())) {
+                current = updateRecord(record -> owns(record,
+                        operationGeneration) ? record.withResourceHandle(
+                                observedHandle, Instant.now()) : record);
+                if (!owns(current, operationGeneration)) {
+                    loseDurableClaim();
+                    return;
+                }
+            }
+            switch (observation.getOutcome()) {
+                case STARTING:
+                case UNKNOWN:
+                    retryDurable(operationGeneration, false);
+                    return;
+                case NOT_FOUND:
+                    if (current.getState()
+                            == RuntimeBindingRecord.State.PROVISIONING) {
+                        retryDurable(operationGeneration, true);
+                    } else {
+                        failDurableRecovery(unavailable(
+                                "runtime_broker_runtime_lost",
+                                "Managed Runtime no longer exists."),
+                                operationGeneration,
+                                RuntimeBindingRecord.State.LOST);
+                    }
+                    return;
+                case CONFLICT:
+                    failDurableRecovery(conflict(
+                            "runtime_broker_resource_conflict",
+                            "Managed Runtime resource identity conflicts."),
+                            operationGeneration,
+                            RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                    return;
+                case READY:
+                    attestDurableResource(operationGeneration, observation);
+                    return;
+                default:
+                    throw new IllegalStateException(
+                            "Unsupported Runtime observation");
+            }
+        }
+
+        private void attestDurableResource(long operationGeneration,
+                RuntimeObservation observation) {
+            RuntimeBindingRecord current = ownedRecord(operationGeneration);
+            if (current == null) {
+                loseDurableClaim();
+                return;
+            }
+            RuntimeProvisionSeed seed = current.getProvisionSeed();
+            if (!seed.getProvisionalRuntimeId().equals(
+                    observation.getRuntimeInstanceId())
+                    || !seed.getLeaseId().equals(observation.getLeaseId())
+                    || seed.getEpoch() != observation.getEpoch()) {
+                failDurableRecovery(conflict(
+                        "runtime_broker_runtime_identity_conflict",
+                        "Managed Runtime identity conflicts."),
+                        operationGeneration,
+                        RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                return;
+            }
+            RuntimeLease lease = new RuntimeLease(
+                    observation.getRuntimeInstanceId(),
+                    observation.getEndpoint(), seed.getToken(),
+                    observation.getLeaseId(), observation.getEpoch());
+            CompletionStage<RuntimeAttestation> attested;
+            try {
+                attested = transport.attest(lease, request, seed);
+            } catch (RuntimeException exception) {
+                retryOrFailDurable(exception, operationGeneration, false);
+                return;
+            }
+            if (attested == null) {
+                retryDurable(operationGeneration, false);
+                return;
+            }
+            attested.whenComplete((attestation, error) -> {
+                synchronized (RuntimeBinding.this) {
+                    if (abandoned || durableOperationGeneration
+                            != operationGeneration) {
+                        return;
+                    }
+                    if (error != null) {
+                        retryOrFailDurable(error, operationGeneration,
+                                false);
+                        return;
+                    }
+                    if (!validAttestation(attestation, lease, seed)) {
+                        failDurableRecovery(conflict(
+                                "runtime_broker_attestation_conflict",
+                                "Managed Runtime attestation conflicts."),
+                                operationGeneration,
+                                RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                        return;
+                    }
+                    Instant now = Instant.now();
+                    RuntimeBindingRecord updated = updateOwnedRecord(
+                            operationGeneration, record -> {
+                                if (record.getState()
+                                                != RuntimeBindingRecord.State.PROVISIONING
+                                        && record.getState()
+                                                != RuntimeBindingRecord.State.READY) {
+                                    return record;
+                                }
+                                return record.withAttestation(lease,
+                                        observation.getHandle(), now, now)
+                                        .withOperation(null, null,
+                                                record.getOperationGeneration());
+                            });
+                    if (updated == null) {
+                        loseDurableClaim();
+                        return;
+                    }
+                    stopOperationRenewal();
+                    provisioning.set(false);
+                    resetDurableOperation();
+                    if (updated.getState()
+                            != RuntimeBindingRecord.State.READY
+                            || updated.getAttestationGeneration() == 0) {
+                        scheduleProvisioningPoll();
+                        return;
+                    }
+                    lastHealthNanos = System.nanoTime();
+                    ready.complete(updated.getLease());
+                    long activeSessions = activeSessionCount(updated);
+                    if (activeSessions == 0
+                            && !updated.isDrainRequested()) {
+                        scheduleIdle();
+                    }
+                    if (updated.isDrainRequested() && activeSessions == 0) {
+                        beginDrain(false);
+                    } else if (updated.isDrainRequested()) {
+                        scheduleDrainPoll();
+                    }
+                }
+            });
+        }
+
+        private boolean validAttestation(RuntimeAttestation attestation,
+                RuntimeLease lease, RuntimeProvisionSeed seed) {
+            return attestation != null
+                    && lease.getRuntimeInstanceId().equals(
+                            attestation.getRuntimeInstanceId())
+                    && seed.getGatewayIncarnation().equals(
+                            attestation.getRuntimeIncarnation())
+                    && lease.getLeaseId().equals(attestation.getLeaseId())
+                    && lease.getEpoch() == attestation.getEpoch()
+                    && request.getScope().equals(attestation.getScope())
+                    && seed.getProvisionRequestId().equals(
+                            attestation.getProvisionRequestId());
+        }
+
+        private RuntimeBindingRecord ownedRecord(long operationGeneration) {
+            RuntimeBindingRecord current = record();
+            return owns(current, operationGeneration) ? current : null;
+        }
+
+        private boolean owns(RuntimeBindingRecord record,
+                long operationGeneration) {
+            return record != null
+                    && brokerOwnerId.equals(record.getOperationOwner())
+                    && record.getOperationGeneration()
+                            == operationGeneration;
+        }
+
+        private void retryDurable(long operationGeneration,
+                boolean ensure) {
+            if (ownedRecord(operationGeneration) == null) {
+                loseDurableClaim();
+                return;
+            }
+            long delay = nextDurableRetryDelay(operationGeneration, ensure);
+            if (delay < 0) {
+                timeoutDurableRecovery(operationGeneration);
+                return;
+            }
+            try {
+                scheduler.schedule(() -> {
+                    if (ensure) {
+                        ensureDurableResource(operationGeneration);
+                    } else {
+                        reconcileDurableResource(operationGeneration);
+                    }
+                }, delay, TimeUnit.MILLISECONDS);
+            } catch (RuntimeException error) {
+                if (!closed.get()) {
+                    failDurableRecovery(error, operationGeneration, null);
+                }
+            }
+        }
+
+        private synchronized void beginDurableOperation(
+                long operationGeneration) {
+            cancelDurableDeadline();
+            durableOperationGeneration = operationGeneration;
+            durableOperationStartedNanos = System.nanoTime();
+            durableRetryCount = 0;
+            durableDeadlineTask = scheduler.schedule(() ->
+                    timeoutDurableRecovery(operationGeneration),
+                    operationDeadlineNanos(), TimeUnit.NANOSECONDS);
+        }
+
+        private synchronized long nextDurableRetryDelay(
+                long operationGeneration, boolean ensure) {
+            if (durableOperationGeneration != operationGeneration) {
+                beginDurableOperation(operationGeneration);
+            }
+            if (System.nanoTime() - durableOperationStartedNanos
+                    >= operationDeadlineNanos()) {
+                return -1;
+            }
+            long initial = ensure ? 100 : 50;
+            int shift = Math.min(durableRetryCount++, 5);
+            return Math.min(2_000, initial << shift);
+        }
+
+        private void timeoutDurableRecovery(long operationGeneration) {
+            synchronized (this) {
+                if (abandoned || durableOperationGeneration
+                        != operationGeneration) {
+                    return;
+                }
+                abandoned = true;
+            }
+            RuntimeBrokerException timeout = unavailable(
+                    "runtime_broker_reconcile_timeout",
+                    "Managed Runtime reconciliation timed out.");
+            stopOperationRenewal();
+            provisioning.set(false);
+            resetDurableOperation();
+            try {
+                updateRecord(record -> owns(record, operationGeneration)
+                        ? record.withOperation(null, null,
+                                record.getOperationGeneration()) : record);
+            } catch (RuntimeException persistenceFailure) {
+                timeout.addSuppressed(persistenceFailure);
+            }
+            synchronized (this) {
+                provisioningFailure = timeout;
+            }
+            bindings.remove(bindingId, this);
+            ready.completeExceptionally(timeout);
+        }
+
+        private void retryOrFailDurable(Throwable error,
+                long operationGeneration, boolean ensure) {
+            Throwable cause = unwrap(error);
+            if (cause instanceof RuntimeBrokerException
+                    && !((RuntimeBrokerException) cause).isRetryable()) {
+                failDurableRecovery(cause, operationGeneration,
+                        RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                return;
+            }
+            retryDurable(operationGeneration, ensure);
+        }
+
+        private void loseDurableClaim() {
+            stopOperationRenewal();
+            provisioning.set(false);
+            resetDurableOperation();
+            if (!abandoned) {
+                scheduleProvisioningPoll();
+            }
+        }
+
+        private synchronized void resetDurableOperation() {
+            cancelDurableDeadline();
+            durableOperationGeneration = -1;
+            durableOperationStartedNanos = 0;
+            durableRetryCount = 0;
+        }
+
+        private void cancelDurableDeadline() {
+            if (durableDeadlineTask != null) {
+                durableDeadlineTask.cancel(false);
+                durableDeadlineTask = null;
+            }
+        }
+
+        private long operationDeadlineNanos() {
+            long leaseNanos = operationLeaseDuration.toNanos();
+            return leaseNanos > Long.MAX_VALUE / 4
+                    ? Long.MAX_VALUE : leaseNanos * 4;
+        }
+
+        private void failDurableRecovery(Throwable error,
+                Long operationGeneration,
+                RuntimeBindingRecord.State failureState) {
+            stopOperationRenewal();
+            provisioning.set(false);
+            resetDurableOperation();
+            if (failureState != null && operationGeneration != null) {
+                RuntimeBindingRecord updated = updateRecord(record ->
+                        owns(record, operationGeneration)
+                                ? record.withState(
+                                        failureState,
+                                        record.getLease(), Instant.now())
+                                        .withOperation(null, null,
+                                                record.getOperationGeneration())
+                                : record);
+                if (updated.getState()
+                        != failureState) {
+                    scheduleProvisioningPoll();
+                    return;
+                }
+                if (failureState == RuntimeBindingRecord.State.LOST) {
+                    recoverLostBinding(error);
+                    return;
+                }
+            }
+            synchronized (this) {
+                provisioningFailure = error;
+            }
+            ready.completeExceptionally(error);
+        }
+
+        private void recoverLostBinding(Throwable error) {
+            RuntimeBindingRecord lost = record();
+            if (lost == null
+                    || lost.getState() != RuntimeBindingRecord.State.LOST
+                    || activeSessionCount(lost) != 0
+                    || executionRepository.hasActiveByBinding(
+                            lost.getBindingId(), lost.getGeneration())) {
+                synchronized (this) {
+                    provisioningFailure = error;
+                }
+                ready.completeExceptionally(error);
+                return;
+            }
+            if (!recoveringLoss.compareAndSet(false, true)) {
+                return;
+            }
+            beginDrain(false);
+            CompletableFuture<Void> drained;
+            synchronized (this) {
+                drained = drainFuture;
+            }
+            if (drained == null) {
+                recoveringLoss.set(false);
+                synchronized (this) {
+                    provisioningFailure = error;
+                }
+                ready.completeExceptionally(error);
+                return;
+            }
+            drained.whenComplete((ignored, drainError) -> {
+                if (drainError != null || closed.get()) {
+                    Throwable failure = drainError == null
+                            ? closed() : unwrap(drainError);
+                    synchronized (this) {
+                        provisioningFailure = failure;
+                    }
+                    ready.completeExceptionally(failure);
+                    return;
+                }
+                RuntimeBindingRecord replacementRecord =
+                        bindingRepository.findOrCreate(request);
+                if (bindingId.equals(replacementRecord.getBindingId())) {
+                    ready.completeExceptionally(error);
+                    return;
+                }
+                RuntimeBinding replacement = bindings.computeIfAbsent(
+                        replacementRecord.getBindingId(), ignoredId ->
+                                new RuntimeBinding(replacementRecord));
+                replacement.start();
+                replacement.ready.whenComplete((lease, replacementError) -> {
+                    if (replacementError == null) {
+                        ready.complete(lease);
+                    } else {
+                        ready.completeExceptionally(
+                                unwrap(replacementError));
+                    }
+                });
+            });
+        }
+
         private void scheduleProvisioningPoll() {
+            if (abandoned || closed.get()) {
+                return;
+            }
             try {
                 scheduler.schedule(this::driveProvisioning, 25,
                         TimeUnit.MILLISECONDS);
@@ -911,7 +1497,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
 
         CompletionStage<RuntimeLease> ensureHealthy(RuntimeLease lease) {
-            CompletableFuture<Boolean> check;
+            CompletableFuture<RuntimeLease> check;
             synchronized (this) {
                 RuntimeBindingRecord current = record();
                 if (current == null
@@ -926,44 +1512,57 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 if (lastHealthNanos != 0
                         && System.nanoTime() - lastHealthNanos
                                 < healthFreshness.toNanos()) {
-                    return CompletableFuture.completedFuture(lease);
+                    return CompletableFuture.completedFuture(
+                            current.getLease());
                 }
                 if (healthCheck != null) {
-                    return checkedLease(lease, healthCheck);
+                    return checkedLease(healthCheck);
                 }
                 healthCheck = new CompletableFuture<>();
                 check = healthCheck;
+            }
+            if (provisioner.supportsDurableRecovery()) {
+                refreshDurableLease().whenComplete((refreshed, error) -> {
+                    if (error == null) {
+                        check.complete(refreshed);
+                    } else {
+                        check.completeExceptionally(unwrap(error));
+                    }
+                });
+                return checkedLease(check);
             }
             CompletionStage<Boolean> health;
             try {
                 health = provisioner.health(request, lease);
             } catch (RuntimeException exception) {
                 check.completeExceptionally(exception);
-                return checkedLease(lease, check);
+                return checkedLease(check);
             }
             if (health == null) {
-                check.complete(false);
-                return checkedLease(lease, check);
+                check.completeExceptionally(healthFailure(null));
+                return checkedLease(check);
             }
             health.whenComplete((healthy, error) -> {
-                if (error == null) {
-                    check.complete(healthy);
+                if (error == null && Boolean.TRUE.equals(healthy)) {
+                    check.complete(lease);
+                } else if (error == null) {
+                    check.completeExceptionally(healthFailure(null));
                 } else {
                     check.completeExceptionally(unwrap(error));
                 }
             });
-            return checkedLease(lease, check);
+            return checkedLease(check);
         }
 
-        private CompletionStage<RuntimeLease> checkedLease(RuntimeLease lease,
-                CompletableFuture<Boolean> check) {
-            return check.handle((healthy, error) -> {
+        private CompletionStage<RuntimeLease> checkedLease(
+                CompletableFuture<RuntimeLease> check) {
+            return check.handle((checked, error) -> {
                 boolean accepted;
                 synchronized (this) {
                     if (healthCheck == check) {
                         healthCheck = null;
                     }
-                    accepted = error == null && Boolean.TRUE.equals(healthy)
+                    accepted = error == null && checked != null
                             && record() != null
                             && record().getState()
                                     == RuntimeBindingRecord.State.READY;
@@ -974,11 +1573,247 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     }
                 }
                 if (accepted) {
-                    return lease;
+                    return checked;
                 }
                 throw new CompletionException(healthFailure(error == null
                         ? null : unwrap(error)));
             });
+        }
+
+        private CompletionStage<RuntimeLease> refreshDurableLease() {
+            RuntimeBindingRecord claimed = bindingRepository.claimOperation(
+                    bindingId, brokerOwnerId, operationLeaseDuration);
+            if (claimed == null
+                    || !brokerOwnerId.equals(claimed.getOperationOwner())
+                    || claimed.getState()
+                            != RuntimeBindingRecord.State.READY
+                    || claimed.getProvisionSeed() == null
+                    || claimed.getResourceHandle() == null) {
+                if (claimed != null
+                        && brokerOwnerId.equals(
+                                claimed.getOperationOwner())) {
+                    clearDurableOperation(
+                            claimed.getOperationGeneration());
+                }
+                return failed(reconcileUnavailable());
+            }
+            long operationGeneration = claimed.getOperationGeneration();
+            startOperationRenewal(operationGeneration);
+            CompletionStage<RuntimeObservation> reconciled;
+            try {
+                reconciled = provisioner.reconcile(request,
+                        claimed.getProvisionSeed(),
+                        claimed.getResourceHandle(), claimed.getLease());
+            } catch (RuntimeException exception) {
+                return failDurableRefresh(exception, operationGeneration,
+                        null);
+            }
+            if (reconciled == null) {
+                return failDurableRefresh(reconcileUnavailable(),
+                        operationGeneration, null);
+            }
+            CompletableFuture<RuntimeLease> result = new CompletableFuture<>();
+            ScheduledFuture<?> deadline = scheduler.schedule(() ->
+                    completeDurableRefreshFailure(result,
+                            reconcileTimeout(), operationGeneration, null),
+                    operationDeadlineNanos(), TimeUnit.NANOSECONDS);
+            result.whenComplete((ignored, error) -> deadline.cancel(false));
+            reconciled.whenComplete((observation, error) -> {
+                if (error != null) {
+                    completeDurableRefreshFailure(result, unwrap(error),
+                            operationGeneration, null);
+                    return;
+                }
+                acceptRefreshObservation(claimed, observation,
+                        operationGeneration, result);
+            });
+            return result;
+        }
+
+        private void acceptRefreshObservation(RuntimeBindingRecord claimed,
+                RuntimeObservation observation, long operationGeneration,
+                CompletableFuture<RuntimeLease> result) {
+            if (result.isDone()) {
+                return;
+            }
+            if (observation == null) {
+                completeDurableRefreshFailure(result,
+                        reconcileUnavailable(), operationGeneration, null);
+                return;
+            }
+            RuntimeResourceHandle handle = observation.getHandle();
+            if (handle != null && !request.getProvisionerKind().equals(
+                    handle.getKind())) {
+                completeDurableRefreshFailure(result, conflict(
+                        "runtime_broker_resource_conflict",
+                        "Managed Runtime resource identity conflicts."),
+                        operationGeneration,
+                        RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                return;
+            }
+            switch (observation.getOutcome()) {
+                case NOT_FOUND:
+                    completeDurableRefreshFailure(result, unavailable(
+                            "runtime_broker_runtime_lost",
+                            "Managed Runtime no longer exists."),
+                            operationGeneration,
+                            RuntimeBindingRecord.State.LOST);
+                    return;
+                case CONFLICT:
+                    completeDurableRefreshFailure(result, conflict(
+                            "runtime_broker_resource_conflict",
+                            "Managed Runtime resource identity conflicts."),
+                            operationGeneration,
+                            RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                    return;
+                case STARTING:
+                case UNKNOWN:
+                    completeDurableRefreshFailure(result,
+                            reconcileUnavailable(), operationGeneration,
+                            null);
+                    return;
+                case READY:
+                    attestRefreshedLease(claimed.getProvisionSeed(),
+                            observation, operationGeneration, result);
+                    return;
+                default:
+                    completeDurableRefreshFailure(result,
+                            reconcileUnavailable(), operationGeneration,
+                            null);
+            }
+        }
+
+        private void attestRefreshedLease(RuntimeProvisionSeed seed,
+                RuntimeObservation observation, long operationGeneration,
+                CompletableFuture<RuntimeLease> result) {
+            if (result.isDone()) {
+                return;
+            }
+            if (!seed.getProvisionalRuntimeId().equals(
+                    observation.getRuntimeInstanceId())
+                    || !seed.getLeaseId().equals(observation.getLeaseId())
+                    || seed.getEpoch() != observation.getEpoch()) {
+                completeDurableRefreshFailure(result, conflict(
+                        "runtime_broker_runtime_identity_conflict",
+                        "Managed Runtime identity conflicts."),
+                        operationGeneration,
+                        RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                return;
+            }
+            RuntimeLease refreshed = new RuntimeLease(
+                    observation.getRuntimeInstanceId(),
+                    observation.getEndpoint(), seed.getToken(),
+                    observation.getLeaseId(), observation.getEpoch());
+            CompletionStage<RuntimeAttestation> attested;
+            try {
+                attested = transport.attest(refreshed, request, seed);
+            } catch (RuntimeException exception) {
+                completeDurableRefreshFailure(result, exception,
+                        operationGeneration, null);
+                return;
+            }
+            if (attested == null) {
+                completeDurableRefreshFailure(result,
+                        reconcileUnavailable(), operationGeneration, null);
+                return;
+            }
+            attested.whenComplete((attestation, error) -> {
+                synchronized (result) {
+                    if (result.isDone()) {
+                        return;
+                    }
+                    if (error != null) {
+                        completeDurableRefreshFailure(result, unwrap(error),
+                                operationGeneration, null);
+                        return;
+                    }
+                    if (!validAttestation(attestation, refreshed, seed)) {
+                        completeDurableRefreshFailure(result, conflict(
+                                "runtime_broker_attestation_conflict",
+                                "Managed Runtime attestation conflicts."),
+                                operationGeneration,
+                                RuntimeBindingRecord.State.RECOVERY_BLOCKED);
+                        return;
+                    }
+                    Instant now = Instant.now();
+                    RuntimeBindingRecord updated = updateOwnedRecord(
+                            operationGeneration, record ->
+                                    record.withAttestation(refreshed,
+                                            observation.getHandle(), now, now)
+                                            .withOperation(null, null,
+                                                    record.getOperationGeneration()));
+                    stopOperationRenewal();
+                    if (updated == null
+                            || updated.getState()
+                                    != RuntimeBindingRecord.State.READY
+                            || updated.getLease() == null
+                            || !refreshed.getEndpoint().equals(
+                                    updated.getLease().getEndpoint())) {
+                        completeDurableRefreshFailure(result,
+                                reconcileUnavailable(), operationGeneration,
+                                null);
+                        return;
+                    }
+                    result.complete(updated.getLease());
+                }
+            });
+        }
+
+        private CompletionStage<RuntimeLease> failDurableRefresh(
+                Throwable error, long operationGeneration,
+                RuntimeBindingRecord.State failureState) {
+            CompletableFuture<RuntimeLease> result = new CompletableFuture<>();
+            completeDurableRefreshFailure(result, error,
+                    operationGeneration, failureState);
+            return result;
+        }
+
+        private void completeDurableRefreshFailure(
+                CompletableFuture<RuntimeLease> result, Throwable error,
+                long operationGeneration,
+                RuntimeBindingRecord.State failureState) {
+            synchronized (result) {
+                if (result.isDone()) {
+                    return;
+                }
+                Throwable cause = unwrap(error);
+                RuntimeBindingRecord.State terminalState = failureState;
+                if (terminalState == null
+                        && cause instanceof RuntimeBrokerException
+                        && !((RuntimeBrokerException) cause).isRetryable()) {
+                    terminalState =
+                            RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+                }
+                try {
+                    if (terminalState == null) {
+                        clearDurableOperation(operationGeneration);
+                    } else {
+                        failDurableRecovery(cause, operationGeneration,
+                                terminalState);
+                    }
+                } catch (RuntimeException persistenceFailure) {
+                    cause.addSuppressed(persistenceFailure);
+                }
+                result.completeExceptionally(cause);
+            }
+        }
+
+        private void clearDurableOperation(long operationGeneration) {
+            stopOperationRenewal();
+            updateRecord(record -> owns(record, operationGeneration)
+                    ? record.withOperation(null, null,
+                            record.getOperationGeneration())
+                    : record);
+        }
+
+        private RuntimeBrokerException reconcileUnavailable() {
+            return unavailable("runtime_broker_reconcile_unavailable",
+                    "Managed Runtime reconciliation is unavailable.");
+        }
+
+        private RuntimeBrokerException reconcileTimeout() {
+            return unavailable("runtime_broker_reconcile_timeout",
+                    "Managed Runtime reconciliation timed out.");
         }
 
         private RuntimeBrokerException healthFailure(Throwable cause) {
@@ -988,7 +1823,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (cause != null) {
                 failure.initCause(cause);
             }
-            beginDrain(true);
+            if (!provisioner.supportsDurableRecovery()) {
+                beginDrain(true);
+            }
             return failure;
         }
 
@@ -1065,7 +1902,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             : record.withDrainRequested(true, Instant.now()));
             if (requested.getState() == RuntimeBindingRecord.State.RELEASED
                     || requested.getState()
-                            == RuntimeBindingRecord.State.FAILED) {
+                            == RuntimeBindingRecord.State.FAILED
+                    || requested.getState()
+                            == RuntimeBindingRecord.State.RECOVERY_BLOCKED) {
                 completeTerminalDrain(requested);
                 return;
             }
@@ -1099,7 +1938,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 && ((current.getState()
                                         != RuntimeBindingRecord.State.READY
                                         && current.getState()
-                                                != RuntimeBindingRecord.State.DRAINING)
+                                                != RuntimeBindingRecord.State.DRAINING
+                                        && current.getState()
+                                                != RuntimeBindingRecord.State.LOST)
                                         || activeSessionCount(current) != 0))) {
                     this.draining.set(false);
                     return;
@@ -1111,7 +1952,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
                             || (record.getState()
                                     != RuntimeBindingRecord.State.READY
                                     && record.getState()
-                                            != RuntimeBindingRecord.State.DRAINING)) {
+                                            != RuntimeBindingRecord.State.DRAINING
+                                    && record.getState()
+                                            != RuntimeBindingRecord.State.LOST)) {
                         return record;
                     }
                     return record.getState()
@@ -1137,49 +1980,103 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 draining = drainFuture;
             }
             startOperationRenewal(claimed.getOperationGeneration());
-            ready.thenCompose(lease -> provisioner.drain(request, lease)
-                    .thenCompose(ignored -> provisioner.release(request,
-                            lease))).whenComplete((ignored, error) -> {
-                                RuntimeBindingRecord terminal = updateRecord(
-                                        record -> {
-                                            if (record.getState()
-                                                    != RuntimeBindingRecord.State.DRAINING
-                                                    || !brokerOwnerId.equals(
-                                                            record.getOperationOwner())
-                                                    || record.getOperationGeneration()
-                                                            != claimed.getOperationGeneration()) {
-                                                return record;
-                                            }
-                                            return record.withState(
-                                                    error == null
-                                                            ? RuntimeBindingRecord.State.RELEASED
-                                                            : RuntimeBindingRecord.State.FAILED,
-                                                    record.getLease(),
-                                                    Instant.now()).withOperation(
-                                                            null, null,
-                                                            record.getOperationGeneration());
-                                        });
-                                stopOperationRenewal();
-                                this.draining.set(false);
-                                if (terminal.getState()
-                                                == RuntimeBindingRecord.State.RELEASED
-                                        || terminal.getState()
-                                                == RuntimeBindingRecord.State.FAILED) {
-                                    bindings.remove(bindingId, this);
-                                    completeUnavailable();
-                                }
-                                if (error == null && terminal.getState()
-                                        == RuntimeBindingRecord.State.RELEASED) {
-                                    draining.complete(null);
-                                } else if (error != null
-                                        && terminal.getState()
-                                                == RuntimeBindingRecord.State.FAILED) {
-                                    draining.completeExceptionally(
-                                            unwrap(error));
-                                } else {
-                                    scheduleDrainPoll();
-                                }
+            CompletionStage<Void> releaseOperation;
+            if (provisioner.supportsDurableRecovery()) {
+                if (updated.getProvisionSeed() == null
+                        || updated.getResourceHandle() == null) {
+                    releaseOperation = failed(unavailable(
+                            "runtime_broker_resource_identity_missing",
+                            "Managed Runtime resource identity is missing."));
+                } else {
+                    RuntimeResourceContext resource =
+                            new RuntimeResourceContext(request,
+                                    updated.getProvisionSeed(),
+                                    updated.getResourceHandle(),
+                                    updated.getLease());
+                    try {
+                        CompletionStage<Void> drained = provisioner.drain(
+                                resource);
+                        if (drained == null) {
+                            releaseOperation = failed(unavailable(
+                                    "runtime_broker_release_failed",
+                                    "Managed Runtime drain returned no operation."));
+                        } else {
+                            releaseOperation = drained.thenCompose(ignored -> {
+                                CompletionStage<Void> released = provisioner
+                                        .release(resource);
+                                return released == null ? failed(unavailable(
+                                        "runtime_broker_release_failed",
+                                        "Managed Runtime release returned no operation."))
+                                        : released;
                             });
+                        }
+                    } catch (RuntimeException exception) {
+                        releaseOperation = failed(exception);
+                    }
+                }
+            } else {
+                releaseOperation = ready.thenCompose(lease ->
+                        provisioner.drain(request, lease)
+                                .thenCompose(ignored -> provisioner.release(
+                                        request, lease)));
+            }
+            releaseOperation.whenComplete((ignored, error) -> {
+                Throwable failure = error == null ? null : unwrap(error);
+                boolean retryableFailure = failure
+                        instanceof RuntimeBrokerException
+                        && ((RuntimeBrokerException) failure).isRetryable();
+                RuntimeBindingRecord terminal = updateRecord(record -> {
+                    if (record.getState()
+                                    != RuntimeBindingRecord.State.DRAINING
+                            || !brokerOwnerId.equals(
+                                    record.getOperationOwner())
+                            || record.getOperationGeneration()
+                                    != claimed.getOperationGeneration()) {
+                        return record;
+                    }
+                    RuntimeBindingRecord.State nextState;
+                    if (failure == null) {
+                        nextState = RuntimeBindingRecord.State.RELEASED;
+                    } else if (provisioner.supportsDurableRecovery()) {
+                        nextState = retryableFailure
+                                ? RuntimeBindingRecord.State.DRAINING
+                                : RuntimeBindingRecord.State.RECOVERY_BLOCKED;
+                    } else {
+                        nextState = RuntimeBindingRecord.State.FAILED;
+                    }
+                    return record.withState(nextState,
+                            record.getLease(), Instant.now()).withOperation(
+                                    null, null,
+                                    record.getOperationGeneration());
+                });
+                stopOperationRenewal();
+                this.draining.set(false);
+                if (terminal.getState()
+                                == RuntimeBindingRecord.State.RELEASED
+                        || terminal.getState()
+                                == RuntimeBindingRecord.State.FAILED) {
+                    bindings.remove(bindingId, this);
+                    completeUnavailable();
+                }
+                if (failure == null && terminal.getState()
+                        == RuntimeBindingRecord.State.RELEASED) {
+                    draining.complete(null);
+                } else if (failure != null
+                        && terminal.getState()
+                                == RuntimeBindingRecord.State.FAILED) {
+                    draining.completeExceptionally(failure);
+                } else if (failure != null
+                        && terminal.getState()
+                                == RuntimeBindingRecord.State.RECOVERY_BLOCKED) {
+                    synchronized (this) {
+                        provisioningFailure = failure;
+                    }
+                    ready.completeExceptionally(failure);
+                    draining.completeExceptionally(failure);
+                } else {
+                    scheduleDrainPoll();
+                }
+            });
         }
 
         private synchronized void completeTerminalDrain(
@@ -1313,6 +2210,30 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 }
             }
         }
+
+        private RuntimeBindingRecord updateOwnedRecord(
+                long operationGeneration,
+                UnaryOperator<RuntimeBindingRecord> mutation) {
+            while (true) {
+                RuntimeBindingRecord current = record();
+                if (current == null) {
+                    throw unavailable("runtime_broker_binding_lost",
+                            "Runtime binding disappeared.");
+                }
+                if (!owns(current, operationGeneration)) {
+                    return null;
+                }
+                RuntimeBindingRecord replacement = mutation.apply(current);
+                if (replacement == current) {
+                    return current;
+                }
+                RuntimeBindingRecord updated = bindingRepository
+                        .compareAndSet(current, replacement);
+                if (updated != null) {
+                    return updated;
+                }
+            }
+        }
     }
 
     private final class SessionBinding {
@@ -1409,7 +2330,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         void assertBindingAvailable() {
             RuntimeBindingRecord current = bindingRepository.findById(
                     binding.bindingId);
-            if (current == null || !current.isActive()
+            if (current == null
+                    || (current.getState()
+                                    != RuntimeBindingRecord.State.PROVISIONING
+                            && current.getState()
+                                    != RuntimeBindingRecord.State.READY)
                     || current.getGeneration()
                             != binding.generation()) {
                 throw unavailable("runtime_broker_binding_unavailable",

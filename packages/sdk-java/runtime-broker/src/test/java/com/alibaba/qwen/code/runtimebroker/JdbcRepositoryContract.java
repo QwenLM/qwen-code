@@ -36,6 +36,7 @@ final class JdbcRepositoryContract {
     static void verify(DataSource dataSource, String prefix) throws Exception {
         verifySchema(dataSource);
         verifyBinding(dataSource, prefix);
+        verifyLegacyLeaseCredential(dataSource, prefix);
         verifySession(dataSource, prefix);
         verifyExecution(dataSource, prefix);
     }
@@ -72,15 +73,19 @@ final class JdbcRepositoryContract {
             throws Exception {
         RuntimeScope scope = scope(prefix + "-tenant");
         RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
-                prefix + "-isolation");
+                prefix + "-isolation", "local-process",
+                prefix + "-placement", prefix + "-template");
+        SecretProtector protector = protector(prefix);
         AtomicInteger firstIds = new AtomicInteger();
         AtomicInteger secondIds = new AtomicInteger();
         JdbcRuntimeBindingRepository first =
                 new JdbcRuntimeBindingRepository(dataSource,
+                        protector,
                         () -> prefix + "-binding-a-"
                                 + firstIds.incrementAndGet());
         JdbcRuntimeBindingRepository second =
                 new JdbcRuntimeBindingRepository(dataSource,
+                        protector,
                         () -> prefix + "-binding-b-"
                                 + secondIds.incrementAndGet());
 
@@ -94,6 +99,9 @@ final class JdbcRepositoryContract {
         assertEquals(Set.of(1L), created.stream()
                 .map(RuntimeBindingRecord::getGeneration)
                 .collect(Collectors.toSet()));
+        assertEquals(1, created.stream()
+                .map(RuntimeBindingRecord::getProvisionSeed)
+                .collect(Collectors.toSet()).size());
         String bindingId = bindingIds.iterator().next();
         assertThrows(IllegalArgumentException.class,
                 () -> first.claimOperation(bindingId, prefix + "-owner-a",
@@ -125,20 +133,28 @@ final class JdbcRepositoryContract {
         assertNull(first.compareAndSet(ownerA,
                 ownerA.withDrainRequested(true, START)));
 
-        RuntimeLease lease = new RuntimeLease(prefix + "-runtime",
-                URI.create("http://127.0.0.1:4096"), prefix + "-token",
-                prefix + "-lease", 1);
+        RuntimeProvisionSeed seed = renewedB.getProvisionSeed();
+        RuntimeLease lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                URI.create("http://127.0.0.1:4096"), seed.getToken(),
+                seed.getLeaseId(), seed.getEpoch());
+        RuntimeResourceHandle handle = new RuntimeResourceHandle(
+                "local-process", 1, Map.of("pid", 42,
+                        "generationDirectory", "/runtime/generation"));
         RuntimeBindingRecord ready = second.compareAndSet(renewedB,
-                renewedB.withState(RuntimeBindingRecord.State.READY, lease,
-                        START));
+                renewedB.withResourceHandle(handle, START)
+                        .withAttestation(lease, handle, START, START));
         RuntimeBindingRecord healthy = second.compareAndSet(ready,
                 ready.withLastHealthAt(START, START)
                         .withDrainRequested(true, START));
         RuntimeBindingRecord persistedReady = first.findById(bindingId);
         assertTrue(persistedReady.isDrainRequested());
         assertEquals(START, persistedReady.getLastHealthAt());
-        assertEquals(prefix + "-token",
+        assertEquals(seed.getToken(),
                 persistedReady.getLease().getToken());
+        assertEquals(handle, persistedReady.getResourceHandle());
+        assertEquals(1, persistedReady.getAttestationGeneration());
+        assertEquals(START, persistedReady.getLastReconciledAt());
+        assertSeedEncrypted(dataSource, bindingId, seed.getToken());
         RuntimeBindingRecord released = second.compareAndSet(healthy,
                 healthy.withState(RuntimeBindingRecord.State.RELEASED, lease,
                         START));
@@ -149,17 +165,19 @@ final class JdbcRepositoryContract {
         assertEquals(2, next.getGeneration());
         assertTrue(next.isActive());
         JdbcRuntimeBindingRepository reconstructed =
-                new JdbcRuntimeBindingRepository(dataSource);
+                new JdbcRuntimeBindingRepository(dataSource, protector);
         assertEquals(next.getBindingId(), reconstructed.findActive(request)
                 .getBindingId());
 
         RuntimeScope otherScope = scope(prefix + "-other-tenant");
         RuntimeProvisionRequest conflictingRequest = new RuntimeProvisionRequest(
-                otherScope, prefix + "-isolation");
+                otherScope, prefix + "-isolation", "local-process",
+                prefix + "-placement", prefix + "-template");
         assertThrows(IllegalArgumentException.class,
                 () -> second.findOrCreate(conflictingRequest));
         RuntimeProvisionRequest otherRequest = new RuntimeProvisionRequest(
-                otherScope, prefix + "-other-isolation");
+                otherScope, prefix + "-other-isolation", "local-process",
+                prefix + "-placement", prefix + "-template");
         RuntimeBindingRecord other = second.findOrCreate(otherRequest);
         assertFalse(next.getBindingId().equals(other.getBindingId()));
         assertEquals(List.of(next.getBindingId()), first
@@ -242,6 +260,37 @@ final class JdbcRepositoryContract {
                                 START)));
     }
 
+    private static void verifyLegacyLeaseCredential(DataSource dataSource,
+            String prefix) throws Exception {
+        SecretProtector protector = protector(prefix + "-legacy");
+        JdbcRuntimeBindingRepository repository =
+                new JdbcRuntimeBindingRepository(dataSource, protector,
+                        () -> prefix + "-legacy-binding");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(
+                scope(prefix + "-legacy-tenant"),
+                prefix + "-legacy-isolation");
+        RuntimeBindingRecord created = repository.findOrCreate(request);
+        RuntimeBindingRecord claimed = repository.claimOperation(
+                created.getBindingId(), prefix + "-legacy-owner",
+                Duration.ofMinutes(30));
+        RuntimeLease lease = new RuntimeLease(prefix + "-legacy-runtime",
+                URI.create("http://127.0.0.1:4097"),
+                prefix + "-legacy-token", prefix + "-legacy-lease", 0);
+        RuntimeBindingRecord ready = repository.compareAndSet(claimed,
+                claimed.withState(RuntimeBindingRecord.State.READY, lease,
+                        START).withOperation(null, null,
+                                claimed.getOperationGeneration()));
+
+        JdbcRuntimeBindingRepository reconstructed =
+                new JdbcRuntimeBindingRepository(dataSource, protector);
+        RuntimeBindingRecord restored = reconstructed.findById(
+                ready.getBindingId());
+        assertEquals(lease.getToken(), restored.getLease().getToken());
+        assertEquals(lease.getEndpoint(), restored.getLease().getEndpoint());
+        assertLeaseCredentialEncrypted(dataSource, ready.getBindingId(),
+                lease.getToken());
+    }
+
     private static void verifyExecution(DataSource dataSource, String prefix)
             throws Exception {
         JdbcToolExecutionRepository first =
@@ -279,6 +328,7 @@ final class JdbcRepositoryContract {
                 prefix + "-dispatcher-b", Duration.ofMinutes(30)));
         assertTrue(second.hasActiveByRuntimeSession(
                 prefix + "-runtime-session"));
+        assertTrue(second.hasActiveByBinding(prefix + "-binding", 1));
         expire(dataSource, "qwen_tool_execution",
                 "dispatch_lease_until", "execution_call_id", executionId);
 
@@ -302,6 +352,7 @@ final class JdbcRepositoryContract {
         assertEquals(result, settled.getResult());
         assertFalse(first.hasActiveByRuntimeSession(
                 prefix + "-runtime-session"));
+        assertFalse(first.hasActiveByBinding(prefix + "-binding", 1));
         assertNull(first.claimDispatch(executionId,
                 prefix + "-dispatcher-a", Duration.ofMinutes(1)));
 
@@ -339,6 +390,52 @@ final class JdbcRepositoryContract {
     private static Map<String, Object> result(String status) {
         return Map.of("executionStatus", status, "output",
                 List.of("durable", "result"));
+    }
+
+    private static SecretProtector protector(String prefix) {
+        byte[] key = new byte[32];
+        byte[] source = prefix.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        for (int index = 0; index < key.length; index++) {
+            key[index] = source[index % source.length];
+        }
+        return new AesGcmSecretProtector(prefix + "-key", key);
+    }
+
+    private static void assertSeedEncrypted(DataSource dataSource,
+            String bindingId, String token) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "SELECT provision_seed_ciphertext, credential_key_id "
+                                + "FROM qwen_runtime_binding "
+                                + "WHERE binding_id = ?")) {
+            statement.setString(1, bindingId);
+            try (ResultSet result = statement.executeQuery()) {
+                assertTrue(result.next());
+                assertNotNull(result.getString(1));
+                assertFalse(result.getString(1).contains(token));
+                assertNotNull(result.getString(2));
+            }
+        }
+    }
+
+    private static void assertLeaseCredentialEncrypted(DataSource dataSource,
+            String bindingId, String token) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "SELECT runtime_credential_ciphertext, "
+                                + "runtime_credential_key_id, "
+                                + "provision_seed_ciphertext "
+                                + "FROM qwen_runtime_binding "
+                                + "WHERE binding_id = ?")) {
+            statement.setString(1, bindingId);
+            try (ResultSet result = statement.executeQuery()) {
+                assertTrue(result.next());
+                assertNotNull(result.getString(1));
+                assertFalse(result.getString(1).contains(token));
+                assertNotNull(result.getString(2));
+                assertNull(result.getString(3));
+            }
+        }
     }
 
     private static void expire(DataSource dataSource, String table,

@@ -60,8 +60,10 @@ public final class InMemoryRuntimeBindingRepository
         }
         long generation = generations.getOrDefault(request, 0L) + 1;
         Instant now = clock.instant();
+        RuntimeProvisionSeed seed = request.requiresDurableIdentity()
+                ? RuntimeProvisionSeed.create(bindingId, generation) : null;
         RuntimeBindingRecord created = new RuntimeBindingRecord(
-                bindingId, request, generation,
+                bindingId, request, seed, generation,
                 RuntimeBindingRecord.State.PROVISIONING, null, false, null,
                 null, 0, 0, null, now);
         generations.put(request, generation);

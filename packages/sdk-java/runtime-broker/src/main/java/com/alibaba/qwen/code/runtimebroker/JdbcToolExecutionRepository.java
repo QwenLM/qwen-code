@@ -224,6 +224,30 @@ public final class JdbcToolExecutionRepository
         });
     }
 
+    @Override
+    public boolean hasActiveByBinding(String bindingId,
+            long runtimeGeneration) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (runtimeGeneration <= 0) {
+            throw new IllegalArgumentException(
+                    "runtimeGeneration must be positive");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            String sql = "SELECT execution_call_id "
+                    + "FROM qwen_tool_execution WHERE binding_id = ? "
+                    + "AND runtime_generation = ? "
+                    + "AND execution_state <> 'SETTLED'";
+            try (PreparedStatement statement = connection.prepareStatement(
+                    sql)) {
+                statement.setString(1, id);
+                statement.setLong(2, runtimeGeneration);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next();
+                }
+            }
+        });
+    }
+
     private static ToolExecutionRecord selectByExecutionId(
             Connection connection, String executionCallId, boolean forUpdate)
             throws SQLException {

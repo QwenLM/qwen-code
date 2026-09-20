@@ -6,8 +6,17 @@ import java.util.Objects;
 public final class RuntimeProvisionRequest {
     private final RuntimeScope scope;
     private final String isolationKey;
+    private final String provisionerKind;
+    private final String placementDomain;
+    private final String runtimeTemplateDigest;
 
     public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey) {
+        this(scope, isolationKey, "legacy", "process-local", "legacy");
+    }
+
+    public RuntimeProvisionRequest(RuntimeScope scope, String isolationKey,
+            String provisionerKind, String placementDomain,
+            String runtimeTemplateDigest) {
         if (scope == null) {
             throw new IllegalArgumentException("scope is required");
         }
@@ -22,6 +31,12 @@ public final class RuntimeProvisionRequest {
             this.isolationKey = null;
         }
         this.scope = scope;
+        this.provisionerKind = BrokerValues.requireId(provisionerKind,
+                "provisionerKind");
+        this.placementDomain = BrokerValues.requireId(placementDomain,
+                "placementDomain");
+        this.runtimeTemplateDigest = BrokerValues.requireId(
+                runtimeTemplateDigest, "runtimeTemplateDigest");
     }
 
     public RuntimeScope getScope() {
@@ -30,6 +45,23 @@ public final class RuntimeProvisionRequest {
 
     public String getIsolationKey() {
         return isolationKey;
+    }
+
+    public String getProvisionerKind() {
+        return provisionerKind;
+    }
+
+    public String getPlacementDomain() {
+        return placementDomain;
+    }
+
+    public String getRuntimeTemplateDigest() {
+        return runtimeTemplateDigest;
+    }
+
+    boolean requiresDurableIdentity() {
+        return !"legacy".equals(provisionerKind)
+                && !"static".equals(provisionerKind);
     }
 
     @Override
@@ -42,11 +74,16 @@ public final class RuntimeProvisionRequest {
         }
         RuntimeProvisionRequest other = (RuntimeProvisionRequest) candidate;
         return scope.equals(other.scope)
-                && Objects.equals(isolationKey, other.isolationKey);
+                && Objects.equals(isolationKey, other.isolationKey)
+                && provisionerKind.equals(other.provisionerKind)
+                && placementDomain.equals(other.placementDomain)
+                && runtimeTemplateDigest.equals(
+                        other.runtimeTemplateDigest);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(scope, isolationKey);
+        return Objects.hash(scope, isolationKey, provisionerKind,
+                placementDomain, runtimeTemplateDigest);
     }
 }

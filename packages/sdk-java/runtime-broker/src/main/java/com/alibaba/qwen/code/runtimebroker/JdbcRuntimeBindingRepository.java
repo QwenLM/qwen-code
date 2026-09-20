@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -21,25 +22,40 @@ public final class JdbcRuntimeBindingRepository
             "binding_id", "request_key", "scope_key", "tenant_id",
             "workspace_id", "workspace_generation", "canonical_cwd",
             "capability_digest", "isolation_class", "isolation_key",
-            "runtime_generation", "binding_state", "runtime_instance_id",
-            "runtime_endpoint", "runtime_token", "runtime_lease_id",
-            "runtime_epoch", "drain_requested", "operation_owner",
+            "provisioner_kind", "placement_domain",
+            "runtime_template_digest", "runtime_generation",
+            "binding_state", "provision_request_id",
+            "provision_seed_ciphertext", "credential_key_id",
+            "resource_handle_version", "resource_handle_json",
+            "runtime_instance_id", "runtime_endpoint", "runtime_lease_id",
+            "runtime_epoch", "runtime_credential_ciphertext",
+            "runtime_credential_key_id", "attestation_generation",
+            "drain_requested", "operation_owner",
             "operation_lease_until", "operation_generation",
-            "record_version", "last_health_at", "last_active_at");
+            "record_version", "last_health_at", "last_reconciled_at",
+            "last_active_at");
 
     private final DataSource dataSource;
+    private final SecretProtector secretProtector;
     private final Supplier<String> idSupplier;
 
-    public JdbcRuntimeBindingRepository(DataSource dataSource) {
-        this(dataSource, () -> UUID.randomUUID().toString());
+    public JdbcRuntimeBindingRepository(DataSource dataSource,
+            SecretProtector secretProtector) {
+        this(dataSource, secretProtector,
+                () -> UUID.randomUUID().toString());
     }
 
     public JdbcRuntimeBindingRepository(DataSource dataSource,
-            Supplier<String> idSupplier) {
+            SecretProtector secretProtector, Supplier<String> idSupplier) {
         this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
+        if (secretProtector == null) {
+            throw new IllegalArgumentException(
+                    "secretProtector is required");
+        }
         if (idSupplier == null) {
             throw new IllegalArgumentException("idSupplier is required");
         }
+        this.secretProtector = secretProtector;
         this.idSupplier = idSupplier;
     }
 
@@ -67,8 +83,11 @@ public final class JdbcRuntimeBindingRepository
             String bindingId = BrokerValues.requireId(idSupplier.get(),
                     "bindingId");
             Instant now = JdbcRepositorySupport.databaseNow(connection);
+            RuntimeProvisionSeed seed = request.requiresDurableIdentity()
+                    ? RuntimeProvisionSeed.create(bindingId, generation)
+                    : null;
             RuntimeBindingRecord created = new RuntimeBindingRecord(
-                    bindingId, request, generation,
+                    bindingId, request, seed, generation,
                     RuntimeBindingRecord.State.PROVISIONING, null, false,
                     null, null, 0, 0, null, now);
             insertBinding(connection, created);
@@ -266,13 +285,18 @@ public final class JdbcRuntimeBindingRepository
         String sql = "INSERT INTO qwen_runtime_binding_slot (request_key, "
                 + "tenant_id, workspace_id, workspace_generation, "
                 + "canonical_cwd, capability_digest, isolation_class, "
-                + "isolation_key, last_generation, active_binding_id) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL) "
+                + "isolation_key, provisioner_kind, placement_domain, "
+                + "runtime_template_digest, last_generation, "
+                + "active_binding_id) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL) "
                 + "ON DUPLICATE KEY UPDATE request_key = request_key";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, requestKey);
             setScope(statement, 2, scope);
             statement.setString(8, request.getIsolationKey());
+            statement.setString(9, request.getProvisionerKind());
+            statement.setString(10, request.getPlacementDomain());
+            statement.setString(11, request.getRuntimeTemplateDigest());
             statement.executeUpdate();
         }
     }
@@ -281,8 +305,10 @@ public final class JdbcRuntimeBindingRepository
             boolean forUpdate) throws SQLException {
         String sql = "SELECT tenant_id, workspace_id, "
                 + "workspace_generation, canonical_cwd, capability_digest, "
-                + "isolation_class, isolation_key, last_generation, "
-                + "active_binding_id FROM qwen_runtime_binding_slot "
+                + "isolation_class, isolation_key, provisioner_kind, "
+                + "placement_domain, runtime_template_digest, "
+                + "last_generation, active_binding_id "
+                + "FROM qwen_runtime_binding_slot "
                 + "WHERE request_key = ?" + (forUpdate
                         ? " FOR UPDATE" : "");
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -293,7 +319,10 @@ public final class JdbcRuntimeBindingRepository
                 }
                 RuntimeScope scope = mapScope(result);
                 RuntimeProvisionRequest request = new RuntimeProvisionRequest(
-                        scope, result.getString("isolation_key"));
+                        scope, result.getString("isolation_key"),
+                        result.getString("provisioner_kind"),
+                        result.getString("placement_domain"),
+                        result.getString("runtime_template_digest"));
                 return new Slot(request,
                         result.getLong("last_generation"),
                         result.getString("active_binding_id"));
@@ -301,7 +330,7 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-    private static RuntimeBindingRecord selectById(Connection connection,
+    private RuntimeBindingRecord selectById(Connection connection,
             String bindingId, boolean forUpdate) throws SQLException {
         String sql = "SELECT " + BINDING_COLUMNS
                 + " FROM qwen_runtime_binding WHERE binding_id = ?"
@@ -322,61 +351,80 @@ public final class JdbcRuntimeBindingRepository
         }
     }
 
-    private static void insertBinding(Connection connection,
+    private void insertBinding(Connection connection,
             RuntimeBindingRecord record) throws SQLException {
         String sql = "INSERT INTO qwen_runtime_binding (" + BINDING_COLUMNS
                 + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                + "?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                + "?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             setBinding(statement, record);
             statement.executeUpdate();
         }
     }
 
-    private static void updateBinding(Connection connection,
+    private void updateBinding(Connection connection,
             RuntimeBindingRecord record) throws SQLException {
         String sql = "UPDATE qwen_runtime_binding SET binding_state = ?, "
-                + "runtime_instance_id = ?, runtime_endpoint = ?, "
-                + "runtime_token = ?, runtime_lease_id = ?, "
-                + "runtime_epoch = ?, drain_requested = ?, "
+                + "resource_handle_version = ?, "
+                + "resource_handle_json = ?, runtime_instance_id = ?, "
+                + "runtime_endpoint = ?, runtime_lease_id = ?, "
+                + "runtime_epoch = ?, runtime_credential_ciphertext = ?, "
+                + "runtime_credential_key_id = ?, "
+                + "attestation_generation = ?, drain_requested = ?, "
                 + "operation_owner = ?, operation_lease_until = ?, "
                 + "operation_generation = ?, record_version = ?, "
-                + "last_health_at = ?, last_active_at = ? "
+                + "last_health_at = ?, last_reconciled_at = ?, "
+                + "last_active_at = ? "
                 + "WHERE binding_id = ?";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, record.getState().name());
+            RuntimeResourceHandle handle = record.getResourceHandle();
+            if (handle == null) {
+                statement.setObject(2, null);
+                statement.setString(3, null);
+            } else {
+                statement.setInt(2, handle.getVersion());
+                statement.setString(3, handle.toJson());
+            }
             RuntimeLease lease = record.getLease();
-            statement.setString(2,
-                    lease == null ? null : lease.getRuntimeInstanceId());
-            statement.setString(3,
-                    lease == null ? null : lease.getEndpoint().toString());
             statement.setString(4,
-                    lease == null ? null : lease.getToken());
+                    lease == null ? null : lease.getRuntimeInstanceId());
             statement.setString(5,
+                    lease == null ? null : lease.getEndpoint().toString());
+            statement.setString(6,
                     lease == null ? null : lease.getLeaseId());
             if (lease == null) {
-                statement.setObject(6, null);
+                statement.setObject(7, null);
             } else {
-                statement.setLong(6, lease.getEpoch());
+                statement.setLong(7, lease.getEpoch());
             }
-            statement.setBoolean(7, record.isDrainRequested());
-            statement.setString(8, record.getOperationOwner());
-            JdbcRepositorySupport.setInstant(statement, 9,
-                    record.getOperationLeaseUntil());
-            statement.setLong(10, record.getOperationGeneration());
-            statement.setLong(11, record.getVersion());
-            JdbcRepositorySupport.setInstant(statement, 12,
-                    record.getLastHealthAt());
+            ProtectedSecret protectedCredential = protectLeaseToken(record);
+            statement.setString(8, protectedCredential == null ? null
+                    : protectedCredential.getCiphertext());
+            statement.setString(9, protectedCredential == null ? null
+                    : protectedCredential.getKeyId());
+            statement.setLong(10, record.getAttestationGeneration());
+            statement.setBoolean(11, record.isDrainRequested());
+            statement.setString(12, record.getOperationOwner());
             JdbcRepositorySupport.setInstant(statement, 13,
+                    record.getOperationLeaseUntil());
+            statement.setLong(14, record.getOperationGeneration());
+            statement.setLong(15, record.getVersion());
+            JdbcRepositorySupport.setInstant(statement, 16,
+                    record.getLastHealthAt());
+            JdbcRepositorySupport.setInstant(statement, 17,
+                    record.getLastReconciledAt());
+            JdbcRepositorySupport.setInstant(statement, 18,
                     record.getLastActiveAt());
-            statement.setString(14, record.getBindingId());
+            statement.setString(19, record.getBindingId());
             if (statement.executeUpdate() != 1) {
                 throw new SQLException("Runtime binding update failed");
             }
         }
     }
 
-    private static void setBinding(PreparedStatement statement,
+    private void setBinding(PreparedStatement statement,
             RuntimeBindingRecord record) throws SQLException {
         RuntimeProvisionRequest request = record.getRequest();
         RuntimeScope scope = request.getScope();
@@ -385,29 +433,57 @@ public final class JdbcRuntimeBindingRepository
         statement.setString(3, JdbcRepositorySupport.scopeKey(scope));
         setScope(statement, 4, scope);
         statement.setString(10, request.getIsolationKey());
-        statement.setLong(11, record.getGeneration());
-        statement.setString(12, record.getState().name());
-        RuntimeLease lease = record.getLease();
-        statement.setString(13,
-                lease == null ? null : lease.getRuntimeInstanceId());
-        statement.setString(14,
-                lease == null ? null : lease.getEndpoint().toString());
-        statement.setString(15, lease == null ? null : lease.getToken());
-        statement.setString(16, lease == null ? null : lease.getLeaseId());
-        if (lease == null) {
-            statement.setObject(17, null);
+        statement.setString(11, request.getProvisionerKind());
+        statement.setString(12, request.getPlacementDomain());
+        statement.setString(13, request.getRuntimeTemplateDigest());
+        statement.setLong(14, record.getGeneration());
+        statement.setString(15, record.getState().name());
+        RuntimeProvisionSeed seed = record.getProvisionSeed();
+        ProtectedSecret protectedSeed = seed == null ? null
+                : secretProtector.protect(seedContext(record.getBindingId()),
+                        seed.encode());
+        statement.setString(16,
+                seed == null ? null : seed.getProvisionRequestId());
+        statement.setString(17, protectedSeed == null ? null
+                : protectedSeed.getCiphertext());
+        statement.setString(18, protectedSeed == null ? null
+                : protectedSeed.getKeyId());
+        RuntimeResourceHandle handle = record.getResourceHandle();
+        if (handle == null) {
+            statement.setObject(19, null);
+            statement.setString(20, null);
         } else {
-            statement.setLong(17, lease.getEpoch());
+            statement.setInt(19, handle.getVersion());
+            statement.setString(20, handle.toJson());
         }
-        statement.setBoolean(18, record.isDrainRequested());
-        statement.setString(19, record.getOperationOwner());
-        JdbcRepositorySupport.setInstant(statement, 20,
+        RuntimeLease lease = record.getLease();
+        statement.setString(21,
+                lease == null ? null : lease.getRuntimeInstanceId());
+        statement.setString(22,
+                lease == null ? null : lease.getEndpoint().toString());
+        statement.setString(23, lease == null ? null : lease.getLeaseId());
+        if (lease == null) {
+            statement.setObject(24, null);
+        } else {
+            statement.setLong(24, lease.getEpoch());
+        }
+        ProtectedSecret protectedCredential = protectLeaseToken(record);
+        statement.setString(25, protectedCredential == null ? null
+                : protectedCredential.getCiphertext());
+        statement.setString(26, protectedCredential == null ? null
+                : protectedCredential.getKeyId());
+        statement.setLong(27, record.getAttestationGeneration());
+        statement.setBoolean(28, record.isDrainRequested());
+        statement.setString(29, record.getOperationOwner());
+        JdbcRepositorySupport.setInstant(statement, 30,
                 record.getOperationLeaseUntil());
-        statement.setLong(21, record.getOperationGeneration());
-        statement.setLong(22, record.getVersion());
-        JdbcRepositorySupport.setInstant(statement, 23,
+        statement.setLong(31, record.getOperationGeneration());
+        statement.setLong(32, record.getVersion());
+        JdbcRepositorySupport.setInstant(statement, 33,
                 record.getLastHealthAt());
-        JdbcRepositorySupport.setInstant(statement, 24,
+        JdbcRepositorySupport.setInstant(statement, 34,
+                record.getLastReconciledAt());
+        JdbcRepositorySupport.setInstant(statement, 35,
                 record.getLastActiveAt());
     }
 
@@ -421,29 +497,38 @@ public final class JdbcRuntimeBindingRepository
         statement.setString(start + 5, scope.getIsolationClass());
     }
 
-    private static RuntimeBindingRecord mapBinding(ResultSet result)
+    private RuntimeBindingRecord mapBinding(ResultSet result)
             throws SQLException {
         RuntimeScope scope = mapScope(result);
         RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
-                result.getString("isolation_key"));
+                result.getString("isolation_key"),
+                result.getString("provisioner_kind"),
+                result.getString("placement_domain"),
+                result.getString("runtime_template_digest"));
         String storedRequestKey = result.getString("request_key");
         if (!JdbcRepositorySupport.requestKey(request).equals(
                 storedRequestKey)) {
             throw new IllegalStateException(
                     "Runtime binding request hash is invalid");
         }
-        RuntimeLease lease = mapLease(result);
+        String bindingId = result.getString("binding_id");
+        RuntimeProvisionSeed seed = mapSeed(result, bindingId);
+        RuntimeResourceHandle handle = mapHandle(result, request);
+        RuntimeLease lease = mapLease(result, seed);
         return new RuntimeBindingRecord(result.getString("binding_id"),
-                request, result.getLong("runtime_generation"),
+                request, seed, result.getLong("runtime_generation"),
                 RuntimeBindingRecord.State.valueOf(
                         result.getString("binding_state")),
-                lease, result.getBoolean("drain_requested"),
+                lease, handle, result.getLong("attestation_generation"),
+                result.getBoolean("drain_requested"),
                 result.getString("operation_owner"),
                 JdbcRepositorySupport.getInstant(result,
                         "operation_lease_until"),
                 result.getLong("operation_generation"),
                 result.getLong("record_version"),
                 JdbcRepositorySupport.getInstant(result, "last_health_at"),
+                JdbcRepositorySupport.getInstant(result,
+                        "last_reconciled_at"),
                 JdbcRepositorySupport.getInstant(result, "last_active_at"));
     }
 
@@ -457,25 +542,107 @@ public final class JdbcRuntimeBindingRepository
                 result.getString("isolation_class"));
     }
 
-    private static RuntimeLease mapLease(ResultSet result)
-            throws SQLException {
+    private RuntimeLease mapLease(ResultSet result,
+            RuntimeProvisionSeed seed) throws SQLException {
         String runtimeInstanceId = result.getString("runtime_instance_id");
         String endpoint = result.getString("runtime_endpoint");
-        String token = result.getString("runtime_token");
         String leaseId = result.getString("runtime_lease_id");
         Object epoch = result.getObject("runtime_epoch");
+        String ciphertext = result.getString(
+                "runtime_credential_ciphertext");
+        String keyId = result.getString("runtime_credential_key_id");
         boolean absent = runtimeInstanceId == null && endpoint == null
-                && token == null && leaseId == null && epoch == null;
+                && leaseId == null && epoch == null;
         if (absent) {
+            if (ciphertext != null || keyId != null) {
+                throw new IllegalStateException(
+                        "Runtime credential columns are inconsistent");
+            }
             return null;
         }
-        if (runtimeInstanceId == null || endpoint == null || token == null
+        if (runtimeInstanceId == null || endpoint == null
                 || leaseId == null || epoch == null) {
             throw new IllegalStateException(
                     "Runtime lease columns are incomplete");
         }
-        return new RuntimeLease(runtimeInstanceId, URI.create(endpoint), token,
-                leaseId, ((Number) epoch).longValue());
+        String token;
+        if (seed != null) {
+            if (ciphertext != null || keyId != null) {
+                throw new IllegalStateException(
+                        "Runtime credential columns are inconsistent");
+            }
+            token = seed.getToken();
+        } else {
+            if (ciphertext == null || keyId == null) {
+                throw new IllegalStateException(
+                        "Runtime credential columns are incomplete");
+            }
+            token = new String(secretProtector.unprotect(
+                    leaseTokenContext(result.getString("binding_id")),
+                    new ProtectedSecret(keyId, ciphertext)),
+                    StandardCharsets.UTF_8);
+        }
+        return new RuntimeLease(runtimeInstanceId, URI.create(endpoint),
+                token, leaseId, ((Number) epoch).longValue());
+    }
+
+    private ProtectedSecret protectLeaseToken(RuntimeBindingRecord record) {
+        RuntimeLease lease = record.getLease();
+        if (lease == null || record.getProvisionSeed() != null) {
+            return null;
+        }
+        return secretProtector.protect(
+                leaseTokenContext(record.getBindingId()),
+                lease.getToken().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private RuntimeProvisionSeed mapSeed(ResultSet result, String bindingId)
+            throws SQLException {
+        String provisionRequestId = result.getString(
+                "provision_request_id");
+        String ciphertext = result.getString("provision_seed_ciphertext");
+        String keyId = result.getString("credential_key_id");
+        boolean absent = provisionRequestId == null && ciphertext == null
+                && keyId == null;
+        if (absent) {
+            return null;
+        }
+        if (provisionRequestId == null || ciphertext == null
+                || keyId == null) {
+            throw new IllegalStateException(
+                    "Runtime provision seed columns are incomplete");
+        }
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.decode(
+                secretProtector.unprotect(seedContext(bindingId),
+                        new ProtectedSecret(keyId, ciphertext)));
+        if (!provisionRequestId.equals(seed.getProvisionRequestId())) {
+            throw new IllegalStateException(
+                    "Runtime provision request identity changed");
+        }
+        return seed;
+    }
+
+    private static RuntimeResourceHandle mapHandle(ResultSet result,
+            RuntimeProvisionRequest request) throws SQLException {
+        Object version = result.getObject("resource_handle_version");
+        String json = result.getString("resource_handle_json");
+        if (version == null && json == null) {
+            return null;
+        }
+        if (!(version instanceof Number) || json == null) {
+            throw new IllegalStateException(
+                    "Runtime resource handle columns are incomplete");
+        }
+        return RuntimeResourceHandle.fromJson(request.getProvisionerKind(),
+                ((Number) version).intValue(), json);
+    }
+
+    private static String seedContext(String bindingId) {
+        return "runtime-provision-seed:" + bindingId;
+    }
+
+    private static String leaseTokenContext(String bindingId) {
+        return "runtime-lease-token:" + bindingId;
     }
 
     private static void requireRequest(RuntimeProvisionRequest request) {
