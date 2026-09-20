@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useEffect } from 'react';
 import type {
   DaemonLiveRequirementState,
   DaemonLiveStatus,
@@ -118,7 +119,19 @@ function liveStateLabel(
   return t(`live.state.${status?.state ?? 'unavailable'}`);
 }
 
-export function LiveVoiceButton(): React.JSX.Element | null {
+export function LiveVoiceButton({
+  hideInactiveTrigger = false,
+  open,
+  onOpenChange,
+  onSupportedChange,
+  onRequestFocusFallback,
+}: {
+  hideInactiveTrigger?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  onSupportedChange?: (supported: boolean) => void;
+  onRequestFocusFallback?: () => void;
+} = {}): React.JSX.Element | null {
   const { t } = useI18n();
   const {
     supported,
@@ -133,6 +146,12 @@ export function LiveVoiceButton(): React.JSX.Element | null {
     stop,
     setMute,
   } = useLiveVoice();
+  useEffect(() => {
+    onSupportedChange?.(supported);
+  }, [onSupportedChange, supported]);
+  useEffect(() => {
+    if (open && supported) void refresh();
+  }, [open, supported, refresh]);
   if (!supported) return null;
 
   const active = isActive(status);
@@ -168,27 +187,40 @@ export function LiveVoiceButton(): React.JSX.Element | null {
 
   return (
     <Dialog
-      onOpenChange={(open) => {
-        if (open) void refresh();
+      open={open}
+      onOpenChange={(nextOpen) => {
+        onOpenChange?.(nextOpen);
+        if (nextOpen && open === undefined) void refresh();
       }}
     >
-      <DialogTrigger asChild>
-        <button
-          type="button"
-          className={styles.trigger}
-          aria-label={label}
-          title={label}
-          data-active={active}
-          data-state={status?.state ?? 'unavailable'}
-          data-available={status?.available === true}
-        >
-          <LiveIcon />
-        </button>
-      </DialogTrigger>
+      {(!hideInactiveTrigger || active) && (
+        <DialogTrigger asChild>
+          <button
+            type="button"
+            className={styles.trigger}
+            aria-label={label}
+            title={label}
+            data-active={active}
+            data-state={status?.state ?? 'unavailable'}
+            data-available={status?.available === true}
+          >
+            <LiveIcon />
+          </button>
+        </DialogTrigger>
+      )}
       {/* Wider than the default dialog, with a wrapping footer: three footer
           buttons do not fit 384px and used to push the requirement states
           outside the dialog. */}
-      <DialogContent data-web-shell-live-dialog className="sm:max-w-md">
+      <DialogContent
+        data-web-shell-live-dialog
+        className="sm:max-w-md"
+        onCloseAutoFocus={(event) => {
+          if (hideInactiveTrigger && !active && onRequestFocusFallback) {
+            event.preventDefault();
+            onRequestFocusFallback();
+          }
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{t('live.title')}</DialogTitle>
           <DialogDescription>
