@@ -265,6 +265,10 @@ import {
   scheduledTaskRunSourceId,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
+import {
+  hasExplicitApprovalModeCliArg,
+  resolveUnattendedAcpChildApprovalMode,
+} from '../../runtime/unattended-acp-child-approval-mode.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
@@ -3490,6 +3494,20 @@ export class Session implements SessionContext {
           completion: req.completion,
           ...(req.model ? { model: req.model } : {}),
           ...(req.name ? { name: req.name } : {}),
+          // Unattended model-facing create_sub_session has nobody attached
+          // to answer session/request_permission. Same honor-pin / elevate-
+          // implicit-DEFAULT policy as scheduled-task fires (R1-3).
+          approvalMode: resolveUnattendedAcpChildApprovalMode(
+            this.config.getApprovalMode(),
+            this.getSettings().merged.tools?.approvalMode,
+            this.config.isSafeMode?.() === true ||
+              this.config.getBareMode?.() === true,
+            {
+              explicitlyChosen:
+                (this.config.getApprovalModeRevision?.() ?? 0) > 0 ||
+                hasExplicitApprovalModeCliArg(),
+            },
+          ),
           callerSessionId: this.sessionId,
         },
       );
@@ -9633,6 +9651,22 @@ export class Session implements SessionContext {
           name: scheduledTaskRunSessionName(
             job.name ?? job.prompt,
             triggeredAt,
+          ),
+          // Unattended cron fires have no client to answer
+          // session/request_permission. Honor an operator pin (and
+          // restricted safe/bare sessions). Only elevate the implicit ACP
+          // ask-permissions boot default (DEFAULT with no settings pin) to
+          // AUTO so the child does not park forever on its first write.
+          approvalMode: resolveUnattendedAcpChildApprovalMode(
+            this.config.getApprovalMode(),
+            this.getSettings().merged.tools?.approvalMode,
+            this.config.isSafeMode?.() === true ||
+              this.config.getBareMode?.() === true,
+            {
+              explicitlyChosen:
+                (this.config.getApprovalModeRevision?.() ?? 0) > 0 ||
+                hasExplicitApprovalModeCliArg(),
+            },
           ),
           ...(job.id
             ? {

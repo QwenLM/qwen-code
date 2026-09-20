@@ -1545,6 +1545,7 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
           completion: 'sent' | 'first-turn';
           model?: string;
           groupId?: string;
+          approvalMode?: string;
           name?: string;
           sourceType?: string;
           sourceId?: string;
@@ -1609,6 +1610,35 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       result: 'done',
       stopReason: 'end_turn',
     });
+  });
+
+  it('forwards approvalMode when provided and rejects unknown values', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-approval' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+
+    await client.extMethod(METHOD, {
+      prompt: 'go',
+      completion: 'sent',
+      approvalMode: 'auto',
+      callerSessionId: 'caller-1',
+    });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'sent',
+      approvalMode: 'auto',
+      callerSessionId: 'caller-1',
+    });
+
+    onCreate.mockClear();
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'go',
+        completion: 'sent',
+        approvalMode: 'not-a-mode',
+        callerSessionId: 'caller-1',
+      }),
+    ).rejects.toThrow(/approvalMode/);
+    expect(onCreate).not.toHaveBeenCalled();
   });
 
   it('omits result/stopReason when the handler does not return them (sent mode)', async () => {

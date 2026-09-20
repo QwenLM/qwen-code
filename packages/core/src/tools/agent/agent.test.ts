@@ -5719,7 +5719,7 @@ describe('AgentTool', () => {
       expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
         'file-search',
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         // Foreground subagents now run with a composed signal (so the
         // dialog can cancel just this child) — the hook receives the
         // composed signal, not the caller-supplied one.
@@ -5918,7 +5918,7 @@ describe('AgentTool', () => {
         '/test/transcript',
         'Task completed successfully',
         false,
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         // Foreground subagents now run with a composed signal.
         expect.any(AbortSignal),
       );
@@ -5989,7 +5989,7 @@ describe('AgentTool', () => {
         '/test/transcript',
         'Task completed successfully',
         true,
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         // Foreground subagents now run with a composed signal.
         expect.any(AbortSignal),
       );
@@ -6801,8 +6801,8 @@ describe('AgentTool', () => {
       ['codex', ApprovalMode.AUTO, 'yolo', ApprovalMode.YOLO],
       ['codex', ApprovalMode.AUTO, 'default', ApprovalMode.DEFAULT],
       ['codex', ApprovalMode.YOLO, 'default', ApprovalMode.YOLO],
-      ['acp', ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
-      [undefined, ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO_EDIT],
+      ['acp', ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO],
+      [undefined, ApprovalMode.DEFAULT, undefined, ApprovalMode.AUTO],
     ] as const)(
       'resolves %s parent=%s override=%s to %s at the child runtime',
       async (kind, parentMode, approvalMode, expectedMode) => {
@@ -7855,7 +7855,7 @@ describe('AgentTool', () => {
         ),
         'Monitor done',
         false,
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         undefined,
       );
       expect(mockAgent.execute).not.toHaveBeenCalled();
@@ -7965,7 +7965,7 @@ describe('AgentTool', () => {
           ),
           'Monitor done',
           false,
-          PermissionMode.AutoEdit,
+          PermissionMode.Auto,
           expect.any(AbortSignal),
         );
       });
@@ -8752,10 +8752,13 @@ describe('resolveSubagentApprovalMode', () => {
     ).toBe(PermissionMode.AutoEdit);
   });
 
-  it('should default to auto-edit when parent is default and folder is trusted', () => {
+  it('should default to auto when parent is default and folder is trusted', () => {
+    // Auto (classifier-mediated), not AutoEdit: an ACP parent now boots
+    // DEFAULT, and AutoEdit would skip the classifier then hard-deny
+    // background subagent non-read-only shell.
     expect(
       resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, true),
-    ).toBe(PermissionMode.AutoEdit);
+    ).toBe(PermissionMode.Auto);
   });
 
   it('should default to parent mode when parent is default and folder is untrusted', () => {

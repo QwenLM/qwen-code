@@ -5549,6 +5549,17 @@ describe('loadCliConfig interactive', () => {
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
   });
+
+  it('keeps --acp non-interactive when stdin is not a TTY', async () => {
+    // interactive means TTY/TUI, not "has a protocol consumer". ACP
+    // permission frames come from the approval-mode default, not this flag.
+    process.stdin.isTTY = false;
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.isInteractive()).toBe(false);
+    expect(config.getExperimentalZedIntegration()).toBe(true);
+  });
 });
 
 describe('loadCliConfig approval mode', () => {
@@ -5576,6 +5587,36 @@ describe('loadCliConfig approval mode', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO);
+  });
+
+  it('defaults --acp sessions to DEFAULT so the client receives session/request_permission', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+  });
+
+  it('honors --approval-mode on --acp sessions', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--approval-mode',
+      'auto-edit',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+  });
+
+  it('honors settings-sourced approvalMode on --acp sessions', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: { approvalMode: 'yolo' },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.YOLO);
   });
 
   it('should set PLAN approval mode when --approval-mode=plan', async () => {
