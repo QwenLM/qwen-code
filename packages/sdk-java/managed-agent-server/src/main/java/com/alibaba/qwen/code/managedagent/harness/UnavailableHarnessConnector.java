@@ -10,25 +10,24 @@ public class UnavailableHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public Attachment createOrLoad(String harnessSessionId,
-            boolean loadExisting) {
+    public Attachment createOrLoad(String sessionId, boolean loadExisting) {
         throw unavailable();
     }
 
     @Override
-    public Admission submit(String harnessSessionId, String promptId,
+    public Admission submit(String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
         throw unavailable();
     }
 
     @Override
-    public SourceStream stream(String harnessSessionId, long lastEventId,
+    public SourceStream stream(String sessionId, long lastEventId,
             String eventEpoch) {
         throw unavailable();
     }
 
     @Override
-    public void cancel(String harnessSessionId) {
+    public void cancel(String sessionId) {
         throw unavailable();
     }
 

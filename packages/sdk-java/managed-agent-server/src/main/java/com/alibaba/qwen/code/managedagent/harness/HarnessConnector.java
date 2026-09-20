@@ -6,15 +6,15 @@ import java.util.Map;
 public interface HarnessConnector extends AutoCloseable {
     boolean isAvailable();
 
-    Attachment createOrLoad(String harnessSessionId, boolean loadExisting);
+    Attachment createOrLoad(String sessionId, boolean loadExisting);
 
-    Admission submit(String harnessSessionId, String promptId,
+    Admission submit(String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest);
 
-    SourceStream stream(String harnessSessionId, long lastEventId,
+    SourceStream stream(String sessionId, long lastEventId,
             String eventEpoch);
 
-    void cancel(String harnessSessionId);
+    void cancel(String sessionId);
 
     @Override
     default void close() {

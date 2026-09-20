@@ -8,8 +8,8 @@ public final class StoreModels {
     }
 
     public record SessionRecord(String tenantId, String sessionId,
-            String harnessSessionId, String agentId, String title,
-            String status, String harnessBootId, String harnessEventEpoch,
+            String agentId, String title, String status,
+            String harnessBootId, String harnessEventEpoch,
             long harnessLastEventId, long lastSequence, long createdAt,
             long updatedAt, long version) {
     }

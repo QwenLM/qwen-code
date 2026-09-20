@@ -103,20 +103,19 @@ Tool Runtime 的请求和结果不经过 Java Prompt Controller。Harness 直接
 
 ## 4. ID 与 fencing 规则
 
-Java 必须保存四层 ID 的显式映射：
+Java 只生成一个全局唯一的 RFC UUID Session ID，并让它贯穿公共 API、Hosted Harness、JSONL 和 Runtime Broker；不得保存公共 Session 到 Harness Session 的映射：
 
-| 层级            | ID                       | 生成方              | 用途                                            |
-| --------------- | ------------------------ | ------------------- | ----------------------------------------------- |
-| 公共 Session    | `publicSessionId`        | Java                | 对外资源和权限边界                              |
-| Harness Session | `harnessSessionId`，UUID | Java                | `/session/:id`，create outcome unknown 时可恢复 |
-| Harness attach  | `harnessClientId`        | Harness             | 当前 Java attachment 的 mutation / SSE 身份     |
-| 公共 Turn       | `publicTurnId`           | Java                | 对外 Turn / Run / Response 映射                 |
-| Harness Prompt  | `promptId`，UUID         | Java                | Prompt admission 幂等和 Harness 事件关联        |
-| Tool execution  | `executionCallId`        | Harness/Broker 协议 | 物理工具幂等                                    |
+| 层级           | ID                | 生成方              | 用途                                                |
+| -------------- | ----------------- | ------------------- | --------------------------------------------------- |
+| Session        | `sessionId`，UUID | Java                | 对外资源、权限边界、`/session/:id` 与 Runtime scope |
+| Harness attach | `harnessClientId` | Harness             | 当前 Java attachment 的 mutation / SSE 身份         |
+| 公共 Turn      | `publicTurnId`    | Java                | 对外 Turn / Run / Response 映射                     |
+| Harness Prompt | `promptId`，UUID  | Java                | Prompt admission 幂等和 Harness 事件关联            |
+| Tool execution | `executionCallId` | Harness/Broker 协议 | 物理工具幂等                                        |
 
-第一版不要求 `publicTurnId` 出现在 Harness 请求体中。Java 用数据库中的 `(harnessSessionId, promptId) -> publicTurnId` 映射完成事件投影，避免把公共 API 结构耦合到 qwen 私有协议。
+第一版不要求 `publicTurnId` 出现在 Harness 请求体中。Java 用数据库中的 `(sessionId, promptId) -> publicTurnId` 映射完成事件投影。
 
-一个 Harness Session 同时绑定：
+一个 Session 同时绑定：
 
 - `harnessEndpointId`：Java 配置中的逻辑 endpoint 名；
 - `harnessBootId`：Harness 进程启动时生成的 UUID；
@@ -248,14 +247,14 @@ v1 DTO 最小字段：
 
 ```text
 CreateHarnessSession
-  harnessSessionId
+  harnessSessionId = sessionId  // v1 兼容字段名，不是第二套 ID
   approvalMode
 
 LoadHarnessSession
-  harnessSessionId
+  harnessSessionId = sessionId
 
 HarnessSessionRef
-  harnessSessionId
+  harnessSessionId = sessionId
   harnessClientId
   harnessBootId
   harnessControlCwd
@@ -279,7 +278,7 @@ StreamHarnessEvents
   optionalSnapshot
 ```
 
-P3 的 Harness 使用启动时固定的、无租户业务文件的 `harnessControlCwd`。create/load 不接收公共 workspace path，也不把 Java 业务 workspace 映射成本机 cwd。Java 在自己的 Session binding 中保存 `workspaceId`，`HarnessSessionResolver` 再用 `harnessSessionId` 把它解析为 Runtime Broker 的 `RuntimeScope`。`sessionScope` 在 transport 内固定为 `thread`，不开放给产品调用方选择。
+P3 的 Harness 使用启动时固定的、无租户业务文件的 `harnessControlCwd`。create/load 不接收公共 workspace path，也不把 Java 业务 workspace 映射成本机 cwd。Java 在自己的 Session binding 中保存 `workspaceId`，`HarnessSessionResolver` 再用同一个 `sessionId` 把它解析为 Runtime Broker 的 `RuntimeScope`。`sessionScope` 在 transport 内固定为 `thread`，不开放给产品调用方选择。
 
 实现要求：
 
@@ -300,15 +299,15 @@ P3 的 Harness 使用启动时固定的、无租户业务文件的 `harnessContr
 
 ### 6.1 create outcome unknown
 
-Java 先生成 `harnessSessionId`，再发送 create。出现响应丢失时执行：
+Java 先生成唯一的 `sessionId`，再发送 create。出现响应丢失时执行：
 
 ```text
-create(harnessSessionId)
+create(sessionId)
   -> success: 保存 binding
   -> outcome unknown:
-       load(harnessSessionId)
+       load(sessionId)
          -> found: 保存 binding
-         -> not found: 用同一 harnessSessionId 重试 create 一次
+         -> not found: 用同一 sessionId 重试 create 一次
          -> generation mismatch: 进入 RECOVERY_REQUIRED
 ```
 
@@ -362,9 +361,9 @@ SessionOperationLock
 TenantWorkspaceAuthorizer
 ```
 
-Controller 只接收公共 ID。Coordinator 在鉴权后解析 Harness ID，任何来自请求体的 tenant、workspace、cwd、Harness endpoint 或 Runtime ID 都不能成为权限依据。
+Controller 只接收 `sessionId`。Coordinator 在租户鉴权后使用同一个 ID 访问 Harness；任何来自请求体的 tenant、workspace、cwd、Harness endpoint 或 Runtime ID 都不能成为权限依据。
 
-`HarnessSessionResolver` 由产品 Java 实现，只按已提交的 `harnessSessionId` 查询 `SessionBackendBinding + AgentSession`，返回 tenant、workspace、capability 和隔离策略组成的 `RuntimeScope`。找不到、未提交、已关闭或 capability 不匹配时必须 fail closed；不能采用 Harness 请求中自报的 scope。
+`HarnessSessionResolver` 由产品 Java 实现，只按已提交的 `sessionId` 查询 `SessionBackendBinding + AgentSession`，返回 tenant、workspace、capability 和隔离策略组成的 `RuntimeScope`。找不到、未提交、已关闭或 capability 不匹配时必须 fail closed；不能采用 Harness 请求中自报的 scope。
 
 ### 7.2 最小持久字段
 
@@ -385,7 +384,7 @@ chat_history
 agent_cli_runtime_session
   cli_code = QWEN_HOSTED_HARNESS
   runtime_opaque_id = harnessEndpointId
-  cli_session_id = harnessSessionId
+  cli_session_id = sessionId
   bridge_endpoint = Hosted Harness base URL
   harness_boot_id / harness_client_id / harness_protocol_version / harness_capability_digest
 
@@ -412,7 +411,7 @@ executionCallId 幂等由 Runtime Broker 管理。bearer token 不写入任何�
 ### 8.1 Session 尚未绑定 Harness
 
 ```text
-T0  Java 完成鉴权，生成/读取 sessionCode、harnessSessionId、requestCode、promptId
+T0  Java 完成鉴权，生成/读取唯一 sessionId、requestCode、promptId
 T1  chat_history 先写 RUNNING，并保存原始请求、promptId、payloadDigest、deadline
 T2  Java create/load Hosted Harness Session，持久化带 boot fencing 的 current binding
 T3  Java 提交同一 promptId，同时异步触发 ToolRuntimeWarmService.warmAsync()
@@ -433,7 +432,7 @@ Harness create 和 submit 在同一分支内顺序执行；Runtime warm 与这�
 persist RUNNING Turn + promptId/digest
   -> parallel
        Harness submit(promptId)
-       Broker warm(harnessSessionId)  // 幂等，通常立即复用
+       Broker warm(sessionId)  // 幂等，通常立即复用
 ```
 
 ### 8.3 无 Outbox 的崩溃恢复策略
@@ -525,7 +524,7 @@ Java instance 1 <-> Harness process 1
 Java instance 2 <-> Harness process 2
 ```
 
-每个 Harness 是常驻、多 Session 的进程，不是每请求一个进程，也不是每 Session 一个 Pod。Session 隔离由 Java binding、Harness Session ID、独立 Context 和 Runtime workspace scope 保证。
+每个 Harness 是常驻、多 Session 的进程，不是每请求一个进程，也不是每 Session 一个 Pod。Session 隔离由 Java binding、统一 Session ID、独立 Context 和 Runtime workspace scope 保证。
 
 Harness 的 primary workspace 是部署级 control workspace，只放共享 agent 配置和 Session 持久化元数据，不放任何租户代码或业务文件。业务 tenant/workspace 路径只存在于 Java 权威映射和 Tool Runtime scope 中。P3 不开放 Hosted Harness 的动态 workspace 注册接口；需要不同 agent capability 的租户使用不同 capability digest 的 Harness pool。
 

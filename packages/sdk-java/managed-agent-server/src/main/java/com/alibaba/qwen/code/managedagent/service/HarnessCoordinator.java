@@ -177,7 +177,7 @@ public class HarnessCoordinator {
         warmRuntime(session, claimed);
         requireLease(leaseLost);
         Attachment attachment = harness.createOrLoad(
-                session.harnessSessionId(), session.harnessBootId() != null);
+                session.sessionId(), session.harnessBootId() != null);
         if (!store.bindHarness(session.tenantId(), session.sessionId(),
                 attachment.bootId())) {
             return fail(claimed, "hosted_harness_generation_mismatch",
@@ -189,7 +189,7 @@ public class HarnessCoordinator {
         if (current.harnessEventEpoch() == null) {
             store.markSubmissionAttempted(current.tenantId(),
                     current.sessionId(), current.turnId(), owner);
-            Admission admission = harness.submit(session.harnessSessionId(),
+            Admission admission = harness.submit(session.sessionId(),
                     current.promptId(), current.input(),
                     current.payloadDigest());
             requireLease(leaseLost);
@@ -200,12 +200,12 @@ public class HarnessCoordinator {
                     current.turnId()).orElseThrow();
         }
         if ("CANCELLING".equals(current.status())) {
-            harness.cancel(session.harnessSessionId());
+            harness.cancel(session.sessionId());
         }
         long lastEventId = current.harnessLastEventId() == null ? 0
                 : current.harnessLastEventId();
         try (SourceStream stream = harness.stream(
-                session.harnessSessionId(), lastEventId,
+                session.sessionId(), lastEventId,
                 current.harnessEventEpoch())) {
             for (SourceEvent event = stream.next(); event != null;
                     event = stream.next()) {
@@ -241,7 +241,7 @@ public class HarnessCoordinator {
                 session.sessionId(), turn.turnId(),
                 "environment.provisioning", Map.of(), false, startKey);
         try {
-            runtimeWarmer.warm(session.harnessSessionId()).whenComplete(
+            runtimeWarmer.warm(session.sessionId()).whenComplete(
                     (ignored, error) -> runtimeWarmResult(session, turn,
                             error));
         } catch (RuntimeException error) {
@@ -272,11 +272,10 @@ public class HarnessCoordinator {
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
             Attachment attachment = harness.createOrLoad(
-                    session.harnessSessionId(),
-                    session.harnessBootId() != null);
+                    session.sessionId(), session.harnessBootId() != null);
             if (store.bindHarness(tenantId, sessionId,
                     attachment.bootId())) {
-                harness.cancel(session.harnessSessionId());
+                harness.cancel(session.sessionId());
             }
         } catch (RuntimeException error) {
             LOG.warn("Managed Turn cancellation will recover tenant={}"

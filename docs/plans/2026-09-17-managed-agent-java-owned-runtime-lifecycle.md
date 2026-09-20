@@ -106,16 +106,16 @@ worker 先写同目录临时文件，再原子 rename 为 `ready.json`。Java �
 ```java
 final class RuntimeProvisionRequest {
     RuntimeScope scope;
-    String isolationKey; // workspace: null; session: harnessSessionId
+    String isolationKey; // workspace: null; session: canonical sessionId
 }
 ```
 
 其 equality/hash 必须覆盖完整 `RuntimeScope` 和 `isolationKey`。Broker 是唯一构造者：
 
 - `workspace` 隔离：`isolationKey = null`；
-- `session` 隔离：`isolationKey = harnessSessionId`。
+- `session` 隔离：`isolationKey = sessionId`；该值同时是公共 API 与 Harness 使用的 UUID。
 
-这样 Local Process 和后续 Kubernetes Provisioner 使用同一 reuse key，不会把两个 Session-isolated Harness Session 放到同一 Runtime。
+这样 Local Process 和后续 Kubernetes Provisioner 使用同一 reuse key，不会把两个 Session-isolated Context 放到同一 Runtime。
 
 ### 4.2 RuntimeProvisioner
 

@@ -26,7 +26,7 @@ Client
 - Harness 常驻并服务多个 Session；模型上下文按 Session 隔离，不为每个请求创建 Harness 进程或 Pod。
 - Tool Runtime 可以是进程、容器或 Pod。Broker 只依赖 `RuntimeProvisioner` 接口，不把 Kubernetes 写进协议。
 - 没有 Tool Call 的 Turn 不访问 Runtime；发生 Tool Call 时，同一轮模型循环等待原 Runtime ready 后继续。
-- Harness 不直接接收 tenant、Runtime endpoint 或调度凭证。Java 根据已认证的 `harnessSessionId` 解析权威 scope。
+- Harness 不直接接收 tenant、Runtime endpoint 或调度凭证。Java 根据已认证的统一 `sessionId` 解析权威 scope；现有 `harnessSessionId` wire 字段仅是同一值的兼容别名。
 - Managed 失败不得把同一 Turn 切到 Legacy 重跑，避免重复副作用和上下文分叉。
 - 现有 `qwen serve` Legacy 链路继续保留；仅新建且通过能力检查的 Session 固定使用 Managed。
 
@@ -60,7 +60,7 @@ Client
 ```text
 T0  Client -> Java: POST Prompt
 T1  Java: 鉴权、固定 executionEngine/agentRevision、写 Input 与 Turn
-T2  Java: 异步 broker.warm(harnessSessionId)
+T2  Java: 异步 broker.warm(sessionId)
 T3  Java -> Harness: submit Prompt
 T4  Harness -> Model: 发起模型流式请求
 T5  Harness -> Java: model.delta；Java 写 eventSequence 并转发 SSE
@@ -129,12 +129,12 @@ Runtime 不主动连接 Java。Local Process 场景只在启动阶段通过独�
 
 产品接入阶段至少需要四个 Repository；当前内存实现只用于契约与 E2E：
 
-| Repository                        | 主键                                      | 必须字段                                                                       | 恢复用途                         |
-| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------ | -------------------------------- |
-| `SessionBackendBindingRepository` | `publicSessionId`                         | tenant、workspace、harnessSessionId、engine、agentRevision、generation、status | 恢复固定 owner，禁止换引擎       |
-| `RuntimeBindingRepository`        | reuse key / `runtimeBindingId`            | scope、state、runtimeInstanceId、leaseId、epoch、idleDeadline                  | 找回原 Runtime，防止跨代请求     |
-| `ToolExecutionRepository`         | `executionCallId` 和唯一 `idempotencyKey` | requestDigest、binding、state、resultRef、errorCode                            | 去重、查询原回执、阻止不确定重放 |
-| `PublicEventStore`                | `publicSessionId + eventSequence`         | turnId、itemId、type、payloadRef、createdAt                                    | SSE 重连和公共 Item 投影         |
+| Repository                        | 主键                                      | 必须字段                                                      | 恢复用途                         |
+| --------------------------------- | ----------------------------------------- | ------------------------------------------------------------- | -------------------------------- |
+| `SessionBackendBindingRepository` | `sessionId`                               | tenant、workspace、engine、agentRevision、generation、status  | 恢复固定 owner，禁止换引擎       |
+| `RuntimeBindingRepository`        | reuse key / `runtimeBindingId`            | scope、state、runtimeInstanceId、leaseId、epoch、idleDeadline | 找回原 Runtime，防止跨代请求     |
+| `ToolExecutionRepository`         | `executionCallId` 和唯一 `idempotencyKey` | requestDigest、binding、state、resultRef、errorCode           | 去重、查询原回执、阻止不确定重放 |
+| `PublicEventStore`                | `sessionId + eventSequence`               | turnId、itemId、type、payloadRef、createdAt                   | SSE 重连和公共 Item 投影         |
 
 数据库事务边界：Prompt admission 必须在同一事务中写入 Input、Turn 和 Session owner；提交后才异步调用 `warm()` 和 Harness。工具执行必须先插入 `accepted`，成功取得唯一键后才能向 Runtime 派发。
 
@@ -148,7 +148,7 @@ ABSENT -> PROVISIONING -> READY -> DRAINING -> RELEASED
 ```
 
 - 相同 reuse key 的并发 `warm/acquire` 共享一个 provisioning future。
-- `isolationClass=workspace` 按 scope 复用；`isolationClass=session` 的 key 额外包含 `harnessSessionId`，且 provisioner 必须返回独立 Runtime。
+- `isolationClass=workspace` 按 scope 复用；`isolationClass=session` 的 key 额外包含统一 `sessionId`，且 provisioner 必须返回独立 Runtime。
 - `FAILED` 可以按退避策略重新 provision；已经 `DISPATCHED` 的 execution 不得换 Runtime 重放。
 - `DRAINING` 不接受新 execution，但允许在途 execution 查询和取消。
 
@@ -222,7 +222,7 @@ Java 产品仓改动：
 
 1. 增加 `ManagedAgentCoordinator`，组合 Session repository、`HarnessClient`、`RuntimeBrokerService` 和 `PublicEventStore`。
 2. Session 创建时固定 `executionEngine=managed`、`agentRevision`、`workspaceGeneration` 和 `capabilityDigest`。
-3. Prompt admission 事务提交后同时调用 `runtimeBroker.warm(harnessSessionId)` 与 `harnessClient.submitPrompt(...)`。
+3. Prompt admission 事务提交后同时调用 `runtimeBroker.warm(sessionId)` 与 `harnessClient.submitPrompt(...)`。
 4. `warm()` 失败只记录 Runtime 状态；在模型尚未产生 Tool Call 时不终止模型流。
 5. Harness 事件由 Java 分配单调 `eventSequence`，通过 SSE 输出；支持 `Last-Event-ID`。
 6. Client 断开只关闭订阅，不取消 Turn；显式 cancel 发送给 Harness，由 Harness 使用精确的 Runtime Session 和 execution ID 继续取消 Broker execution。
@@ -261,7 +261,7 @@ P4 已自动化并接入 Java CI：
 
 执行中取消本机证据：5,043 ms 观察到根进程和子进程已启动，5,087 ms 发出取消；physical execute 与 physical cancel 均为 1，两级 PID 均退出，4 秒延迟写入未发生。
 
-多 Session 本机证据：两个逻辑 Session 共享一次 physical provision，分别完成两次 acquire 和两次 execute；Broker 观察到两个不同 Harness Session ID，两个模型上下文、最终文本和文件内容均保持隔离。
+多 Session 本机证据：两个逻辑 Session 共享一次 physical provision，分别完成两次 acquire 和两次 execute；Broker 观察到两个不同的统一 Session ID，两个模型上下文、最终文本和文件内容均保持隔离。
 
 必须输出指标：`prompt_accepted_ms`、`first_model_event_ms`、`runtime_ready_ms`、`tool_wait_runtime_ms`、`turn_completed_ms`、physical execute count。
 

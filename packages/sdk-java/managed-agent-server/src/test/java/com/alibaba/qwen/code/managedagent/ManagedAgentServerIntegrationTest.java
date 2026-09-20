@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,6 +39,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -65,6 +67,9 @@ class ManagedAgentServerIntegrationTest {
 
     @Autowired
     private ManagedAgentStore store;
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     @Test
     void requiresTenantHeader() throws Exception {
@@ -102,6 +107,12 @@ class ManagedAgentServerIntegrationTest {
                 .andReturn();
         String sessionId = objectMapper.readTree(
                 first.getResponse().getContentAsString()).get("id").asText();
+        assertThat(UUID.fromString(sessionId).toString()).isEqualTo(sessionId);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " INFORMATION_SCHEMA.COLUMNS WHERE"
+                        + " LOWER(TABLE_NAME) = 'managed_agent_session' AND"
+                        + " LOWER(COLUMN_NAME) = 'harness_session_id'",
+                Integer.class)).isZero();
 
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
             MvcResult events = events(tenant, sessionId);
@@ -112,6 +123,7 @@ class ManagedAgentServerIntegrationTest {
             assertThat(data.get(data.size() - 1).get("terminal").asBoolean())
                     .isTrue();
         });
+        assertThat(harness.hasSession(sessionId)).isTrue();
 
         JsonNode allEvents = objectMapper.readTree(events(tenant, sessionId)
                 .getResponse().getContentAsString()).get("data");
@@ -447,6 +459,7 @@ class ManagedAgentServerIntegrationTest {
                 new ConcurrentHashMap<>();
         private final Set<String> cancelled =
                 ConcurrentHashMap.newKeySet();
+        private final Set<String> sessions = ConcurrentHashMap.newKeySet();
         private final Map<String, AtomicInteger> uncertainAttempts =
                 new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> uncertainGates =
@@ -460,52 +473,53 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
-        public Attachment createOrLoad(String harnessSessionId,
+        public Attachment createOrLoad(String sessionId,
                 boolean created) {
+            sessions.add(sessionId);
             return new Attachment(
                     "11111111-1111-4111-8111-111111111111");
         }
 
         @Override
-        public Admission submit(String harnessSessionId, String promptId,
+        public Admission submit(String sessionId, String promptId,
                 List<Map<String, Object>> input, String payloadDigest) {
-            promptIds.put(harnessSessionId, promptId);
+            promptIds.put(sessionId, promptId);
             boolean held = input.stream().anyMatch(block ->
                     "hold".equals(block.get("text")));
             if (held) {
-                gates.put(harnessSessionId, new CountDownLatch(1));
+                gates.put(sessionId, new CountDownLatch(1));
             }
             submits.incrementAndGet();
             boolean uncertain = input.stream().anyMatch(block ->
                     "uncertain".equals(block.get("text")));
             if (uncertain) {
                 int attempt = uncertainAttempts.computeIfAbsent(
-                        harnessSessionId, ignored -> new AtomicInteger())
+                        sessionId, ignored -> new AtomicInteger())
                         .incrementAndGet();
                 if (attempt == 1) {
                     throw new IllegalStateException(
                             "fixture submit outcome is unknown");
                 }
                 CountDownLatch gate = uncertainGates.computeIfAbsent(
-                        harnessSessionId, ignored -> new CountDownLatch(1));
-                uncertainRetries.add(harnessSessionId);
+                        sessionId, ignored -> new CountDownLatch(1));
+                uncertainRetries.add(sessionId);
                 try {
                     gate.await(5, TimeUnit.SECONDS);
                 } catch (InterruptedException error) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException(error);
                 } finally {
-                    uncertainRetries.remove(harnessSessionId);
+                    uncertainRetries.remove(sessionId);
                 }
             }
             return new Admission(0, "epoch-1");
         }
 
         @Override
-        public SourceStream stream(String harnessSessionId, long lastEventId,
+        public SourceStream stream(String sessionId, long lastEventId,
                 String eventEpoch) {
-            String promptId = promptIds.get(harnessSessionId);
-            CountDownLatch gate = gates.get(harnessSessionId);
+            String promptId = promptIds.get(sessionId);
+            CountDownLatch gate = gates.get(sessionId);
             Queue<SourceEvent> events = new ArrayDeque<>();
             if (lastEventId < 1) {
                 events.add(new SourceEvent(1L, "session_update", Map.of(
@@ -536,7 +550,7 @@ class ManagedAgentServerIntegrationTest {
                                 return null;
                             }
                         }
-                        if (cancelled.contains(harnessSessionId)) {
+                        if (cancelled.contains(sessionId)) {
                             return new SourceEvent(2L, "turn_complete",
                                     Map.of("stopReason", "cancelled"),
                                     promptId, Map.of());
@@ -552,9 +566,13 @@ class ManagedAgentServerIntegrationTest {
         }
 
         @Override
-        public void cancel(String harnessSessionId) {
-            cancelled.add(harnessSessionId);
+        public void cancel(String sessionId) {
+            cancelled.add(sessionId);
             cancels.incrementAndGet();
+        }
+
+        boolean hasSession(String sessionId) {
+            return sessions.contains(sessionId);
         }
 
         int submitCount() {

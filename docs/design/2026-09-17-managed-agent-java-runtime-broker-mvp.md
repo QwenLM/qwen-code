@@ -82,11 +82,11 @@ Java may persist a public Item projection, but it does not become a second model
 
 ## 6. Identity model
 
-The following IDs are distinct:
+The Session has one canonical RFC UUID across Java, Harness, and Broker. The
+remaining execution IDs are distinct:
 
 ```text
-publicSessionId   Java public Session
-harnessSessionId  qwen internal Session
+sessionId         public API, qwen Session, and Broker scope
 runtimeSessionId  one Managed Tool Session
 runtimeBindingId  one provisioned workspace Runtime binding
 turnId            one Agent turn
@@ -94,7 +94,7 @@ toolCallId        the model-produced Tool Call
 executionCallId   the durable physical tool execution identity
 ```
 
-Java stores a `SessionBackendBinding` from `publicSessionId` to `harnessSessionId`, tenant, workspace generation, fixed execution engine, Agent revision, and capability digest. The execution engine and revision are immutable after Session creation.
+Java stores a `SessionBackendBinding` keyed by `sessionId` with tenant, workspace generation, fixed execution engine, Agent revision, and capability digest. It does not store a second Harness Session ID. The execution engine and revision are immutable after Session creation.
 
 The default Runtime reuse key is:
 
@@ -108,7 +108,7 @@ tenantId
 + sessionIdentity when isolationClass=session
 ```
 
-Agent revisions with the same executable capabilities may share a Runtime. Strong-isolation workloads use `isolationClass=session`, which adds the owning Harness Session to the binding key and forces the provisioner to return a distinct Runtime.
+Agent revisions with the same executable capabilities may share a Runtime. Strong-isolation workloads use `isolationClass=session`, which adds the canonical Session ID to the binding key and forces the provisioner to return a distinct Runtime.
 
 ## 7. Data models
 
@@ -116,8 +116,7 @@ Agent revisions with the same executable capabilities may share a Runtime. Stron
 
 ```ts
 interface SessionBackendBinding {
-  publicSessionId: string;
-  harnessSessionId: string;
+  sessionId: string;
   tenantId: string;
   workspaceId: string;
   workspaceGeneration: string;
@@ -160,7 +159,7 @@ interface ToolExecution {
   executionCallId: string;
   idempotencyKey: string;
   runtimeBindingId: string;
-  harnessSessionId: string;
+  sessionId: string;
   runtimeSessionId: string;
   turnId: string;
   toolCallId: string;
@@ -190,7 +189,7 @@ ACCEPTED -> WAITING_RUNTIME -> DISPATCHED -> STARTED
 
 ## 8. Harness-to-Broker contract
 
-`qwen serve` adds `BrokerManagedRuntimeProvider`, `ManagedRuntimeBrokerClient`, and a Hosted Harness profile. The provider sends only internal Session and invocation identities. Java resolves tenant and workspace scope from the authenticated `harnessSessionId`; it does not trust tenant or Runtime endpoint fields supplied by the Harness.
+`qwen serve` adds `BrokerManagedRuntimeProvider`, `ManagedRuntimeBrokerClient`, and a Hosted Harness profile. The provider sends the canonical Session ID and invocation identities. Java resolves tenant and workspace scope from the authenticated `sessionId`; the existing `harnessSessionId` wire field is only a compatibility alias carrying that same value. Java does not trust tenant or Runtime endpoint fields supplied by the Harness.
 
 The private API is:
 
@@ -230,7 +229,7 @@ For a cold Tool turn, the Harness creates or resolves a `ToolExecution`; Java ke
 The execution idempotency key is derived from:
 
 ```text
-harnessSessionId + turnId + toolCallId + requestDigest
+sessionId + turnId + toolCallId + requestDigest
 ```
 
 - The same key and request returns the original `executionCallId`.
@@ -342,7 +341,7 @@ The embeddable Java Broker lives in `packages/sdk-java/runtime-broker`. Product 
 - `qwen serve --profile hosted-harness` with loopback-only, bearer-authenticated, API-only startup validation.
 - Dedicated Broker URL and credential inputs with secret scrubbing from child Runtime environments.
 - A broker-backed Managed Tool v2 provider for typed control, durable execution creation/status/cancel, and terminal release.
-- Propagation of the owning Harness Session ID independently from the Runtime Session ID.
+- Propagation of the canonical Session ID independently from the Runtime Session ID.
 - Fail-closed ordinary-session engine selection and removal of Local Runtime fallback in Hosted mode.
 - Lazy Broker acquisition, so a no-Tool turn does not contact or wait for the Broker.
 
@@ -350,7 +349,7 @@ Prompt-time product-service `warm()`, public event projection, standalone Runtim
 
 ### 16.2 Implemented in the current Java slice
 
-- A Java 11 embeddable `RuntimeBrokerService` with authenticated Harness Session scope resolution and compatible Runtime binding reuse.
+- A Java 11 embeddable `RuntimeBrokerService` with authenticated canonical Session scope resolution and compatible Runtime binding reuse.
 - Asynchronous `warm()` and acquisition, allowing the product service to start provisioning without blocking model inference.
 - An in-memory execution ledger that returns one `executionCallId` and dispatches once for one idempotency key.
 - Cross-Harness identity rejection, terminal cancellation precedence, active-execution release fencing, and failed-provisioning retry.

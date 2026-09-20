@@ -1,7 +1,6 @@
 CREATE TABLE managed_agent_session (
     tenant_id VARCHAR(128) NOT NULL,
     session_id VARCHAR(64) NOT NULL,
-    harness_session_id VARCHAR(36) NOT NULL,
     agent_id VARCHAR(128) NOT NULL,
     title VARCHAR(512),
     status VARCHAR(32) NOT NULL,
@@ -13,7 +12,7 @@ CREATE TABLE managed_agent_session (
     updated_at BIGINT NOT NULL,
     version BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, session_id),
-    UNIQUE (harness_session_id)
+    UNIQUE (session_id)
 );
 
 CREATE INDEX managed_agent_session_list_idx

@@ -26,8 +26,8 @@ public state in MySQL, and keep Harness and Tool Runtime credentials private.
   ownership boundary.
 - Do not implement end-user authentication or interpret `Authorization` on the
   public API.
-- Persist Session, Turn, command-idempotency, Harness binding, and public Event
-  state in MySQL.
+- Persist Session, Turn, command-idempotency, Harness generation fencing, and
+  public Event state in MySQL.
 - Submit model work to the existing Hosted Harness without waiting for Tool
   Runtime readiness.
 - Expose durable SSE replay from Java-owned events rather than proxying the
@@ -103,15 +103,18 @@ Phase 1 owns these tables:
 
 | Table                   | Purpose                                                                                             |
 | ----------------------- | --------------------------------------------------------------------------------------------------- |
-| `managed_agent_session` | Tenant-owned public Session, immutable Harness ID/binding, status, and public sequence              |
+| `managed_agent_session` | Tenant-owned Session UUID, Harness generation fence, status, and public sequence                    |
 | `managed_agent_turn`    | One admitted user input, stable Harness prompt identity, digest, dispatch lease, and terminal state |
 | `managed_agent_command` | `(tenant, operation, idempotency key)` claim and semantic request digest                            |
 | `managed_agent_event`   | Per-Session public sequence, source-event deduplication, replay payload, and terminal marker        |
 
-IDs have separate roles: public `sessionId` and `turnId` are API identities;
-`harnessSessionId` and `promptId` are private UUIDs used by the Hosted Harness.
-No Harness endpoint, boot ID, client ID, Runtime token, or local path appears in
-public responses.
+One RFC UUID `sessionId` identifies the Session across the public API, Java
+store, Hosted Harness, JSONL transcript, and Runtime Broker. The internal
+`harnessSessionId` wire field is a compatibility alias carrying this same
+value, not a second identity or database mapping. `turnId` remains the public
+Turn identity and `promptId` remains the private idempotent Harness submission
+identity. No Harness endpoint, boot ID, client ID, Runtime token, or local path
+appears in public responses.
 
 The Session row owns `last_sequence`. Event insertion locks that row, allocates
 the next value, and inserts the Event in the same transaction. A unique source
@@ -138,11 +141,11 @@ semantic request and stores its SHA-256 digest before dispatch.
   same Turn. An expired lease permits recovery by another replica.
 - Harness source cursor and epoch are persisted after every accepted event.
 
-The coordinator attaches or loads the bound Harness Session, submits the
-original prompt, consumes its fenced SSE stream, and projects events into the
-public store. `turn_complete` and `turn_error` settle the Turn durably. A
-scheduled recovery scan reclaims admitted or running Turns whose dispatch
-lease expired.
+The coordinator attaches or loads the same Session UUID in the Harness,
+submits the original prompt, consumes its fenced SSE stream, and projects
+events into the public store. `turn_complete` and `turn_error` settle the Turn
+durably. A scheduled recovery scan reclaims admitted or running Turns whose
+dispatch lease expired.
 
 ## 8. API slice
 
@@ -182,10 +185,9 @@ live `lastSequence` cursor.
 
 Creating the durable Turn and beginning model inference do not depend on Tool
 Runtime readiness. When the embedded Runtime Broker is enabled, the server
-starts `warm(harnessSessionId)` asynchronously after admission and submits the
-Prompt independently. A no-tool Turn can complete without waiting for warmup;
-a Tool Call waits at `BrokerManagedRuntimeProvider` for the original Runtime
-binding.
+starts `warm(sessionId)` asynchronously after admission and submits the Prompt
+independently. A no-tool Turn can complete without waiting for warmup; a Tool
+Call waits at `BrokerManagedRuntimeProvider` for the original Runtime binding.
 
 The Hosted Harness client validates capability digest, protocol version, boot
 ID, SSE epoch, and source sequence. A fence mismatch fails the Turn; it never
@@ -235,6 +237,8 @@ MySQL; H2 in MySQL mode is test-only.
 
 - Unit-test tenant parsing, canonical digesting, event projection, and errors.
 - Start a real Spring context with Flyway and H2 MySQL mode.
+- Verify that the public Session UUID is the exact ID passed to the Harness and
+  Runtime Broker and that no second Session ID is persisted.
 - Verify same-key replay, changed-body conflict, and cross-tenant 404.
 - Verify durable Event ordering and `Last-Event-ID` replay.
 - Run against a deterministic Hosted Harness fixture and prove that create,

@@ -82,11 +82,10 @@ Java 可以持久化公共 Item 投影，但本阶段不成为第二套模型历
 
 ## 6. 身份模型
 
-以下 ID 相互独立：
+Session 在 Java、Harness 和 Broker 中使用同一个 RFC UUID；其余执行 ID 相互独立：
 
 ```text
-publicSessionId   Java 对外 Session
-harnessSessionId  qwen 内部 Session
+sessionId         公共 API、qwen Session 与 Broker scope
 runtimeSessionId  一次 Managed Tool Session
 runtimeBindingId  一个已 provision 的 Workspace Runtime binding
 turnId            一轮 Agent Turn
@@ -94,7 +93,7 @@ toolCallId        模型生成的 Tool Call
 executionCallId   持久化的物理工具执行身份
 ```
 
-Java 保存从 `publicSessionId` 到 `harnessSessionId`、租户、Workspace generation、固定执行引擎、Agent revision 和 capability digest 的 `SessionBackendBinding`。Session 创建后执行引擎和 revision 不可修改。
+Java 保存以 `sessionId` 为键的 `SessionBackendBinding`，其中包含租户、Workspace generation、固定执行引擎、Agent revision 和 capability digest；不再保存第二套 Harness Session ID。Session 创建后执行引擎和 revision 不可修改。
 
 默认 Runtime 复用键为：
 
@@ -108,7 +107,7 @@ tenantId
 + isolationClass=session 时的 sessionIdentity
 ```
 
-如果可执行能力相同，不同 Agent revision 可以共享 Runtime。强隔离任务使用 `isolationClass=session`；此时 binding key 加入所属 Harness Session，并要求 provisioner 返回独立 Runtime。
+如果可执行能力相同，不同 Agent revision 可以共享 Runtime。强隔离任务使用 `isolationClass=session`；此时 binding key 加入统一 Session ID，并要求 provisioner 返回独立 Runtime。
 
 ## 7. 数据模型
 
@@ -116,8 +115,7 @@ tenantId
 
 ```ts
 interface SessionBackendBinding {
-  publicSessionId: string;
-  harnessSessionId: string;
+  sessionId: string;
   tenantId: string;
   workspaceId: string;
   workspaceGeneration: string;
@@ -160,7 +158,7 @@ interface ToolExecution {
   executionCallId: string;
   idempotencyKey: string;
   runtimeBindingId: string;
-  harnessSessionId: string;
+  sessionId: string;
   runtimeSessionId: string;
   turnId: string;
   toolCallId: string;
@@ -190,7 +188,7 @@ ACCEPTED -> WAITING_RUNTIME -> DISPATCHED -> STARTED
 
 ## 8. Harness 到 Broker 契约
 
-`qwen serve` 新增 `BrokerManagedRuntimeProvider`、`ManagedRuntimeBrokerClient` 和 Hosted Harness Profile。Provider 只发送内部 Session 和调用身份。Java 从已认证的 `harnessSessionId` 解析租户和 Workspace 范围，不信任 Harness 提交的 tenant 或 Runtime endpoint 字段。
+`qwen serve` 新增 `BrokerManagedRuntimeProvider`、`ManagedRuntimeBrokerClient` 和 Hosted Harness Profile。Provider 发送统一 Session ID 和调用身份。Java 从已认证的 `sessionId` 解析租户和 Workspace 范围；现有 `harnessSessionId` 协议字段只是传递同一值的兼容别名。Java 不信任 Harness 提交的 tenant 或 Runtime endpoint 字段。
 
 私有接口为：
 
@@ -230,7 +228,7 @@ Java 接受首轮 Prompt 时：
 执行幂等键由以下字段生成：
 
 ```text
-harnessSessionId + turnId + toolCallId + requestDigest
+sessionId + turnId + toolCallId + requestDigest
 ```
 
 - 相同 key 和相同请求返回原 `executionCallId`。
@@ -342,7 +340,7 @@ node managed-runtime-worker.js --boot-config /owned/path/boot.json
 - 增加 `qwen serve --profile hosted-harness`，启动时强制仅监听 loopback、要求 bearer 鉴权并关闭 Web UI。
 - 增加独立的 Broker 地址与凭证输入，并从子 Runtime 环境中清除 Broker 密钥。
 - 增加 Broker 驱动的 Managed Tool v2 Provider，覆盖类型化控制、持久执行创建/状态/取消与终态释放。
-- 独立传递所属 Harness Session ID 和 Runtime Session ID。
+- 独立传递统一 Session ID 和 Runtime Session ID。
 - Hosted 模式下普通会话的引擎选择失败即关闭，并移除 Local Runtime 回退。
 - Broker 获取保持懒加载，因此无 Tool 的轮次不会访问或等待 Broker。
 
@@ -350,7 +348,7 @@ node managed-runtime-worker.js --boot-config /owned/path/boot.json
 
 ### 16.2 当前 Java 切片已完成
 
-- 增加 Java 11 可嵌入 `RuntimeBrokerService`，由已鉴权的 Harness Session 解析权威 scope，并复用兼容 Runtime binding。
+- 增加 Java 11 可嵌入 `RuntimeBrokerService`，由已鉴权的统一 Session 解析权威 scope，并复用兼容 Runtime binding。
 - 增加异步 `warm()` 和 acquire，使产品服务可以启动 Runtime provisioning 而不阻塞模型推理。
 - 增加内存版执行账本，同一幂等键只返回一个 `executionCallId` 并且只派发一次。
 - 覆盖跨 Harness 身份拒绝、取消终态优先、活动执行释放栅栏以及 provisioning 失败后重试。

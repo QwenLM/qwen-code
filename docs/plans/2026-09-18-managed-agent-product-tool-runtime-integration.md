@@ -193,7 +193,7 @@ ALTER TABLE agent_cli_runtime_session
 ```text
 selectCurrentByCliSessionId(
   cliCode = QWEN_HOSTED_HARNESS,
-  cliSessionId = harnessSessionId
+  cliSessionId = sessionId
 )
 ```
 
@@ -217,7 +217,7 @@ agent_managed_runtime_binding
   binding_id
   tenant_id
   session_code
-  harness_session_id
+  session_id
   isolation_class
   isolation_key
   scope_digest
@@ -243,7 +243,7 @@ agent_managed_runtime_session
   binding_id
   runtime_generation
   tenant_id
-  harness_session_id
+  session_id
   turn_kind
   scope_digest
   state = ACQUIRING / READY / RELEASING / RELEASED / FAILED
@@ -255,7 +255,7 @@ agent_managed_tool_execution
   idempotency_key
   binding_id
   runtime_generation
-  harness_session_id
+  session_id
   runtime_session_id
   turn_id
   tool_call_id
@@ -277,13 +277,13 @@ agent_managed_tool_execution
 唯一约束：
 
 ```text
-(tenant_id, harness_session_id, active_slot)
+(tenant_id, session_id, active_slot)
 (runtime_session_id)
 (idempotency_key)
 (execution_call_id)
 ```
 
-MySQL 没有通用 partial unique index，活动 binding 使用 `active_slot=1`，终态行把它更新为 `NULL`；唯一键 `(tenant_id, harness_session_id, active_slot)` 因而只约束一条活动 generation，同时允许保留历史 generation。`runtime_generation` 由 Repository 在创建新活动 binding 时单调递增，旧 generation 的写入必须同时匹配 `binding_id + runtime_generation + version`。
+MySQL 没有通用 partial unique index，活动 binding 使用 `active_slot=1`，终态行把它更新为 `NULL`；唯一键 `(tenant_id, session_id, active_slot)` 因而只约束一条活动 generation，同时允许保留历史 generation。`runtime_generation` 由 Repository 在创建新活动 binding 时单调递增，旧 generation 的写入必须同时匹配 `binding_id + runtime_generation + version`。
 
 `encrypted_runtime_token` 只能由产品 Repository 使用 KMS/现有密钥服务加解密。qwen Repository SPI 可以接收已还原的 `RuntimeLease`，但日志、异常、指标、SQL 参数审计和普通查询对象都不得暴露明文 token。若目标环境暂时没有合规的 secret persistence，本阶段只能保持单 Java 实例，不能通过把 token 明文写库来绕过门禁。
 
@@ -304,7 +304,7 @@ interface RuntimeBindingRepository {
   OperationClaim claimOperation(String bindingId, long generation,
       String owner, Instant leaseUntil);
   RuntimeBindingRecord compareAndSet(RuntimeBindingMutation mutation);
-  RuntimeBindingRecord findActive(String tenantId, String harnessSessionId);
+  RuntimeBindingRecord findActive(String tenantId, String sessionId);
 }
 
 interface RuntimeSessionRepository {
@@ -372,7 +372,7 @@ WHERE execution_call_id = :executionCallId
 
 ```text
 idempotencyKey
-harnessSessionId
+sessionId
 runtimeSessionId
 turnId
 toolCallId
@@ -430,13 +430,13 @@ NONE -> PROVISIONING -> READY -> DRAINING -> RELEASED
 
 创建返回后先 CAS 写入 `dataAgentInstanceId`，再等待 domain 和 `/health`。接管过期 `PROVISIONING` 的 Java 先按 `provisionRequestId`/已写入的 instanceId 查询已有实例，只有明确不存在时才创建。READY 的 heartbeat owner 也通过短 operation lease 选主；Java 正常滚动重启只交出 ownership，不删除仍被 Session 使用的 Runtime。当前 `DataAgentRuntimeProvisioner.close()` 的“删除本进程所有 Runtime”行为必须在 durable 模式下移除。
 
-逻辑 Runtime Session 单独持久化。`acquire` 对 `runtime_session_id` 执行 find-or-create 并核对 Harness、scope、turnKind 和 binding generation；任意 Java 都可以对同一 Runtime 重放幂等 `prepare` 并重建本地 handle。`release` 只有在 durable execution ledger 证明没有非终态 execution 时才能进入 RELEASING。binding 表不维护易错的冗余 Session 计数；`drain_requested=true` 且 `RuntimeSessionRepository.countActiveByBinding(...) = 0` 时，持有 binding operation claim 的实例执行物理 drain/release。
+逻辑 Runtime Session 单独持久化。`acquire` 对 `runtime_session_id` 执行 find-or-create 并核对统一 Session、scope、turnKind 和 binding generation；任意 Java 都可以对同一 Runtime 重放幂等 `prepare` 并重建本地 handle。`release` 只有在 durable execution ledger 证明没有非终态 execution 时才能进入 RELEASING。binding 表不维护易错的冗余 Session 计数；`drain_requested=true` 且 `RuntimeSessionRepository.countActiveByBinding(...) = 0` 时，持有 binding operation claim 的实例执行物理 drain/release。
 
-Hosted Harness close 通过 durable binding 写入 `drain_requested`，不再依赖进程内无限增长的 `retiredHarnessSessions`。晚到的 warm/acquire 查询到 drain 或终态 generation 后 fail closed，不能重新 provision。
+Hosted Harness close 通过 durable binding 写入 `drain_requested`，不再依赖进程内无限增长的 retired Session 集合。晚到的 warm/acquire 查询到 drain 或终态 generation 后 fail closed，不能重新 provision。
 
 ## 5. Runtime scope 解析
 
-`ManagedHarnessSessionResolver.resolve(harnessSessionId)` 的产品身份唯一数据源是已提交的 Hosted binding，但 Runtime 协议的 `workspaceId` 不是产品 workspace/project ID。两类身份必须分开：
+`ManagedHarnessSessionResolver.resolve(sessionId)` 的产品身份唯一数据源是已提交的 Hosted binding，但 Runtime 协议的 `workspaceId` 不是产品 workspace/project ID。这里的 `sessionId` 与公共 API、Harness JSONL 使用同一个 UUID；Runtime `workspaceId` 仍不是产品 workspace/project ID：
 
 ```text
 tenantId                = binding.tenantId
@@ -445,7 +445,7 @@ publicProjectId         = binding.workspaceId，用于 DataAgent placement
 resourceGroupId         = binding.managedResourceGroupId
 runtimeWorkspaceCwd     = canonical properties.workspaceCwd，例如 /workspace
 runtimeWorkspaceId      = sha256(runtimeWorkspaceCwd).hex[0:16]
-workspaceGeneration     = binding.harnessSessionId
+workspaceGeneration     = binding.sessionId
 capabilityDigest        = binding.harnessCapabilityDigest
 isolationClass          = session
 ```
@@ -458,7 +458,7 @@ Java 和 qwen 不各自维护一套含糊的 workspace 规则。Java Broker 模�
 
 - 找不到 current Hosted binding；
 - binding 非 RUNNING；
-- Harness Session、tenant、creator 或 capability 不完整；
+- Session、tenant、creator 或 capability 不完整；
 - Managed resourceGroupId 缺失、非正整数或不是稳定 ID；
 - Session 已关闭、删除或进入 recovery blocked；
 - 请求 capability 与当前部署策略不一致。
@@ -498,7 +498,7 @@ copilot:
 `DataAgentRuntimeProvisioner` 使用现有 `DataAgentInstanceService.createManagedRuntime` 内部入口。该入口与用户创建实例复用配额、资源组、launch 和生命周期落库，但显式跳过模型/BFF/MCP 初始化：
 
 ```text
-name               = managed-runtime-<harnessSessionId-prefix>
+name               = managed-runtime-<sessionId-prefix>
 creationSource     = MANAGED_AGENT
 sessionCode        = public sessionCode
 provisionRequestId = <bindingId>:<runtimeGeneration>
@@ -567,7 +567,7 @@ http://<dataAgentInstanceDomain>:4096
 ```text
 ensureSession()
 persist prompt admission
-schedule ManagedRuntimeWarmService.warmAsync(harnessSessionId)
+schedule ManagedRuntimeWarmService.warmAsync(sessionId)
 submit to Hosted Harness
 stream Harness events
 ```
@@ -576,7 +576,7 @@ stream Harness events
 
 - fire-and-observe，不阻塞 submit 或 SSE；
 - 连 scope 解析和数据库反查也必须在独立 executor 中执行，不能只把 DataAgent create 异步化；
-- 相同 harnessSessionId 重复调用只触发一次 provision；
+- 相同 sessionId 重复调用只触发一次 provision；
 - 失败写指标和 binding 状态，不立即终止无 Tool Turn；
 - 当 Tool Call 真正 acquire 时，Broker 等待同一个 warm future；
 - Session close/delete 触发 drain/release，不能让 reaper 与活跃 execute 并发回收。
@@ -926,9 +926,8 @@ managed_runtime_release_total{state}
 Trace 至少关联：
 
 ```text
-publicSessionId
+sessionId
 publicTurnId
-harnessSessionId
 runtimeSessionId
 executionCallId
 dataAgentInstanceId

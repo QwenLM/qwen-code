@@ -29,7 +29,7 @@ public class RuntimeBrokerConfiguration {
             }
 
             @Override
-            public CompletableFuture<Void> warm(String harnessSessionId) {
+            public CompletableFuture<Void> warm(String sessionId) {
                 return CompletableFuture.completedFuture(null);
             }
         };

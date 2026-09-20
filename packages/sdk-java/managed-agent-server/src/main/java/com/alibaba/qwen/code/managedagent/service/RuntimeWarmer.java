@@ -5,5 +5,5 @@ import java.util.concurrent.CompletionStage;
 public interface RuntimeWarmer {
     boolean isEnabled();
 
-    CompletionStage<Void> warm(String harnessSessionId);
+    CompletionStage<Void> warm(String sessionId);
 }

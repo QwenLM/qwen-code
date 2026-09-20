@@ -365,7 +365,7 @@ createdAt
 ### 5.2 AgentSession
 
 ```text
-publicSessionId
+sessionId
 tenantId
 workspaceId
 agentId
@@ -380,7 +380,7 @@ metadata
 version
 ```
 
-`publicSessionId` 是所有外部 Adapter 共用的稳定 ID。Harness owner、Harness Session、Runtime Session 和 execution ID 都位于单独的 backend binding 中，不得返回给客户端。
+`sessionId` 是所有外部 Adapter、Java 持久化、Hosted Harness 和 Runtime Broker 共用的 RFC UUID。内部协议为兼容现有实现仍可把该字段命名为 `harnessSessionId`，但其值必须等于 `sessionId`，不得再创建或持久化第二套 Session ID。Harness owner、boot generation、Runtime Session 和 execution ID 仍位于单独的 backend binding 中，不得返回给客户端。
 
 Session 状态：
 
@@ -397,11 +397,10 @@ IDLE/FAILED -> DELETING -> DELETED
 ### 5.3 SessionBackendBinding
 
 ```text
-publicSessionId
+sessionId
 executionEngine = managed
 harnessOwnerId
 harnessGeneration
-harnessSessionId
 harnessProtocolVersion
 workspaceGeneration
 capabilityDigest
@@ -415,7 +414,7 @@ version
 
 ```text
 publicTurnId
-publicSessionId
+sessionId
 inputItemIds
 status
 promptId
@@ -459,7 +458,7 @@ error
 
 ```text
 publicItemId
-publicSessionId
+sessionId
 publicTurnId
 type
 status
@@ -469,7 +468,7 @@ completedAt
 sourceRef
 ```
 
-`sourceRef` 只用于 Java 内部去重，例如 `harnessSessionId + harnessEventSequence`，公共响应不得暴露它。
+`sourceRef` 只用于 Java 内部去重，例如 `harnessBootId + harnessEventEpoch + harnessEventSequence`，公共响应不得暴露它。
 
 ### 5.6 Artifact
 
@@ -477,7 +476,7 @@ sourceRef
 
 ```text
 publicArtifactId
-publicSessionId
+sessionId
 publicTurnId
 title
 mimeType
@@ -495,14 +494,14 @@ createdAt
 
 首阶段通过 Repository/View 适配现有表，不立即复制一套公共模型表：
 
-| 内部对象                | 首阶段真相源                             | 说明                                                                     |
-| ----------------------- | ---------------------------------------- | ------------------------------------------------------------------------ |
-| `AgentSession`          | `chat_session` + 当前 Hosted binding     | `sessionCode` 继续作为公共 Session ID；execution engine 从 binding 判定  |
-| `SessionBackendBinding` | `agent_cli_runtime_session`              | 保存 Harness session/client/boot/protocol/digest，不进入公共响应         |
-| `Turn`                  | `chat_history`                           | `requestCode` 作为公共 Turn ID；Managed admission 元数据保存在 `expands` |
-| `Item`                  | `agent_managed_event` 的完整事件 payload | A1/A2 先按 event 形成 View；出现真实查询瓶颈后再物化 Item 表             |
-| `Artifact`              | 现有 Artifact Repository/OSS             | Adapter 只做权限校验和 DTO 投影                                          |
-| `PublicEventStore`      | `agent_managed_event`                    | Java 分配 `publicSequence`，支持 SSE replay                              |
+| 内部对象                | 首阶段真相源                             | 说明                                                                        |
+| ----------------------- | ---------------------------------------- | --------------------------------------------------------------------------- |
+| `AgentSession`          | `chat_session` + 当前 Hosted binding     | `sessionCode` 继续作为公共 Session ID；execution engine 从 binding 判定     |
+| `SessionBackendBinding` | `agent_cli_runtime_session`              | 按同一 `sessionId` 保存 Harness client/boot/protocol/digest，不进入公共响应 |
+| `Turn`                  | `chat_history`                           | `requestCode` 作为公共 Turn ID；Managed admission 元数据保存在 `expands`    |
+| `Item`                  | `agent_managed_event` 的完整事件 payload | A1/A2 先按 event 形成 View；出现真实查询瓶颈后再物化 Item 表                |
+| `Artifact`              | 现有 Artifact Repository/OSS             | Adapter 只做权限校验和 DTO 投影                                             |
+| `PublicEventStore`      | `agent_managed_event`                    | Java 分配 `publicSequence`，支持 SSE replay                                 |
 
 应用层新增的是稳定接口，不是立即新增表。产品代码必须遵循 CQRS，不能实现一个同时读写的
 `AgentSessionApplicationService` 上帝接口：
@@ -584,20 +583,20 @@ interface HarnessClient {
 }
 ```
 
-产品 Java 必须保存公共 ID 到 Harness ID 的稳定映射。首版不要求把 `publicTurnId` 发送给 Harness；它通过 Java 持久化的 `(harnessSessionId, promptId) -> publicTurnId` 映射完成事件投影，避免公共 API 结构进入 qwen 私有协议。
+产品 Java 生成一个 RFC UUID `sessionId`，并把同一个值用于公共 API、Hosted Harness create/load、JSONL 和 Runtime Broker。数据库不得保存公共 ID 到 Harness ID 的映射。首版不要求把 `publicTurnId` 发送给 Harness；Java 通过持久化的 `(sessionId, promptId) -> publicTurnId` 映射完成事件投影。
 
 首版 Hosted Harness 使用部署级固定 capability，Java 在 Session binding 中固定 `agentRevision` 和握手获得的 `capabilityDigest`；它们不要求在每个请求中重复发送。未来支持一个 Harness 上的动态 AgentDefinition 时，通过新私有协议版本扩展，不能改变 v1 的含义。
 
 私有请求至少带：
 
 - `protocolVersion`；
-- `harnessBootId` fencing token 和 `harnessSessionId`；
+- `harnessBootId` fencing token 和 `sessionId`；现有私有协议字段名 `harnessSessionId` 仅为兼容别名；
 - create/load 后的请求还必须带当前 attachment 的 `harnessClientId`；
 - 稳定的 `promptId`；
 - 服务身份 token；
 - 可选 deadline。
 
-Harness 事件至少带 `harnessEventEpoch`、`harnessEventSequence`、`promptId`、稳定 Item/call ID、事件类型和 payload。Java 使用 `harnessBootId + harnessEventEpoch + harnessEventSequence` 作为 `sourceRef`，再通过 `(harnessSessionId, promptId)` 映射公共 Turn，去重后分配公共 `eventSequence`。Harness 不分配公共 Session/Turn ID，也不根据请求体决定 tenant/workspace。
+Harness 事件至少带 `harnessEventEpoch`、`harnessEventSequence`、`promptId`、稳定 Item/call ID、事件类型和 payload。Java 使用 `harnessBootId + harnessEventEpoch + harnessEventSequence` 作为 `sourceRef`，再通过 `(sessionId, promptId)` 映射公共 Turn，去重后分配公共 `eventSequence`。Session UUID 由 Java 在 admission 时分配；Harness 不另行分配 Session/Turn ID，也不根据请求体决定 tenant/workspace。
 
 一个活动 Turn 固定到 `SessionBackendBindingRepository` 中记录的 Harness owner/generation。Harness event epoch 改变时，Java 不得继续使用旧 sequence；必须先读取 snapshot/transcript 完成对账，再从新 epoch 订阅。共享 Session Authority 尚未完成前，不允许在 Turn 中途漂移到任意 Harness 实例。
 
@@ -616,7 +615,7 @@ Harness 事件至少带 `harnessEventEpoch`、`harnessEventSequence`、`promptId
 {
   "eventId": "evt_...",
   "eventSequence": 42,
-  "sessionId": "sess_...",
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
   "turnId": "turn_...",
   "itemId": "item_...",
   "type": "item.output_text.delta",
@@ -738,7 +737,7 @@ GET  /v1/responses/{responseId}/input_items
 
 映射：
 
-- `conversation` 映射到 `publicSessionId`；
+- `conversation` 映射到 `sessionId`；
 - 一个 Response 映射到一个 `publicTurnId`；
 - `input` 转为 input Item；
 - `output[]` 由完成的 Item 投影；
@@ -771,7 +770,7 @@ Java transaction:
   create/update authoritative Session + Turn + input Item + command ledger
 Java -> Client: open SSE and emit turn.accepted
 Java after commit (parallel; existing Reconciler handles unknown submit outcome):
-  A. runtimeBroker.warm(harnessSessionId)
+  A. runtimeBroker.warm(sessionId)
   B. harnessClient.create/load + submitTurn(...)
 Harness -> Model: start streaming
 Harness -> Java: text delta
@@ -1305,7 +1304,7 @@ agent_command_retry_total{operation,outcome}
 agent_recovery_blocked_total
 ```
 
-Trace 至少关联 `publicSessionId`、`publicTurnId`、`publicItemId`、`harnessSessionId` 和 `executionCallId`，但后三者只进入受控内部观测，不进入公共响应。
+Trace 至少关联 `sessionId`、`publicTurnId`、`publicItemId` 和 `executionCallId`；不再记录第二套 Harness Session ID。`executionCallId` 只进入受控内部观测，不进入公共响应。
 
 ## 20. 上线与回滚
 
@@ -1393,7 +1392,7 @@ Responses Adapter，不同时开放两套公网写入口。
 2. Managed Session 的 owner、generation、promptId、event epoch 或 Runtime lease 任一无法证明一致时 fail-closed；
 3. 同一公共 Turn 最多产生一次 Harness admission，同一 `executionCallId` 最多产生一次物理 Tool 副作用；
 4. 定向单测、数据库集成测试、真实 HTTP/进程 E2E、构建和格式检查全部通过；
-5. 观测中能关联公共 Session/Turn、Harness Session/prompt 和 Tool execution，但公共响应不暴露内部 endpoint、token、lease 或 Pod 身份；
+5. 观测中使用同一个 Session UUID 关联公共 Session、Harness/prompt 和 Tool execution，但公共响应不暴露内部 endpoint、token、lease 或 Pod 身份；
 6. 提交内包含对应数据库迁移、配置默认值、灰度策略、回滚方式和故障注入结果。
 
 最小产品验证只看四项：

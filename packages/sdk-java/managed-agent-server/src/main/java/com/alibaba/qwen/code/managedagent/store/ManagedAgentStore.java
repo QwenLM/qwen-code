@@ -43,7 +43,6 @@ public class ManagedAgentStore {
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
-                    result.getString("harness_session_id"),
                     result.getString("agent_id"), result.getString("title"),
                     result.getString("status"),
                     result.getString("harness_boot_id"),
@@ -97,17 +96,14 @@ public class ManagedAgentStore {
             String title, List<Map<String, Object>> input,
             String payloadDigest) {
         long now = clock.millis();
-        String sessionId = publicId("sess");
-        String harnessSessionId = UUID.randomUUID().toString();
+        String sessionId = UUID.randomUUID().toString();
         String turnId = input.isEmpty() ? null : publicId("turn");
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                        + " session_id, harness_session_id, agent_id, title,"
-                        + " status, created_at, updated_at) VALUES"
-                        + " (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)",
-                tenantId, sessionId, harnessSessionId, agentId, title, now,
-                now);
+                        + " session_id, agent_id, title, status, created_at,"
+                        + " updated_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)",
+                tenantId, sessionId, agentId, title, now, now);
         if (turnId != null) {
             insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
@@ -230,12 +226,11 @@ public class ManagedAgentStore {
         return rows.stream().findFirst();
     }
 
-    public Optional<SessionRecord> findSessionByHarnessId(
-            String harnessSessionId) {
+    public Optional<SessionRecord> findSessionById(String sessionId) {
         List<SessionRecord> rows = jdbc.query(
                 "SELECT * FROM managed_agent_session WHERE"
-                        + " harness_session_id = ?",
-                sessionMapper, harnessSessionId);
+                        + " session_id = ?",
+                sessionMapper, sessionId);
         return rows.stream().findFirst();
     }
 

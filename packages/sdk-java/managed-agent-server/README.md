@@ -46,6 +46,15 @@ curl -sS http://127.0.0.1:8080/v1/agents/sessions \
   -d '{"agent_id":"qwen-code","input":[{"type":"text","text":"hello"}]}'
 ```
 
+The returned `sessionId` is an RFC UUID and is the canonical identity used by
+the public API, Hosted Harness transcript, and Runtime Broker. The server does
+not maintain a separate public-to-Harness Session mapping.
+
+The Phase 1 schema has not been released. A development database created by an
+older revision with `harness_session_id` must be recreated before running this
+revision; the service fails Flyway validation instead of silently rewriting
+existing public Session URLs.
+
 The public listener intentionally ignores end-user `Authorization`. The
 optional Runtime Broker listener still requires a separate machine bearer and
 must remain private.

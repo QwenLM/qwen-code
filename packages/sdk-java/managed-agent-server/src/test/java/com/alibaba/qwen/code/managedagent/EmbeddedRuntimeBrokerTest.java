@@ -17,6 +17,9 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class EmbeddedRuntimeBrokerTest {
+    private static final String SESSION_ID =
+            "550e8400-e29b-41d4-a716-446655440000";
+
     @Test
     void usesFetchCompatibleDefaultBrokerPort() {
         assertThat(new ManagedAgentProperties().getRuntimeBroker().getPort())
@@ -27,16 +30,16 @@ class EmbeddedRuntimeBrokerTest {
     void startsPrivateListenerAndResolvesTenantFromTheSessionStore()
             throws Exception {
         ManagedAgentStore store = mock(ManagedAgentStore.class);
-        when(store.findSessionByHarnessId("harness-session")).thenReturn(
-                Optional.of(new SessionRecord("tenant-a", "session-a",
-                        "harness-session", "qwen-code", null, "ACTIVE",
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "ACTIVE",
                         null, null, 0, 0, 1, 1, 0)));
         ManagedAgentProperties properties = properties();
 
         try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
                 properties)) {
-            broker.warm("harness-session").toCompletableFuture().join();
-            verify(store).findSessionByHarnessId("harness-session");
+            broker.warm(SESSION_ID).toCompletableFuture().join();
+            verify(store).findSessionById(SESSION_ID);
 
             URI endpoint = broker.getBaseUri().resolve(
                     "/internal/runtime-broker/v1/tool-sessions:acquire");

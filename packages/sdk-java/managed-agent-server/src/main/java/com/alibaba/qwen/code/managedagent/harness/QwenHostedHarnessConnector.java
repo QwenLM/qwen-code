@@ -46,19 +46,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public Attachment createOrLoad(String harnessSessionId,
-            boolean loadExisting) {
+    public Attachment createOrLoad(String sessionId, boolean loadExisting) {
         HarnessSessionRef attached = attachments.computeIfAbsent(
-                harnessSessionId, ignored -> loadExisting
-                        ? load(harnessSessionId) : create(harnessSessionId));
+                sessionId, ignored -> loadExisting
+                        ? load(sessionId) : create(sessionId));
         return new Attachment(attached.getHarnessBootId());
     }
 
     @Override
-    public Admission submit(String harnessSessionId, String promptId,
+    public Admission submit(String sessionId, String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
-                .session(attachment(harnessSessionId))
+                .session(attachment(sessionId))
                 .promptId(promptId)
                 .payloadDigest(payloadDigest);
         input.forEach(builder::addContent);
@@ -68,11 +67,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public SourceStream stream(String harnessSessionId, long lastEventId,
+    public SourceStream stream(String sessionId, long lastEventId,
             String eventEpoch) {
         HarnessEventStream stream = client().streamEvents(
                 StreamHarnessEvents.builder()
-                        .session(attachment(harnessSessionId))
+                        .session(attachment(sessionId))
                         .lastEventId(lastEventId)
                         .eventEpoch(eventEpoch)
                         .build());
@@ -98,8 +97,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
-    public void cancel(String harnessSessionId) {
-        client().cancelTurn(attachment(harnessSessionId));
+    public void cancel(String sessionId) {
+        client().cancelTurn(attachment(sessionId));
     }
 
     @Override
@@ -111,33 +110,33 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         attachments.clear();
     }
 
-    private HarnessSessionRef attachment(String harnessSessionId) {
-        HarnessSessionRef attachment = attachments.get(harnessSessionId);
+    private HarnessSessionRef attachment(String sessionId) {
+        HarnessSessionRef attachment = attachments.get(sessionId);
         if (attachment == null) {
-            createOrLoad(harnessSessionId, true);
-            attachment = attachments.get(harnessSessionId);
+            createOrLoad(sessionId, true);
+            attachment = attachments.get(sessionId);
         }
         return attachment;
     }
 
-    private HarnessSessionRef create(String harnessSessionId) {
+    private HarnessSessionRef create(String sessionId) {
         try {
             return client().createSession(CreateHarnessSession.builder()
-                    .harnessSessionId(harnessSessionId)
+                    .harnessSessionId(sessionId)
                     .approvalMode(approvalMode)
                     .build());
         } catch (DaemonHttpException error) {
             if (error.getStatusCode() != 409) {
                 throw error;
             }
-            return load(harnessSessionId);
+            return load(sessionId);
         } catch (SessionCreationOutcomeUnknownException error) {
-            return load(harnessSessionId);
+            return load(sessionId);
         }
     }
 
-    private HarnessSessionRef load(String harnessSessionId) {
-        return client().loadSession(new LoadHarnessSession(harnessSessionId));
+    private HarnessSessionRef load(String sessionId) {
+        return client().loadSession(new LoadHarnessSession(sessionId));
     }
 
     private HostedHarnessClient client() {

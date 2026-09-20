@@ -44,14 +44,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         require(properties.getHarness().getCapabilityDigest(),
                 "Hosted Harness capability digest");
         RuntimeProvisioner provisioner = provisioner(broker);
-        HarnessSessionResolver resolver = harnessSessionId -> {
-            SessionRecord session = store.findSessionByHarnessId(
-                    harnessSessionId).orElse(null);
+        HarnessSessionResolver resolver = sessionId -> {
+            SessionRecord session = store.findSessionById(sessionId)
+                    .orElse(null);
             if (session == null) {
                 CompletableFuture<RuntimeScope> failed =
                         new CompletableFuture<>();
                 failed.completeExceptionally(new IllegalArgumentException(
-                        "Harness Session is not owned by this service"));
+                        "Session is not owned by this service"));
                 return failed;
             }
             return CompletableFuture.completedFuture(new RuntimeScope(
@@ -83,8 +83,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
-    public CompletionStage<Void> warm(String harnessSessionId) {
-        return service.warm(harnessSessionId);
+    public CompletionStage<Void> warm(String sessionId) {
+        return service.warm(sessionId);
     }
 
     public URI getBaseUri() {

@@ -16,7 +16,7 @@ Qwen Code 已经具备 Hosted Harness Profile，以及访问其私有 HTTP/SSE �
 - 在 `packages/sdk-java/managed-agent-server` 增加可独立运行的 Spring Boot 应用。
 - Agent API 请求必须携带 `X-Qwen-Tenant-Id`，并将其作为数据库资源归属边界。
 - 不实现终端用户鉴权，也不解释公共 API 的 `Authorization`。
-- 在 MySQL 中持久化 Session、Turn、命令幂等、Harness binding 和公共 Event 状态。
+- 在 MySQL 中持久化 Session、Turn、命令幂等、Harness generation fencing 和公共 Event 状态。
 - 不等待 Tool Runtime ready，直接把模型工作提交给现有 Hosted Harness。
 - 从 Java 自有的持久事件提供 SSE replay，不把 Harness stream 直接代理给客户端。
 - 在同一应用内同时提供 `/v1/agents/sessions/**` 和当前 WebShell 使用的 `/api/agent/web-shell/v1/**` Adapter。
@@ -70,12 +70,12 @@ Phase 1 自有以下表：
 
 | 表                      | 作用                                                                        |
 | ----------------------- | --------------------------------------------------------------------------- |
-| `managed_agent_session` | 租户所有的公共 Session、不可变 Harness ID/binding、状态和公共序号           |
+| `managed_agent_session` | 租户所有的 Session UUID、Harness generation fence、状态和公共序号           |
 | `managed_agent_turn`    | 一次已受理用户输入、稳定 Harness prompt 身份、digest、dispatch lease 和终态 |
 | `managed_agent_command` | `(tenant, operation, idempotency key)` claim 和语义请求 digest              |
 | `managed_agent_event`   | Session 内公共序号、源事件去重、replay payload 和终态标记                   |
 
-不同 ID 的职责保持分离：公共 `sessionId`、`turnId` 是 API 身份；`harnessSessionId`、`promptId` 是 Hosted Harness 使用的私有 UUID。公共响应不得包含 Harness endpoint、boot ID、client ID、Runtime token 或本地路径。
+一个 RFC UUID `sessionId` 贯穿公共 API、Java 存储、Hosted Harness、JSONL transcript 和 Runtime Broker。内部协议中的 `harnessSessionId` 字段只作为兼容别名传递同一个值，不再代表第二套身份，也不在数据库中保存映射。`turnId` 仍是公共 Turn 身份，`promptId` 仍是 Harness 幂等提交使用的私有身份。公共响应不得包含 Harness endpoint、boot ID、client ID、Runtime token 或本地路径。
 
 Session 行持有 `last_sequence`。插入 Event 时锁定该行，在同一事务内分配下一序号并写入事件。唯一 source key 防止 Harness 重连产生重复公共事件。
 
@@ -94,7 +94,7 @@ Session 行持有 `last_sequence`。插入 Event 时锁定该行，在同一事�
 - dispatch lease 防止两个 Spring 副本同时协调同一 Turn；lease 过期后可由其他副本恢复。
 - 每个已受理 Harness 事件后都持久化源 cursor 和 epoch。
 
-Coordinator attach 或 load 已绑定的 Harness Session，提交原 Prompt，消费带 fencing 的 SSE，并投影到公共事件存储。`turn_complete` 和 `turn_error` 负责持久结算 Turn。定时恢复扫描会重新 claim dispatch lease 已过期的 admitted/running Turn。
+Coordinator 使用同一个 Session UUID attach 或 load Harness Session，提交原 Prompt，消费带 fencing 的 SSE，并投影到公共事件存储。`turn_complete` 和 `turn_error` 负责持久结算 Turn。定时恢复扫描会重新 claim dispatch lease 已过期的 admitted/running Turn。
 
 ## 8. API 切片
 
@@ -128,7 +128,7 @@ Transcript 首屏按升序返回最新的有界事件页，`olderCursor` 用于�
 
 ## 9. Hosted Harness 与 Runtime 时序
 
-创建持久 Turn 和开始模型推理不依赖 Tool Runtime ready。启用嵌入 Runtime Broker 后，服务在 admission 后异步调用 `warm(harnessSessionId)`，同时独立提交 Prompt。无工具 Turn 可以在不等待 warmup 的情况下完成；发生 Tool Call 时，由 `BrokerManagedRuntimeProvider` 等待原 Runtime binding。
+创建持久 Turn 和开始模型推理不依赖 Tool Runtime ready。启用嵌入 Runtime Broker 后，服务在 admission 后异步调用 `warm(sessionId)`，同时独立提交 Prompt。无工具 Turn 可以在不等待 warmup 的情况下完成；发生 Tool Call 时，由 `BrokerManagedRuntimeProvider` 等待原 Runtime binding。
 
 Hosted Harness Client 校验 capability digest、protocol version、boot ID、SSE epoch 和源 sequence。fence 不匹配时 Turn 失败关闭；不得回退到 Legacy 或其他 Runtime。
 
@@ -171,6 +171,7 @@ Flyway 在应用启动时执行版本化 migration。生产使用 MySQL；H2 MyS
 
 - 单测 tenant 解析、canonical digest、事件投影和错误映射。
 - 用 H2 MySQL mode 启动真实 Spring Context 和 Flyway。
+- 验证公共 Session UUID 与传给 Harness、Runtime Broker 的 ID 完全一致，数据库不保存第二套 Session ID。
 - 验证相同 key replay、不同正文冲突和跨 tenant 404。
 - 验证持久 Event 顺序与 `Last-Event-ID` replay。
 - 对接确定性 Hosted Harness fixture，证明 create、Prompt admission、SSE 投影、终态结算和 retry 都使用稳定身份。
