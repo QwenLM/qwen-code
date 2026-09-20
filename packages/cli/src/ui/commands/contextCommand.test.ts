@@ -1287,6 +1287,7 @@ describe('collectContextData (contextCommand)', () => {
         {
           name: 'report-tools',
           displayName: 'Report Tools',
+          path: path.dirname(extensionFile),
           contextFiles: [extensionFile],
         },
       ]),
@@ -1299,6 +1300,48 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles[0].path).toBe('QWEN.md');
     expect(data.memoryFiles[1].path).toBe(
       `${t('Extension')}: Report Tools · QWEN.md`,
+    );
+  });
+
+  it('keeps extension file labels distinct and safe without changing token counts', async () => {
+    const workingDir = path.join(os.tmpdir(), 'context-extension-dir');
+    const extensionRoot = path.join(workingDir, 'extensions', 'report-tools');
+    const files = ['docs', 'prompts'].map((dir) =>
+      path.join(extensionRoot, dir, 'QWEN.md'),
+    );
+    const memory = files
+      .map((file) => {
+        const marker = path.relative(workingDir, file);
+        return `--- Context from: ${marker} ---\nextension rules\n--- End of Context from: ${marker} ---`;
+      })
+      .join('\n');
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      getActiveExtensions: vi.fn().mockReturnValue([]),
+    } as unknown as Config;
+    const before = await collectContextData(config, true);
+    vi.mocked(config.getActiveExtensions).mockReturnValue([
+      {
+        name: 'report-tools',
+        displayName: '\u001b[31mReport\u001b[0m\nTools\u202e',
+        path: extensionRoot,
+        contextFiles: files,
+      } as ReturnType<Config['getActiveExtensions']>[number],
+    ]);
+
+    const after = await collectContextData(config, true);
+
+    expect(after.memoryFiles.map((file) => file.path)).toEqual(
+      ['docs', 'prompts'].map(
+        (dir) =>
+          `${t('Extension')}: Report Tools · ${path.join(dir, 'QWEN.md')}`,
+      ),
+    );
+    expect(after.memoryFiles.map((file) => file.tokens)).toEqual(
+      before.memoryFiles.map((file) => file.tokens),
     );
   });
 

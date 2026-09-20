@@ -37,6 +37,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
+import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
 
 /**
  * Classify a token count against the three-tier compaction ladder. Mirrors
@@ -55,7 +56,7 @@ function currentTier(
 }
 
 /**
- * Absolute context-file path → the extension that contributes it.
+ * Absolute context-file path → its extension-attributed display label.
  *
  * An extension's context file is resident in every request of every session it
  * is active in, and its marker path alone does not say which extension is
@@ -68,10 +69,16 @@ function extensionContextFileOwners(
 ): Map<string, string> {
   const owners = new Map<string, string>();
   for (const extension of config.getActiveExtensions?.() ?? []) {
+    const displayName = getSanitizedExtensionDisplayName(extension);
     for (const contextFile of extension.contextFiles ?? []) {
+      const absolutePath = path.resolve(workingDir, contextFile);
+      const fileLabel = formatContextFileDisplayPath(
+        absolutePath,
+        extension.path,
+      );
       owners.set(
-        path.resolve(workingDir, contextFile),
-        extension.displayName || extension.name,
+        absolutePath,
+        `${t('Extension')}: ${displayName} · ${fileLabel}`,
       );
     }
   }
@@ -108,9 +115,7 @@ function parseMemoryFiles(
       // An extension's file is named by its extension rather than by a path
       // under the install directory, which is what makes the row actionable:
       // the reader can disable or migrate that extension.
-      path: owner
-        ? `${t('Extension')}: ${owner} · ${path.basename(absolutePath)}`
-        : formatContextFileDisplayPath(absolutePath, workingDir),
+      path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
     });
   }
