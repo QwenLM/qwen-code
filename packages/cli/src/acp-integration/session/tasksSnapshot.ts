@@ -258,7 +258,11 @@ function serializeWorkflowSnapshot(
     // it is the caller's data.
     ...optionalField(
       'argsUnavailable',
-      snapshotArgsUnavailable(snapshot) === undefined ? undefined : true,
+      // `true as const`: the field is `true | undefined`, and a plain `true`
+      // in this position widens to `boolean`.
+      snapshotArgsUnavailable(snapshot) === undefined
+        ? undefined
+        : (true as const),
     ),
     ...optionalField('toolUseId', snapshot.toolUseId),
     ...optionalField('workflowName', snapshot.workflowName),

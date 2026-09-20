@@ -1205,6 +1205,7 @@ import {
   WorkflowJournalUnavailableError,
   type Config,
   type GoalSnapshotV2,
+  type WorkflowSnapshot,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
@@ -16990,7 +16991,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         const { snapshotArgsUnavailable } = await vi.importActual<
           typeof import('@qwen-code/qwen-code-core')
         >('@qwen-code/qwen-code-core');
-        expect(snapshotArgsUnavailable(snapshot) !== undefined).toBe(refused);
+        expect(
+          snapshotArgsUnavailable(
+            snapshot as Pick<
+              WorkflowSnapshot,
+              'args' | 'argsOmitted' | 'argsRecorded'
+            >,
+          ) !== undefined,
+        ).toBe(refused);
 
         vi.mocked(RequestError.invalidParams).mockImplementationOnce(
           sdk.RequestError.invalidParams,
