@@ -1737,15 +1737,21 @@ describe('serve fast path environment bootstrap', () => {
       join(tempWorkspace, '.qwen', 'settings.json'),
       JSON.stringify({ serve: { tokenQr: true } }),
     );
-    expect(
-      loadServeFastPathSettings(tempWorkspace).serve?.tokenQr,
-    ).toBeUndefined();
+    const workspaceScoped = loadServeFastPathSettings(tempWorkspace);
+    expect(workspaceScoped.serve?.tokenQr).toBeUndefined();
+    // The drop is report-only: the value never enters the summary, but the
+    // boot path names it on stderr instead of discarding it silently.
+    expect(workspaceScoped.ignoredWorkspaceKeys).toEqual(['serve.tokenQr']);
 
     writeFileSync(
       join(qwenHome, 'settings.json'),
       JSON.stringify({ serve: { tokenQr: true } }),
     );
-    expect(loadServeFastPathSettings(tempWorkspace).serve?.tokenQr).toBe(true);
+    const fromUserScope = loadServeFastPathSettings(tempWorkspace);
+    expect(fromUserScope.serve?.tokenQr).toBe(true);
+    // A workspace value stays ignored — and reported — even when an
+    // operator scope also sets the key.
+    expect(fromUserScope.ignoredWorkspaceKeys).toEqual(['serve.tokenQr']);
   });
 
   it('keeps user-scope serve.tokenQr when workspace startup channels merge', () => {
@@ -1763,10 +1769,13 @@ describe('serve fast path environment bootstrap', () => {
       JSON.stringify({ serve: { channels: ['telegram'] } }),
     );
 
-    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+    const merged = loadServeFastPathSettings(tempWorkspace);
+    expect(merged.serve).toEqual({
       channels: ['telegram'],
       tokenQr: true,
     });
+    // A workspace file without serve.tokenQr has nothing to report.
+    expect(merged.ignoredWorkspaceKeys).toBeUndefined();
   });
 
   it('loads serve.tokenQr from the system scope and lets system override user', () => {

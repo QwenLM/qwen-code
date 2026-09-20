@@ -13686,7 +13686,9 @@ describe('runQwenServe channel worker supervisor', () => {
         },
         { bridge: makeFakeBridge(), bootSettings: {} },
       );
-      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQr).toBe(false);
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
       await started.close();
       started = undefined;
 
@@ -13703,7 +13705,9 @@ describe('runQwenServe channel worker supervisor', () => {
           bootSettings: { serve: { tokenQr: true } },
         },
       );
-      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQr).toBe(true);
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'force',
+      );
       await started.close();
       started = undefined;
 
@@ -13718,7 +13722,9 @@ describe('runQwenServe channel worker supervisor', () => {
         },
         { bridge: makeFakeBridge() },
       );
-      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQr).toBe(true);
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'force',
+      );
       await started.close();
       started = undefined;
 
@@ -13739,11 +13745,10 @@ describe('runQwenServe channel worker supervisor', () => {
           bootSettings: { serve: { tokenQr: true } },
         },
       );
-      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQr).toBe(false);
       // The printer must be able to tell a deliberate veto from policy
       // suppression, or its hint advises the flag just passed.
-      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrVetoed).toBe(
-        true,
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'veto',
       );
     } finally {
       vi.unstubAllEnvs();
@@ -13805,11 +13810,11 @@ describe('runQwenServe channel worker supervisor', () => {
           mode: 'http-bridge',
           serveWebShell: false,
         },
-        { bridge: makeFakeBridge() },
+        { bridge: makeFakeBridge(), bootSettings: {} },
       );
       expect(stderrWrites.join('')).not.toContain('has no effect');
-      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrVetoed).toBe(
-        false,
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
       );
     } finally {
       stderrSpy.mockRestore();
@@ -13886,10 +13891,11 @@ describe('runQwenServe channel worker supervisor', () => {
             // A display knob must not take the policy summary down with it:
             // the reader passes the bad value through and the consumer warns.
             policy: { permissionStrategy: 'consensus', consensusQuorum: 2 },
-            // Secret-shaped on purpose: settings strings go through ${VAR}
-            // substitution, so a mis-keyed `"${QWEN_SERVER_TOKEN}"` arrives
-            // here as the live bearer. The warning must name the field and
-            // its type, never echo the value into captured stderr.
+            // Secret-shaped on purpose: a mis-keyed literal bearer — or a
+            // `${VAR}` placeholder outside INTERNAL_SECRET_ENV_VARS, which
+            // the loader substitutes before the consumer sees it — must
+            // never be echoed. The warning names the field and its type,
+            // never the value.
             serve: { tokenQr: 'super-secret-bearer' },
           },
         },
@@ -13899,7 +13905,67 @@ describe('runQwenServe channel worker supervisor', () => {
       );
       expect(stderrWrites.join('')).not.toContain('super-secret-bearer');
       expect(stderrWrites.join('')).not.toContain('could not read settings');
-      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQr).toBe(false);
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
+    } finally {
+      stderrSpy.mockRestore();
+      vi.unstubAllEnvs();
+      await started?.close();
+    }
+  });
+
+  it('names a workspace-scoped serve.tokenQr as ignored instead of dropping it silently', async () => {
+    mockRemoteQuickstart.print.mockClear();
+    vi.stubEnv('QWEN_SERVER_TOKEN', 'env-token-ws-scope');
+    // The real loader runs for this case (no deps.bootSettings), so pin the
+    // system scopes to absent files the way the enclosing beforeEach pins
+    // the user scope with a fresh QWEN_HOME.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-quickstart-ws-scope-')),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+      path.join(tmpDir, 'no-system-settings.json'),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(tmpDir, 'no-system-defaults.json'),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { tokenQr: true } }),
+    );
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    let started: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      started = await runQwenServe(
+        {
+          port: 0,
+          hostname: '0.0.0.0',
+          mode: 'http-bridge',
+          serveWebShell: false,
+          workspace: tmpDir,
+        },
+        { bridge: makeFakeBridge() },
+      );
+      const output = stderrWrites.join('');
+      expect(output).toContain('serve.tokenQr in workspace settings');
+      expect(output).toContain(
+        'is ignored; it is honored from user, system, and system-defaults scopes only.',
+      );
+      // The dropped value never reaches resolution: the printer still sees
+      // the default posture, not the opt-in the workspace asked for.
+      expect(mockRemoteQuickstart.print.mock.calls[0]?.[0].tokenQrMode).toBe(
+        'policy',
+      );
     } finally {
       stderrSpy.mockRestore();
       vi.unstubAllEnvs();

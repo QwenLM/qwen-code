@@ -49,6 +49,15 @@ export type ServeFastPathSettings = Pick<
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
   serve?: { channels?: unknown; tokenQr?: unknown };
+  /**
+   * Report-only: keys a workspace settings file set that only
+   * operator-owned scopes may set (today only `serve.tokenQr` can produce
+   * an entry — it is the one restricted key this reader would otherwise
+   * honor). The values never enter the summary; the serve boot names the
+   * drop on stderr, matching the warning the interactive CLI raises through
+   * getSettingsWarnings.
+   */
+  ignoredWorkspaceKeys?: string[];
 };
 const V2_SETTINGS_VERSION = 2;
 type CachedTrustRule = TrustPrecedenceRule<string>;
@@ -428,6 +437,7 @@ function readSettingsSummary(
   filePath: string,
   includeServe = false,
   includeTokenQr = false,
+  ignoredKeys?: string[],
 ): ServeFastPathSettings {
   if (!fs.existsSync(filePath)) return {};
 
@@ -445,6 +455,18 @@ function readSettingsSummary(
     throw new Error(
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
+  }
+  // serve.tokenQr is honored from operator-owned scopes only (see
+  // pickFastPathSettings); a workspace file that sets it gets the drop
+  // reported, never the value.
+  const serveSection = parsed['serve'];
+  if (
+    ignoredKeys !== undefined &&
+    !includeTokenQr &&
+    isPlainObject(serveSection) &&
+    serveSection['tokenQr'] !== undefined
+  ) {
+    ignoredKeys.push('serve.tokenQr');
   }
   return pickFastPathSettings(parsed, includeServe, includeTokenQr);
 }
@@ -800,8 +822,14 @@ export function loadServeFastPathSettings(
     'settings.json',
   );
   const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
+  const ignoredWorkspaceKeys: string[] = [];
   const workspaceFromDisk = workspaceSettingsActive
-    ? readSettingsSummary(workspaceSettingsPath, startupChannelsTrusted)
+    ? readSettingsSummary(
+        workspaceSettingsPath,
+        startupChannelsTrusted,
+        false,
+        ignoredWorkspaceKeys,
+      )
     : {};
   const workspace = isTrusted ? workspaceFromDisk : {};
 
@@ -812,10 +840,14 @@ export function loadServeFastPathSettings(
       channels: workspaceFromDisk.serve.channels,
     };
   }
-  return resolveEnvVarsInObject(
+  const resolved = resolveEnvVarsInObject(
     merged as Settings,
     getHomeEnvFallbackVarsFastPath(),
   ) as ServeFastPathSettings;
+  if (ignoredWorkspaceKeys.length > 0) {
+    resolved.ignoredWorkspaceKeys = ignoredWorkspaceKeys;
+  }
+  return resolved;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

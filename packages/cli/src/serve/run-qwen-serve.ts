@@ -9893,25 +9893,44 @@ async function runQwenServeImpl(
         // throwing there would discard the whole summary — policy.* and
         // serve.channels with it, silently downgrading permission
         // mediation to its default — because of a display knob. Name the
-        // field and its type, never the value: settings strings go through
-        // ${VAR} substitution, so a mis-keyed `"${QWEN_SERVER_TOKEN}"` would
-        // otherwise re-publish the live bearer into captured stderr on every
-        // boot — the exact exposure this feature exists to prevent.
+        // field and its type, never the value: a malformed value may be a
+        // literal token pasted into the setting, and a `${VAR}` placeholder
+        // outside INTERNAL_SECRET_ENV_VARS is substituted before it reaches
+        // here — echoing either would re-publish a live bearer into
+        // captured stderr on every boot.
         writeStderrLine(
           `qwen serve: serve.tokenQr must be a boolean; ignoring a ${typeof settingTokenQr} value.`,
         );
       }
-      const tokenQr =
-        opts.tokenQr !== undefined
-          ? opts.tokenQr === true
-          : settingTokenQr === true;
+      // A workspace settings file may carry serve.tokenQr, but only
+      // operator-owned scopes may set it. The interactive CLI warns about
+      // the drop via getSettingsWarnings; the serve fast path has no
+      // LoadedSettings, so the one path that reads the key names it itself.
+      for (const ignoredKey of bootSettings?.ignoredWorkspaceKeys ?? []) {
+        writeStderrLine(
+          `qwen serve: ${ignoredKey} in workspace settings ` +
+            `(${path.join(boundWorkspace, '.qwen', 'settings.json')}) is ` +
+            'ignored; it is honored from user, system, and system-defaults ' +
+            'scopes only.',
+        );
+      }
+      // One resolved posture, not a requested/vetoed boolean pair whose two
+      // falses mean opposite things: the veto is derived from the flag
+      // alone, so a settings-level `false` only declines the opt-in and
+      // leaves the default policy suppression in charge.
+      const tokenQrMode =
+        opts.tokenQr === false
+          ? ('veto' as const)
+          : opts.tokenQr === true || settingTokenQr === true
+            ? ('force' as const)
+            : ('policy' as const);
       // Name why a requested QR cannot print instead of discarding the
       // request silently — the same silent-no-op shape this flag exists to
       // remove. Outside the `if (token)` block on purpose: a loopback bind
       // with no bearer is the commonest inert case, and it must be reported
       // too.
       const tokenQrNoEffect = tokenQrNoEffectReason({
-        requested: tokenQr,
+        requested: tokenQrMode === 'force',
         webShellMounted,
         boundAddress,
         generated: generatedToken,
@@ -9926,8 +9945,7 @@ async function runQwenServeImpl(
           token,
           generated: generatedToken,
           web: webShellMounted,
-          tokenQr,
-          tokenQrVetoed: opts.tokenQr === false,
+          tokenQrMode,
         });
       }
       // Operator log on stderr too (systemd/docker/k8s default

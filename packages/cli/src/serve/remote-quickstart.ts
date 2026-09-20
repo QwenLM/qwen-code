@@ -157,13 +157,16 @@ export async function printRemoteQuickstart(input: {
   token: string;
   generated: boolean;
   web: boolean;
-  tokenQr?: boolean;
   /**
-   * True when the operator explicitly passed `--no-token-qr`. Distinguishes a
-   * deliberate veto from policy suppression so the hint does not tell them to
-   * pass the flag they just passed.
+   * The token-QR posture, resolved once by the caller from the flag and the
+   * setting: `'force'` prints the credential-bearing QR even when the
+   * default policy would withhold it, `'veto'` suppresses it on every path
+   * (a generated bearer still prints as plain text), and `'policy'` — or an
+   * omitted field — applies the default suppression. One resolved field,
+   * not a requested/vetoed boolean pair whose two falses would mean
+   * opposite things one hop apart.
    */
-  tokenQrVetoed?: boolean;
+  tokenQrMode?: 'policy' | 'force' | 'veto';
   interfaces?: ReturnType<typeof networkInterfaces>;
 }): Promise<void> {
   // An informational block whose reader going away (`qwen serve | head`) must
@@ -230,16 +233,10 @@ export async function printRemoteQuickstart(input: {
     // disclosure is zero, and the Web Shell's auth gate asks for the token
     // on arrival.
     const suppressTokenQr =
-      input.tokenQrVetoed === true ||
-      (!input.generated && !process.stdout.isTTY && input.tokenQr !== true);
-    if (suppressTokenQr)
-      writeStdoutLineSafe(
-        input.tokenQrVetoed
-          ? 'Token-bearing QR suppressed: the token QR was explicitly ' +
-              'disabled for this run.'
-          : 'Token-bearing QR suppressed: stable operator token with ' +
-              'non-interactive stdout. Pass --token-qr to print it anyway.',
-      );
+      input.tokenQrMode === 'veto' ||
+      (!input.generated &&
+        !process.stdout.isTTY &&
+        input.tokenQrMode !== 'force');
     try {
       const { default: qrcode } = (await import('qrcode-terminal')) as {
         default: typeof import('qrcode-terminal');
@@ -251,6 +248,18 @@ export async function printRemoteQuickstart(input: {
           : `${candidate.url}/#token=${encodeURIComponent(input.token)}`,
         { small: true },
         (code) => {
+          // The hint is emitted only once a QR is actually rendered: when
+          // the renderer itself fails, the catch below already reports the
+          // QR as unavailable, and advising --token-qr there would point the
+          // operator at a flag that cannot produce one.
+          if (suppressTokenQr)
+            writeStdoutLineSafe(
+              input.tokenQrMode === 'veto'
+                ? 'Token-bearing QR suppressed: the token QR was ' +
+                    'explicitly disabled for this run.'
+                : 'Token-bearing QR suppressed: stable operator token with ' +
+                    'non-interactive stdout. Pass --token-qr to print it anyway.',
+            );
           writeStdoutLineSafe(
             `Scan to open Web Shell: ${candidate.url} (${candidate.label})`,
           );
