@@ -101,6 +101,8 @@ For the single-node local-process provisioner, also set:
 ```bash
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN='replace-me'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='local-dev-v1'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='replace-with-base64-encoded-32-byte-key'
 export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/absolute/authorized/workspace'
 export QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY='/absolute/private/state'
 export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
@@ -114,12 +116,16 @@ workspace path. An explicitly configured ID must match that value or startup
 fails before traffic is accepted.
 
 Point `qwen serve --profile hosted-harness` at
-`http://127.0.0.1:4182` with the same Broker bearer. This first embedded path
-uses the Runtime Broker's in-memory repositories and is therefore a
-single-control-plane-node development topology. MySQL-backed Broker
-repositories and a tenant-authorized environment registry remain production
-gates; the public Session, Turn, command, and Event state is already durable in
-MySQL.
+`http://127.0.0.1:4182` with the same Broker bearer. When enabled, the embedded
+Broker always uses the Spring `DataSource` and Flyway-managed Runtime tables;
+it does not fall back to in-memory repositories. The credential key must decode
+to exactly 32 bytes and protects persisted Runtime seeds and static Runtime
+credentials with AES-256-GCM. The local-process adapter can recover the same
+worker after a Java restart on the same host; multi-host scheduling and the
+Kubernetes adapter's real-cluster fault matrix remain production gates. This
+standalone reference resolves every accepted tenant to the one configured
+workspace; a trusted tenant-authorized environment registry is still required
+before using it as a multi-tenant production service.
 
 Build the container from the repository root:
 

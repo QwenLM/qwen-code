@@ -17,10 +17,14 @@ The module provides:
 - authenticated Harness Session scope resolution;
 - asynchronous Runtime warmup and compatible Runtime reuse;
 - Runtime Session acquisition and release;
-- an in-memory execution ledger with at-most-once dispatch per idempotency key;
+- in-memory and JDBC execution ledgers with at-most-once dispatch per
+  idempotency key;
+- encrypted durable Runtime seeds, versioned resource handles, and an
+  owner-generation fence for cross-JVM recovery;
 - a static provisioner for externally managed Runtime endpoints;
 - a local-process provisioner with file boot, active health, idle reclaim,
-  epoch fencing, and owned process-tree shutdown;
+  epoch fencing, same-host process adoption, and owned process-tree shutdown;
+- a bare-Pod and Secret Kubernetes provisioner with UID-fenced reconciliation;
 - the private `/internal/runtime-broker/v1` HTTP contract used by
   `qwen serve --profile hosted-harness`;
 - an HTTP transport for the existing Managed Runtime v1/v2 worker protocol.
@@ -42,6 +46,8 @@ mvn -Pmysql-integration \
   verify
 ```
 
-Durable rows alone do not make a stopped local Runtime process recoverable.
-The embedding service must reconcile a persisted lease before reuse and own the
-process adoption or reprovisioning policy.
+A restored endpoint is never trusted directly. The Broker reconciles the exact
+provider resource and completes private Runtime attestation before opening the
+local readiness gate. The local-process adapter supports same-host adoption;
+the Kubernetes adapter still requires the real-cluster fault matrix described
+in the P3 design before production rollout.

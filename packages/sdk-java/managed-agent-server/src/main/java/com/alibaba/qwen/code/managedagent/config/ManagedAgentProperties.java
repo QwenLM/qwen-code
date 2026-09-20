@@ -201,9 +201,23 @@ public class ManagedAgentProperties {
         private String workspaceCwd = "";
         private String isolationClass = "session";
         private String stateDirectory = "";
+        private String credentialKeyId = "";
+        private String credentialKey = "";
         private String nodeExecutable = "";
         private String workerEntry = "";
         private String cliEntry = "";
+        private String kubernetesApiServer =
+                "https://kubernetes.default.svc";
+        private String kubernetesTokenFile =
+                "/var/run/secrets/kubernetes.io/serviceaccount/token";
+        private String kubernetesCaFile =
+                "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+        private String kubernetesClusterUid = "";
+        private String kubernetesNamespace = "qwen-runtimes";
+        private String kubernetesImage = "";
+        private int kubernetesPort = 4190;
+        private String kubernetesServiceAccountName = "";
+        private String kubernetesWorkspaceClaimName = "";
         private String staticEndpoint = "";
         private String staticToken = "";
         private String staticRuntimeInstanceId = "standalone-runtime";
@@ -291,6 +305,22 @@ public class ManagedAgentProperties {
             this.stateDirectory = stateDirectory;
         }
 
+        public String getCredentialKeyId() {
+            return credentialKeyId;
+        }
+
+        public void setCredentialKeyId(String credentialKeyId) {
+            this.credentialKeyId = credentialKeyId;
+        }
+
+        public String getCredentialKey() {
+            return credentialKey;
+        }
+
+        public void setCredentialKey(String credentialKey) {
+            this.credentialKey = credentialKey;
+        }
+
         public String getNodeExecutable() {
             return nodeExecutable;
         }
@@ -313,6 +343,82 @@ public class ManagedAgentProperties {
 
         public void setCliEntry(String cliEntry) {
             this.cliEntry = cliEntry;
+        }
+
+        public String getKubernetesApiServer() {
+            return kubernetesApiServer;
+        }
+
+        public void setKubernetesApiServer(String kubernetesApiServer) {
+            this.kubernetesApiServer = kubernetesApiServer;
+        }
+
+        public String getKubernetesTokenFile() {
+            return kubernetesTokenFile;
+        }
+
+        public void setKubernetesTokenFile(String kubernetesTokenFile) {
+            this.kubernetesTokenFile = kubernetesTokenFile;
+        }
+
+        public String getKubernetesCaFile() {
+            return kubernetesCaFile;
+        }
+
+        public void setKubernetesCaFile(String kubernetesCaFile) {
+            this.kubernetesCaFile = kubernetesCaFile;
+        }
+
+        public String getKubernetesClusterUid() {
+            return kubernetesClusterUid;
+        }
+
+        public void setKubernetesClusterUid(String kubernetesClusterUid) {
+            this.kubernetesClusterUid = kubernetesClusterUid;
+        }
+
+        public String getKubernetesNamespace() {
+            return kubernetesNamespace;
+        }
+
+        public void setKubernetesNamespace(String kubernetesNamespace) {
+            this.kubernetesNamespace = kubernetesNamespace;
+        }
+
+        public String getKubernetesImage() {
+            return kubernetesImage;
+        }
+
+        public void setKubernetesImage(String kubernetesImage) {
+            this.kubernetesImage = kubernetesImage;
+        }
+
+        public int getKubernetesPort() {
+            return kubernetesPort;
+        }
+
+        public void setKubernetesPort(int kubernetesPort) {
+            this.kubernetesPort = kubernetesPort;
+        }
+
+        public String getKubernetesServiceAccountName() {
+            return kubernetesServiceAccountName;
+        }
+
+        public void setKubernetesServiceAccountName(
+                String kubernetesServiceAccountName) {
+            this.kubernetesServiceAccountName =
+                    kubernetesServiceAccountName;
+        }
+
+        public String getKubernetesWorkspaceClaimName() {
+            return kubernetesWorkspaceClaimName;
+        }
+
+        public void setKubernetesWorkspaceClaimName(
+                String kubernetesWorkspaceClaimName) {
+            this.kubernetesWorkspaceClaimName =
+                    kubernetesWorkspaceClaimName;
         }
 
         public String getStaticEndpoint() {

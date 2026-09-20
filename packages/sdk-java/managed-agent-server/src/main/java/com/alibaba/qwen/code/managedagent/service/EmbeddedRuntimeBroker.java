@@ -5,13 +5,18 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.StaticRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -20,6 +25,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.slf4j.Logger;
@@ -32,7 +38,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerHttpServer server;
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
-            ManagedAgentProperties properties) {
+            ManagedAgentProperties properties,
+            RuntimeBindingRepository bindingRepository,
+            RuntimeSessionRepository sessionRepository,
+            ToolExecutionRepository executionRepository) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();
         require(broker.getToken(), "Runtime Broker token");
@@ -62,7 +71,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     broker.getIsolationClass()));
         };
         this.service = new RuntimeBrokerService(resolver, provisioner,
-                new HttpRuntimeTransport());
+                new HttpRuntimeTransport(), bindingRepository,
+                sessionRepository, executionRepository,
+                UUID.randomUUID().toString());
         try {
             this.server = new RuntimeBrokerHttpServer(
                     new InetSocketAddress(broker.getHost(), broker.getPort()),
@@ -123,12 +134,50 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     broker.getStaticToken(), broker.getStaticLeaseId(),
                     broker.getStaticEpoch()));
         }
+        if ("kubernetes".equals(broker.getProvisioner())) {
+            require(broker.getKubernetesApiServer(),
+                    "Kubernetes API server");
+            require(broker.getKubernetesTokenFile(),
+                    "Kubernetes token file");
+            require(broker.getKubernetesCaFile(), "Kubernetes CA file");
+            require(broker.getKubernetesClusterUid(),
+                    "Kubernetes cluster UID");
+            require(broker.getKubernetesNamespace(),
+                    "Kubernetes namespace");
+            require(broker.getKubernetesImage(), "Kubernetes Runtime image");
+            require(broker.getNodeExecutable(), "Node.js executable");
+            require(broker.getWorkerEntry(), "Runtime worker entry");
+            require(broker.getCliEntry(), "Qwen CLI entry");
+            KubernetesHttpRuntimeClient client =
+                    KubernetesHttpRuntimeClient.fromServiceAccount(
+                            URI.create(broker.getKubernetesApiServer()),
+                            Path.of(broker.getKubernetesTokenFile()),
+                            Path.of(broker.getKubernetesCaFile()));
+            return new KubernetesRuntimeProvisioner(client,
+                    broker.getKubernetesClusterUid(),
+                    broker.getKubernetesNamespace(),
+                    broker.getKubernetesImage(), broker.getKubernetesPort(),
+                    broker.getNodeExecutable(), broker.getWorkerEntry(),
+                    broker.getCliEntry(),
+                    broker.getKubernetesServiceAccountName(),
+                    broker.getKubernetesWorkspaceClaimName());
+        }
         throw new IllegalStateException("Runtime Broker provisioner must be"
-                + " local-process or static");
+                + " local-process, kubernetes, or static");
     }
 
     private static String resolveWorkspaceCwd(
             ManagedAgentProperties.RuntimeBroker broker) {
+        if ("kubernetes".equals(broker.getProvisioner())) {
+            Path configured = Path.of(broker.getWorkspaceCwd());
+            if (!configured.isAbsolute()
+                    || !configured.normalize().toString().equals(
+                            broker.getWorkspaceCwd())) {
+                throw new IllegalStateException("Kubernetes Runtime Broker"
+                        + " workspace cwd must be an absolute normalized path");
+            }
+            return broker.getWorkspaceCwd();
+        }
         if (!"local-process".equals(broker.getProvisioner())) {
             return broker.getWorkspaceCwd();
         }
@@ -145,7 +194,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             ManagedAgentProperties.RuntimeBroker broker,
             String workspaceCwd) {
         String configured = broker.getWorkspaceId();
-        if (!"local-process".equals(broker.getProvisioner())) {
+        if (!"local-process".equals(broker.getProvisioner())
+                && !"kubernetes".equals(broker.getProvisioner())) {
             require(configured, "Runtime Broker workspace ID");
             return configured;
         }

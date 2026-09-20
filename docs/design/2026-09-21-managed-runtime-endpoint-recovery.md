@@ -2,9 +2,10 @@
 
 [English](2026-09-21-managed-runtime-endpoint-recovery.md) | [简体中文](2026-09-21-managed-runtime-endpoint-recovery.zh-CN.md)
 
-Status: Proposed
+Status: Implemented in the reference stack; real-cluster validation pending
 
-Reviewed baseline: `feature/managed-agents-p0-p8` at `2695220a3a`
+Implementation checkout: `feature/managed-agents-p0-p8` at `51cb9977f8b1`
+plus the P3 working-tree change described here
 
 ## 1. Problem
 
@@ -25,43 +26,48 @@ observed attribute of a scheduler-owned resource, not the resource identity.
 
 ## 2. Current implementation evidence
 
-The baseline already contains part of the required foundation:
+The P3 reference implementation now contains the restart-safety path described
+by this design:
 
-- `qwen_runtime_binding` has `runtime_endpoint`, `runtime_instance_id`,
-  `runtime_token`, `runtime_lease_id`, `runtime_epoch`, and health timestamps.
-- `JdbcRuntimeBindingRepository` reconstructs a `RuntimeLease` from those
-  columns.
-- `RuntimeBindingRecord` has an optional `RuntimeProvisionSeed` and
-  `RuntimeBrokerService` can pass it to a seeded provision overload.
-- operation ownership and generations already fence provisioning and release,
-  while the Tool execution ledger fences dispatch and preserves the original
-  `executionCallId`.
+- Flyway and the standalone schema persist placement identity, encrypted
+  provision seed, versioned resource handle, reconciliation time, and
+  attestation generation. The production schema has no plaintext Runtime token
+  column.
+- Spring wires the three JDBC repositories and an AES-GCM secret protector when
+  Runtime Broker is enabled; incomplete database or key configuration fails
+  startup instead of falling back to process memory.
+- `RuntimeBrokerService` fences scheduler work by owner and operation
+  generation. A restored `READY` row keeps its local gate closed until
+  scheduler reconciliation and authenticated Runtime attestation succeed.
+  Reconciliation retries use bounded exponential backoff and an independent
+  operation deadline that also bounds a single in-flight scheduler or
+  attestation call; a timed-out local waiter releases its claim without
+  deleting an uncertain external resource, so another replica can resume from
+  MySQL.
+- The local-process provisioner uses deterministic generation directories,
+  records PID plus process-start identity, and can adopt the exact same-host
+  process from a new JVM after the owner JVM exits. Child stdout/stderr do not
+  remain attached to the parent JVM and are discarded by the reference
+  provisioner.
+- The Kubernetes reference provisioner creates deterministic bare Pod and
+  Secret resources, persists UID/resourceVersion handles, observes Pod IP only
+  as an endpoint, rejects same-name replacement UIDs, and deletes with identity
+  preconditions.
+- The Tool-only worker exposes an authenticated private `v2/attest` route whose
+  response includes the immutable Runtime, lease, provision, and workspace
+  identity.
+- The execution ledger remains pinned to binding ID, binding generation, and
+  the original `executionCallId`; uncertain post-dispatch outcomes are never
+  redispatched.
 
-The current path is not restart-safe yet:
-
-- `EmbeddedRuntimeBroker` uses the three-argument `RuntimeBrokerService`
-  constructor, which selects in-memory repositories; the JDBC repositories are
-  not wired into Spring.
-- neither repository creates or persists `RuntimeProvisionSeed`, so the field
-  is always null in normal allocation.
-- `LocalProcessRuntimeProvisioner` does not implement the seeded overload and
-  generates its Runtime identity, token, lease, epoch, and process handle only
-  in memory.
-- the JDBC schema has no scheduler kind, placement domain, resource handle, or
-  Runtime template digest.
-- a restored `READY` record completes the local ready future immediately and
-  refreshes `lastHealthNanos` before a real health check. The first restored
-  Session can consequently accept a stale endpoint for the health freshness
-  window.
-- `LocalProcessRuntimeProvisioner` sends lease headers to `/health`, but the
-  current owned-worker health route authenticates only the bearer token and
-  returns only `{ "status": "ok" }`; it does not attest Runtime identity,
-  lease ID, or epoch.
-- the current plaintext `runtime_token` column is not an acceptable production
-  secret-storage contract.
-
-This design closes those gaps without putting Kubernetes-specific columns into
-the Broker core.
+Local validation covers the scheduler-neutral recovery state machine,
+cross-JVM local-process adoption after the owner exits, the Kubernetes adapter
+through a fake core-v1 API, strict HTTP attestation, Spring activation, and two
+independent JVMs converging on one binding and one physical execution through
+real MySQL. A real Kubernetes
+cluster was not available in this checkout, so cluster networking, RBAC,
+service-account rotation, Pod lifecycle timing, and conditional deletion still
+require environment validation before production rollout.
 
 ## 3. Goals
 
@@ -83,8 +89,9 @@ the Broker core.
 - Moving model inference or conversation authority into Tool Runtime.
 - Adding Runtime-to-Java callbacks, WebSockets, or a second event system.
 - Automatically replaying an execution whose outcome is unknown.
-- Building the Kubernetes adapter in the JDBC activation change. The contract
-  and schema must support it, but Kubernetes delivery is a later slice.
+- Installing cluster-specific NetworkPolicy, quotas, image policy, or a future
+  Runtime operator. The reference adapter emits Pod and Secret resources; the
+  platform deployment owns those controls.
 - Sharing one session-isolated Runtime between unrelated Sessions.
 
 ## 5. Decisions
@@ -154,11 +161,11 @@ the Session and execution rules in Section 11.
 Add the following immutable fields to `RuntimeProvisionRequest` and include
 them in `request_key` hashing:
 
-| Field                   | Meaning                                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------------------ |
-| `provisionerKind`       | Stable adapter identifier such as `local-process`, `kubernetes`, or `static`.                    |
-| `placementDomain`       | Reachability and ownership domain. Examples: a stable host ID or `cluster-uid/namespace`.        |
-| `runtimeTemplateDigest` | Digest of the worker image, entrypoint, protocol, capability configuration, and relevant mounts. |
+| Field                   | Meaning                                                                                                                                                           |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provisionerKind`       | Stable adapter identifier such as `local-process`, `kubernetes`, or `static`.                                                                                     |
+| `placementDomain`       | Reachability and ownership domain. Examples: a stable host ID or `cluster-uid/namespace`.                                                                         |
+| `runtimeTemplateDigest` | Digest of the worker deployment template: image or executable identity, entrypoint, protocol, and relevant mounts. Capability remains part of the scope identity. |
 
 A loopback endpoint is valid only in the same local-process placement domain.
 This prevents another Java host from reading `http://127.0.0.1:<port>` from
@@ -216,10 +223,12 @@ Kubernetes:
   "kind": "kubernetes",
   "clusterUid": "cluster-a",
   "namespace": "qwen-runtimes",
-  "podName": "qwen-runtime-abc123-g4",
+  "podName": "qwen-runtime-0123456789abcdef0123456789abcdef",
   "podUid": "5ce4...",
-  "secretName": "qwen-runtime-abc123-g4",
-  "secretUid": "94b1..."
+  "podResourceVersion": "7821",
+  "secretName": "qwen-runtime-0123456789abcdef0123456789abcdef",
+  "secretUid": "94b1...",
+  "secretResourceVersion": "7815"
 }
 ```
 
@@ -286,20 +295,23 @@ stateDiagram-v2
     [*] --> PROVISIONING: allocate binding and encrypted seed
     PROVISIONING --> PROVISIONING: ensure resource / STARTING
     PROVISIONING --> READY: reconcile + private attestation
-    PROVISIONING --> FAILED: fatal create or identity conflict
+    PROVISIONING --> RECOVERY_BLOCKED: non-retryable create or identity conflict
     READY --> READY: refresh endpoint and attestation
     READY --> DRAINING: idle, revoke, or requested drain
     READY --> LOST: authoritative resource absence
-    DRAINING --> RELEASED: conditional external release confirmed
-    DRAINING --> LOST: resource already absent
-    LOST --> RELEASED: durable cleanup complete
+    READY --> RECOVERY_BLOCKED: resource or attestation conflict
+    LOST --> DRAINING: idle generation is safe to replace
+    DRAINING --> RELEASED: conditional release confirmed or resource absent
+    DRAINING --> RECOVERY_BLOCKED: conditional release conflict
 ```
 
 Reconciliation itself is an operation gate, not a new durable binding state.
 This keeps the state machine small. A locally reconstructed `RuntimeBinding`
-captures the stored `attestation_generation` and remains closed until it either
-performs a successful attestation itself or observes a later successful
-generation committed by another Java replica.
+captures the stored `attestation_generation` and remains closed until this JVM
+claims the operation gate and performs reconciliation plus a successful
+attestation itself. A success committed by another Java replica releases the
+durable claim, but does not make this JVM trust a cached endpoint without its
+own check.
 
 Provisioning and recovery follow this sequence:
 
@@ -308,15 +320,20 @@ Provisioning and recovery follow this sequence:
 3. Call `ensureResource` with the durable seed and any known handle.
 4. Persist the handle while the same claim generation is still owned.
 5. Poll `reconcile` until `READY`, a terminal result, or the operation deadline.
+   Reconcile retries start at 50 ms, ensure retries start at 100 ms, both double
+   up to 2 seconds, and the deadline is four operation-lease durations. The
+   deadline is scheduled independently, so it also bounds one scheduler or
+   attestation future that never completes.
 6. Build the `RuntimeLease`, call the private attestation route, and verify the
    lease headers, Runtime identity, and immutable scope.
 7. CAS the endpoint, handle, `READY` state, health time, and incremented
    attestation generation in one update.
 8. Complete the local ready gate. Tool Session `prepare` may now run.
 
-If a Java process loses its operation lease at any point, its late result is
-discarded. The external resource remains discoverable through
-`provisionRequestId`, allowing the new owner to converge without duplication.
+If a Java process loses its operation lease or reaches the deadline at any
+point, its late result is discarded. The external resource remains discoverable
+through `provisionRequestId`, allowing the new owner to converge without
+duplication.
 
 ## 9. Endpoint use and refresh
 
@@ -355,14 +372,20 @@ directory plus a PID and process-start fingerprint. Recovery validates:
 
 If the process is definitely absent, reconciliation returns `NOT_FOUND`. If a
 PID, path, or ready record is ambiguous, it returns `CONFLICT` or `UNKNOWN` and
-does not spawn a second process. Clean shutdown must durably terminalize a
-binding before killing its child. Crash recovery may adopt a matching child or
-conditionally reap it; it may not treat a missing Java `Process` object as
-proof that the child stopped.
+does not spawn a second process. Explicit Runtime release must durably move the
+binding through `DRAINING` before killing its child. An ordinary Java process
+shutdown may leave a durable child alive for same-host takeover. Crash recovery
+may adopt a matching child or conditionally reap it; it may not treat a missing
+Java `Process` object as proof that the child stopped.
+
+The child process inherits no stdout/stderr pipe from Java. The reference
+provisioner discards both streams so the child remains healthy after the
+creating JVM exits. A production deployment must route structured worker logs
+independently of the creating JVM.
 
 ### 10.2 Kubernetes
 
-The first Kubernetes adapter should create one bare Pod per Runtime generation,
+The reference Kubernetes adapter creates one bare Pod per Runtime generation,
 with `restartPolicy: Never`, rather than a Deployment that can silently replace
 the physical Runtime. A later operator may own a Runtime CRD, but it implements
 the same Broker contract.
@@ -373,28 +396,42 @@ directories, and credentials are not labels or annotations. Creation is
 GET-or-create and rejects an existing object whose immutable identity labels or
 template digest differ.
 
-For an in-cluster Java control plane, the initial adapter uses the ready Pod IP
+For an in-cluster Java control plane, the current adapter uses the ready Pod IP
 and port as the endpoint. Pod IP is an observation; Pod UID remains the
-identity. A per-Runtime ClusterIP Service is added only when the network
-topology requires it, and it must select exactly one binding generation. The
-adapter verifies the Service UID and the EndpointSlice `ready`/`serving` and
+identity. This reference implementation does not create a Service or inspect
+EndpointSlices. If another network topology requires a per-Runtime ClusterIP
+Service, that future adapter must select exactly one binding generation,
+persist the Service UID, and verify EndpointSlice `ready`/`serving` and
 `terminating` conditions before returning `READY`.
 
-The Pod uses startup and readiness probes, but Kubernetes readiness does not
-replace the Broker's private attestation. Probe type is adapter-specific and
-does not need to expose the control credential. NetworkPolicy allows Runtime
-ingress only from the Java control-plane workload and permits only required
-Runtime egress. Secrets are delivered through a per-Runtime Secret or an
-approved external secret provider.
+The emitted Pod uses TCP startup and readiness probes, but Kubernetes readiness
+does not replace the Broker's private attestation. The boot document is injected
+from a per-Runtime Secret through `QWEN_MANAGED_RUNTIME_BOOT`, and the worker
+starts through its supported `--boot-env` contract. The adapter does not create
+NetworkPolicy; production deployment must allow Runtime ingress only from the
+Java control-plane workload and permit only required Runtime egress.
+The in-cluster client requires an HTTPS API-server origin and validates the
+configured service-account CA. It currently loads the projected token once;
+token rotation remains part of real-cluster acceptance.
 
-Release uses Kubernetes delete preconditions with the persisted UID (and
-resourceVersion when appropriate). A same-name object with a different UID is
-a conflict and is never deleted.
+The current `clusterUid` is trusted deployment configuration, not an identity
+discovered from the Kubernetes API. Production configuration must source an
+immutable identifier that is unique to the target cluster. Real-cluster
+acceptance must also prove that every Java replica receives the same value and
+that a value from another cluster is rejected before a persisted handle is
+used.
+
+Release uses the persisted UID as the Kubernetes delete precondition. The
+observed resourceVersion remains in the durable handle for diagnosis and
+reconciliation, but is intentionally not used for ordinary release because Pod
+status updates change it after provisioning. A same-name object with a
+different UID is a conflict and is never deleted.
 
 Kubernetes controllers are reconciliation loops, Kubernetes object UIDs
-distinguish recreated objects, EndpointSlices expose ready/serving/terminating
-conditions, and delete preconditions accept UID and resourceVersion. These
-properties are the basis of this adapter rather than Pod names or cached IPs:
+distinguish recreated objects, and delete preconditions accept UID and
+resourceVersion. Those properties are the basis of the current adapter rather
+than Pod names or cached IPs; EndpointSlice conditions apply to the future
+Service-based extension described above:
 
 - [Kubernetes controllers](https://kubernetes.io/docs/concepts/architecture/controller/)
 - [Object names and UIDs](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/)
@@ -424,17 +461,19 @@ When a formerly ready Runtime is authoritatively `NOT_FOUND`:
 
 1. mark the binding `LOST` and stop sending requests to its endpoint;
 2. inspect every Tool execution pinned to that binding generation;
-3. if any execution is non-terminal or already `UNKNOWN`, keep the Session in
-   `recovery_blocked` and never create a replacement automatically;
-4. if no ambiguous execution exists, a later slice may CAS-rebind the same
-   public/Harness Session identity to a new internal Runtime binding generation,
-   rerun Tool Session preparation and history binding, and continue; and
+3. if any execution is non-terminal or already `UNKNOWN`, keep the Runtime
+   Session pinned to the `LOST` binding and reject further Runtime operations;
+   never create a replacement automatically;
+4. if there is no active Runtime Session and no active execution, the Broker
+   conditionally releases the lost resource record and allocates a new binding
+   generation for the same request; and
 5. all old execution records remain pinned to the old binding ID and generation
    so late results cannot enter the replacement Runtime Session.
 
-The first JDBC activation slice does not need transparent dead-Runtime rebind.
-It must safely recover the same Runtime or expose `recovery_blocked`. Automatic
-safe rebind is the next bounded milestone after crash/reconciliation tests pass.
+Transparent rebind of an active Runtime Session remains forbidden. The
+implemented automatic replacement is limited to an idle binding with no active
+Runtime Session or execution; otherwise the binding stays `LOST` and recovery
+is explicitly blocked.
 
 ## 12. Spring integration
 
@@ -476,7 +515,7 @@ provisioner contract.
 
 ## 14. Delivery plan
 
-### P3a-1: Durable identity
+### P3a-1: Durable identity — implemented
 
 - Extend request identity and binding records with provisioner, placement, and
   template digest.
@@ -485,7 +524,7 @@ provisioner contract.
 - Remove production plaintext Runtime-token persistence.
 - Extend H2 and real-MySQL Repository contract tests.
 
-### P3a-2: Reconcile gate
+### P3a-2: Reconcile gate — implemented
 
 - Introduce `ensureResource` and `reconcile` results.
 - Add the owned-worker private `v2/attest` route and strict identity response.
@@ -494,25 +533,29 @@ provisioner contract.
   fail-closed cleanup.
 - Add fault tests at every failure point in Section 13.
 
-### P3a-3: Spring activation and proof
+### P3a-3: Spring activation and proof — implemented locally
 
 - Add Flyway V3 and Spring JDBC/secret-protector wiring.
 - Run two independent Java service instances against one real MySQL database.
 - Prove one physical provision, one binding generation, one execution dispatch,
-  restart recovery, and stale-owner rejection.
-- Measure no-tool TTFT and tool-boundary waiting separately.
+  and restart reuse across independent JVMs; Repository fencing tests separately
+  prove expired-owner takeover and stale-owner rejection on real MySQL.
+- Preserve the existing no-tool/non-blocking warm-up contract. Production TTFT
+  and first-tool wait measurement remains a deployment benchmark, not a Broker
+  correctness test.
 
-### P3b: Kubernetes adapter
+### P3b: Kubernetes adapter — implemented, real-cluster proof pending
 
 - Implement the bare-Pod/Secret adapter behind the same contract.
 - Validate with a real test cluster: Java restart, API timeout, Pod deletion,
   same-name/different-UID conflict, delayed readiness, endpoint change,
   conditional cleanup, and an in-flight tool crash.
-- Add safe idle Session rebind only after the ambiguity gates are proven.
+- Safe replacement is implemented only for an idle binding with no active
+  Runtime Session or execution.
 
 ## 15. Validation and acceptance criteria
 
-The design is accepted only when all of the following are demonstrated:
+Implementation status against the acceptance criteria:
 
 - Spring uses JDBC repositories whenever the Runtime Broker is enabled and
   never silently falls back to memory.
@@ -525,16 +568,27 @@ The design is accepted only when all of the following are demonstrated:
 - A recycled local port, same-name/different-UID Pod, stale lease, stale epoch,
   or incompatible template is rejected.
 - `UNKNOWN` never triggers automatic provision or delete.
-- Two Java processes plus real MySQL converge on one binding and one physical
-  execution under concurrent requests and ownership takeover.
+- Two concurrent Java processes plus real MySQL converge on one binding and one
+  physical execution; real-MySQL Repository tests also cover expired-owner
+  takeover, and a later JVM reuses the settled generation after restart.
 - Loss after tool dispatch queries the original `executionCallId` and never
   causes a second physical execution.
 - No-tool turns can produce their first token while Runtime is still starting;
   only a real tool boundary waits.
 - Secrets are encrypted or referenced, redacted from logs, and absent from
   public APIs and resource handles.
-- Local-process and Kubernetes adapters pass the same scheduler-neutral
-  contract suite, with adapter-specific fault tests layered on top.
+- Local-process and Kubernetes adapters pass the scheduler-neutral Broker
+  recovery tests and adapter-specific fault tests.
+- A second JVM adopts the same local worker after the creating JVM has exited;
+  retryable observations back off, hit a bounded deadline, release the stale
+  local claim, and can be resumed by a later request.
+
+All code-level criteria above are covered by local tests. Production acceptance
+still requires the real-cluster P3b matrix: Java restart, Kubernetes API
+timeout, Pod deletion, same-name/different-UID replacement, delayed readiness,
+Pod-IP change, conditional cleanup, and an in-flight tool crash. The Hosted
+Harness TTFT and first-tool-wait benchmark must also be repeated in the target
+deployment; neither item is represented as completed by fake-API tests.
 
 ## 16. Observability
 

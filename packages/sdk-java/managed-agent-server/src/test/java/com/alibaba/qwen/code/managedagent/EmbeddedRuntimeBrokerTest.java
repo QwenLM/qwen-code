@@ -10,6 +10,10 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Path;
@@ -36,8 +40,7 @@ class EmbeddedRuntimeBrokerTest {
                         null, null, 0, 0, 1, 1, 0)));
         ManagedAgentProperties properties = properties();
 
-        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
-                properties)) {
+        try (EmbeddedRuntimeBroker broker = broker(store, properties)) {
             broker.warm(SESSION_ID).toCompletableFuture().join();
             verify(store).findSessionById(SESSION_ID);
 
@@ -59,8 +62,8 @@ class EmbeddedRuntimeBrokerTest {
         properties.getRuntimeBroker().setProvisioner("local-process");
         properties.getRuntimeBroker().setWorkspaceId("");
 
-        assertThatThrownBy(() -> new EmbeddedRuntimeBroker(
-                mock(ManagedAgentStore.class), properties))
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("state directory");
     }
@@ -71,10 +74,22 @@ class EmbeddedRuntimeBrokerTest {
         properties.getRuntimeBroker().setProvisioner("local-process");
         properties.getRuntimeBroker().setWorkspaceId("wrong-workspace");
 
-        assertThatThrownBy(() -> new EmbeddedRuntimeBroker(
-                mock(ManagedAgentStore.class), properties))
+        assertThatThrownBy(() -> broker(mock(ManagedAgentStore.class),
+                properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("canonical workspace path hash");
+    }
+
+    @Test
+    void closingTheListenerAlsoClosesTheBrokerService() throws Exception {
+        EmbeddedRuntimeBroker broker = broker(mock(ManagedAgentStore.class),
+                properties());
+
+        broker.close();
+
+        assertThatThrownBy(() -> broker.warm(SESSION_ID))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasMessageContaining("closed");
     }
 
     private static ManagedAgentProperties properties() throws Exception {
@@ -95,5 +110,13 @@ class EmbeddedRuntimeBrokerTest {
         broker.setStaticEndpoint("http://127.0.0.1:9");
         broker.setStaticToken("runtime-token");
         return properties;
+    }
+
+    private static EmbeddedRuntimeBroker broker(ManagedAgentStore store,
+            ManagedAgentProperties properties) {
+        return new EmbeddedRuntimeBroker(store, properties,
+                new InMemoryRuntimeBindingRepository(),
+                new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository());
     }
 }

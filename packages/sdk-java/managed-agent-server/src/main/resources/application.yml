@@ -55,8 +55,19 @@ qwen:
       workspace-cwd: ${QWEN_MANAGED_AGENT_WORKSPACE_CWD:}
       isolation-class: ${QWEN_MANAGED_AGENT_RUNTIME_ISOLATION:session}
       state-directory: ${QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY:}
+      credential-key-id: ${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID:}
+      credential-key: ${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:}
       node-executable: ${QWEN_MANAGED_AGENT_NODE_EXECUTABLE:}
       worker-entry: ${QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY:}
       cli-entry: ${QWEN_MANAGED_AGENT_CLI_ENTRY:}
+      kubernetes-api-server: ${QWEN_MANAGED_AGENT_KUBERNETES_API_SERVER:https://kubernetes.default.svc}
+      kubernetes-token-file: ${QWEN_MANAGED_AGENT_KUBERNETES_TOKEN_FILE:/var/run/secrets/kubernetes.io/serviceaccount/token}
+      kubernetes-ca-file: ${QWEN_MANAGED_AGENT_KUBERNETES_CA_FILE:/var/run/secrets/kubernetes.io/serviceaccount/ca.crt}
+      kubernetes-cluster-uid: ${QWEN_MANAGED_AGENT_KUBERNETES_CLUSTER_UID:}
+      kubernetes-namespace: ${QWEN_MANAGED_AGENT_KUBERNETES_NAMESPACE:qwen-runtimes}
+      kubernetes-image: ${QWEN_MANAGED_AGENT_KUBERNETES_IMAGE:}
+      kubernetes-port: ${QWEN_MANAGED_AGENT_KUBERNETES_PORT:4190}
+      kubernetes-service-account-name: ${QWEN_MANAGED_AGENT_KUBERNETES_SERVICE_ACCOUNT:}
+      kubernetes-workspace-claim-name: ${QWEN_MANAGED_AGENT_KUBERNETES_WORKSPACE_CLAIM:}
       static-endpoint: ${QWEN_MANAGED_AGENT_STATIC_RUNTIME_ENDPOINT:}
       static-token: ${QWEN_MANAGED_AGENT_STATIC_RUNTIME_TOKEN:}

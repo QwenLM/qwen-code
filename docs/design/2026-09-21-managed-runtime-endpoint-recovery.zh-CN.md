@@ -2,9 +2,10 @@
 
 [English](2026-09-21-managed-runtime-endpoint-recovery.md) | [简体中文](2026-09-21-managed-runtime-endpoint-recovery.zh-CN.md)
 
-状态：方案设计
+状态：参考实现已完成；真实集群验证待完成
 
-调研基线：`feature/managed-agents-p0-p8` 的 `2695220a3a`
+实现基线：`feature/managed-agents-p0-p8` 的 `51cb9977f8b1`，以及本文描述的
+P3 工作区变更
 
 ## 1. 问题
 
@@ -22,36 +23,36 @@ Runtime，需要管控面记住 Runtime 的监听地址。但仅持久化 URL �
 
 ## 2. 当前实现证据
 
-当前基线已经包含部分必要基础：
+P3 参考实现已经落地本文描述的重启安全链路：
 
-- `qwen_runtime_binding` 已有 `runtime_endpoint`、`runtime_instance_id`、
-  `runtime_token`、`runtime_lease_id`、`runtime_epoch` 和健康时间字段。
-- `JdbcRuntimeBindingRepository` 可以从这些列恢复 `RuntimeLease`。
-- `RuntimeBindingRecord` 有可选的 `RuntimeProvisionSeed`，
-  `RuntimeBrokerService` 也可以将 seed 传给带 seed 的 provision 重载。
-- operation owner/generation 已经为 provision 和 release 提供 fencing；Tool
-  execution ledger 也已为 dispatch 提供 fencing，并保存原始
-  `executionCallId`。
+- Flyway 与 standalone schema 持久化 placement identity、加密 provision seed、
+  带版本 resource handle、reconcile 时间和 attestation generation；生产 schema
+  不再包含明文 Runtime token 列。
+- Runtime Broker 启用时，Spring 会装配三个 JDBC Repository 和 AES-GCM secret
+  protector；数据库或密钥配置不完整会直接启动失败，不会退回进程内存。
+- `RuntimeBrokerService` 使用 owner 和 operation generation 对调度器操作做
+  fencing。恢复出的 `READY` 行在调度器 reconcile 和带鉴权 Runtime
+  attestation 成功前不会打开本地 gate。reconcile 重试采用有界指数退避和独立
+  operation deadline，单个一直不完成的调度器或 attestation 调用也受其约束；
+  本地等待者超时后只释放 claim，不会删除状态不确定的外部资源，其他副本可以从
+  MySQL 继续恢复。
+- local-process provisioner 使用确定性的 generation 目录，记录 PID 和进程启动
+  身份，并能在创建者 JVM 退出后由另一个 JVM 接管同主机上的同一个精确进程。
+  子进程 stdout/stderr 不依赖父 JVM 管道，参考 provisioner 会丢弃这两个流。
+- Kubernetes 参考 provisioner 创建确定性的 bare Pod 和 Secret，持久化
+  UID/resourceVersion handle，只把 Pod IP 当 endpoint 观测值，拒绝同名不同 UID
+  对象，并使用身份 precondition 删除。
+- Tool-only worker 提供带鉴权的私有 `v2/attest` route，返回不可变的 Runtime、
+  lease、provision 和 workspace identity。
+- Execution ledger 继续固定到 binding ID、binding generation 和原始
+  `executionCallId`；dispatch 后结果不确定时绝不重新派发。
 
-但当前链路仍不具备重启安全性：
-
-- `EmbeddedRuntimeBroker` 使用三参数 `RuntimeBrokerService` 构造器，实际选择
-  内存 Repository；JDBC Repository 尚未接入 Spring。
-- 两种 Repository 都不会创建或持久化 `RuntimeProvisionSeed`，因此正常分配
-  出来的该字段始终为 null。
-- `LocalProcessRuntimeProvisioner` 没有实现带 seed 的重载，Runtime identity、
-  token、lease、epoch 和进程句柄都只在内存中生成。
-- JDBC schema 没有调度器类型、placement domain、resource handle 或 Runtime
-  template digest。
-- 恢复一个 `READY` 记录时，代码会立即完成本地 ready future，并在真实健康
-  检查前刷新 `lastHealthNanos`；因此恢复后的第一个 Session 可能在 health
-  freshness 窗口内误用旧 endpoint。
-- `LocalProcessRuntimeProvisioner` 会把 lease headers 发给 `/health`，但当前
-  owned-worker health route 只校验 bearer token，并且只返回
-  `{ "status": "ok" }`；它不会证明 Runtime identity、lease ID 或 epoch。
-- 当前明文 `runtime_token` 列不能作为生产级密钥存储契约。
-
-本设计补齐这些缺口，同时避免把 Kubernetes 专属列加入 Broker 核心模型。
+本地验证已经覆盖调度器无关恢复状态机、创建者退出后的跨 JVM local-process
+接管、基于 fake core-v1 API 的 Kubernetes adapter、严格 HTTP attestation、
+Spring 激活，以及两个独立 JVM 通过真实 MySQL 收敛到一个 binding 和一次物理
+execution。当前环境没有真实
+Kubernetes 集群，因此集群网络、RBAC、service-account 轮换、Pod 生命周期时序
+和条件删除仍需在生产发布前做环境验证。
 
 ## 3. 目标
 
@@ -73,8 +74,8 @@ Runtime，需要管控面记住 Runtime 的监听地址。但仅持久化 URL �
 - 把模型推理或对话权威状态下沉到 Tool Runtime。
 - 增加 Runtime 到 Java 的回调、WebSocket 或第二套事件系统。
 - 自动重放结果未知的 execution。
-- 在 JDBC 激活变更中同时实现 Kubernetes adapter。契约和 schema 必须支持
-  Kubernetes，但实际交付属于后续切片。
+- 安装集群专属的 NetworkPolicy、quota、镜像策略或未来 Runtime operator。参考
+  adapter 负责生成 Pod 和 Secret，平台部署负责这些控制项。
 - 让相互无关的 Session 共享 session-isolated Runtime。
 
 ## 5. 设计决策
@@ -137,11 +138,11 @@ execution 规则进入新物理 generation。
 为 `RuntimeProvisionRequest` 增加以下不可变字段，并将它们加入 `request_key`
 摘要：
 
-| 字段                    | 含义                                                                         |
-| ----------------------- | ---------------------------------------------------------------------------- |
-| `provisionerKind`       | 稳定的 adapter 标识，例如 `local-process`、`kubernetes` 或 `static`。        |
-| `placementDomain`       | endpoint 可达并可被接管的范围，例如稳定 host ID 或 `cluster-uid/namespace`。 |
-| `runtimeTemplateDigest` | worker 镜像、入口、协议、能力配置和相关挂载的摘要。                          |
+| 字段                    | 含义                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------ |
+| `provisionerKind`       | 稳定的 adapter 标识，例如 `local-process`、`kubernetes` 或 `static`。                            |
+| `placementDomain`       | endpoint 可达并可被接管的范围，例如稳定 host ID 或 `cluster-uid/namespace`。                     |
+| `runtimeTemplateDigest` | worker 部署模板（镜像或可执行文件身份、入口、协议和相关挂载）的摘要；能力仍属于 scope identity。 |
 
 loopback endpoint 只允许在同一个 local-process placement domain 内使用。这样可
 防止另一台 Java 主机从 MySQL 读到 `http://127.0.0.1:<port>` 后，误连自己机器
@@ -197,10 +198,12 @@ Kubernetes：
   "kind": "kubernetes",
   "clusterUid": "cluster-a",
   "namespace": "qwen-runtimes",
-  "podName": "qwen-runtime-abc123-g4",
+  "podName": "qwen-runtime-0123456789abcdef0123456789abcdef",
   "podUid": "5ce4...",
-  "secretName": "qwen-runtime-abc123-g4",
-  "secretUid": "94b1..."
+  "podResourceVersion": "7821",
+  "secretName": "qwen-runtime-0123456789abcdef0123456789abcdef",
+  "secretUid": "94b1...",
+  "secretResourceVersion": "7815"
 }
 ```
 
@@ -265,19 +268,21 @@ stateDiagram-v2
     [*] --> PROVISIONING: 分配 binding 和加密 seed
     PROVISIONING --> PROVISIONING: ensure resource / STARTING
     PROVISIONING --> READY: reconcile + 私有 attestation
-    PROVISIONING --> FAILED: 创建致命失败或身份冲突
+    PROVISIONING --> RECOVERY_BLOCKED: 不可重试的创建失败或身份冲突
     READY --> READY: 刷新 endpoint 和 attestation
     READY --> DRAINING: 空闲、撤销或主动 drain
     READY --> LOST: 明确确认资源不存在
-    DRAINING --> RELEASED: 条件释放外部资源成功
-    DRAINING --> LOST: 资源已经不存在
-    LOST --> RELEASED: 持久化清理完成
+    READY --> RECOVERY_BLOCKED: 资源或 attestation 冲突
+    LOST --> DRAINING: 空闲 generation 可安全替换
+    DRAINING --> RELEASED: 条件释放成功或资源已不存在
+    DRAINING --> RECOVERY_BLOCKED: 条件释放冲突
 ```
 
 reconcile 本身是 operation gate，不新增持久 binding 状态，以保持状态机精简。
 进程内重新构造的 `RuntimeBinding` 会记录当前 `attestation_generation`，并保持
-gate 关闭；只有它自己完成成功 attestation，或者看到另一个 Java 副本提交了更
-大的成功 generation，才允许打开。
+gate 关闭；只有当前 JVM 获取 operation gate，并亲自完成 reconcile 和成功
+attestation，才允许打开。另一个 Java 副本提交成功只会释放持久 claim，不能让
+当前 JVM 在没有自行校验的情况下信任缓存 endpoint。
 
 provision 和 recovery 按以下顺序执行：
 
@@ -285,15 +290,18 @@ provision 和 recovery 按以下顺序执行：
 2. 使用数据库时间获取 per-binding operation lease。
 3. 使用持久 seed 和已有 handle 调用 `ensureResource`。
 4. 只有仍持有相同 claim generation 时才持久化 handle。
-5. 轮询 `reconcile`，直到 `READY`、终态结果或 operation deadline。
+5. 轮询 `reconcile`，直到 `READY`、终态结果或 operation deadline。reconcile
+   重试从 50 ms 开始，ensure 重试从 100 ms 开始，均以 2 秒为上限倍增；deadline
+   为四个 operation lease 周期。deadline 独立调度，因此一个永远不完成的调度器
+   或 attestation future 也会被截止。
 6. 构造 `RuntimeLease`，调用私有 attestation route，并校验 lease headers、
    Runtime identity 和不可变 scope。
 7. 用一次 CAS 更新 endpoint、handle、`READY` 状态、health 时间，并递增
    attestation generation。
 8. 完成本地 ready gate；此后才允许执行 Tool Session `prepare`。
 
-Java 进程在任何阶段失去 operation lease，都必须丢弃迟到结果。外部资源仍可
-通过 `provisionRequestId` 发现，新 owner 可以无重复地继续收敛。
+Java 进程在任何阶段失去 operation lease 或到达 deadline，都必须丢弃迟到结果。
+外部资源仍可通过 `provisionRequestId` 发现，新 owner 可以无重复地继续收敛。
 
 ## 9. Endpoint 使用与刷新
 
@@ -327,13 +335,19 @@ resource handle 保存受控 generation 目录、PID 和进程启动指纹。恢
   scope。
 
 如果明确确认进程不存在，reconcile 返回 `NOT_FOUND`；如果 PID、路径或 ready
-record 有歧义，则返回 `CONFLICT` 或 `UNKNOWN`，不能启动第二个进程。正常关闭
-必须先把 binding 持久化为终态，再停止子进程。崩溃恢复可以接管匹配的子进程，
-或按身份条件回收它；不能把 Java `Process` 对象丢失当作子进程已经结束的证据。
+record 有歧义，则返回 `CONFLICT` 或 `UNKNOWN`，不能启动第二个进程。显式释放
+Runtime 时，必须先把 binding 持久化推进到 `DRAINING`，再停止子进程；普通 Java
+进程关闭可以保留 durable 子进程，供同主机新实例接管。崩溃恢复可以接管匹配的
+子进程，或按身份条件回收它；不能把 Java `Process` 对象丢失当作子进程已经结束
+的证据。
+
+子进程不继承 Java 的 stdout/stderr 管道。参考 provisioner 会丢弃这两个流，保证
+创建者 JVM 退出后子进程仍能健康运行。生产部署必须使用不依赖创建者 JVM 的独立
+结构化 worker 日志链路。
 
 ### 10.2 Kubernetes
 
-第一个 Kubernetes adapter 应当为每个 Runtime generation 创建一个 bare Pod，
+Kubernetes 参考 adapter 为每个 Runtime generation 创建一个 bare Pod，
 并使用 `restartPolicy: Never`；不使用可能静默替换物理 Runtime 的 Deployment。
 后续 operator 可以拥有 Runtime CRD，但仍实现同一套 Broker 契约。
 
@@ -342,24 +356,33 @@ Pod 和 Secret 使用由 `provisionRequestId`、binding ID 和 generation 推导
 采用 GET-or-create；若同名对象的不可变身份标签或 template digest 不一致，则
 拒绝接管。
 
-Java 管控面位于集群内时，初始 adapter 使用 ready Pod IP 和端口作为 endpoint。
-Pod IP 只是观测值，Pod UID 才是身份。只有网络拓扑确实需要时，才增加
-per-Runtime ClusterIP Service，而且它必须只选择一个 binding generation。
-adapter 在返回 `READY` 前校验 Service UID，以及 EndpointSlice 的 `ready`、
-`serving` 和 `terminating` 条件。
+Java 管控面位于集群内时，当前 adapter 使用 ready Pod IP 和端口作为 endpoint。
+Pod IP 只是观测值，Pod UID 才是身份。该参考实现不创建 Service，也不读取
+EndpointSlice。如果其他网络拓扑需要 per-Runtime ClusterIP Service，未来 adapter
+必须只选择一个 binding generation，持久化 Service UID，并在返回 `READY` 前
+校验 EndpointSlice 的 `ready`、`serving` 和 `terminating` 条件。
 
-Pod 配置 startup probe 和 readiness probe，但 Kubernetes readiness 不能替代
-Broker 的私有 attestation。probe 类型由 adapter 决定，不需要暴露管控凭证。
-NetworkPolicy 只允许 Java 管控面 workload 访问 Runtime，并只开放 Runtime 所需
-的出站流量。凭证通过 per-Runtime Secret 或经过批准的外部 secret provider
-下发。
+生成的 Pod 配置 TCP startup probe 和 readiness probe，但 Kubernetes readiness
+不能替代 Broker 的私有 attestation。boot 文档通过 per-Runtime Secret 注入
+`QWEN_MANAGED_RUNTIME_BOOT`，worker 使用其已支持的 `--boot-env` 契约启动。
+adapter 不负责创建 NetworkPolicy；生产部署必须只允许 Java 管控面 workload
+访问 Runtime，并只开放 Runtime 所需的出站流量。
+集群内客户端要求 Kubernetes API server 使用 HTTPS，并使用配置的
+service-account CA 做校验。当前实现只在启动时读取一次 projected token；token
+轮换仍属于真实集群验收项。
 
-release 使用持久 UID（必要时同时使用 resourceVersion）作为 Kubernetes delete
-precondition。同名但 UID 不同的对象属于冲突，绝不能删除。
+当前 `clusterUid` 是受信任的部署配置，并非从 Kubernetes API 自动发现的身份。
+生产配置必须使用目标集群唯一且不可变的标识。真实集群验收还必须证明所有 Java
+副本拿到相同值，并且在使用持久 handle 前拒绝来自其他集群的值。
 
-Kubernetes controller 是 reconcile loop；对象 UID 用来区分重建对象；
-EndpointSlice 暴露 ready/serving/terminating 条件；delete precondition 支持 UID
-和 resourceVersion。本 adapter 以这些能力为基础，而不是依赖 Pod 名称或缓存 IP：
+release 使用持久 UID 作为 Kubernetes delete precondition。观测到的
+resourceVersion 仍保存在 durable handle 中供诊断和 reconcile 使用，但普通
+release 不使用它，因为 Pod 状态更新会在 provision 之后正常改变
+resourceVersion。同名但 UID 不同的对象属于冲突，绝不能删除。
+
+Kubernetes controller 是 reconcile loop；对象 UID 用来区分重建对象；delete
+precondition 支持 UID 和 resourceVersion。当前 adapter 以这些能力为基础，而不是
+依赖 Pod 名称或缓存 IP；EndpointSlice 条件用于上面描述的未来 Service 扩展：
 
 - [Kubernetes controllers](https://kubernetes.io/docs/concepts/architecture/controller/)
 - [Object names and UIDs](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/)
@@ -387,17 +410,16 @@ identity 幂等调用 `prepare`。
 
 1. 将 binding 标记为 `LOST`，停止向旧 endpoint 发送请求；
 2. 检查所有固定到该 binding generation 的 Tool execution；
-3. 如果任一 execution 未终结或已经是 `UNKNOWN`，则 Session 保持
-   `recovery_blocked`，不能自动创建 replacement；
-4. 如果没有模糊 execution，后续切片可以通过 CAS，把同一个 public/Harness
-   Session identity 重新绑定到新的内部 Runtime binding generation，重新完成
-   Tool Session prepare 和 history binding 后继续；
+3. 如果任一 execution 未终结或已经是 `UNKNOWN`，则 Runtime Session 继续固定在
+   `LOST` binding，并拒绝后续 Runtime 操作；不能自动创建 replacement；
+4. 如果没有活跃 Runtime Session，也没有活跃 execution，Broker 条件释放已丢失
+   的资源记录，并为同一个 request 分配新的 binding generation；
 5. 所有旧 execution 记录继续绑定旧 binding ID 和 generation，迟到结果不能进入
    replacement Runtime Session。
 
-第一个 JDBC 激活切片不需要实现透明 dead-Runtime rebind。它必须能够安全恢复
-同一个 Runtime，或者明确暴露 `recovery_blocked`。自动安全 rebind 是 crash/
-reconcile 测试通过后的下一个有界里程碑。
+仍然禁止透明重绑活跃 Runtime Session。已实现的自动 replacement 只适用于没有
+活跃 Runtime Session 或 execution 的空闲 binding；否则 binding 保持 `LOST`，
+并明确阻塞恢复。
 
 ## 12. Spring 集成
 
@@ -436,7 +458,7 @@ claim 和 provisioner 契约。
 
 ## 14. 交付计划
 
-### P3a-1：持久身份
+### P3a-1：持久身份——已实现
 
 - 为 request identity 和 binding record 增加 provisioner、placement 和 template
   digest。
@@ -445,7 +467,7 @@ claim 和 provisioner 契约。
 - 移除生产路径中的明文 Runtime token 持久化。
 - 扩展 H2 和真实 MySQL Repository contract tests。
 
-### P3a-2：Reconcile gate
+### P3a-2：Reconcile gate——已实现
 
 - 引入 `ensureResource` 和 `reconcile` 结果。
 - 增加 owned-worker 私有 `v2/attest` route 和严格的身份响应。
@@ -453,24 +475,27 @@ claim 和 provisioner 契约。
 - 让 local-process 使用 durable seed，并实现同主机接管或失败关闭清理。
 - 为第 13 节每个故障点增加测试。
 
-### P3a-3：Spring 激活与证明
+### P3a-3：Spring 激活与证明——本地已实现
 
 - 新增 Flyway V3 和 Spring JDBC/secret-protector 接线。
 - 使用同一个真实 MySQL 运行两个相互独立的 Java 服务实例。
-- 证明只有一次物理 provision、一个 binding generation、一次 execution dispatch，
-  并证明重启恢复和过期 owner 拒绝。
-- 分别测量无工具 TTFT 与工具边界等待时间。
+- 证明独立 JVM 之间只有一次物理 provision、一个 binding generation、一次
+  execution dispatch，并能在重启后复用；真实 MySQL Repository fencing 测试另行
+  证明过期 owner takeover 与旧 owner 拒绝。
+- 保持现有无工具轮次不阻塞、warm-up 并行的契约。生产 TTFT 和首个工具等待
+  测量属于部署基准，不是 Broker 正确性测试。
 
-### P3b：Kubernetes adapter
+### P3b：Kubernetes adapter——已实现，真实集群证明待完成
 
 - 在同一契约后实现 bare-Pod/Secret adapter。
 - 在真实测试集群验证：Java 重启、API 超时、Pod 删除、同名不同 UID 冲突、延迟
   readiness、endpoint 变化、条件清理和工具执行中崩溃。
-- 只有模糊状态 gate 被证明可靠后，才增加安全的 idle Session rebind。
+- 安全 replacement 仅适用于没有活跃 Runtime Session 或 execution 的空闲
+  binding。
 
 ## 15. 验证与验收标准
 
-只有以下内容全部得到证明，本设计才算完成：
+各项验收标准的实现状态如下：
 
 - Runtime Broker 启用时 Spring 一定使用 JDBC Repository，绝不静默退回内存。
 - 第一次调度器副作用前已经提交 binding seed，两个 Java 竞争者读取到完全相同的
@@ -481,14 +506,22 @@ claim 和 provisioner 契约。
 - 被复用的本地端口、同名不同 UID Pod、旧 lease、旧 epoch 或不兼容 template
   都会被拒绝。
 - `UNKNOWN` 永远不会触发自动 provision 或 delete。
-- 两个 Java 进程和真实 MySQL 在并发请求与 owner takeover 下，收敛到一个
-  binding 和一次物理 execution。
+- 两个并发 Java 进程和真实 MySQL 收敛到一个 binding 和一次物理 execution；
+  真实 MySQL Repository 测试另行覆盖过期 owner takeover，后续 JVM 在重启后复用
+  已完成的 generation。
 - 工具 dispatch 后丢失响应时，查询原 `executionCallId`，不会产生第二次物理
   execution。
 - Runtime 仍在启动时，无工具轮次可以产生首 token；只有真实工具边界等待。
 - secret 被加密或引用，不出现在日志、公共 API 和 resource handle 中。
-- local-process 和 Kubernetes adapter 通过同一套调度器无关 contract suite，
-  并各自通过专属故障测试。
+- local-process 和 Kubernetes adapter 已通过调度器无关 Broker 恢复测试及各自的
+  专属故障测试。
+- 创建者 JVM 退出后，第二个 JVM 能接管同一个本地 worker；可重试观测会退避，
+  到达有界 deadline 后释放过期本地 claim，并可由后续请求继续恢复。
+
+以上代码级标准均有本地测试覆盖。生产验收仍需执行真实集群 P3b 矩阵：Java
+重启、Kubernetes API 超时、Pod 删除、同名不同 UID 替换、延迟 readiness、Pod
+IP 变化、条件清理和工具执行中崩溃。目标部署还必须重新测量 Hosted Harness
+TTFT 与首个工具等待；fake API 测试不能代表这两项已经完成。
 
 ## 16. 可观测性
 
