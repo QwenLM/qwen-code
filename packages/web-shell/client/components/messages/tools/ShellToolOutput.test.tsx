@@ -77,6 +77,25 @@ function result(overrides: Record<string, unknown> = {}) {
 }
 
 describe('shell result presentation', () => {
+  it('uses an intact text fallback for documents without structured metadata', () => {
+    const text = envelope('failed output');
+    render(tool(text, { status: 'failed' }), true);
+    expect(container.textContent).toContain(text);
+    expect(container.querySelector('details')).toBeNull();
+    expect(container.textContent).not.toContain('Use default');
+    expect(container.querySelector('button')).toBeNull();
+  });
+  it.each([
+    ['cancelled', null],
+    ['timed_out', null],
+    ['failed', 15],
+  ])('hides synthetic exit zero for %s / signal %s', (outcome, signal) => {
+    render(tool('', { rawOutput: result({ outcome, signal, exitCode: 0 }) }));
+    expect(container.querySelector('dl')?.textContent).not.toContain(
+      'Exit code',
+    );
+  });
+
   it('uses compatible text for unknown structured versions', () => {
     const rawOutput = result({ version: 2, notices: ['future notice'] });
     render(tool('', { rawOutput }));

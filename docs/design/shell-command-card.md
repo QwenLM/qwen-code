@@ -27,3 +27,5 @@ Verify successful output is separated from metadata and commands appear once in 
 Historical records have no structured metadata and remain verbatim. This may retain clutter but avoids inventing fields from command output. No open product decisions.
 
 Shell outcome follows the existing exit-error policy: exit 1 from grep/rg/diff/test is a completed negative result, not an execution failure. Web Shell trusts the structured outcome and retains the numeric exit code in details. PostToolUse and PostToolBatch hooks keep string display fields through shared normalization; UI/history retain structured data. Running elapsed time is visible beside the status.
+
+When an exported document has only legacy text, render the command and complete fallback text without category disclosures or inferred execution metadata. Structured directory values are resolved execution paths. Hide exit codes for cancelled, timed-out or signal-terminated commands; keep their outcome and signal visible.

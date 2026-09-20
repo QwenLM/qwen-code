@@ -3698,7 +3698,7 @@ describe('ShellTool', () => {
         version: 1,
         text: 'completed',
         output: 'completed',
-        directory: expect.any(String),
+        directory: '/test/dir',
         exitCode: 0,
         signal: 0,
         pid: 12345,
@@ -3966,6 +3966,9 @@ describe('ShellTool', () => {
           );
           expect(result.llmContent).toContain(truncatedContent);
           expect(result.persistedOutputFiles).toEqual([outputFile]);
+          expect(result.returnDisplay).toMatchObject({
+            outputFiles: [outputFile],
+          });
         } finally {
           spy.mockRestore();
         }
@@ -7560,6 +7563,7 @@ describe('ShellTool', () => {
         );
         // Captured output is preserved.
         expect(String(result.llmContent)).toContain('oops too late');
+        expect(result.returnDisplay).toMatchObject({ outcome: 'completed' });
       });
 
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {

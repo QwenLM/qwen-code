@@ -132,6 +132,22 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
                   : 'shell.result.completed',
               );
 
+  if (documentMode && !result) {
+    return (
+      <div className={styles.expandedCard}>
+        <div className={styles.expandedCardHeader}>
+          <span className={styles.expandedCardTitle}>
+            {localizeToolDisplayName(tool.toolName, t)}
+          </span>
+        </div>
+        <div className={styles.expandedCardBody}>
+          {command && <pre className={styles.expandedOutput}>{command}</pre>}
+          <pre className={styles.expandedOutput}>{output}</pre>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.expandedCard} data-shell-command-card>
       <div className={styles.expandedCardHeader}>
@@ -289,19 +305,18 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {result && (
                 <>
                   <dt>{t('shell.result.directory')}</dt>
-                  <dd>
-                    {result.directory === '(root)'
-                      ? t('shell.result.defaultDirectory')
-                      : result.directory}
-                  </dd>
+                  <dd>{result.directory}</dd>
                 </>
               )}
-              {result?.exitCode != null && (
-                <>
-                  <dt>{t('shell.result.exitCode')}</dt>
-                  <dd>{result.exitCode}</dd>
-                </>
-              )}
+              {result?.exitCode != null &&
+                !cancelled &&
+                result.outcome !== 'timed_out' &&
+                !result.signal && (
+                  <>
+                    <dt>{t('shell.result.exitCode')}</dt>
+                    <dd>{result.exitCode}</dd>
+                  </>
+                )}
               {result && result.outputFiles.length > 0 && (
                 <>
                   <dt>{t('shell.result.outputFiles')}</dt>
