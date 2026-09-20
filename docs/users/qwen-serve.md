@@ -1073,6 +1073,8 @@ archive after rotation.
 
 The log captures lifecycle messages, route errors (with `route=` and `sessionId=` context), ACP child stderr, and — when `QWEN_SERVE_DEBUG=1` is set — extra bridge breadcrumbs. Lines that go to stderr today still go to stderr; the file log is **additive**, not a replacement.
 
+Failed standalone creation adds `Standalone session creation failed.` with the validated target `sessionId`, failed `phase`, safe `reason`, `dispatchState` and `cleanupOutcome`. Child creation retains the child ID and records the validated parent separately as `relatedSessionId`. Correlate `source_persistence_failed` lines by session ID for private source acknowledgement or transport details; `write_not_confirmed` does not identify a filesystem cause. A completed quarantine is distinct from rollback, and `unknown` does not establish cleanup success. Public error codes and retry behavior remain unchanged. These diagnostics omit raw causes, prompts and source payloads.
+
 The active file rotates before it would exceed 10 MiB. Each family retains
 four archives under `archive/`, and each file record is capped at 256 KiB. The
 in-memory queue accepts at most 4 MiB of unsettled file payload. Queue pressure,
