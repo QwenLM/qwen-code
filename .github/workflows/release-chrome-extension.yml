@@ -106,14 +106,15 @@ jobs:
           npm -w packages/chrome-extension run typecheck
 
       - name: 'Package for the store'
-        # The scan reads the staged build and the archive the store receives,
-        # not the side-loading pair, which this job never produces.
-        env:
-          EXTENSION_OUT_DIR: 'dist/store-extension'
-          EXTENSION_ZIP: 'chrome-extension-store.zip'
         run: |-
           npm -w packages/chrome-extension run package:store
-          npm -w packages/chrome-extension run scan:artifacts
+          # Only the scan is redirected: EXTENSION_OUT_DIR also steers the
+          # build, which must still write dist/extension for the store copy to
+          # be made from. The scan reads the staged build and the archive the
+          # store receives, not the side-loading pair this job never produces.
+          EXTENSION_OUT_DIR='dist/store-extension' \
+            EXTENSION_ZIP='chrome-extension-store.zip' \
+            npm -w packages/chrome-extension run scan:artifacts
 
       - name: 'Verify the package'
         id: 'version'
