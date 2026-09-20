@@ -223,9 +223,9 @@ async function start(
         }
       | undefined;
     reassertSessionRecord?: () => Promise<void>;
-    getPolicySetting?: () => InboundPolicy | undefined;
-    getHeldExpiryMs?: () => number | null;
-    getPolicyScope?: () => PolicyScope | undefined;
+    getPolicySetting?: (sessionId?: string) => InboundPolicy | undefined;
+    getHeldExpiryMs?: (sessionId?: string) => number | null;
+    getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
     controllerRegistryPath?: string;
     admission?: PeerAdmission;
     dropReceiptTrailMs?: number;
@@ -1374,6 +1374,29 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
         .map((r) => (r as { status: string }).status);
     expect(statusesFor(consumed.msgId)).toEqual(['delivered']);
     expect(statusesFor(waiting.msgId)).toEqual(['delivered', 'expired']);
+  });
+
+  it('asks each setting reader about the session a message is addressed to', async () => {
+    const sender = await startSenderInbox();
+    const asked: Array<string | undefined> = [];
+    const { submitted } = await start(ApprovalMode.DEFAULT, {
+      ownsSessionId: (id) => id === 'hosted-1',
+      getPolicySetting: (id) => {
+        asked.push(id);
+        return 'accept';
+      },
+    });
+    await send(
+      messaging!.socketPath!,
+      peerFrame({
+        content: 'pinned',
+        from: sender.socketPath,
+        toSessionId: 'hosted-1',
+      }),
+    );
+    await settle();
+    expect(submitted).toHaveLength(1);
+    expect(asked).toContain('hosted-1');
   });
 
   it('settles a partially flushed buffer alongside queued frames at exit', async () => {

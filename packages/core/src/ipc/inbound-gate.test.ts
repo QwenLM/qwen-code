@@ -823,11 +823,8 @@ describe('receipts', () => {
 
   it('judges a parked frame against the sessions a host still holds', () => {
     // The multi-session shape: no single id to compare, so the release
-    // path asks whether the frame's addressee is still one of them. The
-    // ACP host that wires this today refuses everything on arrival, so
-    // nothing reaches here from it — the rule belongs to the gate all the
-    // same, and a caller that parks (an inbound policy that holds) must
-    // not have its pin judged by whichever check ran first.
+    // path asks whether the frame's addressee is still one of them — a
+    // hosted session can go while its message waits for review.
     const hosted = new Set(['session-a', 'session-b']);
     const delivered: PeerUserFrame[] = [];
     const statuses: string[] = [];
@@ -2278,5 +2275,154 @@ describe('a message settled without the far model seeing it', () => {
     // repeat memory, never the allowance.
     expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('dropped');
     expect(h.drops.at(-1)?.reason).toBe('rate-limited');
+  });
+});
+
+describe('a gate for a process hosting several sessions', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Two hosted sessions with different settings behind one gate: `strict`
+   * holds everything for review and keeps a hold for a minute; `relaxed`
+   * leaves the policy unset, reviews each action, and keeps a hold for
+   * five.
+   */
+  function hostOfTwo() {
+    const delivered: PeerUserFrame[] = [];
+    const statuses: Array<{ msgId: string; status: string }> = [];
+    const asked: Array<{ reader: string; sessionId?: string }> = [];
+    const settings: Record<
+      string,
+      {
+        policy?: InboundPolicy;
+        mode: ApprovalMode;
+        expiryMs: number | null;
+        scope?: PolicyScope;
+      }
+    > = {
+      strict: {
+        policy: 'hold',
+        mode: ApprovalMode.DEFAULT,
+        expiryMs: 60_000,
+        scope: 'workspace',
+      },
+      relaxed: { mode: ApprovalMode.DEFAULT, expiryMs: 300_000 },
+    };
+    const gate = new InboundGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: (id) => {
+        asked.push({ reader: 'mode', sessionId: id });
+        return id ? (settings[id]?.mode ?? null) : null;
+      },
+      getPolicySetting: (id) => {
+        asked.push({ reader: 'policy', sessionId: id });
+        return id ? settings[id]?.policy : 'refuse';
+      },
+      getPolicyScope: (id) => (id ? settings[id]?.scope : undefined),
+      getHeldExpiryMs: (id) =>
+        id ? (settings[id]?.expiryMs ?? null) : DEFAULT_HELD_EXPIRY_MS,
+      ownsSessionId: (id) => id in settings,
+      deliver: (candidate) => delivered.push(candidate),
+      reportStatus: (candidate, status) =>
+        statuses.push({ msgId: candidate.msgId, status }),
+    });
+    return { gate, delivered, statuses, asked, settings };
+  }
+
+  it('judges each message by the settings of the session it is addressed to', () => {
+    const host = hostOfTwo();
+    const forStrict = frame({ fromMode: 'prompting', toSessionId: 'strict' });
+    const forRelaxed = frame({ fromMode: 'prompting', toSessionId: 'relaxed' });
+
+    // Same sender, same claimed review class: the strict session's
+    // explicit hold parks it, the relaxed one's parity delivers it.
+    expect(host.gate.admit(forStrict)).toBe('held');
+    expect(host.gate.admit(forRelaxed)).toBe('accept');
+    expect(host.delivered).toEqual([forRelaxed]);
+    expect(host.gate.getHeld()[0]).toMatchObject({
+      cause: 'explicit-setting',
+      policyScope: 'workspace',
+    });
+    expect(host.asked).toContainEqual({
+      reader: 'policy',
+      sessionId: 'strict',
+    });
+    expect(host.asked).toContainEqual({ reader: 'mode', sessionId: 'relaxed' });
+  });
+
+  it('re-judges a held message for its own session when a mode changes', () => {
+    const host = hostOfTwo();
+    const forRelaxed = frame({ fromMode: 'bypass', toSessionId: 'relaxed' });
+    expect(host.gate.admit(forRelaxed)).toBe('held');
+
+    host.settings['relaxed']!.mode = ApprovalMode.YOLO;
+    expect(host.gate.reevaluate('approval-mode-changed')).toBe(1);
+    expect(host.delivered).toEqual([forRelaxed]);
+  });
+
+  it("expires each held message on its own session's schedule", () => {
+    const host = hostOfTwo();
+    const forStrict = frame({ fromMode: 'bypass', toSessionId: 'strict' });
+    const forRelaxed = frame({ fromMode: 'bypass', toSessionId: 'relaxed' });
+    host.gate.admit(forRelaxed);
+    host.gate.admit(forStrict);
+    expect(host.gate.getHeld()).toHaveLength(2);
+
+    // The newer message has the shorter lifetime, so it is the next to
+    // go even though it is not the oldest.
+    vi.advanceTimersByTime(60_001);
+    expect(host.gate.getHeld().map((entry) => entry.frame.msgId)).toEqual([
+      forRelaxed.msgId,
+    ]);
+    expect(host.statuses.at(-1)).toEqual({
+      msgId: forStrict.msgId,
+      status: 'expired',
+    });
+
+    vi.advanceTimersByTime(240_000);
+    expect(host.gate.getHeld()).toHaveLength(0);
+    expect(host.statuses.at(-1)).toEqual({
+      msgId: forRelaxed.msgId,
+      status: 'expired',
+    });
+  });
+
+  it('caps held messages per session, so one backlog cannot turn away another', () => {
+    const host = hostOfTwo();
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      expect(
+        host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'strict' })),
+      ).toBe('held');
+    }
+    // Full for `strict`, respelled or not...
+    expect(
+      host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'STRICT' })),
+    ).toBe('dropped');
+    // ...and still open for its sibling.
+    expect(
+      host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'relaxed' })),
+    ).toBe('held');
+  });
+
+  it('answers a held message whose session is gone misaddressed, not denied', () => {
+    const host = hostOfTwo();
+    const forStrict = frame({ fromMode: 'bypass', toSessionId: 'strict' });
+    host.gate.admit(forStrict);
+    // The session leaves without its holds being settled; a sibling's mode
+    // change then re-judges the backlog.
+    delete host.settings['strict'];
+    host.gate.reevaluate('approval-mode-changed');
+
+    expect(host.gate.getHeld()).toHaveLength(0);
+    expect(host.statuses.at(-1)).toEqual({
+      msgId: forStrict.msgId,
+      status: 'misaddressed',
+    });
   });
 });
