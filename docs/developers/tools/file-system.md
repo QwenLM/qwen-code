@@ -223,7 +223,7 @@ grep_search(pattern="function", glob="*.js", limit=10)
   - If `old_string` is empty and `file_path` does not exist, creates a new file with `new_string` as content.
   - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence unless `replace_all` is true.
   - If the match is unique (or `replace_all` is true), it replaces the text with `new_string`.
-  - An empty `new_string` deletes the matched text without automatically consuming a following newline. To delete an entire line without leaving a blank line, include its newline in `old_string`.
+  - An empty `new_string` deletes the matched text. For exact matches, a following newline is retained unless it is included in `old_string`. To delete an entire line without leaving a blank line, include its newline in `old_string`.
   - **Enhanced Reliability (Multi-Stage Edit Correction):** To significantly improve the success rate of edits, especially when the model-provided `old_string` might not be perfectly precise, the tool incorporates a multi-stage edit correction mechanism.
     - If the initial `old_string` isn't found or matches multiple locations, the tool can leverage the Qwen model to iteratively refine `old_string` (and potentially `new_string`).
     - This self-correction process attempts to identify the unique segment the model intended to modify, making the `edit` operation more robust even with slightly imperfect initial context.

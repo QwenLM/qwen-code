@@ -917,6 +917,30 @@ describe('EditTool', () => {
           expected: 'before\nafter\n',
         },
         {
+          name: 'a fuzzy-matched line including its newline',
+          original: 'before\nremove-me \nafter\n',
+          oldString: 'remove-me\n',
+          expected: 'before\nafter\n',
+        },
+        {
+          name: 'a whole line with an explicitly CRLF-spelled needle',
+          original: 'before\nremove-me\nafter\n',
+          oldString: 'remove-me\r\n',
+          expected: 'before\nafter\n',
+        },
+        {
+          name: 'fuzzy-matched multiline context including its newline',
+          original: 'alpha\nbeta\nremove-me \ndelta\n',
+          oldString: 'alpha\nbeta\nremove-me\n',
+          expected: 'delta\n',
+        },
+        {
+          name: 'a fuzzy-matched line without a requested newline',
+          original: 'before\nremove-me \nafter\n',
+          oldString: 'remove-me\t',
+          expected: 'before\n\nafter\n',
+        },
+        {
           name: 'a multiline fragment starting mid-line',
           original:
             'BASE_URL=https://example.test/legacy\nremove-me\nRETRIES=3\n',

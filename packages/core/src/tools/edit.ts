@@ -780,7 +780,7 @@ Expectation for required parameters:
           },
           new_string: {
             description:
-              'The exact literal text to replace `old_string` with, preferably unescaped. Provide the EXACT text. Ensure the resulting code is correct and idiomatic.',
+              'The exact literal text to replace `old_string` with, preferably unescaped. Provide the EXACT text. Ensure the resulting code is correct and idiomatic. For deletion, use an empty `new_string` and include the trailing newline in `old_string` when removing a whole line to avoid leaving a blank line.',
             type: 'string',
           },
           replace_all: {

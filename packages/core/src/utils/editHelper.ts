@@ -217,16 +217,27 @@ function findLineBasedMatch(
     }
     matchIndex = attemptMatch(trimmedPattern);
     if (matchIndex !== null) {
+      const withNewline = sliceFromLines(
+        haystack,
+        offsets,
+        lines,
+        matchIndex,
+        trimmedPattern.length,
+        true,
+      );
+      const withoutNewline = sliceFromLines(
+        haystack,
+        offsets,
+        lines,
+        matchIndex,
+        trimmedPattern.length,
+        false,
+      );
+      const includeNewline =
+        endsWithNewline && withNewline.length > withoutNewline.length;
       return {
-        slice: sliceFromLines(
-          haystack,
-          offsets,
-          lines,
-          matchIndex,
-          trimmedPattern.length,
-          false,
-        ),
-        removedTrailingFinalEmptyLine: true,
+        slice: includeNewline ? withNewline : withoutNewline,
+        removedTrailingFinalEmptyLine: !includeNewline,
       };
     }
   }

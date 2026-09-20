@@ -80,6 +80,37 @@ const two = 2;
     });
   });
 
+  it.each(['\n', '\r\n'])(
+    'preserves the requested newline in a fuzzy replacement with %j',
+    (eol) => {
+      const fileContent = 'before\nvalue = 1; \nafter\n';
+      const result = normalizeEditStrings(
+        fileContent,
+        `value = 1;${eol}`,
+        'value = 2;\n',
+      );
+      expect(result).toEqual({
+        oldString: 'value = 1; \n',
+        newString: 'value = 2;\n',
+      });
+      expect(fileContent.replace(result.oldString, result.newString)).toBe(
+        'before\nvalue = 2;\nafter\n',
+      );
+    },
+  );
+
+  it('drops only the missing final newline when the file already ends with one', () => {
+    const result = normalizeEditStrings(
+      'value = 1; \n',
+      'value = 1;\n\n',
+      'value = 2;\n\n',
+    );
+    expect(result).toEqual({
+      oldString: 'value = 1; \n',
+      newString: 'value = 2;\n',
+    });
+  });
+
   // Tests for issue #1618: Preserve trailing whitespace in newString
   describe('trailing whitespace preservation in newString', () => {
     it('preserves trailing whitespace when intentionally adding to end of line', () => {
