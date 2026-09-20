@@ -2112,6 +2112,52 @@ describe('WorkflowRunner', () => {
         await expect(handle.completion).resolves.toMatchObject({ ok: true });
       });
 
+      // The write is the only await between the last cancellation check and
+      // `register`, and `register` does not read the controller. Without a
+      // second check the run registers anyway and settles `failed`, under a
+      // caller that was handed `{cancelled: true}`.
+      it('reports a cancellation that lands while the checkpoint is being written', async () => {
+        const { config, registry } = configWithRegistry();
+        const root = await makeStorageRoot();
+        stubStorage(config, root);
+        const first = await settledRun(config);
+        const settled = registry.get(first.runId);
+        const actual = await vi.importActual<
+          typeof import('../workflow-checkpoint.js')
+        >('../workflow-checkpoint.js');
+        let wrote = false;
+        writeWorkflowCheckpointMock.mockImplementationOnce(
+          async (
+            ...args: Parameters<typeof actual.writeWorkflowCheckpoint>
+          ) => {
+            const outcome = await actual.writeWorkflowCheckpoint(...args);
+            // The file is on disk; the cancel arrives before `register`.
+            expect(registry.cancelStarting(first.runId)).toBe(true);
+            wrote = true;
+            return outcome;
+          },
+        );
+        const dispatch = vi.fn(async () => 'live');
+
+        await expect(
+          WorkflowRunner.start({
+            ...resumeOf(config, first.runId),
+            runInBackground: true,
+            dispatch,
+          }),
+        ).rejects.toBeInstanceOf(WorkflowStartCancelledError);
+
+        expect(wrote).toBe(true);
+        expect(dispatch).not.toHaveBeenCalled();
+        // Not replaced by a run that never started, and no record left
+        // claiming a process still has it.
+        expect(registry.get(first.runId)).toBe(settled);
+        expect(registry.get(first.runId)?.status).toBe('completed');
+        await expect(
+          fs.access(path.join(root, first.runId, 'checkpoint.json')),
+        ).rejects.toThrow();
+      });
+
       it('takes back the checkpoint when the start it recorded then fails', async () => {
         const { config, registry } = configWithRegistry();
         const root = await makeStorageRoot();

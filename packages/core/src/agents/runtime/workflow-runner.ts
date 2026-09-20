@@ -593,6 +593,13 @@ export class WorkflowRunner {
         if ((await checkpointWrite) === 'failed') {
           throw new WorkflowCheckpointUnwritableError(runId);
         }
+        // That write is the only await between the check above and
+        // `register`, which does not read the controller. A cancel landing
+        // during it would otherwise register anyway and settle the run
+        // `failed` under a caller that was just told it was cancelled --
+        // exactly what the earlier check exists to prevent. The catch below
+        // takes the checkpoint back.
+        assertStartNotCancelled();
       }
       entry = registry?.register(registration, controller);
     } catch (error) {
