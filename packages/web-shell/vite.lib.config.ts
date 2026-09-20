@@ -150,8 +150,41 @@ function injectCssModules(): Plugin {
 // renderer. Built alongside the root entry, it would inherit the full
 // component stylesheet (editor, sidebar, …) that the `/export html`
 // document renderer inlines into every exported file (#11031).
+// The transcript renderer is inlined into every `/export html` document, under
+// a byte budget that web-templates enforces at build time. Strings for
+// surfaces the read-only transcript can never render have no business there:
+// the Live Voice dialog and setup card alone are ~200 entries. Matching on the
+// resolved id (not the specifier) keeps this working however the module is
+// imported.
+const LIVE_MESSAGES_MODULE = resolve(__dirname, './client/live/messages.ts');
+const LIVE_MESSAGES_TRANSCRIPT_STUB = resolve(
+  __dirname,
+  './client/live/messages.transcript-stub.ts',
+);
+
+function stubTranscriptDeadMessages(): Plugin {
+  return {
+    name: 'web-shell-stub-transcript-dead-messages',
+    enforce: 'pre',
+    async resolveId(source, importer, options) {
+      const resolved = await this.resolve(source, importer, {
+        ...options,
+        skipSelf: true,
+      });
+      return resolved?.id === LIVE_MESSAGES_MODULE
+        ? LIVE_MESSAGES_TRANSCRIPT_STUB
+        : null;
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), tailwindcss(), injectCssModules()],
+  plugins: [
+    ...(mode === 'transcript' ? [stubTranscriptDeadMessages()] : []),
+    react(),
+    tailwindcss(),
+    injectCssModules(),
+  ],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
