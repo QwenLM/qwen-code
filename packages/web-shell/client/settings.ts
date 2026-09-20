@@ -85,11 +85,13 @@ export interface WebShellSettingsOptions {
   excludeItems?: readonly WebShellSettingItemId[];
 }
 
-// Predicates run once per rendered row, so each unknown id warns once.
+// Predicates run once per rendered row, so each unknown id warns once. The
+// library build folds import.meta.env.DEV to false, so gating on it would
+// dead-code the diagnostic out of the only artifact hosts install.
 const warnedUnknownItemIds = new Set<string>();
 
 function warnUnknownItemIds(options?: WebShellSettingsOptions): void {
-  if (!import.meta.env.DEV || !options) return;
+  if (!options) return;
   for (const id of [
     ...(options.includeItems ?? []),
     ...(options.excludeItems ?? []),

@@ -158,37 +158,52 @@ describe('settings presentation aliases', () => {
       expect(WEB_SHELL_SETTING_ITEM_IDS).toContain(id);
     }
   });
-  it('warns once per unrecognized item id and never for published ids', async () => {
-    // The warn-once dedup is module state and earlier tests legitimately pass
-    // published ids through the same predicates, so probe a fresh instance.
-    vi.resetModules();
-    const fresh = await import('./settings');
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    try {
-      const options = {
-        includeItems: [
-          'setting:langauge' as WebShellSettingItemId,
-          'setting:theme',
-        ],
-      };
-      fresh.isSettingVisible('ui.theme', options);
-      fresh.isItemVisible('builtin:live-setup', options);
-      const warned = warn.mock.calls.map((call) => String(call[0]));
-      expect(warned.filter((text) => text.includes('"setting:theme"'))).toEqual(
-        [],
-      );
-      expect(
-        warned.filter((text) => text.includes('"setting:langauge"')),
-      ).toHaveLength(1);
-      warn.mockClear();
-      fresh.isSettingVisible('general.language', { includeItems: [] });
-      fresh.isSettingVisible('general.language', { excludeItems: [] });
-      fresh.isItemVisible('builtin:chat-width');
-      expect(warn).not.toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
-    }
-  });
+  // The diagnostic ships in the production bundle (the lib build folds
+  // import.meta.env.DEV to false), so pin identical behavior in both modes.
+  it.each([true, false])(
+    'warns once per unrecognized item id and never for published ids (DEV=%s)',
+    async (dev) => {
+      // The warn-once dedup is module state and earlier tests legitimately pass
+      // published ids through the same predicates, so probe a fresh instance.
+      vi.resetModules();
+      const fresh = await import('./settings');
+      vi.stubEnv('DEV', dev);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const options = {
+          includeItems: [
+            'setting:langauge' as WebShellSettingItemId,
+            'setting:theme',
+          ],
+        };
+        fresh.isSettingVisible('ui.theme', options);
+        fresh.isItemVisible('builtin:live-setup', options);
+        const excludeOptions = {
+          excludeItems: ['setting:fastModel' as WebShellSettingItemId],
+        };
+        fresh.isSettingVisible('fastModel', excludeOptions);
+        fresh.isItemVisible('builtin:live-setup', excludeOptions);
+        const warned = warn.mock.calls.map((call) => String(call[0]));
+        expect(
+          warned.filter((text) => text.includes('"setting:theme"')),
+        ).toEqual([]);
+        expect(
+          warned.filter((text) => text.includes('"setting:langauge"')),
+        ).toHaveLength(1);
+        expect(
+          warned.filter((text) => text.includes('"setting:fastModel"')),
+        ).toHaveLength(1);
+        warn.mockClear();
+        fresh.isSettingVisible('general.language', { includeItems: [] });
+        fresh.isSettingVisible('general.language', { excludeItems: [] });
+        fresh.isItemVisible('builtin:chat-width');
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    },
+  );
   it('filters by every published setting alias in both directions', () => {
     // SETTING_KEYS is module-private, so this mirror pins the published
     // alias-to-key contract; the completeness assertion keeps it in sync.
