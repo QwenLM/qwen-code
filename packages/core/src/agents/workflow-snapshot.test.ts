@@ -258,11 +258,29 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     await writeWorkflowSnapshot(config, task({ runId: 'wf_real' }));
     const real = config.storage.getWorkflowRunSnapshotPath('wf_real');
 
+    // The shape that matters: the link points outside the runs directory at
+    // a file that does name this run, so only refusing the link refuses it.
+    const outside = path.join(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'wf-outside-')),
+      'planted.json',
+    );
+    await fs.writeFile(
+      outside,
+      JSON.stringify({
+        ...JSON.parse(await fs.readFile(real, 'utf8')),
+        runId: 'wf_planted',
+      }),
+      'utf8',
+    );
     const planted = config.storage.getWorkflowRunSnapshotPath('wf_planted');
-    await fs.symlink(real, planted);
+    await fs.symlink(outside, planted);
     await expect(
       readWorkflowSnapshot(config, 'wf_planted'),
     ).resolves.toBeUndefined();
+    // Reading it directly is what the link would have delivered.
+    expect(JSON.parse(await fs.readFile(planted, 'utf8')).runId).toBe(
+      'wf_planted',
+    );
 
     // A file placed under one id that claims to be another run.
     await fs.writeFile(
