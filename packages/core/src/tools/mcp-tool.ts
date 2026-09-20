@@ -600,61 +600,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       throw createToolCallAbortError();
     }
 
-    // A previous turn's cancellation can leave this server recorded
-    // DISCONNECTED: aborting an in-flight request closes the transport, the
-    // SDK `onerror` fires, and nothing else on the tool path ever
-    // re-initializes the session. Rebuild it before issuing the call so this
-    // invocation proceeds against a live session instead of inheriting the
-    // dead one.
-    //
-    // Awaiting here is safe: this is the start of a user-requested call, not
-    // inside a cancellation, so a cancelled call still returns immediately.
-    // The reconnect replays nothing — nothing has been executed yet — and it
-    // is scoped to servers actually recorded DISCONNECTED, so a connected
-    // server pays nothing. A server that is genuinely down also lands here,
-    // which costs one reconnect attempt per invocation by design; the health
-    // monitor covers the steady state.
-    // Deliberately checks for a *recorded* DISCONNECTED (same convention as
-    // isExecutionTimeoutFailure above): getMCPServerStatus() reports
-    // DISCONNECTED for servers it has never seen, so the simpler comparison
-    // would misroute every pre-discovery invocation into a repair.
-    const statuses = getAllMCPServerStatuses();
-    if (
-      statuses.has(this.serverName) &&
-      statuses.get(this.serverName) === MCPServerStatus.DISCONNECTED
-    ) {
-      const repairedTool = await this.attemptReconnect();
-      // Only route the call onto the rebuilt session when the rebuild actually
-      // healed it. This bounds the repair to one attempt per invocation: a
-      // server that stays down does not loop the call through repeated
-      // re-inits, and we never execute against a client that is still
-      // disconnected.
-      if (
-        repairedTool &&
-        getMCPServerStatus(this.serverName) === MCPServerStatus.CONNECTED
-      ) {
-        return new DiscoveredMCPToolInvocation(
-          repairedTool['mcpTool'],
-          this.serverName,
-          this.serverToolName,
-          this.displayName,
-          repairedTool.name,
-          repairedTool.permissionAliases,
-          repairedTool.trust,
-          this.params,
-          this.cliConfig,
-          repairedTool['mcpClient'],
-          this.mcpTimeout,
-          this.mcpToolIdleTimeoutMs,
-          repairedTool.annotations,
-          repairedTool['allowInvocationContext'] === true,
-          repairedTool['appResourceUri'],
-          repairedTool.appResourceUi,
-          this.retryCount,
-        ).execute(signal, updateOutput);
-      }
-    }
-
     // Create an AbortController for idle timeout
     const idleTimeoutController = new AbortController();
     const parentAbortController = new AbortController();
