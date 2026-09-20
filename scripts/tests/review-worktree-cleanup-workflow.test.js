@@ -35,7 +35,7 @@ import {
 // renaming the layout there fails the build here instead of silently
 // no-op-ing the sweeps on the shared runners — a suffix rename already
 // broke a sweeper once (see paths.ts).
-// npm-cache.yml and qwen-triage.yml also run on the shared pool but are
+// pnpm-store.yml and qwen-triage.yml also run on the shared pool but are
 // deliberately not covered here; extending the sweep to them is follow-up
 // work.
 const probePr = 12345;
@@ -315,6 +315,7 @@ const runReviewCleanStep = (workspace, hostileRegistrations) =>
       env: {
         ...process.env,
         GITHUB_WORKSPACE: workspace,
+        RUNNER_TEMP: workspace,
         HOSTILE_REGISTRATIONS: hostileRegistrations
           .map((path) => `worktree ${path}`)
           .join('\n'),
@@ -335,6 +336,19 @@ const linkExists = (path) => {
 };
 
 describe('review worktree cleanup steps', () => {
+  it('keeps the review scratch sweep inside the fixture', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'review-clean-step-'));
+    const stale = join(workspace, 'qwen-review-scratch.stale');
+    mkdirSync(stale);
+    try {
+      const out = runReviewCleanStep(workspace, []);
+      expect(out.status, out.stderr).toBe(0);
+      expect(existsSync(stale)).toBe(false);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed if the trusted classifier residue survives cleanup', () => {
     const cleanupIndex = classifyPrSteps.findIndex(
       (s) => s.name === 'Clean stale .qwen before checkout',

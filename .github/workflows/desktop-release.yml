@@ -277,9 +277,7 @@ jobs:
         with:
           node-version: '${{ env.NODE_VERSION }}'
           cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            packages/desktop-shell/package-lock.json
+          cache-dependency-path: 'packages/desktop-shell/package-lock.json'
 
       - name: 'Configure bundled Node.js cache'
         id: 'node-cache-path'
@@ -313,7 +311,12 @@ jobs:
         working-directory: '${{ runner.temp }}/qwen-code-source'
         env:
           QWEN_SKIP_PREPARE: '1'
-        run: 'npm ci --no-audit --progress=false'
+        run: |-
+          if [ -f pnpm-lock.yaml ]; then
+            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          else
+            npm ci --no-audit --progress=false
+          fi
 
       - name: 'Install desktop dependencies'
         working-directory: 'packages/desktop-shell'

@@ -525,6 +525,13 @@ const EN: Messages = {
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
   'artifact.openLink': 'Open link',
+  'artifact.longDocument': 'File is large. Source is shown by default.',
+  'artifact.renderFullPreview': 'Render full preview',
+  'artifact.registrationFailed': (v) =>
+    `Could not add exported artifact: ${v?.message ?? ''}`,
+  'artifact.previewFailed': (v) =>
+    `Could not load preview: ${v?.message ?? ''}`,
+  'artifact.showSource': 'Show source',
   'common.na': 'N/A',
   'common.server': 'Server',
   'common.agent': 'Agent',
@@ -556,7 +563,7 @@ const EN: Messages = {
   'live.setupDescription':
     'Install Qwen Live Host and complete every permission before Live Voice can start.',
   'live.noFallback':
-    'Live Voice never uses the browser microphone or a reduced no-Appshot mode.',
+    'This daemon only supports Live Voice through Qwen Live Host; it never falls back to a reduced no-Appshot mode.',
   'live.shortcutHint': (v) => `Global shortcut: ${v?.shortcut ?? ''}`,
   'live.browser.connect': 'Talk in this browser',
   'live.browser.connecting': 'Connecting microphone…',
@@ -595,6 +602,17 @@ const EN: Messages = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API key',
   'settings.liveSetup.apiKeyPlaceholder': 'Enter a DashScope API key',
   'settings.liveSetup.apiKeyReplace': 'Enter a new key to replace it',
+  'settings.liveSetup.keyFromEnv': (v) =>
+    `Read from the ${v?.env ?? ''} environment variable of the selected model.`,
+  'settings.liveSetup.keyFromEnvMissing': (v) =>
+    `The selected model reads its key from ${v?.env ?? ''}, which is not set in the daemon's environment.`,
+  'settings.liveSetup.model': 'Realtime model',
+  'settings.liveSetup.modelHint':
+    'Add a model with realtimeOnly: true under modelProviders in your user settings (~/.qwen/settings.json) to choose it here.',
+  'settings.liveSetup.voice': 'Voice',
+  'settings.liveSetup.voiceHint':
+    'A voice name of the selected model. It is checked with the provider when Live Voice is on.',
+  'settings.liveSetup.appliesNextCall': 'Applies to the next call.',
   'settings.liveSetup.configured': 'Configured',
   'settings.liveSetup.notConfigured': 'Required',
   'settings.liveSetup.save': 'Save',
@@ -1013,6 +1031,9 @@ const EN: Messages = {
   'contextUsage.free': 'Free',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
+  'contextUsage.startupContext': 'Startup context',
+  'contextUsage.unattributed': 'Unattributed',
+  'contextUsage.cachedPrefix': 'Cached prefix',
   'contextUsage.mcpTools': 'MCP tools',
   'contextUsage.model': 'Model',
   'contextUsage.noSession':
@@ -1032,12 +1053,15 @@ const EN: Messages = {
   'contextUsage.viewInConversation':
     'Click to view the breakdown in the conversation.',
   'daemon.title': 'Daemon Status',
-  'daemon.connection.title': 'Connection',
+  'daemon.connection.title': 'Connections',
   'daemon.connection.target': 'Current target',
   'daemon.connection.state': 'Connection state',
   'daemon.connection.address': 'Daemon address',
   'daemon.connection.token': 'Bearer token (optional)',
   'daemon.connection.connect': 'Connect',
+  'daemon.connection.add': 'Add connection',
+  'daemon.connection.saved': 'Connected computers',
+  'daemon.connection.forget': (v) => `Forget ${v?.address}`,
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
   'daemon.connection.notReady':
     'The daemon did not accept the connection; the stored credential was left unchanged.',
@@ -1049,6 +1073,7 @@ const EN: Messages = {
     'Browser storage is unavailable, so the token could not be carried to that daemon.',
   'daemon.connection.status.idle': 'Idle',
   'daemon.connection.status.connecting': 'Connecting',
+  'daemon.connection.status.adding': 'Adding',
   'daemon.connection.status.connected': 'Connected',
   'daemon.connection.status.error': 'Error',
   'daemon.details.loading': 'Loading diagnostics...',
@@ -1761,6 +1786,24 @@ const EN: Messages = {
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
   'sidebar.addWorkspaceAdding': 'Adding…',
+  'workspaceHost.source': 'Folder source',
+  'workspaceHost.thisComputer': 'This computer',
+  'workspaceHost.folderOn': (vars) => `Folder on ${vars?.address}`,
+  'workspaceHost.folderOnThisComputer': 'Folder on this computer',
+  'workspaceHost.browseHint':
+    'Choose a folder below, or type an absolute path.',
+  'workspaceHost.parent': 'Parent folder',
+  'workspaceHost.addFolder': 'Add this folder',
+  'workspaceHost.noFolders': 'No subfolders in this directory.',
+  'workspaceHost.folderListError':
+    'Could not read folders from this computer. Check the path or connection.',
+  'workspaceHost.navigationUnavailable':
+    'Browser storage is unavailable, so the remote folder flow cannot continue safely.',
+  'workspaceHost.unsupported':
+    'This computer does not support adding workspaces.',
+  'workspaceHost.loadingFolders': 'Loading folders from this computer…',
+  'workspaceHost.connectionError':
+    'Could not load workspace capabilities from this computer.',
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
   'sidebar.renameWorkspace': 'Rename…',
@@ -4533,6 +4576,11 @@ const ZH: Messages = {
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
   'artifact.openLink': '打开链接',
+  'artifact.longDocument': '文件过大，默认展示源码。',
+  'artifact.renderFullPreview': '完整排版预览',
+  'artifact.registrationFailed': (v) => `无法添加导出文件：${v?.message ?? ''}`,
+  'artifact.previewFailed': (v) => `无法加载预览：${v?.message ?? ''}`,
+  'artifact.showSource': '显示源码',
   'common.na': '不适用',
   'common.server': '服务器',
   'common.agent': '智能体',
@@ -4563,7 +4611,7 @@ const ZH: Messages = {
   'live.setupDescription':
     '安装 Qwen Live Host 并完成全部授权后，才能使用实时语音。',
   'live.noFallback':
-    '实时语音不会使用浏览器麦克风，也不会降级为缺少 Appshot 的模式。',
+    '此 daemon 仅支持通过 Qwen Live Host 使用实时语音，不会降级为缺少 Appshot 的模式。',
   'live.shortcutHint': (v) => `全局快捷键：${v?.shortcut ?? ''}`,
   'live.browser.connect': '在此浏览器中通话',
   'live.browser.connecting': '正在连接麦克风…',
@@ -4599,6 +4647,17 @@ const ZH: Messages = {
   'settings.liveSetup.apiKey': 'DashScope Realtime API Key',
   'settings.liveSetup.apiKeyPlaceholder': '输入 DashScope API Key',
   'settings.liveSetup.apiKeyReplace': '输入新 Key 以替换当前配置',
+  'settings.liveSetup.keyFromEnv': (v) =>
+    `从所选模型的环境变量 ${v?.env ?? ''} 读取。`,
+  'settings.liveSetup.keyFromEnvMissing': (v) =>
+    `所选模型从 ${v?.env ?? ''} 读取 key，但 daemon 的环境里没有设置它。`,
+  'settings.liveSetup.model': 'Realtime 模型',
+  'settings.liveSetup.modelHint':
+    '在用户设置（~/.qwen/settings.json）的 modelProviders 下添加带 realtimeOnly: true 的模型后，即可在此选择。',
+  'settings.liveSetup.voice': '音色',
+  'settings.liveSetup.voiceHint':
+    '所选模型的音色名称。开启 Live Voice 时保存前会先向 provider 校验。',
+  'settings.liveSetup.appliesNextCall': '将在下一次通话生效。',
   'settings.liveSetup.configured': '已配置',
   'settings.liveSetup.notConfigured': '必填',
   'settings.liveSetup.save': '保存',
@@ -4982,6 +5041,9 @@ const ZH: Messages = {
   'contextUsage.free': '空闲',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
+  'contextUsage.startupContext': '启动上下文',
+  'contextUsage.unattributed': '未归因',
+  'contextUsage.cachedPrefix': '缓存前缀',
   'contextUsage.mcpTools': 'MCP 工具',
   'contextUsage.model': '模型',
   'contextUsage.noSession':
@@ -4999,12 +5061,15 @@ const ZH: Messages = {
   'contextUsage.viewDetails': '查看明细',
   'contextUsage.viewInConversation': '点击在对话中查看上下文组成。',
   'daemon.title': 'Daemon 状态',
-  'daemon.connection.title': '连接',
+  'daemon.connection.title': '远程连接',
   'daemon.connection.target': '当前目标',
   'daemon.connection.state': '连接状态',
   'daemon.connection.address': 'Daemon 地址',
   'daemon.connection.token': 'Bearer token（可选）',
   'daemon.connection.connect': '连接',
+  'daemon.connection.add': '添加连接',
+  'daemon.connection.saved': '已连接的计算机',
+  'daemon.connection.forget': (v) => `移除 ${v?.address}`,
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
@@ -5015,6 +5080,7 @@ const ZH: Messages = {
     '浏览器存储不可用，因此无法把 token 带到该 daemon。',
   'daemon.connection.status.idle': '空闲',
   'daemon.connection.status.connecting': '连接中',
+  'daemon.connection.status.adding': '添加中',
   'daemon.connection.status.connected': '已连接',
   'daemon.connection.status.error': '错误',
   'daemon.details.loading': '正在加载诊断信息...',
@@ -5679,6 +5745,21 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
+  'workspaceHost.source': '目录来源',
+  'workspaceHost.thisComputer': '这台计算机',
+  'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目录`,
+  'workspaceHost.folderOnThisComputer': '这台计算机上的目录',
+  'workspaceHost.browseHint': '请从下方选择目录，或输入绝对路径。',
+  'workspaceHost.parent': '上一级',
+  'workspaceHost.addFolder': '添加此文件夹',
+  'workspaceHost.noFolders': '此目录下没有子目录。',
+  'workspaceHost.folderListError':
+    '无法读取该计算机上的目录，请检查路径或连接状态。',
+  'workspaceHost.navigationUnavailable':
+    '浏览器存储不可用，无法安全继续添加远程目录。',
+  'workspaceHost.unsupported': '这台计算机不支持添加工作区。',
+  'workspaceHost.loadingFolders': '正在从这台计算机加载目录…',
+  'workspaceHost.connectionError': '无法从这台计算机加载工作区能力。',
   'sidebar.removeWorkspace': '移除工作区',
   'sidebar.workspaceActions': '工作区操作',
   'sidebar.renameWorkspace': '重命名…',
@@ -7716,6 +7797,7 @@ const ZH: Messages = {
   'settings.category.Context': '上下文',
   'settings.category.Tools': '工具',
   'settings.category.Daemon': '守护进程',
+  'settings.category.Connections': '连接',
   'settings.category.Experimental': '实验性',
   'settings.category.Advanced': '高级',
   'settings.label.general.enableAutoUpdate': '启用自动更新',
