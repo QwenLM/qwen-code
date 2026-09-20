@@ -28,6 +28,7 @@ import type {
   AtMentionWorkspaceActions,
   BuiltinProviderCache,
 } from '../../hooks/useAtMentionSources';
+import { LiveVoiceMenuItem } from '../../live/LiveVoiceMenuItem';
 import { ModeIcon } from '../ModeIcon';
 import { Button } from '../ui/button';
 import {
@@ -676,13 +677,10 @@ export function AddMenu({
                     )}
                   </Button>
                   {mobileActions.onLiveVoice && (
-                    <Button
-                      variant="ghost"
+                    <LiveVoiceMenuItem
                       className={mobileRowClass}
                       onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
-                    >
-                      {t('composerMobile.liveVoice')}
-                    </Button>
+                    />
                   )}
                   {plan && (
                     <Button
