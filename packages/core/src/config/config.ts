@@ -342,12 +342,26 @@ const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 const MEMORY_CONTEXT_WARNING_RATIO = 0.15;
 
+// Absolute ceiling on the same warning: 15% of a 1M window is 150,000 tokens,
+// so the ratio alone means a large-window session can carry an enormous
+// always-on context and never be told. The cost of that context is the same on
+// every model (#12029); the #12028 sample carried 15,400 tokens of it and drew
+// no warning at all.
+const MEMORY_CONTEXT_WARNING_MAX_TOKENS = 10_000;
+
 /** Re-inject the active Todo reminder every Nth tool turn, not every turn. */
 const ACTIVE_TODO_REMINDER_REFRESH_TURNS = 3;
 
 // Default `tools.toolSearch.threshold` (percent of the context window):
 // mirrors the settings-schema default in packages/cli.
 const DEFAULT_TOOL_SEARCH_THRESHOLD = 10;
+
+// Default `tools.toolSearch.maxPreloadTokens`: mirrors the settings-schema
+// default in packages/cli. Chosen so a bundled-only deferred pool (~4.2k
+// tokens in the #12028 sample) still preloads on every window size, while a
+// pool past this size — an MCP-heavy install — goes back to on-demand
+// loading, where it breaks even within roughly twenty turns (#12029).
+const DEFAULT_TOOL_SEARCH_MAX_PRELOAD_TOKENS = 8_000;
 
 import {
   ModelsConfig,
@@ -1045,6 +1059,16 @@ export interface ConfigParameters {
    * excluded from this preload. `0` disables preloading.
    */
   toolSearchThreshold?: number;
+  /**
+   * Absolute ceiling, in tokens, on that same preload budget. The effective
+   * budget is the smaller of the percentage and this value, so a large
+   * context window no longer implies a large preload: the trade the
+   * percentage models — carrying deferred schemas every turn versus one
+   * mid-session reveal rebuilding the prompt-cache prefix — depends on the
+   * size of the deferred pool and of the prefix, not on the window (#12029).
+   * `0` disables preloading, like a `0` threshold.
+   */
+  toolSearchMaxPreloadTokens?: number;
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -2698,6 +2722,7 @@ export class Config {
   private readonly visibleTools: ReadonlySet<string>;
   private readonly eagerTools: readonly string[] | undefined;
   private readonly toolSearchThreshold: number;
+  private readonly toolSearchMaxPreloadTokens: number;
   private readonly toolMode: ToolModeValue;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
@@ -3134,6 +3159,9 @@ export class Config {
           );
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
+    this.toolSearchMaxPreloadTokens =
+      params.toolSearchMaxPreloadTokens ??
+      DEFAULT_TOOL_SEARCH_MAX_PRELOAD_TOKENS;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -4939,18 +4967,26 @@ export class Config {
     }
 
     const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
-    const thresholdTokens = Math.floor(
+    const ratioTokens = Math.floor(
       contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
+    );
+    const thresholdTokens = Math.min(
+      ratioTokens,
+      MEMORY_CONTEXT_WARNING_MAX_TOKENS,
     );
     if (estimatedTokens <= thresholdTokens) {
       return undefined;
     }
 
+    // Name whichever bound actually fired, so the number in the message is one
+    // the reader can act on rather than a percentage that did not apply.
+    const bound =
+      thresholdTokens === ratioTokens
+        ? `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this model's ${contextWindowSize.toLocaleString()} token context window`
+        : `${MEMORY_CONTEXT_WARNING_MAX_TOKENS.toLocaleString()} tokens, which every request of this session carries`;
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
-      `${estimatedTokens.toLocaleString()} tokens, more than ` +
-      `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
-      `model's ${contextWindowSize.toLocaleString()} token context window. ` +
+      `${estimatedTokens.toLocaleString()} tokens, more than ${bound}. ` +
       `Consider trimming long always-loaded context or moving details into ` +
       `on-demand files.`
     );
@@ -7334,6 +7370,14 @@ export class Config {
    */
   getToolSearchThreshold(): number {
     return this.toolSearchThreshold;
+  }
+
+  /**
+   * Absolute token ceiling on the deferred-tool preload budget. See
+   * {@link ConfigParameters.toolSearchMaxPreloadTokens}.
+   */
+  getToolSearchMaxPreloadTokens(): number {
+    return this.toolSearchMaxPreloadTokens;
   }
 
   getCodeModeOnly(): boolean {

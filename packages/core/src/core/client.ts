@@ -1805,9 +1805,20 @@ export class LlmClient {
     if (!contextWindow || contextWindow <= 0) {
       return;
     }
-    toolRegistry.preloadDeferredToolsWithinBudget(
-      Math.floor((contextWindow * boundedPercent) / 100),
-    );
+    // The percentage alone scales the wrong way: what decides whether
+    // preloading is cheaper than on-demand loading is the size of the deferred
+    // pool against the prefix a mid-session reveal would rebuild — neither of
+    // which grows with the window. A 1M-context model would otherwise preload
+    // a pool ten times the size a 128k one defers (#12029), so an absolute
+    // ceiling bounds the budget too. `Math.max(0, …)` keeps a negative
+    // hand-edited value from inverting the `Math.min`; a cap of 0 zeroes the
+    // budget, which is the same "never preload" a threshold of 0 asks for.
+    const percentBudget = Math.floor((contextWindow * boundedPercent) / 100);
+    const maxPreloadTokens = this.config.getToolSearchMaxPreloadTokens?.();
+    const budget = Number.isFinite(maxPreloadTokens)
+      ? Math.min(percentBudget, Math.max(0, maxPreloadTokens as number))
+      : percentBudget;
+    toolRegistry.preloadDeferredToolsWithinBudget(budget);
   }
 
   /**
