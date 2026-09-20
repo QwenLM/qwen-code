@@ -2007,6 +2007,184 @@ describe('WorkflowRunner', () => {
         fs.access(path.join(root, handle.runId, 'checkpoint.json')),
       ).rejects.toThrow();
     });
+
+    // A history retry reads a surviving checkpoint as a process that has not
+    // been seen to exit, and refuses. So a resume that registers before its
+    // own checkpoint lands leaves another process free to start a second
+    // runner on the same journal -- the one thing the refusal exists to stop.
+    describe('a resume waits for its own', () => {
+      const settledRun = async (config: Config) => {
+        const first = await WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: 'return await agent("work")',
+          args: undefined,
+          dispatch: async () => 'live',
+        });
+        await first.completion;
+        writeWorkflowCheckpointMock.mockClear();
+        return first;
+      };
+      const resumeOf = (config: Config, runId: string) => ({
+        config,
+        signal: new AbortController().signal,
+        script: 'return await agent("work")',
+        args: undefined,
+        resumeFromRunId: runId,
+      });
+
+      it('does not register until the checkpoint is on disk', async () => {
+        const { config, registry } = configWithRegistry();
+        stubStorage(config, await makeStorageRoot());
+        const first = await settledRun(config);
+        const actual = await vi.importActual<
+          typeof import('../workflow-checkpoint.js')
+        >('../workflow-checkpoint.js');
+        let release: (() => void) | undefined;
+        writeWorkflowCheckpointMock.mockImplementationOnce(
+          async (
+            ...args: Parameters<typeof actual.writeWorkflowCheckpoint>
+          ) => {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            return actual.writeWorkflowCheckpoint(...args);
+          },
+        );
+
+        const resume = WorkflowRunner.start({
+          ...resumeOf(config, first.runId),
+          dispatch: async () => 'live',
+        });
+        await vi.waitFor(() => expect(release).toBeDefined());
+
+        // Still the settled run, not this one: nothing has replaced it.
+        expect(registry.get(first.runId)?.status).toBe('completed');
+        expect(registry.get(first.runId)?.startMode).toBeUndefined();
+
+        release!();
+        await expect((await resume).completion).resolves.toMatchObject({
+          ok: true,
+        });
+        expect(registry.get(first.runId)?.startMode).toBe('retry');
+      });
+
+      it('refuses the start when the checkpoint cannot be written', async () => {
+        const { config, registry } = configWithRegistry();
+        const root = await makeStorageRoot();
+        stubStorage(config, root);
+        const first = await settledRun(config);
+        const settled = registry.get(first.runId);
+        const journal = await fs.readFile(first.journalPath!, 'utf8');
+        const dispatch = vi.fn(async () => 'live');
+        writeWorkflowCheckpointMock.mockResolvedValueOnce('failed');
+
+        await expect(
+          WorkflowRunner.start({ ...resumeOf(config, first.runId), dispatch }),
+        ).rejects.toThrow(
+          `Could not record that workflow run ${first.runId} is running again, so another process could start it a second time. Nothing was started; try again.`,
+        );
+
+        expect(dispatch).not.toHaveBeenCalled();
+        // The very entry the settled run left, not a replacement: the run is
+        // exactly as resumable as it was before this start was attempted.
+        expect(registry.get(first.runId)).toBe(settled);
+        expect(registry.get(first.runId)?.status).toBe('completed');
+        await expect(fs.readFile(first.journalPath!, 'utf8')).resolves.toBe(
+          journal,
+        );
+        await expect(fs.readFile(first.scriptPath!, 'utf8')).resolves.toBe(
+          'return await agent("work")',
+        );
+      });
+
+      it('starts when there is nowhere to keep a checkpoint', async () => {
+        const { config } = configWithRegistry();
+        stubStorage(config, await makeStorageRoot());
+        const first = await settledRun(config);
+        writeWorkflowCheckpointMock.mockResolvedValueOnce('unavailable');
+
+        const handle = await WorkflowRunner.start({
+          ...resumeOf(config, first.runId),
+          dispatch: async () => 'live',
+        });
+
+        await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      });
+
+      it('takes back the checkpoint when the start it recorded then fails', async () => {
+        const { config, registry } = configWithRegistry();
+        const root = await makeStorageRoot();
+        stubStorage(config, root);
+        const first = await settledRun(config);
+        const file = path.join(root, first.runId, 'checkpoint.json');
+        vi.spyOn(registry, 'register').mockImplementationOnce(() => {
+          throw new Error('registry said no');
+        });
+
+        await expect(
+          WorkflowRunner.start({
+            ...resumeOf(config, first.runId),
+            dispatch: async () => 'live',
+          }),
+        ).rejects.toThrow('registry said no');
+
+        // Left behind, it would read as a live run in another process and
+        // refuse every later retry until that pid is gone.
+        await expect(fs.access(file)).rejects.toThrow();
+      });
+
+      it('does not hold a fresh start for a write nothing depends on', async () => {
+        const { config } = configWithRegistry();
+        stubStorage(config, await makeStorageRoot());
+        const actual = await vi.importActual<
+          typeof import('../workflow-checkpoint.js')
+        >('../workflow-checkpoint.js');
+        let release: (() => void) | undefined;
+        let landed = false;
+        writeWorkflowCheckpointMock.mockImplementationOnce(
+          async (
+            ...args: Parameters<typeof actual.writeWorkflowCheckpoint>
+          ) => {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+            landed = true;
+            return actual.writeWorkflowCheckpoint(...args);
+          },
+        );
+
+        const handle = await WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: 'return "done"',
+          args: undefined,
+          dispatch: async () => 'unused',
+        });
+
+        // A fresh run has no history entry for anyone to retry, so its
+        // checkpoint only matters if this process dies first.
+        expect(landed).toBe(false);
+        release!();
+        await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      });
+
+      it('starts a fresh run whose checkpoint could not be written', async () => {
+        const { config } = configWithRegistry();
+        stubStorage(config, await makeStorageRoot());
+        writeWorkflowCheckpointMock.mockResolvedValueOnce('failed');
+
+        const handle = await WorkflowRunner.start({
+          config,
+          signal: new AbortController().signal,
+          script: 'return "done"',
+          args: undefined,
+          dispatch: async () => 'unused',
+        });
+
+        await expect(handle.completion).resolves.toMatchObject({ ok: true });
+      });
+    });
   });
 
   it('rejects a concurrent resume while the original run is active', async () => {
