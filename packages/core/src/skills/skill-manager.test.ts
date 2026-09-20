@@ -1623,6 +1623,51 @@ Review content`;
     });
   });
 
+  describe('discovery completeness', () => {
+    it('does not treat absent optional directories as discovery errors', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(
+        Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      );
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it('reports directory read errors until a successful refresh', async () => {
+      vi.mocked(fs.readdir).mockRejectedValue(
+        Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+      );
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(false);
+    });
+
+    it('reports a failed level even when other levels can be listed', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockImplementation(() => {
+        throw new Error('Unavailable');
+      });
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+    });
+
+    it('reports unreadable skill files instead of confirming their removal', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'unreadable',
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      vi.mocked(fs.access).mockRejectedValue(
+        Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+      );
+      await manager.refreshCache();
+      expect(manager.hasDiscoveryErrors()).toBe(true);
+    });
+  });
+
   describe('conditional skill activation', () => {
     // Minimal setup: a project dir containing one conditional skill whose
     // paths glob matches `src/**/*.tsx`. After refreshCache() loads it,

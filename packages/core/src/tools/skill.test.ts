@@ -153,6 +153,7 @@ describe('SkillTool', () => {
         };
       }),
       getParseErrors: vi.fn().mockReturnValue(new Map()),
+      hasDiscoveryErrors: vi.fn().mockReturnValue(false),
       getCachedSkills: vi.fn().mockReturnValue(mockSkills),
       // Default to "all skills active" so existing tests that use
       // unconditional skills are unaffected by the conditional-skill gating
@@ -808,6 +809,7 @@ describe('SkillTool', () => {
           body: 'Version one.',
         };
         vi.mocked(mockSkillManager.listSkills).mockResolvedValue([original]);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([original]);
         vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
           original,
         );
@@ -826,6 +828,7 @@ describe('SkillTool', () => {
         expect(await invoke()).toContain('already loaded');
         const updated = { ...original, body: 'Version two.' };
         vi.mocked(mockSkillManager.listSkills).mockResolvedValue([updated]);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([updated]);
         vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
           updated,
         );
@@ -836,9 +839,16 @@ describe('SkillTool', () => {
         expect(skillTool.getLoadedSkillContents()).toEqual(
           new Set([first, second]),
         );
+        expect(skillTool.getLoadedSkillContentNames()).toEqual(
+          new Map([
+            [first, original.name],
+            [second, original.name],
+          ]),
+        );
         await skillTool.refreshSkills();
         expect(await invoke()).toContain('already loaded');
         vi.mocked(mockSkillManager.listSkills).mockResolvedValue([original]);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([original]);
         vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
           original,
         );
@@ -888,6 +898,146 @@ describe('SkillTool', () => {
         vi.mocked(config.isSkillEnabled).mockReturnValue(true);
         await skillTool.refreshSkills();
         expect(await invoke()).toBe(first);
+      },
+    );
+
+    it.each(['inactive', 'hidden', 'incomplete discovery'] as const)(
+      'keeps unchanged content deduplicated across %s refreshes',
+      async (state) => {
+        const original = { ...mockSkills[0], paths: ['src/**'] };
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue([original]);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([original]);
+        await skillTool.refreshSkills();
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          original,
+        );
+        const invoke = async () =>
+          partToString(
+            (
+              await (skillTool as SkillToolWithProtectedMethods)
+                .createInvocation({ skill: original.name })
+                .execute()
+            ).llmContent,
+          );
+        const first = await invoke();
+        if (state === 'inactive') {
+          vi.mocked(mockSkillManager.isSkillActive).mockReturnValue(false);
+        } else if (state === 'hidden') {
+          vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+            { ...original, disableModelInvocation: true },
+          ]);
+          vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+            { ...original, disableModelInvocation: true },
+          ]);
+        } else {
+          vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
+          vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([]);
+          vi.mocked(mockSkillManager.hasDiscoveryErrors).mockReturnValue(true);
+        }
+        await skillTool.refreshSkills();
+        expect(
+          skillTool.validateToolParams({ skill: original.name }),
+        ).not.toBeNull();
+        expect(skillTool.getLoadedSkillNames()).toEqual(
+          new Set([original.name]),
+        );
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set([first]));
+        vi.mocked(mockSkillManager.isSkillActive).mockReturnValue(true);
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue(mockSkills);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue(mockSkills);
+        vi.mocked(mockSkillManager.hasDiscoveryErrors).mockReturnValue(false);
+        await skillTool.refreshSkills();
+        expect(await invoke()).toContain('already loaded');
+      },
+    );
+
+    it.each(['changed', 'disabled'] as const)(
+      'still invalidates a %s known skill during incomplete discovery',
+      async (state) => {
+        const original = mockSkills[0];
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          original,
+        );
+        const first = partToString(
+          (
+            await (skillTool as SkillToolWithProtectedMethods)
+              .createInvocation({ skill: original.name })
+              .execute()
+          ).llmContent,
+        );
+        vi.mocked(mockSkillManager.hasDiscoveryErrors).mockReturnValue(true);
+        if (state === 'changed') {
+          vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
+            { ...original, body: 'Changed.' },
+          ]);
+          vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([
+            { ...original, body: 'Changed.' },
+          ]);
+        } else {
+          vi.mocked(config.isSkillEnabled).mockReturnValue(false);
+        }
+        await skillTool.refreshSkills();
+        expect(skillTool.getLoadedSkillNames().has(original.name)).toBe(false);
+        expect(skillTool.getLoadedSkillContents()).toEqual(new Set([first]));
+      },
+    );
+
+    it.each([false, true])(
+      'restores, refreshes and invokes historical skill content (changed: %s)',
+      async (changed) => {
+        const original = mockSkills[0];
+        const first = buildSkillLlmContent(
+          path.dirname(original.filePath),
+          original.body,
+        );
+        await skillTool.restoreLoadedSkillsFromHistory([
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'restore-refresh',
+                  name: ToolNames.SKILL,
+                  args: { skill: original.name },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'restore-refresh',
+                  name: ToolNames.SKILL,
+                  response: { output: first },
+                },
+              },
+            ],
+          },
+        ]);
+        const current = changed
+          ? { ...original, body: 'Replacement body.' }
+          : original;
+        vi.mocked(mockSkillManager.listSkills).mockResolvedValue([current]);
+        vi.mocked(mockSkillManager.getCachedSkills).mockReturnValue([current]);
+        vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+          current,
+        );
+        await skillTool.refreshSkills();
+        const result = partToString(
+          (
+            await (skillTool as SkillToolWithProtectedMethods)
+              .createInvocation({ skill: original.name })
+              .execute()
+          ).llmContent,
+        );
+        expect(result).toContain(
+          changed ? 'Replacement body.' : 'already loaded',
+        );
+        expect(skillTool.getLoadedSkillContents()).toEqual(
+          new Set(changed ? [first, result] : [first]),
+        );
       },
     );
 
