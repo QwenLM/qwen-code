@@ -217,6 +217,8 @@ extension 的内容按性质分三层：
 
 ### `threshold: 0` 不是白捡的收益
 
+> **⚠️ 本小节的成本模型待重写。** [#10410](https://github.com/QwenLM/qwen-code/pull/10410) 用 `tool_search` → `tool_call` 桥接取代"揭示即改写声明列表"：声明列表保持字节稳定，中途发现工具不再作废前缀缓存，该 PR 因此把 `threshold` 默认值改为 `0`。下面这笔账建立在"揭示会重写声明列表"之上，**它一旦合入，本小节的数字与结论（含平衡点 40 轮）全部作废**，需要按桥接重新推导。第 10 节记录了当前状态。
+
 `docs/design/toolsearch-preload-threshold.md` 说明了这个权衡：一次会话中途的 ToolSearch 揭示会重写函数声明列表，而它在前缀最前面，**整段 prompt KV 缓存作废**。
 
 |                     | 代价                                                                  |
