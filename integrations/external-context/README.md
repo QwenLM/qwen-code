@@ -200,10 +200,10 @@ another copy of the same content.
    On Windows, the approved `PATH` must resolve both `pwsh` and `powershell`
    to administrator-controlled executables (`pwsh` wins when both are
    present, and only where the hook shell is resolved by probing), `ComSpec`
-   must be pinned to the interpreter the hooks are written for because a
-   `ComSpec` naming `powershell.exe` or `pwsh.exe` is launched as it stands
-   with no `PATH` lookup, and PowerShell profiles must be absent or
-   administrator-controlled.
+   must be pinned to the **absolute path** of the interpreter the hooks are
+   written for because a `ComSpec` naming `powershell.exe` or `pwsh.exe` is
+   launched as it stands with no `PATH` lookup, and PowerShell profiles must
+   be absent or administrator-controlled.
 
 In regular interactive mode, the `permissions.ask` rule presents Qwen's normal
 server/tool confirmation and the `PreToolUse` Hook then presents a second
@@ -275,10 +275,10 @@ Missing or invalid provenance fails closed before configuration or credentials a
    On Windows, the approved `PATH` must resolve both `pwsh` and `powershell`
    to administrator-controlled executables (`pwsh` wins when both are
    present, and only where the hook shell is resolved by probing), `ComSpec`
-   must be pinned to the interpreter the hooks are written for because a
-   `ComSpec` naming `powershell.exe` or `pwsh.exe` is launched as it stands
-   with no `PATH` lookup, and PowerShell profiles must be absent or
-   administrator-controlled. A user-controlled shell shim or profile is
+   must be pinned to the **absolute path** of the interpreter the hooks are
+   written for because a `ComSpec` naming `powershell.exe` or `pwsh.exe` is
+   launched as it stands with no `PATH` lookup, and PowerShell profiles must
+   be absent or administrator-controlled. A user-controlled shell shim or profile is
    outside the Direct Profile trust model.
 
 Do not link or enable the external-context Extension Manifest and do not
