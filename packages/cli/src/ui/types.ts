@@ -525,8 +525,16 @@ export interface ContextCategoryBreakdown {
   builtinTools: number;
   mcpTools: number;
   memoryFiles: number;
+  /** Skill tool definition + the `<available_skills>` listing as sent + loaded bodies. */
   skills: number;
+  /** Startup prelude outside the skill listing: environment context, MCP server instructions, deferred-tools reminder. */
+  startupContext?: number;
+  /** Content estimate of the conversation after the startup prelude. */
   messages: number;
+  /** Provider total not accounted for by any category estimate. Categories plus this sum to `totalTokens`. */
+  unattributed?: number;
+  /** Provider-reported cached prefix. An annotation, not a category: the cached prefix spans several categories. */
+  cachedTokens?: number;
   freeSpace: number;
   /**
    * Distance from the auto-compaction threshold to the window edge.
@@ -556,7 +564,7 @@ export interface ContextMemoryDetail {
 
 export interface ContextSkillDetail {
   name: string;
-  /** Token cost of the skill listing (name+description) in the tool definition */
+  /** Token cost of this skill's entry in the `<available_skills>` listing as sent (after budget trimming) */
   tokens: number;
   /** Whether this skill has been invoked and its full body loaded into context */
   loaded?: boolean;

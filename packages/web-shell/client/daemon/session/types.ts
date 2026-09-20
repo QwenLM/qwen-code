@@ -39,6 +39,8 @@ import type {
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionArtifactsEnvelope,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
   SessionSourceInput,
   SessionSourcesResult,
   SessionSourceUpsertResult,
@@ -707,6 +709,14 @@ export interface DaemonSessionActions {
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
   loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
+  /**
+   * Register an artifact this client knows about — a file a slash command
+   * reported it wrote, for example. The store owns identity, so re-registering
+   * the same workspace path updates the existing entry instead of duplicating.
+   */
+  addArtifact(
+    artifact: DaemonSessionArtifactInput,
+  ): Promise<DaemonSessionArtifactMutationResult>;
   listSources(): Promise<SessionSourcesResult>;
   upsertSource(source: SessionSourceInput): Promise<SessionSourceUpsertResult>;
   removeSource(sourceId: string): Promise<SessionSourceRemoveResult>;

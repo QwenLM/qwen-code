@@ -441,6 +441,12 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     lines.push(
       `█ Used ${fmtTokensShort(totalTokens)} tokens (${pct(totalTokens, windowSize)}%)`,
     );
+    const cached = Number(breakdown['cachedTokens'] ?? 0);
+    if (cached > 0) {
+      lines.push(
+        `█ Cached prefix ${fmtTokensShort(cached)} tokens (${pct(cached, windowSize)}%)`,
+      );
+    }
     lines.push(
       `░ Free ${fmtTokensShort(free)} tokens (${pct(free, windowSize)}%)`,
     );
@@ -456,10 +462,13 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ['MCP tools', 'mcpTools'],
     ['Memory files', 'memoryFiles'],
     ['Skills', 'skills'],
+    ['Startup context', 'startupContext'],
   ];
   for (const [label, key] of categories) {
     const value = Number(breakdown[key] ?? 0);
-    if (key === 'mcpTools' && value <= 0) continue;
+    if ((key === 'mcpTools' || key === 'startupContext') && value <= 0) {
+      continue;
+    }
     lines.push(
       `█ ${label} ${fmtTokensShort(value)} tokens (${pct(value, windowSize)}%)`,
     );
@@ -469,6 +478,12 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     lines.push(
       `█ Messages ${fmtTokensShort(messages)} tokens (${pct(messages, windowSize)}%)`,
     );
+    const unattributed = Number(breakdown['unattributed'] ?? 0);
+    if (unattributed > 0) {
+      lines.push(
+        `█ Unattributed ${fmtTokensShort(unattributed)} tokens (${pct(unattributed, windowSize)}%)`,
+      );
+    }
   }
   // Three-tier compaction ladder — ink renders it whenever thresholds +
   // currentTier are present (even while usage is still estimated).
