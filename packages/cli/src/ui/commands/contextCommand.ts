@@ -55,12 +55,37 @@ function currentTier(
 }
 
 /**
+ * Absolute context-file path → the extension that contributes it.
+ *
+ * An extension's context file is resident in every request of every session it
+ * is active in, and its marker path alone does not say which extension is
+ * paying for it (#12030). Built from the live extension list so a row can name
+ * the owner instead of an opaque path.
+ */
+function extensionContextFileOwners(
+  config: import('@qwen-code/qwen-code-core').Config,
+  workingDir: string,
+): Map<string, string> {
+  const owners = new Map<string, string>();
+  for (const extension of config.getActiveExtensions?.() ?? []) {
+    for (const contextFile of extension.contextFiles ?? []) {
+      owners.set(
+        path.resolve(workingDir, contextFile),
+        extension.displayName || extension.name,
+      );
+    }
+  }
+  return owners;
+}
+
+/**
  * Parse concatenated memory content into individual file entries.
  * Memory content format: "--- Context from: <path> ---\n<content>\n--- End of Context from: <path> ---"
  */
 function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
+  extensionOwners: ReadonlyMap<string, string> = new Map(),
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
@@ -73,15 +98,19 @@ function parseMemoryFiles(
   while ((match = regex.exec(memoryContent)) !== null) {
     const filePath = match[1]!;
     const content = match[2]!;
+    // Marker paths are relative to the session working directory (where
+    // memory discovery ran, which may differ from process.cwd() in
+    // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
+    // global memory files don't render as `../../..` chains.
+    const absolutePath = path.resolve(workingDir, filePath);
+    const owner = extensionOwners.get(absolutePath);
     results.push({
-      // Marker paths are relative to the session working directory (where
-      // memory discovery ran, which may differ from process.cwd() in
-      // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
-      // global memory files don't render as `../../..` chains.
-      path: formatContextFileDisplayPath(
-        path.resolve(workingDir, filePath),
-        workingDir,
-      ),
+      // An extension's file is named by its extension rather than by a path
+      // under the install directory, which is what makes the row actionable:
+      // the reader can disable or migrate that extension.
+      path: owner
+        ? `${t('Extension')}: ${owner} · ${path.basename(absolutePath)}`
+        : formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
     });
   }
@@ -418,7 +447,11 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent, config.getWorkingDir());
+  const memoryFiles = parseMemoryFiles(
+    memoryContent,
+    config.getWorkingDir(),
+    extensionContextFileOwners(config, config.getWorkingDir()),
+  );
   const autoMemoryPrompt = config.getAutoMemoryPrompt();
   if (autoMemoryPrompt) {
     memoryFiles.push({
