@@ -4005,6 +4005,125 @@ const EN: Messages = {
   'settings.label.visionModel': 'Vision Model',
   'settings.description.visionModel':
     'Image-capable model used as the vision bridge. Leave empty to auto-select.',
+
+  // --- Additional settings labels & descriptions (previously untranslated) ---
+  'settings.category.Review': 'Review',
+  'settings.category.Output': 'Output',
+  'settings.category.IDE': 'IDE',
+  'settings.category.Goals': 'Goals',
+  'settings.category.Policy': 'Policy',
+  'settings.category.Agents': 'Agents',
+  'settings.category.Memory': 'Memory',
+  'settings.category.MCP': 'MCP',
+  'settings.category.Security': 'Security',
+  'settings.category.Generation Configuration': 'Generation Configuration',
+
+  'settings.label.review.attribution': 'Attribution: review',
+  'settings.description.review.attribution':
+    'Append the attribution footer naming the model and CLI version to review bodies and inline comments posted to GitHub.',
+  'settings.label.review.sandbox': 'Sandbox the reviewed code: review',
+  'settings.description.review.sandbox':
+    'Run the reviewed code in a sandbox environment.',
+  'settings.label.review.effort': 'Default effort: review',
+  'settings.description.review.effort':
+    'Default effort for /review when neither --effort nor a project-remembered level applies.',
+  'settings.label.review.comment': 'Comment by default: review',
+  'settings.description.review.comment':
+    'Treat every PR /review as if --comment was passed: findings are posted to the pull request without the flag.',
+  'settings.label.review.severityFloor': 'Posting floor: review',
+  'settings.description.review.severityFloor':
+    'The lowest severity a PR /review posts when --severity-floor is not given.',
+  'settings.label.review.reverseAuditRounds':
+    'Reverse-audit round ceiling: review',
+  'settings.description.review.reverseAuditRounds':
+    'Lower the reverse-audit loop ceiling for /review.',
+  'settings.label.review.approachRounds':
+    'Approach-signal round threshold: review',
+  'settings.description.review.approachRounds':
+    'How many rounds a pull request must reach before the review may add an advisory paragraph about the change shape.',
+
+  'settings.label.output.showTimestamps': 'Show Timestamps',
+  'settings.description.output.showTimestamps':
+    'Show [HH:MM:SS] timestamp before each assistant response.',
+
+  'settings.label.ui.disableWorkflowKeywordTrigger':
+    'Disable Workflow Keyword Trigger',
+  'settings.description.ui.disableWorkflowKeywordTrigger':
+    'Mentioning the word "workflow" in a prompt no longer steers the turn toward the Workflow tool.',
+  'settings.label.ui.showStatusInTitle': 'Show Status in Title',
+  'settings.description.ui.showStatusInTitle':
+    'Show Qwen Code session name and status in the terminal window title.',
+  'settings.label.ui.showResponseTokensPerSecond':
+    'Show Response Tokens Per Second',
+  'settings.description.ui.showResponseTokensPerSecond':
+    'Show a live tokens/sec estimate next to the response token counter while the model is streaming.',
+  'settings.label.ui.showToolCallDetails': 'Show Tool Call Details',
+  'settings.description.ui.showToolCallDetails':
+    'Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary.',
+
+  'settings.label.modelFallbacks': 'Model Fallbacks',
+  'settings.description.modelFallbacks':
+    'Ordered list of fallback model IDs (max 3) to try when the primary model hits capacity errors.',
+
+  'settings.label.tools.codeModeOnly': 'Code Mode Only (Experimental)',
+  'settings.description.tools.codeModeOnly':
+    'Expose ordinary tools to the model only through the isolated exec JavaScript tool.',
+  'settings.label.tools.webSearch.enabled': 'Enable WebSearch',
+  'settings.description.tools.webSearch.enabled':
+    'Set false to disable the built-in web_search tool.',
+  'settings.label.tools.webSearch.model': 'Search Model',
+  'settings.description.tools.webSearch.model':
+    'Model selector for the explicit search path.',
+  'settings.label.tools.webSearch.webExtractor': 'Open Result Pages',
+  'settings.description.tools.webSearch.webExtractor':
+    'Let the search agent open and read result pages for better-grounded answers.',
+  'settings.label.tools.webSearch.timeoutMs': 'Search Timeout (ms)',
+  'settings.description.tools.webSearch.timeoutMs':
+    'Total time budget for one web_search call, in milliseconds.',
+  'settings.label.tools.webSearch.maxPerSession': 'Max Searches per Session',
+  'settings.description.tools.webSearch.maxPerSession':
+    'Maximum web_search calls in one session.',
+  'settings.label.tools.toolSearch.threshold':
+    'Deferred Tool Preload Threshold (%)',
+  'settings.description.tools.toolSearch.threshold':
+    'Context-window percentage used as the session-start budget for preloading deferred tools.',
+  'settings.label.tools.listDirectory.enabled': 'Enable ListDirectory',
+  'settings.description.tools.listDirectory.enabled':
+    'Enable the built-in list_directory tool.',
+  'settings.label.tools.todoWrite.enabled': 'Enable Todo Write',
+  'settings.description.tools.todoWrite.enabled':
+    'Enable the built-in todo_write tool and its system-prompt guidance.',
+  'settings.label.tools.workflowsEnabled': 'Dynamic Workflows',
+  'settings.description.tools.workflowsEnabled':
+    'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel.',
+  'settings.label.tools.workflowSizeGuideline': 'Dynamic Workflow Size',
+  'settings.description.tools.workflowSizeGuideline':
+    'Advisory size guideline for the dynamic workflows the model writes.',
+  'settings.label.tools.workflowNameOnly': 'Named Workflows Only',
+  'settings.description.tools.workflowNameOnly':
+    'Restrict the model to running named workflows only.',
+
+  'settings.label.goals.modelProposed': 'Model-Proposed Goals',
+  'settings.description.goals.modelProposed':
+    'Controls the propose_goal tool, which lets the model propose a session Goal for you to approve.',
+
+  'settings.label.experimental.cron': 'Enable Cron/Loop Tools',
+  'settings.description.experimental.cron':
+    'Enable in-session cron/loop tools for creating recurring prompts.',
+  'settings.label.experimental.sessionWriterLease':
+    'Enable ACP Session Writer Lease',
+  'settings.description.experimental.sessionWriterLease':
+    'Enable cross-process write fencing for persisted ACP and daemon sessions.',
+  'settings.label.experimental.agentTeam': 'Enable Agent Team',
+  'settings.description.experimental.agentTeam':
+    'Enable agent team collaboration tools (experimental).',
+  'settings.label.omni.enabled': 'Enable Omni Media Delivery',
+  'settings.description.omni.enabled':
+    'Enable the omni media pipeline for media files referenced with @.',
+  'settings.label.experimental.artifact': 'Enable Artifacts',
+  'settings.description.experimental.artifact':
+    'Enable artifact tools for publishing interactive HTML pages.',
+
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
@@ -7882,6 +8001,117 @@ const ZH: Messages = {
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
+
+  // --- 补全缺失的设置项中文翻译 ---
+  'settings.category.Review': '代码审查',
+  'settings.category.Output': '输出',
+  'settings.category.IDE': 'IDE',
+  'settings.category.Goals': '目标',
+  'settings.category.Policy': '策略',
+  'settings.category.Agents': '智能体',
+  'settings.category.Memory': '记忆',
+  'settings.category.MCP': 'MCP',
+  'settings.category.Security': '安全',
+  'settings.category.Generation Configuration': '生成配置',
+
+  'settings.label.review.attribution': '署名：审查',
+  'settings.description.review.attribution':
+    '在发布到 GitHub 的审查正文和内联评论中附加署名信息（模型名称和 CLI 版本）。',
+  'settings.label.review.sandbox': '沙箱运行审查代码：审查',
+  'settings.description.review.sandbox': '在沙箱环境中运行被审查的代码。',
+  'settings.label.review.effort': '默认审查力度：审查',
+  'settings.description.review.effort':
+    '当未指定 --effort 且无项目记忆级别时，/review 的默认审查力度。',
+  'settings.label.review.comment': '默认发布评论：审查',
+  'settings.description.review.comment':
+    '将每次 PR /review 视为传入了 --comment：审查发现会自动发布到拉取请求上。',
+  'settings.label.review.severityFloor': '发布严重度下限：审查',
+  'settings.description.review.severityFloor':
+    '未指定 --severity-floor 时，PR /review 发布的最低严重级别。',
+  'settings.label.review.reverseAuditRounds': '反向审计轮次上限：审查',
+  'settings.description.review.reverseAuditRounds':
+    '降低 /review 的反向审计轮次上限。',
+  'settings.label.review.approachRounds': '方案信号轮次阈值：审查',
+  'settings.description.review.approachRounds':
+    '拉取请求需达到多少轮后，审查可添加一段关于变更方案的建议性段落。',
+
+  'settings.label.output.showTimestamps': '显示时间戳',
+  'settings.description.output.showTimestamps':
+    '在每条助手回复前显示 [HH:MM:SS] 时间戳。',
+
+  'settings.label.ui.disableWorkflowKeywordTrigger': '禁用工作流关键词触发',
+  'settings.description.ui.disableWorkflowKeywordTrigger':
+    '启用后，在提示中提及"workflow"一词不再自动引导至工作流工具。',
+  'settings.label.ui.showStatusInTitle': '在标题栏显示状态',
+  'settings.description.ui.showStatusInTitle':
+    '在终端窗口标题中显示 Qwen Code 会话名称和状态。',
+  'settings.label.ui.showResponseTokensPerSecond': '显示响应 Tokens/秒',
+  'settings.description.ui.showResponseTokensPerSecond':
+    '模型流式输出时，在响应 token 计数器旁显示实时的 tokens/秒估算值。',
+  'settings.label.ui.showToolCallDetails': '显示工具调用详情',
+  'settings.description.ui.showToolCallDetails':
+    '内联显示工具参数和结果。禁用后将普通工具调用渲染为单行摘要。',
+
+  'settings.label.modelFallbacks': '模型回退',
+  'settings.description.modelFallbacks':
+    '当主模型遇到容量错误（429/503/529）时，按顺序尝试的回退模型 ID 列表（最多 3 个）。',
+
+  'settings.label.tools.codeModeOnly': '仅代码模式（实验性）',
+  'settings.description.tools.codeModeOnly':
+    '仅通过隔离的 exec JavaScript 工具向模型暴露普通工具。',
+  'settings.label.tools.webSearch.enabled': '启用网络搜索',
+  'settings.description.tools.webSearch.enabled':
+    '设为 false 以禁用内置的 web_search 工具。',
+  'settings.label.tools.webSearch.model': '搜索模型',
+  'settings.description.tools.webSearch.model': '显式搜索路径的模型选择器。',
+  'settings.label.tools.webSearch.webExtractor': '打开结果页面',
+  'settings.description.tools.webSearch.webExtractor':
+    '允许搜索代理打开并阅读结果页面，以获得更有依据的回答。',
+  'settings.label.tools.webSearch.timeoutMs': '搜索超时（毫秒）',
+  'settings.description.tools.webSearch.timeoutMs':
+    '单次 web_search 调用的总时间预算（毫秒）。',
+  'settings.label.tools.webSearch.maxPerSession': '每会话最大搜索次数',
+  'settings.description.tools.webSearch.maxPerSession':
+    '单个会话中最大的 web_search 调用次数。',
+  'settings.label.tools.toolSearch.threshold': '延迟工具预加载阈值（%）',
+  'settings.description.tools.toolSearch.threshold':
+    '以上下文窗口百分比作为会话启动时预加载延迟工具的预算。',
+  'settings.label.tools.listDirectory.enabled': '启用目录列表',
+  'settings.description.tools.listDirectory.enabled':
+    '启用内置的 list_directory 工具。',
+  'settings.label.tools.todoWrite.enabled': '启用任务清单写入',
+  'settings.description.tools.todoWrite.enabled':
+    '启用内置的 todo_write 工具及其系统提示词引导。',
+  'settings.label.tools.workflowsEnabled': '动态工作流',
+  'settings.description.tools.workflowsEnabled':
+    '启用工作流工具，允许模型编写并运行脚本以并行编排子智能体。',
+  'settings.label.tools.workflowSizeGuideline': '动态工作流规模',
+  'settings.description.tools.workflowSizeGuideline':
+    '模型编写的动态工作流的建议规模指导。',
+  'settings.label.tools.workflowNameOnly': '仅命名工作流',
+  'settings.description.tools.workflowNameOnly':
+    '限制模型只能运行已命名的工作流。',
+
+  'settings.label.goals.modelProposed': '模型提议目标',
+  'settings.description.goals.modelProposed':
+    '控制 propose_goal 工具，允许模型为你提议一个会话目标供审批。',
+
+  'settings.label.experimental.cron': '启用 Cron/Loop 工具',
+  'settings.description.experimental.cron':
+    '启用会话内 cron/loop 工具，用于创建周期性提示。',
+  'settings.label.experimental.sessionWriterLease': '启用 ACP 会话写入锁',
+  'settings.description.experimental.sessionWriterLease':
+    '为持久化 ACP 和 daemon 会话启用跨进程写入围栏。',
+  'settings.label.experimental.agentTeam': '启用智能体团队',
+  'settings.description.experimental.agentTeam':
+    '启用智能体团队协作工具（实验性）。',
+  'settings.label.omni.enabled': '启用全模态媒体传输',
+  'settings.description.omni.enabled':
+    '启用全模态媒体管道，处理通过 @ 引用的媒体文件。',
+  'settings.label.experimental.artifact': '启用制品',
+  'settings.description.experimental.artifact':
+    '启用制品工具，用于发布交互式 HTML 页面。',
+
   'welcome.modeHint': 'Shift+Tab 或 /approval-mode',
   'welcome.prompt': '你想构建什么？',
   'welcome.titlePrefix': '欢迎使用',
