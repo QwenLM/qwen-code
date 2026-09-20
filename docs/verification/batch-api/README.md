@@ -3,10 +3,15 @@
 配套 `docs/plans/2026-09-14-batch-api-feasibility.md` §6 的三个待测问题。
 脚本只打百炼接口，不碰仓库代码；跑完把 `out/*.result.json` 贴回来即可。
 
-**依赖**：`regression.sh` 与 `fake-dashscope.mjs` 驱动的是 `qwen batch` /
-`--batch` 本身，这两条由 [#11874](https://github.com/QwenLM/qwen-code/pull/11874)
-引入。在 #11874 合并之前，本目录里的四个线上探测（`00`–`03`，只依赖 `openai`
-SDK 与百炼接口）可以独立运行，`regression.sh` 则需要那个分支的 CLI。
+**依赖**：`regression.sh` 与 `fake-dashscope.mjs` 驱动的是 `qwen batch` 命令本身，
+它由 [#11874](https://github.com/QwenLM/qwen-code/pull/11874) 引入。在 #11874
+合并之前，本目录里的四个线上探测（`00`–`03`，只依赖 `openai` SDK 与百炼接口）
+可以独立运行，`regression.sh` 则需要那个分支的 CLI。
+
+**`--batch` 已不存在。** headless 置换按下方「判定」表的第二行被否掉，已从 #11874
+移出（保存在 `archive/headless-batch-mode-11874`）。`regression.sh` 原有的
+R4/R5/R6/R8/R9 与 R7 的 SIGINT 部分随之删除；`fake-dashscope.mjs` 里
+`tools` / `failed` / `unpollable` 三个场景暂时保留但已无人驱动，若确认不再恢复可一并删掉。
 
 **已知待修（留给本 PR 自己的 review 轮）**：`00-plumbing.mjs` 默认的
 `batch-test-model` 跑不通——官方要求该模型的 `url`/`endpoint` 填
@@ -83,19 +88,20 @@ P_OUT=4 CACHE_RATIO=0.2 node docs/verification/batch-api/02-cache.mjs
 （见 `docs/users/configuration/auth.md`），上面准备块里的 `DASHSCOPE_API_KEY` 它并不读。
 记得 body 里显式写 `enable_thinking: false`，否则新模型默认开 thinking。
 
-## `--batch`（置换 v1）的验收
+## `--batch`（置换 v1）的验收——已判定不做
 
-`qwen -p "..." --batch` 已实现：主循环每一跳走 Batch API，side-call / 压缩 / 子 agent 仍是实时。
-它的验收就是 01：如果 01 通，跑一次带工具调用的 `qwen -p "列出当前目录文件并总结" --batch`，
-应看到 stderr 打出 `[batch] submitted batch_xxx`，等待后正常完成一轮工具调用。
-TUI 下 `--batch` 会被 `.check()` 拒绝；QWEN_OAUTH 或非 DashScope 端点在启动时被门禁直接拒绝
-（不发出任何请求）；`pipeline.ts` 里 `runBatch` 的抛错是 core 侧的兜底。
+原计划：01 通过即跑一次带工具调用的 `qwen -p "..." --batch` 作为验收。
+**实测结果让这一步失去意义**：01 通过，但 02 不通（batch 内隐式与显式缓存臂
+均 `cached_tokens: 0`，实时对照 0.647，`cost_vs_realtime = 1.03`），
+落在下方判定表的第二行——「只做形态 A（扇出）」。
+
+置换 v1 已从 #11874 移出，本节保留作记录。
 
 ## 本地回归（不花钱、不联网）
 
 `fake-dashscope.mjs` 是一个假的百炼兼容服务（`/files`、`/batches`、`/batches/:id/cancel`、
 `/files/:id/content`、`/chat/completions`），按场景推进 batch 状态并记录每条请求；
-`regression.sh` 驱动**真实 CLI 进程**跑完 happy / tools / failed / stuck / unpollable 五个场景，
+`regression.sh` 驱动**真实 CLI 进程**跑完 happy / stuck 两个场景，
 断言退出码、stdout 与请求序列（`fake-dashscope.mjs` 支持 `SLOW_SECONDS`，但本脚本没有启动
 slow 场景，`pollJob` 的 slow 分支未被覆盖）：
 
@@ -103,19 +109,23 @@ slow 场景，`pollJob` 的 slow 分支未被覆盖）：
 bash docs/verification/batch-api/regression.sh   # 约 10–15 分钟（受 tsx 冷启动影响），断言数以脚本末尾的 === N passed === 汇总为准
 ```
 
-覆盖：submit 只创建一个 batch（不被内存重启重复提交）、四个子命令退出码、已结算作业的 cancel
-被拒绝（与真实提供方一致）、鉴权门禁、`--batch` 对 `-i` 的拒绝、`--batch` 两跳工具调用端到端、
-失败时透出服务端原因且不重试、未 settle 时拒绝 fetch、SIGINT 触发服务端 cancel、
-只有主循环走 batch（side-call 保持实时）、以及不可轮询的作业被放弃时输入文件保留、
-错误信息指向 `qwen batch fetch`（R8/R9）。
+覆盖（R1–R4）：submit 只创建一个 batch（不被内存重启重复提交）、四个子命令退出码、
+已结算作业的 cancel 被拒绝（与真实提供方一致）、运行中作业的 cancel 成功、
+远端文件在 `--delete` 后被清掉、鉴权门禁（QWEN_OAUTH 下退出 1 且不落进主流程）、
+未 settle 时拒绝 fetch。
 
 它证明的是 qwen-code 这一侧的进程行为，**不能**替代上面三个线上探针——百炼是否接受这些请求、
 工具调用能否穿过 batch body、batch 内是否命中缓存，只有真打接口才知道。
 
 ## 判定
 
-| 01   | 02   | 结论                                                 |
-| ---- | ---- | ---------------------------------------------------- |
-| 通   | 通   | 值得做 §6 的 headless `--batch` 置换                 |
-| 通   | 不通 | 置换技术可行但主循环账是亏的，只做 §3 形态 A（扇出） |
-| 不通 | —    | agent 没有工具，放弃置换，只做形态 A                 |
+| 01     | 02       | 结论                                                     |
+| ------ | -------- | -------------------------------------------------------- |
+| 通     | 通       | 值得做 §6 的 headless `--batch` 置换                     |
+| **通** | **不通** | **置换技术可行但主循环账是亏的，只做 §3 形态 A（扇出）** |
+| 不通   | —        | agent 没有工具，放弃置换，只做形态 A                     |
+
+**实测落在第二行**（2026-09-18/19，华北2·北京，`qwen3.7-max`）：01 通过
+（`tools` / `tool_calls` / assistant+tool 历史都能穿过 batch body，
+`finish_reason: "tool_calls"` 保留）；02 不通（两条臂 `cached_tokens: 0`，
+实时对照 0.647，`cost_vs_realtime = 1.03`）。按本表执行：只做形态 A。
