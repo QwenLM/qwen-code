@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,9 +21,9 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
 // Executes the CI lock-dir resolver and the docker branch of the E2E runner
-// against a poisoned ${HOME}/.cache/qwen-code-ci, so the #12006 fallback is
-// witnessed by bash rather than by shape assertions alone. Bash-driven, so it
-// is excluded from the Windows lanes in vitest.config.ts.
+// against a poisoned ${HOME}/.cache/qwen-code-ci, so the #12006 repair and
+// fallback are witnessed by bash rather than by shape assertions alone.
+// Bash-driven, so it is excluded from the Windows lanes in vitest.config.ts.
 //
 // Run 35069321648 failed the docker leg's 'Run E2E tests' and 'Prune dangling
 // docker images' steps in under a second each: a root-owned leftover lock
@@ -80,8 +81,13 @@ describe('CI docker lock dir resolution', () => {
     }
   });
 
+  // The repairable half of #12006: unlink permission lives on the
+  // containing directory, so a foreign-owned lock file inside a writable
+  // shared dir is unlinked and re-probed — the host heals in place and the
+  // job keeps the shared dir (and its cross-job coordination) instead of
+  // falling back.
   it.skipIf(isRoot)(
-    'falls back to a job-private dir when a lock file is not writable',
+    'repairs an unwritable lock file in place when the shared dir is writable',
     () => {
       const world = makeWorld();
       try {
@@ -91,15 +97,45 @@ describe('CI docker lock dir resolution', () => {
         writeFileSync(daemonLock, '');
         chmodSync(daemonLock, 0o400);
         const result = runResolver(world, ['docker-sandbox-daemon.lock']);
+        expect(result.stdout.trim()).toBe(shared);
+        expect(result.stderr).toBe('');
+        // The poison is unlinked, not worked around, and a fresh lock
+        // opens in its place.
+        expect(existsSync(daemonLock)).toBe(false);
+        writeFileSync(daemonLock, '');
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The unrepairable half: the lock name exists and is not writable, and
+  // the unlink fails. A directory squatting on the lock name is the shape
+  // a single-uid test can build — `rm -f` without -r cannot unlink a
+  // directory — standing in for any unlink failure (EROFS, a foreign-owned
+  // name in a sticky dir); the veto and the fallback must still fire.
+  it.skipIf(isRoot)(
+    'falls back to a job-private dir when an unwritable lock cannot be unlinked',
+    () => {
+      const world = makeWorld();
+      try {
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        mkdirSync(shared, { recursive: true });
+        const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+        mkdirSync(daemonLock);
+        chmodSync(daemonLock, 0o500);
+        const result = runResolver(world, ['docker-sandbox-daemon.lock']);
         const fallback = join(world.runnerTemp, 'qwen-code-ci-locks');
         expect(result.stdout.trim()).toBe(fallback);
         expect(result.stderr).toContain('::warning::');
         expect(result.stderr).toContain('job-private');
-        // The warning must name the offending file: a hardcoded cause (an
+        // The warning must name the offending name: a hardcoded cause (an
         // unhealed root-owned leftover) sends the next debugger at the heal
         // step when the poison can be a lock of any family, of any owner.
         expect(result.stderr).toContain('docker-sandbox-daemon.lock');
         expect(existsSync(fallback)).toBe(true);
+        // A failed repair must leave the poison untouched.
+        expect(statSync(daemonLock).isDirectory()).toBe(true);
       } finally {
         rmSync(world.dir, { recursive: true, force: true });
       }
@@ -125,6 +161,9 @@ describe('CI docker lock dir resolution', () => {
       ]);
       expect(result.stdout.trim()).toBe(shared);
       expect(result.stderr).toBe('');
+      // The repair is as narrow as the veto: a lock the caller never
+      // named is neither repaired nor removed.
+      expect(existsSync(foreignLock)).toBe(true);
     } finally {
       rmSync(world.dir, { recursive: true, force: true });
     }
@@ -168,6 +207,9 @@ describe('CI docker lock dir resolution', () => {
         const result = runResolver(world, ['docker-sandbox-daemon.lock']);
         expect(result.stdout.trim()).toBe(shared);
         expect(result.stderr).toBe('');
+        // The daemon call never named the build lock, so the repair must
+        // leave it in place.
+        expect(existsSync(buildLock)).toBe(true);
       } finally {
         rmSync(world.dir, { recursive: true, force: true });
       }
@@ -338,11 +380,12 @@ describe('CI docker lock dir resolution', () => {
     }
   });
 
-  // The #12006 reproduction: with a lock file the runner cannot open, the
-  // pre-fix script died at `exec 9>` before a test ran (exit 1, EACCES);
-  // the resolver must route the leg to the job-private dir instead.
+  // The #12006 shape at the leg level: a poisoned daemon lock inside a
+  // writable shared dir is repaired in place, so the leg runs green AND
+  // keeps the daemon lock on the shared path the prune step, the host
+  // cleanup timer and the release lane all coordinate on.
   it.skipIf(isRoot)(
-    'keeps the docker leg green when the shared lock file is not writable',
+    'keeps the docker leg on the shared lock dir when the poisoned lock is repairable',
     () => {
       const world = makeWorld();
       try {
@@ -351,6 +394,41 @@ describe('CI docker lock dir resolution', () => {
         const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
         writeFileSync(daemonLock, '');
         chmodSync(daemonLock, 0o400);
+        const { exitCode, output } = runDockerLeg(world);
+        expect(exitCode).toBe(0);
+        expect(output).not.toContain('job-private');
+        expect(existsSync(join(shared, 'docker-sandbox-daemon.lock'))).toBe(
+          true,
+        );
+        expect(
+          existsSync(
+            join(
+              world.runnerTemp,
+              'qwen-code-ci-locks',
+              'docker-sandbox-daemon.lock',
+            ),
+          ),
+        ).toBe(false);
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The unrepairable form of the #12006 poison: a directory squats on the
+  // daemon lock name, so the in-place unlink fails and the resolver must
+  // route the leg to the job-private dir instead of dying at `exec 9>`
+  // with EACCES before a test runs, as the pre-fix script did.
+  it.skipIf(isRoot)(
+    'keeps the docker leg green when the shared lock name cannot be unlinked',
+    () => {
+      const world = makeWorld();
+      try {
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        mkdirSync(shared, { recursive: true });
+        const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+        mkdirSync(daemonLock);
+        chmodSync(daemonLock, 0o500);
         const { exitCode, output } = runDockerLeg(world);
         expect(exitCode).toBe(0);
         expect(output).toContain('job-private');
@@ -363,6 +441,7 @@ describe('CI docker lock dir resolution', () => {
             ),
           ),
         ).toBe(true);
+        expect(statSync(daemonLock).isDirectory()).toBe(true);
       } finally {
         rmSync(world.dir, { recursive: true, force: true });
       }
@@ -401,11 +480,12 @@ describe('CI docker lock dir resolution', () => {
   );
 
   // The leg resolves the daemon lock independently of the build-family
-  // locks: with only docker-sandbox-build.lock poisoned, the daemon lock
-  // must stay on the shared dir (the prune step, the host cleanup timer
-  // and the release lane all hardcode that path) while the build locks
-  // fall back. The build mutex only opens on the image-build path, so the
-  // docker stub reports the image absent.
+  // locks: with only docker-sandbox-build.lock poisoned (here squatted by
+  // a directory, so the repair's unlink fails), the daemon lock must stay
+  // on the shared dir (the prune step, the host cleanup timer and the
+  // release lane all hardcode that path) while the build locks fall back.
+  // The build mutex only opens on the image-build path, so the docker stub
+  // reports the image absent.
   it.skipIf(isRoot)(
     'keeps the daemon lock shared when only a build lock is poisoned',
     () => {
@@ -414,8 +494,8 @@ describe('CI docker lock dir resolution', () => {
         const shared = join(world.home, '.cache', 'qwen-code-ci');
         mkdirSync(shared, { recursive: true });
         const buildLock = join(shared, 'docker-sandbox-build.lock');
-        writeFileSync(buildLock, '');
-        chmodSync(buildLock, 0o400);
+        mkdirSync(buildLock);
+        chmodSync(buildLock, 0o500);
         const summary = join(world.dir, 'summary.md');
         writeFileSync(summary, '');
         const { exitCode, output } = runDockerLeg(world, {
@@ -445,6 +525,7 @@ describe('CI docker lock dir resolution', () => {
         const content = readFileSync(summary, 'utf8');
         expect(content).toContain('docker-sandbox-build.lock');
         expect(content).not.toMatch(/prune/);
+        expect(statSync(buildLock).isDirectory()).toBe(true);
       } finally {
         rmSync(world.dir, { recursive: true, force: true });
       }
