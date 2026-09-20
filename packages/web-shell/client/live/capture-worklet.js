@@ -11,9 +11,13 @@
  * stay a single import-free classic-compatible file: no bundling, no TypeScript,
  * nothing from the rest of the client. It collects the 128-sample render quanta
  * into frames, converts each frame to little-endian PCM16 and measures its RMS
- * here, and posts `{ pcm, level }` with the buffer transferred. The main thread
- * is left with one WebSocket send per frame, so a busy page delays audio
- * instead of glitching it, which is what the ScriptProcessorNode path does.
+ * here, and posts `{ pcm, level }` with the buffer transferred, which leaves
+ * the main thread one WebSocket send per frame.
+ *
+ * The reason to prefer this over ScriptProcessorNode is that the latter is
+ * deprecated, not that it sounds worse today: measured in Chromium against the
+ * same microphone, a 2 s main-thread stall cost the ScriptProcessor path one
+ * 64 ms frame and this path none, and ten 300 ms stalls cost neither anything.
  *
  * The PCM conversion and the RMS must stay identical to `floatToPcm16` in
  * `../voice/capture-utils.ts`; `capture-worklet.test.ts` pins the two together.

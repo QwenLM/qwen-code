@@ -77,9 +77,9 @@ const SILENT_INPUT: LiveInputLevel = { level: 0, at: 0, dropping: false };
 const CAPTURE_WORKLET_PROCESSOR = 'qwen-live-capture';
 
 /**
- * `worklet`: microphone frames are produced on the audio rendering thread, so
- * a busy page delays them instead of glitching them. `script-processor`: the
- * deprecated main-thread fallback, used where the worklet module cannot be
+ * `worklet`: microphone frames are produced, converted and measured on the
+ * audio rendering thread. `script-processor`: the deprecated main-thread
+ * node, kept as the fallback for wherever the worklet module cannot be
  * loaded — a browser without AudioWorklet, or an embedding whose library build
  * inlines the module as a `data:` URL the CSP refuses.
  */
