@@ -524,7 +524,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'either mode.',
       })
       .option('child-heap-mode', {
-        choices: ['off', 'observe', 'admit'] as const,
+        choices: ['off', 'observe', 'admit', 'enforce'] as const,
         default: 'observe' as const,
         description:
           'Whether the daemon models a per-child heap partition of the ' +
@@ -537,7 +537,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'apply; children still run on the much larger host-derived ' +
           'ceiling, so a workload needing more old space than the modeled ' +
           'ceiling looks healthy here. `admit` rejects starts past the modeled ' +
-          'process limit but keeps the existing child heap arguments.',
+          'process limit but keeps the existing child heap arguments. ' +
+          'Experimental `enforce` also applies the fixed modeled old-space ' +
+          'ceiling to each managed child; it does not cap total process RSS.',
       })
       .option('mcp-client-budget', {
         type: 'number',

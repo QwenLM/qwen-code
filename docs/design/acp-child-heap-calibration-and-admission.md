@@ -4,7 +4,7 @@
 
 ## 1. Status and decision
 
-This document records the evidence and design boundary for a future fixed heap ceiling on daemon ACP children. It does not enable enforcement. `observe` remains the default, `limits.memory.enforced` remains `false`, and production children continue to receive the legacy host-derived heap arguments.
+This document records the calibration evidence and the implementation design for an experimental, opt-in fixed heap ceiling on daemon ACP children. `observe` remains the default and retains legacy host-derived heap arguments. Only explicitly selecting `--child-heap-mode enforce` on the fully managed daemon path applies the fixed old-space ceiling and reports `limits.memory.enforced: true`. The historical calibration summary is unchanged; it is evidence for a bounded candidate, not a production-default recommendation.
 
 The accepted Node 24 calibration set contains eight runs, 184 real-model turns and 360 exact tool calls across long-session, multi-MCP and four-child concurrent profiles. Within those bounded profiles, a 544 MiB old-space ceiling completed the workload and retained at least 434.03 MiB of observed old-generation headroom. This supports retaining 544 MiB as a scoped implementation candidate. It does not establish a universal safe ceiling, a process RSS bound, maximum deployment concurrency, multi-hour stability or acceptable GC and latency thresholds.
 
@@ -61,7 +61,7 @@ Three failed Node 24 attempts remain excluded:
 
 The evidence does not cover multiple retained sessions inside one Node 24 child, broader real-world profiles, materially larger contexts, multi-hour stability, other host partitions or rollout thresholds. Those gaps prevent a production-default claim. They do not require committing every historical raw-derived record to preserve the current scoped conclusion.
 
-## 3. Current implementation boundary
+## 3. Baseline implementation boundary
 
 | Component                                                 | Current behavior and consequence                                                                                                                            |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -80,15 +80,15 @@ Multiple sessions can share one ACP child. Registration count, session count, ac
 
 ### 4.1 Mode and supported wiring
 
-After the remaining rollout decisions are resolved, add `enforce` to the existing `--child-heap-mode` option and its SDK types. Keep `off`, `observe` and `admit` behavior unchanged. Resolve the mode and budget once before constructing child factories; changing it requires a daemon restart. This proposal adds no environment variable and no workspace registration limit.
+Add experimental opt-in `enforce` to the existing `--child-heap-mode` option and its SDK types. Keep `off`, `observe` and `admit` behavior unchanged. Resolve the mode and budget once before constructing child factories; changing it requires a daemon restart. This proposal adds no environment variable and no workspace registration limit.
 
-The first enforcing path must require the built-in daemon spawn path, one shared process registry and one shared heap policy. Reject unsupported injected bridges or factories before listening. Reject a zero-slot or null-ceiling configuration before preheat. Standalone ACP, IDE and direct-embed callers retain their existing behavior unless separately wired and documented.
+The first enforcing path must require the built-in daemon spawn path, one shared process registry and one shared heap policy. Reject unsupported injected bridges or factories before listening. Reject a zero-slot or null-ceiling configuration before preheat. Standalone ACP and IDE callers retain their existing behavior. Direct-embed callers requesting `enforce` without matching managed process wiring fail explicitly, even if an injected status snapshot claims enforcement. Both the normal CLI parser and the serve fast path accept the new mode; the TypeScript SDK exposes the same mode and boolean enforcement status.
 
 ### 4.2 Reserve, spawn and release
 
 Reuse `ProcessRegistry.reserve()` and `committedProcessCount`. Reserve first, make the capacity decision with the new reservation included, and cancel the reservation before `spawn()` when refused. Existing error paths must release the reservation if policy evaluation or spawn fails.
 
-For an admitted child, emit exactly one explicit `--max-old-space-size=<ceiling>` and preserve `--expose-gc`. Normalize inherited fixed old-space flags and reject `--max-old-space-size-percentage` in the enforcing path because the percentage flag takes precedence. Preserve unrelated Node options.
+For an admitted child, emit exactly one explicit `--max-old-space-size=<ceiling>` and preserve `--expose-gc`. Normalize inherited fixed old-space flags and reject `--max-old-space-size-percentage` in the enforcing path because the percentage flag takes precedence. Preserve unrelated Node options. Check both `process.execArgv` and `NODE_OPTIONS`, including underscore aliases and split values; validate the final child environment after per-spawn overrides. Invalid or conflicting options fail before spawning, without retaining a process reservation. A fixed flag must be emitted even when the parent already has a larger heap limit.
 
 After attach, the process registry owns release. Signalling a process or closing ACP streams is not cleanup proof. Replacement can temporarily require two slots because the old and new children both count until the old child is released. The first version adds no unbudgeted replacement allowance and no waiting queue.
 
@@ -112,15 +112,15 @@ Set `limits.memory.enforced` to true only for the fully wired built-in enforcing
 
 The implementation PR must cover both parsers and every supported child factory; final-slot races; cancellation; synchronous and asynchronous spawn failures; termination overlap; failed cleanup; shutdown; zero capacity; multi-session sharing; full-capacity registration; inherited heap flags; and REST, ACP, standalone and runtime-coordinator error preservation.
 
-Run focused package tests, build, typecheck, bundle and real daemon E2E verification. Confirm the actual child arguments and status output. Production rollout also requires explicit GC and latency thresholds, staged enablement and rollback criteria.
+Run focused package tests, build, typecheck, bundle and real daemon E2E verification. Confirm the actual child arguments and status output. Local functional verification proves argument propagation, admission and cleanup, not workload capacity. Initially enable only on an isolated daemon after comparing the actual workload with `admit` on the same host partition. Record completion, old-generation peaks, major GC and latency; roll back by restarting with `admit` if heap OOMs, lost work or unacceptable workload-specific latency occur. Do not automatically restart into another mode. Broader production rollout still requires explicit GC and latency thresholds.
 
-This documentation PR changes no runtime behavior. Its acceptance criterion is that the bilingual design and compact summary agree on the measured scope, metrics, exclusions, decision and remaining gaps.
+Implementation acceptance requires unchanged defaults and existing modes, one fixed old-space argument for each supported factory, shared capacity accounting through cleanup, honest status, and unchanged rollback-aware capacity errors. The bilingual design must continue to distinguish local functional validation from the historical Node 24 calibration evidence. The implementation changes the policy, spawn argument handling, CLI parsers and daemon wiring, status/SDK types, related tests and current user documentation; existing wrapper and transport behavior needs regression coverage rather than a new error protocol.
 
 ## 7. Open decisions
 
 - Define acceptable GC and latency regressions and the staged rollout and rollback criteria.
-- Decide whether the first supported enforcement scope should be limited to the measured 4-vCPU, 7,265 MiB partition and Node 24 workload profiles.
+- Experimental opt-in uses the existing modeled partition on supported Node runtimes; it is not hardcoded to 544 MiB or restricted by host identity. Calibrate each target workload and partition before production adoption.
 - Validate multiple retained sessions per child, broader real-world workloads, materially larger contexts, multi-hour stability and other host partitions before making enforcement the default.
-- Finalize exact route outcomes for capacity refusal after filesystem or persistence side effects.
+- Capacity refusals retain existing route outcomes: a proven pre-dispatch standalone rollback reports its operation code with nested capacity metadata; uncertain persistence keeps the existing quarantine outcome. Runtime wrappers preserve the capacity cause. Clients must not retry the entire request automatically.
 
 Do not infer these decisions from the earlier registration or RSS capacity experiments, and do not replace the modeled partition with an assumed 16-child limit.

@@ -209,20 +209,19 @@ interface DaemonStatusLimits {
   acpPreAttachMaxPayloadBytesPerConnection: number | null;
   acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
-   * The daemon's resolved memory figures. Observed and reported only: nothing
-   * consumes them to size a child. `null` on paths that resolve none, such as
-   * direct-embed bridges.
+   * The daemon's resolved memory figures and child policy. `null` on paths
+   * that resolve none, such as direct-embed bridges.
    */
   memory: DaemonStatusMemoryLimits | null;
 }
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False: modeled child heap ceilings are not applied. Count admission is
-   * reported by `childHeap.admissionEnforced`; adaptive journal growth is
-   * reported separately under `journalGrowth`.
+   * True only when managed child-count admission and the fixed old-space
+   * ceiling are both applied. Does not bound total process RSS. Adaptive
+   * journal growth is reported separately under `journalGrowth`.
    */
-  enforced: false;
+  enforced: boolean;
   /**
    * Adaptive live-journal growth derived from this budget: session caps really do
    * grow within this pool mid-turn (per-session effective limits appear on
@@ -238,7 +237,7 @@ export interface DaemonStatusMemoryLimits {
     baselineMaxBytes: number;
   } | null;
   /**
-   * The per-child heap partition the daemon models but does not apply.
+   * The fixed per-child heap partition, applied only under `enforce`.
    * `null` when no policy was built.
    */
   childHeap: {
@@ -253,15 +252,15 @@ export interface DaemonStatusMemoryLimits {
      */
     maxConcurrentChildren: number | null;
     /**
-     * What each would receive. Never 0 and never below
+     * What each receives under `enforce`. Never 0 and never below
      * `modeled.minChildHeapMb`; `null` instead, both under `off` and wherever
      * the partition cannot be modeled within that floor.
      */
     perChildCeilingMb: number | null;
     /**
      * Spawns that would have exceeded `maxConcurrentChildren`. Admission
-     * pressure only: 0 does **not** mean the partition is safe to apply,
-     * because children still run on the much larger host-derived ceiling.
+     * pressure only: 0 does **not** prove the workload fits the ceiling.
+     * Under `observe` and `admit`, children retain the legacy heap arguments.
      *
      * Two known sources of counts that are not capacity pressure: a channel
      * swap on a daemon already at `maxConcurrentChildren` books one, because
@@ -281,8 +280,8 @@ export interface DaemonStatusMemoryLimits {
   availableMemorySource: 'constrained' | 'host';
   insufficientMemory: boolean;
   /**
-   * Derived memory model used to calculate the child-count admission limit.
-   * These values do not reserve memory or set child heap limits.
+   * Derived memory model used to calculate child-count admission and the
+   * fixed old-space ceiling. These values do not reserve physical memory.
    */
   modeled: {
     rootReserveMb: number;
@@ -306,7 +305,7 @@ export function toDaemonStatusMemoryLimits(
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    enforced: false,
+    enforced: admissionEnforced && childHeap?.mode === 'enforce',
     journalGrowth: journalGrowth ?? null,
     childHeap: childHeap
       ? {

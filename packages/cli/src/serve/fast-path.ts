@@ -439,7 +439,8 @@ export function parseServeFastPathArgs(
       if (
         read.value !== 'off' &&
         read.value !== 'observe' &&
-        read.value !== 'admit'
+        read.value !== 'admit' &&
+        read.value !== 'enforce'
       ) {
         return { kind: 'fallback' };
       }

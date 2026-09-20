@@ -38,6 +38,7 @@ import { AcpChildCapacityExceededError } from './bridgeErrors.js';
 import { EXTERNAL_TOOL_GUARD_TOKEN_ENV } from './externalToolGuard.js';
 import { ProcessRegistry } from './process-registry.js';
 import type { ChildHeapPolicy } from './child-heap-policy.js';
+import { applyChildHeapLimit } from './child-heap-args.js';
 import { estimateJsonStringBytes } from './json-string-bytes.js';
 import { detectAvailableMemoryMb } from './daemon-memory-budget.js';
 
@@ -432,12 +433,30 @@ export function createSpawnChannelFactory(
   options: SpawnChannelFactoryOptions = {},
 ): ChannelFactory {
   if (options.pipeLimits) validateNdJsonStreamLimits(options.pipeLimits);
-  if (
-    !options.processRegistry &&
-    options.childHeapPolicy?.snapshot().mode === 'admit'
-  ) {
+  const policy = options.childHeapPolicy?.snapshot();
+  const admissionEnforced =
+    policy?.mode === 'admit' || policy?.mode === 'enforce';
+  if (!options.processRegistry && admissionEnforced) {
     throw new TypeError(
       'ACP admission requires an explicit shared process registry.',
+    );
+  }
+  const enforcedCeiling =
+    policy?.mode === 'enforce' ? policy.perChildCeilingMb : undefined;
+  if (enforcedCeiling !== undefined) {
+    if (
+      enforcedCeiling === null ||
+      !Number.isInteger(enforcedCeiling) ||
+      enforcedCeiling <= 0
+    ) {
+      throw new TypeError(
+        'ACP heap enforcement requires a positive heap ceiling.',
+      );
+    }
+    applyChildHeapLimit(
+      process.execArgv,
+      { ...(options.sourceEnv ?? process.env) },
+      enforcedCeiling,
     );
   }
   const processRegistry = options.processRegistry ?? new ProcessRegistry();
@@ -470,6 +489,10 @@ export function createSpawnChannelFactory(
     const execArgs = process.execArgv.filter(
       (a) => !/^--inspect(-brk)?($|=)/.test(a),
     );
+    const enforcedArgs =
+      enforcedCeiling !== undefined
+        ? applyChildHeapLimit(execArgs, childEnv, enforcedCeiling)
+        : undefined;
     // Reserve BEFORE deciding: the reservation is what makes this spawn
     // visible to any other spawn racing it, so the count below includes this
     // child and two concurrent spawns cannot both be told they are alone.
@@ -484,11 +507,7 @@ export function createSpawnChannelFactory(
       let decision = options.childHeapPolicy?.decide(
         processRegistry.committedProcessCount,
       );
-      if (
-        decision?.refuse &&
-        options.childHeapPolicy?.snapshot().mode === 'admit' &&
-        options.reclaimIdleChild
-      ) {
+      if (decision?.refuse && admissionEnforced && options.reclaimIdleChild) {
         reservation.cancel();
         if (startup) {
           startup.getTimeoutError = () =>
@@ -512,7 +531,8 @@ export function createSpawnChannelFactory(
             ? signal.reason
             : new Error('ACP channel spawn was aborted');
         }
-        const limit = options.childHeapPolicy.snapshot().maxConcurrentChildren!;
+        const limit =
+          options.childHeapPolicy!.snapshot().maxConcurrentChildren!;
         if (processRegistry.committedProcessCount >= limit) {
           throw new AcpChildCapacityExceededError(
             limit,
@@ -520,29 +540,23 @@ export function createSpawnChannelFactory(
           );
         }
         reservation = processRegistry.reserve();
-        decision = options.childHeapPolicy.decide(
+        decision = options.childHeapPolicy!.decide(
           processRegistry.committedProcessCount,
         );
       }
       if (decision?.refuse) {
         const policy = options.childHeapPolicy!.snapshot();
-        if (policy.mode === 'admit') {
+        if (admissionEnforced) {
           throw new AcpChildCapacityExceededError(
             policy.maxConcurrentChildren!,
             processRegistry.committedProcessCount - 1,
           );
         }
       }
-      const memoryArgs = getAcpMemoryArgs();
+      const nodeArgs = enforcedArgs ?? [...execArgs, ...getAcpMemoryArgs()];
       child = spawn(
         process.execPath,
-        [
-          ...execArgs,
-          ...memoryArgs,
-          cliEntry,
-          '--acp',
-          ...(options.extraArgs ?? []),
-        ],
+        [...nodeArgs, cliEntry, '--acp', ...(options.extraArgs ?? [])],
         {
           cwd: workspaceCwd,
           stdio: ['pipe', 'pipe', 'pipe'],
