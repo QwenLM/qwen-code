@@ -426,9 +426,15 @@ describe('e2e workflow', () => {
       expect(prune.run).toContain(
         '[ "${ci_lock_dir}" != "${HOME}/.cache/qwen-code-ci" ]',
       );
+      // The open keeps its own arm, separate from the flock condition:
+      // bash -e never aborts on a command failing inside an if-condition,
+      // so a folded `exec 9> ... && flock` would send an open failure
+      // (EISDIR on a squatter) to the else arm and misreport it as a live
+      // daemon.
       expect(prune.run).toContain(
-        'elif exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock" && flock --nonblock 9; then',
+        'if ! exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"; then',
       );
+      expect(prune.run).toContain('elif flock --nonblock 9; then');
     });
 
     it('keeps the test leg failing loudly when no lock dir can be created', () => {

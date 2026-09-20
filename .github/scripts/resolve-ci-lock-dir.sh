@@ -56,9 +56,18 @@ lock_held() {
     # 66 (cannot open) or anything else: fall through to /proc/locks.
   fi
   [[ -r /proc/locks ]] || return 1
-  local ino
+  # A /proc/locks line lays a lock out as
+  # `<id>: FLOCK ADVISORY WRITE <pid> <major>:<minor>:<inode> <start> <end>`
+  # — the witness triple is $6, while $5 is the holder's PID. The device
+  # must compare with the inode: an inode-only match names a phantom
+  # holder on another filesystem. %D is st_dev in hex (major above the low
+  # minor byte); the hex arithmetic stays in bash because strtonum is
+  # gawk-only.
+  local dev ino want
+  dev="$(stat -c %D -- "${path}" 2>/dev/null)" || return 1
   ino="$(stat -c %i -- "${path}" 2>/dev/null)" || return 1
-  awk -v ino="${ino}" '{ split($5, a, ":"); if (a[3] == ino) found = 1 } END { exit !found }' /proc/locks
+  printf -v want '%02x:%02x:%d' "$((0x${dev} >> 8))" "$((0x${dev} & 0xff))" "${ino}"
+  awk -v want="${want}" '$6 == want { found = 1 } END { exit !found }' /proc/locks
 }
 
 ci_lock_dir_writable() {
@@ -74,13 +83,21 @@ ci_lock_dir_writable() {
     return 1
   fi
   for name in "$@"; do
+    # Vet the open the caller is about to make, not the mode bits: a
+    # directory, FIFO, or dangling symlink at the lock name passes -w (or
+    # never reaches it) and then fails or hangs the caller's `exec N>`.
+    # `-e` follows symlinks, so `-L` is what sees a dangling one.
+    if [[ -e "${dir}/${name}" || -L "${dir}/${name}" ]] && ! [[ -f "${dir}/${name}" ]]; then
+      problem="${dir}/${name} exists but is not a regular file"
+      return 1
+    fi
     if [[ -e "${dir}/${name}" && ! -w "${dir}/${name}" ]]; then
       # Unlink permission comes from the directory, so a runner-owned dir
       # holding a foreign-owned lock is repairable without sudo. Narrow on
       # purpose: only files this probe found unwritable — never a glob,
       # never a writable file a live sibling holds, and never a file a live
       # process flocks. The re-test still covers a failed unlink (EROFS, a
-      # sticky dir, a name a directory squats on).
+      # sticky dir).
       if lock_held "${dir}/${name}"; then
         problem="lock file ${dir}/${name} is not writable and is locked by a live process"
         return 1
@@ -94,6 +111,15 @@ ci_lock_dir_writable() {
       # the next poisoned run has a trail. stderr only — stdout stays the
       # single-path payload both callers capture with $(...).
       echo "::warning::unlinked stale unwritable lock file ${dir}/${name}; a fresh one opens in its place" >&2
+    fi
+    # Vet the very open the caller makes next, in append mode so the probe
+    # can never truncate an inode a live process flocks. The regular-file
+    # vet above keeps the open bounded (a FIFO would hang it), and a name
+    # the heal just unlinked is absent here — the caller's own open
+    # creates it — so only a surviving name is probed.
+    if [[ -e "${dir}/${name}" ]] && ! (exec 9>>"${dir}/${name}") 2>/dev/null; then
+      problem="cannot open ${dir}/${name} for writing"
+      return 1
     fi
   done
   return 0

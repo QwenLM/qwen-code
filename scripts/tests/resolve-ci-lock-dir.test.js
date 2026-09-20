@@ -8,11 +8,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,6 +40,47 @@ const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 // a contender cannot take it.
 const hasFlock =
   spawnSync('flock', ['--version'], { encoding: 'utf8' }).status === 0;
+
+// The unreadable-lock live-holder case needs /proc/locks to actually
+// witness a holder: a sandbox can present it as an empty masked file,
+// where the resolver's witness can never report held and the case would
+// assert a veto the environment cannot produce. Probe the capability the
+// way the case uses it — hold a flock, then look for the inode.
+const hasProcLocksWitness = (() => {
+  if (!hasFlock || !existsSync('/proc/locks')) return false;
+  const dir = mkdtempSync(join(tmpdir(), 'qwen-ci-proclock-'));
+  const lock = join(dir, 'probe.lock');
+  const ready = join(dir, 'ready');
+  writeFileSync(lock, '');
+  const holder = spawn(
+    'bash',
+    [
+      '-c',
+      'exec 8>>"$1"; flock --exclusive 8; touch "$2"; sleep 30',
+      '_',
+      lock,
+      ready,
+    ],
+    { detached: true, stdio: 'ignore' },
+  );
+  try {
+    const deadline = Date.now() + 10000;
+    while (!existsSync(ready) && Date.now() < deadline) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+    if (!existsSync(ready)) return false;
+    return readFileSync('/proc/locks', 'utf8').includes(
+      `:${statSync(lock).ino} `,
+    );
+  } finally {
+    try {
+      process.kill(-holder.pid, 'SIGTERM');
+    } catch {
+      // The holder already exited.
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
 
 describe('CI docker lock dir resolution', () => {
   const runnerScript = readFileSync('.github/scripts/run-e2e-tests.sh', 'utf8');
@@ -185,11 +228,104 @@ describe('CI docker lock dir resolution', () => {
     },
   );
 
-  // The unrepairable half: the lock name exists and is not writable, and
-  // the unlink fails. A directory squatting on the lock name is the shape
-  // a single-uid test can build — `rm -f` without -r cannot unlink a
-  // directory — standing in for any unlink failure (EROFS, a foreign-owned
-  // name in a sticky dir); the veto and the fallback must still fire.
+  // The unreadable half of the live-holder veto: with the mode dropped to
+  // 0000 the flock probe cannot even open the file (exit 66), so only the
+  // /proc/locks witness can see the holder — the witness that keyed on the
+  // lock line's PID field before the field-index fix, answered not-held
+  // for every holder, and let the heal unlink the inode out from under the
+  // root qwen-docker-cleanup timer.
+  it.skipIf(isRoot || !hasFlock || !hasProcLocksWitness)(
+    'refuses to unlink an unreadable lock a live process holds',
+    () => {
+      const world = makeWorld();
+      const shared = join(world.home, '.cache', 'qwen-code-ci');
+      mkdirSync(shared, { recursive: true });
+      const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+      writeFileSync(daemonLock, '');
+      const ready = join(world.dir, 'holder-ready');
+      const holder = spawn(
+        'bash',
+        [
+          '-c',
+          'exec 8>>"$1"; flock --exclusive 8; touch "$2"; sleep 60',
+          '_',
+          daemonLock,
+          ready,
+        ],
+        // Own process group, so the finally kills the sleep with it.
+        { detached: true, stdio: 'ignore' },
+      );
+      try {
+        const deadline = Date.now() + 15000;
+        while (!existsSync(ready) && Date.now() < deadline) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+        }
+        expect(existsSync(ready)).toBe(true);
+        // Dropped after the holder opened the lock: opening a 0000 file
+        // for append would fail EACCES for a non-root holder, while chmod
+        // by the owner needs no mode bits.
+        chmodSync(daemonLock, 0o000);
+        const inoBefore = statSync(daemonLock).ino;
+        const result = runResolver(world, ['docker-sandbox-daemon.lock']);
+        expect(result.stdout.trim()).toBe(
+          join(world.runnerTemp, 'qwen-code-ci-locks'),
+        );
+        expect(result.stderr).toContain(
+          'is not writable and is locked by a live process',
+        );
+        // The held inode is never unlinked, so the holder's lock keeps
+        // covering the name every sibling opens.
+        expect(statSync(daemonLock).ino).toBe(inoBefore);
+        // A 0000 mode refuses every open, so a contender probe against it
+        // would fail on EACCES without ever reaching the flock; restore a
+        // readable mode first so a refused flock is what the assertion
+        // measures.
+        chmodSync(daemonLock, 0o600);
+        const contender = spawnSync('bash', [
+          '-c',
+          'exec 8<"$1"; flock --nonblock --exclusive 8',
+          '_',
+          daemonLock,
+        ]);
+        expect(contender.status).not.toBe(0);
+      } finally {
+        try {
+          process.kill(-holder.pid, 'SIGTERM');
+        } catch {
+          // The holder already exited.
+        }
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // The negative sibling: an unreadable lock NO process holds must still
+  // be healed. The positive case alone passes a witness that always
+  // answers held (a `return 0` mutant, or the block deleted so the case
+  // falls through with status 0) — the veto then stands against the exact
+  // #12006 poison, and only this case goes red.
+  it.skipIf(isRoot)('heals an unreadable lock no live process holds', () => {
+    const world = makeWorld();
+    try {
+      const shared = join(world.home, '.cache', 'qwen-code-ci');
+      mkdirSync(shared, { recursive: true });
+      const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+      writeFileSync(daemonLock, '');
+      chmodSync(daemonLock, 0o000);
+      const result = runResolver(world, ['docker-sandbox-daemon.lock']);
+      expect(result.stdout.trim()).toBe(shared);
+      expect(result.stderr).toContain('unlinked stale unwritable lock file');
+      expect(existsSync(daemonLock)).toBe(false);
+    } finally {
+      rmSync(world.dir, { recursive: true, force: true });
+    }
+  });
+
+  // The unrepairable half: the lock name is poisoned in a shape the
+  // in-place heal must not touch, and the veto and the fallback must
+  // still fire. A directory squatting on the lock name is the shape a
+  // single-uid test can build — the regular-file vet refuses it before
+  // any unlink, which `rm -f` without -r could never complete anyway.
   it.skipIf(isRoot)(
     'falls back to a job-private dir when an unwritable lock cannot be unlinked',
     () => {
@@ -790,6 +926,75 @@ describe('CI docker lock dir resolution', () => {
         }
       },
     );
+
+    // A runner-owned DIRECTORY at the daemon-lock name passes a mode-bit
+    // probe — a directory its owner may write IS -w — and the step's
+    // `exec 9>` then fails with EISDIR. Only the resolver's regular-file
+    // vet routes the step to its skip arm; probing mode bits alone, the
+    // open failure used to fall into the else arm and blame a live daemon
+    // no probe verified. The directory stays at its default 0755: the 0500
+    // the unrepairable-name cases use is the half a mode-bit probe catches.
+    it('skips the labelled prune when a directory squats on the daemon lock name', () => {
+      const world = makeWorld();
+      try {
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        mkdirSync(shared, { recursive: true });
+        const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+        mkdirSync(daemonLock);
+        const { exitCode, output, dockerArgv } = runPruneStep(world, {
+          withResolver: true,
+        });
+        expect(exitCode).toBe(0);
+        expect(output).not.toContain('shared daemon is active');
+        // The skip line must name the lock path the step could not use —
+        // the resolver's ::warning:: names it too, but that line scrolls
+        // past while the skip line is what a run page is searched for.
+        const skipLine = output
+          .split('\n')
+          .find((line) => line.includes('Docker cleanup skipped'));
+        expect(skipLine).toContain('docker-sandbox-daemon.lock');
+        // Only the dangling prune (which needs no exclusion) may run.
+        expect(dockerArgv).not.toContain('image prune --all');
+        expect(dockerArgv).toContain('image prune --force');
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    });
+
+    // The dangling-symlink arm of the same gate: `-e` never sees a
+    // dangling link, so a mode-bit probe certifies the shared dir, and the
+    // step's `exec 9>` then follows the link and CREATES the target — the
+    // flock "succeeds" on a file no other process on the host ever opens
+    // and the destructive labelled prune runs behind an exclusion that
+    // excludes nothing.
+    it('skips the labelled prune when a dangling symlink squats on the daemon lock name', () => {
+      const world = makeWorld();
+      try {
+        const shared = join(world.home, '.cache', 'qwen-code-ci');
+        mkdirSync(shared, { recursive: true });
+        const daemonLock = join(shared, 'docker-sandbox-daemon.lock');
+        // The target sits inside the same writable directory, so an open
+        // that follows the link would succeed.
+        symlinkSync(join(shared, 'stale-target.lock'), daemonLock);
+        const { exitCode, output, dockerArgv } = runPruneStep(world, {
+          withResolver: true,
+        });
+        expect(exitCode).toBe(0);
+        expect(output).not.toContain('shared daemon is active');
+        const skipLine = output
+          .split('\n')
+          .find((line) => line.includes('Docker cleanup skipped'));
+        expect(skipLine).toContain('docker-sandbox-daemon.lock');
+        expect(dockerArgv).not.toContain('image prune --all');
+        expect(dockerArgv).toContain('image prune --force');
+        // The squatter is refused, never repaired away: only the resolver's
+        // unwritable-regular-file heal unlinks, and only after a live-holder
+        // veto.
+        expect(lstatSync(daemonLock).isSymbolicLink()).toBe(true);
+      } finally {
+        rmSync(world.dir, { recursive: true, force: true });
+      }
+    });
 
     // This step discards a job-private resolver result and opens no lock in
     // it, so the resolver's banner ("this job locks in the job-private

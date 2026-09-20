@@ -385,15 +385,24 @@ jobs:
             fi
           }
           if [ -n "${ci_lock_dir}" ] && [ "${ci_lock_dir}" != "${HOME}/.cache/qwen-code-ci" ]; then
-            skip_reason="the shared lock dir ${HOME}/.cache/qwen-code-ci is not usable by this job"
+            skip_reason="the shared daemon lock ${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock is not usable by this job"
             ci_lock_dir=''
           fi
           if [ -z "${ci_lock_dir}" ]; then
             echo "Docker cleanup skipped: ${skip_reason}; clearing ${HOME}/.cache/qwen-code-ci needs a human on this host"
-          elif exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock" && flock --nonblock 9; then
-            docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' 9>&- || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
           else
-            echo "Docker cleanup skipped because the shared daemon is active"
+            # bash -e does not abort on a command failing inside an
+            # if-condition, so the open keeps its own arm: folded into the
+            # flock condition, an open failure (EISDIR on a squatter the
+            # resolver could not vet) would report the "shared daemon is
+            # active" cause no probe verified.
+            if ! exec 9>"${ci_lock_dir}/docker-sandbox-daemon.lock"; then
+              echo "Docker cleanup skipped: cannot open ${ci_lock_dir}/docker-sandbox-daemon.lock for writing"
+            elif flock --nonblock 9; then
+              docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' 9>&- || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
+            else
+              echo "Docker cleanup skipped because the shared daemon is active"
+            fi
           fi
           # The dangling prune removes only untagged, unreferenced images,
           # so it needs no daemon lock and stays unconditional — announced
