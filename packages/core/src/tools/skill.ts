@@ -123,7 +123,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }> = [];
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
-  private loadedSkillContents: Set<string> = new Set();
+  private loadedSkillContents = new Map<string, string>();
   private loadedSkillContentByName = new Map<string, string>();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
@@ -207,13 +207,24 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         this.skillManager,
         this.config,
       );
-      const availableByName = new Map(
-        collected.availableSkills.map((skill) => [skill.name, skill]),
+      const discoveredByName = new Map(
+        (this.skillManager.getCachedSkills() ?? []).map((skill) => [
+          skill.name,
+          skill,
+        ]),
       );
       for (const name of this.loadedSkillNames) {
-        const skill = availableByName.get(name);
+        const skill = discoveredByName.get(name);
+        if (
+          !skill &&
+          this.skillManager.hasDiscoveryErrors() &&
+          !this.config.getDisabledSkillNames().has(name.toLowerCase())
+        ) {
+          continue;
+        }
         if (
           !skill ||
+          !this.config.isSkillEnabled(skill) ||
           this.loadedSkillContentByName.get(name) !==
             buildSkillLlmContent(path.dirname(skill.filePath), skill.body)
         ) {
@@ -358,7 +369,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string, content?: string) => {
         this.loadedSkillNames.add(name);
         if (content !== undefined) {
-          this.loadedSkillContents.add(content);
+          this.loadedSkillContents.set(content, name);
           this.loadedSkillContentByName.set(name, content);
         }
       },
@@ -379,15 +390,19 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
-   * Returns the set of skill names that have been successfully loaded
-   * (invoked) during the current session. Used by /context to attribute
-   * loaded skill body tokens separately from the tool-definition cost.
+   * Returns the skill names whose current content is already loaded.
+   * Historical bodies remain available through getLoadedSkillContents().
    */
   getLoadedSkillNames(): ReadonlySet<string> {
     return this.loadedSkillNames;
   }
 
   getLoadedSkillContents(): ReadonlySet<string> {
+    return new Set(this.loadedSkillContents.keys());
+  }
+
+  /** Maps exact emitted bodies to skill names, retained across refreshes. */
+  getLoadedSkillContentNames(): ReadonlyMap<string, string> {
     return this.loadedSkillContents;
   }
 
@@ -451,7 +466,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         if (rearm) unmatched.set(skill.name, skill.config);
         return;
       }
-      this.loadedSkillContents.add(skill.output);
+      this.loadedSkillContents.set(skill.output, skill.name);
       this.loadedSkillNames.add(skill.name);
       this.loadedSkillContentByName.set(skill.name, skill.output);
       if (rearm) restored.set(skill.name, skill.config);

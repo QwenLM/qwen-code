@@ -12,6 +12,8 @@ import {
   getBuiltInOutputStyle,
   getCoreSystemPrompt,
   resolveInteractionMode,
+  estimateContextTextTokens,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import {
@@ -493,6 +495,61 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(2);
     expect(data.memoryFiles[0].path).toBe('QWEN.md');
     expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+  });
+
+  it('attributes all injected skill bodies after refresh, removal and disable', async () => {
+    const history = new Map([
+      ['Earlier body retained in conversation.', 'edited'],
+      ['New body injected after refresh.', 'edited'],
+      ['Removed skill body retained in conversation.', 'removed'],
+      ['Disabled skill body retained in conversation.', 'disabled'],
+    ]);
+    const tool = {
+      name: ToolNames.SKILL,
+      schema: { name: ToolNames.SKILL, description: 'Static skill definition' },
+      getLoadedSkillNames: () => new Set(['edited']),
+      getLoadedSkillContents: () => new Set(history.keys()),
+      getLoadedSkillContentNames: () => history,
+    };
+    const config = {
+      ...makeMockConfig(),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () => [tool],
+        getFunctionDeclarations: () => [tool.schema],
+        isDeferredAndHidden: () => false,
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue(
+          ['edited', 'disabled'].map((name) => ({
+            name,
+            description: 'Skill',
+            level: 'user',
+            filePath: `/skills/${name}/SKILL.md`,
+            body: 'Unloaded replacement content on disk.'.repeat(100),
+          })),
+        ),
+      }),
+      getDisabledSkillNames: () => new Set(['disabled']),
+    } as unknown as Config;
+    const data = await collectContextData(config, true);
+    const bodyTokens = [...history.keys()].reduce(
+      (sum, content) => sum + estimateContextTextTokens(content),
+      0,
+    );
+    expect(data.breakdown.skills).toBe(
+      estimateContextTextTokens(JSON.stringify(tool.schema)) + bodyTokens,
+    );
+    expect(data.skills.find((skill) => skill.name === 'edited')).toMatchObject({
+      loaded: true,
+      bodyTokens:
+        estimateContextTextTokens('Earlier body retained in conversation.') +
+        estimateContextTextTokens('New body injected after refresh.'),
+    });
+    for (const name of ['removed', 'disabled']) {
+      expect(data.skills.find((skill) => skill.name === name)).toMatchObject({
+        loaded: true,
+      });
+    }
   });
 
   it('excludes disabled skills from the detail breakdown', async () => {

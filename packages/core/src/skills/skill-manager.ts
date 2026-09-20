@@ -37,6 +37,7 @@ import {
   splitConditionalSkills,
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isNodeError } from '../utils/errors.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { expandHomeDir } from '../utils/paths.js';
 import {
@@ -93,6 +94,7 @@ export class SkillManager {
   // `slashCommandProcessor.ts:416`.
   private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
+  private discoveryHasErrors = false;
   private readonly watchers: Map<string, FSWatcher> = new Map();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
@@ -300,6 +302,11 @@ export class SkillManager {
     return this.collectCachedSkills(level);
   }
 
+  /** Whether missing entries in the current cache might be discovery failures. */
+  hasDiscoveryErrors(): boolean {
+    return this.discoveryHasErrors || this.parseErrors.size > 0;
+  }
+
   private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
@@ -441,6 +448,7 @@ export class SkillManager {
     debugLogger.info('Refreshing skills cache...');
     const skillsCache = new Map<SkillLevel, SkillConfig[]>();
     this.parseErrors.clear();
+    this.discoveryHasErrors = false;
 
     // Safe mode: only load bundled (system) skills
     const levels: SkillLevel[] = this.config.isSafeMode()
@@ -470,6 +478,7 @@ export class SkillManager {
         totalSkills += levelSkills.length;
       } else {
         errors.push(result.reason);
+        this.discoveryHasErrors = true;
         debugLogger.warn(
           `Failed to load ${levels[i]} level skills:`,
           result.reason,
@@ -1148,6 +1157,12 @@ export class SkillManager {
           if (isSymlink) {
             const check = await validateSymlinkTarget(skillDir);
             if (!check.ok) {
+              if (
+                check.reason === 'invalid' &&
+                !(isNodeError(check.error) && check.error.code === 'ENOENT')
+              ) {
+                this.discoveryHasErrors = true;
+              }
               if (check.reason === 'not-directory') {
                 debugLogger.warn(
                   `Skipping symlink ${entry.name} that does not point to a directory`,
@@ -1167,6 +1182,9 @@ export class SkillManager {
             await fs.access(skillManifest);
             return await this.parseSkillFileInternal(skillManifest, level);
           } catch (error) {
+            if (!(isNodeError(error) && error.code === 'ENOENT')) {
+              this.discoveryHasErrors = true;
+            }
             if (error instanceof SkillError) {
               debugLogger.error(
                 `Failed to parse skill at ${skillDir}: ${error.message}`,
@@ -1183,6 +1201,9 @@ export class SkillManager {
 
       return loaded.filter((s): s is SkillConfig => s !== null);
     } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) {
+        this.discoveryHasErrors = true;
+      }
       // Directory doesn't exist or can't be read
       const errorMessage =
         error instanceof Error ? error.message : 'Unknown error';

@@ -24,7 +24,6 @@ import {
   getMainSessionBaseSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
-  buildSkillLlmContent,
   computeThresholds,
   isMediaPolicyToolHiddenFromModel,
   estimateContextTextTokens,
@@ -183,12 +182,25 @@ export async function collectContextData(
     ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
     : 0;
 
-  const loadedSkillNames: ReadonlySet<string> =
-    skillTool && 'getLoadedSkillNames' in skillTool
+  const loadedContentNames: ReadonlyMap<string, string> =
+    skillTool && 'getLoadedSkillContentNames' in skillTool
       ? (
-          skillTool as { getLoadedSkillNames(): ReadonlySet<string> }
-        ).getLoadedSkillNames()
-      : new Set();
+          skillTool as {
+            getLoadedSkillContentNames(): ReadonlyMap<string, string>;
+          }
+        ).getLoadedSkillContentNames()
+      : new Map();
+  const bodyTokensByName = new Map<string, number>();
+  for (const [content, name] of loadedContentNames) {
+    bodyTokensByName.set(
+      name,
+      (bodyTokensByName.get(name) ?? 0) + estimateContextTextTokens(content),
+    );
+  }
+  const loadedBodiesTokens = [...bodyTokensByName.values()].reduce(
+    (sum, tokens) => sum + tokens,
+    0,
+  );
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
@@ -197,22 +209,12 @@ export async function collectContextData(
       .filter((skill) => config.isSkillEnabled(skill))
       .map((skill) => skill.name.toLowerCase()),
   );
-  let loadedBodiesTokens = 0;
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
     const listingTokens = estimateContextTextTokens(
       `<skill>\n<name>\n${skill.name}\n</name>\n<description>\n${skill.description} (${skill.level})\n</description>\n<location>\n${skill.level}\n</location>\n</skill>`,
     );
-    const isLoaded = loadedSkillNames.has(skill.name);
-    let bodyTokens: number | undefined;
-    if (isLoaded && skill.body) {
-      const baseDir = skill.filePath
-        ? skill.filePath.replace(/\/[^/]+$/, '')
-        : '';
-      bodyTokens = estimateContextTextTokens(
-        buildSkillLlmContent(baseDir, skill.body),
-      );
-      loadedBodiesTokens += bodyTokens;
-    }
+    const bodyTokens = bodyTokensByName.get(skill.name);
+    const isLoaded = bodyTokens !== undefined;
     return {
       name: skill.name,
       tokens: listingTokens,
@@ -220,6 +222,13 @@ export async function collectContextData(
       bodyTokens,
     };
   });
+
+  const discoveredNames = new Set(skillConfigs.map((skill) => skill.name));
+  for (const [name, bodyTokens] of bodyTokensByName) {
+    if (!discoveredNames.has(name)) {
+      skills.push({ name, tokens: 0, loaded: true, bodyTokens });
+    }
+  }
 
   const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
@@ -387,8 +396,9 @@ export async function collectContextData(
     mcpTools: showDetails ? detailMcpTools : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
-      ? detailSkills.filter((skill) =>
-          enabledSkillNames.has(skill.name.toLowerCase()),
+      ? detailSkills.filter(
+          (skill) =>
+            skill.loaded || enabledSkillNames.has(skill.name.toLowerCase()),
         )
       : [],
     isEstimated,
