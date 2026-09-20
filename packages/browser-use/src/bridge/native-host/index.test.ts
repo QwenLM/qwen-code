@@ -23,6 +23,7 @@ import {
 import {
   CHROME_BRIDGE_PROTOCOL_VERSION,
   CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   type BridgeRequest,
 } from '../protocol.js';
 import { encodeFrame, FrameDecoder } from '../transport/framing.js';
@@ -307,6 +308,17 @@ describe.skipIf(process.platform === 'win32')('Native Host processes', () => {
     await waitFor(() => expect(a.socket.destroyed).toBe(true));
     expect(h.messages.some((m) => m.method === 'tabs.close')).toBe(false);
   });
+
+  test.each(CHROME_EXTENSION_IDS)(
+    'serves a hello from extension %s',
+    async (extensionId) => {
+      const h = startHost({ extensionId });
+      const a = await client(h.socketPath);
+      const hello = await a.hello();
+      expect(hello.extensionId).toBe(extensionId);
+      expect(h.child.exitCode).toBeNull();
+    },
+  );
 
   test('exits without listening when the hello is not from the Qwen extension', async () => {
     const rejectedId = 'a'.repeat(32);

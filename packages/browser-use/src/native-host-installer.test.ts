@@ -435,8 +435,43 @@ describe('Chrome Native Host installer', () => {
   it('trusts exactly the documented extension ids', () => {
     // A typo or placeholder id here would widen what the Native Host accepts
     // and what Chrome may launch it for, with every other test still green.
-    expect(CHROME_EXTENSION_IDS).toEqual(['idkijaaipeeinemigojbjkmfmabokbdk']);
+    expect(CHROME_EXTENSION_IDS).toEqual([
+      'idkijaaipeeinemigojbjkmfmabokbdk',
+      'hdhmmjclhibojdddmancfgbkleahfaph',
+    ]);
   });
+
+  it.each(CHROME_EXTENSION_IDS)(
+    'upgrades a registration that lists only %s',
+    async (id) => {
+      const fixture = createFixture();
+      createBrowserProfile(fixture.homeDir, 'darwin', 'chrome');
+      const options = { ...fixture, platform: 'darwin' as const };
+      const installed = await installChromeNativeHost(options);
+      const manifestPath = installed.manifestPaths[0]!;
+      // What an install from before the other id existed left behind.
+      fs.writeFileSync(
+        manifestPath,
+        JSON.stringify({
+          name: CHROME_NATIVE_HOST_NAME,
+          description: 'Qwen Browser Use',
+          path: installed.launcherPath,
+          type: 'stdio',
+          allowed_origins: ['chrome-extension://' + id + '/'],
+        }),
+      );
+
+      const result = await ensureChromeNativeHost(options);
+
+      expect(result.skippedForeignPaths).toEqual([]);
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+        allowed_origins: string[];
+      };
+      expect(manifest.allowed_origins).toEqual(
+        CHROME_EXTENSION_IDS.map((each) => 'chrome-extension://' + each + '/'),
+      );
+    },
+  );
 
   it('requires absolute executable paths', async () => {
     const fixture = createFixture();
