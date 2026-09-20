@@ -34,10 +34,13 @@ by a marker-less compressed prefix.
 ## Identity lifecycle
 
 Interactive, headless, OpenTUI, and ACP entry points mint ids in the form
-`sessionId########<counter>`. Resume and fork paths seed the counter after the
-highest retained turn and file snapshot so a new turn does not reuse an
-existing key. Duplicate ids remain possible in older transcripts, so lookup
-requires exactly one matching API entry and refuses when there are two.
+`sessionId########<counter>`. Resume and fork paths seed the counter past the
+identities the transcript already claims, so a new turn does not reuse an
+existing key. The interactive and OpenTUI seeds additionally cover retained
+file-history snapshot keys, whose turns a conversation-only rewind dropped
+from the transcript; the headless and ACP seeds read recorded prompt ids only.
+Duplicate ids remain possible in older transcripts, so lookup requires exactly
+one matching API entry and refuses when there are two.
 
 Compression records persist prompt ids in an array parallel to their history
 snapshot. Restoring a compression checkpoint reattaches each id to the same

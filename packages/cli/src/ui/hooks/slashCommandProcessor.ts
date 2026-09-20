@@ -882,8 +882,9 @@ export const useSlashCommandProcessor = (
       existingInvocationItemId?: number,
       // The minted id of the turn this invocation's submit_prompt content
       // will be sent under. Echoed onto the invocation item when the command
-      // submits to the model so the marked API entry has a UI claimant
-      // (R49-2) — the rewind gate's claim scans key on it.
+      // submits to the model, so the rendered turn and its marked API entry
+      // share one identity and rewind can resolve the turn by id instead of
+      // falling back to positional order.
       invocationPromptId?: string,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {

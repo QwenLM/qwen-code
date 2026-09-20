@@ -785,17 +785,16 @@ function computeRetainedFileSnapshotTurn(
  * history (startup --resume, in-session /resume, /branch, session switch).
  * The counter must restart past every identity the transcript claims —
  * re-minting an id a surviving resumed turn still wears collapses the
- * rewind identity resolution to a duplicate (R37-31, R38-1). ACP and
- * headless mint `sessionId########<n>` 1-based and skip turns that write no
- * record, so the highest claimed turn sits above the record count; the TUI
- * mints pre-increment, hence the +1. Floored at the user-turn count for
+ * rewind identity resolution to a duplicate. ACP and headless mint
+ * `sessionId########<n>` 1-based and skip turns that write no record, so the
+ * highest claimed turn sits above the record count; the TUI mints
+ * pre-increment, hence the +1. Never below the user-turn count, for
  * transcripts whose records predate claims, and past every retained
  * file-history snapshot key (see computeRetainedFileSnapshotTurn). Returns 0
  * when the transcript holds no user turns and no retained snapshots — a
  * no-op for the monotonic seed consumers, so callers pass the result
  * through unconditionally.
  */
-
 export function computeResumedPromptCountSeed(
   records: readonly ChatRecord[],
   sessionId: string,

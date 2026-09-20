@@ -1620,11 +1620,10 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
-    it('echoes the minted prompt id onto the invocation item when submitting (R49-2)', async () => {
+    it('echoes the minted prompt id onto the invocation item when submitting', async () => {
       // The send path marks the API entry with the turn's minted id; the
-      // invocation item must wear the same id or the rewind gate's claim
-      // scans treat the entry as unowned excess and can cut a turn the UI
-      // still displays.
+      // invocation item must wear the same id, or rewind finds no identity on
+      // the rendered turn and falls back to positional order.
       const fileCommand = createTestCommand(
         {
           name: 'filecmd',

@@ -16,30 +16,63 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
-/** TUI rewind excludes cleared media-only placeholders from legacy counts. */
+/**
+ * TUI rewind's binding of the shared user-prompt classifier. Deliberately
+ * module-private: `isUserTextContent` below is the only door to this rule, and
+ * the OpenTUI parity path reaches it by importing that function. Exporting the
+ * options would let a caller compose `isApiUserPrompt(x, …)` directly and
+ * re-create the per-surface twin this consolidation removes.
+ */
 const TUI_API_USER_PROMPT_OPTIONS: ApiUserPromptOptions = {
   excludeClearedMediaPlaceholders: true,
 };
 
 /**
- * Returns true when the history item represents a user prompt sent to the
- * model, rather than a slash command handled only by the UI.
+ * Returns true when the history item represents a real user prompt that was
+ * sent to the model, as opposed to a slash-command invocation (`/help`,
+ * `/stats`, …) which is stored with `type: 'user'` in the UI but never
+ * reaches the API history or `turnParentUuids`.
+ *
+ * Typed as a type predicate so callers can drop their `as HistoryItemUser`
+ * casts — a regression that loosened either side of the narrowing would now
+ * be caught by tsc instead of silently bypassing it.
  */
 export function isRealUserTurn(
   item: HistoryItem,
 ): item is HistoryItem & HistoryItemUser {
   if (item.type !== 'user' || !item.text) return false;
   if (typeof item.sentToModel === 'boolean') return item.sentToModel;
-  // Legacy resumed sessions do not have sentToModel metadata.
+  // Legacy resumed sessions do not have sentToModel, so this fallback is
+  // intentionally coupled to isSlashCommand's current lexical classifier.
+  // Changes to slash-command classification must account for old sessions that
+  // still rely on this inference.
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 
-/** Returns true for user text prompts, excluding tool results. */
+/**
+ * Checks if a Content entry is a user-initiated text prompt
+ * as opposed to a tool result (functionResponse).
+ *
+ * Thin binding of the shared classifier: TUI rewind excludes microcompaction
+ * media-clear placeholders because a cleared media-only entry never produced
+ * a visible user turn, so counting it would desynchronize the API prompt
+ * count from the UI turn count and truncate one turn early. See
+ * `ApiUserPromptOptions` in core for why that exclusion is an option rather
+ * than part of the shared rule — ACP must keep those entries counted — and
+ * for the exact-match collision it leaves behind, which remains an open
+ * limitation pinned by the tests in this file's suite.
+ */
 export function isUserTextContent(content: Content): boolean {
   return isApiUserPrompt(content, TUI_API_USER_PROMPT_OPTIONS);
 }
 
-/** Finds the last successful summarizing compression marker. */
+/**
+ * Finds the last successful *summarizing* compression marker. Fast
+ * (rule-based) compression markers are excluded: `/compress-fast` removes no
+ * user prompts from the API history and inserts no summary prefix, so its
+ * marker is not a truncation boundary — treating it as one collapses the
+ * rewind anchor and silently drops the pre-marker history.
+ */
 function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
   return history.findLastIndex(
     (item) =>
@@ -50,10 +83,26 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
 }
 
 /**
- * Computes the number of API history entries to keep when rewinding to a UI
- * user turn. A turn whose API entry carries its stable identity resolves by
- * that identity; everything else keeps the positional mapping used before
- * prompt identities existed.
+ * Computes the number of API Content[] entries to keep when rewinding
+ * to a specific user turn in the UI history.
+ *
+ * A turn whose API entry carries its stable identity resolves by that
+ * identity; everything else keeps the positional mapping used before prompt
+ * identities existed. That mapping counts user text Content entries (skipping
+ * tool results and the startup context entry) to find the API boundary
+ * corresponding to the target UI user turn.
+ *
+ * Note: In IDE mode, additional user Content entries may be injected for
+ * IDE context. This function does not account for those and will produce
+ * incorrect results. Rewind is therefore disabled in IDE mode (guarded
+ * in openRewindSelector).
+ *
+ * @param uiHistory The full UI history array
+ * @param targetUserItemId The ID of the user HistoryItem to rewind to
+ * @param apiHistory The current API Content[] array
+ * @returns The number of Content entries to keep, or -1 if the target turn
+ *   could not be located (e.g., it was absorbed by chat compression, or its
+ *   identity is claimed by more than one turn on either side).
  */
 export function computeApiTruncationIndex(
   uiHistory: HistoryItem[],
@@ -82,7 +131,10 @@ export function computeApiTruncationIndex(
     includeCompressed: true,
   });
 
-  // Marker-less auto-compaction has already absorbed the first turn.
+  // Marker-less auto-compaction: the API history carries a compressed prefix
+  // but the UI has no summarizing compression boundary, so the first turn has
+  // already been absorbed. Rewinding to it would silently truncate to
+  // [prelude, summary, ack] and drop every real turn — fail loud instead.
   if (
     uiUserTurnCount === 0 &&
     compressionIndex === -1 &&
@@ -138,5 +190,7 @@ export function computeApiTruncationIndex(
     }
   }
 
+  // Not enough user prompts after the startup context (e.g. after
+  // compression): the target turn is unreachable.
   return -1;
 }

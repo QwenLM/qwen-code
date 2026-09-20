@@ -2022,14 +2022,15 @@ describe('expandCollapsedHistory', () => {
 describe('resumed identity survives a synthetic display string', () => {
   // End-to-end through the real builders on BOTH sides: the same records
   // produce the UI items and the model-facing history, exactly as resume
-  // does. The rewind ownership proof compares the two, so a UI item whose
-  // displayed text is synthetic ('[User message with attachments]') used to
-  // match nothing and silently lose identity resolution for that turn.
+  // does. Rewind resolution compares the two, so a UI item whose displayed
+  // text is synthetic ('[User message with attachments]') used to match
+  // nothing and silently lose identity resolution for that turn.
   //
-  // The fixture makes the walk and the identity gate DISAGREE, otherwise it
-  // would pin nothing: turn 2 is a media-only prompt whose entry was cleared
-  // to a placeholder, which the rewind walk excludes from its count, so
-  // rewinding to turn 3 desyncs the walk and only identity can land it.
+  // The fixture makes the positional walk and the identity lookup DISAGREE,
+  // otherwise it would pin nothing: turn 2 is a media-only prompt whose entry
+  // was cleared to a placeholder, which the rewind walk excludes from its
+  // count, so rewinding to turn 3 desyncs the walk and only identity can
+  // land it.
   const PLACEHOLDER = '[Old inline media cleared: image/png]';
 
   const rec = (over: Record<string, unknown>) =>
@@ -2130,16 +2131,13 @@ describe('resumed identity survives a synthetic display string', () => {
     ).toBe(4);
   });
 
-  it("claims a pre-identity turn's unmarked entry by its model-facing text in the safe-cut scan", () => {
-    // The safe-cut scan pairs an UNMARKED entry (here the middle turn's own,
-    // recorded before identities existed) against each still-displayed
-    // pre-target turn's model-facing text. That text was captured only when
-    // the record's promptId survived the duplicate census, so for exactly
-    // the no-mark population the scan fell back to the DISPLAY string —
-    // '[User message with attachments]' matches no entry — and the demotion
-    // cut at 4, dropping the displayed middle turn's own entry while its UI
-    // item stayed on screen (R50-1). The goal_runtime record between the
-    // turns inflates the walk (counted, no UI item) so the demotion engages.
+  it('lands an identified target past a goal_runtime record that inflates the walk', () => {
+    // A `goal_runtime` record is counted by the positional walk but produces
+    // no UI item, so the walk runs one ahead of the displayed turns: on its
+    // own it cuts at 4, dropping the displayed middle turn's own entry while
+    // its UI item stays on screen. The middle turn carries no mark — it was
+    // recorded before identities existed — so only the target's own identity
+    // can land the cut at 6.
     expect(
       truncationIndexForLastUserTurn([
         rec({
@@ -2171,13 +2169,12 @@ describe('resumed identity survives a synthetic display string', () => {
   });
 
   it('still resolves a placeholder-texted turn that follows an attachment-only turn', () => {
-    // R32-1 (the behind direction): an attachment-only record resumes to a
-    // visible '[User message with attachments]' turn whose API entry has no
-    // text part, so the UI turn count and the API prompt count diverge by
-    // one. The ordinal proof must count the same population on both sides —
-    // turns whose prompt carried a model-facing text — or the placeholder
-    // target's own marked, text-matching entry is refused (-1) even though
-    // nothing about it is ambiguous.
+    // An attachment-only record resumes to a visible '[User message with
+    // attachments]' turn whose API entry has no text part, so the UI turn
+    // count and the API prompt count diverge by one. The target's own text is
+    // a cleared-media placeholder, which the positional walk excludes from
+    // its count — the walk can therefore never land it, and only its identity
+    // can.
     expect(
       truncationIndexForLastUserTurn([
         leadingTurns()[0]!,
@@ -2255,7 +2252,7 @@ describe('resumed promptId attachment', () => {
       ...over,
     }) as unknown as ChatRecord;
 
-  it('attaches recorded prompt identities and lets lookup reject duplicates', () => {
+  it('attaches recorded prompt identities to resumed user items', () => {
     const sessionData = {
       conversation: {
         messages: [
@@ -2295,6 +2292,9 @@ describe('resumed promptId attachment', () => {
         item.type === 'user',
     );
     expect(userItems).toHaveLength(3);
+    // Duplicates are carried through verbatim rather than deduplicated:
+    // refusing an ambiguous id is the resolver's job (historyMapping), not
+    // the builder's.
     expect(userItems.map((item) => item.promptId)).toEqual([
       's########0',
       's########0',
