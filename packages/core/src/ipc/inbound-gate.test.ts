@@ -2442,40 +2442,6 @@ describe('a gate for a process hosting several sessions', () => {
     ).toBe('held');
   });
 
-  it('treats every spelling a host answers to as the one session', () => {
-    // The ACP host answers both to the id a session was published under
-    // and to the id it has now: one session, two spellings. Judged apart,
-    // a sender alternating between them would get two hold allowances and
-    // two sets of settings.
-    const asked: Array<string | undefined> = [];
-    const gate = new InboundGate({
-      admission: unmeteredAdmission(),
-      getApprovalMode: () => ApprovalMode.DEFAULT,
-      getPolicySetting: (id) => {
-        asked.push(id);
-        return 'hold';
-      },
-      getHeldExpiryMs: () => DEFAULT_HELD_EXPIRY_MS,
-      ownsSessionId: (id) => id === 'published' || id === 'current',
-      resolveSessionId: (id) =>
-        id === 'published' || id === 'current' ? 'published' : undefined,
-      deliver: () => {},
-      reportStatus: () => {},
-    });
-
-    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
-      expect(
-        gate.admit(frame({ fromMode: 'bypass', toSessionId: 'published' })),
-      ).toBe('held');
-    }
-    // The other spelling is the same session, so it is full too.
-    expect(
-      gate.admit(frame({ fromMode: 'bypass', toSessionId: 'current' })),
-    ).toBe('dropped');
-    // And the settings were read for the session, not for the spelling.
-    expect(new Set(asked)).toEqual(new Set(['published']));
-  });
-
   it('answers a held message whose session is gone misaddressed, not denied', () => {
     const host = hostOfTwo();
     const forStrict = frame({ fromMode: 'bypass', toSessionId: 'strict' });
