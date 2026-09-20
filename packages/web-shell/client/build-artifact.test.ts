@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import { LIVE_MESSAGES_EN } from './live/messages';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
 const TRANSCRIPT_DIST_PATH = resolve(DIST_DIR, 'transcript.js');
+const SERVICE_WORKER_DIST_PATH = resolve(DIST_DIR, 'sw.js');
 
 function readBundle(): string {
   return readFileSync(DIST_PATH, 'utf8');
@@ -43,6 +45,12 @@ describe('build artifact — package boundary', () => {
   it('does not depend on @qwen-code/webui', () => {
     const bundle = readPackageJavascript();
     expect(bundle).not.toContain('@qwen-code/webui');
+  });
+
+  it('keeps standalone service-worker registration out of embedded bundles', () => {
+    expect(readPackageJavascript()).not.toContain(
+      'service worker registration failed',
+    );
   });
 
   it('owns the DaemonSessionProvider source code', () => {
@@ -307,6 +315,20 @@ describe('build artifact — package boundary', () => {
   });
 });
 
+describe('build artifact — standalone PWA', () => {
+  it('emits a classic root service worker tied to the package version', () => {
+    const worker = readFileSync(SERVICE_WORKER_DIST_PATH, 'utf8');
+    const packageJson = JSON.parse(
+      readFileSync(resolve(__dirname, '../package.json'), 'utf8'),
+    ) as { version: string };
+
+    expect(worker).not.toMatch(/^\s*(?:import|export)\b/m);
+    expect(worker).not.toContain('import.meta');
+    expect(worker).toContain('qwen-code-shell-v1-');
+    expect(worker).toContain(JSON.stringify(packageJson.version));
+  });
+});
+
 describe('build artifact — transcript entry (#11031)', () => {
   // `@qwen-code/web-shell/transcript` exists so the self-contained
   // `/export html` document renderer can bundle the read-only transcript
@@ -350,6 +372,26 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js.length).toBeLessThan(1_300_000);
+  });
+
+  it('carries no Live Voice strings and looks none up', () => {
+    // vite.lib.config.ts swaps client/live/messages.ts for an empty stub in
+    // this build, which keeps ~200 entries out of every exported document. It
+    // is only safe while nothing in the bundle asks for one: a lookup here
+    // would render as its key name. Key literals survive minification, so
+    // their absence shows that no Live surface entered the graph — the app
+    // itself may use them anywhere (the composer's add menu does).
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const keys = Object.keys(LIVE_MESSAGES_EN);
+    expect(keys.length).toBeGreaterThan(50);
+    const present = keys.filter(
+      (key) => js.includes(`"${key}"`) || js.includes(`'${key}'`),
+    );
+    expect(present).toEqual([]);
+    expect(js).not.toContain('Talk in this browser');
   });
 
   it('still carries what a transcript actually renders', () => {

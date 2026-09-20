@@ -33,6 +33,8 @@ const {
   mockWindowState,
   mockQwenAgentManagerInstances,
   mockClipboardWriteText,
+  mockEnvRemoteName,
+  mockAsExternalUri,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
     (event: { affectsConfiguration: (section: string) => boolean }) => unknown
@@ -108,6 +110,10 @@ const {
     disconnect: ReturnType<typeof vi.fn>;
   }>,
   mockClipboardWriteText: vi.fn(),
+  // `vscode.env.remoteName` is undefined in a local window and a string
+  // ('ssh-remote', 'dev-container', 'wsl', ...) in a remote one.
+  mockEnvRemoteName: { current: undefined as string | undefined },
+  mockAsExternalUri: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -194,8 +200,13 @@ vi.mock('vscode', () => ({
       fsPath: `${base.fsPath ?? ''}/${parts.join('/')}`.replace(/\/+/g, '/'),
     })),
     file: vi.fn((filePath: string) => ({ fsPath: filePath })),
+    parse: vi.fn((value: string) => ({ toString: () => value })),
   },
   env: {
+    get remoteName() {
+      return mockEnvRemoteName.current;
+    },
+    asExternalUri: mockAsExternalUri,
     openExternal: mockOpenExternal,
     clipboard: {
       writeText: mockClipboardWriteText,
@@ -221,7 +232,10 @@ vi.mock('vscode', () => ({
   },
 }));
 
-vi.mock('../../services/settingsWriter.js', () => ({
+vi.mock('../../services/settingsWriter.js', async (importOriginal) => ({
+  resolveProviderSettings: (
+    await importOriginal<typeof import('../../services/settingsWriter.js')>()
+  ).resolveProviderSettings,
   writeCodingPlanConfig: mockWriteCodingPlanConfig,
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
@@ -500,6 +514,8 @@ beforeEach(() => {
   mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
   mockClipboardWriteText.mockReset();
   mockClipboardWriteText.mockResolvedValue(undefined);
+  mockEnvRemoteName.current = undefined;
+  mockAsExternalUri.mockReset();
 });
 
 describe('WebViewProvider.attachToView', () => {
@@ -1845,6 +1861,146 @@ describe('WebViewProvider.handleAuthInteractive credential rollback', () => {
     expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: 'Responses-only reconnect',
+      sibling: false,
+      savedAuth: undefined,
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Responses beside Chat',
+      sibling: true,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai-responses',
+    },
+    {
+      name: 'selected Chat beside Responses',
+      sibling: true,
+      savedAuth: 'openai',
+      otherEndpoint: false,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'new endpoint',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: true,
+      explicitChat: false,
+      expected: 'openai',
+    },
+    {
+      name: 'explicit Chat choice',
+      sibling: false,
+      savedAuth: 'openai-responses',
+      otherEndpoint: false,
+      explicitChat: true,
+      expected: 'openai',
+    },
+  ])(
+    'preserves preset routes and selects the identified wire: $name',
+    async ({ sibling, savedAuth, otherEndpoint, explicitChat, expected }) => {
+      const model = {
+        id: inputs.modelIds[0],
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        name: '[DeepSeek] Tuned',
+        wireApi: 'responses',
+        generationConfig: { contextWindowSize: 32000 },
+      };
+      mockSnapshotSettingsForRollback.mockReturnValue({
+        modelProviders: {
+          openai: [
+            ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+            model,
+          ],
+        },
+        model: { name: model.id },
+        security: { auth: { selectedType: savedAuth } },
+      });
+      const provider = makeProvider();
+      (
+        provider as unknown as {
+          doInitializeAgentConnection: () => Promise<void>;
+        }
+      ).doInitializeAgentConnection = vi.fn(async () => {
+        (provider as unknown as { authState: boolean }).authState = true;
+      });
+      await provider['handleAuthInteractive'](providerConfig, {
+        ...inputs,
+        ...(otherEndpoint ? { baseUrl: 'https://another.example/v1' } : {}),
+        ...(explicitChat ? { wireApi: 'chat-completions' as const } : {}),
+      });
+      expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+      const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+      expect(plan.authType).toBe(expected);
+      if (!otherEndpoint && !explicitChat) {
+        expect(plan.modelProviders[0].models).toEqual([
+          ...(sibling ? [{ ...model, wireApi: undefined }] : []),
+          model,
+        ]);
+      } else {
+        expect(plan.modelProviders[0].models).toHaveLength(1);
+        expect(plan.modelProviders[0].models[0]).toMatchObject({
+          id: model.id,
+          baseUrl: otherEndpoint
+            ? 'https://another.example/v1'
+            : inputs.baseUrl,
+          ...(explicitChat ? { wireApi: 'chat-completions' } : {}),
+        });
+        if (otherEndpoint) {
+          expect(plan.modelProviders[0].models[0].wireApi).toBeUndefined();
+        }
+      }
+    },
+  );
+
+  it('reconnects a mixed preset without changing either API or the selected model', async () => {
+    const models = [
+      {
+        id: 'deepseek-v4-pro',
+        name: '[DeepSeek] Pro',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+      },
+      {
+        id: 'deepseek-v4-flash',
+        name: '[DeepSeek] Flash',
+        baseUrl: inputs.baseUrl,
+        envKey: 'DEEPSEEK_API_KEY',
+        wireApi: 'responses',
+      },
+    ];
+    mockSnapshotSettingsForRollback.mockReturnValue({
+      modelProviders: { openai: models },
+      model: { name: 'deepseek-v4-flash', baseUrl: inputs.baseUrl },
+      security: { auth: { selectedType: 'openai-responses' } },
+    });
+    const provider = makeProvider();
+    (
+      provider as unknown as {
+        doInitializeAgentConnection: () => Promise<void>;
+      }
+    ).doInitializeAgentConnection = vi.fn(async () => {
+      (provider as unknown as { authState: boolean }).authState = true;
+    });
+    await provider['handleAuthInteractive'](
+      { ...providerConfig, models: models.map(({ id }) => ({ id })) },
+      { ...inputs, modelIds: models.map(({ id }) => id) },
+    );
+    expect(mockApplyProviderInstallPlanToFile).toHaveBeenCalledOnce();
+    const plan = mockApplyProviderInstallPlanToFile.mock.calls[0][0];
+    expect(plan.modelProviders[0].models).toEqual(models);
+    expect(plan.authType).toBe('openai-responses');
+    expect(plan.modelSelection).toEqual({ modelId: 'deepseek-v4-flash' });
+    expect(mockRestoreSettingsSnapshot).not.toHaveBeenCalled();
+  });
+
   it('restores the snapshot when the reconnect leaves authState !== true', async () => {
     const snapshot = { env: { OPENAI_API_KEY: 'sk-old' } };
     mockSnapshotSettingsForRollback.mockReturnValue(snapshot);
@@ -2430,6 +2586,128 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         (message as { type?: string }).type === 'webShellBootstrapError',
     );
     expect(firstErrors).toHaveLength(0);
+  });
+
+  function bootstrapPayloads(postMessage: ReturnType<typeof vi.fn>) {
+    return postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: Record<string, unknown> },
+      )
+      .filter((message) => message.type === 'webShellBootstrap')
+      .map((message) => message.data);
+  }
+
+  it('hands the webview the tunnelled daemon URL in a remote window', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://localhost:52100',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    // The daemon binds the loopback of the machine hosting the extension
+    // process, but the shell renders on the client, where that address points
+    // at the client's own loopback. Only the forwarded URL is reachable.
+    const [bootstrap] = bootstrapPayloads(setup.postMessage);
+    expect(bootstrap?.baseUrl).toBe('http://localhost:52100');
+    expect(bootstrap?.token).toBe('token-1');
+    // The tunnel is resolved from the daemon's own loopback URL, which stays
+    // the source of truth for everything the host does with it.
+    const resolvedFrom = mockAsExternalUri.mock.calls[0]?.[0] as {
+      toString(): string;
+    };
+    expect(resolvedFrom.toString()).toBe('http://127.0.0.1:4101');
+  });
+
+  it('leaves the daemon URL untouched in a local window', async () => {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    const [bootstrap] = bootstrapPayloads(setup.postMessage);
+    expect(bootstrap?.baseUrl).toBe('http://127.0.0.1:4101');
+    expect(mockAsExternalUri).not.toHaveBeenCalled();
+  });
+
+  it('re-resolves the tunnel on every bootstrap instead of caching it', async () => {
+    mockEnvRemoteName.current = 'dev-container';
+    mockAsExternalUri
+      .mockResolvedValueOnce({ toString: () => 'http://localhost:52100' })
+      .mockResolvedValueOnce({ toString: () => 'http://localhost:52101' });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    // A restarted extension host forwards to a fresh client-side port, so a
+    // cached resolution would point every later panel at a dead one.
+    expect(
+      bootstrapPayloads(setup.postMessage).map((data) => data?.baseUrl),
+    ).toEqual(['http://localhost:52100', 'http://localhost:52101']);
+  });
+
+  it('refuses a resolution that is not a forwarded loopback address', async () => {
+    // A browser-based remote resolves to a relay origin. The bootstrap payload
+    // carries the daemon's bearer token, so it must not be handed to a webview
+    // pointed at a third-party host.
+    mockEnvRemoteName.current = 'codespaces';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'https://4101-space.app.github.dev',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: { message?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data?.message).toContain(
+      'not a forwarded loopback address',
+    );
+  });
+
+  it('refuses an IPv6 loopback that the webview CSP cannot express', async () => {
+    mockEnvRemoteName.current = 'ssh-remote';
+    mockAsExternalUri.mockResolvedValue({
+      toString: () => 'http://[::1]:52100',
+    });
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+      context: createSharedContext(),
+    });
+
+    await setup.messageHandler?.({ type: 'webShellReady' });
+
+    expect(bootstrapPayloads(setup.postMessage)).toHaveLength(0);
+    const errors = setup.postMessage.mock.calls
+      .map(
+        ([message]) =>
+          message as { type?: string; data?: { message?: string } },
+      )
+      .filter((message) => message.type === 'webShellBootstrapError');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data?.message).toContain(
+      'cannot connect to an IPv6 literal',
+    );
   });
 });
 

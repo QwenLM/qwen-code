@@ -580,6 +580,8 @@ export default {
     'Esta extensão instalará os seguintes subagentes:',
   'This extension will install the following workflows (JavaScript scripts that can start subagents):':
     'Esta extensão instalará os seguintes fluxos de trabalho (scripts JavaScript que podem iniciar subagentes):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Estes scripts de fluxo de trabalho mudaram desde a versão instalada: {{names}}.',
   'Installation cancelled for "{{name}}".':
     'Instalação cancelada para "{{name}}".',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
@@ -732,6 +734,12 @@ export default {
   '{{count}} hooks configured': '{{count}} hooks configurados',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Este menu é somente leitura. Para adicionar ou modificar hooks, edite settings.json diretamente ou pergunte ao Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Reabra este menu para recarregar as definições dos hooks.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Os controles dos hooks e as configurações de segurança HTTP exigem uma reinicialização.',
+  'Failed to reload hook definitions: {{error}}':
+    'Falha ao recarregar as definições dos hooks: {{error}}',
   'Enter to select · Esc to cancel':
     'Enter para selecionar · Esc para cancelar',
   // Hooks - Detail Step
@@ -1132,6 +1140,12 @@ export default {
   'Clear Authentication': 'Limpar autenticação',
   disabled: 'desativado',
   enabled: 'ativado',
+  'disabled (bare mode)': 'desativado (modo mínimo)',
+  'disabled (safe mode)': 'desativado (modo seguro)',
+  'disabled (disableAllHooks)': 'desativado (disableAllHooks)',
+  'disabled (folder not trusted)': 'desativado (pasta não confiável)',
+  'disabled (turned off for this session)':
+    'desativado (desligado nesta sessão)',
   'Server:': 'Servidor:',
   Reconnect: 'Reconectar',
   'View tools': 'Ver ferramentas',
@@ -1567,6 +1581,11 @@ export default {
   'No tasks currently running': 'Nenhuma tarefa em execução',
   'No entry to show.': 'Nenhuma entrada para mostrar.',
   'needs approval': 'precisa de aprovação',
+  'Large workflow': 'Workflow grande',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Workflow grande: {{agents}} agentes agendados (limite de aviso {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Workflow grande: ~{{tokens}} tokens de saída previstos (limite de aviso {{cap}}).',
   'rejected — edit config to re-approve':
     'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
@@ -1845,6 +1864,9 @@ export default {
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
+  'Startup context': 'Contexto inicial',
+  Unattributed: 'Não atribuído',
+  'Cached prefix': 'Prefixo em cache',
   'Run /context detail for per-item breakdown.':
     'Execute /context detail para detalhamento por item.',
   active: 'ativo',

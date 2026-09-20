@@ -549,6 +549,58 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
+  it('preserves independent correlation records in historical task snapshots', () => {
+    const source = workflowSnapshot({
+      toolUseId: 'exact-tool-call',
+      sourceRef: { id: 'flow', revision: 'rev-1' },
+      workflowCalls: [
+        {
+          id: 'call-1',
+          stepId: 'outer',
+          workflowName: 'ext:check',
+          status: 'completed',
+          startedAt: 500,
+          endedAt: 900,
+        },
+      ],
+      workflowCallsTruncated: true,
+      dispatches: [
+        {
+          id: 'dispatch-1',
+          phaseVisitId: null,
+          label: 'check',
+          prompt: 'check',
+          status: 'cached',
+          stepId: 'inner',
+          workflowCallId: 'call-1',
+          dependsOn: [],
+          queuedAt: 600,
+        },
+      ],
+    });
+    const snapshot = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [source],
+      { includeWorkflows: true },
+    );
+    const entry = snapshot.tasks.find((task) => task.kind === 'workflow');
+    expect(entry).toMatchObject({
+      id: source.runId,
+      toolUseId: 'exact-tool-call',
+      sourceRef: { id: 'flow', revision: 'rev-1' },
+      workflowCalls: [{ id: 'call-1', stepId: 'outer', status: 'completed' }],
+      workflowCallsTruncated: true,
+      dispatches: [
+        { stepId: 'inner', workflowCallId: 'call-1', status: 'cached' },
+      ],
+    });
+    expect(entry?.sourceRef).not.toBe(source.sourceRef);
+    expect(entry?.workflowCalls?.[0]).not.toBe(source.workflowCalls?.[0]);
+    expect(entry?.dispatches[0]).not.toBe(source.dispatches?.[0]);
+  });
+
   it('omits workflow tasks unless the caller opts in', () => {
     const snapshot = buildSessionTasksStatus(
       'session-1',
@@ -755,6 +807,28 @@ describe('buildSessionTasksStatus workflow graph', () => {
         ],
       }),
     ]);
+  });
+
+  // A host decides before asking whether a history entry can be restarted;
+  // the args themselves stay on disk, since they can be large.
+  it('says when a history entry could not keep its args, and never carries the args', () => {
+    const { tasks } = buildSessionTasksStatus(
+      'session-1',
+      configWith([]),
+      2_000,
+      [
+        workflowSnapshot({ runId: 'wf_kept', args: { prompt: 'secret' } }),
+        workflowSnapshot({ runId: 'wf_omitted', argsOmitted: true }),
+      ],
+      { includeWorkflows: true },
+    );
+    const kept = tasks.find((task) => task.id === 'wf_kept');
+    const omitted = tasks.find((task) => task.id === 'wf_omitted');
+
+    expect(kept).not.toHaveProperty('args');
+    expect(kept).not.toHaveProperty('argsOmitted');
+    expect(omitted).toMatchObject({ id: 'wf_omitted', argsOmitted: true });
+    expect(omitted).not.toHaveProperty('args');
   });
 
   it('prefers the in-memory workflow task over a persisted duplicate', () => {

@@ -39,6 +39,17 @@ describe('contextLengthError', () => {
     expect(isContextLengthExceededError(new Error(message))).toBe(false);
   });
 
+  it('parses the DashScope input-range upper bound as the limit', () => {
+    const info = getContextLengthExceededInfo(
+      new Error(
+        '<400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 196608]',
+      ),
+    );
+    expect(info.isExceeded).toBe(true);
+    expect(info.limitTokens).toBe(196608);
+    expect(info.actualTokens).toBeUndefined();
+  });
+
   it('parses prompt-too-long actual and limit token counts', () => {
     const info = getContextLengthExceededInfo(
       new Error('prompt is too long: 137500 tokens > 135000 maximum'),

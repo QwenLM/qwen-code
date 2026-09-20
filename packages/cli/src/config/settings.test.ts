@@ -1427,6 +1427,11 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('should use system folderTrust over user setting', () => {
+      vi.mocked(isWorkspaceTrusted).mockImplementation((settings) => ({
+        isTrusted:
+          settings.security?.folderTrust?.enabled === true ? undefined : true,
+        source: undefined,
+      }));
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const userSettingsContent = {
         security: {
@@ -1441,6 +1446,7 @@ describe('Settings Loading and Merging', () => {
             enabled: true, // This should be ignored
           },
         },
+        context: { fileName: 'WORKSPACE.md' },
       };
       const systemSettingsContent = {
         security: {
@@ -1464,6 +1470,8 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.security?.folderTrust?.enabled).toBe(true); // System setting should be used
+      expect(settings.isTrusted).toBe(false);
+      expect(settings.merged.context?.fileName).toBeUndefined();
     });
 
     it('should handle contextFileName correctly when only in user settings', () => {
@@ -3288,37 +3296,81 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.ui?.theme).toBe('dark');
     });
 
-    it('should NOT merge workspace settings when workspace is not trusted', () => {
+    it.each([false, undefined])(
+      'should NOT merge workspace settings when trust is %s',
+      (isTrusted) => {
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        const userSettingsContent = {
+          ui: { theme: 'dark' },
+          security: { folderTrust: { enabled: true } },
+          tools: { sandbox: false },
+          context: { fileName: 'USER.md' },
+        };
+        const workspaceSettingsContent = {
+          tools: { sandbox: true },
+          security: { folderTrust: { enabled: false } },
+          context: { fileName: 'WORKSPACE.md' },
+        };
+
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify(workspaceSettingsContent);
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+        expect(settings.merged.tools?.sandbox).toBe(false); // User setting
+        expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
+        expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      },
+    );
+
+    it('reads folder trust enabled only in system defaults for the initial check', async () => {
+      // Folder trust enabled by the fleet/operator scope alone must reach the
+      // phase-1 trust check, not just the merged settings: otherwise the
+      // loader trusts the workspace and applies its scope while every
+      // Config-side gate (loadCliConfig derives `trustedFolder` from the
+      // merged settings) reports it untrusted.
       vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
+        isTrusted: undefined,
+        source: undefined,
       });
       (mockFsExistsSync as Mock).mockReturnValue(true);
-      const userSettingsContent = {
-        ui: { theme: 'dark' },
-        tools: { sandbox: false },
-        context: { fileName: 'USER.md' },
-      };
-      const workspaceSettingsContent = {
-        tools: { sandbox: true },
-        context: { fileName: 'WORKSPACE.md' },
-      };
-
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
+          if (p === getSystemDefaultsPath()) {
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+            });
+          }
           return '{}';
         },
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.merged.tools?.sandbox).toBe(false); // User setting
-      expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
-      expect(settings.merged.ui?.theme).toBe('dark'); // User setting
+      expect(settings.merged.security?.folderTrust?.enabled).toBe(true);
+      expect(settings.isTrusted).toBe(false);
+
+      // `loadCliConfig` re-runs the real resolver against the merged
+      // settings; the phase-1 argument must yield the same decision.
+      const { isWorkspaceTrusted: resolveTrust } = await vi.importActual<
+        typeof import('./trustedFolders.js')
+      >('./trustedFolders.js');
+      const phase1Settings = vi.mocked(isWorkspaceTrusted).mock.calls[0][0];
+      expect(resolveTrust(phase1Settings).isTrusted).toBe(
+        resolveTrust(settings.merged).isTrusted,
+      );
     });
 
     it('should use an explicit runtime trust decision instead of cached folder trust', () => {
@@ -3806,6 +3858,125 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('named-workflows-only lock scope handling', () => {
+    it('honors a workspace that turns the lock on', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowNameOnly: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(false);
+    });
+
+    it('drops, with a warning, a workspace that would turn an operator lock off', () => {
+      // A cloned repository must not let the model run scripts in a session
+      // its operator locked to named workflows.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({ tools: { workflowNameOnly: true } });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              tools: { workflowNameOnly: false, useRipgrep: false },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      // ...while other workspace tool settings still merge.
+      expect(settings.merged.tools?.useRipgrep).toBe(false);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  // The workspace is compared against the value in force without it. User
+  // overrides SystemDefaults in the merge, so a User value that loosened a
+  // SystemDefaults one is the baseline, and a workspace may tighten it back.
+  describe('tighten-only baseline when User loosens SystemDefaults', () => {
+    function mockScopes(
+      systemDefaults: object,
+      user: object,
+      workspace: object,
+    ): void {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify(systemDefaults);
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(user);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspace);
+          return '{}';
+        },
+      );
+    }
+
+    it('keeps a workspace lock over a User value that turned the SystemDefaults lock off', () => {
+      mockScopes(
+        { tools: { workflowNameOnly: true } },
+        { tools: { workflowNameOnly: false } },
+        { tools: { workflowNameOnly: true } },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.workflowNameOnly).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('tools.workflowNameOnly'),
+        ),
+      ).toBe(false);
+    });
+
+    it('keeps a workspace hold over a User accept that loosened a SystemDefaults refuse', () => {
+      mockScopes(
+        { agents: { crossSessionInbound: 'refuse' } },
+        { agents: { crossSessionInbound: 'accept' } },
+        { agents: { crossSessionInbound: 'hold' } },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('hold');
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('agents.crossSessionInbound'),
+        ),
+      ).toBe(false);
+    });
+
+    it('still drops, with a warning, a workspace value looser than User', () => {
+      mockScopes(
+        { agents: { crossSessionInbound: 'accept' } },
+        { agents: { crossSessionInbound: 'refuse' } },
+        { agents: { crossSessionInbound: 'hold' } },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('refuse');
+      expect(
+        getSettingsWarnings(settings).find((w) =>
+          w.includes('agents.crossSessionInbound'),
+        ),
+      ).toContain('would loosen the User value');
+    });
+  });
+
   describe('cross-session settings scope handling', () => {
     it('should honor the cross-session keys from user scope', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
@@ -3853,15 +4024,17 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.agents?.maxParallelAgents).toBe(4);
 
       const warnings = getSettingsWarnings(settings);
-      for (const key of [
-        'agents.crossSessionMessaging',
-        'agents.crossSessionInbound',
-      ]) {
-        const warning = warnings.find((w) => w.includes(key));
-        expect(warning).toBeDefined();
-        expect(warning).toContain('would loosen the default value');
-        expect(warning).toContain('only make this setting stricter');
-      }
+      const inboundWarning = warnings.find((w) =>
+        w.includes('agents.crossSessionInbound'),
+      );
+      expect(inboundWarning).toBeDefined();
+      expect(inboundWarning).toContain('would loosen the default value');
+      expect(inboundWarning).toContain('only make this setting stricter');
+      // The switch is on by default, so a workspace `true` only repeats
+      // what is already in force: dropped, but nothing to warn about.
+      expect(
+        warnings.some((w) => w.includes('agents.crossSessionMessaging')),
+      ).toBe(false);
     });
 
     it('honors a workspace value that tightens the user value', () => {
@@ -3934,7 +4107,9 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
       expect(settings.merged.agents?.crossSessionInbound).toBe('hold');
-      expect(settings.merged.agents?.crossSessionMessaging).toBeUndefined();
+      // The switch defaults to on, so a workspace `false` is a tightening
+      // against an unset user scope and is kept — also without a warning.
+      expect(settings.merged.agents?.crossSessionMessaging).toBe(false);
       expect(
         getSettingsWarnings(settings).some((w) => w.includes('crossSession')),
       ).toBe(false);
@@ -3958,6 +4133,31 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.agents?.crossSessionInbound).toBe('refuse');
       const warning = getSettingsWarnings(settings).find((w) =>
         w.includes('agents.crossSessionInbound'),
+      );
+      expect(warning).toContain('would loosen the User value');
+    });
+
+    it('warns when a workspace true would reopen a switch the user turned off', () => {
+      // The one warning path left for this key: an operator scope's false
+      // outranks a workspace true. An unset operator scope would not reach
+      // it — a workspace true then repeats the default and drops silently.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionMessaging: false },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ agents: { crossSessionMessaging: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionMessaging).toBe(false);
+      const warning = getSettingsWarnings(settings).find((w) =>
+        w.includes('agents.crossSessionMessaging'),
       );
       expect(warning).toContain('would loosen the User value');
     });
@@ -4275,6 +4475,66 @@ describe('Settings Loading and Merging', () => {
       } finally {
         delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
       }
+    });
+  });
+
+  describe('getSystemHooks', () => {
+    const hook = (command: string) => [
+      { hooks: [{ type: 'command', command }] },
+    ];
+
+    function loadWith(files: Record<string, Record<string, unknown>>) {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => typeof p === 'string' && p in files,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          typeof p === 'string' && p in files ? JSON.stringify(files[p]) : '{}',
+      );
+      return loadSettings(MOCK_WORKSPACE_DIR);
+    }
+
+    it('concatenates SystemDefaults and System hooks, SystemDefaults first', () => {
+      const settings = loadWith({
+        [getSystemDefaultsPath()]: {
+          hooks: { PreToolUse: hook('echo defaults') },
+        },
+        [getSystemSettingsPath()]: {
+          hooks: { PreToolUse: hook('echo system') },
+        },
+      });
+
+      expect(settings.getSystemHooks()).toEqual({
+        PreToolUse: [...hook('echo defaults'), ...hook('echo system')],
+      });
+    });
+
+    it('returns undefined, not an empty object, when neither system file has hooks', () => {
+      const settings = loadWith({
+        [getSystemSettingsPath()]: { ui: { theme: 'system-theme' } },
+        [USER_SETTINGS_PATH]: { hooks: { Stop: hook('echo user') } },
+      });
+
+      expect(settings.getSystemHooks()).toBeUndefined();
+    });
+
+    it('returns only system hooks, never user or workspace hooks', () => {
+      const settings = loadWith({
+        [getSystemSettingsPath()]: {
+          hooks: { PreToolUse: hook('echo system') },
+        },
+        [USER_SETTINGS_PATH]: { hooks: { PreToolUse: hook('echo user') } },
+        [MOCK_WORKSPACE_SETTINGS_PATH]: {
+          hooks: { PreToolUse: hook('echo workspace') },
+        },
+      });
+
+      expect(settings.getSystemHooks()).toEqual({
+        PreToolUse: hook('echo system'),
+      });
+      expect(settings.getUserHooks()).toEqual({
+        PreToolUse: hook('echo user'),
+      });
     });
   });
 
@@ -4861,46 +5121,49 @@ describe('Settings Loading and Merging', () => {
       expect(process.env['TESTTEST']).toEqual('1234');
     });
 
-    it('does not load project .env files from untrusted workspaces', () => {
-      delete process.env['PROJECT_ENV_VAR'];
-      const cwdSpy = vi
-        .spyOn(process, 'cwd')
-        .mockReturnValue(MOCK_WORKSPACE_DIR);
+    it.each([false, undefined])(
+      'does not load project .env files when trust is %s',
+      (isTrusted) => {
+        delete process.env['PROJECT_ENV_VAR'];
+        const cwdSpy = vi
+          .spyOn(process, 'cwd')
+          .mockReturnValue(MOCK_WORKSPACE_DIR);
 
-      const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
+        const projectEnvPath = path.join(MOCK_WORKSPACE_DIR, '.env');
 
-      vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
-      });
-      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-        [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
-      );
-      const userSettingsContent: Settings = {
-        ui: {
-          theme: 'dark',
-        },
-        security: {
-          folderTrust: {
-            enabled: true,
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted,
+          source: isTrusted === undefined ? undefined : 'file',
+        });
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, projectEnvPath].includes(p.toString()),
+        );
+        const userSettingsContent: Settings = {
+          ui: {
+            theme: 'dark',
           },
-        },
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
-          return '{}';
-        },
-      );
+          security: {
+            folderTrust: {
+              enabled: true,
+            },
+          },
+        };
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === projectEnvPath) return 'PROJECT_ENV_VAR=from_project';
+            return '{}';
+          },
+        );
 
-      loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
+        loadEnvironment(loadSettings(MOCK_WORKSPACE_DIR).merged);
 
-      // Project .env should NOT be loaded when workspace is untrusted
-      expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
-      cwdSpy.mockRestore();
-    });
+        // Project .env should NOT be loaded when workspace is untrusted
+        expect(process.env['PROJECT_ENV_VAR']).toBeUndefined();
+        cwdSpy.mockRestore();
+      },
+    );
 
     it('uses user .qwen/.env as fallback when the project .env lacks an API key', () => {
       delete process.env['OPENCODE_GO_API_KEY'];
