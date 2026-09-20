@@ -133,6 +133,37 @@ describe('projectTrajectoryWindow', () => {
     expect(first?.recordId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it('leaves a delegated run’s token total out of the round entries', () => {
+    // A subagent tool result reports the whole delegated run's tokens, tagged
+    // with the tool call that spawned it. Taken as a round entry it would be
+    // read as the next main-session request's counts.
+    const delegated = sessionUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        usage: { inputTokens: 900, outputTokens: 90, totalTokens: 990 },
+        parentToolCallId: 'call-agent',
+      },
+    });
+    const own = sessionUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: { usage: { inputTokens: 10, outputTokens: 1, totalTokens: 11 } },
+    });
+
+    const entries = projectTrajectoryWindow([
+      text('user_message_chunk', 'go'),
+      delegated,
+      own,
+    ]);
+
+    expect(
+      entries.flatMap((entry) =>
+        entry.kind === 'usage' ? [entry.usage.inputTokens] : [],
+      ),
+    ).toEqual([10]);
+  });
+
   it('keeps a frame out of the block stream', () => {
     const entries = projectTrajectoryWindow([
       text('user_message_chunk', 'hi'),

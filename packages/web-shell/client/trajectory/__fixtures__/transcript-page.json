@@ -128,13 +128,13 @@
         "content": [],
         "locations": [
           {
-            "path": "/tmp/claude-1001/-home-qqqys-code-qwen-code/1aa009d1-26d1-4b10-9a37-666387220d5e/scratchpad/e2e/ws/note.txt",
+            "path": "/workspace/demo/note.txt",
             "line": null
           }
         ],
         "kind": "read",
         "rawInput": {
-          "file_path": "/tmp/claude-1001/-home-qqqys-code-qwen-code/1aa009d1-26d1-4b10-9a37-666387220d5e/scratchpad/e2e/ws/note.txt"
+          "file_path": "/workspace/demo/note.txt"
         },
         "_meta": {
           "toolName": "read_file",
@@ -161,7 +161,7 @@
         "kind": "search",
         "rawInput": {
           "pattern": "*",
-          "path": "/tmp/claude-1001/-home-qqqys-code-qwen-code/1aa009d1-26d1-4b10-9a37-666387220d5e/scratchpad/e2e/ws"
+          "path": "/workspace/demo"
         },
         "_meta": {
           "toolName": "glob",
@@ -272,7 +272,7 @@
             "type": "content",
             "content": {
               "type": "text",
-              "text": "Found 1 file(s) matching \"*\" within /tmp/claude-1001/-home-qqqys-code-qwen-code/1aa009d1-26d1-4b10-9a37-666387220d5e/scratchpad/e2e/ws, sorted by modification time (newest first):\n---\n/tmp/claude-1001/-home-qqqys-code-qwen-code/1aa009d1-26d1-4b10-9a37-666387220d5e/scratchpad/e2e/ws/note.txt"
+              "text": "Found 1 file(s) matching \"*\" within /workspace/demo, sorted by modification time (newest first):\n---\n/workspace/demo/note.txt"
             }
           }
         ],
