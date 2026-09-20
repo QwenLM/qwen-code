@@ -208,6 +208,45 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('forwards artifact descriptors from a message command result', async () => {
+    const artifacts = [
+      {
+        kind: 'file',
+        storage: 'workspace',
+        title: 'export.md',
+        workspacePath: 'export.md',
+        sizeBytes: 42,
+      },
+    ];
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'export',
+        description: 'Export',
+        kind: CommandKind.BUILT_IN,
+        supportedModes: ['acp'],
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content: 'Exported.',
+          artifacts,
+        }),
+      },
+    ]);
+    vi.mocked(mockConfig.getExperimentalZedIntegration).mockReturnValue(true);
+    const result = await handleSlashCommand(
+      '/export md',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Exported.',
+      artifacts,
+    });
+  });
+
   it('should execute local commands with non_interactive supportedModes', async () => {
     const mockInitCommand = {
       name: 'init',

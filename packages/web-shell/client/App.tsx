@@ -273,7 +273,7 @@ import {
   clearRemoteWorkspaceAddStep,
   completeRemoteWorkspaceAdd,
   discardAbandonedRemoteWorkspaceAdd,
-  getRemoteWorkspaceAddStep,
+  isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
   selectRemoteWorkspaceLocation,
 } from './config/remote-workspace-add';
@@ -3682,25 +3682,23 @@ export function App({
     true;
   const gitHubPrsSupported =
     workspace.capabilities?.features?.includes('workspace_github_prs') === true;
-  const [initialRemoteWorkspaceAddStep] = useState(() =>
-    standalone ? getRemoteWorkspaceAddStep() : undefined,
+  const [initialRemoteWorkspaceAddActive] = useState(
+    () => standalone && isRemoteWorkspaceAddActive(),
   );
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(
-    initialRemoteWorkspaceAddStep === 'browse',
+    initialRemoteWorkspaceAddActive,
   );
   // Browsing the daemon's folders, whether this tab navigated here for it or
   // opened the browser in place.
-  const workspaceBrowseActiveRef = useRef(
-    initialRemoteWorkspaceAddStep === 'browse',
-  );
+  const workspaceBrowseActiveRef = useRef(initialRemoteWorkspaceAddActive);
   useEffect(() => {
     // No marker on a standalone boot means the hand-over that wrote the return
     // location was abandoned (reload or Back), not resumed. Dropping it here
     // keeps a later Cancel in an unrelated Add-workspace dialog from consuming
     // the stale location and navigating the shell away.
-    if (initialRemoteWorkspaceAddStep) clearRemoteWorkspaceAddStep();
+    if (initialRemoteWorkspaceAddActive) clearRemoteWorkspaceAddStep();
     else if (standalone) discardAbandonedRemoteWorkspaceAdd();
-  }, [initialRemoteWorkspaceAddStep, standalone]);
+  }, [initialRemoteWorkspaceAddActive, standalone]);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
@@ -4234,7 +4232,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
-  } = useSessionArtifacts();
+  } = useSessionArtifacts(t);
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
   const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<

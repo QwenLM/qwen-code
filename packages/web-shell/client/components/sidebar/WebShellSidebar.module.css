@@ -2062,32 +2062,6 @@
   }
 }
 
-/* Registered workspace count next to the Projects label. */
-.projectsHeaderRemote {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  max-width: 140px;
-  height: 16px;
-  padding: 0 6px;
-  border-radius: 8px;
-  background: var(--sidebar-accent);
-  color: var(--agent-blue-500);
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.projectsHeaderRemote svg {
-  width: 10px;
-  height: 10px;
-  flex: 0 0 10px;
-}
-
 .projectsHeaderCount {
   display: inline-flex;
   align-items: center;
