@@ -372,7 +372,7 @@ describe('e2e workflow', () => {
       );
       expect(pack.run).toContain('.github/scripts/e2e-build-pack.sh');
       // The same "the install must not build" premise as on the legs: without
-      // it npm ci runs prepare (a full build and bundle) and the explicit
+      // it the install runs prepare (a full build and bundle) and the explicit
       // build steps below then do it a second time on the critical path.
       const install = build.steps.find(
         (step) => step.name === 'Install dependencies',
@@ -407,7 +407,7 @@ describe('e2e workflow', () => {
 
     it('keeps the web-shell regression job building during its install', () => {
       // That job has no build step of its own: its tree comes solely from
-      // the prepare script that npm ci runs, so it must not carry the skip
+      // the prepare script that the install runs, so it must not carry the skip
       // the artifact-fed legs carry.
       const install = yml.jobs['web-shell-browser-regression'].steps.find(
         (step) => step.name === 'Install dependencies',
@@ -449,13 +449,13 @@ describe('e2e workflow', () => {
     });
   });
 
-  describe('npm ci retry', () => {
+  describe('install retry', () => {
     // Run 34700339334 died at the build job's bare `npm ci` before any test
     // ran — the same install reproduces clean at that commit, so the failure
     // was a transient the tree could not explain — and every leg behind
     // `needs: [build]` went down with it. repo-hygiene.yml and
     // qwen-autofix.yml already wrap their installs in this exact bounded
-    // retry; a regression to a bare `npm ci` is silent until the next
+    // retry; a regression to a bare unretried install is silent until the next
     // transient reddens a main run, so pin the shape on every install step.
     const installSteps = Object.entries(yml.jobs).flatMap(([jobName, job]) =>
       (job.steps ?? [])
@@ -466,7 +466,7 @@ describe('e2e workflow', () => {
     it('wraps every Install dependencies step in the bounded retry', () => {
       // Six jobs install: the build, the three artifact-fed legs, the
       // nightly legs, and the web-shell browser gate. A new job adding a
-      // bare `npm ci` must fail here, not in a main-branch run.
+      // bare install must fail here, not in a main-branch run.
       expect(installSteps.map(([jobName]) => jobName).sort()).toEqual([
         'build',
         'e2e-interactive-opentui',
@@ -482,7 +482,7 @@ describe('e2e workflow', () => {
       for (const [jobName, step] of installSteps) {
         expect(step.run, jobName).toContain('for attempt in 1 2 3; do');
         expect(step.run, jobName).toContain(
-          'if npm ci --prefer-offline --no-audit --progress=false; then',
+          'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
         );
         expect(step.run, jobName).toContain('exit 1');
         expect(step.run, jobName).toContain('sleep $((attempt * 15))');
@@ -497,9 +497,11 @@ describe('e2e workflow', () => {
         // though the recovered job concludes green — the same rule the
         // upload-artifact retry's announce step follows. Deleting the echo
         // from any one copy must red this loop.
-        expect(step.run, jobName).toContain('echo "::warning::npm ci');
-        // The defect under test is a bare `npm ci` line outside the loop.
-        expect(step.run, jobName).not.toMatch(/^\s*npm ci/m);
+        expect(step.run, jobName).toContain(
+          'echo "::warning::corepack pnpm install',
+        );
+        // The defect under test is a bare `corepack pnpm install` line outside the loop.
+        expect(step.run, jobName).not.toMatch(/^\s*corepack pnpm install/m);
       }
     });
 
@@ -507,18 +509,18 @@ describe('e2e workflow', () => {
     // shell can write one command cannot be enumerated against a regex. The
     // previous pair exempted a whole body for carrying any retry loop — a
     // trailing bare install rode the exemption — and saw only installs
-    // opening their line, so `cd … && npm ci` and `time npm ci` were
+    // opening their line, so `cd … && pnpm install` and `time pnpm install` were
     // invisible. The exemption is keyed on the line's shape, never the
     // step's name: a name key pardons the six pinned bodies wholesale, so a
     // bare install appended after `done` would ride the step's identity
     // with its body never read. Require every executable line mentioning
-    // `npm ci` to open with one of the two retry-loop lines pinned above,
+    // `pnpm install` to open with one of the two retry-loop lines pinned above,
     // so an unrecognised shape reddens the suite for a human to judge
     // instead of passing silently. Full-line `#` comments never execute, so
     // a body quoting the recipe in prose is excluded rather than flagged.
     const retriedInstallLines = [
-      'if npm ci --prefer-offline --no-audit --progress=false; then',
-      'echo "::warning::npm ci',
+      'if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
+      'echo "::warning::corepack pnpm install',
     ];
     const findUnretriedInstalls = (jobs) =>
       Object.entries(jobs).flatMap(([jobName, job]) =>
@@ -531,7 +533,7 @@ describe('e2e workflow', () => {
                 .filter((line) => !line.trimStart().startsWith('#'))
                 .some(
                   (line) =>
-                    line.includes('npm ci') &&
+                    line.includes('pnpm install') &&
                     !retriedInstallLines.some((ok) =>
                       line.trimStart().startsWith(ok),
                     ),
@@ -540,7 +542,7 @@ describe('e2e workflow', () => {
           .map((step) => `${jobName}/${step.name ?? '(unnamed)'}`),
       );
 
-    it('retries every npm ci run body, whatever the step is named', () => {
+    it('retries every pnpm install run body, whatever the step is named', () => {
       // The name-keyed collection above misses an install hiding under any
       // other step name — repo-hygiene.yml and qwen-autofix.yml call theirs
       // 'Install dependencies and build' — so scan the command itself.
@@ -565,9 +567,9 @@ describe('e2e workflow', () => {
               name: 'Install dependencies',
               run: [
                 'for attempt in 1 2 3; do',
-                '  if npm ci --prefer-offline --no-audit --progress=false; then',
+                '  if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then',
                 '    if [[ "${attempt}" != "1" ]]; then',
-                '      echo "::warning::npm ci failed $((attempt - 1)) time(s)"',
+                '      echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s)"',
                 '    fi',
                 '    break',
                 '  fi',
@@ -576,7 +578,7 @@ describe('e2e workflow', () => {
                 '  fi',
                 '  sleep $((attempt * 15))',
                 'done',
-                'cd integration-tests && npm ci',
+                'cd integration-tests && pnpm install',
               ].join('\n'),
             },
           ],
@@ -589,21 +591,21 @@ describe('e2e workflow', () => {
                 'for attempt in 1 2 3; do',
                 '  npx playwright install --with-deps chromium && break',
                 'done',
-                'npm ci --prefer-offline --no-audit --progress=false',
+                'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
               ].join('\n'),
             },
             {
               name: 'Install integration dependencies',
-              run: 'cd integration-tests && npm ci',
+              run: 'cd integration-tests && pnpm install',
             },
-            { name: 'Time the install', run: 'time npm ci' },
+            { name: 'Time the install', run: 'time pnpm install' },
             {
               name: 'Retry the install once',
-              run: 'for attempt in 1; do npm ci --prefer-offline; done',
+              run: 'for attempt in 1; do pnpm install --prefer-offline; done',
             },
             {
               name: 'Mention the recipe',
-              run: '# npm ci is retried elsewhere\necho done',
+              run: '# pnpm install is retried elsewhere\necho done',
             },
           ],
         },

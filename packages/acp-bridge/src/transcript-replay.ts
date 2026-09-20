@@ -1203,6 +1203,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             // Replayed on its own key, exactly as it was recorded: the folded
             // block keeps both, so the note survives beside the result.
             ...(contextCompressionNotice ? { contextCompressionNotice } : {}),
+            ...(Array.isArray(item['sessionArtifacts'])
+              ? { sessionArtifacts: item['sessionArtifacts'] }
+              : {}),
           },
         }),
       );

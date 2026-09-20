@@ -513,27 +513,16 @@ function testRuntimeNodePtyTargetMapping() {
     );
   }
 
-  // The pins are real registry metadata, and they are what makes the release
-  // matrix's cross-built leg work: `@lydell/node-pty-darwin-x64` declares
-  // os darwin / cpu x64, so the `npm ci` on the arm64 macos-15 runner that
-  // builds x86_64-apple-darwin skips it. Staging therefore has to fetch the
-  // target's locked package instead of reading the host's node_modules
-  // (#11872).
+  // Cross-built prebuilds must stay exact so staging fetches the same version
+  // that the frozen root install verified (#11872).
   const rootPackage = JSON.parse(
     fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
   );
-  const packageLock = JSON.parse(
-    fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'),
-  );
-  const crossBuilt =
-    packageLock.packages['node_modules/@lydell/node-pty-darwin-x64'];
-  assert.equal(
+  assert.match(
     rootPackage.optionalDependencies?.['@lydell/node-pty-darwin-x64'],
-    crossBuilt?.version,
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/,
     'the darwin-x64 prebuild must stay pinned so a cross-building leg can fetch its locked version',
   );
-  assert.deepEqual(crossBuilt?.os, ['darwin']);
-  assert.deepEqual(crossBuilt?.cpu, ['x64']);
 }
 
 function testRuntimePreparation(directory) {
@@ -561,8 +550,7 @@ function testRuntimePreparation(directory) {
   fs.mkdirSync(path.join(sourceRoot, 'dist', 'web-shell', 'assets'), {
     recursive: true,
   });
-  // The pins staging resolves its package specs from: root package.json
-  // optionalDependencies for the names, package-lock.json for the versions.
+  // The exact pins staging resolves its package specs from.
   const nodePtyPins = {
     '@lydell/node-pty': '0.0.0-test',
     '@lydell/node-pty-darwin-x64': '0.0.0-test',
@@ -572,17 +560,6 @@ function testRuntimePreparation(directory) {
     JSON.stringify({
       version: '0.0.0-test',
       optionalDependencies: nodePtyPins,
-    }),
-  );
-  fs.writeFileSync(
-    path.join(sourceRoot, 'package-lock.json'),
-    JSON.stringify({
-      packages: Object.fromEntries(
-        Object.keys(nodePtyPins).map((name) => [
-          `node_modules/${name}`,
-          { version: nodePtyPins[name] },
-        ]),
-      ),
     }),
   );
   fs.mkdirSync(path.dirname(testScript), { recursive: true });
@@ -737,7 +714,7 @@ globalThis.fetch = async (url) => {
   );
 
   // ...and it has to get there by fetching the TARGET's pinned package, at the
-  // version package-lock.json locks, not out of a host node_modules that cannot
+  // version package.json pins, not out of a host node_modules that cannot
   // contain a darwin-x64 addon.
   const installs = fs
     .readFileSync(npmLog, 'utf8')
