@@ -259,6 +259,22 @@ export class WorkflowJournalUnavailableError extends Error {
   }
 }
 
+/**
+ * A resume could not record that its run is running again.
+ *
+ * Retrying a run from history refuses one whose checkpoint is on disk, so a
+ * resume that starts without writing one leaves another process free to be
+ * the second runner on its journal. Nothing was started when this is thrown.
+ */
+export class WorkflowCheckpointUnwritableError extends Error {
+  constructor(readonly runId: string) {
+    super(
+      `Could not record that workflow run ${runId} is running again, so another process could start it a second time. Nothing was started; try again.`,
+    );
+    this.name = 'WorkflowCheckpointUnwritableError';
+  }
+}
+
 export class WorkflowRunner {
   static async start(
     options: WorkflowRunnerOptions,
@@ -575,9 +591,7 @@ export class WorkflowRunner {
           ),
         );
         if ((await checkpointWrite) === 'failed') {
-          throw new Error(
-            `Could not record that workflow run ${runId} is running again, so another process could start it a second time. Nothing was started; try again.`,
-          );
+          throw new WorkflowCheckpointUnwritableError(runId);
         }
       }
       entry = registry?.register(registration, controller);

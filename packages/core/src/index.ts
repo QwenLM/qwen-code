@@ -492,7 +492,10 @@ export * from './agents/workflow-run-registry.js';
 export * from './agents/workflow-correlation.js';
 export * from './agents/workflow-snapshot.js';
 export * from './agents/workflow-checkpoint.js';
-export { WorkflowJournalUnavailableError } from './agents/runtime/workflow-runner.js';
+export {
+  WorkflowCheckpointUnwritableError,
+  WorkflowJournalUnavailableError,
+} from './agents/runtime/workflow-runner.js';
 export {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
