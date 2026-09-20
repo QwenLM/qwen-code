@@ -6,6 +6,7 @@
 
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -74,7 +75,8 @@ export function ConversationSearch({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [selected, setSelected] = useState(0);
+  const [selectedKey, setSelectedKey] = useState<string>();
+  const resultListId = useId();
   const [locating, setLocating] = useState(false);
   const [locateError, setLocateError] = useState(false);
   const navigationIntent = useRef(0);
@@ -145,7 +147,7 @@ export function ConversationSearch({
     navigationIntent.current += 1;
     setLocating(false);
     setLocateError(false);
-    setSelected(0);
+    setSelectedKey(undefined);
     setPersisted(undefined);
     setError(false);
     if (
@@ -228,7 +230,20 @@ export function ConversationSearch({
     return [...older, ...live].slice(0, 200);
   }, [blocks, needle, open, persisted, t]);
 
-  const activeIndex = Math.min(selected, Math.max(0, results.length - 1));
+  useEffect(() => {
+    setSelectedKey((current) =>
+      results.some((result) => result.key === current)
+        ? current
+        : results[0]?.key,
+    );
+  }, [results]);
+  const activeIndex = Math.max(
+    0,
+    results.findIndex((result) => result.key === selectedKey),
+  );
+  const searchFailed =
+    error ||
+    (!loading && navigation.mode === 'ready' && persisted?.complete === false);
   const choose = async (result: SearchResult) => {
     const intent = ++navigationIntent.current;
     setLocating(true);
@@ -288,6 +303,15 @@ export function ConversationSearch({
             <Input
               autoFocus
               type="search"
+              role="combobox"
+              aria-expanded="true"
+              aria-autocomplete="list"
+              aria-controls={resultListId}
+              aria-activedescendant={
+                results[activeIndex]
+                  ? `${resultListId}-${activeIndex}`
+                  : undefined
+              }
               value={query}
               aria-label={t('chat.searchConversation')}
               placeholder={t('chat.searchConversationPlaceholder')}
@@ -309,10 +333,12 @@ export function ConversationSearch({
                   results.length
                 ) {
                   event.preventDefault();
-                  setSelected(
-                    (activeIndex +
-                      (event.key === 'ArrowDown' ? 1 : results.length - 1)) %
-                      results.length,
+                  setSelectedKey(
+                    results[
+                      (activeIndex +
+                        (event.key === 'ArrowDown' ? 1 : results.length - 1)) %
+                        results.length
+                    ]!.key,
                   );
                 }
               }}
@@ -348,8 +374,10 @@ export function ConversationSearch({
                     className="min-h-11 min-w-11"
                     aria-label={t('chat.searchPrevious')}
                     onClick={() =>
-                      setSelected(
-                        (activeIndex + results.length - 1) % results.length,
+                      setSelectedKey(
+                        results[
+                          (activeIndex + results.length - 1) % results.length
+                        ]!.key,
                       )
                     }
                   >
@@ -361,7 +389,9 @@ export function ConversationSearch({
                     className="min-h-11 min-w-11"
                     aria-label={t('chat.searchNext')}
                     onClick={() =>
-                      setSelected((activeIndex + 1) % results.length)
+                      setSelectedKey(
+                        results[(activeIndex + 1) % results.length]!.key,
+                      )
                     }
                   >
                     <ChevronDownIcon />
@@ -369,21 +399,12 @@ export function ConversationSearch({
                 </div>
               )}
             </div>
-            {persisted &&
-              !persisted.complete &&
-              !loading &&
-              !error &&
-              navigation.mode === 'ready' && (
-                <p role="status" className="text-sm text-muted-foreground">
-                  {t('chat.searchFailed')}
-                </p>
-              )}
             {(persisted?.truncated || results.length === 200) && (
               <p className="text-sm text-muted-foreground">
                 {t('chat.searchResultsLimited', { count: results.length })}
               </p>
             )}
-            {error && (
+            {searchFailed && (
               <div
                 role="alert"
                 className="flex items-center justify-between gap-2 text-sm"
@@ -403,13 +424,18 @@ export function ConversationSearch({
               </p>
             )}
             <ol
+              id={resultListId}
+              role="listbox"
               className="min-h-0 flex-1 overflow-y-auto"
               aria-label={t('chat.searchResults')}
             >
               {results.map((result, index) => (
-                <li key={result.key}>
+                <li key={result.key} role="none">
                   <button
+                    id={`${resultListId}-${index}`}
                     type="button"
+                    role="option"
+                    aria-selected={index === activeIndex}
                     disabled={locating}
                     aria-current={index === activeIndex ? 'true' : undefined}
                     className={`w-full min-w-0 rounded-lg p-3 text-left text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere] hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring ${index === activeIndex ? 'bg-muted' : ''}`}
@@ -418,7 +444,7 @@ export function ConversationSearch({
                         node.scrollIntoView?.({ block: 'nearest' });
                     }}
                     onClick={() => {
-                      setSelected(index);
+                      setSelectedKey(result.key);
                       void choose(result);
                     }}
                   >

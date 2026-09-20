@@ -487,3 +487,136 @@ it('keeps the established entry when a disconnected live update would trigger a 
   expect(trigger()).not.toBeNull();
   expect(mocks.scan).not.toHaveBeenCalled();
 });
+
+it('keeps the selected live identity and Enter target when historical results arrive', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  const pending = deferred<ConversationSearchResult>();
+  mocks.scan.mockReturnValue(pending.promise);
+  await render();
+  await open();
+  await type('Message');
+  await debounce();
+  const input = document.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  for (let index = 0; index < 2; index++) {
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      ),
+    );
+  }
+  const selectedText = document.querySelector(
+    '[aria-current="true"]',
+  )?.textContent;
+  expect(selectedText).toBe('chat.searchUserMessage 2');
+  const progress = result({
+    complete: false,
+    hits: [
+      {
+        sessionId: 'session',
+        snapshot: 's',
+        revision: 0,
+        recordId: 'old-message',
+        turnId: 'old-turn',
+        turnOrdinal: 0,
+        role: 'user',
+        snippet: 'Message from history',
+        matchStart: 0,
+        matchEnd: 7,
+      },
+    ],
+    matchCount: 1,
+  });
+  await act(async () => mocks.scan.mock.calls[0][1].onProgress(progress));
+  expect(document.querySelector('[aria-current="true"]')?.textContent).toBe(
+    selectedText,
+  );
+  await act(async () =>
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    ),
+  );
+  expect(scrollToMessage).toHaveBeenCalledWith('message-2');
+  expect(scrollToSearchHit).not.toHaveBeenCalled();
+});
+
+it('retries a successful but incomplete history scan without editing the query', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.scan
+    .mockResolvedValueOnce(result({ complete: false, messageCount: 0 }))
+    .mockResolvedValueOnce(result());
+  await render();
+  await open();
+  await type('missing');
+  await debounce();
+  const retry = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('button'),
+  ).find((button) => button.textContent === 'common.retry');
+  expect(retry).toBeDefined();
+  expect(retry!.parentElement?.textContent).toContain('chat.searchFailed');
+  await act(async () => retry!.click());
+  await debounce();
+  expect(mocks.scan).toHaveBeenCalledTimes(2);
+  expect(mocks.scan).toHaveBeenLastCalledWith(
+    'missing',
+    expect.objectContaining({ onProgress: expect.any(Function) }),
+  );
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+});
+
+it('connects combobox selection to the active listbox option across arrows and progress', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.scan.mockReturnValue(new Promise(() => {}));
+  await render();
+  await open();
+  await type('Message');
+  await debounce();
+  const input = document.querySelector<HTMLInputElement>(
+    'input[type="search"]',
+  )!;
+  expect(input.getAttribute('role')).toBe('combobox');
+  expect(input.getAttribute('aria-expanded')).toBe('true');
+  const list = document.getElementById(input.getAttribute('aria-controls')!);
+  expect(list?.getAttribute('role')).toBe('listbox');
+  const options = Array.from(list!.querySelectorAll('[role="option"]'));
+  expect(options).toHaveLength(11);
+  expect(input.getAttribute('aria-activedescendant')).toBe(options[0]!.id);
+  for (let index = 0; index < 2; index++) {
+    await act(async () =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      ),
+    );
+  }
+  expect(input.getAttribute('aria-activedescendant')).toBe(options[2]!.id);
+  expect(options[2]!.getAttribute('aria-selected')).toBe('true');
+  expect(options[0]!.getAttribute('aria-selected')).toBe('false');
+  await act(async () =>
+    mocks.scan.mock.calls[0][1].onProgress(
+      result({
+        complete: false,
+        hits: [
+          {
+            sessionId: 'session',
+            snapshot: 's',
+            revision: 0,
+            recordId: 'older',
+            turnId: 'turn',
+            turnOrdinal: 0,
+            role: 'user',
+            snippet: 'Message from history',
+            matchStart: 0,
+            matchEnd: 7,
+          },
+        ],
+      }),
+    ),
+  );
+  const active = document.getElementById(
+    input.getAttribute('aria-activedescendant')!,
+  );
+  expect(active?.textContent).toBe('chat.searchUserMessage 2');
+  expect(active?.getAttribute('aria-selected')).toBe('true');
+  expect(list!.querySelectorAll('[aria-selected="true"]')).toHaveLength(1);
+});

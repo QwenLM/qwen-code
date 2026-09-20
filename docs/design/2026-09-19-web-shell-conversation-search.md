@@ -47,3 +47,5 @@ The search state and dialog stay mounted above the transcript viewport. Only the
 A persisted user record can resolve through its verified live prompt alias. Assistant records must resolve to their own block, loading retained history even when the user turn is live. Search navigation waits for an existing boundary read and can retry a retryable boundary failure; it never substitutes the user turn for an assistant record.
 
 IME confirmation keys do not select a result. Incomplete scans cannot replace an established visibility count, and reconnecting retries the count probe and active query. A search keeps the currently viewed historical page pinned until it succeeds, so cancellation or failure cannot evict the page being read.
+
+Progressive history results preserve selection by message identity rather than list position. Incomplete scans expose the same retry action as failed scans. The search input and results use combobox/listbox semantics so the active option is available to assistive technology.

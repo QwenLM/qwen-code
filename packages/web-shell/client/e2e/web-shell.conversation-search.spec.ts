@@ -35,7 +35,7 @@ test('search locates persisted history outside the live window without changing 
   await expect(input).toBeFocused();
   await input.fill('unique-needle');
   const hit = dialog
-    .getByRole('button')
+    .getByRole('option')
     .filter({ hasText: 'Archived UNIQUE-NEEDLE answer.' });
   await expect(hit).toBeVisible();
   await page.screenshot({ path: '/tmp/qwen-12231-search-history-dialog.png' });
@@ -146,25 +146,36 @@ for (const theme of ['light', 'dark']) {
   }
 }
 
-test('search keyboard and previous/next controls wrap and Enter locates the selected result', async ({
+test('search keyboard and previous/next controls wrap and Enter locates the selected result @smoke', async ({
   page,
   baseURL,
 }) => {
   await setup(page, baseURL, { count: 12 });
   await searchButton(page).click();
   const dialog = page.locator('[data-conversation-search]');
-  const input = dialog.locator('input');
+  const input = dialog.getByRole('combobox');
+  const listbox = dialog.getByRole('listbox');
+  await expect(input).toHaveAttribute('aria-expanded', 'true');
+  await expect(input).toHaveAttribute(
+    'aria-controls',
+    (await listbox.getAttribute('id'))!,
+  );
   await input.fill('Synthetic message');
   const results = dialog.locator('ol button');
   await expect(results).toHaveCount(10);
   const active = dialog.locator('ol button[aria-current="true"]');
   await expect(active).toContainText('Synthetic message 0');
+  await expect(input).toHaveAttribute(
+    'aria-activedescendant',
+    (await active.getAttribute('id'))!,
+  );
   await input.press('ArrowUp');
   await expect(active).toContainText('Synthetic message 10');
   await input.press('ArrowDown');
   await expect(active).toContainText('Synthetic message 0');
   await input.press('ArrowDown');
-  await expect(active).toContainText('Synthetic message 1');
+  await expect(input).toBeFocused();
+  await expect(active).toContainText(/Synthetic message 1$/);
   await dialog
     .getByRole('button', { name: 'Previous result', exact: true })
     .click();
@@ -178,10 +189,18 @@ test('search keyboard and previous/next controls wrap and Enter locates the sele
     .click();
   await expect(active).toContainText('Synthetic message 0');
   await input.press('ArrowDown');
-  await expect(active).toContainText('Synthetic message 1');
+  await expect(input).toBeFocused();
+  await expect(active).toContainText(/Synthetic message 1$/);
+  const selectedOption = listbox.getByRole('option', { selected: true });
+  await expect(selectedOption).toHaveCount(1);
+  await expect(selectedOption).toContainText(/Synthetic message 1$/);
+  await expect(input).toHaveAttribute(
+    'aria-activedescendant',
+    (await selectedOption.getAttribute('id'))!,
+  );
   await input.press('Enter');
   await expect(dialog).toHaveCount(0);
   await expect(
     page.locator('[data-web-shell-message-list] [class*="flash"]'),
-  ).toContainText('Synthetic message 1');
+  ).toContainText(/Synthetic message 1$/);
 });
