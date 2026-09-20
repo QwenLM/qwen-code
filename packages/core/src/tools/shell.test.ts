@@ -8919,9 +8919,9 @@ describe('ShellTool', () => {
      * cheaper than bash, and a change that levels them up should be a
      * deliberate one.
      *
-     * Measured when written: bash/linux 5,068 · Git Bash on win32 4,892 ·
-     * powershell.exe 4,558 · pwsh.exe 4,452 · cmd.exe 4,317. Each budget
-     * leaves 330–360 characters of headroom — a paragraph, not a sentence.
+     * Measured when written: bash/linux 4,946 · Git Bash on win32 4,771 ·
+     * powershell.exe 4,456 · pwsh.exe 4,350 · cmd.exe 4,207. Each budget
+     * leaves 443–479 characters of headroom — a paragraph, not a sentence.
      */
     function buildForShape(
       platform: 'linux' | 'win32',
@@ -8996,7 +8996,8 @@ describe('ShellTool', () => {
     );
 
     // Parameter descriptions other than `command` do not vary by shell, so
-    // one shape is enough for them.
+    // one shape is enough for them. `command` stays off this list on purpose:
+    // it does vary, and the `toBe` assertions above pin it exactly per shape.
     it.each<[string, number]>([
       ['is_background', 350],
       ['directory', 250],
@@ -9008,9 +9009,13 @@ describe('ShellTool', () => {
         const schema = buildForShape('linux').schema.parametersJsonSchema as {
           properties: Record<string, { description?: string }>;
         };
-        expect(
-          schema.properties[name]?.description?.length ?? 0,
-        ).toBeLessThanOrEqual(budget);
+        // No `?? 0` fallback: renaming one of these parameters must fail the
+        // row rather than pass it on a length of zero.
+        const description = schema.properties[name]?.description;
+        if (description === undefined) {
+          throw new Error(`shell schema has no budgeted parameter "${name}"`);
+        }
+        expect(description.length).toBeLessThanOrEqual(budget);
       },
     );
   });

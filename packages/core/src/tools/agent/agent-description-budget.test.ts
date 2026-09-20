@@ -86,7 +86,15 @@ function paramDescription(tool: AgentTool, name: string): string {
   const schema = tool.schema.parametersJsonSchema as {
     properties: Record<string, { description?: string }>;
   };
-  return schema.properties[name]?.description ?? '';
+  // No `?? ''` fallback: a budget row must fail when the parameter it names
+  // is renamed or stops being declared, not pass on an empty string. Every
+  // name in the lists below is present in the shape that list measures, so
+  // this throws only when a row has gone stale.
+  const description = schema.properties[name]?.description;
+  if (description === undefined) {
+    throw new Error(`agent schema has no budgeted parameter "${name}"`);
+  }
+  return description;
 }
 
 /** What the model is actually charged for: description plus the schema. */
@@ -164,26 +172,48 @@ describe('AgentTool per-turn size budgets', () => {
   });
 
   // Parameter descriptions are declared statically in the constructor, so
-  // these budgets are flat. `model` is omitted: it is added only when
-  // `getAvailableModelGrades()` is non-empty, which this fixture leaves
-  // empty.
-  it.each<[string, number]>([
+  // these budgets are flat. This is every parameter the *default* shape
+  // declares — the next test pins that — with two deliberate omissions from
+  // the other shapes: `model`, added only when `getAvailableModelGrades()` is
+  // non-empty (this fixture leaves it empty), and `name` /
+  // `plan_mode_required` / `read_only`, declared only when
+  // `isAgentTeamEnabled()`.
+  const DEFAULT_SHAPE_PARAM_BUDGETS: Array<[string, number]> = [
     ['run_in_background', 850],
     ['fork_tools', 600],
     ['working_dir', 600],
     ['isolation', 350],
     ['fork_turns', 320],
     ['fork_profile', 250],
+    ['todo_id', 180],
     ['subagent_type', 150],
     ['description', 100],
     ['prompt', 100],
-  ])(
+  ];
+
+  it.each<[string, number]>(DEFAULT_SHAPE_PARAM_BUDGETS)(
     'keeps the %s parameter description within its budget',
     async (name, budget) => {
       const tool = await buildTool();
       expect(paramDescription(tool, name).length).toBeLessThanOrEqual(budget);
     },
   );
+
+  /**
+   * The rows above are only a ratchet if they cover the shape they measure:
+   * a parameter added to the schema and left off the list would grow the
+   * request with no row noticing, which is the failure this file exists to
+   * prevent (#12054).
+   */
+  it('budgets every parameter the default shape declares', async () => {
+    const tool = await buildTool();
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: Record<string, unknown>;
+    };
+    expect(Object.keys(schema.properties).sort()).toEqual(
+      DEFAULT_SHAPE_PARAM_BUDGETS.map(([name]) => name).sort(),
+    );
+  });
 
   /**
    * `run_in_background`'s teammate half is about the `name` parameter,
