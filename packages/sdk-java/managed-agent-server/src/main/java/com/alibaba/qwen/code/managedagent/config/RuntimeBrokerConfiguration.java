@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import java.util.concurrent.CompletableFuture;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -15,7 +15,7 @@ public class RuntimeBrokerConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public EmbeddedRuntimeBroker embeddedRuntimeBroker(
-            ManagedAgentStore store, ManagedAgentProperties properties) {
+            AgentStateStore store, ManagedAgentProperties properties) {
         return new EmbeddedRuntimeBroker(store, properties);
     }
 

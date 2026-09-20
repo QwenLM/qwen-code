@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -10,8 +11,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.service.SessionEventHub;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
@@ -42,6 +46,8 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-agent;MODE=MySQL;"
@@ -70,6 +76,12 @@ class ManagedAgentServerIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @Autowired
+    private SessionEventHub eventHub;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     @Test
     void requiresTenantHeader() throws Exception {
@@ -371,6 +383,99 @@ class ManagedAgentServerIntegrationTest {
             assertThat(first.turnId()).isEqualTo(second.turnId());
             assertThat(List.of(first.replayed(), second.replayed()))
                     .containsExactlyInAnyOrder(false, true);
+        }
+    }
+
+    @Test
+    void commitsHarnessEventsAsOneReplayableBatch() throws Exception {
+        String tenant = "tenant-batch-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "batch-create",
+                "sha256:" + "a".repeat(64), "qwen-code", null,
+                List.of(), null);
+        List<Map<String, Object>> input = List.of(Map.of(
+                "type", "text", "text", "batch"));
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "batch-turn", "sha256:" + "b".repeat(64),
+                session.sessionId(), input, "sha256:" + "c".repeat(64));
+        String owner = "batch-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
+                owner, "batch-epoch", 0);
+        long before = store.requireSession(tenant, session.sessionId())
+                .lastSequence();
+        ProjectedEvent first = new ProjectedEvent(
+                "item.output_text.delta", Map.of("text", "one"), false,
+                null, null, null);
+        ProjectedEvent second = new ProjectedEvent(
+                "item.output_text.delta", Map.of("text", "two"), false,
+                null, null, null);
+        List<HarnessEvent> batch = List.of(
+                new HarnessEvent(1, "boot:batch-epoch:1", first),
+                new HarnessEvent(2, "boot:batch-epoch:2", null),
+                new HarnessEvent(3, "boot:batch-epoch:3", second));
+
+        try (SessionEventHub.Subscription subscription = eventHub.subscribe(
+                tenant, session.sessionId())) {
+            store.recordHarnessEvents(tenant, session.sessionId(),
+                    turn.turnId(), owner, "batch-epoch", batch);
+            SessionEventHub.Delivery delivery = subscription.await(before,
+                    Duration.ofSeconds(1));
+            assertThat(delivery.overflowed()).isFalse();
+            assertThat(delivery.events()).extracting(event -> event.sequence())
+                    .containsExactly(before + 1, before + 2);
+        }
+
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "batch-epoch", batch);
+        assertThat(store.findEvents(tenant, session.sessionId(), before, 100))
+                .extracting(event -> event.data().get("text"))
+                .containsExactly("one", "two");
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().extracting(record -> record.harnessLastEventId())
+                .isEqualTo(3L);
+
+        ProjectedEvent terminal = new ProjectedEvent("turn.completed",
+                Map.of(), true, "COMPLETED", null, null);
+        store.recordHarnessEvents(tenant, session.sessionId(), turn.turnId(),
+                owner, "batch-epoch", List.of(new HarnessEvent(4,
+                        "boot:batch-epoch:4", terminal)));
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().extracting(record -> record.status())
+                .isEqualTo("COMPLETED");
+        assertThat(store.findEvents(tenant, session.sessionId(), before, 100))
+                .extracting(event -> event.sequence())
+                .containsExactly(before + 1, before + 2, before + 3);
+    }
+
+    @Test
+    void doesNotPublishRolledBackEvents() throws Exception {
+        String tenant = "tenant-rollback-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "rollback-create",
+                "sha256:" + "d".repeat(64), "qwen-code", null,
+                List.of(), null);
+        long before = store.requireSession(tenant, session.sessionId())
+                .lastSequence();
+
+        try (SessionEventHub.Subscription subscription = eventHub.subscribe(
+                tenant, session.sessionId())) {
+            TransactionTemplate transaction = new TransactionTemplate(
+                    transactionManager);
+            assertThatThrownBy(() -> transaction.executeWithoutResult(
+                    ignored -> {
+                        store.appendPublicEventIfAbsent(tenant,
+                                session.sessionId(), null, "test.event",
+                                Map.of(), false, "rollback-source");
+                        throw new IllegalStateException("roll back");
+                    })).isInstanceOf(IllegalStateException.class);
+
+            SessionEventHub.Delivery delivery = subscription.await(before,
+                    Duration.ofMillis(20));
+            assertThat(delivery.events()).isEmpty();
+            assertThat(store.requireSession(tenant, session.sessionId())
+                    .lastSequence()).isEqualTo(before);
         }
     }
 

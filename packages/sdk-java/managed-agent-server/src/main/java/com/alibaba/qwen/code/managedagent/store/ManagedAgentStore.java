@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -26,9 +27,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Repository
-public class ManagedAgentStore {
+public class ManagedAgentStore implements AgentStateStore {
     private static final TypeReference<List<Map<String, Object>>> INPUT_TYPE =
             new TypeReference<>() {
             };
@@ -40,6 +43,7 @@ public class ManagedAgentStore {
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final CommittedEventPublisher eventPublisher;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
                     result.getString("session_id"),
@@ -84,10 +88,11 @@ public class ManagedAgentStore {
                     result.getLong("created_at"));
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock, CommittedEventPublisher eventPublisher) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.eventPublisher = eventPublisher;
     }
 
     @Transactional
@@ -437,56 +442,135 @@ public class ManagedAgentStore {
     }
 
     @Transactional
-    public void recordHarnessEvent(String tenantId, String sessionId,
-            String turnId, String owner, String eventEpoch, long sourceId,
-            String sourceKey, ProjectedEvent projection) {
-        TurnRecord turn = requireTurn(tenantId, sessionId, turnId);
+    public void recordHarnessEvents(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            List<HarnessEvent> events) {
+        if (events.isEmpty()) {
+            return;
+        }
+        SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         if (!owner.equals(turn.dispatchOwner())
                 || turn.dispatchLeaseUntil() == null
                 || turn.dispatchLeaseUntil() < clock.millis()) {
             throw new IllegalStateException("Turn dispatch lease was lost");
         }
-        if (turn.harnessLastEventId() != null
-                && sourceId <= turn.harnessLastEventId()) {
+        if (!eventEpoch.equals(turn.harnessEventEpoch())) {
+            throw new IllegalStateException(
+                    "Hosted Harness event epoch changed");
+        }
+        long lastSourceId = turn.harnessLastEventId() == null ? 0
+                : turn.harnessLastEventId();
+        List<HarnessEvent> accepted = new ArrayList<>();
+        for (HarnessEvent event : events) {
+            if (event.sourceId() > lastSourceId) {
+                accepted.add(event);
+                lastSourceId = event.sourceId();
+            }
+        }
+        if (accepted.isEmpty()) {
             return;
         }
         long now = clock.millis();
-        int updated = jdbc.update("UPDATE managed_agent_turn SET"
+        HarnessEvent terminal = null;
+        for (int index = 0; index < accepted.size(); index++) {
+            HarnessEvent event = accepted.get(index);
+            if (event.projection() != null
+                    && event.projection().terminal()) {
+                if (terminal != null || index != accepted.size() - 1) {
+                    throw new IllegalArgumentException(
+                            "Terminal Harness event must end the batch");
+                }
+                terminal = event;
+            }
+        }
+        int updated = terminal == null
+                ? updateHarnessCursor(tenantId, sessionId, turnId, owner,
+                        eventEpoch, lastSourceId, now)
+                : completeHarnessTurn(tenantId, sessionId, turnId, owner,
+                        eventEpoch, lastSourceId, terminal.projection(), now);
+        if (updated != 1) {
+            throw new IllegalStateException("Turn dispatch lease was lost");
+        }
+        List<HarnessEvent> projected = accepted.stream()
+                .filter(event -> event.projection() != null).toList();
+        List<EventRecord> committed = appendEvents(tenantId, sessionId,
+                turnId, eventEpoch, lastSourceId, session.lastSequence(),
+                projected, now);
+        publishAfterCommit(committed);
+    }
+
+    private int updateHarnessCursor(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long lastSourceId, long now) {
+        return jdbc.update("UPDATE managed_agent_turn SET"
                         + " harness_event_epoch = ?,"
                         + " harness_last_event_id = ?, updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
                         + " >= ?",
-                eventEpoch, sourceId, now, tenantId, sessionId, turnId,
+                eventEpoch, lastSourceId, now, tenantId, sessionId, turnId,
                 owner, now);
-        if (updated != 1) {
-            throw new IllegalStateException("Turn dispatch lease was lost");
+    }
+
+    private int completeHarnessTurn(String tenantId, String sessionId,
+            String turnId, String owner, String eventEpoch,
+            long lastSourceId, ProjectedEvent terminal, long now) {
+        return jdbc.update("UPDATE managed_agent_turn SET"
+                        + " harness_event_epoch = ?,"
+                        + " harness_last_event_id = ?, status = ?,"
+                        + " error_code = ?, error_message = ?,"
+                        + " completed_at = ?, updated_at = ?,"
+                        + " dispatch_owner = NULL,"
+                        + " dispatch_lease_until = NULL, version ="
+                        + " version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND"
+                        + " dispatch_owner = ? AND dispatch_lease_until"
+                        + " >= ?",
+                eventEpoch, lastSourceId, terminal.terminalStatus(),
+                terminal.errorCode(), terminal.errorMessage(), now, now,
+                tenantId, sessionId, turnId, owner, now);
+    }
+
+    private List<EventRecord> appendEvents(String tenantId,
+            String sessionId, String turnId, String eventEpoch,
+            long lastSourceId, long sequence, List<HarnessEvent> events,
+            long now) {
+        List<EventRecord> records = new ArrayList<>();
+        long next = sequence;
+        for (HarnessEvent event : events) {
+            ProjectedEvent projection = event.projection();
+            records.add(new EventRecord(tenantId, sessionId, ++next,
+                    publicId("evt"), turnId, projection.type(),
+                    projection.data(), projection.terminal(),
+                    event.sourceKey(), now));
         }
         jdbc.update("UPDATE managed_agent_session SET harness_event_epoch ="
-                        + " ?, harness_last_event_id = ?, updated_at = ?,"
-                        + " version = version + 1 WHERE tenant_id = ? AND"
-                        + " session_id = ?",
-                eventEpoch, sourceId, now, tenantId, sessionId);
-        if (projection == null) {
-            return;
+                        + " ?, harness_last_event_id = ?, last_sequence = ?,"
+                        + " updated_at = ?, version = version + 1 WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                eventEpoch, lastSourceId, next, now, tenantId, sessionId);
+        if (!records.isEmpty()) {
+            jdbc.batchUpdate("INSERT INTO managed_agent_event (tenant_id,"
+                            + " session_id, sequence_id, event_id, turn_id,"
+                            + " event_type, data_json, terminal, source_key,"
+                            + " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " ?, ?)",
+                    records, records.size(), (statement, event) -> {
+                        statement.setString(1, event.tenantId());
+                        statement.setString(2, event.sessionId());
+                        statement.setLong(3, event.sequence());
+                        statement.setString(4, event.eventId());
+                        statement.setString(5, event.turnId());
+                        statement.setString(6, event.type());
+                        statement.setString(7, writeJson(event.data()));
+                        statement.setBoolean(8, event.terminal());
+                        statement.setString(9, event.sourceKey());
+                        statement.setLong(10, event.createdAt());
+                    });
         }
-        if (!hasSourceEvent(tenantId, sessionId, sourceKey)) {
-            appendEvent(tenantId, sessionId, turnId, projection.type(),
-                    projection.data(), projection.terminal(), sourceKey, now);
-        }
-        if (projection.terminal()) {
-            jdbc.update("UPDATE managed_agent_turn SET status = ?,"
-                            + " error_code = ?, error_message = ?,"
-                            + " completed_at = ?, updated_at = ?,"
-                            + " dispatch_owner = NULL,"
-                            + " dispatch_lease_until = NULL, version ="
-                            + " version + 1 WHERE tenant_id = ? AND"
-                            + " session_id = ? AND turn_id = ?",
-                    projection.terminalStatus(), projection.errorCode(),
-                    projection.errorMessage(), now, now, tenantId,
-                    sessionId, turnId);
-        }
+        return List.copyOf(records);
     }
 
     @Transactional
@@ -580,6 +664,19 @@ public class ManagedAgentStore {
                         "The Turn was not found."));
     }
 
+    private TurnRecord requireTurnForUpdate(String tenantId,
+            String sessionId, String turnId) {
+        try {
+            return jdbc.queryForObject("SELECT * FROM managed_agent_turn"
+                            + " WHERE tenant_id = ? AND session_id = ? AND"
+                            + " turn_id = ? FOR UPDATE",
+                    turnMapper, tenantId, sessionId, turnId);
+        } catch (EmptyResultDataAccessException error) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "turn_not_found",
+                    "The Turn was not found.");
+        }
+    }
+
     private void insertTurn(String tenantId, String sessionId,
             String turnId, String promptId, List<Map<String, Object>> input,
             String payloadDigest, long now) {
@@ -602,7 +699,7 @@ public class ManagedAgentStore {
                 sessionId, turnId, now);
     }
 
-    private void appendEvent(String tenantId, String sessionId,
+    private EventRecord appendEvent(String tenantId, String sessionId,
             String turnId, String type, Map<String, Object> data,
             boolean terminal, String sourceKey, long now) {
         Long sequence = jdbc.queryForObject("SELECT last_sequence FROM"
@@ -613,6 +710,9 @@ public class ManagedAgentStore {
             throw new IllegalStateException("Session sequence is unavailable");
         }
         long next = sequence + 1;
+        EventRecord event = new EventRecord(tenantId, sessionId, next,
+                publicId("evt"), turnId, type, data, terminal, sourceKey,
+                now);
         jdbc.update("UPDATE managed_agent_session SET last_sequence = ?,"
                         + " updated_at = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
@@ -621,8 +721,29 @@ public class ManagedAgentStore {
                         + " session_id, sequence_id, event_id, turn_id,"
                         + " event_type, data_json, terminal, source_key,"
                         + " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                tenantId, sessionId, next, publicId("evt"), turnId, type,
-                writeJson(data), terminal, sourceKey, now);
+                event.tenantId(), event.sessionId(), event.sequence(),
+                event.eventId(), event.turnId(), event.type(),
+                writeJson(event.data()), event.terminal(), event.sourceKey(),
+                event.createdAt());
+        publishAfterCommit(List.of(event));
+        return event;
+    }
+
+    private void publishAfterCommit(List<EventRecord> events) {
+        if (events.isEmpty()) {
+            return;
+        }
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            eventPublisher.publish(events);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        eventPublisher.publish(events);
+                    }
+                });
     }
 
     private boolean hasActiveTurn(String tenantId, String sessionId) {

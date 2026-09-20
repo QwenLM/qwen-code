@@ -134,9 +134,12 @@ public class ManagedAgentProperties {
     }
 
     public static class Events {
-        private Duration pollInterval = Duration.ofMillis(200);
+        private Duration pollInterval = Duration.ofSeconds(5);
         private Duration heartbeatInterval = Duration.ofSeconds(15);
         private Duration streamTimeout = Duration.ofMinutes(30);
+        private Duration batchInterval = Duration.ofMillis(75);
+        private int batchMaxEvents = 64;
+        private int batchMaxBytes = 65536;
 
         public Duration getPollInterval() {
             return pollInterval;
@@ -160,6 +163,30 @@ public class ManagedAgentProperties {
 
         public void setStreamTimeout(Duration streamTimeout) {
             this.streamTimeout = streamTimeout;
+        }
+
+        public Duration getBatchInterval() {
+            return batchInterval;
+        }
+
+        public void setBatchInterval(Duration batchInterval) {
+            this.batchInterval = batchInterval;
+        }
+
+        public int getBatchMaxEvents() {
+            return batchMaxEvents;
+        }
+
+        public void setBatchMaxEvents(int batchMaxEvents) {
+            this.batchMaxEvents = batchMaxEvents;
+        }
+
+        public int getBatchMaxBytes() {
+            return batchMaxBytes;
+        }
+
+        public void setBatchMaxBytes(int batchMaxBytes) {
+            this.batchMaxBytes = batchMaxBytes;
         }
     }
 

@@ -14,7 +14,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTurn;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
@@ -39,12 +39,12 @@ public class ManagedAgentService {
     private static final String CANCEL = "CANCEL_TURN";
     private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(
             "^[\\x21-\\x7e]{1,128}$");
-    private final ManagedAgentStore store;
+    private final AgentStateStore store;
     private final RequestDigests digests;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
 
-    public ManagedAgentService(ManagedAgentStore store,
+    public ManagedAgentService(AgentStateStore store,
             RequestDigests digests, HarnessCoordinator coordinator,
             HarnessConnector harness) {
         this.store = store;
@@ -257,13 +257,13 @@ public class ManagedAgentService {
                 turn.completedAt(), turn.errorCode(), null);
     }
 
-    private PublicEvent publicEvent(EventRecord event) {
+    PublicEvent publicEvent(EventRecord event) {
         return new PublicEvent(event.sequence(), event.eventId(),
                 event.sessionId(), event.turnId(), event.type(),
                 event.createdAt() / 1000, event.data(), event.terminal());
     }
 
-    private WebShellEvent webShellEvent(EventRecord event) {
+    WebShellEvent webShellEvent(EventRecord event) {
         return new WebShellEvent(event.sequence(), event.eventId(),
                 event.sessionId(), event.turnId(), event.type(),
                 event.createdAt(), event.data(), event.terminal());

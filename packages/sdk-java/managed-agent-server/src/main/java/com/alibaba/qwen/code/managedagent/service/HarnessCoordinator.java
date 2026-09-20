@@ -10,20 +10,27 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Admission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceStream;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import jakarta.annotation.PreDestroy;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -37,7 +44,7 @@ import org.springframework.stereotype.Component;
 public class HarnessCoordinator {
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
-    private final ManagedAgentStore store;
+    private final AgentStateStore store;
     private final HarnessConnector harness;
     private final HarnessEventProjector projector;
     private final RuntimeWarmer runtimeWarmer;
@@ -45,6 +52,9 @@ public class HarnessCoordinator {
     private final Clock clock;
     private final Duration leaseDuration;
     private final Duration renewInterval;
+    private final Duration batchInterval;
+    private final int batchMaxEvents;
+    private final int batchMaxBytes;
     private final String owner = UUID.randomUUID().toString();
     private final Set<String> active = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService renewer =
@@ -55,7 +65,7 @@ public class HarnessCoordinator {
                 return thread;
             });
 
-    public HarnessCoordinator(ManagedAgentStore store,
+    public HarnessCoordinator(AgentStateStore store,
             HarnessConnector harness, HarnessEventProjector projector,
             RuntimeWarmer runtimeWarmer, ExecutorService executor,
             Clock clock, ManagedAgentProperties properties) {
@@ -68,6 +78,14 @@ public class HarnessCoordinator {
         this.leaseDuration = properties.getDispatch().getLeaseDuration();
         this.renewInterval = properties.getDispatch()
                 .getLeaseRenewInterval();
+        this.batchInterval = properties.getEvents().getBatchInterval();
+        this.batchMaxEvents = properties.getEvents().getBatchMaxEvents();
+        this.batchMaxBytes = properties.getEvents().getBatchMaxBytes();
+        if (batchInterval.isNegative() || batchInterval.isZero()
+                || batchMaxEvents <= 0 || batchMaxBytes <= 0) {
+            throw new IllegalStateException(
+                    "Managed event batch limits must be positive");
+        }
     }
 
     public void dispatch(String tenantId, String sessionId, String turnId) {
@@ -207,29 +225,154 @@ public class HarnessCoordinator {
         try (SourceStream stream = harness.stream(
                 session.sessionId(), lastEventId,
                 current.harnessEventEpoch())) {
-            for (SourceEvent event = stream.next(); event != null;
-                    event = stream.next()) {
-                requireLease(leaseLost);
-                if (event.id() == null
-                        || (event.promptId() != null
-                                && !current.promptId().equals(
-                                        event.promptId()))) {
+            return consumeStream(current, attachment.bootId(), stream,
+                    leaseLost);
+        }
+    }
+
+    private boolean consumeStream(TurnRecord turn, String bootId,
+            SourceStream stream, AtomicBoolean leaseLost) {
+        int capacity = Math.max(128, batchMaxEvents * 2);
+        BlockingQueue<StreamItem> incoming =
+                new ArrayBlockingQueue<>(capacity);
+        Future<?> reader = executor.submit(() -> readStream(stream,
+                incoming));
+        List<HarnessEvent> batch = new ArrayList<>();
+        int batchBytes = 0;
+        long flushAt = 0;
+        boolean flushFirstVisibleText = true;
+        try {
+            while (true) {
+                StreamItem item = take(incoming, batch, flushAt);
+                if (item == null) {
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    batchBytes = 0;
+                    flushAt = 0;
                     continue;
                 }
-                ProjectedEvent projection = projector.project(event);
-                String sourceKey = attachment.bootId() + ":"
-                        + stream.eventEpoch() + ":" + event.id();
-                store.recordHarnessEvent(current.tenantId(),
-                        current.sessionId(), current.turnId(), owner,
-                        stream.eventEpoch(), event.id(), sourceKey,
+                if (item.error() != null) {
+                    throw item.error();
+                }
+                if (item.end()) {
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    throw new IllegalStateException(
+                            "Hosted Harness stream ended before a terminal"
+                                    + " event");
+                }
+                SourceEvent source = item.event();
+                requireLease(leaseLost);
+                if (source.id() == null
+                        || source.promptId() != null
+                        && !turn.promptId().equals(source.promptId())) {
+                    continue;
+                }
+                ProjectedEvent projection = projector.project(source);
+                HarnessEvent event = new HarnessEvent(source.id(),
+                        bootId + ":" + stream.eventEpoch() + ":"
+                                + source.id(),
                         projection);
-                if (projection != null && projection.terminal()) {
-                    return true;
+                if (projection != null && !isTextDelta(projection)) {
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    record(turn, stream.eventEpoch(), List.of(event),
+                            leaseLost);
+                    if (projection.terminal()) {
+                        return true;
+                    }
+                    batchBytes = 0;
+                    flushAt = 0;
+                    continue;
+                }
+                if (batch.isEmpty()) {
+                    flushAt = System.nanoTime()
+                            + batchInterval.toNanos();
+                }
+                batch.add(event);
+                batchBytes += estimatedBytes(projection);
+                if (projection != null && flushFirstVisibleText) {
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    flushFirstVisibleText = false;
+                    batchBytes = 0;
+                    flushAt = 0;
+                } else if (batch.size() >= batchMaxEvents
+                        || batchBytes >= batchMaxBytes) {
+                    flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    batchBytes = 0;
+                    flushAt = 0;
                 }
             }
+        } finally {
+            reader.cancel(true);
         }
-        throw new IllegalStateException(
-                "Hosted Harness stream ended before a terminal event");
+    }
+
+    private static void readStream(SourceStream stream,
+            BlockingQueue<StreamItem> incoming) {
+        try {
+            for (SourceEvent event = stream.next(); event != null;
+                    event = stream.next()) {
+                incoming.put(new StreamItem(event, null, false));
+            }
+            incoming.put(new StreamItem(null, null, true));
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException error) {
+            try {
+                incoming.put(new StreamItem(null, error, false));
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private StreamItem take(BlockingQueue<StreamItem> incoming,
+            List<HarnessEvent> batch, long flushAt) {
+        try {
+            if (batch.isEmpty()) {
+                return incoming.take();
+            }
+            long remaining = Math.max(1, flushAt - System.nanoTime());
+            return incoming.poll(remaining, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Managed event batching was interrupted", error);
+        }
+    }
+
+    private void flush(TurnRecord turn, String eventEpoch,
+            List<HarnessEvent> events, AtomicBoolean leaseLost) {
+        if (events.isEmpty()) {
+            return;
+        }
+        record(turn, eventEpoch, List.copyOf(events), leaseLost);
+        events.clear();
+    }
+
+    private void record(TurnRecord turn, String eventEpoch,
+            List<HarnessEvent> events, AtomicBoolean leaseLost) {
+        requireLease(leaseLost);
+        store.recordHarnessEvents(turn.tenantId(), turn.sessionId(),
+                turn.turnId(), owner, eventEpoch, events);
+    }
+
+    private static boolean isTextDelta(ProjectedEvent event) {
+        return "item.output_text.delta".equals(event.type())
+                || "item.reasoning.delta".equals(event.type());
+    }
+
+    private static int estimatedBytes(ProjectedEvent event) {
+        if (event == null) {
+            return 64;
+        }
+        Object text = event.data().get("text");
+        return 128 + (text instanceof String
+                ? ((String) text).getBytes(StandardCharsets.UTF_8).length
+                : event.data().toString().getBytes(StandardCharsets.UTF_8)
+                        .length);
+    }
+
+    private record StreamItem(SourceEvent event, RuntimeException error,
+            boolean end) {
     }
 
     private void warmRuntime(SessionRecord session, TurnRecord turn) {

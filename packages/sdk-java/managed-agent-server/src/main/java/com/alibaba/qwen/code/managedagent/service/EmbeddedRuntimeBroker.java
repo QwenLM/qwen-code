@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
@@ -31,7 +31,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerService service;
     private final RuntimeBrokerHttpServer server;
 
-    public EmbeddedRuntimeBroker(ManagedAgentStore store,
+    public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties) {
         ManagedAgentProperties.RuntimeBroker broker =
                 properties.getRuntimeBroker();

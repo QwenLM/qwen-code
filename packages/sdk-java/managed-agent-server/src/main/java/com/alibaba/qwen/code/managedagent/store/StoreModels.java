@@ -54,4 +54,8 @@ public final class StoreModels {
             boolean terminal, String terminalStatus, String errorCode,
             String errorMessage) {
     }
+
+    public record HarnessEvent(long sourceId, String sourceKey,
+            ProjectedEvent projection) {
+    }
 }

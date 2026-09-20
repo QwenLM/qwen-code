@@ -37,9 +37,12 @@ qwen:
       lease-duration: 60s
       lease-renew-interval: 20s
     events:
-      poll-interval: 200ms
+      poll-interval: 5s
       heartbeat-interval: 15s
       stream-timeout: 30m
+      batch-interval: 75ms
+      batch-max-events: 64
+      batch-max-bytes: 65536
     runtime-broker:
       enabled: ${QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED:false}
       host: ${QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST:127.0.0.1}
