@@ -5693,6 +5693,9 @@ export function registerSessionRoutes(
                   ...loaded,
                   displayName: published.displayName,
                   forkedFrom: published.forkedFrom,
+                  ...(published.sourceWarnings?.length
+                    ? { sourceWarnings: published.sourceWarnings }
+                    : {}),
                 };
                 runtime.generationGuard?.assertOpen();
                 const changed = await runtime.bridge.changeSessionCwd(

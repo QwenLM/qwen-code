@@ -218,6 +218,27 @@ describe('isValidCheckoutRef', () => {
 });
 
 describe('gitEnv (R12 env isolation)', () => {
+  it('preserves commit identity while scrubbing repository selectors', () => {
+    const env = gitEnv({
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+      GIT_SSL_CAINFO: '/operator/ca.pem',
+      GIT_SSL_CAPATH: '/operator/certs',
+      GIT_DIR: '/elsewhere/.git',
+    });
+    expect(env).toMatchObject({
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+      GIT_SSL_CAINFO: '/operator/ca.pem',
+      GIT_SSL_CAPATH: '/operator/certs',
+    });
+    expect(env['GIT_DIR']).toBeUndefined();
+  });
+
   it('strips repository-shaping variables from the child environment', () => {
     const env = gitEnv({
       PATH: '/usr/bin',
@@ -965,6 +986,31 @@ describe('gitPush push-remote precedence (R12)', () => {
 });
 
 describe('gitCommit', () => {
+  it('uses identity supplied by the operator environment', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitidentity-'));
+    tmpRoots.push(dir);
+    const env = {
+      ...hermeticEnv(),
+      GIT_AUTHOR_NAME: 'CI Bot',
+      GIT_AUTHOR_EMAIL: 'bot@example.invalid',
+      GIT_COMMITTER_NAME: 'CI Bot',
+      GIT_COMMITTER_EMAIL: 'bot@example.invalid',
+    };
+    execFileSync('git', ['init', '-q'], { cwd: dir, env });
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+    execFileSync('git', ['add', 'a.txt'], { cwd: dir, env });
+
+    await gitCommit(dir, 'first commit', undefined, env);
+
+    expect(
+      execFileSync('git', ['log', '-1', '--format=%ae'], {
+        cwd: dir,
+        env,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('bot@example.invalid');
+  });
+
   it('commits staged changes and returns sha and subject', async () => {
     const dir = makeRepo();
     fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');

@@ -174,6 +174,12 @@ describe('resolveSessionManagedGitCwd', () => {
       cwd: repo,
     });
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: repo });
+    execFileSync(
+      'git',
+      ['config', 'core.hooksPath', path.join(runtimeBase, 'empty-hooks')],
+      { cwd: repo },
+    );
     fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
     execFileSync('git', ['add', '.'], { cwd: repo });
     execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: repo });
@@ -538,6 +544,14 @@ describe('resolveSessionManagedGitCwd', () => {
     fs.mkdirSync(subdirectory, { recursive: true });
     fs.mkdirSync(nestedRepo);
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: nestedRepo });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+      cwd: nestedRepo,
+    });
+    execFileSync(
+      'git',
+      ['config', 'core.hooksPath', path.join(runtimeBase, 'empty-hooks')],
+      { cwd: nestedRepo },
+    );
     execFileSync('git', ['config', 'user.email', 'test@example.com'], {
       cwd: nestedRepo,
     });
@@ -573,6 +587,14 @@ describe('resolveSessionManagedGitCwd', () => {
     const worktree = path.join(nestedRepo, '.qwen', 'worktrees', 'task');
     fs.mkdirSync(nestedRepo, { recursive: true });
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: nestedRepo });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+      cwd: nestedRepo,
+    });
+    execFileSync(
+      'git',
+      ['config', 'core.hooksPath', path.join(runtimeBase, 'empty-hooks')],
+      { cwd: nestedRepo },
+    );
     execFileSync('git', ['config', 'user.email', 'test@example.com'], {
       cwd: nestedRepo,
     });
@@ -592,6 +614,85 @@ describe('resolveSessionManagedGitCwd', () => {
         workspaceCwd: workspace,
       } as unknown as WorkspaceRuntime),
     ).toBeNull();
+  });
+
+  it.each(['non-git', 'git'] as const)(
+    'rejects an external-gitdir worktree nested in a %s workspace',
+    async (kind) => {
+      const workspace =
+        kind === 'git'
+          ? repo
+          : fs.mkdtempSync(path.join(os.tmpdir(), 'non-git-workspace-'));
+      const nestedRepo = path.join(workspace, 'inner');
+      const metadata = path.join(runtimeBase, `metadata-${kind}`);
+      const worktree = path.join(nestedRepo, '.qwen', 'worktrees', 'task');
+      fs.mkdirSync(nestedRepo, { recursive: true });
+      try {
+        execFileSync(
+          'git',
+          ['init', '-q', '-b', 'main', `--separate-git-dir=${metadata}`],
+          { cwd: nestedRepo },
+        );
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: nestedRepo,
+        });
+        execFileSync(
+          'git',
+          ['config', 'core.hooksPath', path.join(runtimeBase, 'empty-hooks')],
+          { cwd: nestedRepo },
+        );
+        fs.writeFileSync(path.join(nestedRepo, 'base.txt'), 'base\n');
+        execFileSync('git', ['add', '.'], { cwd: nestedRepo });
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'base',
+          ],
+          { cwd: nestedRepo },
+        );
+        fs.mkdirSync(path.dirname(worktree), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-q', '-b', 'worktree-task', worktree, 'HEAD'],
+          { cwd: nestedRepo },
+        );
+
+        expect(
+          await resolveSessionManagedGitCwd(fakeReq(worktree), {
+            workspaceCwd: workspace,
+          } as unknown as WorkspaceRuntime),
+        ).toBeNull();
+      } finally {
+        if (kind === 'non-git') {
+          fs.rmSync(workspace, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it('accepts a linked worktree that is itself the registered workspace', async () => {
+    const worktree = path.join(repo, '.qwen', 'worktrees', 'registered');
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-q', '-b', 'worktree-registered', worktree, 'HEAD'],
+      { cwd: repo },
+    );
+    const runtime = { workspaceCwd: worktree } as unknown as WorkspaceRuntime;
+
+    expect(await resolveSessionManagedGitCwd(fakeReq(), runtime)).toBe(
+      worktree,
+    );
+    expect(await resolveSessionManagedGitCwd(fakeReq(worktree), runtime)).toBe(
+      fs.realpathSync(worktree),
+    );
   });
 
   it.each(['...', '..cache'])(

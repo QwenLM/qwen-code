@@ -86,6 +86,18 @@ const REMOTE_GIT_TRANSPORT_KEYS = new Set(
     key.toLowerCase(),
   ),
 );
+const GIT_METADATA_KEYS = new Set(
+  [
+    'GIT_AUTHOR_NAME',
+    'GIT_AUTHOR_EMAIL',
+    'GIT_AUTHOR_DATE',
+    'GIT_COMMITTER_NAME',
+    'GIT_COMMITTER_EMAIL',
+    'GIT_COMMITTER_DATE',
+    'GIT_SSL_CAINFO',
+    'GIT_SSL_CAPATH',
+  ].map((key) => key.toLowerCase()),
+);
 
 // Transport names git ships helpers for: `ext` is deny-by-default but
 // re-enableable from config files, `fd` is allowed by default and needs no
@@ -97,7 +109,8 @@ const HELPER_PROTOCOLS = new Set(['ext', 'fd']);
 export function gitEnv(
   base?: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> {
-  const env = { ...(base ?? process.env) };
+  const source = base ?? process.env;
+  const env = { ...source };
   for (const key of Object.keys(env)) {
     const normalizedKey = key.toLowerCase();
     if (
@@ -108,6 +121,9 @@ export function gitEnv(
     ) {
       delete env[key];
     }
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (GIT_METADATA_KEYS.has(key.toLowerCase())) env[key] = value;
   }
   // GIT_ALLOW_PROTOCOL is git's only protocol control that OVERRIDES
   // config-file policy, so deleting it outright would hand a

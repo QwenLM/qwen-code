@@ -47,18 +47,12 @@ function redactGitPaths(detail: string, cwd: string): string {
     roots.add(path.resolve(cwd).slice(0, managedWorktreeOffset));
   }
   let message = detail;
-  for (const root of [...roots].sort((a, b) => b.length - a.length)) {
-    message = message.split(root).join('<workspace>');
-  }
   // The gitdir git echoes for config writes can live OUTSIDE the cwd's
   // tree: a linked worktree shares the MAIN repository's .git dir (`could
   // not lock config file /srv/main/.git/config`), a submodule's gitdir
   // lives under the superproject's .git/modules. Probe from the git root
   // (it holds the .git file; cwd may be a sub-directory).
   const externals = gitExternalDirs(gitRoot ?? cwd);
-  for (const dir of externals.dirs) {
-    message = message.split(dir).join('<workspace>');
-  }
   for (const key of externals.truncatedKeys) {
     // A target longer than the read head: git echoes it whole, so the
     // head is redacted as a PREFIX up to the end of its whitespace-
@@ -66,6 +60,11 @@ function redactGitPaths(detail: string, cwd: string): string {
     // absolute path on the wire. Per-token discipline, matching the
     // /etc/gitconfig arm below.
     message = replaceTruncatedKey(message, key);
+  }
+  for (const root of [...roots, ...externals.dirs].sort(
+    (a, b) => b.length - a.length,
+  )) {
+    message = message.split(root).join('<workspace>');
   }
   // Inherited-scope config files git echoes by absolute path when one is
   // malformed or unreadable (`fatal: bad config line N in file <path>`,

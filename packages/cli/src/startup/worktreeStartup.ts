@@ -29,6 +29,7 @@ import {
   readWorktreeSessionMarker,
   replaceWorktreeSessionMarker,
   worktreeBranchForSlug,
+  WorktreeMarkerCommittedError,
   WorktreeSessionMarkerOwnerChangedError,
 } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import {
@@ -461,6 +462,7 @@ export async function persistStartupWorktreeSidecar(
             `persistStartupWorktreeSidecar: cannot verify marker owner ${observedOwner} at ` +
               `${path.join(context.worktreePath, '.qwen-session')}; preserving ownership`,
           );
+          return { overrodeResumedWorktree: false, sidecarPath };
         } else {
           await replaceWorktreeSessionMarker(
             context.worktreePath,
@@ -475,20 +477,29 @@ export async function persistStartupWorktreeSidecar(
     if (error instanceof WorktreeSessionMarkerOwnerChangedError) {
       throw new WorktreeOwnershipConflictError(observedOwner ?? '(unknown)');
     }
-    let markerAlreadyOwned = false;
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      const currentOwner = await readWorktreeSessionMarker(
-        context.worktreePath,
-      );
-      if (currentOwner !== null && currentOwner !== sessionId) {
-        throw new WorktreeOwnershipConflictError(currentOwner);
+    if (error instanceof WorktreeMarkerCommittedError) {
+      if (
+        error.committedOwner !== sessionId ||
+        (await readWorktreeSessionMarker(context.worktreePath)) !== sessionId
+      ) {
+        throw error;
       }
-      markerAlreadyOwned = currentOwner === sessionId;
+    } else {
+      let markerAlreadyOwned = false;
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        const currentOwner = await readWorktreeSessionMarker(
+          context.worktreePath,
+        );
+        if (currentOwner !== null && currentOwner !== sessionId) {
+          throw new WorktreeOwnershipConflictError(currentOwner);
+        }
+        markerAlreadyOwned = currentOwner === sessionId;
+      }
+      if (context.wasReattached && !markerAlreadyOwned) throw error;
+      debugLogger.warn(
+        `persistStartupWorktreeSidecar: marker update failed; persisting the sidecar without changing ownership: ${error}`,
+      );
     }
-    if (context.wasReattached && !markerAlreadyOwned) throw error;
-    debugLogger.warn(
-      `persistStartupWorktreeSidecar: marker update failed; persisting the sidecar without changing ownership: ${error}`,
-    );
   }
 
   await writeWorktreeSession(sidecarPath, {

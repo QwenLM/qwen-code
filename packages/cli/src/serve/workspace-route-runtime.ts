@@ -518,13 +518,32 @@ async function markerIsOwnedBy(
   }
 }
 
-async function isManagedWorktreePath(cwd: string): Promise<boolean> {
-  const commonDir = await resolveGitCommonDir(cwd);
-  if (commonDir === null) return false;
-  return isWithinRoot(
-    cwd,
-    path.join(path.dirname(commonDir), '.qwen', 'worktrees'),
-  );
+async function isLinkedWorktreeOrUnknown(cwd: string): Promise<boolean> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync(
+      'git',
+      ['rev-parse', '--git-common-dir', '--absolute-git-dir'],
+      { cwd, encoding: 'utf8', timeout: 30_000, env: gitEnv() },
+    ));
+  } catch (error) {
+    if (isGitProbeInfrastructureError(error)) throw error;
+    const stderr = (error as { stderr?: unknown }).stderr;
+    return !(
+      typeof stderr === 'string' && /not a git repository/i.test(stderr)
+    );
+  }
+  const [common, absolute] = stdout.trim().split('\n');
+  if (!common || !absolute) return true;
+  try {
+    const [commonDir, gitDir] = await Promise.all([
+      fsPromises.realpath(path.resolve(cwd, common)),
+      fsPromises.realpath(absolute),
+    ]);
+    return commonDir !== gitDir;
+  } catch {
+    return true;
+  }
 }
 
 export async function resolveSessionManagedGitCwd(
@@ -559,7 +578,7 @@ export async function resolveSessionManagedGitCwd(
       typeof stderr === 'string' &&
       /not a git repository/i.test(stderr) &&
       isWithinRoot(requested, workspace) &&
-      !(await isManagedWorktreePath(requested))
+      !(await isLinkedWorktreeOrUnknown(requested))
     ) {
       return requested;
     }
@@ -567,11 +586,12 @@ export async function resolveSessionManagedGitCwd(
   }
   const repoTop = await fsPromises.realpath(stdout.trim()).catch(() => null);
   if (repoTop === null) return null;
+  if (requested === workspace) return requested;
   const managedRoot = path.join(repoTop, '.qwen', 'worktrees');
   if (
     isWithinRoot(requested, workspace) &&
     !isWithinRoot(requested, managedRoot) &&
-    !(await isManagedWorktreePath(requested))
+    !(await isLinkedWorktreeOrUnknown(requested))
   ) {
     return requested;
   }

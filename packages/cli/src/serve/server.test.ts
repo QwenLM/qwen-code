@@ -26248,6 +26248,14 @@ describe('createServeApp', () => {
       const worktreeBranch = `worktree-${slug}`;
       try {
         await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await execFileAsync(
+          'git',
+          ['config', 'core.hooksPath', path.join(repo, '.git', 'empty-hooks')],
+          { cwd: repo },
+        );
         await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
         await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
         await execFileAsync(
@@ -26350,6 +26358,7 @@ describe('createServeApp', () => {
               sessionId: 'source-session',
               displayName: 'Source',
             },
+            sourceWarnings: ['Session sources could not be copied.'],
           }),
         );
         bridge.branchSession = branchSession;
@@ -26378,6 +26387,9 @@ describe('createServeApp', () => {
           currentCwd: worktreePath,
           worktree: { slug, path: worktreePath, branch: worktreeBranch },
         });
+        expect(res.body.sourceWarnings).toEqual([
+          'Session sources could not be copied.',
+        ]);
         expect(JSON.stringify(res.body)).not.toContain('private skill body');
         expect(
           res.body.compactedReplay[0].data.update._meta.availableSkills,
@@ -26545,6 +26557,18 @@ describe('createServeApp', () => {
         const worktreeBranch = `worktree-${slug}`;
         try {
           await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+          await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+            cwd: repo,
+          });
+          await execFileAsync(
+            'git',
+            [
+              'config',
+              'core.hooksPath',
+              path.join(repo, '.git', 'empty-hooks'),
+            ],
+            { cwd: repo },
+          );
           await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
           await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
           await execFileAsync(

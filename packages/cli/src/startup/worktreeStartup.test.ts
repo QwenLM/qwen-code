@@ -11,6 +11,32 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+const markerCloseFault = vi.hoisted(() => ({ enabled: false, failed: false }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      if (
+        markerCloseFault.enabled &&
+        String(args[0]).includes('.qwen-session.') &&
+        String(args[0]).endsWith('.tmp')
+      ) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close();
+          if (!markerCloseFault.failed) {
+            markerCloseFault.failed = true;
+            throw new Error('post-commit close failed');
+          }
+        };
+      }
+      return handle;
+    },
+  };
+});
+
 import {
   setupStartupWorktree,
   buildStartupWorktreeNotice,
@@ -505,15 +531,11 @@ describe('persistStartupWorktreeSidecar', () => {
         wasReattached: true,
       });
 
+      expect(result.overrodeResumedWorktree).toBe(false);
       expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
         'old-session',
       );
-      await expect(
-        readWorktreeSession(result.sidecarPath),
-      ).resolves.toMatchObject({
-        slug: setup.context.slug,
-        worktreePath: setup.context.worktreePath,
-      });
+      await expect(readWorktreeSession(result.sidecarPath)).resolves.toBeNull();
     },
   );
 
@@ -551,6 +573,36 @@ describe('persistStartupWorktreeSidecar', () => {
         config.getSessionService().getWorktreeSessionPath('new-session'),
       ),
     ).resolves.toBeNull();
+  });
+
+  it('persists a re-attached sidecar when marker close fails after commit', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+    const setup = await setupStartupWorktree('committed-marker');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    markerCloseFault.enabled = true;
+    markerCloseFault.failed = false;
+
+    let result: Awaited<ReturnType<typeof persistStartupWorktreeSidecar>>;
+    try {
+      result = await persistStartupWorktreeSidecar(
+        makeConfig(setup.context.worktreePath, 'new-session'),
+        { ...setup.context, wasReattached: true },
+      );
+    } finally {
+      markerCloseFault.enabled = false;
+    }
+    expect(markerCloseFault.failed).toBe(true);
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'new-session',
+    );
+    await expect(
+      readWorktreeSession(result.sidecarPath),
+    ).resolves.toMatchObject({
+      slug: setup.context.slug,
+      worktreePath: setup.context.worktreePath,
+    });
   });
 
   it('adopts a stale marker when re-attaching to an inactive owner', async () => {
