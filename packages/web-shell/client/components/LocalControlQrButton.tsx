@@ -13,6 +13,7 @@ import {
   writeClipboardText,
 } from '../utils/clipboard';
 import {
+  LocalControlRequestError,
   requestLocalControl,
   type LocalControlStatus,
 } from './local-control-api';
@@ -34,29 +35,80 @@ export function LocalControlQrButton({
   const { t } = useI18n();
   const { baseUrl, token } = useWorkspace();
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<LocalControlStatus>();
+  const [status, setStatus] = useState<
+    LocalControlStatus & { expiresAt?: number }
+  >();
   const [error, setError] = useState('');
+  const [address, setAddress] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  const [now, setNow] = useState(Date.now);
 
   useEffect(() => {
     if (!open) return;
     let ignore = false;
+    let refreshTimer: ReturnType<typeof setTimeout>;
     setStatus(undefined);
     setError('');
-    requestLocalControl(baseUrl, token, 'GET', '/workspace/local-control')
-      .then((next) => {
-        if (!ignore) setStatus(next);
-      })
-      .catch((failure: unknown) => {
-        if (!ignore) {
-          setError(
-            failure instanceof Error ? failure.message : String(failure),
+    const refresh = async () => {
+      try {
+        let next: LocalControlStatus;
+        try {
+          next = await requestLocalControl(
+            baseUrl,
+            token,
+            'POST',
+            '/web-shell/pairing',
+            address ? { address } : undefined,
+          );
+        } catch (failure) {
+          if (
+            !(failure instanceof LocalControlRequestError) ||
+            failure.status !== 404
+          )
+            throw failure;
+          next = { active: false };
+        }
+        if (!next.active) {
+          next = await requestLocalControl(
+            baseUrl,
+            token,
+            'GET',
+            '/workspace/local-control',
           );
         }
-      });
+        if (ignore) return;
+        const expiresAt =
+          next.expiresInMs === undefined
+            ? undefined
+            : Date.now() + next.expiresInMs;
+        setStatus({ ...next, expiresAt });
+        setNow(Date.now());
+        setError('');
+        if (expiresAt) {
+          refreshTimer = setTimeout(
+            () => void refresh(),
+            Math.max(1000, expiresAt - Date.now() - 15_000),
+          );
+        }
+      } catch (failure) {
+        if (ignore) return;
+        setError(failure instanceof Error ? failure.message : String(failure));
+        refreshTimer = setTimeout(() => void refresh(), 5000);
+      }
+    };
+    void refresh();
+    const clock = setInterval(() => setNow(Date.now()), 1000);
     return () => {
       ignore = true;
+      clearTimeout(refreshTimer);
+      clearInterval(clock);
     };
-  }, [open, baseUrl, token]);
+  }, [open, baseUrl, token, address, attempt]);
+
+  const remaining =
+    status?.expiresAt === undefined
+      ? undefined
+      : Math.max(0, Math.ceil((status.expiresAt - now) / 1000));
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -74,10 +126,17 @@ export function LocalControlQrButton({
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80">
         {!status && !error && <Spinner />}
-        {status?.active && status.url && (
+        {status?.active && status.url && remaining !== 0 && (
           <div className="flex flex-col items-center gap-3">
+            {remaining !== undefined && (
+              <p className="text-sm text-muted-foreground">
+                {t('localControl.expires', { seconds: remaining })}
+              </p>
+            )}
             {status.qrText && (
               <pre
+                // CJK font fallback gives block glyphs a different width than spaces.
+                lang="en"
                 aria-label={t('settings.localControl.qr')}
                 className="w-fit overflow-hidden rounded-lg bg-white p-3 font-mono text-[7px] leading-[7px] tracking-normal text-black select-none"
               >
@@ -100,8 +159,46 @@ export function LocalControlQrButton({
               <CopyIcon aria-hidden="true" />
               {t('common.copy')}
             </Button>
+            {remaining !== undefined && (
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  status.encrypted
+                    ? 'localControl.securePairing'
+                    : 'localControl.insecurePairing',
+                )}
+              </p>
+            )}
           </div>
         )}
+        {remaining === 0 && (
+          <p className="text-sm text-muted-foreground">
+            {t('localControl.expired')}
+          </p>
+        )}
+        {status?.active &&
+          !status.url &&
+          !status.urlRedacted &&
+          status.interfaces && (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm text-muted-foreground">
+                {t(
+                  status.interfaces.length
+                    ? 'settings.localControl.selectNetwork'
+                    : 'localControl.noNetwork',
+                )}
+              </p>
+              {status.interfaces.map((candidate) => (
+                <Button
+                  key={candidate.address}
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setAddress(candidate.address)}
+                >
+                  {candidate.interfaceName}: {candidate.address}
+                </Button>
+              ))}
+            </div>
+          )}
         {status?.active && !status.url && status.urlRedacted && (
           <p className="text-sm text-muted-foreground">
             {t('settings.localControl.urlRedacted')}
@@ -126,9 +223,18 @@ export function LocalControlQrButton({
           </div>
         )}
         {error && (
-          <p className="text-sm text-destructive" role="alert">
-            {error}
-          </p>
+          <div className="flex flex-col items-start gap-2">
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setAttempt((value) => value + 1)}
+            >
+              {t('localControl.retry')}
+            </Button>
+          </div>
         )}
       </PopoverContent>
     </Popover>

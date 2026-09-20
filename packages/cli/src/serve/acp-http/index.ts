@@ -5,6 +5,7 @@
  */
 
 import type { IncomingMessage } from 'node:http';
+import { TLSSocket } from 'node:tls';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -1639,6 +1640,11 @@ export function mountAcpHttp(
       const fromLoopback = isLoopbackSocket(socket);
       const upgradeListenerIdentity = listenerIdentityOfSocket(socket);
       const host = (req.headers['host'] ?? '').toLowerCase();
+      const authenticatedRemoteBind =
+        upgradeListenerIdentity.kind === 'primary' &&
+        opts.hostname !== undefined &&
+        !isLoopbackBind(opts.hostname) &&
+        !upgradeCredentials.isOpen(upgradeListenerIdentity);
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware
       // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
@@ -1660,7 +1666,7 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
-      } else if (fromLoopback) {
+      } else if (fromLoopback && !authenticatedRemoteBind) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -1713,7 +1719,17 @@ export function mountAcpHttp(
           const isListenerOrigin =
             upgradeListenerIdentity.kind === 'local-control' &&
             upgradeListenerIdentity.origin === origin.toLowerCase();
-          if (!isLoopbackOrigin && !isAllowlistedOrigin && !isListenerOrigin) {
+          const scheme =
+            socket instanceof TLSSocket && socket.encrypted ? 'https' : 'http';
+          const isPrimaryOrigin =
+            authenticatedRemoteBind &&
+            new URL(`${scheme}://${host}`).origin === origin;
+          if (
+            !isLoopbackOrigin &&
+            !isAllowlistedOrigin &&
+            !isListenerOrigin &&
+            !isPrimaryOrigin
+          ) {
             logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();

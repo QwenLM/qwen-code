@@ -30,7 +30,16 @@ vi.mock('./ui/popover', async () => {
   }
   function PopoverTrigger({ children }: { children?: ReactNode }) {
     const setOpen = useContext(OpenContext);
-    return createElement('div', { onClick: () => setOpen(true) }, children);
+    return createElement(
+      'div',
+      null,
+      createElement('div', { onClick: () => setOpen(true) }, children),
+      createElement(
+        'button',
+        { onClick: () => setOpen(false) },
+        'Close test popover',
+      ),
+    );
   }
   function PopoverContent({ children }: { children?: ReactNode }) {
     return createElement('div', { 'data-test-popover-content': '' }, children);
@@ -121,9 +130,84 @@ afterEach(() => {
     container.remove();
   }
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('LocalControlQrButton', () => {
+  it.each([-120_000, 120_000])(
+    'rotates with a %i ms browser clock offset and stops requesting on close',
+    async (offset) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.now() + offset);
+      vi.mocked(fetch).mockImplementation(async () =>
+        localControlResponse({
+          active: true,
+          url: `http://qwen.test/#pairing=${Date.now()}`,
+          qrText: 'DYNAMIC-QR',
+          expiresInMs: 60_000,
+        }),
+      );
+      mount();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Mobile access"]',
+          )!
+          .click(),
+      );
+      expect(container.textContent).toContain('Expires in 60s');
+      const firstUrl = container.textContent;
+      await act(async () => vi.advanceTimersByTimeAsync(45_000));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toBe(firstUrl);
+      const close = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Close test popover',
+      )!;
+      act(() => close.click());
+      await act(async () => vi.advanceTimersByTimeAsync(90_000));
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('hides expired QR material when refreshing fails', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=old',
+        qrText: 'OLD-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    vi.useFakeTimers();
+    mount();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Mobile access"]')!
+        .click(),
+    );
+    vi.mocked(fetch).mockRejectedValue(new Error('offline'));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(container.textContent).not.toContain('OLD-QR');
+    expect(container.textContent).not.toContain('#pairing=old');
+    expect(container.textContent).toContain('QR code expired');
+    expect(container.textContent).toContain('Retry');
+  });
+
+  it('falls back to Local Control on older daemons', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        localControlResponse({ error: 'not found' }, false, 404),
+      )
+      .mockResolvedValueOnce(localControlResponse({ active: false }));
+    mount();
+    await openPopover();
+    expect(fetch).toHaveBeenLastCalledWith(
+      new URL('http://127.0.0.1:8080/workspace/local-control'),
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(container.textContent).toContain('Local Control is off');
+  });
+
   it('shows the QR code and pairing URL when Local Control is active', async () => {
     vi.mocked(fetch).mockResolvedValue(
       localControlResponse({
@@ -136,8 +220,8 @@ describe('LocalControlQrButton', () => {
     await openPopover();
 
     expect(fetch).toHaveBeenCalledWith(
-      new URL('http://127.0.0.1:8080/workspace/local-control'),
-      expect.objectContaining({ method: 'GET' }),
+      new URL('http://127.0.0.1:8080/web-shell/pairing'),
+      expect.objectContaining({ method: 'POST' }),
     );
     expect(container.textContent).toContain('QR-TEXT');
     expect(container.textContent).toContain(

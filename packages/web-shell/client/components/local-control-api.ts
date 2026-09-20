@@ -19,6 +19,7 @@ export interface LocalControlStatus {
    */
   urlRedacted?: boolean;
   qrText?: string;
+  expiresInMs?: number;
   interfaceName?: string;
   address?: string;
   sleepInhibited?: boolean;
@@ -35,6 +36,7 @@ export class LocalControlRequestError extends Error {
   constructor(
     message: string,
     readonly payload?: LocalControlStatus,
+    readonly status?: number,
   ) {
     super(message);
     this.name = 'LocalControlRequestError';
@@ -72,6 +74,7 @@ export async function requestLocalControl(
         response.statusText ||
         `Local Control request failed (${response.status})`,
       payload,
+      response.status,
     );
   }
   return payload!;

@@ -55,6 +55,24 @@ async function mount(
     ),
   );
 }
+
+it('shows a recoverable pairing failure without probing or caching the invitation', async () => {
+  vi.stubGlobal('fetch', vi.fn());
+  await act(async () =>
+    root.render(
+      <StandaloneAuth
+        baseUrl="http://daemon.test"
+        pairingFailed
+        language="zh-CN"
+      >
+        {() => <p>Connected</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('请扫描新的二维码');
+  expect(fetch).not.toHaveBeenCalled();
+  expect(tokenInput()).not.toBeNull();
+});
 function stubResponse({
   status,
   retryAfter,
