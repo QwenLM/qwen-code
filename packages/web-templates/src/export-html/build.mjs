@@ -59,11 +59,13 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // it counted is no longer in the JS.
 //
 // The bundle pulls web-shell's built transcript entry, which carries the
-// whole i18n table, so every string the Web Shell adds anywhere lands here:
-// #12154 measured +5,396 bytes for eleven user-facing sentences in two
-// locales, which the cap above already has room for. Note a local build
-// reports a different figure (a worktree whose node_modules predate the
-// lockfile measures higher); the lane's number is the one these constants
+// whole i18n table, so every string the Web Shell adds anywhere lands here.
+// Measured for #12154 by building this bundle twice against the same tree,
+// once with its dictionary and once with main's: 1,996,101 against
+// 1,989,890, so +6,211 bytes for thirty-eight keys across two locales,
+// which the cap above has room for. Both figures are local and both are
+// higher than the lane's; it is the difference between them that is
+// comparable, and the lane's absolute number is what these constants
 // track.
 //
 // Keep the warning close to the measurement and the hard ceiling close above
