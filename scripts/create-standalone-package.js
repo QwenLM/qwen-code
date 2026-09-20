@@ -74,6 +74,8 @@ const DIST_REQUIRED_PATHS = [
   'cli-entry.js',
   'codeModeHost.js',
   'execution-worker.js',
+  'sandboxBwrapRelay.js',
+  'sandboxFileWorker.js',
   'chunks',
   'vendor',
   'bundled/qc-helper/docs',
@@ -88,6 +90,11 @@ const DIST_ALLOWED_ENTRIES = new Set([
   // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
   'fzfWorker.js',
   'codeModeHost.js',
+  // bwrap sandbox relay + confined file worker; esbuild emits them as
+  // standalone entries that sandboxAsset() resolves from the bundle dir at
+  // execution time (packages/core/src/sandbox/bwrap-execution.ts).
+  'sandboxBwrapRelay.js',
+  'sandboxFileWorker.js',
   'chunks',
   'vendor',
   'bundled',
