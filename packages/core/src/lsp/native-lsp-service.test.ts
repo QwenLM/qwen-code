@@ -2055,6 +2055,111 @@ describe('NativeLspService', () => {
     }
   });
 
+  test('rejects when every document symbol request fails', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-all-failed-'));
+    const filePath = path.join(tempDir, 'main.ts');
+    fs.writeFileSync(filePath, 'export const value = 1;\n', 'utf-8');
+    const uri = pathToFileURL(filePath).toString();
+    const requestError = new Error('server unavailable');
+    const connection = {
+      listen: vi.fn(),
+      send: vi.fn(),
+      onNotification: vi.fn(),
+      onRequest: vi.fn(),
+      request: vi.fn(async () => {
+        throw requestError;
+      }),
+      initialize: vi.fn(async () => ({})),
+      shutdown: vi.fn(async () => {}),
+      end: vi.fn(),
+    };
+    const handle = {
+      config: {
+        name: 'typescript',
+        languages: ['typescript'],
+        command: 'typescript-language-server',
+        args: ['--stdio'],
+        transport: 'stdio',
+      },
+      status: 'READY',
+      textDocumentSync: 1,
+      connection,
+    };
+    const serverManager = {
+      getHandles: () => new Map([['typescript', handle]]),
+      warmupTypescriptServer: vi.fn(),
+      isTypescriptServer: () => true,
+    };
+    const tempService = new NativeLspService(
+      new MockConfig() as unknown as CoreConfig,
+      new MockWorkspaceContext() as unknown as WorkspaceContext,
+      new EventEmitter(),
+      new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+      new MockIdeContextStore() as unknown as IdeContextStore,
+      { workspaceRoot: tempDir },
+    );
+    (tempService as unknown as { serverManager: unknown }).serverManager =
+      serverManager;
+
+    try {
+      await expect(tempService.documentSymbols(uri)).rejects.toBe(requestError);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('preserves empty document symbol results when a server responds', async () => {
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'lsp-empty-results-'),
+    );
+    const filePath = path.join(tempDir, 'main.ts');
+    fs.writeFileSync(filePath, 'export const value = 1;\n', 'utf-8');
+    const uri = pathToFileURL(filePath).toString();
+    const connection = {
+      listen: vi.fn(),
+      send: vi.fn(),
+      onNotification: vi.fn(),
+      onRequest: vi.fn(),
+      request: vi.fn(async () => []),
+      initialize: vi.fn(async () => ({})),
+      shutdown: vi.fn(async () => {}),
+      end: vi.fn(),
+    };
+    const handle = {
+      config: {
+        name: 'typescript',
+        languages: ['typescript'],
+        command: 'typescript-language-server',
+        args: ['--stdio'],
+        transport: 'stdio',
+      },
+      status: 'READY',
+      textDocumentSync: 1,
+      connection,
+    };
+    const serverManager = {
+      getHandles: () => new Map([['typescript', handle]]),
+      warmupTypescriptServer: vi.fn(),
+      isTypescriptServer: () => true,
+    };
+    const tempService = new NativeLspService(
+      new MockConfig() as unknown as CoreConfig,
+      new MockWorkspaceContext() as unknown as WorkspaceContext,
+      new EventEmitter(),
+      new MockFileDiscoveryService() as unknown as FileDiscoveryService,
+      new MockIdeContextStore() as unknown as IdeContextStore,
+      { workspaceRoot: tempDir },
+    );
+    (tempService as unknown as { serverManager: unknown }).serverManager =
+      serverManager;
+
+    try {
+      await expect(tempService.documentSymbols(uri)).resolves.toEqual([]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('should retry document operations for slow servers after fresh didOpen', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-retry-doc-'));
     const filePath = path.join(tempDir, 'Main.java');
