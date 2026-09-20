@@ -89,6 +89,8 @@ The SDK request and abort signal use the same deadline, and caller cancellation
 still aborts the read. Limit failures identify the relevant setting in the
 existing display warning without changing the successful tool result.
 
+SDK initialization and daemon settings read/write preserve both resource-limit
+fields, including finite values that the core later rounds and clamps.
 These settings travel with discovered tools through metadata enrichment,
 qualified names, per-session projections, and reconnect retries. They are part
 of the pool fingerprint so sessions with different resource policies cannot

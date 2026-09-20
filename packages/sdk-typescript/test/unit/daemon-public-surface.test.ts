@@ -730,7 +730,13 @@ describe('runtime MCP add/remove SDK types', () => {
   it('request type compiles', () => {
     const req: DaemonRuntimeMcpAddRequest = {
       name: 'echo',
-      config: { command: 'node', args: ['echo.js'], type: 'stdio' },
+      config: {
+        command: 'node',
+        args: ['echo.js'],
+        type: 'stdio',
+        appResourceMaxBytes: 4_194_304,
+        appResourceTimeoutMs: 30_000,
+      },
       displayName: 'Echo Server',
     };
     expect(req.name).toBe('echo');

@@ -19418,6 +19418,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    {
+      transport: 'stdio',
+      command: 'node',
+      appResourceMaxBytes: 0,
+      appResourceTimeoutMs: 150.9,
+    },
+    {
+      transport: 'http',
+      httpUrl: 'https://example.com/mcp',
+      appResourceMaxBytes: 4_194_304,
+      appResourceTimeoutMs: 30_000,
+    },
+    {
+      transport: 'sse',
+      url: 'https://example.com/sse',
+      appResourceMaxBytes: -1,
+      appResourceTimeoutMs: 200_000,
+    },
+  ])(
+    'preserves App resource limits through $transport settings read and write',
+    async (server) => {
+      const settings = makeCoreSettings();
+      (settings.user.settings as Record<string, unknown>)['mcpServers'] = {
+        apps: server,
+      };
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        const result = (await agent.extMethod('qwen/settings/getCore', {})) as {
+          user: {
+            mcpServers: Array<{
+              name: string;
+              server: Record<string, unknown>;
+            }>;
+          };
+        };
+        const entry = result.user.mcpServers.find(
+          (entry) => entry.name === 'apps',
+        );
+        expect(entry?.server).toMatchObject(server);
+        await agent.extMethod('qwen/settings/setMcpServer', {
+          scope: 'user',
+          name: 'apps',
+          server: entry?.server,
+        });
+        expect(settings.setValue).toHaveBeenCalledWith(
+          'User',
+          'mcpServers',
+          expect.objectContaining({
+            apps: expect.objectContaining({
+              appResourceMaxBytes: server.appResourceMaxBytes,
+              appResourceTimeoutMs: server.appResourceTimeoutMs,
+            }),
+          }),
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('qwen/settings/setMcpServer rejects invalid version negotiation', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
