@@ -140,6 +140,24 @@ describe('web-shell publish artifact verifier', () => {
     expect(result.stderr).toBe('');
   });
 
+  it('refuses a wildcard target under a literal exports key', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, {
+        '.': { import: './dist/index.js' },
+        './foo': './dist/*.js',
+      });
+      write(fixture, 'dist/index.js', 'export default 1;\n');
+      write(fixture, 'dist/bar.js', 'export default 2;\n');
+    });
+
+    // Node gives `*` pattern meaning only when the exports KEY carries it: a
+    // wildcard target under a literal key resolves to a literal path, so the
+    // verifier must keep the literal checks for it instead of pattern-matching
+    // it against whatever the package happens to contain.
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('missing ./dist/*.js');
+  });
+
   it('still fails closed on a wildcard pattern that matches nothing packed', () => {
     const result = runVerifier((fixture) => {
       declarePackage(fixture, {
@@ -147,6 +165,10 @@ describe('web-shell publish artifact verifier', () => {
         './*': './dist/absent/*',
       });
       write(fixture, 'dist/index.js', 'export default 1;\n');
+      // On disk but not packed: `dist/*.js` does not cross a `/`, so this
+      // keeps the fixture discriminating between the packed-list oracle and a
+      // filesystem-existence oracle.
+      write(fixture, 'dist/absent/sdk.js', 'export const sdk = 1;\n');
     });
 
     expect(result.status).toBe(1);

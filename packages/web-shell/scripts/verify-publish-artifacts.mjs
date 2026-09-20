@@ -34,15 +34,26 @@ try {
 // membership check have to be reduced to that form first.
 const packPath = (target) => relative(root, target).split(sep).join('/');
 
-const entryPoints = Object.values(pkg.exports).flatMap((entry) =>
-  typeof entry === 'string' ? [entry] : Object.values(entry),
+const entryPoints = Object.entries(pkg.exports).flatMap(([key, entry]) =>
+  typeof entry === 'string'
+    ? [[key, entry]]
+    : Object.values(entry).map((value) => [key, value]),
 );
-for (const entry of new Set(entryPoints)) {
+const seen = new Set();
+for (const [key, entry] of entryPoints) {
+  // `[key, entry]` pairs are fresh arrays, so identity dedup (`new Set` over
+  // the pairs) would never fire; dedupe on the key/target text instead.
+  if (seen.has(key + '\0' + entry)) continue;
+  seen.add(key + '\0' + entry);
   // A subpath pattern (`"./*": "./dist/*"`) names a family of files, not a
   // path: statting it literally would report a false `missing`. Hold the
   // family against the packed list instead — at least one packed file must
   // match, or the manifest advertises subpaths the tarball does not ship.
-  if (entry.includes('*')) {
+  // Node gives `*` pattern meaning only when the KEY carries it, so gate on
+  // both sides: a `*` target under a literal key is a literal path and keeps
+  // the checks below, and a pattern key with a literal target still needs the
+  // relative-import chunk scan the `continue` would skip.
+  if (key.includes('*') && entry.includes('*')) {
     if (packed) {
       const pattern = packPath(join(root, entry))
         .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
