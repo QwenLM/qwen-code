@@ -5,6 +5,7 @@ import {
 } from './java-managed-agent-client';
 import {
   projectJavaAgentEvent,
+  projectJavaAgentItem,
   toTimestamp,
 } from './java-managed-agent-event-projector';
 import type {
@@ -55,11 +56,15 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
+      const itemEvents = (transcript.items ?? []).flatMap(projectJavaAgentItem);
+      const tailEvents = transcript.events.flatMap((event) => {
+        const projected = projectJavaAgentEvent(event);
+        return projected ? [projected] : [];
+      });
       return {
-        events: transcript.events.flatMap((event) => {
-          const projected = projectJavaAgentEvent(event);
-          return projected ? [projected] : [];
-        }),
+        events: [...itemEvents, ...tailEvents].sort(
+          (left, right) => left.id - right.id,
+        ),
         olderCursor: transcript.olderCursor,
         lastEventId: transcript.lastSequence,
       };

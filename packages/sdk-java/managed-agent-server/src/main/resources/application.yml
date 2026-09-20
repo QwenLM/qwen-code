@@ -41,6 +41,7 @@ qwen:
       heartbeat-interval: 15s
       stream-timeout: 30m
       batch-interval: 75ms
+      materialize-interval: 100ms
       batch-max-events: 64
       batch-max-bytes: 65536
     runtime-broker:

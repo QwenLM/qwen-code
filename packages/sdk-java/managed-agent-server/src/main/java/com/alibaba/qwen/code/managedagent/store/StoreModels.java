@@ -46,6 +46,30 @@ public final class StoreModels {
     public record EventPage(List<EventRecord> events, boolean hasMore) {
     }
 
+    public record ItemPartRecord(String partId, String type, String text,
+            long firstSequence, long lastSequence, long createdAt,
+            long updatedAt, long revision) {
+    }
+
+    public record ItemRecord(String tenantId, String sessionId,
+            String itemId, String turnId, String type, String role,
+            String status, Map<String, Object> attributes,
+            long firstSequence, long lastSequence, long createdAt,
+            long updatedAt, long revision, List<ItemPartRecord> content) {
+    }
+
+    public record SnapshotRecord(String tenantId, String sessionId,
+            long version, long coveredSequence, List<ItemRecord> items,
+            long createdAt, long updatedAt) {
+    }
+
+    public record MaterializationTarget(String tenantId, String sessionId) {
+    }
+
+    public record MaterializationResult(boolean advanced,
+            long coveredSequence) {
+    }
+
     public record DispatchTarget(String tenantId, String sessionId,
             String turnId) {
     }

@@ -7,16 +7,25 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -38,6 +47,10 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final TypeReference<Map<String, Object>> MAP_TYPE =
             new TypeReference<>() {
             };
+    private static final TypeReference<List<ItemRecord>> ITEMS_TYPE =
+            new TypeReference<>() {
+            };
+    private static final String MESSAGE_PROJECTION = "message_projection";
     private static final List<String> ACTIVE_TURN_STATES = List.of(
             "ACCEPTED", "RUNNING", "CANCELLING");
     private final JdbcTemplate jdbc;
@@ -86,6 +99,30 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getBoolean("terminal"),
                     result.getString("source_key"),
                     result.getLong("created_at"));
+    private final RowMapper<ItemRow> itemMapper = (result, row) ->
+            new ItemRow(result.getString("tenant_id"),
+                    result.getString("session_id"),
+                    result.getString("item_id"),
+                    result.getString("turn_id"),
+                    result.getString("item_type"),
+                    result.getString("item_role"),
+                    result.getString("item_status"),
+                    readMap(result.getString("attributes_json")),
+                    result.getLong("first_sequence"),
+                    result.getLong("last_sequence"),
+                    result.getLong("created_at"),
+                    result.getLong("updated_at"),
+                    result.getLong("revision"));
+    private final RowMapper<ItemPartRow> partMapper = (result, row) ->
+            new ItemPartRow(result.getString("item_id"),
+                    new ItemPartRecord(result.getString("part_id"),
+                            result.getString("part_type"),
+                            result.getString("part_text"),
+                            result.getLong("first_sequence"),
+                            result.getLong("last_sequence"),
+                            result.getLong("created_at"),
+                            result.getLong("updated_at"),
+                            result.getLong("revision")));
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
             Clock clock, CommittedEventPublisher eventPublisher) {
@@ -109,6 +146,11 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " session_id, agent_id, title, status, created_at,"
                         + " updated_at) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)",
                 tenantId, sessionId, agentId, title, now, now);
+        jdbc.update("INSERT INTO managed_agent_consumer_progress"
+                        + " (tenant_id, session_id, consumer_name,"
+                        + " covered_sequence, updated_at) VALUES"
+                        + " (?, ?, ?, 0, ?)",
+                tenantId, sessionId, MESSAGE_PROJECTION, now);
         if (turnId != null) {
             insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
@@ -119,7 +161,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {
             appendEvent(tenantId, sessionId, turnId, "turn.accepted",
-                    Map.of("turnId", turnId), false, null, now);
+                    acceptedData(turnId, input), false, null, now);
         }
         return new Admission(sessionId, turnId, false, true);
     }
@@ -150,7 +192,7 @@ public class ManagedAgentStore implements AgentStateStore {
         insertCommand(tenantId, operation, idempotencyKey, requestDigest,
                 sessionId, turnId, now);
         appendEvent(tenantId, sessionId, turnId, "turn.accepted",
-                Map.of("turnId", turnId), false, null, now);
+                acceptedData(turnId, input), false, null, now);
         return new Admission(sessionId, turnId, false, true);
     }
 
@@ -304,6 +346,19 @@ public class ManagedAgentStore implements AgentStateStore {
                 tenantId, sessionId, afterSequence, limit);
     }
 
+    public List<EventRecord> findControlEvents(String tenantId,
+            String sessionId, long throughSequence) {
+        requireSession(tenantId, sessionId);
+        return jdbc.query("SELECT * FROM managed_agent_event WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " sequence_id <= ? AND event_type NOT IN"
+                        + " ('turn.accepted', 'item.output_text.delta',"
+                        + " 'item.reasoning.delta',"
+                        + " 'item.tool_call.updated') ORDER BY sequence_id"
+                        + " ASC",
+                eventMapper, tenantId, sessionId, throughSequence);
+    }
+
     public EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit) {
         requireSession(tenantId, sessionId);
@@ -326,6 +381,99 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         java.util.Collections.reverse(rows);
         return new EventPage(List.copyOf(rows), hasMore);
+    }
+
+    public Optional<SnapshotRecord> findSnapshot(String tenantId,
+            String sessionId) {
+        requireSession(tenantId, sessionId);
+        List<SnapshotRecord> rows = jdbc.query(
+                "SELECT * FROM managed_agent_snapshot WHERE tenant_id = ?"
+                        + " AND session_id = ?",
+                (result, row) -> new SnapshotRecord(
+                        result.getString("tenant_id"),
+                        result.getString("session_id"),
+                        result.getLong("snapshot_version"),
+                        result.getLong("covered_sequence"),
+                        readItems(result.getString("items_json")),
+                        result.getLong("created_at"),
+                        result.getLong("updated_at")),
+                tenantId, sessionId);
+        return rows.stream().findFirst();
+    }
+
+    public List<MaterializationTarget> findMaterializationTargets(int limit) {
+        return jdbc.query("SELECT s.tenant_id, s.session_id FROM"
+                        + " managed_agent_session s JOIN"
+                        + " managed_agent_consumer_progress p ON"
+                        + " p.tenant_id = s.tenant_id AND p.session_id ="
+                        + " s.session_id AND p.consumer_name = ? WHERE"
+                        + " s.last_sequence > p.covered_sequence ORDER BY"
+                        + " p.updated_at ASC LIMIT ?",
+                (result, row) -> new MaterializationTarget(
+                        result.getString("tenant_id"),
+                        result.getString("session_id")),
+                MESSAGE_PROJECTION, limit);
+    }
+
+    @Transactional
+    public MaterializationResult materializeNextBatch(String tenantId,
+            String sessionId, int limit) {
+        requireSession(tenantId, sessionId);
+        Long covered = jdbc.queryForObject("SELECT covered_sequence FROM"
+                        + " managed_agent_consumer_progress WHERE tenant_id"
+                        + " = ? AND session_id = ? AND consumer_name = ?"
+                        + " FOR UPDATE",
+                Long.class, tenantId, sessionId, MESSAGE_PROJECTION);
+        if (covered == null) {
+            throw new IllegalStateException(
+                    "Message projection progress is unavailable");
+        }
+        List<EventRecord> events = jdbc.query("SELECT * FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? AND sequence_id > ? ORDER BY"
+                        + " sequence_id ASC LIMIT ?",
+                eventMapper, tenantId, sessionId, covered, limit);
+        if (events.isEmpty()) {
+            return new MaterializationResult(false, covered);
+        }
+        long expected = covered + 1;
+        for (EventRecord event : events) {
+            if (event.sequence() != expected) {
+                throw new IllegalStateException(
+                        "Message projection event sequence has a gap");
+            }
+            materializeEvent(event);
+            expected++;
+        }
+        long nextCovered = events.get(events.size() - 1).sequence();
+        long now = clock.millis();
+        jdbc.update("UPDATE managed_agent_consumer_progress SET"
+                        + " covered_sequence = ?, updated_at = ? WHERE"
+                        + " tenant_id = ? AND session_id = ? AND"
+                        + " consumer_name = ?",
+                nextCovered, now, tenantId, sessionId, MESSAGE_PROJECTION);
+        List<ItemRecord> items = allItems(tenantId, sessionId);
+        List<Long> versions = jdbc.query("SELECT snapshot_version FROM"
+                        + " managed_agent_snapshot WHERE tenant_id = ? AND"
+                        + " session_id = ? FOR UPDATE",
+                (result, row) -> result.getLong("snapshot_version"),
+                tenantId, sessionId);
+        if (versions.isEmpty()) {
+            jdbc.update("INSERT INTO managed_agent_snapshot (tenant_id,"
+                            + " session_id, snapshot_version,"
+                            + " covered_sequence, items_json, created_at,"
+                            + " updated_at) VALUES (?, ?, 1, ?, ?, ?, ?)",
+                    tenantId, sessionId, nextCovered, writeJson(items), now,
+                    now);
+        } else {
+            jdbc.update("UPDATE managed_agent_snapshot SET"
+                            + " snapshot_version = ?, covered_sequence = ?,"
+                            + " items_json = ?, updated_at = ? WHERE"
+                            + " tenant_id = ? AND session_id = ?",
+                    versions.get(0) + 1, nextCovered, writeJson(items), now,
+                    tenantId, sessionId);
+        }
+        return new MaterializationResult(true, nextCovered);
     }
 
     public List<DispatchTarget> findDispatchable(long now, int limit) {
@@ -644,6 +792,250 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The Session was not found."));
     }
 
+    private void materializeEvent(EventRecord event) {
+        switch (event.type()) {
+            case "turn.accepted" -> materializeInput(event);
+            case "item.output_text.delta" -> materializeText(event,
+                    "output_text");
+            case "item.reasoning.delta" -> materializeText(event,
+                    "reasoning");
+            case "item.tool_call.updated" -> materializeTool(event);
+            case "turn.completed", "turn.failed", "turn.cancelled" ->
+                    settleTurnItems(event);
+            default -> {
+                return;
+            }
+        }
+    }
+
+    private void materializeInput(EventRecord event) {
+        List<Map<String, Object>> input = inputData(event.data().get("input"));
+        if (input.isEmpty()) {
+            input = requireTurn(event.tenantId(), event.sessionId(),
+                    event.turnId()).input();
+        }
+        String itemId = string(event.data().get("itemId"));
+        if (itemId == null) {
+            itemId = inputItemId(event.turnId());
+        }
+        upsertItem(event, itemId, "message", "user", "completed",
+                Map.of());
+        for (int index = 0; index < input.size(); index++) {
+            Map<String, Object> block = input.get(index);
+            String text = string(block.get("text"));
+            if (text == null) {
+                continue;
+            }
+            replacePart(event, itemId,
+                    "part_" + event.turnId() + "_input_" + index,
+                    "input_text", text);
+        }
+    }
+
+    private void materializeText(EventRecord event, String partType) {
+        String text = string(event.data().get("text"));
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        String itemId = string(event.data().get("itemId"));
+        if (itemId == null) {
+            itemId = "item_" + event.turnId() + "_assistant";
+        }
+        String partId = string(event.data().get("contentPartId"));
+        if (partId == null) {
+            partId = "part_" + event.turnId() + "_" + partType;
+        }
+        upsertItem(event, itemId, "message", "assistant", "in_progress",
+                Map.of());
+        appendPart(event, itemId, partId, partType, text);
+    }
+
+    private void materializeTool(EventRecord event) {
+        String itemId = string(event.data().get("itemId"));
+        if (itemId == null) {
+            String callId = string(event.data().get("toolCallId"));
+            if (callId == null) {
+                callId = string(event.data().get("callId"));
+            }
+            String identity = callId == null
+                    ? event.turnId() + ":sequence:" + event.sequence()
+                    : event.turnId() + ":" + callId;
+            itemId = "item_tool_" + UUID.nameUUIDFromBytes(
+                    identity.getBytes(StandardCharsets.UTF_8));
+        }
+        String sourceStatus = string(event.data().get("status"));
+        String status = switch (sourceStatus == null ? ""
+                : sourceStatus.toLowerCase()) {
+            case "completed", "success" -> "completed";
+            case "failed" -> "failed";
+            case "cancelled" -> "cancelled";
+            default -> "in_progress";
+        };
+        Map<String, Object> attributes = existingAttributes(event, itemId);
+        attributes.putAll(event.data());
+        attributes.remove("itemId");
+        upsertItem(event, itemId, "tool_call", "assistant", status,
+                Map.copyOf(attributes));
+    }
+
+    private Map<String, Object> existingAttributes(EventRecord event,
+            String itemId) {
+        List<String> rows = jdbc.query("SELECT attributes_json FROM"
+                        + " managed_agent_item WHERE tenant_id = ? AND"
+                        + " session_id = ? AND item_id = ?",
+                (result, row) -> result.getString("attributes_json"),
+                event.tenantId(), event.sessionId(), itemId);
+        return rows.isEmpty() ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(readMap(rows.get(0)));
+    }
+
+    private void settleTurnItems(EventRecord event) {
+        String status = switch (event.type()) {
+            case "turn.completed" -> "completed";
+            case "turn.cancelled" -> "cancelled";
+            default -> "failed";
+        };
+        jdbc.update("UPDATE managed_agent_item SET item_status = ?,"
+                        + " last_sequence = CASE WHEN last_sequence < ?"
+                        + " THEN ? ELSE last_sequence END, updated_at = ?,"
+                        + " revision = revision + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND item_status"
+                        + " = 'in_progress'",
+                status, event.sequence(), event.sequence(),
+                event.createdAt(), event.tenantId(), event.sessionId(),
+                event.turnId());
+    }
+
+    private void upsertItem(EventRecord event, String itemId, String type,
+            String role, String status, Map<String, Object> attributes) {
+        int updated = jdbc.update("UPDATE managed_agent_item SET"
+                        + " item_status = ?, attributes_json = ?,"
+                        + " last_sequence = ?, updated_at = ?, revision ="
+                        + " revision + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ? AND item_id = ?",
+                status, writeJson(attributes), event.sequence(),
+                event.createdAt(), event.tenantId(), event.sessionId(),
+                itemId);
+        if (updated == 0) {
+            jdbc.update("INSERT INTO managed_agent_item (tenant_id,"
+                            + " session_id, item_id, turn_id, item_type,"
+                            + " item_role, item_status, attributes_json,"
+                            + " first_sequence, last_sequence, created_at,"
+                            + " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " ?, ?, ?, ?)",
+                    event.tenantId(), event.sessionId(), itemId,
+                    event.turnId(), type, role, status,
+                    writeJson(attributes), event.sequence(), event.sequence(),
+                    event.createdAt(), event.createdAt());
+        }
+    }
+
+    private void replacePart(EventRecord event, String itemId,
+            String partId, String type, String text) {
+        int updated = jdbc.update("UPDATE managed_agent_item_part SET"
+                        + " part_text = ?, last_sequence = ?, updated_at = ?,"
+                        + " revision = revision + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND item_id = ? AND part_id = ?",
+                text, event.sequence(), event.createdAt(), event.tenantId(),
+                event.sessionId(), itemId, partId);
+        if (updated == 0) {
+            insertPart(event, itemId, partId, type, text);
+        }
+    }
+
+    private void appendPart(EventRecord event, String itemId,
+            String partId, String type, String text) {
+        int updated = jdbc.update("UPDATE managed_agent_item_part SET"
+                        + " part_text = CONCAT(part_text, ?),"
+                        + " last_sequence = ?, updated_at = ?, revision ="
+                        + " revision + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ? AND item_id = ? AND part_id = ?",
+                text, event.sequence(), event.createdAt(), event.tenantId(),
+                event.sessionId(), itemId, partId);
+        if (updated == 0) {
+            insertPart(event, itemId, partId, type, text);
+        }
+    }
+
+    private void insertPart(EventRecord event, String itemId,
+            String partId, String type, String text) {
+        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
+                        + " session_id, item_id, part_id, part_type,"
+                        + " part_text, first_sequence, last_sequence,"
+                        + " created_at, updated_at) VALUES (?, ?, ?, ?, ?,"
+                        + " ?, ?, ?, ?, ?)",
+                event.tenantId(), event.sessionId(), itemId, partId, type,
+                text, event.sequence(), event.sequence(), event.createdAt(),
+                event.createdAt());
+    }
+
+    private List<ItemRecord> allItems(String tenantId, String sessionId) {
+        return withParts(jdbc.query("SELECT * FROM managed_agent_item WHERE"
+                        + " tenant_id = ? AND session_id = ? ORDER BY"
+                        + " first_sequence ASC",
+                itemMapper, tenantId, sessionId));
+    }
+
+    private List<ItemRecord> withParts(List<ItemRow> rows) {
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+        ItemRow first = rows.get(0);
+        String placeholders = String.join(", ",
+                Collections.nCopies(rows.size(), "?"));
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(first.tenantId());
+        arguments.add(first.sessionId());
+        rows.forEach(row -> arguments.add(row.itemId()));
+        List<ItemPartRow> partRows = jdbc.query("SELECT * FROM"
+                        + " managed_agent_item_part WHERE tenant_id = ? AND"
+                        + " session_id = ? AND item_id IN (" + placeholders
+                        + ") ORDER BY first_sequence ASC",
+                partMapper, arguments.toArray());
+        Map<String, List<ItemPartRecord>> parts = new HashMap<>();
+        for (ItemPartRow row : partRows) {
+            parts.computeIfAbsent(row.itemId(), ignored -> new ArrayList<>())
+                    .add(row.part());
+        }
+        return rows.stream().map(row -> row.toRecord(
+                List.copyOf(parts.getOrDefault(row.itemId(), List.of()))))
+                .toList();
+    }
+
+    private static Map<String, Object> acceptedData(String turnId,
+            List<Map<String, Object>> input) {
+        return Map.of("turnId", turnId, "itemId", inputItemId(turnId),
+                "input", input);
+    }
+
+    private static String inputItemId(String turnId) {
+        return "item_" + turnId + "_input";
+    }
+
+    private static String string(Object value) {
+        return value instanceof String ? (String) value : null;
+    }
+
+    private static List<Map<String, Object>> inputData(Object value) {
+        if (!(value instanceof List<?> values)) {
+            return List.of();
+        }
+        List<Map<String, Object>> input = new ArrayList<>();
+        for (Object item : values) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            Map<String, Object> block = new LinkedHashMap<>();
+            raw.forEach((key, entry) -> {
+                if (key instanceof String name) {
+                    block.put(name, entry);
+                }
+            });
+            input.add(Map.copyOf(block));
+        }
+        return List.copyOf(input);
+    }
+
     private SessionRecord requireSessionForUpdate(String tenantId,
             String sessionId) {
         try {
@@ -799,6 +1191,15 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    private List<ItemRecord> readItems(String value) {
+        try {
+            return objectMapper.readValue(value, ITEMS_TYPE);
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException("Stored snapshot is invalid",
+                    error);
+        }
+    }
+
     private static Long nullableLong(java.sql.ResultSet result, String name)
             throws java.sql.SQLException {
         long value = result.getLong(name);
@@ -808,5 +1209,20 @@ public class ManagedAgentStore implements AgentStateStore {
     private static String publicId(String prefix) {
         return prefix + "_" + UUID.randomUUID().toString()
                 .replace("-", "");
+    }
+
+    private record ItemRow(String tenantId, String sessionId, String itemId,
+            String turnId, String type, String role, String status,
+            Map<String, Object> attributes, long firstSequence,
+            long lastSequence, long createdAt, long updatedAt,
+            long revision) {
+        private ItemRecord toRecord(List<ItemPartRecord> content) {
+            return new ItemRecord(tenantId, sessionId, itemId, turnId, type,
+                    role, status, attributes, firstSequence, lastSequence,
+                    createdAt, updatedAt, revision, content);
+        }
+    }
+
+    private record ItemPartRow(String itemId, ItemPartRecord part) {
     }
 }

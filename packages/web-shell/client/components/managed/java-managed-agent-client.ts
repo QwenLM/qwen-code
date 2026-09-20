@@ -40,6 +40,29 @@ export interface JavaAgentEvent {
   terminal: boolean;
 }
 
+export interface JavaAgentContentPart {
+  partId: string;
+  type: 'input_text' | 'output_text' | 'reasoning' | string;
+  text: string;
+  firstSequence: number;
+  lastSequence: number;
+}
+
+export interface JavaAgentItem {
+  itemId: string;
+  sessionId: string;
+  turnId: string;
+  type: 'message' | 'tool_call' | string;
+  role?: string;
+  status: string;
+  content: JavaAgentContentPart[];
+  attributes: Record<string, unknown>;
+  firstSequence: number;
+  lastSequence: number;
+  createdAt: JavaAgentDate;
+  updatedAt: JavaAgentDate;
+}
+
 export interface JavaAgentCommandAdmission {
   sessionId: string;
   turnId?: string;
@@ -54,7 +77,9 @@ export interface JavaAgentCursorPage<T> {
 }
 
 export interface JavaAgentTranscript {
+  items?: JavaAgentItem[];
   events: JavaAgentEvent[];
+  coveredSequence?: number;
   olderCursor?: string;
   hasMore: boolean;
   lastSequence: number;

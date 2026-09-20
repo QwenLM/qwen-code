@@ -266,7 +266,8 @@ public class HarnessCoordinator {
                         && !turn.promptId().equals(source.promptId())) {
                     continue;
                 }
-                ProjectedEvent projection = projector.project(source);
+                ProjectedEvent projection = projector.project(source,
+                        turn.turnId());
                 HarnessEvent event = new HarnessEvent(source.id(),
                         bootId + ":" + stream.eventEpoch() + ":"
                                 + source.id(),

@@ -57,7 +57,8 @@ import org.springframework.transaction.support.TransactionTemplate;
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
-        "qwen.managed-agent.events.poll-interval=10ms"
+        "qwen.managed-agent.events.poll-interval=10ms",
+        "qwen.managed-agent.events.materialize-interval=10ms"
 })
 @AutoConfigureMockMvc
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
@@ -236,33 +237,45 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.activeTurn.status")
                         .value("completed"));
 
-        MvcResult newest = mvc.perform(post(
-                        "/api/agent/web-shell/v1/transcript/query")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionId\":\"" + sessionId
-                                + "\",\"limit\":2}"))
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            MvcResult transcript = mvc.perform(post(
+                            "/api/agent/web-shell/v1/transcript/query")
+                            .header(TenantContextFilter.HEADER, tenant)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sessionId\":\"" + sessionId
+                                    + "\",\"limit\":2}"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.hasMore").value(false))
+                    .andReturn();
+            JsonNode body = objectMapper.readTree(
+                    transcript.getResponse().getContentAsString());
+            assertThat(body.get("coveredSequence").asLong())
+                    .isEqualTo(body.get("lastSequence").asLong());
+            assertThat(body.get("items")).hasSize(2);
+            assertThat(body.get("items").get(0).get("content").get(0)
+                    .get("text").asText()).isEqualTo("hi");
+            assertThat(body.get("items").get(1).get("content").get(0)
+                    .get("text").asText()).isEqualTo("hello");
+        });
+
+        MvcResult firstItems = mvc.perform(get(
+                        "/v1/agents/sessions/{id}/items", sessionId)
+                        .param("limit", "1")
+                        .header(TenantContextFilter.HEADER, tenant))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.hasMore").value(true))
-                .andExpect(jsonPath("$.olderCursor").isNotEmpty())
-                .andReturn();
-        JsonNode newestBody = objectMapper.readTree(
-                newest.getResponse().getContentAsString());
-        long newestFirst = newestBody.get("events").get(0)
-                .get("sequence").asLong();
-        String olderCursor = newestBody.get("olderCursor").asText();
-        MvcResult older = mvc.perform(post(
-                        "/api/agent/web-shell/v1/transcript/query")
-                        .header(TenantContextFilter.HEADER, tenant)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionId\":\"" + sessionId
-                                + "\",\"cursor\":\"" + olderCursor
-                                + "\",\"limit\":2}"))
-                .andExpect(status().isOk()).andReturn();
-        assertThat(objectMapper.readTree(
-                        older.getResponse().getContentAsString())
-                .get("events")).allMatch(event ->
-                        event.get("sequence").asLong() < newestFirst);
+                .andExpect(jsonPath("$.data.length()").value(1))
+                .andExpect(jsonPath("$.has_more").value(true))
+                .andExpect(jsonPath("$.next_cursor").isNotEmpty())
+                .andExpect(jsonPath("$.snapshot_through_sequence")
+                        .isNumber()).andReturn();
+        String after = objectMapper.readTree(firstItems.getResponse()
+                .getContentAsString()).get("next_cursor").asText();
+        mvc.perform(get("/v1/agents/sessions/{id}/items", sessionId)
+                        .param("after", after).param("limit", "1")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(1))
+                .andExpect(jsonPath("$.has_more").value(false));
     }
 
     @Test
@@ -447,6 +460,21 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.findEvents(tenant, session.sessionId(), before, 100))
                 .extracting(event -> event.sequence())
                 .containsExactly(before + 1, before + 2, before + 3);
+        store.materializeNextBatch(tenant, session.sessionId(), 200);
+        assertThat(store.findSnapshot(tenant, session.sessionId()))
+                .get().satisfies(snapshot -> {
+                    assertThat(snapshot.coveredSequence())
+                            .isEqualTo(before + 3);
+                    assertThat(snapshot.items()).filteredOn(item ->
+                            "assistant".equals(item.role()))
+                            .singleElement().satisfies(item ->
+                                    assertThat(item.content())
+                                            .singleElement()
+                                            .extracting(part -> part.text())
+                                            .isEqualTo("onetwo"));
+                });
+        assertThat(store.materializeNextBatch(tenant, session.sessionId(),
+                200).advanced()).isFalse();
     }
 
     @Test

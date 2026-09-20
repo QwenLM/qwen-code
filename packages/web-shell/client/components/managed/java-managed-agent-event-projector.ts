@@ -1,6 +1,7 @@
 import type {
   JavaAgentDate,
   JavaAgentEvent,
+  JavaAgentItem,
 } from './java-managed-agent-client';
 import type {
   ManagedAgentSessionEvent,
@@ -19,6 +20,71 @@ export function projectJavaAgentEvent(
     sessionId: event.sessionId,
     turnId: event.turnId,
     data: normalizeData(type, event.data),
+  };
+}
+
+export function projectJavaAgentItem(
+  item: JavaAgentItem,
+): ManagedAgentSessionEvent[] {
+  if (item.type === 'message' && item.role === 'user') {
+    return [
+      projectedItemEvent(item, item.firstSequence, 'accepted', {
+        itemId: item.itemId,
+        prompt: item.content
+          .filter((part) => part.type === 'input_text')
+          .map((part) => ({ type: 'text', text: part.text })),
+      }),
+    ];
+  }
+  if (item.type === 'message' && item.role === 'assistant') {
+    return item.content
+      .filter(
+        (part) => part.type === 'output_text' || part.type === 'reasoning',
+      )
+      .map((part) =>
+        projectedItemEvent(
+          item,
+          part.firstSequence,
+          part.type === 'reasoning' ? 'assistant_thought' : 'assistant_delta',
+          { itemId: item.itemId, text: part.text },
+        ),
+      );
+  }
+  if (item.type === 'tool_call') {
+    const failed = item.status.toLowerCase() === 'failed';
+    const settled = ['completed', 'failed', 'cancelled'].includes(
+      item.status.toLowerCase(),
+    );
+    return [
+      projectedItemEvent(
+        item,
+        item.firstSequence,
+        settled ? 'tool_completed' : 'tool_started',
+        {
+          ...item.attributes,
+          itemId: item.itemId,
+          toolName: item.attributes['toolName'] ?? item.attributes['name'],
+          failed,
+        },
+      ),
+    ];
+  }
+  return [];
+}
+
+function projectedItemEvent(
+  item: JavaAgentItem,
+  id: number,
+  type: ManagedAgentSessionEventType,
+  data: Record<string, unknown>,
+): ManagedAgentSessionEvent {
+  return {
+    id,
+    at: toTimestamp(item.createdAt),
+    type,
+    sessionId: item.sessionId,
+    turnId: item.turnId,
+    data,
   };
 }
 

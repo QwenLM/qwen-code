@@ -6,8 +6,11 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.HarnessEvent;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import java.time.Duration;
 import java.util.List;
@@ -49,8 +52,19 @@ public interface AgentStateStore {
     List<EventRecord> findEvents(String tenantId, String sessionId,
             long afterSequence, int limit);
 
+    List<EventRecord> findControlEvents(String tenantId, String sessionId,
+            long throughSequence);
+
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
+
+    Optional<SnapshotRecord> findSnapshot(String tenantId,
+            String sessionId);
+
+    List<MaterializationTarget> findMaterializationTargets(int limit);
+
+    MaterializationResult materializeNextBatch(String tenantId,
+            String sessionId, int limit);
 
     List<DispatchTarget> findDispatchable(long now, int limit);
 

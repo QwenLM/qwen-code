@@ -74,6 +74,31 @@ public final class ApiModels {
             boolean terminal) {
     }
 
+    public record PublicContentPart(@JsonProperty("part_id") String partId,
+            String type, String text,
+            @JsonProperty("first_sequence") long firstSequence,
+            @JsonProperty("last_sequence") long lastSequence) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicItem(String id, String object,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("turn_id") String turnId, String type, String role,
+            long revision, String status, List<PublicContentPart> content,
+            Map<String, Object> attributes,
+            @JsonProperty("first_sequence") long firstSequence,
+            @JsonProperty("last_sequence") long lastSequence,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    public record PublicItemList(String object, List<PublicItem> data,
+            @JsonProperty("has_more") boolean hasMore,
+            @JsonProperty("next_cursor") String nextCursor,
+            @JsonProperty("snapshot_through_sequence")
+                    long snapshotThroughSequence) {
+    }
+
     public record WebShellListRequest(String cursor, Integer limit) {
     }
 
@@ -134,7 +159,20 @@ public final class ApiModels {
             Map<String, Object> data, boolean terminal) {
     }
 
-    public record WebShellTranscript(List<WebShellEvent> events,
+    public record WebShellContentPart(String partId, String type, String text,
+            long firstSequence, long lastSequence) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellItem(String itemId, String sessionId,
+            String turnId, String type, String role, String status,
+            List<WebShellContentPart> content,
+            Map<String, Object> attributes, long firstSequence,
+            long lastSequence, long createdAt, long updatedAt) {
+    }
+
+    public record WebShellTranscript(List<WebShellItem> items,
+            List<WebShellEvent> events, long coveredSequence,
             String olderCursor, boolean hasMore, long lastSequence) {
     }
 }

@@ -172,4 +172,92 @@ describe('createJavaManagedAgentProvider', () => {
     expect(transcript.olderCursor).toBe('older-1');
     expect(transcript.lastEventId).toBe(4);
   });
+
+  it('hydrates history from durable items plus control events', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        items: [
+          {
+            itemId: 'input-1',
+            sessionId: 'session-1',
+            turnId: 'turn-1',
+            type: 'message',
+            role: 'user',
+            status: 'completed',
+            content: [
+              {
+                partId: 'input-part-1',
+                type: 'input_text',
+                text: 'hello',
+                firstSequence: 1,
+                lastSequence: 1,
+              },
+            ],
+            attributes: {},
+            firstSequence: 1,
+            lastSequence: 1,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+          {
+            itemId: 'output-1',
+            sessionId: 'session-1',
+            turnId: 'turn-1',
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [
+              {
+                partId: 'output-part-1',
+                type: 'output_text',
+                text: 'world',
+                firstSequence: 2,
+                lastSequence: 3,
+              },
+            ],
+            attributes: {},
+            firstSequence: 2,
+            lastSequence: 4,
+            createdAt: 2,
+            updatedAt: 4,
+          },
+        ],
+        events: [
+          {
+            sequence: 4,
+            eventId: 'evt_4',
+            sessionId: 'session-1',
+            turnId: 'turn-1',
+            type: 'turn.completed',
+            createdAt: 4,
+            data: {},
+            terminal: true,
+          },
+        ],
+        coveredSequence: 4,
+        hasMore: false,
+        lastSequence: 4,
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+
+    const transcript = await provider.getTranscript('session-1', {
+      clientId: 'client-1',
+    });
+
+    expect(transcript.events).toEqual([
+      expect.objectContaining({ id: 1, type: 'accepted' }),
+      expect.objectContaining({
+        id: 2,
+        type: 'assistant_delta',
+        data: { itemId: 'output-1', text: 'world' },
+      }),
+      expect.objectContaining({ id: 4, type: 'completed' }),
+    ]);
+    expect(transcript.olderCursor).toBeUndefined();
+    expect(transcript.lastEventId).toBe(4);
+  });
 });

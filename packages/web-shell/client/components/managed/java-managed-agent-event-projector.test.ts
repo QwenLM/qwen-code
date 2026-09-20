@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   projectJavaAgentEvent,
+  projectJavaAgentItem,
   toTimestamp,
 } from './java-managed-agent-event-projector';
 
@@ -45,5 +46,38 @@ describe('java managed agent event projector', () => {
   it('uses a safe timestamp fallback for invalid legacy values', () => {
     vi.spyOn(Date, 'now').mockReturnValue(42);
     expect(toTimestamp('not-a-date')).toBe(42);
+  });
+
+  it('projects a durable message part as one complete delta', () => {
+    expect(
+      projectJavaAgentItem({
+        itemId: 'item-1',
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        content: [
+          {
+            partId: 'part-1',
+            type: 'output_text',
+            text: 'hello world',
+            firstSequence: 2,
+            lastSequence: 3,
+          },
+        ],
+        attributes: {},
+        firstSequence: 2,
+        lastSequence: 4,
+        createdAt: 20,
+        updatedAt: 40,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        id: 2,
+        type: 'assistant_delta',
+        data: { itemId: 'item-1', text: 'hello world' },
+      }),
+    ]);
   });
 });

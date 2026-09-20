@@ -5,10 +5,15 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicContentPart;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItem;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellContentPart;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellItem;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.WebShellTranscript;
@@ -18,8 +23,11 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.EventPage;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemPartRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ItemRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -191,18 +199,63 @@ public class ManagedAgentService {
                 .stream().map(this::webShellEvent).toList();
     }
 
+    public PublicItemList listPublicItems(String tenantId,
+            String sessionId, long afterSequence, int requestedLimit) {
+        if (afterSequence < 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "invalid_event_cursor",
+                    "Item sequence must be non-negative.");
+        }
+        int limit = limit(requestedLimit);
+        store.requireSession(tenantId, sessionId);
+        SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
+                .orElse(null);
+        if (snapshot == null) {
+            return new PublicItemList("list", List.of(), false, null, 0);
+        }
+        List<ItemRecord> matching = snapshot.items().stream()
+                .filter(item -> item.firstSequence() > afterSequence)
+                .toList();
+        boolean hasMore = matching.size() > limit;
+        List<PublicItem> items = matching.stream().limit(limit)
+                .map(this::publicItem).toList();
+        String nextCursor = hasMore && !items.isEmpty()
+                ? Long.toString(items.get(items.size() - 1).firstSequence())
+                : null;
+        return new PublicItemList("list", items, hasMore, nextCursor,
+                snapshot.coveredSequence());
+    }
+
     public WebShellTranscript transcript(String tenantId, String sessionId,
             String cursor, int requestedLimit) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
         int limit = limit(requestedLimit);
+        if (cursor == null || cursor.isBlank()) {
+            SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
+                    .orElse(null);
+            if (snapshot != null) {
+                long visibleSequence = Math.max(session.lastSequence(),
+                        snapshot.coveredSequence());
+                List<EventRecord> events = new ArrayList<>(
+                        store.findControlEvents(tenantId, sessionId,
+                                snapshot.coveredSequence()));
+                events.addAll(tailEvents(tenantId, sessionId,
+                        snapshot.coveredSequence(), visibleSequence));
+                return new WebShellTranscript(snapshot.items().stream()
+                        .map(this::webShellItem).toList(),
+                        events.stream().map(this::webShellEvent).toList(),
+                        snapshot.coveredSequence(), null, false,
+                        visibleSequence);
+            }
+        }
         EventPage page = store.findTranscriptEvents(tenantId, sessionId,
                 transcriptCursor(cursor), limit);
         List<WebShellEvent> events = page.events().stream()
                 .map(this::webShellEvent).toList();
         String olderCursor = page.hasMore() && !events.isEmpty()
                 ? Long.toString(events.get(0).sequence()) : null;
-        return new WebShellTranscript(events, olderCursor, page.hasMore(),
-                session.lastSequence());
+        return new WebShellTranscript(List.of(), events, 0, olderCursor,
+                page.hasMore(), session.lastSequence());
     }
 
     public long lastSequence(String tenantId, String sessionId) {
@@ -267,6 +320,55 @@ public class ManagedAgentService {
         return new WebShellEvent(event.sequence(), event.eventId(),
                 event.sessionId(), event.turnId(), event.type(),
                 event.createdAt(), event.data(), event.terminal());
+    }
+
+    private PublicItem publicItem(ItemRecord item) {
+        return new PublicItem(item.itemId(), "agent.item",
+                item.sessionId(), item.turnId(), item.type(), item.role(),
+                item.revision(), item.status(), item.content().stream()
+                        .map(this::publicContentPart).toList(),
+                item.attributes(), item.firstSequence(), item.lastSequence(),
+                item.createdAt() / 1000, item.updatedAt() / 1000);
+    }
+
+    private PublicContentPart publicContentPart(ItemPartRecord part) {
+        return new PublicContentPart(part.partId(), part.type(), part.text(),
+                part.firstSequence(), part.lastSequence());
+    }
+
+    private WebShellItem webShellItem(ItemRecord item) {
+        return new WebShellItem(item.itemId(), item.sessionId(),
+                item.turnId(), item.type(), item.role(), item.status(),
+                item.content().stream().map(this::webShellContentPart)
+                        .toList(),
+                item.attributes(), item.firstSequence(), item.lastSequence(),
+                item.createdAt(), item.updatedAt());
+    }
+
+    private WebShellContentPart webShellContentPart(ItemPartRecord part) {
+        return new WebShellContentPart(part.partId(), part.type(), part.text(),
+                part.firstSequence(), part.lastSequence());
+    }
+
+    private List<EventRecord> tailEvents(String tenantId, String sessionId,
+            long afterSequence, long throughSequence) {
+        List<EventRecord> result = new ArrayList<>();
+        long cursor = afterSequence;
+        while (cursor < throughSequence) {
+            List<EventRecord> page = store.findEvents(tenantId, sessionId,
+                    cursor, 100);
+            if (page.isEmpty()) {
+                break;
+            }
+            for (EventRecord event : page) {
+                if (event.sequence() > throughSequence) {
+                    return List.copyOf(result);
+                }
+                result.add(event);
+                cursor = event.sequence();
+            }
+        }
+        return List.copyOf(result);
     }
 
     private void dispatch(String tenantId, Admission admission) {

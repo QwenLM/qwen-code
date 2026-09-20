@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
@@ -115,6 +116,15 @@ public class PublicAgentController {
         List<PublicEvent> events = service.publicEvents(tenant.tenantId(),
                 sessionId, cursor, limit);
         return new PublicList<>("list", events, false, null);
+    }
+
+    @GetMapping("/{sessionId}/items")
+    public PublicItemList items(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestParam(defaultValue = "0") long after,
+            @RequestParam(defaultValue = "20") int limit) {
+        return service.listPublicItems(tenant.tenantId(), sessionId, after,
+                limit);
     }
 
     private static long parseSequence(String header, long fallback) {
