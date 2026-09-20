@@ -1013,7 +1013,6 @@ describe('history replay page', () => {
         {
           kind: 'tool',
           durationMs: 16,
-          startedAt: Date.parse(TIMESTAMP) - 16,
           callId: 'call-1',
           toolName: 'read_file',
           toolStatus: 'success',

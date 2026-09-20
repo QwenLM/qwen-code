@@ -69,6 +69,13 @@ export interface PendingTranscriptToolCall {
    * against both.
    */
   readonly rawCallId?: string;
+  /**
+   * Set once a timing frame has claimed this call, so a second telemetry
+   * record naming the same recorded id resolves to the next allocation
+   * instead of re-claiming this one. Persisted with the rest of the pending
+   * entry because a page can split between a call and its telemetry.
+   */
+  readonly timingMatched?: true;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -355,7 +362,14 @@ export function createTranscriptUsageUpdate(
  */
 export interface TranscriptTimingMeta {
   readonly kind: 'request' | 'tool';
-  /** Epoch ms. Omitted when the record's end time does not parse. */
+  /**
+   * Epoch ms, and `kind === 'request'` only. A request is logged when its
+   * stream ends, so its start time is a real subtraction from a real end time.
+   * Tool calls are logged in one loop after their whole batch settles, so the
+   * recorded timestamp is the batch's end for every tool in it and no honest
+   * per-tool start can be derived; a tool frame carries only `durationMs`
+   * until the recorded event itself carries a start time.
+   */
   readonly startedAt?: number;
   readonly durationMs: number;
   /** `kind === 'request'`: dispatch to first user-visible content. */
@@ -439,15 +453,8 @@ function parseTelemetryTiming(
   const durationMs = finiteNumber(uiEvent['duration_ms']);
   if (durationMs === undefined || durationMs < 0) return undefined;
 
-  // `event.timestamp` marks the END of the measured span.
-  const endMs = toTranscriptEpochMs(
-    typeof uiEvent['event.timestamp'] === 'string'
-      ? uiEvent['event.timestamp']
-      : undefined,
-  );
   const shared = {
     durationMs,
-    ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
     ...(nonEmptyString(uiEvent['response_id']) !== undefined
       ? { responseId: nonEmptyString(uiEvent['response_id']) }
       : {}),
@@ -465,6 +472,11 @@ function parseTelemetryTiming(
     if (callId === undefined) return undefined;
     const toolName = nonEmptyString(uiEvent['function_name']);
     const toolStatus = parseToolTimingStatus(uiEvent['status']);
+    // A call denied at confirmation, failed validation, or cancelled before it
+    // ran is recorded with `durationMs: 0` as a placeholder, and
+    // `ToolCallEvent` turns a missing duration into 0 as well. A zero on
+    // anything but a success is therefore a stand-in, not a measurement.
+    if (durationMs === 0 && toolStatus !== 'success') return undefined;
     return {
       kind: 'tool',
       ...shared,
@@ -476,9 +488,20 @@ function parseTelemetryTiming(
 
   const ttftMs = finiteNumber(uiEvent['ttft_ms']);
   const model = nonEmptyString(uiEvent['model']);
+  // A request is logged the moment its stream ends, so its `event.timestamp`
+  // really is this span's end and the start time follows from the duration.
+  // Tool calls are logged in a batch loop after the whole batch settles, so
+  // the same subtraction would place a fast tool just before the batch ended
+  // rather than when it actually ran — see `startedAt` on the type.
+  const endMs = toTranscriptEpochMs(
+    typeof uiEvent['event.timestamp'] === 'string'
+      ? uiEvent['event.timestamp']
+      : undefined,
+  );
   return {
     kind: 'request',
     ...shared,
+    ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
     status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
     ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
       ? { ttftMs }
@@ -1433,15 +1456,24 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
    * telemetry record is written after its assistant record and before its
    * result. A subagent's tool never has a pending entry in this machine, so
    * its id passes through untouched.
+   *
+   * When one recorded id was allocated more than once, the candidates are
+   * consumed in allocation order — the map preserves insertion order — so the
+   * first telemetry record naming it takes the first allocation rather than
+   * every record collapsing onto the rewritten one.
    */
   private resolveTimingCallId(
     timing: TranscriptTimingMeta,
   ): TranscriptTimingMeta {
     if (timing.kind !== 'tool' || timing.callId === undefined) return timing;
     for (const pending of this.pendingToolCalls.values()) {
-      if (pending.rawCallId === timing.callId) {
-        return { ...timing, callId: pending.callId };
-      }
+      const recordedId = pending.rawCallId ?? pending.callId;
+      if (recordedId !== timing.callId || pending.timingMatched) continue;
+      this.pendingToolCalls.set(pending.callId, {
+        ...pending,
+        timingMatched: true,
+      });
+      return { ...timing, callId: pending.callId };
     }
     return timing;
   }
@@ -1740,6 +1772,14 @@ function parseInitialState(
           sourceRecordId: pending['sourceRecordId'],
           ...(typeof pending['sourceTimestamp'] === 'string'
             ? { sourceTimestamp: pending['sourceTimestamp'] }
+            : {}),
+          // Dropping these would make a timing frame that arrives on a later
+          // page resolve against the recorded id instead of the allocated one.
+          ...(typeof pending['rawCallId'] === 'string'
+            ? { rawCallId: pending['rawCallId'] }
+            : {}),
+          ...(pending['timingMatched'] === true
+            ? { timingMatched: true as const }
             : {}),
         },
       ];

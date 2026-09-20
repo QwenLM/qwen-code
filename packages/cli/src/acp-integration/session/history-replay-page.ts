@@ -143,6 +143,10 @@ function parseTranscriptReplayState(
               ...(pending.sourceTimestamp
                 ? { timestamp: pending.sourceTimestamp }
                 : {}),
+              ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+              ...(pending.timingMatched
+                ? { timingMatched: true as const }
+                : {}),
             },
           ];
         }

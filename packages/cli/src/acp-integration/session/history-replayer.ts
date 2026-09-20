@@ -39,6 +39,14 @@ export interface PendingReplayToolCall {
   toolName: string;
   timestamp?: string;
   recordId: string;
+  /**
+   * The id the transcript recorded, when it differs from `callId` because a
+   * collision forced a rewrite. Carried across pages so a timing frame on a
+   * later page still resolves to the call the tool_call update went out with.
+   */
+  rawCallId?: string;
+  /** Set once a timing frame has claimed this call. */
+  timingMatched?: true;
 }
 
 export interface HistoryReplayPageOptions {
@@ -296,6 +304,8 @@ function toPendingTranscriptToolCall(
     toolName: pending.toolName,
     sourceRecordId: pending.recordId,
     ...(pending.timestamp ? { sourceTimestamp: pending.timestamp } : {}),
+    ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+    ...(pending.timingMatched ? { timingMatched: true as const } : {}),
   };
 }
 
@@ -307,5 +317,7 @@ function toLegacyPendingToolCall(
     toolName: pending.toolName,
     recordId: pending.sourceRecordId,
     ...(pending.sourceTimestamp ? { timestamp: pending.sourceTimestamp } : {}),
+    ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+    ...(pending.timingMatched ? { timingMatched: true as const } : {}),
   };
 }

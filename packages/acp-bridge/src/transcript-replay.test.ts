@@ -2333,7 +2333,6 @@ describe('ui_telemetry timing frames', () => {
       {
         kind: 'tool',
         durationMs: 16,
-        startedAt: Date.parse('2026-07-14T00:00:06.560Z') - 16,
         callId: 'call_glob_1',
         toolName: 'glob',
         toolStatus: 'success',
@@ -2409,7 +2408,9 @@ describe('ui_telemetry timing frames', () => {
   it('re-points a tool frame at a rewritten call id', () => {
     const machine = timingMachine();
     // Two assistant records reusing one recorded call id: the second
-    // allocation collides and the machine rewrites it.
+    // allocation collides and the machine rewrites it. Once the first call's
+    // result has closed it out, the rewritten one is the only holder of the
+    // recorded id left, so the frame must follow it.
     updates(machine, assistantWithToolCall('assistant-1', 'call_dup'));
     const rewritten = updates(
       machine,
@@ -2418,6 +2419,20 @@ describe('ui_telemetry timing frames', () => {
     const rewrittenCallId = (rewritten[0] as unknown as { toolCallId: string })
       .toolCallId;
     expect(rewrittenCallId).not.toBe('call_dup');
+    updates(
+      machine,
+      record('result-1', 'tool_result', {
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: { id: 'call_dup', name: 'glob', response: {} },
+            },
+          ],
+        },
+        toolCallResult: { callId: 'call_dup', status: 'success' },
+      }),
+    );
 
     const [toolTiming] = timings(
       machine,
@@ -2603,7 +2618,25 @@ describe('ui_telemetry timing frames', () => {
     expect(withTiming).toEqual(withoutTiming);
   });
 
-  it('keeps timing frames out of the replay state', () => {
+  it('keeps timing frames out of the replay state when it is off', () => {
+    const conversation = [
+      telemetry('tel-1', API_RESPONSE_EVENT),
+      assistantWithToolCall('assistant-1', 'call_glob_1'),
+      telemetry('tel-2', TOOL_CALL_EVENT),
+    ];
+    const off = createTranscriptReplayMachine();
+    const withoutTelemetry = createTranscriptReplayMachine();
+    for (const item of conversation) {
+      updates(off, item);
+      if (item.subtype !== 'ui_telemetry') updates(withoutTelemetry, item);
+    }
+
+    expect(off.snapshot()).toEqual(withoutTelemetry.snapshot());
+  });
+
+  it('records only the claim flag in the replay state when it is on', () => {
+    // The one state change timing makes: the claimed call is flagged so a
+    // later page cannot hand the same allocation a second frame.
     const conversation = [
       telemetry('tel-1', API_RESPONSE_EVENT),
       assistantWithToolCall('assistant-1', 'call_glob_1'),
@@ -2615,8 +2648,156 @@ describe('ui_telemetry timing frames', () => {
       updates(on, item);
       updates(off, item);
     }
+    const base = off.snapshot();
 
-    expect(on.snapshot()).toEqual(off.snapshot());
+    expect(on.snapshot()).toEqual({
+      ...base,
+      pendingToolCalls: base.pendingToolCalls.map((pending) => ({
+        ...pending,
+        timingMatched: true,
+      })),
+    });
+  });
+
+  it('gives a tool frame no start time, because none was recorded', () => {
+    // logToolCall runs in one loop after the whole batch settles, so the
+    // recorded timestamp is the batch's end for every tool in it. Subtracting
+    // a fast tool's own duration from that would place it just before the
+    // batch ended rather than when it ran.
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', TOOL_CALL_EVENT),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 16 });
+    expect(toolTiming).not.toHaveProperty('startedAt');
+  });
+
+  it('still derives a start time for a request', () => {
+    // A request is logged the moment its own stream ends, so the subtraction
+    // is sound there.
+    const [requestTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', API_RESPONSE_EVENT),
+    );
+
+    expect(requestTiming).toMatchObject({
+      startedAt: Date.parse('2026-07-14T00:00:06.544Z') - 6544,
+    });
+  });
+
+  it.each([
+    ['denied at confirmation', 'error'],
+    ['cancelled before it ran', 'cancelled'],
+    ['an unrecognized status', 'timed_out'],
+  ])('emits no tool frame for a zero duration on %s', (_label, status) => {
+    // `ToolCallEvent` writes 0 when a call never ran, so a zero on anything
+    // but a success is a placeholder rather than a measurement.
+    expect(
+      updates(
+        timingMachine(),
+        telemetry('tel-1', {
+          ...TOOL_CALL_EVENT,
+          duration_ms: 0,
+          status,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('keeps a zero duration reported by a successful tool', () => {
+    const [toolTiming] = timings(
+      timingMachine(),
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, duration_ms: 0 }),
+    );
+
+    expect(toolTiming).toMatchObject({ kind: 'tool', durationMs: 0 });
+  });
+
+  it('consumes duplicate recorded ids in allocation order', () => {
+    // Two calls recorded under one id: the first keeps it, the second is
+    // rewritten. Each telemetry record must claim its own allocation.
+    const machine = timingMachine();
+    updates(machine, assistantWithToolCall('assistant-1', 'call_dup'));
+    const second = updates(
+      machine,
+      assistantWithToolCall('assistant-2', 'call_dup'),
+    );
+    const rewrittenCallId = (second[0] as unknown as { toolCallId: string })
+      .toolCallId;
+    expect(rewrittenCallId).not.toBe('call_dup');
+
+    const first = timings(
+      machine,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+    const next = timings(
+      machine,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    expect(first[0]).toMatchObject({ callId: 'call_dup' });
+    expect(next[0]).toMatchObject({ callId: rewrittenCallId });
+  });
+
+  it('resolves a rewritten id from a telemetry record on a later page', () => {
+    // A page can end right after the assistant record, leaving the tool's
+    // telemetry for the next one, which replays from the serialized state.
+    const first = timingMachine();
+    updates(first, assistantWithToolCall('assistant-1', 'call_dup'));
+    const rewritten = updates(
+      first,
+      assistantWithToolCall('assistant-2', 'call_dup'),
+    );
+    const rewrittenCallId = (rewritten[0] as unknown as { toolCallId: string })
+      .toolCallId;
+
+    const carried = JSON.parse(
+      JSON.stringify(first.snapshot()),
+    ) as TranscriptReplayStateV1;
+    expect(carried.pendingToolCalls).toContainEqual(
+      expect.objectContaining({ rawCallId: 'call_dup' }),
+    );
+
+    const next = createTranscriptReplayMachine({
+      includeTiming: true,
+      initialState: carried,
+    });
+    const firstFrame = timings(
+      next,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+    const secondFrame = timings(
+      next,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    expect(firstFrame[0]).toMatchObject({ callId: 'call_dup' });
+    expect(secondFrame[0]).toMatchObject({ callId: rewrittenCallId });
+  });
+
+  it('does not re-claim a call already matched on an earlier page', () => {
+    const first = timingMachine();
+    updates(first, assistantWithToolCall('assistant-1', 'call_dup'));
+    updates(first, assistantWithToolCall('assistant-2', 'call_dup'));
+    timings(
+      first,
+      telemetry('tel-1', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    const carried = JSON.parse(
+      JSON.stringify(first.snapshot()),
+    ) as TranscriptReplayStateV1;
+    const next = createTranscriptReplayMachine({
+      includeTiming: true,
+      initialState: carried,
+    });
+    const [later] = timings(
+      next,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_dup' }),
+    );
+
+    expect(later).not.toMatchObject({ callId: 'call_dup' });
   });
 
   it('pins the telemetry event names to core', () => {
