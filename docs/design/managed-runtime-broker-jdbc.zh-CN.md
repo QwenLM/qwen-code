@@ -152,3 +152,5 @@ Repository 注入 `RuntimeBrokerService`。下一个集成切片必须移除生�
 InMemory 接线，让两个 Java 进程共享一个 MySQL，在重启后 reconcile 失效
 Runtime lease 并恢复原 execution，随后再加入延迟 Runtime 的 TTFT 场景。
 后续集成必须依赖这套持久事实来源，不能再增加另一套状态存储。
+该切片所需的调度器无关 endpoint、resource handle 和恢复契约，详见
+[Managed Runtime Endpoint 持久化与恢复](2026-09-21-managed-runtime-endpoint-recovery.zh-CN.md)。

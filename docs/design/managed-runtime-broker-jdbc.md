@@ -182,4 +182,6 @@ must remove the production InMemory wiring, run two Java processes against one
 MySQL database, reconcile stale Runtime leases after restart, recover the
 original execution, and then add the delayed-Runtime TTFT scenario. That
 integration must depend on this durable source of truth rather than add another
-state store.
+state store. The scheduler-neutral endpoint, resource-handle, and recovery
+contract for that slice is specified in
+[Managed Runtime Endpoint Persistence and Recovery](2026-09-21-managed-runtime-endpoint-recovery.md).
