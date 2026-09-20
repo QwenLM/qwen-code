@@ -77,6 +77,12 @@ export interface WorkflowSnapshot {
   args?: unknown;
   /** The run had `args` this snapshot could not keep. */
   argsOmitted?: true;
+  /**
+   * The run's `args` are recorded as they were, `undefined` included. Absent
+   * only on a snapshot written before args were kept, where "no `args`
+   * field" cannot be told from "the run had none".
+   */
+  argsRecorded?: true;
   meta: WorkflowMeta | null;
   status: WorkflowTerminalStatus;
   script: string;
@@ -156,8 +162,12 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
  */
 export function snapshotArgs(
   args: unknown,
-): Pick<WorkflowSnapshot, 'args' | 'argsOmitted'> {
-  if (args === undefined) return {};
+): Pick<WorkflowSnapshot, 'args' | 'argsOmitted' | 'argsRecorded'> {
+  // A run with no args says so, rather than looking like a snapshot from
+  // before args were kept: a retry reuses the journal, whose key chain is
+  // rooted in a hash of the args, so restarting with the wrong ones replays
+  // nothing and re-dispatches every agent under the old run id.
+  if (args === undefined) return { argsRecorded: true };
   let json: string | undefined;
   try {
     json = JSON.stringify(args);
@@ -167,7 +177,7 @@ export function snapshotArgs(
   if (json === undefined || json.length > MAX_SNAPSHOT_ARGS_CHARS) {
     return { argsOmitted: true };
   }
-  return { args: JSON.parse(json) as unknown };
+  return { args: JSON.parse(json) as unknown, argsRecorded: true };
 }
 
 /** A non-JSON-serializable result is replaced with a placeholder string. */
@@ -525,6 +535,7 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
       value['startMode'] === 'retry' ||
       value['startMode'] === 'rerun') &&
     (value['argsOmitted'] === undefined || value['argsOmitted'] === true) &&
+    (value['argsRecorded'] === undefined || value['argsRecorded'] === true) &&
     isWorkflowMeta(value['meta']) &&
     (status === 'completed' || status === 'failed' || status === 'cancelled') &&
     typeof value['script'] === 'string' &&

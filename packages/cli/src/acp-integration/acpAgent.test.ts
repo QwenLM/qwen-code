@@ -16715,6 +16715,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       script: 'return await agent(args.prompt)',
       scriptPath: '/tmp/.qwen/workflows/deep-review.js',
       args: { prompt: 'finish the review' },
+      argsRecorded: true,
       sourceRef: { id: 'definition-7', revision: 'rev-3' },
       meta: null,
       phases: [],
@@ -16893,18 +16894,45 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await daemon.stop();
     });
 
-    it('starts a snapshot written before args were kept without args', async () => {
+    // A run that had no args says so, so it restarts; the journal's key
+    // chain is rooted in the same hash either way.
+    it('restarts a run recorded as having no args', async () => {
       const daemon = await startDaemon();
-      const legacy = historical();
-      delete (legacy as { args?: unknown }).args;
-      mockReadWorkflowSnapshot.mockResolvedValue(legacy);
+      const noArgs = historical();
+      delete (noArgs as { args?: unknown }).args;
+      mockReadWorkflowSnapshot.mockResolvedValue(noArgs);
 
-      await expect(daemon.act('rerun')).resolves.toMatchObject({
+      await expect(daemon.act('retry')).resolves.toMatchObject({
         changed: true,
       });
 
       const [params] = daemon.buildSessionOwnedBackground.mock.calls[0]!;
       expect(params['args']).toBeUndefined();
+      await daemon.stop();
+    });
+
+    // Before args were kept, "no args field" and "the run had none" look the
+    // same. Starting such a run with none would replay nothing and
+    // re-dispatch every agent while the script read `args` as undefined.
+    it('refuses a snapshot written before args were kept, saying its history cannot name them', async () => {
+      const sdk = await actualSdk();
+      const daemon = await startDaemon();
+      const legacy = historical();
+      delete (legacy as { args?: unknown }).args;
+      delete (legacy as { argsRecorded?: true }).argsRecorded;
+      mockReadWorkflowSnapshot.mockResolvedValue(legacy);
+
+      for (const action of ['retry', 'rerun'] as const) {
+        vi.mocked(RequestError.invalidParams).mockImplementationOnce(
+          sdk.RequestError.invalidParams,
+        );
+        await expect(daemon.act(action)).rejects.toMatchObject({
+          code: -32602,
+          data: { errorKind: 'workflow_args_unavailable' },
+          message: expect.stringContaining('cannot say what they were'),
+        });
+      }
+      expect(daemon.buildSessionOwnedBackground).not.toHaveBeenCalled();
       await daemon.stop();
     });
 

@@ -164,6 +164,7 @@ describe('checkpointFromTask', () => {
       startMode: 'retry',
       tokenBudgetTotal: 5000,
       args: { files: ['a.csv'] },
+      argsRecorded: true,
     });
   });
 

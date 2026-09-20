@@ -82,6 +82,7 @@ export interface WorkflowCheckpoint {
   tokenBudgetTotal: number | null;
   args?: unknown;
   argsOmitted?: true;
+  argsRecorded?: true;
 }
 
 /** A run a claim found interrupted, with what its notice needs. */
@@ -236,7 +237,8 @@ function isWorkflowCheckpoint(value: unknown): value is WorkflowCheckpoint {
       startMode === 'rerun') &&
     (budget === null ||
       (typeof budget === 'number' && Number.isFinite(budget))) &&
-    (value['argsOmitted'] === undefined || value['argsOmitted'] === true)
+    (value['argsOmitted'] === undefined || value['argsOmitted'] === true) &&
+    (value['argsRecorded'] === undefined || value['argsRecorded'] === true)
   );
 }
 
@@ -323,9 +325,10 @@ async function claimOne(
     ...(checkpoint.startMode ? { startMode: checkpoint.startMode } : {}),
     ...(checkpoint.argsOmitted
       ? { argsOmitted: true as const }
-      : checkpoint.args !== undefined
-        ? { args: checkpoint.args }
-        : {}),
+      : {
+          ...(checkpoint.args !== undefined ? { args: checkpoint.args } : {}),
+          ...(checkpoint.argsRecorded ? { argsRecorded: true as const } : {}),
+        }),
     meta: checkpoint.meta,
     status: 'failed',
     script: checkpoint.script,

@@ -15331,10 +15331,23 @@ class QwenAgent implements Agent {
             `Workflow run ${runId} is recorded as running in another process (host ${checkpoint.hostname}, pid ${checkpoint.pid}), so retrying it here would run two copies against its journal. Rerun it instead: that starts a new run id and leaves this one alone.`,
           );
         }
-        if (snapshot.argsOmitted) {
+        // Starting a run from history with the wrong args is worse than
+        // refusing it: the journal's key chain is rooted in a hash of the
+        // args, so a retry that supplies none replays nothing and
+        // re-dispatches every agent under the old run id, while the script
+        // reads `args` as undefined. A snapshot written before args were
+        // kept cannot say whether the run had any, so it is refused for the
+        // same reason as one whose args were too large — the cost is a
+        // legacy run that truly had none, which a relaunch covers.
+        const startedWith = snapshot.argsOmitted
+          ? 'args too large to keep in its history'
+          : snapshot.argsRecorded !== true && snapshot.args === undefined
+            ? 'args this daemon recorded before it kept them, so its history cannot say what they were'
+            : undefined;
+        if (startedWith) {
           throw RequestError.invalidParams(
             { errorKind: 'workflow_args_unavailable' },
-            `Workflow run ${runId} was launched with args too large to keep in its history, so it cannot be ${action === 'retry' ? 'retried' : 'rerun'} from there. Start it again with run-saved or run-script and the original args.`,
+            `Workflow run ${runId} was launched with ${startedWith}, so it cannot be ${action === 'retry' ? 'retried' : 'rerun'} from there. Start it again with run-saved or run-script and the args it should have.`,
           );
         }
         return this.startWorkflowRestart(config, action, {

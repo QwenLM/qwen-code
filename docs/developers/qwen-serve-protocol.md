@@ -2298,10 +2298,13 @@ registers in, and reports its completion to, the session that sent the
 action. A `retry` resumes the run's journal under the same run id and applies
 to a `failed` run that no process is still running; a `rerun` starts a new run
 id from any finished run. A history entry carrying `argsOmitted` was launched
-with `args` too large to keep, so neither action applies to it. Snapshots
-written before `args` were kept carry neither field and are started without
-`args`. `run-script` passes no
-definition name, so the run is labelled by the script's own
+with `args` too large to keep, so neither action applies to it. Neither does a
+snapshot written before `args` were kept, which carries neither `argsOmitted`
+nor `argsRecorded`: a run's journal is keyed from a hash of its `args`, so
+restarting one whose `args` its history cannot name would replay nothing and
+re-dispatch every agent. Both refusals are `workflow_args_unavailable`.
+
+`run-script` passes no definition name, so the run is labelled by the script's own
 `export const meta` — a compiled script should declare one, or the run shows
 only its id.
 
