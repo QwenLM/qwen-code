@@ -162,13 +162,6 @@ export type OpenTuiDispatchOutcome =
       modelOverride?: string;
       /** ink parity: refresh memory when the turn writes a context file. */
       refreshContextFilesOnWrite?: boolean;
-      /**
-       * The echoed invocation row, when one exists. The turn mints its
-       * promptId only at submit time, so the consumer echoes it back onto
-       * this item — the API entry is marked with it and the rewind gate's
-       * claim scans need a UI claimant (R49-2).
-       */
-      invocationItemId?: number;
     }
   | { kind: 'quit'; messages: HistoryItem[] }
   | { kind: 'open_dialog'; request: OpenTuiDialogRequest };
@@ -642,7 +635,6 @@ export class OpenTuiSlashDispatcher {
         return {
           kind: 'submit_prompt',
           content: mergedContent,
-          ...(invocationItemId !== undefined ? { invocationItemId } : {}),
           ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
           ...(refreshContextFilesOnWrite
             ? { refreshContextFilesOnWrite: true }
@@ -862,9 +854,6 @@ export class OpenTuiSlashDispatcher {
                 return {
                   kind: 'submit_prompt',
                   content,
-                  ...(invocationItemId !== undefined
-                    ? { invocationItemId }
-                    : {}),
                   ...(result.onComplete
                     ? { onComplete: result.onComplete }
                     : {}),

@@ -221,34 +221,6 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(live.turns[0]?.prompt).toBe('expanded skill prompt');
   });
 
-  it('returns the minted promptId for the invocation echo back-fill, undefined when queued', async () => {
-    const { result } = renderHook(() =>
-      useOpenTuiLiveTurn({ config: {} as Config }),
-    );
-
-    let minted: string | undefined;
-    act(() => {
-      minted = result.current.submit('expanded skill prompt', undefined, {
-        invocationEchoed: true,
-      });
-    });
-    // The id the API entry is marked with — the caller back-fills it onto
-    // the dispatcher's invocation row (R49-2).
-    expect(minted).toBe('session-1########0');
-
-    let queued: string | undefined = 'sentinel';
-    act(() => {
-      queued = result.current.submit('mid-turn follow-up');
-    });
-    // Queued behind the streaming turn: no id minted, nothing to echo.
-    expect(queued).toBeUndefined();
-
-    await act(async () => {
-      for (const wake of live.waiters.splice(0)) wake();
-      await vi.waitFor(() => expect(live.turns).toHaveLength(2));
-    });
-  });
-
   it('keeps the transcript seam callbacks stable across turn state', () => {
     const { result, rerender } = renderHook(() =>
       useOpenTuiLiveTurn({ config: {} as Config }),

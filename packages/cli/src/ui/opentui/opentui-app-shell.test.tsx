@@ -616,42 +616,6 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
-  it('back-fills the echoed invocation row with the minted prompt id (R49-2)', async () => {
-    // The dispatcher echoes the invocation row, so the live turn adds no
-    // user item for the expanded content — but the API entry is still
-    // marked with the turn's minted id. The shell back-fills that id onto
-    // the invocation row so the rewind gate's claim scans see its owner.
-    const onSubmitPrompt = vi.fn().mockReturnValue('session-1########3');
-    renderApp({ onSubmitPrompt });
-    await settle();
-    const host = mocks.state.host as {
-      addItem: (item: unknown, ts: number) => number;
-      getHistory: () => Array<{ id: number; promptId?: string }>;
-    };
-    let invocationItemId = -1;
-    await act(async () => {
-      invocationItemId = host.addItem(
-        { type: 'user', text: '/review', sentToModel: false },
-        1000,
-      );
-    });
-    mocks.state.handleResult = {
-      kind: 'submit_prompt',
-      content: 'expanded review content',
-      invocationItemId,
-    } satisfies OpenTuiDispatchOutcome;
-
-    await submit('/review');
-    expect(onSubmitPrompt).toHaveBeenCalledWith(
-      'expanded review content',
-      undefined,
-      expect.objectContaining({ invocationEchoed: true }),
-    );
-    expect(
-      host.getHistory().find((item) => item.id === invocationItemId),
-    ).toMatchObject({ promptId: 'session-1########3' });
-  });
-
   it("forwards a submit_prompt outcome's per-turn options to the seam", async () => {
     const onSubmitPrompt = vi.fn();
     const onComplete = async () => {};
