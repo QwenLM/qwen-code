@@ -527,6 +527,8 @@ function runScenario(
         timeout: 30_000,
         env: {
           ...process.env,
+          // Replay retry policy without requiring Linux namespaces locally.
+          RUNNER_ENVIRONMENT: 'github-hosted',
           // Every inherited QWEN_CI_REAL_* capture neutralized first
           // (R28-1); the pins below re-establish the ones this replay
           // needs to point somewhere specific.
