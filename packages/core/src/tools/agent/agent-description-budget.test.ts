@@ -322,10 +322,11 @@ describe('AgentTool per-turn size budgets', () => {
    * noticing. Optional blocks have their own bounds above.
    */
   it('keeps the whole model-visible surface within its budget', async () => {
-    // Description plus serialized schema, default shape. Measured at ~11,380
-    // characters: ~13,720 before the prompt-writing guidance moved into the
-    // bundled `agent-delegation` skill (#12054), and before that higher still,
-    // with the teammate-only guidance sent to sessions without teams.
+    // Description plus serialized schema, default shape. Measured at 11,030
+    // characters (7,386 + 3,644): 13,374 before the prompt-writing guidance
+    // moved into the bundled `agent-delegation` skill (#12054), and before
+    // that higher still, with the teammate-only guidance sent to sessions
+    // without teams.
     const tool = await buildTool();
     expect(surfaceLength(tool)).toBeLessThanOrEqual(11_750);
   });
