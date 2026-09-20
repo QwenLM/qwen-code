@@ -322,6 +322,159 @@ describe('useLiveBrowserHost', () => {
     expect(ws.audio()).toHaveLength(1);
   });
 
+  it('measures the microphone before the call starts, so it can be checked', async () => {
+    await render();
+    const ws = await connected();
+
+    // Idle: nothing is sent yet, but the meter answers "will it hear me?".
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeCloseTo(0.5, 3);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    expect(ws.audio()).toHaveLength(0);
+
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeCloseTo(0.5, 3);
+    expect(ws.audio()).toHaveLength(1);
+  });
+
+  it('stamps every frame, so a meter can tell a stalled callback from silence', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    await connected();
+    now.mockReturnValue(1_000);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.at).toBe(1_000);
+    now.mockReturnValue(1_064);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.at).toBe(1_064);
+    now.mockRestore();
+  });
+
+  it('drops the meter to zero when input is muted', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeGreaterThan(0);
+
+    await act(async () => {
+      ws.receive({
+        type: 'host.state',
+        epoch: 1,
+        status: status('listening', { inputMuted: true }),
+      });
+    });
+    // Not frozen at the last level before the mute.
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBe(0);
+  });
+
+  it('reads zero, not the last level, once the socket is no longer open', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBeGreaterThan(0);
+
+    ws.readyState = 2; // CLOSING: the capture callback can still fire
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.level).toBe(0);
+  });
+
+  it('flags frames it drops during a call, instead of looking healthy', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+
+    // The microphone works and the daemon still is not hearing it.
+    expect(ws.audio()).toHaveLength(0);
+    expect(host!.inputLevel.current).toMatchObject({ dropping: true });
+    expect(host!.inputLevel.current.level).toBeGreaterThan(0);
+
+    // Sending resumes at once; the report itself is held (see below).
+    ws.bufferedAmount = 0;
+    speak([0.5, -0.5]);
+    expect(ws.audio()).toHaveLength(1);
+  });
+
+  it('holds the dropping report instead of flickering with the socket buffer', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+
+    // bufferedAmount hovering around the limit: over, under, over, under...
+    now.mockReturnValue(1_000);
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+    expect(ws.audio()).toHaveLength(0);
+
+    // The very next frame goes out again — but the report does not flip back
+    // 64 ms later, or the flag would strobe at the audio frame rate.
+    now.mockReturnValue(1_064);
+    ws.bufferedAmount = 0;
+    speak([0.5, -0.5]);
+    expect(ws.audio()).toHaveLength(1);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    now.mockReturnValue(1_400);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    // Half a second after the last dropped frame it clears.
+    now.mockReturnValue(1_501);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    expect(ws.audio()).toHaveLength(3);
+    now.mockRestore();
+  });
+
+  it('ends the dropping report with the call', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    now.mockReturnValue(1_000);
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    // The call stops inside the hold window: nothing is being sent by design
+    // now, and that is not a fault to keep reporting.
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 2, status: status('idle') });
+    });
+    now.mockReturnValue(1_064);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    now.mockRestore();
+  });
+
+  it('does not call a backed-up socket "dropping" before the call has started', async () => {
+    await render();
+    const ws = await connected();
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    // Nothing is sent while idle anyway; that is not a fault to report.
+    expect(host!.inputLevel.current.dropping).toBe(false);
+  });
+
   it('drops microphone frames rather than queue them behind a stalled socket', async () => {
     await render();
     const ws = await connected();

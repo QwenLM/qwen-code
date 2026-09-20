@@ -667,4 +667,65 @@ describe('TurnOutputs artifact downloads', () => {
 
     act(() => root.unmount());
   });
+
+  it('opens a recorded link through the external opener instead of the panel', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const onOpenRequest = vi.fn();
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-link"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'recorded-link',
+                kind: 'link',
+                storage: 'external_url',
+                status: 'available',
+                title: 'Recorded link',
+                url: 'https://platform.example.com/detail?id=7',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The card keeps a single control: the address it opens.
+    expect(container.querySelectorAll('button, a')).toHaveLength(1);
+    const link = container.querySelector('a');
+    expect(link?.textContent?.trim()).toBe('Open');
+    expect(link?.getAttribute('href')).toBe(
+      'https://platform.example.com/detail?id=7',
+    );
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://platform.example.com/detail?id=7',
+    });
+    expect(onOpenRequest).not.toHaveBeenCalled();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    delete (window as { __TAURI__?: unknown }).__TAURI__;
+  });
 });
