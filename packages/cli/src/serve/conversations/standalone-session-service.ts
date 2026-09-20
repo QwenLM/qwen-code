@@ -2558,7 +2558,7 @@ export class StandaloneSessionService {
     const created = await this.createInternal(
       request,
       prompt,
-      request.parentSessionId,
+      request,
       request.promptId,
     );
     if (!created.initialPrompt) {
@@ -2573,7 +2573,10 @@ export class StandaloneSessionService {
   private async createInternal(
     request: CreateStandaloneSessionRequest,
     prompt?: string,
-    rawParentSessionId?: string,
+    parentRequest?: Pick<
+      CreateStandaloneChildSessionRequest,
+      'parentSessionId'
+    >,
     promptId: string = randomUUID(),
   ): Promise<CreatedStandaloneSessionInternal> {
     const { sessionId } = parseRequiredSessionId(request.sessionId);
@@ -2588,12 +2591,12 @@ export class StandaloneSessionService {
       },
     };
     try {
-      if (rawParentSessionId !== undefined)
+      if (parentRequest !== undefined)
         attempt.diagnostic.phase = 'parent_validation';
       const parentSessionId =
-        rawParentSessionId === undefined
+        parentRequest === undefined
           ? undefined
-          : parseRequiredSessionId(rawParentSessionId).sessionId;
+          : parseRequiredSessionId(parentRequest.parentSessionId).sessionId;
       if (parentSessionId !== undefined) {
         attempt.diagnostic.phase = 'parent_validation';
         attempt.diagnostic.relatedSessionId = parentSessionId;

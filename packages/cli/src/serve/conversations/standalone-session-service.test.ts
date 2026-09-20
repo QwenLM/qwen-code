@@ -4211,23 +4211,30 @@ describe('creation failure diagnostics', () => {
     expect(h.warn).not.toHaveBeenCalled();
   });
 
-  it('omits an invalid parent identity from direct-child diagnostics', async () => {
-    const h = createHarness();
-    await expect(
-      h.service.createChildWithInitialPrompt(
-        { sessionId, parentSessionId: 'SECRET_PARENT', promptId: 'private' },
-        'SECRET_PROMPT',
-      ),
-    ).rejects.toMatchObject({ code: 'invalid_request' });
-    expect(h.warn).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
-      sessionId,
-      phase: 'parent_validation',
-      reason: 'unknown',
-      dispatchState: 'not_dispatched',
-      cleanupOutcome: 'not_needed',
-    });
-    expect(h.ensureRuntime).not.toHaveBeenCalled();
-  });
+  it.each(['SECRET_PARENT', undefined, null])(
+    'omits invalid parent identity %s from direct-child diagnostics',
+    async (parentSessionId) => {
+      const h = createHarness();
+      await expect(
+        h.service.createChildWithInitialPrompt(
+          {
+            sessionId,
+            parentSessionId: parentSessionId as string,
+            promptId: 'private',
+          },
+          'SECRET_PROMPT',
+        ),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      expect(h.warn).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+        sessionId,
+        phase: 'parent_validation',
+        reason: 'unknown',
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      });
+      expect(h.ensureRuntime).not.toHaveBeenCalled();
+    },
+  );
 
   it('keeps the creation result when every diagnostic sink throws', async () => {
     vi.spyOn(
