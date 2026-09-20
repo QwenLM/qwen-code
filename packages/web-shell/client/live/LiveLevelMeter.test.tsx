@@ -55,20 +55,28 @@ function input(): { current: LiveInputLevel } {
   return { current: { level: 0, at: clock, dropping: false } };
 }
 
+const onDroppingChange = vi.fn();
+
+function meterElement(
+  value: { current: LiveInputLevel },
+  muted: boolean,
+): React.JSX.Element {
+  return (
+    <LiveLevelMeter
+      level={value}
+      muted={muted}
+      label="mic"
+      droppingLabel="not reaching the daemon"
+      onDroppingChange={onDroppingChange}
+    />
+  );
+}
+
 function mount(value: { current: LiveInputLevel }, muted = false): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() =>
-    root.render(
-      <LiveLevelMeter
-        level={value}
-        muted={muted}
-        label="mic"
-        droppingLabel="not reaching the daemon"
-      />,
-    ),
-  );
+  act(() => root.render(meterElement(value, muted)));
   mounted.push({ root, container });
   return container;
 }
@@ -77,6 +85,7 @@ beforeEach(() => {
   frames = [];
   cancelled = [];
   clock = 10_000;
+  onDroppingChange.mockReset();
   let nextHandle = 1;
   vi.stubGlobal('requestAnimationFrame', (frame: FrameRequestCallback) => {
     frames.push(frame);
@@ -184,6 +193,64 @@ describe('LiveLevelMeter', () => {
     paintFrames();
     expect(meter().dataset['dropping']).toBe('false');
     expect(meter().title).toBe('mic');
+  });
+
+  it('reports a dropping flip once, not on every frame, and never the initial "fine"', () => {
+    const value = input();
+    mount(value);
+    heard(value, 0.1);
+    paintFrames(5);
+    // "Not dropping" is what the dialog already assumes.
+    expect(onDroppingChange).not.toHaveBeenCalled();
+
+    for (let i = 0; i < 20; i++) {
+      heard(value, 0.1, true);
+      paintFrames();
+    }
+    expect(onDroppingChange.mock.calls).toEqual([[true]]);
+
+    for (let i = 0; i < 20; i++) {
+      heard(value, 0.1, false);
+      paintFrames();
+    }
+    expect(onDroppingChange.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it('withdraws a dropping report when it is muted or goes away', () => {
+    const value = input();
+    mount(value);
+    heard(value, 0.1, true);
+    paintFrames();
+    expect(onDroppingChange).toHaveBeenLastCalledWith(true);
+
+    const { root } = mounted[0]!;
+    act(() => root.render(meterElement(value, true)));
+    expect(onDroppingChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('paints zero and stops animating when input becomes muted mid-call', () => {
+    const value = input();
+    const container = mount(value);
+    heard(value, 0.1);
+    paintFrames();
+    expect(level()).toBeCloseTo(0.8, 3);
+    expect(frames).toHaveLength(1);
+
+    const bar = container.querySelector<HTMLElement>(
+      '[data-live-level-meter] > div',
+    )!;
+    const paint = vi.spyOn(bar.style, 'setProperty');
+    const { root } = mounted[0]!;
+    act(() => root.render(meterElement(value, true)));
+
+    // An actual paint of 0 — `level()` alone reads 0 for "never painted" too.
+    expect(paint).toHaveBeenCalledWith(LIVE_LEVEL_PROPERTY, '0.000');
+    expect(cancelled).not.toHaveLength(0);
+    // And nothing is queued any more: the loop is over, not idling.
+    frames = [];
+    paintFrames(5);
+    expect(level()).toBe(0);
+    expect(frames).toHaveLength(0);
   });
 
   it('settles at zero and stops rewriting the same value', () => {

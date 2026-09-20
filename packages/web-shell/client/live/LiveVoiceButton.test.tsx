@@ -318,6 +318,25 @@ describe('LiveVoiceButton as a browser Host', () => {
     ).toBe('true');
   });
 
+  it('has a status region ready, and empty, while this tab is the endpoint', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+
+    // Mounted before it has anything to say: a live region that appears
+    // together with its text is not announced.
+    const region = document.querySelector('[data-live-input-dropping]');
+    expect(region?.getAttribute('role')).toBe('status');
+    expect(region?.textContent).toBe('');
+    expect(region?.getAttribute('data-live-input-dropping')).toBe('false');
+  });
+
   it('shows no meter for a call another endpoint is carrying', () => {
     mocks.result.status = {
       v: 1,

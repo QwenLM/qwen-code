@@ -402,10 +402,68 @@ describe('useLiveBrowserHost', () => {
     expect(host!.inputLevel.current).toMatchObject({ dropping: true });
     expect(host!.inputLevel.current.level).toBeGreaterThan(0);
 
+    // Sending resumes at once; the report itself is held (see below).
     ws.bufferedAmount = 0;
     speak([0.5, -0.5]);
-    expect(host!.inputLevel.current.dropping).toBe(false);
     expect(ws.audio()).toHaveLength(1);
+  });
+
+  it('holds the dropping report instead of flickering with the socket buffer', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+
+    // bufferedAmount hovering around the limit: over, under, over, under...
+    now.mockReturnValue(1_000);
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+    expect(ws.audio()).toHaveLength(0);
+
+    // The very next frame goes out again — but the report does not flip back
+    // 64 ms later, or the flag would strobe at the audio frame rate.
+    now.mockReturnValue(1_064);
+    ws.bufferedAmount = 0;
+    speak([0.5, -0.5]);
+    expect(ws.audio()).toHaveLength(1);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    now.mockReturnValue(1_400);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    // Half a second after the last dropped frame it clears.
+    now.mockReturnValue(1_501);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    expect(ws.audio()).toHaveLength(3);
+    now.mockRestore();
+  });
+
+  it('ends the dropping report with the call', async () => {
+    const now = vi.spyOn(performance, 'now');
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    now.mockReturnValue(1_000);
+    ws.bufferedAmount = 10 * 1024 * 1024;
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(true);
+
+    // The call stops inside the hold window: nothing is being sent by design
+    // now, and that is not a fault to keep reporting.
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 2, status: status('idle') });
+    });
+    now.mockReturnValue(1_064);
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current.dropping).toBe(false);
+    now.mockRestore();
   });
 
   it('does not call a backed-up socket "dropping" before the call has started', async () => {

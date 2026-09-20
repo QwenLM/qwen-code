@@ -36,6 +36,7 @@ export function LiveLevelMeter({
   muted,
   label,
   droppingLabel,
+  onDroppingChange,
 }: {
   level: RefObject<LiveInputLevel>;
   /** Input is muted: hold the meter at zero instead of animating it. */
@@ -43,7 +44,15 @@ export function LiveLevelMeter({
   label: string;
   /** Shown while frames are being dropped instead of sent. */
   droppingLabel: string;
+  /**
+   * Called when the dropping state flips, never per frame. The bar is
+   * decorative and hidden from assistive technology; "the daemon is not
+   * hearing you" is status, and the dialog says it in text.
+   */
+  onDroppingChange?: (dropping: boolean) => void;
 }): React.JSX.Element {
+  const onDroppingChangeRef = useRef(onDroppingChange);
+  onDroppingChangeRef.current = onDroppingChange;
   const meterRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
@@ -58,6 +67,11 @@ export function LiveLevelMeter({
     let shownDropping: boolean | undefined;
     const paintDropping = (dropping: boolean) => {
       if (dropping === shownDropping) return;
+      // Not on the first paint: "not dropping" is the state the dialog
+      // already assumes, and announcing it would be noise.
+      if (shownDropping !== undefined || dropping) {
+        onDroppingChangeRef.current?.(dropping);
+      }
       shownDropping = dropping;
       const meter = meterRef.current;
       if (!meter) return;
@@ -86,7 +100,11 @@ export function LiveLevelMeter({
       paintDropping(live && input.dropping);
       frame = requestAnimationFrame(tick);
     });
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      cancelAnimationFrame(frame);
+      // Muting, or the meter going away, ends the report with it.
+      if (shownDropping) onDroppingChangeRef.current?.(false);
+    };
   }, [level, muted, label, droppingLabel]);
 
   return (

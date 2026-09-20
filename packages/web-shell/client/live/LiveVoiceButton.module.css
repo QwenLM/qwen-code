@@ -199,3 +199,20 @@
 .levelMeter[data-dropping='true'] .levelMeterFill {
   background: var(--destructive, #d9534f);
 }
+
+.droppingStatus {
+  margin: 0;
+  color: var(--destructive, #d9534f);
+  font-size: 12px;
+}
+
+.droppingStatus:not(:empty) {
+  margin-top: 6px;
+}
+
+/* One grid item for the state row and its status line, so the empty live
+   region adds neither height nor a grid gap. */
+.liveStateGroup {
+  display: flex;
+  flex-direction: column;
+}
