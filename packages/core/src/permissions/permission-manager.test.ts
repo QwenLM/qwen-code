@@ -2530,6 +2530,30 @@ describe('PermissionManager', () => {
       ).toBe('allow');
     });
 
+    it('deny survives a `cd` ended by one quote reading alone (#12246)', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+          permissionsDeny: ['Write(.qwen/settings.json)'],
+          cwd: '/repo',
+          projectRoot: '/repo',
+        }),
+      );
+      pm.initialize();
+      // bash reads `'x\''` + `';echo '` as one word, so ` & ` backgrounds the
+      // second `cd` and the write lands in .qwen; the controls are the same
+      // command with the quoting that makes the operator plain.
+      for (const command of [
+        `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+        'cd .qwen ; cd x & echo {} > settings.json',
+        'cd .qwen ; echo {} > settings.json',
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
     it('semicolon compound: deny in second → deny', async () => {
       pm = new PermissionManager(
         makeConfig({

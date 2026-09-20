@@ -755,6 +755,23 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  // Only the escape-everywhere reading sees a `;` between the two quote
+  // fragments; bash concatenates them into one word, so the ` & ` is the real
+  // terminator and the backgrounded `cd` never moves the parent shell. Neither
+  // reading owns that decision, so the write is attributed to both cwds and the
+  // protected path stays covered (#12246).
+  it('keeps both cwds when one reading alone ends the `cd`', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/x/settings.json' },
+    ]);
+  });
+
   it('does not mark later paths uncertain for a backgrounded dynamic `cd`', () => {
     // The foreground form below cannot know where it landed; the backgrounded
     // one can, because it did not move the cwd at all.

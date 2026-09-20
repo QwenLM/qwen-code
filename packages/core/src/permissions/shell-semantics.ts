@@ -2121,7 +2121,10 @@ function resolveCdTargetCwd(
  *   - Shell wrappers are unwrapped after the outer command is split, so
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
- *   - Operation order is preserved across segments.
+ *   - Operation order is preserved across segments. A `cd` ended by an
+ *     operator only one backslash reading found leaves both the moved and
+ *     the unmoved cwd open, so the segments after it report their paths
+ *     under each (#12246).
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and
@@ -2353,7 +2356,12 @@ function walkCompoundCommand(
     for (const { cwd: segmentCwd, cwdUnknown } of candidates) {
       if (unwrappable && subUnwrapped !== sub) {
         ops.push(
-          ...walkCompoundCommand(subUnwrapped, segmentCwd, depth + 1, cwdUnknown),
+          ...walkCompoundCommand(
+            subUnwrapped,
+            segmentCwd,
+            depth + 1,
+            cwdUnknown,
+          ),
         );
         continue;
       }
