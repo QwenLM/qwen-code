@@ -25,23 +25,23 @@
 
 两种读法：
 
-| 方法 | 得到什么 | 注意 |
-| --- | --- | --- |
-| 新会话直接 `/context detail`（不发消息） | `isEstimated: true` 的分项估算 | **少报约 11%**，见下 |
-| 会话记录里第一条 `qwen-code.api_response` 的 `input_token_count` | provider 的真实计数 | 这是账单依据 |
+| 方法                                                             | 得到什么                       | 注意                 |
+| ---------------------------------------------------------------- | ------------------------------ | -------------------- |
+| 新会话直接 `/context detail`（不发消息）                         | `isEstimated: true` 的分项估算 | **少报约 11%**，见下 |
+| 会话记录里第一条 `qwen-code.api_response` 的 `input_token_count` | provider 的真实计数            | 这是账单依据         |
 
 ### 实测基线（改动前）
 
-| 类别 | token | 占非对话 |
-| --- | ---: | ---: |
-| 内置工具 | 21,461 | 45.9% |
-| 上下文（`QWEN.md`）文件 | 15,400 | 33.0% |
-| 系统提示词 | 5,253 | 11.2% |
-| skills | 472 | 1.0% |
-| MCP | 0 | — |
-| 分类合计 | 42,586 | |
-| **真实首轮 `input_token_count`** | **47,931** | |
-| **未被任何分类计入** | **5,345（11.2%）** | 见 [#12033](https://github.com/QwenLM/qwen-code/issues/12033) |
+| 类别                             |              token |                                                      占非对话 |
+| -------------------------------- | -----------------: | ------------------------------------------------------------: |
+| 内置工具                         |             21,461 |                                                         45.9% |
+| 上下文（`QWEN.md`）文件          |             15,400 |                                                         33.0% |
+| 系统提示词                       |              5,253 |                                                         11.2% |
+| skills                           |                472 |                                                          1.0% |
+| MCP                              |                  0 |                                                             — |
+| 分类合计                         |             42,586 |                                                               |
+| **真实首轮 `input_token_count`** |         **47,931** |                                                               |
+| **未被任何分类计入**             | **5,345（11.2%）** | 见 [#12033](https://github.com/QwenLM/qwen-code/issues/12033) |
 
 另一会话独立验证：总数 48,375 − 分类和 42,835 = 5,540。两次都落在 5.3–5.5k，稳定。这部分是 skill 清单（裁剪后）+ 延迟工具提醒 + 启动环境上下文 + 估算误差。
 
@@ -49,13 +49,13 @@
 
 ### 目标
 
-| 分项 | 现在 | 目标 |
-| --- | ---: | ---: |
-| 内置工具 | 21,461 | **≤ 6k**（保守版 9.5k，见 §2） |
-| 上下文文件 | 15,400 | **≤ 5k** |
-| 系统提示词 | 5,253 | **4–5k**（已达标，不动） |
-| skills | 472 起 | ≤ 2.5k |
-| **空载成本** | **47,931** | **≈ 16,000** |
+| 分项         |       现在 |                           目标 |
+| ------------ | ---------: | -----------------------------: |
+| 内置工具     |     21,461 | **≤ 6k**（保守版 9.5k，见 §2） |
+| 上下文文件   |     15,400 |                       **≤ 5k** |
+| 系统提示词   |      5,253 |       **4–5k**（已达标，不动） |
+| skills       |     472 起 |                         ≤ 2.5k |
+| **空载成本** | **47,931** |                   **≈ 16,000** |
 
 第二个判据：**前缀应在 5–10 轮之内被对话内容超过**。现状按每轮约 2k 增长要 23 轮，目标 7 轮。
 
@@ -65,13 +65,13 @@
 
 ### 2.1 已核实的机制
 
-| 开关 | 注册 | 首轮发 schema | 还能用 | 管子 agent |
-| --- | --- | --- | --- | --- |
-| 列进 `tools.eager` | ✅ | ✅ | ✅ | ✅ |
-| **不列进 `tools.eager`** | ✅ | ❌ | ✅ 走 `tool_search` | ✅ |
-| `tools.disabled` | ❌ | ❌ | ❌ | ✅ |
-| `permissions.deny`（整工具） | ❌ | ❌ | ❌ | ✅ |
-| 审批模式 / `permissions.allow` | ✅ | ✅ | ✅ | 不影响 |
+| 开关                           | 注册 | 首轮发 schema | 还能用              | 管子 agent |
+| ------------------------------ | ---- | ------------- | ------------------- | ---------- |
+| 列进 `tools.eager`             | ✅   | ✅            | ✅                  | ✅         |
+| **不列进 `tools.eager`**       | ✅   | ❌            | ✅ 走 `tool_search` | ✅         |
+| `tools.disabled`               | ❌   | ❌            | ❌                  | ✅         |
+| `permissions.deny`（整工具）   | ❌   | ❌            | ❌                  | ✅         |
+| 审批模式 / `permissions.allow` | ✅   | ✅            | ✅                  | 不影响     |
 
 代码位置：`packages/cli/src/config/settingsSchema.ts`（`tools.eager` 定义）→ `packages/cli/src/config/config.ts:1935-1953`（读取，**bare/safe 模式下直接忽略**）→ `packages/core/src/permissions/permission-manager.ts:872-882`（判定）→ `packages/core/src/tools/tool-registry.ts:393-402`（`registerPermissionDeferredFactory`）。
 
@@ -126,11 +126,11 @@ python3 -m json.tool <projectRoot>/.qwen/settings.json
 #    读 isEstimated 快照的 "Built-in tools" 总数
 ```
 
-| 白名单 | builtinTools 预期 | 降幅 |
-| --- | ---: | ---: |
-| 改动前 | 21,461 | — |
-| 保守版（含 `agent`） | **9,481** | −56% |
-| 激进版（不含 `agent`） | **5,868** | −73% |
+| 白名单                 | builtinTools 预期 | 降幅 |
+| ---------------------- | ----------------: | ---: |
+| 改动前                 |            21,461 |    — |
+| 保守版（含 `agent`）   |         **9,481** | −56% |
+| 激进版（不含 `agent`） |         **5,868** | −73% |
 
 **没变化 = 配置没被接受**，按 §2.3 的三条逐一排查（先看是不是写漏了、再看 scope 覆盖、再开 debug 日志看 `Unknown setting`）。
 
@@ -140,10 +140,10 @@ python3 -m json.tool <projectRoot>/.qwen/settings.json
 
 按该部署的价格（输入 ¥12/百万，隐式缓存命中 ¥2.4/百万）与前缀规模测算：
 
-| | 金额 |
-| --- | ---: |
-| 降级 17,361 token，每会话节省 | ¥0.625 |
-| 一次中途揭示的前缀重建 | ¥0.282 |
+|                               |                                  金额 |
+| ----------------------------- | ------------------------------------: |
+| 降级 17,361 token，每会话节省 |                                ¥0.625 |
+| 一次中途揭示的前缀重建        |                                ¥0.282 |
 | 揭示 0 / 1 / 2 / 3 次的净收益 | +0.625 / +0.343 / +0.061 / **−0.221** |
 
 > **运营指标：每会话 `tool_search` 调用次数 ≤ 2。超过 3 次，降级就是净亏。**
@@ -172,11 +172,11 @@ python3 -m json.tool <projectRoot>/.qwen/settings.json
 
 extension 的内容按性质分三层：
 
-| 内容性质 | 放哪 | 常驻成本 |
-| --- | --- | --- |
-| 永远成立的少量事实（身份、术语、硬约束） | `contextFileName` | 常驻，应当很小 |
-| 场景性指引（怎么写查询、怎么配调度、怎么排障） | **`paths:` 门控的 skill** | 清单 100–200 token，正文按需 |
-| 固定流程 | saved workflow（见 [#11631](https://github.com/QwenLM/qwen-code/issues/11631)） | 只写名字 |
+| 内容性质                                       | 放哪                                                                            | 常驻成本                     |
+| ---------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------- |
+| 永远成立的少量事实（身份、术语、硬约束）       | `contextFileName`                                                               | 常驻，应当很小               |
+| 场景性指引（怎么写查询、怎么配调度、怎么排障） | **`paths:` 门控的 skill**                                                       | 清单 100–200 token，正文按需 |
+| 固定流程                                       | saved workflow（见 [#11631](https://github.com/QwenLM/qwen-code/issues/11631)） | 只写名字                     |
 
 依据：extension **可以**携带 skill（`extensionManager.ts:1715-1717`），skill 支持 `paths:` 条件激活（`packages/core/src/skills/types.ts:155-157` + `packages/core/src/skills/skill-activation.ts:42-56`）；而 `.qwen/rules/` 的条件机制**不对 extension 开放**（`packages/core/src/config/rulesDiscovery.ts:305-324`）。更新的 `agent-plugins-v1` 格式已经完全跳过 `contextFileName`、只带 skill（`extensionManager.ts:1702-1705`）——方向上游已经选了。
 
@@ -224,16 +224,16 @@ ls ~/.qwen/extensions/*/skills/
 
 ## 6. 影响面清单（上线前逐条过）
 
-| # | 项目 | 结论 |
-| --- | --- | --- |
-| 1 | **subagent** | ⚠️ 见 §2.4。`tools.eager` 降级会过滤 subagent 的显式 tools 列表，静默失效 |
-| 2 | 后台记忆 agent | ✅ 它依赖的 6 个工具（read_file/grep_search/glob/shell/write_file/edit）全在白名单里 |
-| 3 | token 换类别 | ⚠️ 去掉 `grep_search`/`glob` 后模型会改用 shell 的 `find`/`grep`，输出进对话上下文。**验收必须看每任务总 input token，不能只看非对话几类** |
-| 4 | 旧会话恢复 | ✅ 历史里引用过的降级工具会自动补发 schema（`packages/core/src/core/client.ts:1783-1822`）；被 deny 的不会 |
-| 5 | skill 的 `allowedTools` | ✅ 只给自动放行，不声明也不加载工具（`packages/core/src/skills/types.ts:38-56`）。降级不影响，deny 会在运行时失败 |
-| 6 | 作用域外溢 | ⚠️ `permissions.deny` 写在 settings 里会作用于所有读这份 settings 的客户端；配置应放工作区级 |
-| 7 | DeepSeek 系模型 | ⚠️ 不适用于本部署，但若换模型：`packages/cli/src/config/config.ts:1993-2013` 会把 `tool_search` 推进 deny 列表并**主动揭示所有延迟工具**。注释说明这是有意的（DeepSeek 前缀缓存折扣最高到 1/120，稳定前缀比省 token 值钱） |
-| 8 | `tools.disabled` 的已知缺口 | ⚠️ [#11814](https://github.com/QwenLM/qwen-code/issues/11814)：`zoom_image` 已移出 registry 但 schema 仍会发给模型。**以"被禁用工具不得出现在请求 schema 中"为验收项的部署需要关注** |
+| #   | 项目                        | 结论                                                                                                                                                                                                                       |
+| --- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **subagent**                | ⚠️ 见 §2.4。`tools.eager` 降级会过滤 subagent 的显式 tools 列表，静默失效                                                                                                                                                  |
+| 2   | 后台记忆 agent              | ✅ 它依赖的 6 个工具（read_file/grep_search/glob/shell/write_file/edit）全在白名单里                                                                                                                                       |
+| 3   | token 换类别                | ⚠️ 去掉 `grep_search`/`glob` 后模型会改用 shell 的 `find`/`grep`，输出进对话上下文。**验收必须看每任务总 input token，不能只看非对话几类**                                                                                 |
+| 4   | 旧会话恢复                  | ✅ 历史里引用过的降级工具会自动补发 schema（`packages/core/src/core/client.ts:1783-1822`）；被 deny 的不会                                                                                                                 |
+| 5   | skill 的 `allowedTools`     | ✅ 只给自动放行，不声明也不加载工具（`packages/core/src/skills/types.ts:38-56`）。降级不影响，deny 会在运行时失败                                                                                                          |
+| 6   | 作用域外溢                  | ⚠️ `permissions.deny` 写在 settings 里会作用于所有读这份 settings 的客户端；配置应放工作区级                                                                                                                               |
+| 7   | DeepSeek 系模型             | ⚠️ 不适用于本部署，但若换模型：`packages/cli/src/config/config.ts:1993-2013` 会把 `tool_search` 推进 deny 列表并**主动揭示所有延迟工具**。注释说明这是有意的（DeepSeek 前缀缓存折扣最高到 1/120，稳定前缀比省 token 值钱） |
+| 8   | `tools.disabled` 的已知缺口 | ⚠️ [#11814](https://github.com/QwenLM/qwen-code/issues/11814)：`zoom_image` 已移出 registry 但 schema 仍会发给模型。**以"被禁用工具不得出现在请求 schema 中"为验收项的部署需要关注**                                       |
 
 ---
 
