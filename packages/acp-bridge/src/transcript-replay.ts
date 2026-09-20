@@ -417,6 +417,20 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+/**
+ * A subagent round's prompt id is `<sessionId>#<agentId>#<round>`; the main
+ * session's is `<sessionId>########<n>`, which splits into nine parts rather
+ * than three. Kept in step with `extractSubagentSuffix` in core's
+ * `openaiLogger.ts`, the canonical reader of this shape.
+ */
+function isSubagentPromptId(promptId: string | undefined): boolean {
+  if (promptId === undefined) return false;
+  const parts = promptId.split('#');
+  if (parts.length !== 3) return false;
+  const [, agentId, round] = parts;
+  return Boolean(agentId) && /^\d+$/.test(round ?? '');
+}
+
 function parseToolTimingStatus(
   value: unknown,
 ): TranscriptTimingMeta['toolStatus'] {
@@ -1461,14 +1475,26 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
    * consumed in allocation order — the map preserves insertion order — so the
    * first telemetry record naming it takes the first allocation rather than
    * every record collapsing onto the rewritten one.
+   *
+   * Two guards keep a subagent's tool from claiming a main-session call.
+   * `logToolCall` attaches no subagent identity, so a subagent's tool
+   * telemetry is indistinguishable by id alone — only its prompt id says it
+   * came from a subagent, and this machine holds no pending entry for a
+   * subagent's own calls. A provider that reuses `call_0` on every response
+   * would otherwise let the first tool inside an Agent call claim the Agent
+   * call itself, permanently, via `timingMatched`. The tool name has to agree
+   * for the same reason.
    */
   private resolveTimingCallId(
     timing: TranscriptTimingMeta,
   ): TranscriptTimingMeta {
     if (timing.kind !== 'tool' || timing.callId === undefined) return timing;
+    if (isSubagentPromptId(timing.promptId)) return timing;
     for (const pending of this.pendingToolCalls.values()) {
       const recordedId = pending.rawCallId ?? pending.callId;
       if (recordedId !== timing.callId || pending.timingMatched) continue;
+      if (timing.toolName !== undefined && pending.toolName !== timing.toolName)
+        continue;
       this.pendingToolCalls.set(pending.callId, {
         ...pending,
         timingMatched: true,

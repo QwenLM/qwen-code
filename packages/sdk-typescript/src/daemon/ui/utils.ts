@@ -45,9 +45,13 @@ export function extractTranscriptTiming(
   const kind = timing['kind'];
   if (kind !== 'request' && kind !== 'tool') return undefined;
   const durationMs = getFiniteNumber(timing, 'durationMs');
-  if (durationMs === undefined) return undefined;
+  if (durationMs === undefined || durationMs < 0) return undefined;
 
-  const startedAt = getFiniteNumber(timing, 'startedAt');
+  // A start time is only meaningful on a request; the tool logger can batch,
+  // so the producer never puts one on a tool frame and a reader must not
+  // trust one that shows up anyway.
+  const startedAt =
+    kind === 'request' ? getFiniteNumber(timing, 'startedAt') : undefined;
   const ttftMs = getFiniteNumber(timing, 'ttftMs');
   const status = timing['status'];
   const toolStatus = timing['toolStatus'];
@@ -66,7 +70,9 @@ export function extractTranscriptTiming(
     durationMs,
     ...carriedStrings,
     ...(startedAt !== undefined ? { startedAt } : {}),
-    ...(kind === 'request' && ttftMs !== undefined ? { ttftMs } : {}),
+    ...(kind === 'request' && ttftMs !== undefined && ttftMs >= 0
+      ? { ttftMs }
+      : {}),
     ...(kind === 'request' && (status === 'ok' || status === 'error')
       ? { status }
       : {}),

@@ -2454,6 +2454,73 @@ describe('ui_telemetry timing frames', () => {
     expect(toolTiming).toMatchObject({ callId: 'call_subagent_own' });
   });
 
+  it('never lets a subagent tool claim a main-session call', () => {
+    // The shape real data has: `logToolCall` attaches no subagent identity, so
+    // only the prompt id marks the round as a subagent's. With a provider that
+    // reuses `call_0`, the Agent call is rewritten to `call_0:2` and a tool
+    // inside the subagent reports plain `call_0` first.
+    const machine = timingMachine();
+    updates(machine, assistantWithToolCall('assistant-1', 'call_0'));
+    const agentCall = updates(
+      machine,
+      assistantWithToolCall('assistant-2', 'call_0'),
+    );
+    const agentCallId = (agentCall[0] as unknown as { toolCallId: string })
+      .toolCallId;
+
+    const [subagentTiming] = timings(
+      machine,
+      telemetry('tel-1', {
+        ...TOOL_CALL_EVENT,
+        call_id: 'call_0',
+        prompt_id: 'session-1#general-purpose-call_0#0',
+      }),
+    );
+
+    expect(subagentTiming).toMatchObject({ callId: 'call_0' });
+    expect(subagentTiming).not.toMatchObject({ callId: agentCallId });
+
+    // And the Agent call's own frame is still free to claim it afterwards.
+    const [mainTiming] = timings(
+      machine,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_0' }),
+    );
+    expect(mainTiming).toMatchObject({ callId: 'call_0' });
+  });
+
+  it('requires the tool name to agree before claiming a call', () => {
+    const machine = timingMachine();
+    updates(machine, assistantWithToolCall('assistant-1', 'call_0'));
+    const second = updates(
+      machine,
+      assistantWithToolCall('assistant-2', 'call_0'),
+    );
+    const rewrittenCallId = (second[0] as unknown as { toolCallId: string })
+      .toolCallId;
+
+    const [other] = timings(
+      machine,
+      telemetry('tel-1', {
+        ...TOOL_CALL_EVENT,
+        call_id: 'call_0',
+        function_name: 'run_shell_command',
+      }),
+    );
+
+    // Neither allocation is a `run_shell_command`, so nothing is claimed.
+    expect(other).toMatchObject({ callId: 'call_0' });
+    const [glob] = timings(
+      machine,
+      telemetry('tel-2', { ...TOOL_CALL_EVENT, call_id: 'call_0' }),
+    );
+    expect(glob).toMatchObject({ callId: 'call_0' });
+    const [nextGlob] = timings(
+      machine,
+      telemetry('tel-3', { ...TOOL_CALL_EVENT, call_id: 'call_0' }),
+    );
+    expect(nextGlob).toMatchObject({ callId: rewrittenCallId });
+  });
+
   it.each([
     ['a missing duration', { duration_ms: undefined }],
     ['a non-numeric duration', { duration_ms: '6544' }],

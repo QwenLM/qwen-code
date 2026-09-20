@@ -10812,6 +10812,38 @@ describe('transcript timing frames', () => {
     expect(extractTranscriptTiming(update)).toBeUndefined();
   });
 
+  it('drops a start time that showed up on a tool frame', () => {
+    // The producer never puts one there; a reader must not trust one anyway.
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: 1_760_000_000_000,
+          },
+        },
+      }),
+    ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
+  });
+
+  it('rejects a negative duration', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: { timing: { kind: 'request', durationMs: -1 } },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('drops a negative TTFT but keeps the frame', () => {
+    const timing = extractTranscriptTiming({
+      _meta: { timing: { kind: 'request', durationMs: 10, ttftMs: -5 } },
+    });
+
+    expect(timing).toEqual({ kind: 'request', durationMs: 10 });
+  });
+
   it('drops fields that do not belong to the frame kind', () => {
     expect(
       extractTranscriptTiming({

@@ -201,7 +201,12 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
  */
 export interface DaemonTranscriptTimingMeta {
   kind: 'request' | 'tool';
-  /** Epoch ms. Absent when the record's end time did not parse. */
+  /**
+   * Epoch ms, and `kind === 'request'` only. A request is logged when its own
+   * stream ends, so its start follows from its duration. Tool calls can be
+   * logged in one loop after their whole batch settles, so no honest per-tool
+   * start is derivable and a tool frame never carries this.
+   */
   startedAt?: number;
   durationMs: number;
   /** `kind === 'request'`: dispatch to first user-visible content. */
@@ -215,7 +220,11 @@ export interface DaemonTranscriptTimingMeta {
   callId?: string;
   toolName?: string;
   toolStatus?: 'success' | 'error' | 'cancelled';
-  /** Set when a subagent issued the request or tool call. */
+  /**
+   * `kind === 'request'` in practice: the tool logger attaches no subagent
+   * identity, so a subagent's tool frame never carries this. Its `promptId`
+   * (`<sessionId>#<agentId>#<round>`) is what marks it as a subagent's.
+   */
   subagentId?: string;
 }
 
