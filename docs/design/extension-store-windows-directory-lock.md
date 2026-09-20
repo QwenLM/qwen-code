@@ -406,7 +406,8 @@ destination that resolves outside the extensions root, and a linked root inside 
 each being refused with the relocated tree left intact; a relative symlink target
 surviving a copy swap; a lock-defeated rollback keeping its journal and its backup
 once the generation moves; a destination's stacked transactions replayed newest
-first; a second transaction for one destination refused, and refused with the
+first by the generation key that marking cannot move, the commit guard replaying
+in that same order; a second transaction for one destination refused, and refused with the
 locked-directory message naming the directory the user can act on when the holder
 is what blocked the first one; a journal whose marker could not be written
 refusing every later operation with its raw errno, backup and tree left intact;
@@ -476,7 +477,8 @@ Acceptance:
   journal markers and their rules (a settled transaction does not block the next
   mutation, a genuinely unresolved one is refused, a rollback whose retry cannot
   produce a loadable artifact stops the caller, and a blocked rollback is retried on
-  a deferred window); newest-first replay; lock-classified retries on the
+  a deferred window); newest-first replay on a generation key no pass can move,
+  shared with the commit guard; lock-classified retries on the
   removals a rollback and a journal teardown perform, with one allowance per store
   operation; the `.partial` sibling those teardowns remove; and the refusal, with
   the locked-directory text, that a blocked rollback leaves on Windows.

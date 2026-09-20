@@ -1709,24 +1709,57 @@ export class ExtensionStore {
     }
   }
 
-  private async recoverTransactionsUnlocked(): Promise<void> {
-    const transactionsDir = path.join(this.storeDir, 'transactions');
+  /** Pending transactions in replay order, shared by recovery and the commit
+   *  guard: newest transaction first. The key must be one a pass cannot move
+   *  itself - marking a journal rewrites its mtime - so the store-wide
+   *  targetGeneration decides and the read-time mtime only breaks its ties.
+   *  A comparator switching keys on a pairwise property is not a valid
+   *  ordering at all. The live guard cannot stack two rollback-owed journals
+   *  for one destination; this orders the stacks a copied or older-build
+   *  store can still carry on disk. */
+  private async orderedPendingTransactions(
+    transactionsDir: string,
+  ): Promise<
+    Array<{ journalPath: string; journal: ExtensionTransactionJournal }>
+  > {
     const names = await fsp.readdir(transactionsDir);
-    // One allowance per recovery pass, so stacked journals cannot multiply it.
-    const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
-    const snapshot = await this.readSnapshotUnlocked();
-    // Newest first: a destination's stacked transactions end on the last backup.
-    const ordered: Array<{ journalPath: string; mtimeMs: number }> = [];
+    const pending: Array<{
+      journalPath: string;
+      journal: ExtensionTransactionJournal;
+      targetGeneration: number;
+      mtimeMs: number;
+    }> = [];
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const journalPath = path.join(transactionsDir, name);
-      const stats = await lstatOrNull(journalPath);
-      ordered.push({ journalPath, mtimeMs: Number(stats?.mtimeMs ?? 0) });
-    }
-    ordered.sort((left, right) => right.mtimeMs - left.mtimeMs);
-    for (const { journalPath } of ordered) {
       const journal = await this.readRecoverableJournalUnlocked(journalPath);
       if (!journal) continue;
+      const stats = await lstatOrNull(journalPath);
+      if (!stats) continue;
+      pending.push({
+        journalPath,
+        journal,
+        targetGeneration: journal.targetGeneration,
+        mtimeMs: Number(stats.mtimeMs),
+      });
+    }
+    pending.sort(
+      (left, right) =>
+        right.targetGeneration - left.targetGeneration ||
+        right.mtimeMs - left.mtimeMs,
+    );
+    return pending;
+  }
+
+  private async recoverTransactionsUnlocked(): Promise<void> {
+    const transactionsDir = path.join(this.storeDir, 'transactions');
+    // One allowance per recovery pass, so stacked journals cannot multiply it.
+    const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
+    const snapshot = await this.readSnapshotUnlocked();
+    for (const {
+      journalPath,
+      journal,
+    } of await this.orderedPendingTransactions(transactionsDir)) {
       if (isTransactionResolved(journal, snapshot)) {
         if (this.retryDue(journal)) {
           try {
@@ -1882,27 +1915,25 @@ export class ExtensionStore {
     destinationDirectory: string,
   ): Promise<void> {
     const transactionsDir = path.join(this.storeDir, 'transactions');
-    const names = await fsp.readdir(transactionsDir);
     const snapshot = await this.readSnapshotUnlocked();
     const resolvedDestination = path.resolve(destinationDirectory);
-    for (const name of names) {
-      if (!name.endsWith('.json')) continue;
-      const journalPath = path.join(transactionsDir, name);
-      const journal = await this.readRecoverableJournalUnlocked(journalPath);
+    // One allowance per guard pass, matching recovery's rule: stacked
+    // journals must not multiply it.
+    const budget: LockRetryBudget = { remainingMs: LOCK_RETRY_BUDGET_MS };
+    for (const {
+      journalPath,
+      journal,
+    } of await this.orderedPendingTransactions(transactionsDir)) {
       if (
-        !journal ||
         path.resolve(journal.destinationDirectory) !== resolvedDestination ||
         isTransactionResolved(journal, snapshot)
       ) {
         continue;
       }
       // The retry window defers reads, not a mutation of the very directory
-      // it waits on: this destination gets its owed rollback right now.
-      if (
-        !(await this.attemptRollback(journal, journalPath, {
-          remainingMs: LOCK_RETRY_BUDGET_MS,
-        }))
-      ) {
+      // it waits on: this destination gets its owed rollbacks right now, in
+      // the same newest-first order recovery would replay.
+      if (!(await this.attemptRollback(journal, journalPath, budget))) {
         // Still blocked after a fresh attempt, so the diagnosis is current.
         throw process.platform === 'win32'
           ? new ExtensionDirectoryLockedError(journal.destinationDirectory)

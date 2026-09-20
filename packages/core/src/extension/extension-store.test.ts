@@ -2986,6 +2986,21 @@ describe('ExtensionStore', () => {
       return target;
     };
 
+    /** Forces the persisted retry window due on named journals: rewrites the
+     *  marker to expire now. Pass them in oldest-first order when the rewrite
+     *  order sets the mtimes a case depends on. */
+    const expireJournalWindow = async (...journalPaths: string[]) => {
+      for (const journalPath of journalPaths) {
+        const due = JSON.parse(
+          await fsp.readFile(journalPath, 'utf8'),
+        ) as Record<string, unknown>;
+        await fsp.writeFile(
+          journalPath,
+          JSON.stringify({ ...due, rollbackRetryAt: 1 }),
+        );
+      }
+    };
+
     /** Writes a planted journal, plus the backup tree it names when given. */
     const plantJournal = async (
       journal: Record<string, unknown> & { transactionId: string },
@@ -3447,7 +3462,7 @@ describe('ExtensionStore', () => {
       expect(await leftoverJournals()).toEqual([]);
     });
 
-    it('replays a destination pending transactions newest first', async () => {
+    it('falls back to mtime order when a stack claims one generation', async () => {
       const store = makeStore();
       const identity = { id: 'f6'.repeat(32), name: 'demo' };
       const initial = await store.ensureInitialized([identity]);
@@ -3876,13 +3891,8 @@ describe('ExtensionStore', () => {
 
         const expireWindow = async () => {
           const [journalName] = await leftoverJournals();
-          const journalPath = path.join(storeDir, 'transactions', journalName!);
-          const due = JSON.parse(
-            await fsp.readFile(journalPath, 'utf8'),
-          ) as Record<string, unknown>;
-          await fsp.writeFile(
-            journalPath,
-            JSON.stringify({ ...due, rollbackRetryAt: 1 }),
+          await expireJournalWindow(
+            path.join(storeDir, 'transactions', journalName!),
           );
         };
         // An expired window admits one retry; still held, it re-marks, so
@@ -4791,10 +4801,7 @@ describe('ExtensionStore', () => {
         expect(restored).toHaveLength(settled);
         // Once the window passes recovery tries again, so the destination is not
         // wedged after the holder lets go.
-        await fsp.writeFile(
-          marked.journalPath,
-          JSON.stringify({ ...marked.journal, rollbackRetryAt: 1 }),
-        );
+        await expireJournalWindow(marked.journalPath);
         await store.readSnapshot();
         expect(restored.length).toBeGreaterThan(settled);
 
@@ -4874,6 +4881,194 @@ describe('ExtensionStore', () => {
         expect(
           await fsp.readFile(path.join(destination, 'version'), 'utf8'),
         ).toBe('two');
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    // Stacked journals for one destination: replay order decides which
+    // backup the tree ends on, and the key must be one a pass cannot move -
+    // marking a journal rewrites its mtime.
+    const plantStackedPair = async (store: ExtensionStore) => {
+      const identity = { id: 'da'.repeat(32), name: 'demo' };
+      const snapshot = await targetSnapshotFor(store, identity);
+      const destination = path.join(extensionsDir, 'demo');
+      await fsp.mkdir(destination, { recursive: true });
+      await fsp.writeFile(
+        path.join(destination, EXTENSIONS_CONFIG_FILENAME),
+        '{"name":"demo"}',
+      );
+      await fsp.writeFile(path.join(destination, 'version'), 'three');
+      // T2 stacks on T1, so its backup holds the post-T1 tree. T1 is planted
+      // last and ends up the newest by mtime.
+      // The on-disk snapshot sits at generation 1 after initialization, so
+      // the stacked pair spans generations 1->2 and 2->3.
+      await plantJournal(
+        {
+          transactionId: 'stack-t2',
+          operation: 'update',
+          phase: 'prepared',
+          destinationDirectory: destination,
+          stagingDirectory: path.join(storeDir, 'staging', 'stack-t2'),
+          backupDirectory: path.join(storeDir, 'rollback', 'stack-t2'),
+          swapStrategy: 'copy',
+          previousGeneration: 2,
+          targetGeneration: 3,
+          targetSnapshot: { ...snapshot, generation: 3 },
+        },
+        { [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}', version: 'two' },
+      );
+      await plantJournal(
+        {
+          transactionId: 'stack-t1',
+          operation: 'update',
+          phase: 'prepared',
+          destinationDirectory: destination,
+          stagingDirectory: path.join(storeDir, 'staging', 'stack-t1'),
+          backupDirectory: path.join(storeDir, 'rollback', 'stack-t1'),
+          swapStrategy: 'copy',
+          previousGeneration: 1,
+          targetGeneration: 2,
+          targetSnapshot: { ...snapshot, generation: 2 },
+        },
+        { [EXTENSIONS_CONFIG_FILENAME]: '{"name":"demo"}', version: 'one' },
+      );
+      return { identity, destination, snapshot };
+    };
+
+    const holdStackedRestores = (
+      store: ExtensionStore,
+      rollbackRoot: string,
+      staging: () => string | undefined,
+    ) => {
+      const internals = store as unknown as {
+        copyTree: (
+          source: string,
+          target: string,
+          budget: unknown,
+        ) => Promise<void>;
+      };
+      const copyTree = internals.copyTree.bind(store);
+      const state = { holdRestore: true, holdApply: false };
+      vi.spyOn(internals, 'copyTree').mockImplementation(
+        async (source: string, target: string, budget: unknown) => {
+          if (state.holdRestore && source.startsWith(rollbackRoot)) {
+            throw lockError(source);
+          }
+          if (state.holdApply && source === staging()) {
+            throw lockError(source);
+          }
+          return await copyTree(source, target, budget);
+        },
+      );
+      return state;
+    };
+
+    it('replays stacked journals newest-first through recovery and the guard', async () => {
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      const store = makeStore();
+      const { identity, destination } = await plantStackedPair(store);
+      const rollbackRoot = path.join(storeDir, 'rollback');
+      let stagingDir: string | undefined;
+      const state = holdStackedRestores(store, rollbackRoot, () => stagingDir);
+      try {
+        // Pass 1 defeats both rollbacks and marks both journals - the last
+        // mark moves its journal to the front of any mtime-ordered replay.
+        await store.readSnapshot();
+        expect((await leftoverJournals()).sort()).toEqual([
+          'stack-t1.json',
+          'stack-t2.json',
+        ]);
+
+        // Guard path: the forced retry follows recovery's newest-first
+        // order, not bare readdir. With the holder gone the commit unwinds
+        // T2 then T1, and only its own defeated apply fails.
+        state.holdRestore = false;
+        stagingDir = await stageUpdate(store);
+        state.holdApply = true;
+        renameFault.inspect = (src) =>
+          src === destination ? lockError(src) : undefined;
+        await expect(
+          store.commitArtifact({
+            operation: 'update',
+            identity,
+            stagingDirectory: stagingDir,
+            destinationDirectory: destination,
+          }),
+        ).rejects.toBeInstanceOf(ExtensionDirectoryLockedError);
+        expect(await leftoverJournals()).toEqual([]);
+        expect(await fsp.readdir(rollbackRoot)).toEqual([]);
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('one');
+
+        // Recovery path: a fresh stack, marked by a pass that left T1 the
+        // newest mtime, must still unwind T2 before T1 once due - even with
+        // a pending journal for a second destination interleaved between
+        // them. A comparator that switches keys on destination equality is
+        // not a valid ordering, and V8 then emits the pair oldest-first for
+        // some readdir orders, so pin one such order for the witness.
+        state.holdApply = false;
+        state.holdRestore = true;
+        const { snapshot } = await plantStackedPair(store);
+        const otherDir = path.join(extensionsDir, 'other');
+        await fsp.mkdir(otherDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(otherDir, EXTENSIONS_CONFIG_FILENAME),
+          '{"name":"other"}',
+        );
+        await fsp.writeFile(path.join(otherDir, 'version'), 'b-old');
+        await plantJournal(
+          {
+            transactionId: 'stack-o',
+            operation: 'update',
+            phase: 'prepared',
+            destinationDirectory: otherDir,
+            stagingDirectory: path.join(storeDir, 'staging', 'stack-o'),
+            backupDirectory: path.join(storeDir, 'rollback', 'stack-o'),
+            swapStrategy: 'copy',
+            previousGeneration: 3,
+            targetGeneration: 4,
+            targetSnapshot: { ...snapshot, generation: 4 },
+          },
+          {
+            [EXTENSIONS_CONFIG_FILENAME]: '{"name":"other"}',
+            version: 'b-old',
+          },
+        );
+        await store.readSnapshot();
+        // Expire oldest-first so the rewrites leave T1 the newest mtime.
+        await expireJournalWindow(
+          path.join(storeDir, 'transactions', 'stack-t2.json'),
+          path.join(storeDir, 'transactions', 'stack-o.json'),
+          path.join(storeDir, 'transactions', 'stack-t1.json'),
+        );
+        state.holdRestore = false;
+        const readdir = fsp.readdir.bind(fsp);
+        const transactionsRoot = path.join(storeDir, 'transactions');
+        const readdirSpy = vi
+          .spyOn(fsp, 'readdir')
+          .mockImplementation(async (dir, opts) =>
+            String(dir) === transactionsRoot
+              ? (['stack-t1.json', 'stack-o.json', 'stack-t2.json'] as never)
+              : (readdir(
+                  dir as Parameters<typeof readdir>[0],
+                  opts as Parameters<typeof readdir>[1],
+                ) as unknown as never),
+          );
+        try {
+          await store.readSnapshot();
+        } finally {
+          readdirSpy.mockRestore();
+        }
+        expect(await leftoverJournals()).toEqual([]);
+        expect(await fsp.readdir(rollbackRoot)).toEqual([]);
+        expect(
+          await fsp.readFile(path.join(destination, 'version'), 'utf8'),
+        ).toBe('one');
+        expect(await fsp.readFile(path.join(otherDir, 'version'), 'utf8')).toBe(
+          'b-old',
+        );
       } finally {
         vi.restoreAllMocks();
       }
