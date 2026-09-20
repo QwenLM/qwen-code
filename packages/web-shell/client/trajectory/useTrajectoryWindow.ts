@@ -1,0 +1,253 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { DaemonEvent } from '@qwen-code/sdk/daemon';
+import { buildTrajectory } from './buildTrajectory';
+import { projectTrajectoryWindow } from './projectTrajectoryWindow';
+import type { Trajectory } from './types';
+
+export const TRAJECTORY_PAGE_SIZE = 100;
+/**
+ * Pages held at once. The window is re-projected whole on every change, and
+ * each page is a full replay of its records, so this is the ceiling on both
+ * the retained bytes and the per-change work.
+ */
+export const TRAJECTORY_MAX_PAGES = 10;
+
+/**
+ * The fields of a transcript page this view reads. Narrower than the daemon's
+ * own page type on purpose: the client's page satisfies it structurally, and a
+ * test can hand back a page without standing up the rest of the envelope.
+ */
+export interface TrajectoryPageResult {
+  events: readonly DaemonEvent[];
+  nextCursor?: string;
+  hasMore: boolean;
+  partial?: true;
+  replayError?: string;
+}
+
+/**
+ * Fetches one page of the session's transcript, newest page first and older
+ * pages by cursor. Supplied by the host rather than called here so the panel
+ * never reaches for a daemon client of its own.
+ *
+ * There is no cancellation: the daemon client exposes no abort, so a superseded
+ * request is discarded on arrival by generation rather than stopped in flight.
+ */
+export type TrajectoryPageLoader = (opts: {
+  cursor?: string;
+  limit: number;
+}) => Promise<TrajectoryPageResult>;
+
+export interface TrajectoryWindow {
+  trajectory: Trajectory | undefined;
+  status: 'idle' | 'loading' | 'ready' | 'error';
+  error?: string;
+  /** More history exists and the window has room for it. */
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  /** True when older history exists but the window is full. */
+  atCapacity: boolean;
+  loadOlder: () => void;
+  refresh: () => void;
+}
+
+interface WindowState {
+  /** Fetched pages, oldest first; an older page is prepended. */
+  pages: ReadonlyArray<readonly DaemonEvent[]>;
+  olderCursor?: string;
+  hasOlder: boolean;
+  status: TrajectoryWindow['status'];
+  error?: string;
+  loadingOlder: boolean;
+}
+
+const EMPTY_STATE: WindowState = {
+  pages: [],
+  hasOlder: false,
+  status: 'idle',
+  loadingOlder: false,
+};
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  const text = String(error ?? '');
+  return text.length > 0 ? text : 'Unknown error';
+}
+
+/**
+ * A page the daemon could not read in full. Its events are a prefix of the
+ * truth, so folding them would show a run with records silently missing —
+ * report it instead.
+ */
+function pageFailure(page: TrajectoryPageResult): string | undefined {
+  if (page.replayError) return page.replayError;
+  return page.partial ? 'partial' : undefined;
+}
+
+/**
+ * Hold a window of transcript pages for one session and fold it into a
+ * trajectory.
+ *
+ * The window is this view's own: paged replay is the only path that emits
+ * timing frames, and the chat store is fed by the live stream and by bulk
+ * replay, neither of which carries them. Fetching here also keeps the window
+ * contiguous by construction, which is what lets the projection pair a frame
+ * with what it measured.
+ *
+ * `refresh` rebuilds the window from the newest page rather than splicing one
+ * in: page boundaries are chosen per request, so a fresh newest page and the
+ * held one overlap by an unknown amount and cannot be joined without dropping
+ * or repeating records.
+ */
+export function useTrajectoryWindow(
+  loadPage: TrajectoryPageLoader | undefined,
+  options: { pageSize?: number; maxPages?: number } = {},
+): TrajectoryWindow {
+  const pageSize = options.pageSize ?? TRAJECTORY_PAGE_SIZE;
+  const maxPages = options.maxPages ?? TRAJECTORY_MAX_PAGES;
+
+  const [state, setState] = useState<WindowState>(EMPTY_STATE);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  // Every fetch carries the generation it started in. A refresh, a loader
+  // change and unmount all bump it, so a reply that arrives after any of them
+  // is dropped instead of writing a window its caller no longer owns.
+  const generationRef = useRef(0);
+  const olderInFlightRef = useRef(false);
+
+  const loadNewest = useCallback(() => {
+    if (!loadPage) return;
+    const generation = ++generationRef.current;
+    olderInFlightRef.current = false;
+    setState((previous) => ({
+      ...previous,
+      status: 'loading',
+      error: undefined,
+      loadingOlder: false,
+    }));
+    loadPage({ limit: pageSize }).then(
+      (page) => {
+        if (generationRef.current !== generation) return;
+        const failure = pageFailure(page);
+        if (failure !== undefined) {
+          // Keep whatever is already on screen: a failed refresh should not
+          // also erase the run the reader was looking at.
+          setState((previous) => ({
+            ...previous,
+            status: 'error',
+            error: failure,
+            loadingOlder: false,
+          }));
+          return;
+        }
+        setState({
+          pages: [page.events],
+          ...(page.nextCursor !== undefined
+            ? { olderCursor: page.nextCursor }
+            : {}),
+          hasOlder: page.hasMore,
+          status: 'ready',
+          loadingOlder: false,
+        });
+      },
+      (error: unknown) => {
+        if (generationRef.current !== generation) return;
+        setState((previous) => ({
+          ...previous,
+          status: 'error',
+          error: errorMessage(error),
+          loadingOlder: false,
+        }));
+      },
+    );
+  }, [loadPage, pageSize]);
+
+  const loadOlder = useCallback(() => {
+    if (!loadPage || olderInFlightRef.current) return;
+    const current = stateRef.current;
+    const cursor = current.olderCursor;
+    if (!current.hasOlder || cursor === undefined) return;
+    if (current.pages.length >= maxPages) return;
+    const generation = ++generationRef.current;
+    olderInFlightRef.current = true;
+    setState((previous) => ({ ...previous, loadingOlder: true }));
+    loadPage({ cursor, limit: pageSize }).then(
+      (page) => {
+        if (generationRef.current !== generation) return;
+        olderInFlightRef.current = false;
+        const failure = pageFailure(page);
+        if (failure !== undefined) {
+          setState((previous) => ({
+            ...previous,
+            status: 'error',
+            error: failure,
+            loadingOlder: false,
+          }));
+          return;
+        }
+        setState((previous) => ({
+          ...previous,
+          pages: [page.events, ...previous.pages],
+          ...(page.nextCursor !== undefined
+            ? { olderCursor: page.nextCursor }
+            : { olderCursor: undefined }),
+          hasOlder: page.hasMore,
+          status: 'ready',
+          error: undefined,
+          loadingOlder: false,
+        }));
+      },
+      (error: unknown) => {
+        if (generationRef.current !== generation) return;
+        olderInFlightRef.current = false;
+        setState((previous) => ({
+          ...previous,
+          status: 'error',
+          error: errorMessage(error),
+          loadingOlder: false,
+        }));
+      },
+    );
+  }, [loadPage, maxPages, pageSize]);
+
+  useEffect(() => {
+    if (!loadPage) {
+      generationRef.current += 1;
+      olderInFlightRef.current = false;
+      setState(EMPTY_STATE);
+      return;
+    }
+    loadNewest();
+    return () => {
+      generationRef.current += 1;
+      olderInFlightRef.current = false;
+    };
+  }, [loadPage, loadNewest]);
+
+  const trajectory = useMemo(
+    () =>
+      state.pages.length === 0
+        ? undefined
+        : buildTrajectory(projectTrajectoryWindow(state.pages.flat())),
+    [state.pages],
+  );
+
+  const atCapacity = state.hasOlder && state.pages.length >= maxPages;
+
+  return {
+    trajectory,
+    status: state.status,
+    ...(state.error !== undefined ? { error: state.error } : {}),
+    hasOlder: state.hasOlder && !atCapacity,
+    loadingOlder: state.loadingOlder,
+    atCapacity,
+    loadOlder,
+    refresh: loadNewest,
+  };
+}
