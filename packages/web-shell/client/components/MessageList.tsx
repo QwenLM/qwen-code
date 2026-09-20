@@ -2318,7 +2318,7 @@ export interface MessageListHandle {
   scrollToSearchHit?: (
     hit: import('../daemon/session/turn-navigation-store').ConversationSearchHit,
     isCurrent?: () => boolean,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | 'cancelled'>;
   /** Resume bottom-follow mode and scroll to the latest output. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
 }

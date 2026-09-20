@@ -7576,7 +7576,6 @@ export function App({
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
-  const navigateToMessage = useMessageNavigation(messageListRef);
   const editorRef = useRef<EditorHandle | null>(null);
   const restoreConversationSearchFocus = useCallback(() => {
     editorRef.current?.focus();
@@ -8805,6 +8804,9 @@ export function App({
     | 'workspaces'
     | null
   >(initialConnectionsSettingsCategory ? 'settings' : null);
+  const chatActive =
+    !activePanel && mainView === 'chat' && !artifactPanelFullscreen;
+  const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
   const activePanelRef = useRef(activePanel);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
@@ -19887,6 +19889,7 @@ export function App({
                               <ConversationSearch
                                 key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
                                 threshold={conversationSearchThreshold}
+                                active={chatActive}
                                 registerInteractionBlocker={registerInteractionBlocker}
                                 messageListRef={messageListRef}
                                 className={styles.conversationSearchButton}

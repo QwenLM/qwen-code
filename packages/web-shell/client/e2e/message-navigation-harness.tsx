@@ -7,9 +7,12 @@ const params = new URLSearchParams(window.location.search);
 const theme = params.get('theme') === 'dark' ? 'dark' : 'light';
 document.documentElement.classList.add(`theme-${theme}`);
 document.documentElement.classList.toggle('dark', theme === 'dark');
-window.localStorage.setItem('qwen-code-web-shell-chat-width', 'wide');
+if (params.get('timeline') === 'true')
+  window.localStorage.removeItem('qwen-code-web-shell-chat-width');
+else window.localStorage.setItem('qwen-code-web-shell-chat-width', 'wide');
 let api: WebShellApi | null = null;
 Object.assign(window, {
+  openSyntheticOverview: () => api?.openSessionOverview(),
   navigateSyntheticMessage: (request: WebShellMessageNavigationRequest) =>
     api?.navigateToMessage(request),
 });

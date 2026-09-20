@@ -332,6 +332,84 @@ describe('createDaemonTurnNavigationStore', () => {
     expect(store.getViewportSnapshot().pages.size).toBe(0);
   });
 
+  it.each([true, false])(
+    'searches across a trimmed live boundary only when it can reopen (reachable=%s)',
+    async (reachable) => {
+      const { client, getTurnIndexPage, getTranscriptPage } = createClient();
+      const originalMaterialize = client.materializeTranscriptEvents;
+      client.materializeTranscriptEvents = (...args) => {
+        const result = originalMaterialize(...args);
+        return {
+          ...result,
+          blocks: result.blocks.map((block) =>
+            block.sourceRecordIds?.includes('turn')
+              ? block
+              : { ...block, kind: 'assistant' as const },
+          ),
+        };
+      };
+      getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn']));
+      getTranscriptPage.mockResolvedValue(
+        transcriptPage(['turn', 'a1'], { targetRecordId: 'turn' }),
+      );
+      const store = createDaemonTurnNavigationStore({
+        captureLiveBoundary: () => ({
+          beforeRecordId: 'a2',
+          reachable,
+          isCurrent: () => true,
+        }),
+      });
+      await ready(store, client);
+      store.observeLiveBlocks([assistantBlock('live-one', 'a1')]);
+      await store.locateOrdinal(0);
+      expect(store.getViewportSnapshot().ranges[0]?.newer.kind).toBe('live');
+      const revision = store.getViewportSnapshot().revision;
+      store.observeLiveBlocks([assistantBlock('live-two', 'a2')]);
+      expect(store.getViewportSnapshot().revision).toBe(revision);
+      getTranscriptPage.mockImplementation(async (options) =>
+        transcriptPage(
+          options.beforeRecordId ? ['turn', 'a1'] : ['turn', 'a1', 'a2'],
+          { targetRecordId: 'turn' },
+        ),
+      );
+      const hit = (
+        await store.scanConversation('a1', { isCurrent: () => true })
+      ).hits[0]!;
+      expect(hit).toMatchObject({
+        recordId: 'a1',
+        turnId: 'turn',
+        role: 'assistant',
+        revision,
+      });
+      getTranscriptPage.mockClear();
+      const location = store.locateViewportSearchHit(
+        hit,
+        { isCurrent: () => true },
+        () => {},
+      );
+      if (!reachable) {
+        await expect(location).rejects.toThrow(
+          'Conversation search message is unavailable',
+        );
+        expect(getTranscriptPage).not.toHaveBeenCalled();
+        return;
+      }
+      const located = await location;
+      expect(located.view).toBe('historical');
+      const block = store
+        .getViewportSnapshot()
+        .pages.get(located.pageId!)
+        ?.blocks.find((block) => block.id === located.blockId);
+      expect(block?.sourceRecordIds).toContain('a1');
+      expect(getTranscriptPage).toHaveBeenCalledOnce();
+      expect(getTranscriptPage).toHaveBeenCalledWith({
+        beforeRecordId: 'a2',
+        snapshot: 'snapshot-1',
+        limit: 200,
+      });
+    },
+  );
+
   it('recovers a trimmed live connection for a globally located range before continuing', async () => {
     const { client, getTurnIndexPage, getTranscriptPage } = createClient();
     getTurnIndexPage.mockResolvedValue(turnPage(0, ['turn', 'live-1']));

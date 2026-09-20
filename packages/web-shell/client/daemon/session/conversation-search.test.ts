@@ -91,6 +91,71 @@ async function ready(
 }
 
 describe('conversation search', () => {
+  it('streams the exact target page before replacing a full pinned reading window', async () => {
+    const { store, client, second } = fixture(1);
+    await ready(store);
+    const hit = (
+      await store.scanConversation('Newest answer', { isCurrent: () => true })
+    ).hits[0]!;
+    const original = await store.locateOrdinal(0);
+    store.setViewportAnchor('reader', original.pageId);
+    vi.mocked(client.getTranscriptPage).mockImplementation(async (options) => ({
+      v: 1,
+      sessionId: 'session',
+      targetRecordId: 'u2',
+      events: (options.cursor ? [second[1]!] : [second[0]!]).map((data) => ({
+        v: 1,
+        type: 'test',
+        data,
+      })),
+      hasMore: !options.cursor,
+      ...(options.cursor ? {} : { nextCursor: 'target-page' }),
+    }));
+    const release = vi.fn(() => store.setViewportAnchor('reader'));
+    const located = await store.locateViewportSearchHit(
+      hit,
+      { isCurrent: () => true },
+      release,
+    );
+    expect(release).toHaveBeenCalledOnce();
+    expect(located.view).toBe('historical');
+    const page = store.getViewportSnapshot().pages.get(located.pageId!)!;
+    expect(
+      page.blocks.find((block) => block.id === located.blockId)
+        ?.sourceRecordIds,
+    ).toEqual(['a2']);
+    expect([...page.recordIds]).toEqual(['a2']);
+    expect(store.getViewportSnapshot().pages.size).toBe(1);
+    expect(store.getViewportSnapshot().ranges[0]?.older.kind).toBe('loadable');
+    expect(store.getSnapshot().error).toBeUndefined();
+  });
+
+  it('replaces an overlapping pinned sequential page only when the exact hit is ready', async () => {
+    const { store } = fixture(1);
+    await ready(store);
+    const hit = (
+      await store.scanConversation('older MATCH', { isCurrent: () => true })
+    ).hits[0]!;
+    const rangeId = await store.openBeforeLive('u2', { isCurrent: () => true });
+    const original = store
+      .getViewportSnapshot()
+      .ranges.find((range) => range.id === rangeId)!;
+    store.setViewportAnchor('reader', original.pageIds[0]);
+    const release = vi.fn(() => store.setViewportAnchor('reader'));
+    const located = await store.locateViewportSearchHit(
+      hit,
+      { isCurrent: () => true },
+      release,
+    );
+    expect(release).toHaveBeenCalledOnce();
+    const page = store.getViewportSnapshot().pages.get(located.pageId!)!;
+    expect(
+      page.blocks.find((block) => block.id === located.blockId)
+        ?.sourceRecordIds,
+    ).toEqual(['a1']);
+    expect(store.getViewportSnapshot().pages.size).toBe(1);
+  });
+
   it('resolves the exact persisted record even when messages have identical text', async () => {
     const { store, client, first, second } = fixture();
     await ready(store);

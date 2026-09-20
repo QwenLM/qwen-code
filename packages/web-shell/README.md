@@ -717,6 +717,6 @@ const result = await shellRef.current?.navigateToMessage({
 搜索图标隐藏时也可调用。很旧的目标需要线性扫描历史，找到记录即停止。
 
 结果 `status` 为 `located`、`not_found`、`not_ready`、`session_mismatch`、`unsupported`、
-`cancelled` 或 `error`；`located` 不代表滚动动画已结束。未就绪时宿主须等待会话/视图就绪后再调用。
+`cancelled` 或 `error`；`located` 不代表滚动动画已结束。未就绪时宿主须等待会话/视图就绪后再调用。聊天被面板或全页视图覆盖时返回 `not_ready`，宿主应先恢复聊天视图。
 新请求、会话/工作目录变化、卸载或 AbortSignal 取消会使旧请求失效。
 现有跨会话搜索接口仅返回会话和摘要，不提供 `recordId`；宿主搜索需补齐记录 ID 后才可精确定位。

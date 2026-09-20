@@ -33,6 +33,7 @@ export async function setupConversationSearch(
     theme?: string;
     language?: string;
     externalNavigation?: boolean;
+    timeline?: boolean;
   } = {},
 ) {
   const count = options.count ?? 40;
@@ -143,7 +144,7 @@ export async function setupConversationSearch(
     return route.fallback();
   });
   await page.goto(
-    `${options.externalNavigation ? '/e2e/message-navigation-harness.html?sessionId=' : '/session/'}${scenario.sessionId}${options.externalNavigation ? '&' : '?'}theme=${options.theme ?? 'light'}&language=${options.language ?? 'en'}`,
+    `${options.externalNavigation ? '/e2e/message-navigation-harness.html?sessionId=' : '/session/'}${scenario.sessionId}${options.externalNavigation ? '&' : '?'}timeline=${options.timeline ?? false}&theme=${options.theme ?? 'light'}&language=${options.language ?? 'en'}`,
   );
   await daemon.sse.waitForConnection(scenario.sessionId, { timeout: 30_000 });
   await daemon.sendEvent(

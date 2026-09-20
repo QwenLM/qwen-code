@@ -22,9 +22,15 @@ export type WebShellMessageNavigationResult = {
 
 export function useMessageNavigation(
   messageListRef: RefObject<MessageListHandle | null>,
+  active = true,
 ) {
   const history = useDaemonHistoryNavigationStore();
   const generation = useRef(0);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => {
+    if (!active) generation.current += 1;
+  }, [active]);
   const currentHistory = useRef(history);
   currentHistory.current = history;
   const mounted = useRef(false);
@@ -54,6 +60,7 @@ export function useMessageNavigation(
       if (state.sessionId !== sessionId) return { status: 'session_mismatch' };
       if (state.mode === 'legacy') return { status: 'unsupported' };
       if (
+        !activeRef.current ||
         !viewport.connected ||
         state.mode !== 'ready' ||
         !messageListRef.current?.scrollToSearchHit
@@ -64,6 +71,7 @@ export function useMessageNavigation(
       const token = ++generation.current;
       const isCurrent = () =>
         mounted.current &&
+        activeRef.current &&
         currentHistory.current === history &&
         generation.current === token &&
         !signal?.aborted &&
@@ -72,15 +80,25 @@ export function useMessageNavigation(
       try {
         const hit = await history.resolveMessageRecord(recordId, { isCurrent });
         if (!isCurrent()) return { status: 'cancelled' };
+        if (!history.getViewportSnapshot().connected)
+          return { status: 'not_ready' };
         if (!hit) return { status: 'not_found' };
         const located = await messageListRef.current?.scrollToSearchHit?.(
           hit,
           isCurrent,
         );
-        if (!isCurrent()) return { status: 'cancelled' };
+        if (!isCurrent() || located === 'cancelled')
+          return { status: 'cancelled' };
+        if (!history.getViewportSnapshot().connected)
+          return { status: 'not_ready' };
         return { status: located ? 'located' : 'error' };
       } catch {
-        return { status: isCurrent() ? 'error' : 'cancelled' };
+        if (!isCurrent()) return { status: 'cancelled' };
+        return {
+          status: history.getViewportSnapshot().connected
+            ? 'error'
+            : 'not_ready',
+        };
       }
     },
     [history, messageListRef],

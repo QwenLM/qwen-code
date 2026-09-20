@@ -24,6 +24,7 @@ import {
 import { extractHttpStatus } from './httpErrors.js';
 import {
   HistoricalTranscriptPageTooLargeError,
+  HistoricalTranscriptWindowFullError,
   HistoricalTranscriptPageTable,
   type HistoricalTranscriptPage,
   type HistoricalTranscriptRange,
@@ -1034,6 +1035,108 @@ export function createDaemonTurnNavigationStore(
     request: HistoryViewportRequest,
     releaseAnchor: () => void,
   ): Promise<DaemonTurnLocation> {
+    try {
+      return await walkViewportSearchHit(hit, request, () => {});
+    } catch (error) {
+      if (!(error instanceof HistoricalTranscriptWindowFullError)) throw error;
+    }
+    const activeClient = client;
+    const entry = findIndexEntry(hit.turnOrdinal);
+    const valid = () =>
+      request.isCurrent() &&
+      hit.sessionId === sessionId &&
+      hit.revision === viewportSnapshot.revision &&
+      activeClient !== undefined &&
+      isCurrentClient(activeClient);
+    if (!valid() || !activeClient || entry?.entry.turnId !== hit.turnId)
+      throw new Error('Conversation search result expired');
+    let response = await activeClient.getTranscriptPage({
+      atRecordId: hit.turnId,
+      snapshot: entry.page.snapshot,
+      limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+    });
+    let previousCursor: string | undefined;
+    while (valid()) {
+      validateHistoricalResponse(response, sessionId);
+      if (!previousCursor && response.targetRecordId !== hit.turnId)
+        throw new Error(
+          'Anchored transcript response did not contain its target',
+        );
+      const liveBlock = lastLiveBlocks?.find((block) =>
+        block.sourceRecordIds?.includes(hit.recordId),
+      );
+      if (liveBlock)
+        return { turnId: hit.turnId, blockId: liveBlock.id, view: 'live' };
+      const materialized = activeClient.materializeTranscriptEvents(
+        response.events,
+        1,
+        new Set(),
+      );
+      if (
+        materialized.blocks.some((block) =>
+          block.sourceRecordIds?.includes(hit.recordId),
+        )
+      ) {
+        // Keep the reading pin through every await. Only the final, exact page
+        // replaces it; failed admission rolls back before the caller re-pins.
+        releaseAnchor();
+        if (!valid()) throw new Error('Conversation search result expired');
+        const target = pageTable.admitAnchor(
+          hit.turnOrdinal,
+          hit.turnId,
+          entry.page.snapshot,
+          {
+            ...response,
+            targetRecordId: hit.turnId,
+            hasOlder: Boolean(previousCursor) || response.hasOlder,
+          },
+          hit.recordId,
+        );
+        const blockId = pageTable
+          .getSnapshot()
+          .pages.get(target.pageId)!
+          .blocks.find((block) =>
+            block.sourceRecordIds?.includes(hit.recordId),
+          )!.id;
+        const location: DaemonTurnLocation = {
+          ...target,
+          blockId,
+          turnId: hit.turnId,
+          view: 'historical',
+        };
+        publish({
+          selected: {
+            ordinal: hit.turnOrdinal,
+            turnId: hit.turnId,
+            status: 'ready',
+            location,
+          },
+          ...(snapshot.error?.operation === 'locate'
+            ? { error: undefined }
+            : {}),
+        });
+        return location;
+      }
+      if (
+        !response.hasMore ||
+        !response.nextCursor ||
+        response.nextCursor === previousCursor
+      )
+        throw new Error('Conversation search message is unavailable');
+      previousCursor = response.nextCursor;
+      response = await activeClient.getTranscriptPage({
+        cursor: previousCursor,
+        limit: WEB_SHELL_HISTORY_PAGE_SIZE,
+      });
+    }
+    throw new Error('Conversation search result expired');
+  }
+
+  async function walkViewportSearchHit(
+    hit: ConversationSearchHit,
+    request: HistoryViewportRequest,
+    releaseAnchor: () => void,
+  ): Promise<DaemonTurnLocation> {
     const valid = () =>
       request.isCurrent() &&
       hit.sessionId === sessionId &&
@@ -1088,6 +1191,7 @@ export function createDaemonTurnNavigationStore(
         !range ||
         (range.newer.kind !== 'loadable' &&
           range.newer.kind !== 'cached' &&
+          range.newer.kind !== 'live' &&
           range.newer.kind !== 'loading' &&
           !(range.newer.kind === 'error' && range.newer.retryable))
       )

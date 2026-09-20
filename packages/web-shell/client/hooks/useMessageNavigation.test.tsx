@@ -25,6 +25,7 @@ vi.mock('../daemon/session/DaemonSessionProvider', () => ({
 let root: Root | undefined;
 let container: HTMLDivElement;
 let navigate: ReturnType<typeof useMessageNavigation>;
+let active = true;
 const scroll = vi.fn();
 let list: RefObject<MessageListHandle | null>;
 const hit = {
@@ -48,10 +49,11 @@ function deferred<T>() {
   return { promise, resolve };
 }
 function Probe() {
-  navigate = useMessageNavigation(list);
+  navigate = useMessageNavigation(list, active);
   return null;
 }
 beforeEach(async () => {
+  active = true;
   historyStore = store;
   mocks.state = { sessionId: 'session', mode: 'ready' };
   mocks.viewport = { revision: 0, connected: true };
@@ -234,5 +236,68 @@ it.each([
     pending.resolve(hit);
     expect(await active).toEqual({ status: 'located' });
     expect(scroll).toHaveBeenCalledTimes(1);
+  },
+);
+
+it('reports viewport-superseded navigation as cancelled rather than located or error', async () => {
+  scroll.mockResolvedValue('cancelled');
+  expect(await navigate(request)).toEqual({ status: 'cancelled' });
+  expect(scroll.mock.calls[0][1]()).toBe(true);
+});
+
+it.each(['resolve rejection', 'missing resolution', 'scroll failure'] as const)(
+  'reports not_ready when disconnecting during %s',
+  async (stage) => {
+    if (stage === 'resolve rejection') {
+      mocks.resolve.mockImplementation(async () => {
+        mocks.viewport = { ...mocks.viewport, connected: false };
+        throw new Error('connection closed');
+      });
+    } else if (stage === 'missing resolution') {
+      mocks.resolve.mockImplementation(async () => {
+        mocks.viewport = { ...mocks.viewport, connected: false };
+        return undefined;
+      });
+    } else {
+      scroll.mockImplementation(async () => {
+        mocks.viewport = { ...mocks.viewport, connected: false };
+        return false;
+      });
+    }
+    expect(await navigate(request)).toEqual({ status: 'not_ready' });
+  },
+);
+
+it('rejects navigation while the chat is hidden without resolving history', async () => {
+  active = false;
+  await act(async () => root!.render(<Probe />));
+  expect(await navigate(request)).toEqual({ status: 'not_ready' });
+  expect(mocks.resolve).not.toHaveBeenCalled();
+  expect(scroll).not.toHaveBeenCalled();
+});
+
+it.each(['resolve', 'scroll'] as const)(
+  'cancels an in-flight %s when the chat hides, even if it becomes visible before completion',
+  async (stage) => {
+    const pending = deferred<typeof hit>();
+    const pendingScroll = deferred<boolean>();
+    if (stage === 'resolve') mocks.resolve.mockReturnValue(pending.promise);
+    else scroll.mockReturnValue(pendingScroll.promise);
+    const promise = navigate(request);
+    await Promise.resolve();
+    const isCurrent =
+      stage === 'resolve'
+        ? mocks.resolve.mock.calls[0][1].isCurrent
+        : scroll.mock.calls[0][1];
+    active = false;
+    await act(async () => root!.render(<Probe />));
+    expect(isCurrent()).toBe(false);
+    active = true;
+    await act(async () => root!.render(<Probe />));
+    expect(isCurrent()).toBe(false);
+    if (stage === 'resolve') pending.resolve(hit);
+    else pendingScroll.resolve(true);
+    expect(await promise).toEqual({ status: 'cancelled' });
+    if (stage === 'resolve') expect(scroll).not.toHaveBeenCalled();
   },
 );

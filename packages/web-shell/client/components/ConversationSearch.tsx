@@ -41,6 +41,7 @@ interface SearchResult {
 
 interface ConversationSearchProps {
   children?: (trigger: ReactNode) => ReactNode;
+  active?: boolean;
   onRestoreFocus?: () => void;
   threshold?: number;
   className?: string;
@@ -50,6 +51,7 @@ interface ConversationSearchProps {
 
 export function ConversationSearch({
   children,
+  active = true,
   onRestoreFocus,
   threshold = 10,
   className,
@@ -96,25 +98,34 @@ export function ConversationSearch({
   );
 
   useEffect(() => {
+    if (!active) {
+      navigationIntent.current += 1;
+      setOpen(false);
+      setQuery('');
+    }
+  }, [active]);
+
+  useEffect(() => {
     const restoreFocus = wasOpen.current && !open;
     wasOpen.current = open;
-    if (!restoreFocus) return;
+    if (!restoreFocus || !active) return;
     const frame = requestAnimationFrame(() => {
       trigger.current?.focus({ preventScroll: true });
       if (!trigger.current || document.activeElement !== trigger.current)
         onRestoreFocus?.();
     });
     return () => cancelAnimationFrame(frame);
-  }, [open, onRestoreFocus]);
+  }, [active, open, onRestoreFocus]);
 
   useEffect(() => {
-    if (open) return registerInteractionBlocker?.();
-  }, [open, registerInteractionBlocker]);
+    if (active && open) return registerInteractionBlocker?.();
+  }, [active, open, registerInteractionBlocker]);
 
   useEffect(() => setCount(0), [limit, viewportState.revision]);
 
   useEffect(() => {
     if (
+      !active ||
       !viewportState.connected ||
       liveCount > limit ||
       navigation.mode !== 'ready'
@@ -135,6 +146,7 @@ export function ConversationSearch({
       current = false;
     };
   }, [
+    active,
     history,
     liveCount,
     limit,
@@ -151,6 +163,7 @@ export function ConversationSearch({
     setPersisted(undefined);
     setError(false);
     if (
+      !active ||
       !open ||
       !needle ||
       !viewportState.connected ||
@@ -187,6 +200,7 @@ export function ConversationSearch({
       clearTimeout(timer);
     };
   }, [
+    active,
     history,
     navigation.mode,
     needle,
@@ -257,8 +271,8 @@ export function ConversationSearch({
           )
         : result.messageId && list?.scrollToMessage(result.messageId);
       if (intent !== navigationIntent.current) return;
-      if (found) setOpen(false);
-      else setLocateError(true);
+      if (found === true) setOpen(false);
+      else if (found !== 'cancelled') setLocateError(true);
     } catch {
       if (intent === navigationIntent.current) setLocateError(true);
     } finally {
@@ -267,7 +281,7 @@ export function ConversationSearch({
   };
 
   const button =
-    Math.max(liveCount, count) > limit || open ? (
+    active && (Math.max(liveCount, count) > limit || open) ? (
       <button
         ref={trigger}
         type="button"
@@ -288,7 +302,7 @@ export function ConversationSearch({
   return (
     <>
       {children ? children(button) : button}
-      {open && (
+      {active && open && (
         <DialogShell
           title={t('chat.searchConversation')}
           onClose={() => {
@@ -321,6 +335,13 @@ export function ConversationSearch({
                 if (event.nativeEvent.isComposing || event.keyCode === 229)
                   return;
                 if (
+                  event.metaKey ||
+                  event.ctrlKey ||
+                  event.altKey ||
+                  event.shiftKey
+                )
+                  return;
+                if (
                   event.key === 'Enter' &&
                   results[activeIndex] &&
                   !locating
@@ -343,7 +364,7 @@ export function ConversationSearch({
                 }
               }}
             />
-            {navigation.mode !== 'ready' && (
+            {(navigation.mode !== 'ready' || !viewportState.connected) && (
               <p className="text-sm text-muted-foreground">
                 {t('chat.searchLoadedOnly')}
               </p>
@@ -362,7 +383,10 @@ export function ConversationSearch({
                           current: activeIndex + 1,
                           total: results.length,
                         })
-                      : !error && persisted?.complete !== false
+                      : (navigation.mode !== 'ready' ||
+                            viewportState.connected) &&
+                          !error &&
+                          persisted?.complete !== false
                         ? t('chat.searchNoResults')
                         : ''}
               </p>

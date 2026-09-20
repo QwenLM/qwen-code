@@ -68,3 +68,63 @@ for (const theme of ['light', 'dark']) {
     });
   }
 }
+
+test('does not navigate behind a covering panel @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  await setupConversationSearch(page, baseURL, {
+    history: true,
+    externalNavigation: true,
+  });
+  await page.evaluate(() =>
+    (
+      window as unknown as { openSyntheticOverview: () => void }
+    ).openSyntheticOverview(),
+  );
+  await expect(page.locator('[data-web-shell-message-list]')).not.toBeVisible();
+  const result = await page.evaluate(() =>
+    (
+      window as unknown as {
+        navigateSyntheticMessage: (request: {
+          sessionId: string;
+          recordId: string;
+        }) => Promise<{ status: string }>;
+      }
+    ).navigateSyntheticMessage({
+      sessionId: 'search-fixture',
+      recordId: 'record-3',
+    }),
+  );
+  expect(result).toEqual({ status: 'not_ready' });
+});
+
+test('closes conversation search when a host panel covers chat @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  await setupConversationSearch(page, baseURL, {
+    history: true,
+    externalNavigation: true,
+    timeline: true,
+  });
+  await page
+    .getByRole('button', { name: 'Search this conversation', exact: true })
+    .click();
+  const dialog = page.getByRole('dialog', {
+    name: 'Search this conversation',
+    exact: true,
+  });
+  await dialog.getByRole('combobox').fill('UNIQUE-NEEDLE');
+  await expect(dialog.getByRole('option')).toHaveCount(1);
+  await page.evaluate(() =>
+    (
+      window as unknown as { openSyntheticOverview: () => void }
+    ).openSyntheticOverview(),
+  );
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator('[data-web-shell-message-list]')).not.toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-portal-root] [role="dialog"]'),
+  ).toHaveCount(0);
+});

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { ConversationSearchResult } from '../daemon/session/turn-navigation-store';
 import { ConversationSearch } from './ConversationSearch';
+import type { MessageListHandle } from './MessageList';
 
 const mocks = vi.hoisted(() => ({
   transcript: { blocks: [] as DaemonTranscriptBlock[] },
@@ -34,7 +35,9 @@ const historyStore = {
 let root: Root | undefined;
 let container: HTMLDivElement;
 const scrollToMessage = vi.fn(() => true);
-const scrollToSearchHit = vi.fn(async () => true);
+const scrollToSearchHit = vi.fn<
+  NonNullable<MessageListHandle['scrollToSearchHit']>
+>(async () => true);
 const props = {
   messageListRef: { current: { scrollToMessage, scrollToSearchHit } },
 } as unknown as ComponentProps<typeof ConversationSearch>;
@@ -619,4 +622,177 @@ it('connects combobox selection to the active listbox option across arrows and p
   expect(active?.textContent).toBe('chat.searchUserMessage 2');
   expect(active?.getAttribute('aria-selected')).toBe('true');
   expect(list!.querySelectorAll('[aria-selected="true"]')).toHaveLength(1);
+});
+
+it.each(['metaKey', 'ctrlKey', 'altKey', 'shiftKey'])(
+  'leaves %s modified arrows and Enter to the input',
+  async (modifier) => {
+    await render();
+    await open();
+    await type('Message');
+    const input = document.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    const selected = input.getAttribute('aria-activedescendant');
+    for (const key of ['ArrowDown', 'ArrowUp', 'Enter']) {
+      const event = new KeyboardEvent('keydown', {
+        key,
+        [modifier]: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => input.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+      expect(input.getAttribute('aria-activedescendant')).toBe(selected);
+      expect(scrollToMessage).not.toHaveBeenCalled();
+      expect(scrollToSearchHit).not.toHaveBeenCalled();
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    }
+  },
+);
+
+it('discloses loaded-only search while disconnected and resumes on reconnect', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.viewport = { revision: 0, connected: false };
+  await render();
+  await open();
+  await type('missing');
+  await debounce();
+  expect(mocks.scan).not.toHaveBeenCalled();
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+    'chat.searchLoadedOnly',
+  );
+  expect(document.querySelector('[role="status"]')?.textContent).not.toContain(
+    'chat.searchNoResults',
+  );
+  mocks.viewport = { revision: 0, connected: true };
+  await render();
+  await debounce();
+  expect(mocks.scan).toHaveBeenCalledOnce();
+  expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain(
+    'chat.searchLoadedOnly',
+  );
+  expect(document.querySelector('[role="status"]')?.textContent).toContain(
+    'chat.searchNoResults',
+  );
+});
+
+it('closes and invalidates an in-flight search when chat becomes inactive', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.scan.mockReturnValue(new Promise(() => {}));
+  const onRestoreFocus = vi.fn();
+  const release = vi.fn();
+  const registerInteractionBlocker = vi.fn(() => release);
+  const extra = { onRestoreFocus, registerInteractionBlocker };
+  await render(extra);
+  await open();
+  await type('pending');
+  await debounce();
+  const options = mocks.scan.mock.calls[0][1];
+  await render({ ...extra, active: false });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(20);
+  });
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  expect(trigger()).toBeNull();
+  expect(options.isCurrent()).toBe(false);
+  expect(release).toHaveBeenCalledOnce();
+  expect(onRestoreFocus).not.toHaveBeenCalled();
+  await render(extra);
+  await open();
+  expect(
+    document.querySelector<HTMLInputElement>('input[type="search"]')?.value,
+  ).toBe('');
+});
+
+it('keeps the dialog usable without a locate error when navigation is cancelled', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.scan.mockResolvedValue(
+    result({
+      hits: [
+        {
+          sessionId: 'session',
+          snapshot: 's',
+          revision: 0,
+          recordId: 'history',
+          turnId: 't',
+          turnOrdinal: 0,
+          role: 'assistant',
+          snippet: 'older text',
+          matchStart: 0,
+          matchEnd: 5,
+        },
+      ],
+    }),
+  );
+  scrollToSearchHit.mockResolvedValueOnce('cancelled');
+  await render();
+  await open();
+  await type('older');
+  await debounce();
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>('ol button')!.click(),
+  );
+  expect(scrollToSearchHit).toHaveBeenCalledOnce();
+  expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(document.querySelector<HTMLButtonElement>('ol button')!.disabled).toBe(
+    false,
+  );
+});
+
+it('invalidates a pending historical navigation when chat becomes inactive', async () => {
+  mocks.navigation = { mode: 'ready', sessionId: 'session' };
+  mocks.scan.mockResolvedValue(
+    result({
+      hits: [
+        {
+          sessionId: 'session',
+          snapshot: 's',
+          revision: 0,
+          recordId: 'history',
+          turnId: 't',
+          turnOrdinal: 0,
+          role: 'assistant',
+          snippet: 'older text',
+          matchStart: 0,
+          matchEnd: 5,
+        },
+      ],
+    }),
+  );
+  const pending = deferred<boolean>();
+  scrollToSearchHit.mockReturnValueOnce(pending.promise);
+  await render();
+  await open();
+  await type('older');
+  await debounce();
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>('ol button')!.click(),
+  );
+  const isCurrent = scrollToSearchHit.mock.calls[0][1]!;
+  expect(isCurrent()).toBe(true);
+  await render({ active: false });
+  expect(isCurrent()).toBe(false);
+  await act(async () => pending.resolve(false));
+  await render();
+  await open();
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+});
+
+it('reports no matches for legacy loaded-only search without a daemon connection', async () => {
+  mocks.navigation = { mode: 'legacy', sessionId: 'session' };
+  mocks.viewport = { revision: 0, connected: false };
+  await render();
+  await open();
+  await type('missing');
+  await debounce();
+  expect(mocks.scan).not.toHaveBeenCalled();
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+    'chat.searchLoadedOnly',
+  );
+  expect(document.querySelector('[role="status"]')?.textContent).toBe(
+    'chat.searchNoResults',
+  );
+  expect(document.querySelector('[role="alert"]')).toBeNull();
 });

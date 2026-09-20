@@ -141,15 +141,15 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
         const provisional =
           navigation.provisionalTurns[ordinal - navigation.totalTurns];
         const location = hit
-          ? await store.locateViewportSearchHit(hit, request, () => {
-              // A cancelled search must retain the page the user is reading.
-            })
+          ? await store.locateViewportSearchHit(hit, request, () =>
+              store.setViewportAnchor(viewportId),
+            )
           : provisional?.blockId
             ? { blockId: provisional.blockId, view: 'live' as const }
             : await store.locateViewportOrdinal(ordinal, request, () =>
                 store.setViewportAnchor(viewportId),
               );
-        if (!request.isCurrent()) return false;
+        if (!request.isCurrent()) return 'cancelled' as const;
         if (location.view === 'historical') {
           if (
             !location.rangeId ||
@@ -169,10 +169,9 @@ export function useTranscriptViewport(liveMessages: Message[], t: Translator) {
         setTarget({ blockId: location.blockId, token });
         return true;
       } catch {
-        if (request.isCurrent()) {
-          store.setViewportAnchor(viewportId, pinnedPage.current);
-          setError(true);
-        }
+        if (!request.isCurrent()) return 'cancelled' as const;
+        store.setViewportAnchor(viewportId, pinnedPage.current);
+        if (store.getViewportSnapshot().connected) setError(true);
         return false;
       } finally {
         if (
