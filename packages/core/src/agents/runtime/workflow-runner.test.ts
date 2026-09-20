@@ -30,6 +30,7 @@ import {
 import {
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
+  WorkflowJournalUnavailableError,
   WorkflowStartCancelledError,
 } from './workflow-runner.js';
 import { claimInterruptedWorkflowRuns } from '../workflow-checkpoint.js';
@@ -1736,14 +1737,22 @@ describe('WorkflowRunner', () => {
       stubStorage(config, root);
       const dispatch = vi.fn(async () => 'live');
 
-      await expect(
-        WorkflowRunner.start({
-          ...resumeOptions(config, 'wf_1234abcd'),
-          dispatch,
-        }),
-      ).rejects.toThrow(
+      const start = WorkflowRunner.start({
+        ...resumeOptions(config, 'wf_1234abcd'),
+        dispatch,
+      });
+      await expect(start).rejects.toThrow(
         'No journal found for workflow run wf_1234abcd, so there is nothing to resume. To run the workflow from the start, call Workflow again without resumeFromRunId.',
       );
+      // Typed, so a host resuming on a caller's behalf can answer it as the
+      // run's state rather than as its own fault.
+      await expect(start).rejects.toBeInstanceOf(
+        WorkflowJournalUnavailableError,
+      );
+      await expect(start).rejects.toMatchObject({
+        runId: 'wf_1234abcd',
+        reason: 'missing',
+      });
 
       expect(dispatch).not.toHaveBeenCalled();
       expect(registry.get('wf_1234abcd')).toBeUndefined();
@@ -1764,14 +1773,18 @@ describe('WorkflowRunner', () => {
       });
       const dispatch = vi.fn(async () => 'live');
 
-      await expect(
-        WorkflowRunner.start({
-          ...resumeOptions(config, 'wf_1234abcd'),
-          dispatch,
-        }),
-      ).rejects.toThrow(
+      const start = WorkflowRunner.start({
+        ...resumeOptions(config, 'wf_1234abcd'),
+        dispatch,
+      });
+      await expect(start).rejects.toThrow(
         /^Could not read the journal for workflow run wf_1234abcd: \S/,
       );
+      await expect(start).rejects.toMatchObject({
+        name: 'WorkflowJournalUnavailableError',
+        runId: 'wf_1234abcd',
+        reason: 'unreadable',
+      });
       expect(dispatch).not.toHaveBeenCalled();
       expect(registry.get('wf_1234abcd')).toBeUndefined();
     });
