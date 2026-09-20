@@ -350,6 +350,16 @@ process.stdin.on('data', (chunk: Buffer) => {
           message.extensionInstanceId.length === 0 ||
           message.extensionInstanceId.length > 128
         ) {
+          // stdout is the Native Messaging channel and the extension discards
+          // the disconnect reason, so stderr is the only place this rejection
+          // can be read; Chrome writes it to the extension's error log.
+          process.stderr.write(
+            'Qwen Browser Use Host: refusing a hello from extension ' +
+              JSON.stringify(message.extensionId) +
+              ' with protocol ' +
+              JSON.stringify(message.protocolVersion) +
+              '\n',
+          );
           void shutdown(1);
           return;
         }

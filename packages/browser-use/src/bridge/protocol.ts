@@ -19,7 +19,10 @@ export const CHROME_NATIVE_HOST_NAME = 'com.qwen.browser_use';
 export const CHROME_NATIVE_HOST_REVISION = 1;
 // The id an unpacked build keeps, pinned by the manifest key. The Chrome Web
 // Store rejects that key and assigns its own id, so a user's extension can
-// carry either one; add the store's id here once the listing exists.
+// carry either one. Add the store's id here once the listing exists, and bump
+// CHROME_NATIVE_HOST_REVISION in the same change: the Host bundles this set,
+// and an installed Host of the same revision is reused rather than replaced,
+// so without the bump it would keep rejecting the new id.
 export const CHROME_EXTENSION_ID = 'idkijaaipeeinemigojbjkmfmabokbdk';
 export const CHROME_EXTENSION_IDS: readonly string[] = [CHROME_EXTENSION_ID];
 export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;

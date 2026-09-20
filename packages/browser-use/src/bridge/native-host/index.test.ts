@@ -309,10 +309,16 @@ describe.skipIf(process.platform === 'win32')('Native Host processes', () => {
   });
 
   test('exits without listening when the hello is not from the Qwen extension', async () => {
-    const h = startHost({ extensionId: 'a'.repeat(32) });
+    const rejectedId = 'a'.repeat(32);
+    const h = startHost({ extensionId: rejectedId });
+    let stderr = '';
+    h.child.stderr.on('data', (chunk: Buffer) => (stderr += String(chunk)));
     const [code] = await once(h.child, 'exit');
     expect(code).toBe(1);
     expect(fs.existsSync(h.socketPath)).toBe(false);
+    // The extension discards the disconnect reason, so this is the only
+    // record of why a Host that Chrome keeps relaunching refuses to serve.
+    expect(stderr).toContain(rejectedId);
   });
 
   test.each([

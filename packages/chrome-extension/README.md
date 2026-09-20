@@ -170,7 +170,10 @@ draw manual review and must be justified in the store listing.
 
 **Extension id note:** the manifest's `key` fixes the id of an unpacked build.
 The store rejects that key on a first upload and assigns its own id, so a store
-build must drop it and the two builds carry different ids. Browser Use treats
+build must drop it and the two builds carry different ids. Nothing in this repo
+drops the key yet: `npm run package` zips the built manifest verbatim, so the
+first store upload needs the key removed by hand until the publish workflow in
+#12240 does it. Browser Use treats
 the id as a set (`CHROME_EXTENSION_IDS` in the Browser Use package): the Native
 Messaging registration lists every known origin and the handshake accepts any
 of them, so both builds reach the same Host. Add the store's id there once the
