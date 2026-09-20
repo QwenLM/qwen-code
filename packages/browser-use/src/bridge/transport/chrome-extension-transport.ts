@@ -10,7 +10,7 @@ import { clearTimeout, setTimeout } from 'node:timers';
 import {
   CDP_REQUEST_TIMEOUT_MS,
   CHROME_BRIDGE_PROTOCOL_VERSION,
-  CHROME_EXTENSION_ID,
+  CHROME_EXTENSION_IDS,
   defaultChromeBridgeSocketPath,
   type BridgeEvent,
   type BridgeHello,
@@ -416,7 +416,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
             }
             if (
               message.type !== 'hello' ||
-              message.extensionId !== CHROME_EXTENSION_ID ||
+              !CHROME_EXTENSION_IDS.includes(message.extensionId as string) ||
               message.protocolVersion !== CHROME_BRIDGE_PROTOCOL_VERSION ||
               typeof message.extensionInstanceId !== 'string' ||
               !message.extensionInstanceId ||

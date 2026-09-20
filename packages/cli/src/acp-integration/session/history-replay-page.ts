@@ -143,6 +143,10 @@ function parseTranscriptReplayState(
               ...(pending.sourceTimestamp
                 ? { timestamp: pending.sourceTimestamp }
                 : {}),
+              ...(pending.rawCallId ? { rawCallId: pending.rawCallId } : {}),
+              ...(pending.timingMatched
+                ? { timingMatched: true as const }
+                : {}),
             },
           ];
         }
@@ -389,6 +393,9 @@ export async function replayTranscriptRecordPage({
       finalizeDangling:
         finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
+      // Paged replay is where trajectory inspection reads from, and its pages
+      // are bounded by records and bytes rather than by an update count.
+      includeTiming: true,
       ...(state.goalState ? { goalState: state.goalState } : {}),
       ...(state.goalCause ? { goalCause: state.goalCause } : {}),
     });
