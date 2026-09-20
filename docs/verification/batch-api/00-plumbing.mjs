@@ -26,7 +26,7 @@ const path = writeJsonl(
 );
 const submitted = await submit(oa, path);
 const batch = await waitFor(oa, submitted.id, { every: 10_000 });
-const { ok, err, byId } = await collect(oa, batch);
+const { ok, failed, err, byId } = await collect(oa, batch);
 
 const verdict = {
   status: batch.status,
@@ -39,9 +39,16 @@ const verdict = {
     expires_at: batch.expires_at,
   },
   ok_lines: ok.length,
+  // A line can fail inside the output file while request_counts.failed stays
+  // 0, so the gate has to look at the status codes, not just the row count.
+  failed_lines: failed,
   err_lines: err.length,
   sample: bodyOf(byId['p1'])?.choices?.[0]?.message?.content ?? null,
-  pass: batch.status === 'completed' && ok.length === 3 && err.length === 0,
+  pass:
+    batch.status === 'completed' &&
+    ok.length === 3 &&
+    failed === 0 &&
+    err.length === 0,
 };
 save('00-plumbing.result.json', { verdict, batch, err });
 await cleanup(oa, batch);

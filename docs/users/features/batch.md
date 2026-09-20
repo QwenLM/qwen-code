@@ -6,28 +6,53 @@ Code exposes it in two ways: a `qwen batch` command for pushing many
 independent requests through it, and an experimental `--batch` flag that sends
 a headless run's own turns through it.
 
-Both need an OpenAI-compatible API key on a DashScope endpoint: set
-`OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` (or `QWEN_MODEL`) —
-see [Authentication](../configuration/auth.md). Both paths refuse to run
-unless all three resolve the `openai` auth type. Qwen OAuth has no `/batches`
-route, and no other provider (Gemini, Vertex, Anthropic, the Responses API)
-has a Batch API at all — both paths refuse those rather than quietly running
-at full price.
+Both need an OpenAI-compatible API key: set `OPENAI_API_KEY`,
+`OPENAI_BASE_URL`, and `OPENAI_MODEL` (or `QWEN_MODEL`) — see
+[Authentication](../configuration/auth.md). Both paths refuse to run unless
+the **resolved** auth type is `openai` on the chat-completions wire, so a
+model pinned to `wireApi: "responses"` is refused too — the Responses API has
+no Batch route, and neither does Gemini, Vertex, Anthropic or Qwen OAuth.
+Refusing is the point: a generator that ignores batch would otherwise run the
+turn realtime, immediately, at full price.
+
+The two paths differ on the host. `--batch` requires a DashScope endpoint
+(loopback is allowed, for a local proxy or the test harness). `qwen batch`
+accepts any OpenAI-compatible endpoint, because a Batch-compatible gateway in
+front of DashScope is a legitimate setup; a host with no Batch API then fails
+server-side with a 404, surfaced verbatim.
 
 ## When batch is the right tool
 
 Batch is priced at 50% of realtime, but DashScope also bills cached input at
-20% of list. Realtime plus prefix caching therefore beats batch whenever the
-input cache-hit rate is above roughly 64% — which an agent loop routinely
-reaches, because every turn resends the same conversation prefix.
+20% of list — and **the prefix cache does not hit inside a batch**. Measured
+against the live API, both batch arms returned `cached_tokens: 0` while the
+realtime control on the same prompts hit a cache rate of 0.647. Setting the
+two price models equal (realtime `1 − 0.8h` against batch `0.5`, for a
+cache-hit rate `h`) breaks even at `h = 0.625`, and an agent loop routinely
+sits above that, because every turn resends the same conversation prefix.
+
+The measurements, not just the model:
+
+| shape                      | cache-hit rate             | batch / realtime   |
+| -------------------------- | -------------------------- | ------------------ |
+| agent loop (shared prefix) | 0.647 realtime, 0 in batch | **1.03** — 3% more |
+| fan-out (no shared prefix) | 0                          | **0.50** — half    |
 
 So the shape batch is genuinely good for is **fan-out**: many independent
 single-turn requests that share no prefix, where the 50% is real and the
 realtime quota is left alone. Classifying a thousand files, generating a
 thousand summaries, re-labelling a dataset. That is what `qwen batch` serves.
 
-`--batch` is the other shape — one agent run deferred — and it is
-experimental for a reason. See [Limits](#limits) before using it.
+Latency is the other half of the story. Measured from `in_progress` to
+`completed`: 596 s for a 3-line job, 1720 s for 24 lines, 3718 s for 1000 —
+and `status` can read unchanged for 10–30 minutes at a time while the job
+works (one 1000-line job sat at 889/1000 for 28 minutes, then finished
+1000/1000). Plan in tens of minutes to hours.
+
+`--batch` is therefore **not** a way to make an agent run cheaper. It is a
+switch for a run you are happy to leave going: it spares the realtime quota
+and defers the turn, at roughly realtime cost. See [Limits](#limits) before
+using it.
 
 ## `qwen batch`
 
@@ -123,6 +148,11 @@ Requests that already completed are still billed.
 
 ## `--batch` (experimental)
 
+A switch for a headless run you are happy to leave going for hours: it moves
+that run's own turns off the realtime quota. It is not a discount — on an
+agent-loop shape it measured 1.03× realtime, because the prefix cache does not
+apply inside a batch.
+
 ```bash
 qwen -p "list the files here and summarize" --batch
 # [batch] submitted batch_xyz789; results due by 2026-09-19T12:00:00.000Z
@@ -130,8 +160,8 @@ qwen -p "list the files here and summarize" --batch
 ```
 
 Non-interactive runs only — `-p`, a positional prompt, or piped stdin. It is
-rejected with `-i` and in the TUI, because there is nothing to show while the
-job sits in a queue for hours.
+rejected with `-i`, with an empty positional, and in the TUI, because there is
+nothing to show while the job sits in a queue for hours.
 
 With it set, **only the main loop's own turns** go through the Batch API. Side
 calls (compression, session titles, permission classifiers, goal judges) and
@@ -149,24 +179,27 @@ files it uploaded.
 
 The client side is built for tool calls and multi-turn runs: a turn that
 comes back with `tool_calls` runs the tools locally and submits the next turn
-as a **new** batch job carrying the full `assistant` + `tool` history. What
-is **not yet verified against the live API** is whether the provider accepts
-`tools`/`tool_calls` in a batch body at all — see the probe in
-[Limits](#limits); treat multi-turn `--batch` as blocked on that result.
+as a **new** batch job carrying the full `assistant` + `tool` history. The
+provider accepts that shape — measured against the live API, `tools`,
+`tool_calls` and an `assistant` + `tool` history all pass through a batch body
+unchanged, with `finish_reason: "tool_calls"` preserved.
 
 What the Batch API does not have is server-side conversation state. Every job
 is one stateless request with the complete `messages` array, so an N-turn run
 means N jobs, N queue waits (serially — each turn needs the previous result),
-and N re-uploads of the whole context. Budget accordingly: with a p50 queue
-wait of Q, a five-turn task takes at least 5Q.
+and N re-uploads of the whole context. Budget with the measured per-job wait,
+not a guess: a trivial 3-line job took 596 s from `in_progress` to
+`completed`, so a five-turn task is an afternoon, not a minute.
 
 ### Limits
 
-- **Not measured yet.** Whether tool calls pass through a real batch body, and
-  whether context caching hits inside a batch, have not been verified against
-  the live API — see `docs/verification/batch-api/` for the probes that answer
-  both. If the cache does not hit, `--batch` on an agent loop costs _more_ than
-  realtime, and is worth using only to spare the realtime quota.
+- **It costs slightly more on an agent loop.** Measured against the live API:
+  no cache hits inside a batch (`cached_tokens: 0` on both arms, against 0.647
+  for the realtime control), so an agent-loop run came out at **1.03×**
+  realtime. Use `--batch` to spare the realtime quota on a run you can leave
+  for hours — not to save money on it.
+- **Nothing arrives until the whole turn is done.** There is no streaming, and
+  `status` can read unchanged for 10–30 minutes while the job works.
 - No cost accounting. The session footer's token numbers do not know about the
   50% discount, so a `--batch` run's reported cost overstates the bill.
 - No batch-id persistence across processes beyond the stderr line.

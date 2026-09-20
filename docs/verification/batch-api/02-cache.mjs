@@ -89,22 +89,34 @@ const explicitLines = questions.map((q, i) =>
 );
 
 // Submit both batch arms first, run the realtime control while they queue.
-// The ids go to disk immediately: everything after this point (the control
-// loop included) can fail without losing the paid jobs' only handle.
+// Each id goes to disk the moment its own submit resolves: `Promise.all`
+// rejects as soon as either arm throws, so writing the file only after both
+// would drop the surviving arm's id — a live, billing job that the documented
+// rerun then submits a second time, contaminating the very cache measurement
+// this probe exists to make.
 const PENDING = path.join(OUT, '02-pending.json');
-let subA, subB;
-if (fs.existsSync(PENDING)) {
-  const saved = JSON.parse(fs.readFileSync(PENDING, 'utf8'));
-  subA = { id: saved.A };
-  subB = { id: saved.B };
-  console.log(ts(), `resuming pending batch ids ${saved.A} ${saved.B}`);
-} else {
-  [subA, subB] = await Promise.all([
-    submit(oa, writeJsonl('02-cache-implicit.jsonl', implicitLines)),
-    submit(oa, writeJsonl('02-cache-explicit.jsonl', explicitLines)),
-  ]);
-  fs.writeFileSync(PENDING, JSON.stringify({ A: subA.id, B: subB.id }));
-}
+const readPending = () =>
+  fs.existsSync(PENDING) ? JSON.parse(fs.readFileSync(PENDING, 'utf8')) : {};
+// Sync read + write, no await between: two arms resolving concurrently cannot
+// clobber each other's key.
+const writePending = (patch) =>
+  fs.writeFileSync(PENDING, JSON.stringify({ ...readPending(), ...patch }));
+
+const submitArm = async (key, name, lines) => {
+  const saved = readPending()[key];
+  if (saved) {
+    console.log(ts(), `resuming arm ${key} from pending batch id ${saved}`);
+    return { id: saved };
+  }
+  const sub = await submit(oa, writeJsonl(name, lines));
+  writePending({ [key]: sub.id });
+  return sub;
+};
+
+const [subA, subB] = await Promise.all([
+  submitArm('A', '02-cache-implicit.jsonl', implicitLines),
+  submitArm('B', '02-cache-explicit.jsonl', explicitLines),
+]);
 
 // The control is a convenience baseline, not a gate worth losing the paid
 // arms over: a failed control request is counted, not fatal.
@@ -168,17 +180,16 @@ function summarize(rows, multiplier) {
   };
 }
 
-// A failed request line comes back inside the OUTPUT file as
-// response.status_code !== 200 (a zero-token row that must not be summed as
-// a success), not only in the error file.
-const failedLines = (rows) =>
-  rows.filter((r) => r?.response?.status_code !== 200).length;
-
-const a = summarize(A.ok, BATCH);
-const b = summarize(B.ok, BATCH);
+// Summarise every output row, not just the successful ones: a failed line
+// comes back inside the OUTPUT file as response.status_code !== 200 (a
+// zero-token row), and `complete()` below needs the true line count to tell a
+// full arm from one that lost requests. `collect()` reports those rows as
+// `failed`, so the pass gate still refuses to publish a ratio over them.
+const a = summarize(A.rows, BATCH);
+const b = summarize(B.rows, BATCH);
 const c = summarize(realtime, 1);
-const aFailed = failedLines(A.ok) + A.err.length;
-const bFailed = failedLines(B.ok) + B.err.length;
+const aFailed = A.failed + A.err.length;
+const bFailed = B.failed + B.err.length;
 const cFailed = realtimeFailures.length;
 // The headline ratio is the probe's pass criterion, so publish it only when
 // the comparison is complete on both sides: an arm that lost requests looks

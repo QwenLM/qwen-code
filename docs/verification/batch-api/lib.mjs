@@ -59,20 +59,37 @@ export async function submit(oa, jsonlPath, { window = '24h', metadata } = {}) {
   });
   let batch;
   try {
-    batch = await oa.batches.create({
-      input_file_id: file.id,
-      endpoint: '/v1/chat/completions',
-      completion_window: window,
-      ...(metadata ? { metadata } : {}),
-    });
-  } catch (error) {
-    // The upload is already a billable object; a failed create must not
-    // orphan it on the account with no id recorded anywhere.
-    console.warn(
-      ts(),
-      `batches.create failed; deleting orphaned input file ${file.id}`,
+    batch = await oa.batches.create(
+      {
+        input_file_id: file.id,
+        endpoint: '/v1/chat/completions',
+        completion_window: window,
+        ...(metadata ? { metadata } : {}),
+      },
+      // POST /batches is not idempotent and carries no idempotency key, so
+      // the SDK's default two retries can each start another live, paid 24h
+      // job whose id nobody records. The production path does the same.
+      { maxRetries: 0 },
     );
-    await oa.files.delete(file.id).catch(() => {});
+  } catch (error) {
+    // The upload is already a billable object. A 4xx is the provider refusing
+    // the job, so the file is an orphan worth deleting; anything else is
+    // ambiguous — the job may exist and be billing, and deleting its input
+    // would break it.
+    const status = error?.status;
+    if (typeof status === 'number' && status >= 400 && status < 500) {
+      console.warn(
+        ts(),
+        `batches.create failed; deleting orphaned input file ${file.id}`,
+      );
+      await oa.files.delete(file.id).catch(() => {});
+    } else {
+      console.warn(
+        ts(),
+        `batches.create failed ambiguously; keeping input file ${file.id} ` +
+          `(the job may exist)`,
+      );
+    }
     throw error;
   }
   console.log(ts(), `submitted ${batch.id} (input ${file.id})`);
@@ -117,14 +134,23 @@ export async function download(oa, fileId) {
     .map((l) => JSON.parse(l));
 }
 
-/** Both output and error files, keyed by custom_id. */
+/**
+ * Both result files, keyed by custom_id.
+ *
+ * `rows` is every line of the output file; `ok` is only the lines whose
+ * `response.status_code` is 200. The split matters: a request can fail
+ * *inside* the output file, and the provider still counts it as completed
+ * (`request_counts.failed` stays 0), so labelling every output row `ok` lets
+ * a batch in which all three requests failed read as PASS.
+ */
 export async function collect(oa, batch) {
-  const ok = await download(oa, batch.output_file_id);
+  const rows = await download(oa, batch.output_file_id);
   const err = await download(oa, batch.error_file_id);
+  const ok = rows.filter((r) => r?.response?.status_code === 200);
   const byId = {};
-  for (const r of ok) byId[r.custom_id] = r;
+  for (const r of rows) byId[r.custom_id] = r;
   for (const r of err) byId[r.custom_id] = r;
-  return { ok, err, byId };
+  return { rows, ok, failed: rows.length - ok.length, err, byId };
 }
 
 export const bodyOf = (r) => r?.response?.body;

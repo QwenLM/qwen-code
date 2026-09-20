@@ -264,20 +264,39 @@ UI 等一个 session title 等一天，权限分类器卡死整个 tool 调度�
 
 ## 9. Handoff（接手者从这里开始）
 
-**一句话状态**：评估写完、探测脚本写完、草稿 PR #11874 已开，**脚本还没对线上跑过**。
-下一步不是写代码，是拿一个 DashScope key 跑三个脚本，用结果选方向。
+**一句话状态**：评估写完、探测脚本写完、**四个脚本已对线上跑完**（华北2·北京，`qwen3.7-max`，
+2026-09-18/19），结果见 PR #11874 的
+[#issuecomment-5732395864](https://github.com/QwenLM/qwen-code/pull/11874#issuecomment-5732395864)（00/01/02）与
+[#issuecomment-5738810147](https://github.com/QwenLM/qwen-code/pull/11874#issuecomment-5738810147)（03/04）。
+方向已由结果选定：§9.3 判定矩阵的每一个分支都落在「扇出用命令、主循环不用 batch」，
+`--batch` 只作为**不占实时配额的夜间开关**保留。
+
+**实测结论（不再是假设）**：
+
+| 探测             | 结果                                                                                                                                                 |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 00 plumbing      | PASS（`qwen3.7-max`，3/3 在 output、0 在 error）。默认的 `batch-test-model` 跑不通：它要求 `url` 填 `/v1/chat/ds-test`                               |
+| 01 tools         | **PASS**：`tools`、`tool_calls`、带 `assistant` + `tool` 历史的 `messages[]` 原样穿过 batch body，`finish_reason: tool_calls` 保留                   |
+| 02 cache         | 实时对照 `hit_rate 0.647`；两个 batch 臂 `cached_tokens` **均为 0** ⇒ `cost_vs_realtime = 1.03`（implicit / explicit 同）                            |
+| 03/04 延迟与规模 | 3 行 596 s、24 行 1720 s、1000 行 3718 s；终态前 `status` 可 10–30 分钟无变化（889/1000 停滞 28 分钟后 1000/1000 全成）；无共享前缀的扇出形状 `0.50` |
+
+盈亏平衡点因此是实的：设命中率 `h`，实时 `1 − 0.8h` 对批量 `0.5`，交点 `h = 0.625`；
+批量内缓存 0 命中意味着主循环形状（`h` 最高）必然贵于实时。
 
 ### 9.1 现在有什么
 
-| 物件                            | 位置                                                                                                                                                                                                        | 状态                                                               |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| 本评估                          | `docs/plans/2026-09-14-batch-api-feasibility.md`                                                                                                                                                            | §1-§8 完成                                                         |
-| 探测脚本 + README               | `docs/verification/batch-api/`                                                                                                                                                                              | 语法检查过，无 key 路径跑过，**未对线上运行**                      |
-| 草稿 PR                         | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`）                                                                                          | 等测试结果                                                         |
-| `qwen batch` 命令（形态 A）     | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`）                                                                                                                               | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖 |
-| headless `--batch` 置换（§6）v1 | `core/openaiContentGenerator/batch.ts`（运行器）、`pipeline.ts` 两处分支、`contentGenerator.ts` 的 `executionMode`、`llm-chat.ts` 主循环设置、`Config.getBatchMode()`、CLI `--batch` flag + `.check()` 门禁 | 已实现 v1；**未对线上跑，01 探测是验收标准**                       |
+| 物件                            | 位置                                                                                                                                                                                                        | 状态                                                                                                    |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| 本评估                          | `docs/plans/2026-09-14-batch-api-feasibility.md`                                                                                                                                                            | §1-§8 完成，§9 已按实测结果更新                                                                         |
+| 探测脚本 + README               | `docs/verification/batch-api/`                                                                                                                                                                              | **已对线上运行**（00/01/02/03/04），结果见上方两条 PR 评论                                              |
+| 草稿 PR                         | https://github.com/QwenLM/qwen-code/pull/11874（分支 `docs/batch-api-feasibility`，基于 `origin/main` `85631a3d`）                                                                                          | 等评审                                                                                                  |
+| `qwen batch` 命令（形态 A）     | `packages/cli/src/commands/batch.ts`（+ 同名测试，注册在 `config/config.ts`）                                                                                                                               | 已实现：`submit / status / fetch / cancel`，原生 `fetch`，无新依赖；`submit/status/cancel` 已对线上验证 |
+| headless `--batch` 置换（§6）v1 | `core/openaiContentGenerator/batch.ts`（运行器）、`pipeline.ts` 两处分支、`contentGenerator.ts` 的 `executionMode`、`llm-chat.ts` 主循环设置、`Config.getBatchMode()`、CLI `--batch` flag + `.check()` 门禁 | 已实现 v1；01 探测（验收标准）**已通过**，但 `--batch` 本身尚未对线上端到端跑过                         |
 
-### 9.2 立刻要做的事（按顺序）
+### 9.2 当时列的执行步骤（已完成，保留作复现说明）
+
+下列四个探测已于 2026-09-18/19 对线上跑完，结果见 §9 开头的表格与两条 PR 评论。
+命令保留在这里，是为了让别人能用自己的 key 复现同一组测量。
 
 前提：北京 region 的 `DASHSCOPE_API_KEY`，只放 env，不落盘。在仓库根目录：
 
