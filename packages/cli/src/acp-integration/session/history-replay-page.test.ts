@@ -575,6 +575,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
     });
     expect(encodeCursor).toHaveBeenCalledWith(cursorState());
   });
@@ -606,6 +607,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
       goalState: GOAL_STATE,
       goalCause: 'verifier_reject',
     });
@@ -640,6 +642,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
     });
   });
 
@@ -672,6 +675,7 @@ describe('history replay page', () => {
       pendingToolCalls: [],
       finalizeDangling: true,
       gaps: [],
+      includeTiming: true,
       goalState: GOAL_STATE,
     });
   });
@@ -925,5 +929,152 @@ describe('history replay page', () => {
         encodeCursor: vi.fn(),
       }),
     ).rejects.toThrow('Unsupported transcript replay state version');
+  });
+
+  describe('timing frames', () => {
+    function telemetryRecord(
+      uuid: string,
+      uiEvent: Record<string, unknown>,
+    ): ChatRecord {
+      return {
+        uuid,
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: TIMESTAMP,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        cwd: '/workspace',
+        version: '1.0.0',
+        systemPayload: { uiEvent },
+      } as unknown as ChatRecord;
+    }
+
+    function requestTelemetry(uuid = 'telemetry-request'): ChatRecord {
+      return telemetryRecord(uuid, {
+        'event.name': 'qwen-code.api_response',
+        'event.timestamp': TIMESTAMP,
+        response_id: 'chatcmpl-abc',
+        model: 'qwen3.8-max',
+        duration_ms: 6544,
+        ttft_ms: 2344,
+        prompt_id: `${SESSION_ID}########0`,
+      });
+    }
+
+    function toolTelemetry(uuid = 'telemetry-tool'): ChatRecord {
+      return telemetryRecord(uuid, {
+        'event.name': 'qwen-code.tool_call',
+        'event.timestamp': TIMESTAMP,
+        call_id: 'call-1',
+        function_name: 'read_file',
+        duration_ms: 16,
+        status: 'success',
+        response_id: 'chatcmpl-abc',
+      });
+    }
+
+    function timingsOf(updates: SessionUpdate[]) {
+      return updates
+        .map(
+          (update) =>
+            (update as { _meta?: { timing?: Record<string, unknown> } })._meta
+              ?.timing,
+        )
+        .filter(Boolean);
+    }
+
+    it('surfaces request and tool timing on a forward page', async () => {
+      const result = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [
+            userRecord(),
+            requestTelemetry(),
+            toolCallRecord(),
+            toolTelemetry(),
+            toolResultRecord(),
+          ],
+        }),
+        encodeCursor: vi.fn(),
+      });
+
+      expect(result.replayError).toBeUndefined();
+      expect(timingsOf(result.updates)).toEqual([
+        {
+          kind: 'request',
+          status: 'ok',
+          durationMs: 6544,
+          ttftMs: 2344,
+          startedAt: Date.parse(TIMESTAMP) - 6544,
+          responseId: 'chatcmpl-abc',
+          promptId: `${SESSION_ID}########0`,
+          model: 'qwen3.8-max',
+        },
+        {
+          kind: 'tool',
+          durationMs: 16,
+          startedAt: Date.parse(TIMESTAMP) - 16,
+          callId: 'call-1',
+          toolName: 'read_file',
+          toolStatus: 'success',
+          responseId: 'chatcmpl-abc',
+        },
+      ]);
+    });
+
+    it('surfaces timing on a backward page whose head is the assistant record', async () => {
+      // The split a backward page actually makes: the api_response record
+      // stays behind on the older page, so the newer page must still carry
+      // its own frames and the older page must not lose its one.
+      const newer = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          direction: 'backward',
+          records: [toolCallRecord(), toolTelemetry(), toolResultRecord()],
+        }),
+        encodeCursor: vi.fn(),
+      });
+      const older = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          direction: 'backward',
+          records: [userRecord(), requestTelemetry()],
+        }),
+        encodeCursor: vi.fn(),
+      });
+
+      expect(timingsOf(newer.updates)).toMatchObject([{ kind: 'tool' }]);
+      expect(timingsOf(older.updates)).toMatchObject([{ kind: 'request' }]);
+    });
+
+    it('leaves the rest of the page projection untouched', async () => {
+      const withTelemetry = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [
+            userRecord(),
+            requestTelemetry(),
+            toolCallRecord(),
+            toolTelemetry(),
+            toolResultRecord(),
+          ],
+        }),
+        encodeCursor: vi.fn(),
+      });
+      const withoutTelemetry = await replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({
+          records: [userRecord(), toolCallRecord(), toolResultRecord()],
+        }),
+        encodeCursor: vi.fn(),
+      });
+
+      const withoutTimingFrames = withTelemetry.updates.filter(
+        (update) =>
+          (update as { _meta?: { timing?: unknown } })._meta?.timing ===
+          undefined,
+      );
+      expect(withoutTimingFrames).toEqual(withoutTelemetry.updates);
+    });
   });
 });

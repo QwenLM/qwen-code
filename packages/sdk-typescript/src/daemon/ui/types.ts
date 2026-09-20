@@ -188,6 +188,38 @@ export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
 }
 
 /**
+ * Recorded timing for one model request or one tool call, carried on
+ * `agent_message_chunk._meta.timing` by paged transcript replay.
+ *
+ * These frames are emitted at the telemetry record's own position rather than
+ * attached to the message they describe, because a transcript page can split
+ * the two apart. Readers pair them across their own event window: a request
+ * against the next assistant message in scope, a tool against its `callId`.
+ *
+ * Every field but `kind` and `durationMs` is optional and only ever holds a
+ * recorded value — a missing field means the session did not record it.
+ */
+export interface DaemonTranscriptTimingMeta {
+  kind: 'request' | 'tool';
+  /** Epoch ms. Absent when the record's end time did not parse. */
+  startedAt?: number;
+  durationMs: number;
+  /** `kind === 'request'`: dispatch to first user-visible content. */
+  ttftMs?: number;
+  /** `kind === 'request'`: 'error' means the request failed. */
+  status?: 'ok' | 'error';
+  responseId?: string;
+  promptId?: string;
+  model?: string;
+  /** `kind === 'tool'`: the id of the `tool_call` this timing belongs to. */
+  callId?: string;
+  toolName?: string;
+  toolStatus?: 'success' | 'error' | 'cancelled';
+  /** Set when a subagent issued the request or tool call. */
+  subagentId?: string;
+}
+
+/**
  * Token usage the agent reports for one model round, carried on the daemon's
  * `agent_message_chunk._meta.usage`. A turn issues one of these per model call,
  * so a turn's total is the sum of its rounds. Sub-agent (delegated) usage is

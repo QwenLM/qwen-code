@@ -48,6 +48,11 @@ export interface HistoryReplayPageOptions {
   gaps?: HistoryGap[];
   goalState?: GoalSnapshotV2;
   goalCause?: GoalStateCause;
+  /**
+   * Emit a timing frame per `ui_telemetry` record. Paged replay opts in; the
+   * bulk `replay()` path, which runs against a fixed update cap, does not.
+   */
+  includeTiming?: boolean;
 }
 
 export interface HistoryReplayPageState {
@@ -237,6 +242,7 @@ export class HistoryReplayer {
       ...(options.skipFinalizeCallIds
         ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
         : {}),
+      ...(options.includeTiming ? { includeTiming: true } : {}),
       onDiagnostic: (diagnostic) => {
         if (
           diagnostic.code === 'malformed_part' &&

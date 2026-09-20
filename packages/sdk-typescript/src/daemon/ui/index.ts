@@ -61,6 +61,7 @@ export type {
 } from './conformance.js';
 export {
   extractContentPart,
+  extractTranscriptTiming,
   getOutputText,
   isSensitiveKey as isDaemonUiSensitiveKey,
   redactSensitiveFields as redactDaemonUiSensitiveFields,
@@ -77,6 +78,7 @@ export {
 export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonTranscriptTimingMeta,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
