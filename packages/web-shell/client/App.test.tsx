@@ -46,6 +46,7 @@ import type {
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import { serializeStatsMessage } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
 type StreamingState = 'idle' | 'responding';
@@ -26596,6 +26597,57 @@ describe('App session callbacks', () => {
       );
     },
   );
+
+  it('keeps the Java Managed panel open without a daemon workspace context', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=managed-one',
+    );
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = { workspaces: [] };
+
+    const { container } = renderApp({
+      managedAgentProvider: createJavaManagedAgentProvider({
+        baseUrl: 'https://java.example',
+      }),
+    });
+    await flush();
+
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '1',
+    );
+    expect(
+      new URLSearchParams(window.location.search).get('managedSession'),
+    ).toBe('managed-one');
+    expect(
+      container.querySelector('[data-testid="managed-sessions-page"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps the daemon Managed panel behind the workspace gate', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=managed-one',
+    );
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = { workspaces: [] };
+
+    const { container } = renderApp();
+    await flush();
+
+    expect(new URLSearchParams(window.location.search).has('managed')).toBe(
+      false,
+    );
+    expect(
+      container.querySelector('[data-testid="managed-sessions-page"]'),
+    ).toBeNull();
+  });
 
   it('does not open the extensions manager page with /extension manage', async () => {
     const { container } = renderApp();

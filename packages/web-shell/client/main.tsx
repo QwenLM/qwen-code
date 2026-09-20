@@ -9,6 +9,8 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { StandaloneAuth } from './components/StandaloneAuth';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -160,6 +162,20 @@ function getSessionContextFromUrl(): DaemonProductSessionContext | undefined {
     : undefined;
 }
 
+function getDevelopmentManagedAgentProvider():
+  | ManagedAgentProvider
+  | undefined {
+  if (!import.meta.env.DEV) return undefined;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('managedProvider') !== 'java') return undefined;
+  const tenantId = params.get('tenant')?.trim() || 'local-java-demo';
+  return createJavaManagedAgentProvider({
+    baseUrl: window.location.origin,
+    getHeaders: () => ({ 'X-Qwen-Tenant-Id': tenantId }),
+    productScope: tenantId,
+  });
+}
+
 function replaceStandaloneSessionUrl(
   sessionId: string | undefined,
   workspaceId?: string,
@@ -208,6 +224,9 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [sessionContext, setSessionContext] = useState<
     DaemonProductSessionContext | undefined
   >(() => getSessionContextFromUrl());
+  const [managedAgentProvider] = useState(() =>
+    getDevelopmentManagedAgentProvider(),
+  );
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
   // initializers above; strip them once mounted so a bookmarked URL cannot
@@ -323,6 +342,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
               onLanguageChange: handleLanguageChange,
               onBrandResolved: handleBrandResolved,
               onSessionIdChange: handleSessionIdChange,
+              managedAgentProvider,
               sidebar: { enabled: true, showLive: true },
               header: {
                 items: [

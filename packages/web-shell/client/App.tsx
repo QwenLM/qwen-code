@@ -3503,6 +3503,7 @@ export function App({
     ordinaryWorkspaces.length > 0 ||
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
+  const externalManagedAgentAvailable = managedAgentProvider !== undefined;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -8343,7 +8344,11 @@ export function App({
     if (workspaceContextActive) return;
     splitClassificationGenerationRef.current += 1;
     if (!projectFeaturesAvailable) setSplitSessionIds([]);
-    if (!projectFeaturesAvailable && activePanel !== 'status') {
+    if (
+      !projectFeaturesAvailable &&
+      activePanel !== 'status' &&
+      !(activePanel === 'managed' && externalManagedAgentAvailable)
+    ) {
       setActivePanel(null);
     }
     setShowResumeDialog(false);
@@ -8371,6 +8376,7 @@ export function App({
     }
   }, [
     activePanel,
+    externalManagedAgentAvailable,
     mainView,
     modelDialogMode,
     projectFeaturesAvailable,
@@ -17506,7 +17512,10 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable || activePanel === 'status') && (
+                (projectFeaturesAvailable ||
+                  activePanel === 'status' ||
+                  (activePanel === 'managed' &&
+                    externalManagedAgentAvailable)) && (
                 <section
                   className={styles.panelHost}
                   role="region"

@@ -50,22 +50,36 @@ The public listener intentionally ignores end-user `Authorization`. The
 optional Runtime Broker listener still requires a separate machine bearer and
 must remain private.
 
-## WebShell development entry
+## Full WebShell dual-path development entry
 
-After the Spring service is running, start the repository-owned Managed Agent
-WebShell entry from the repository root:
+The full WebShell can keep an ordinary Qwen daemon for its existing chat,
+workspace, settings, and terminal surfaces while routing only the Managed
+panel to this Spring service. Start an ordinary `qwen serve` on port 4170 in
+addition to the private Hosted Harness used by Spring, then run from the
+repository root:
 
 ```bash
+QWEN_DAEMON_URL=http://127.0.0.1:4170 \
 QWEN_MANAGED_AGENT_JAVA_URL=http://127.0.0.1:8080 \
   npm run dev:managed-agent-web
 ```
 
-Open `http://127.0.0.1:5174/?tenant=local-java-demo`. The page renders the
-exported `ManagedAgentWebShell` directly and proxies only
-`/api/agent/web-shell/v1/**` to the Java service. It does not connect to a Qwen
-daemon and never receives the private Harness or Runtime Broker credentials.
-Use `managedSession=<sessionId>` to deep-link a Session. The `tenant` query
-parameter is a local-development convenience, not an authentication mechanism.
+Open
+`http://127.0.0.1:5174/?managed=1&managedProvider=java&tenant=local-java-demo`.
+The standard WebShell entry proxies its existing routes to the ordinary daemon
+and `/api/agent/web-shell/v1/**` to Spring. Use
+`managedSession=<sessionId>` to deep-link a Managed Session. If the ordinary
+daemon requires authentication, append its token as the usual `#token=...`
+fragment.
+
+`managedProvider=java` and `tenant` are local-development conveniences and are
+honored only by the Vite development entry. Production hosts should construct
+`createJavaManagedAgentProvider(...)` themselves and pass it to
+`WebShellWithProviders.managedAgentProvider`; a trusted upstream must derive
+the tenant instead of trusting a browser query parameter. Products that do not
+have an ordinary daemon can continue to render the exported
+`ManagedAgentWebShell` directly. Neither browser mode receives the private
+Harness or Runtime Broker credentials.
 
 ## Embedded Runtime Broker
 
