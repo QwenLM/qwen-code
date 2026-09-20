@@ -54,12 +54,16 @@ function fileBoot(directory: string): ManagedWorkerFileBoot {
     type: 'boot',
     version: 1,
     runtimeInstanceId: 'runtime-1',
+    provisionRequestId: 'binding-1:1',
     gatewayIncarnation: 'broker-1',
     leaseId: 'lease-1',
     epoch: 1,
     tenantId: 'tenant-1',
     workspaceId: 'workspace-1',
+    workspaceGeneration: 'generation-1',
     workspaceCwd: path.join(directory, 'workspace'),
+    capabilityDigest: 'a'.repeat(64),
+    isolationClass: 'session',
     token: 'runtime-token',
     outputRoot: path.join(directory, 'output'),
     cliEntry: path.join(directory, 'cli.js'),
@@ -70,7 +74,14 @@ describe('managed Runtime worker bootstrap', () => {
   it('keeps IPC mode strict and separate from file mode', async () => {
     const directory = await temporaryDirectory();
     const boot = fileBoot(directory);
-    const { runtimeInstanceId: _runtimeInstanceId, ...ipcBoot } = boot;
+    const {
+      runtimeInstanceId: _runtimeInstanceId,
+      provisionRequestId: _provisionRequestId,
+      workspaceGeneration: _workspaceGeneration,
+      capabilityDigest: _capabilityDigest,
+      isolationClass: _isolationClass,
+      ...ipcBoot
+    } = boot;
 
     expect(isManagedWorkerBoot(ipcBoot)).toBe(true);
     expect(isManagedWorkerBoot(boot)).toBe(false);

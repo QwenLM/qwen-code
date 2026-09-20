@@ -34,7 +34,14 @@ const IPC_BOOT_KEYS = [
   'outputRoot',
   'cliEntry',
 ] as const;
-const FILE_BOOT_KEYS = [...IPC_BOOT_KEYS, 'runtimeInstanceId'] as const;
+const FILE_BOOT_KEYS = [
+  ...IPC_BOOT_KEYS,
+  'runtimeInstanceId',
+  'provisionRequestId',
+  'workspaceGeneration',
+  'capabilityDigest',
+  'isolationClass',
+] as const;
 const REMOTE_FILE_BOOT_KEYS = [
   ...FILE_BOOT_KEYS,
   'listenHostname',
@@ -55,6 +62,10 @@ const FILE_READY_KEYS = [
 
 export interface ManagedWorkerFileBoot extends ManagedWorkerBoot {
   readonly runtimeInstanceId: string;
+  readonly provisionRequestId: string;
+  readonly workspaceGeneration: string;
+  readonly capabilityDigest: string;
+  readonly isolationClass: 'workspace' | 'session';
   readonly listenHostname?: '0.0.0.0';
   readonly listenPort?: number;
 }
@@ -293,6 +304,14 @@ function validBoot(
     'cliEntry',
   ];
   if (keys.includes('runtimeInstanceId')) strings.push('runtimeInstanceId');
+  if (keys.includes('provisionRequestId')) {
+    strings.push(
+      'provisionRequestId',
+      'workspaceGeneration',
+      'capabilityDigest',
+      'isolationClass',
+    );
+  }
   return (
     boot['type'] === 'boot' &&
     boot['version'] === 1 &&
@@ -302,6 +321,9 @@ function validBoot(
       (key) =>
         typeof boot[key] === 'string' && (boot[key] as string).length > 0,
     ) &&
+    (!keys.includes('isolationClass') ||
+      boot['isolationClass'] === 'workspace' ||
+      boot['isolationClass'] === 'session') &&
     ['workspaceCwd', 'outputRoot', 'cliEntry'].every((key) =>
       path.isAbsolute(boot[key] as string),
     )

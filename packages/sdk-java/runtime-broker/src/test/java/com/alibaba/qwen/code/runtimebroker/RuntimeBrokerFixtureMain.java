@@ -144,6 +144,53 @@ public final class RuntimeBrokerFixtureMain {
             }
 
             @Override
+            public String kind() {
+                return delegate.kind();
+            }
+
+            @Override
+            public String placementDomain() {
+                return delegate.placementDomain();
+            }
+
+            @Override
+            public String runtimeTemplateDigest() {
+                return delegate.runtimeTemplateDigest();
+            }
+
+            @Override
+            public boolean supportsDurableRecovery() {
+                return delegate.supportsDurableRecovery();
+            }
+
+            @Override
+            public CompletionStage<RuntimeResourceHandle> ensureResource(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed,
+                    RuntimeResourceHandle knownHandle) {
+                provisionCount.incrementAndGet();
+                provisionStartedAt.compareAndSet(-1,
+                        System.currentTimeMillis());
+                return delegate.ensureResource(request, seed, knownHandle);
+            }
+
+            @Override
+            public CompletionStage<RuntimeObservation> reconcile(
+                    RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed,
+                    RuntimeResourceHandle handle, RuntimeLease lastLease) {
+                return delegate.reconcile(request, seed, handle, lastLease)
+                        .whenComplete((observation, error) -> {
+                            if (error == null && observation != null
+                                    && observation.getOutcome()
+                                            == RuntimeObservation.Outcome.READY) {
+                                runtimeReadyAt.compareAndSet(-1,
+                                        System.currentTimeMillis());
+                            }
+                        });
+            }
+
+            @Override
             public CompletionStage<Void> drain(
                     RuntimeProvisionRequest request, RuntimeLease lease) {
                 return delegate.drain(request, lease);
@@ -153,6 +200,18 @@ public final class RuntimeBrokerFixtureMain {
             public CompletionStage<Void> release(
                     RuntimeProvisionRequest request, RuntimeLease lease) {
                 return delegate.release(request, lease);
+            }
+
+            @Override
+            public CompletionStage<Void> drain(
+                    RuntimeResourceContext resource) {
+                return delegate.drain(resource);
+            }
+
+            @Override
+            public CompletionStage<Void> release(
+                    RuntimeResourceContext resource) {
+                return delegate.release(resource);
             }
 
             @Override
@@ -174,6 +233,14 @@ public final class RuntimeBrokerFixtureMain {
             Set<String> acquiredHarnessSessionIds,
             Set<String> executedHarnessSessionIds) {
         return new RuntimeTransport() {
+            @Override
+            public CompletionStage<RuntimeAttestation> attest(
+                    RuntimeLease lease, RuntimeProvisionRequest request,
+                    RuntimeProvisionSeed seed) {
+                return observe("attest", delegate.attest(lease, request,
+                        seed));
+            }
+
             @Override
             public CompletionStage<Void> acquire(RuntimeLease lease,
                     RuntimeSession session) {

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.InetAddress;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -15,10 +16,12 @@ import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.security.SecureRandom;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -43,9 +47,12 @@ public final class LocalProcessRuntimeProvisioner
     private static final int BOOT_MAXIMUM_BYTES = 32 * 1024;
     private static final int READY_MAXIMUM_BYTES = 8 * 1024;
     private static final int HEALTH_MAXIMUM_BYTES = 8 * 1024;
+    private static final int PROCESS_MAXIMUM_BYTES = 8 * 1024;
     private static final Set<String> READY_FIELDS = Set.of("type", "version",
             "runtimeInstanceId", "gatewayIncarnation", "leaseId", "epoch",
             "tenantId", "workspaceId", "workspaceCwd", "url");
+    private static final Set<String> PROCESS_FIELDS = Set.of("schemaVersion",
+            "kind", "generationDirectory", "pid", "processStartedAt");
     private static final List<String> BLOCKED_ENVIRONMENT_PREFIXES = List.of(
             "OPENAI_", "ANTHROPIC_", "DASHSCOPE_", "GEMINI_",
             "GOOGLE_GENERATIVE_AI_", "AZURE_OPENAI_", "QWEN_MODEL",
@@ -63,14 +70,14 @@ public final class LocalProcessRuntimeProvisioner
     private final Duration forceStopTimeout;
     private final HttpClient httpClient;
     private final ExecutorService executor;
-    private final SecureRandom random = new SecureRandom();
-    private final String brokerIncarnation = UUID.randomUUID().toString();
+    private final String placementDomain;
+    private final String templateDigest;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Object lock = new Object();
     private final ConcurrentMap<RuntimeProvisionRequest, Generation>
             generations = new ConcurrentHashMap<>();
-    private final ConcurrentMap<RuntimeProvisionRequest, AtomicLong> epochs =
-            new ConcurrentHashMap<>();
+    private final ConcurrentMap<RuntimeProvisionRequest, AtomicLong>
+            directEpochs = new ConcurrentHashMap<>();
     private final AtomicInteger physicalStarts = new AtomicInteger();
     private final AtomicInteger physicalStops = new AtomicInteger();
 
@@ -96,8 +103,13 @@ public final class LocalProcessRuntimeProvisioner
             Duration gracefulStopTimeout, Duration forceStopTimeout,
             HttpClient httpClient, ExecutorService executor) {
         rejectUnsupportedPlatform();
-        this.stateDirectory = absolute(stateDirectory, "stateDirectory")
-                .normalize();
+        Path configuredStateDirectory = absolute(stateDirectory,
+                "stateDirectory").normalize();
+        if (configuredStateDirectory.getParent() == null
+                || Files.isSymbolicLink(configuredStateDirectory)) {
+            throw new IllegalArgumentException(
+                    "stateDirectory must be a private non-root directory");
+        }
         if (workerCommand == null || workerCommand.isEmpty()
                 || workerCommand.stream().anyMatch(value -> value == null
                         || value.isBlank())) {
@@ -121,12 +133,38 @@ public final class LocalProcessRuntimeProvisioner
         this.httpClient = required(httpClient, "httpClient");
         this.executor = required(executor, "executor");
         try {
-            createOwnerDirectory(this.stateDirectory);
+            createOwnerDirectory(configuredStateDirectory);
+            this.stateDirectory = configuredStateDirectory.toRealPath();
+            this.placementDomain = "local-" + digest(
+                    InetAddress.getLocalHost().getHostName(),
+                    this.stateDirectory.toString());
         } catch (IOException exception) {
             throw failure("runtime_broker_release_failed",
                     "Managed Runtime state directory is unavailable.", true,
                     exception);
         }
+        this.templateDigest = "sha256:" + templateDigest(this.workerCommand,
+                this.cliEntry, this.environment);
+    }
+
+    @Override
+    public String kind() {
+        return "local-process";
+    }
+
+    @Override
+    public String placementDomain() {
+        return placementDomain;
+    }
+
+    @Override
+    public String runtimeTemplateDigest() {
+        return templateDigest;
+    }
+
+    @Override
+    public boolean supportsDurableRecovery() {
+        return true;
     }
 
     @Override
@@ -136,10 +174,6 @@ public final class LocalProcessRuntimeProvisioner
             throw new IllegalArgumentException("request is required");
         }
         synchronized (lock) {
-            if (closed.get()) {
-                return failed(failure("runtime_broker_closed",
-                        "Runtime Broker is closed.", false, null));
-            }
             Generation existing = generations.get(request);
             if (existing != null) {
                 if (existing.isReusable()) {
@@ -149,25 +183,76 @@ public final class LocalProcessRuntimeProvisioner
                         "Managed Runtime generation is draining.", true,
                         null));
             }
-            if (generations.size() >= maximumRuntimes) {
-                return failed(failure("runtime_broker_capacity_exhausted",
-                        "Managed Runtime capacity is exhausted.", true, null));
-            }
-            long epoch = epochs.computeIfAbsent(request,
-                    ignored -> new AtomicLong()).incrementAndGet();
-            Generation generation = new Generation(request, epoch);
-            generations.put(request, generation);
-            try {
-                executor.execute(() -> start(generation));
-            } catch (RuntimeException exception) {
-                generations.remove(request, generation);
-                generation.ready.completeExceptionally(failure(
-                        "runtime_broker_process_exited",
-                        "Managed Runtime failed to start.", true,
-                        exception));
-            }
-            return generation.ready;
         }
+        long epoch = directEpochs.computeIfAbsent(request,
+                ignored -> new AtomicLong()).incrementAndGet();
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create(
+                "direct-" + UUID.randomUUID(), epoch);
+        return ensureGeneration(request, seed, null, false)
+                .thenCompose(handle -> generation(request, seed).ready);
+    }
+
+    @Override
+    public CompletionStage<RuntimeLease> provision(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        return ensureGeneration(request, seed, null, true)
+                .thenCompose(handle -> generation(request, seed).ready);
+    }
+
+    @Override
+    public CompletionStage<RuntimeResourceHandle> ensureResource(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle knownHandle) {
+        validateDurableRequest(request, seed);
+        return ensureGeneration(request, seed, knownHandle, true);
+    }
+
+    @Override
+    public CompletionStage<RuntimeObservation> reconcile(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, RuntimeLease lastLease) {
+        validateDurableRequest(request, seed);
+        if (handle == null) {
+            throw new IllegalArgumentException("handle is required");
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            Generation generation;
+            try {
+                generation = generation(request, seed, handle, true);
+            } catch (RuntimeBrokerException exception) {
+                return exception.isRetryable()
+                        ? RuntimeObservation.unknown(handle)
+                        : RuntimeObservation.conflict(handle);
+            }
+            if (generation.process == null
+                    || !generation.process.isAlive()) {
+                return RuntimeObservation.notFound();
+            }
+            if (!Files.exists(generation.readyRecord,
+                    LinkOption.NOFOLLOW_LINKS)) {
+                return RuntimeObservation.starting(handle);
+            }
+            RuntimeLease lease;
+            try {
+                lease = readReady(generation);
+            } catch (IOException | RuntimeException exception) {
+                return RuntimeObservation.conflict(handle);
+            }
+            if (!checkHealth(lease)) {
+                return RuntimeObservation.unknown(handle);
+            }
+            if (lastLease != null
+                    && (!lastLease.getRuntimeInstanceId().equals(
+                            lease.getRuntimeInstanceId())
+                            || !lastLease.getLeaseId().equals(
+                                    lease.getLeaseId())
+                            || lastLease.getEpoch() != lease.getEpoch())) {
+                return RuntimeObservation.conflict(handle);
+            }
+            return RuntimeObservation.ready(handle, lease.getEndpoint(),
+                    lease.getRuntimeInstanceId(), lease.getLeaseId(),
+                    lease.getEpoch());
+        }, executor);
     }
 
     @Override
@@ -182,6 +267,21 @@ public final class LocalProcessRuntimeProvisioner
     public CompletionStage<Void> release(RuntimeProvisionRequest request,
             RuntimeLease lease) {
         Generation generation = requireGeneration(request, lease);
+        return generation.stop();
+    }
+
+    @Override
+    public CompletionStage<Void> drain(RuntimeResourceContext resource) {
+        Generation generation = generation(resource.getRequest(),
+                resource.getSeed(), resource.getHandle(), true);
+        generation.markDraining();
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletionStage<Void> release(RuntimeResourceContext resource) {
+        Generation generation = generation(resource.getRequest(),
+                resource.getSeed(), resource.getHandle(), true);
         return generation.stop();
     }
 
@@ -205,7 +305,9 @@ public final class LocalProcessRuntimeProvisioner
         }
         List<CompletableFuture<Void>> stops = new ArrayList<>();
         for (Generation generation : owned) {
-            stops.add(generation.stop().toCompletableFuture());
+            if (!generation.durable) {
+                stops.add(generation.stop().toCompletableFuture());
+            }
         }
         try {
             CompletableFuture.allOf(stops.toArray(new CompletableFuture[0]))
@@ -216,7 +318,11 @@ public final class LocalProcessRuntimeProvisioner
                     "Managed Runtime shutdown did not complete.", true,
                     exception);
         } finally {
-            executor.shutdownNow();
+            if (owned.stream().anyMatch(generation -> generation.durable)) {
+                executor.shutdown();
+            } else {
+                executor.shutdownNow();
+            }
         }
     }
 
@@ -236,6 +342,249 @@ public final class LocalProcessRuntimeProvisioner
         return Set.copyOf(result);
     }
 
+    private CompletionStage<RuntimeResourceHandle> ensureGeneration(
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle knownHandle, boolean durable) {
+        if (request == null || seed == null) {
+            throw new IllegalArgumentException(
+                    "request and seed are required");
+        }
+        synchronized (lock) {
+            if (closed.get()) {
+                return failed(failure("runtime_broker_closed",
+                        "Runtime Broker is closed.", false, null));
+            }
+            Generation existing = generations.get(request);
+            if (existing != null) {
+                if (!existing.seed.equals(seed)) {
+                    return failed(failure(
+                            "runtime_broker_resource_conflict",
+                            "Managed Runtime seed identity conflicts.",
+                            false, null));
+                }
+                if (existing.handleReady.isDone()
+                        && (existing.process == null
+                                || !existing.process.isAlive())) {
+                    generations.remove(request, existing);
+                    deleteGenerationDirectory(existing.directory);
+                    existing = null;
+                }
+            }
+            if (existing != null) {
+                if (!existing.isReusable()) {
+                    return failed(failure(
+                            "runtime_broker_capacity_exhausted",
+                            "Managed Runtime generation is draining.",
+                            true, null));
+                }
+                return existing.handleReady;
+            }
+            if (generations.size() >= maximumRuntimes) {
+                return failed(failure("runtime_broker_capacity_exhausted",
+                        "Managed Runtime capacity is exhausted.", true, null));
+            }
+            try {
+                RuntimeResourceHandle discovered = knownHandle;
+                Path directory = generationDirectory(seed);
+                if (discovered == null && Files.exists(directory,
+                        LinkOption.NOFOLLOW_LINKS)) {
+                    Path metadata = directory.resolve("process.json");
+                    if (!Files.exists(metadata, LinkOption.NOFOLLOW_LINKS)) {
+                        return failed(failure(
+                                "runtime_broker_resource_unknown",
+                                "Managed Runtime process identity is ambiguous.",
+                                true, null));
+                    }
+                    discovered = readProcessHandle(metadata);
+                }
+                if (discovered != null) {
+                    Generation adopted = adopt(request, seed, discovered,
+                            durable);
+                    if (adopted.process != null
+                            && adopted.process.isAlive()) {
+                        generations.put(request, adopted);
+                        return adopted.handleReady;
+                    }
+                    deleteGenerationDirectory(adopted.directory);
+                }
+                Generation generation = new Generation(request, seed,
+                        durable);
+                generations.put(request, generation);
+                try {
+                    executor.execute(() -> start(generation));
+                } catch (RuntimeException exception) {
+                    generations.remove(request, generation);
+                    generation.handleReady.completeExceptionally(failure(
+                            "runtime_broker_process_exited",
+                            "Managed Runtime failed to start.", true,
+                            exception));
+                    generation.ready.completeExceptionally(exception);
+                }
+                return generation.handleReady;
+            } catch (RuntimeException exception) {
+                return failed(exception);
+            }
+        }
+    }
+
+    private Generation generation(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed) {
+        synchronized (lock) {
+            Generation generation = generations.get(request);
+            if (generation == null || !generation.seed.equals(seed)) {
+                throw failure("runtime_broker_resource_unknown",
+                        "Managed Runtime generation is unavailable.", true,
+                        null);
+            }
+            return generation;
+        }
+    }
+
+    private Generation generation(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+            boolean durable) {
+        synchronized (lock) {
+            Generation generation = generations.get(request);
+            if (generation != null) {
+                if (!generation.seed.equals(seed)
+                        || !matchesHandle(generation, handle)) {
+                    throw failure("runtime_broker_resource_conflict",
+                            "Managed Runtime resource identity conflicts.",
+                            false, null);
+                }
+                return generation;
+            }
+            Generation adopted = adopt(request, seed, handle, durable);
+            generations.put(request, adopted);
+            return adopted;
+        }
+    }
+
+    private Generation adopt(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
+            boolean durable) {
+        if (!kind().equals(handle.getKind()) || handle.getVersion() != 1) {
+            throw failure("runtime_broker_resource_conflict",
+                    "Managed Runtime resource handle is unsupported.", false,
+                    null);
+        }
+        Map<String, Object> value = handle.getValue();
+        if (!value.keySet().equals(PROCESS_FIELDS)
+                || number(value.get("schemaVersion")) != 1
+                || !kind().equals(value.get("kind"))) {
+            throw failure("runtime_broker_resource_conflict",
+                    "Managed Runtime resource handle is invalid.", false,
+                    null);
+        }
+        Object rawDirectory = value.get("generationDirectory");
+        Object rawStartedAt = value.get("processStartedAt");
+        long pid = number(value.get("pid"));
+        if (!(rawDirectory instanceof String)
+                || !(rawStartedAt instanceof String) || pid <= 0) {
+            throw failure("runtime_broker_resource_conflict",
+                    "Managed Runtime resource handle is invalid.", false,
+                    null);
+        }
+        Path expected = generationDirectory(seed);
+        Path directory = Path.of((String) rawDirectory).toAbsolutePath()
+                .normalize();
+        if (!directory.equals(expected)
+                || !directory.startsWith(stateDirectory)
+                || Files.isSymbolicLink(directory)) {
+            throw failure("runtime_broker_resource_conflict",
+                    "Managed Runtime generation directory conflicts.", false,
+                    null);
+        }
+        Instant startedAt;
+        try {
+            startedAt = Instant.parse((String) rawStartedAt);
+        } catch (RuntimeException exception) {
+            throw failure("runtime_broker_resource_conflict",
+                    "Managed Runtime process fingerprint is invalid.", false,
+                    exception);
+        }
+        Generation generation = new Generation(request, seed, durable);
+        ProcessHandle process = ProcessHandle.of(pid).orElse(null);
+        if (process != null) {
+            Instant actual = process.info().startInstant().orElse(null);
+            if (actual == null || !actual.equals(startedAt)) {
+                throw failure("runtime_broker_resource_conflict",
+                        "Managed Runtime process fingerprint conflicts.",
+                        false, null);
+            }
+            generation.process = new OwnedRuntimeProcess(process);
+        }
+        generation.processStartedAt = startedAt;
+        generation.handleReady.complete(generation.process == null
+                ? handle : generation.handle());
+        return generation;
+    }
+
+    private boolean matchesHandle(Generation generation,
+            RuntimeResourceHandle handle) {
+        if (handle == null || !kind().equals(handle.getKind())
+                || handle.getVersion() != 1
+                || !handle.getValue().keySet().equals(PROCESS_FIELDS)) {
+            return false;
+        }
+        Map<String, Object> value = handle.getValue();
+        return number(value.get("schemaVersion")) == 1
+                && kind().equals(value.get("kind"))
+                && generation.directory.toString().equals(
+                        value.get("generationDirectory"))
+                && generation.process != null
+                && number(value.get("pid")) == generation.process.pid()
+                && generation.processStartedAt != null
+                && generation.processStartedAt.toString().equals(
+                        value.get("processStartedAt"));
+    }
+
+    private RuntimeResourceHandle readProcessHandle(Path metadata) {
+        try {
+            BasicFileAttributes attributes = Files.readAttributes(metadata,
+                    BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!attributes.isRegularFile()
+                    || attributes.size() > PROCESS_MAXIMUM_BYTES) {
+                throw new IOException("process metadata is invalid");
+            }
+            byte[] bytes;
+            try (InputStream input = Files.newInputStream(metadata)) {
+                bytes = input.readNBytes(PROCESS_MAXIMUM_BYTES + 1);
+            }
+            if (bytes.length > PROCESS_MAXIMUM_BYTES) {
+                throw new IOException("process metadata is too large");
+            }
+            return new RuntimeResourceHandle(kind(), 1,
+                    JsonCodec.parseObject(bytes,
+                            "Runtime process metadata"));
+        } catch (IOException | RuntimeException exception) {
+            throw failure("runtime_broker_resource_unknown",
+                    "Managed Runtime process identity is unavailable.", true,
+                    exception);
+        }
+    }
+
+    private void validateDurableRequest(RuntimeProvisionRequest request,
+            RuntimeProvisionSeed seed) {
+        if (request == null || seed == null) {
+            throw new IllegalArgumentException(
+                    "request and seed are required");
+        }
+        if (!kind().equals(request.getProvisionerKind())
+                || !placementDomain.equals(request.getPlacementDomain())
+                || !templateDigest.equals(
+                        request.getRuntimeTemplateDigest())) {
+            throw failure("runtime_broker_resource_conflict",
+                    "Managed Runtime placement identity conflicts.", false,
+                    null);
+        }
+    }
+
+    private Path generationDirectory(RuntimeProvisionSeed seed) {
+        return stateDirectory.resolve("generation-" + digest(
+                seed.getProvisionRequestId()).substring(0, 32)).normalize();
+    }
+
     private void start(Generation generation) {
         try {
             Path workspace = Path.of(generation.request.getScope()
@@ -251,6 +600,8 @@ public final class LocalProcessRuntimeProvisioner
             builder.directory(workspace.toFile());
             builder.environment().clear();
             builder.environment().putAll(environment);
+            builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            builder.redirectError(ProcessBuilder.Redirect.DISCARD);
             Process process;
             synchronized (generation) {
                 if (generation.stopping) {
@@ -259,11 +610,14 @@ public final class LocalProcessRuntimeProvisioner
                 }
                 process = builder.start();
                 generation.process = new OwnedRuntimeProcess(process);
+                generation.processStartedAt = process.toHandle().info()
+                        .startInstant().orElseThrow(() -> new IOException(
+                                "process start fingerprint is unavailable"));
             }
+            writeProcessMetadata(generation);
             process.getOutputStream().close();
-            executor.execute(new StreamTail(process.getInputStream()));
-            executor.execute(new StreamTail(process.getErrorStream()));
             physicalStarts.incrementAndGet();
+            generation.handleReady.complete(generation.handle());
             long startupDeadline = System.nanoTime()
                     + startupTimeout.toNanos();
             RuntimeLease lease = waitForReady(generation, startupDeadline);
@@ -274,6 +628,7 @@ public final class LocalProcessRuntimeProvisioner
             Throwable failure = error instanceof RuntimeBrokerException
                     ? error : failure("runtime_broker_process_exited",
                             "Managed Runtime failed to start.", true, error);
+            generation.handleReady.completeExceptionally(failure);
             generation.stop().whenComplete((ignored, stopError) -> {
                 if (stopError != null) {
                     failure.addSuppressed(stopError);
@@ -361,7 +716,8 @@ public final class LocalProcessRuntimeProvisioner
                 || number(ready.get("epoch")) != generation.epoch
                 || !generation.runtimeInstanceId.equals(
                         ready.get("runtimeInstanceId"))
-                || !brokerIncarnation.equals(ready.get("gatewayIncarnation"))
+                || !generation.seed.getGatewayIncarnation().equals(
+                        ready.get("gatewayIncarnation"))
                 || !generation.leaseId.equals(ready.get("leaseId"))
                 || !generation.request.getScope().getTenantId().equals(
                         ready.get("tenantId"))
@@ -454,12 +810,21 @@ public final class LocalProcessRuntimeProvisioner
         boot.put("type", "boot");
         boot.put("version", 1);
         boot.put("runtimeInstanceId", generation.runtimeInstanceId);
-        boot.put("gatewayIncarnation", brokerIncarnation);
+        boot.put("provisionRequestId",
+                generation.seed.getProvisionRequestId());
+        boot.put("gatewayIncarnation",
+                generation.seed.getGatewayIncarnation());
         boot.put("leaseId", generation.leaseId);
         boot.put("epoch", generation.epoch);
         boot.put("tenantId", generation.request.getScope().getTenantId());
         boot.put("workspaceId", generation.request.getScope().getWorkspaceId());
+        boot.put("workspaceGeneration",
+                generation.request.getScope().getWorkspaceGeneration());
         boot.put("workspaceCwd", workspace.toString());
+        boot.put("capabilityDigest",
+                generation.request.getScope().getCapabilityDigest());
+        boot.put("isolationClass",
+                generation.request.getScope().getIsolationClass());
         boot.put("token", generation.token);
         boot.put("outputRoot", generation.outputRoot.toString());
         boot.put("cliEntry", cliEntry.toString());
@@ -478,6 +843,29 @@ public final class LocalProcessRuntimeProvisioner
                         StandardCopyOption.ATOMIC_MOVE);
             } catch (AtomicMoveNotSupportedException exception) {
                 Files.move(temporary, generation.bootConfig);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private void writeProcessMetadata(Generation generation)
+            throws IOException {
+        byte[] bytes = JsonCodec.encode(generation.handle().getValue());
+        if (bytes.length > PROCESS_MAXIMUM_BYTES) {
+            throw new IOException("process metadata exceeds its limit");
+        }
+        Path temporary = generation.directory.resolve(".process-"
+                + UUID.randomUUID() + ".tmp");
+        Files.write(temporary, bytes, StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE);
+        setOwnerPermissions(temporary, false);
+        try {
+            try {
+                Files.move(temporary, generation.processMetadata,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException exception) {
+                Files.move(temporary, generation.processMetadata);
             }
         } finally {
             Files.deleteIfExists(temporary);
@@ -656,31 +1044,95 @@ public final class LocalProcessRuntimeProvisioner
         });
     }
 
+    private static String templateDigest(List<String> workerCommand,
+            Path cliEntry, Map<String, String> environment) {
+        List<String> values = new ArrayList<>();
+        values.addAll(workerCommand);
+        values.add(cliEntry.toString());
+        environment.entrySet().stream().sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> {
+                    values.add(entry.getKey());
+                    values.add(entry.getValue());
+                });
+        return digest(values.toArray(String[]::new));
+    }
+
+    private static String digest(String... values) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (String value : values) {
+                byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+                digest.update((byte) (bytes.length >>> 24));
+                digest.update((byte) (bytes.length >>> 16));
+                digest.update((byte) (bytes.length >>> 8));
+                digest.update((byte) bytes.length);
+                digest.update(bytes);
+            }
+            StringBuilder result = new StringBuilder(64);
+            for (byte value : digest.digest()) {
+                result.append(String.format(Locale.ROOT, "%02x",
+                        value & 0xff));
+            }
+            return result.toString();
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable",
+                    exception);
+        }
+    }
+
     private final class Generation {
         private final RuntimeProvisionRequest request;
+        private final RuntimeProvisionSeed seed;
+        private final boolean durable;
         private final long epoch;
-        private final String runtimeInstanceId = UUID.randomUUID().toString();
-        private final String leaseId = UUID.randomUUID().toString();
-        private final String token = token();
+        private final String runtimeInstanceId;
+        private final String leaseId;
+        private final String token;
         private final Path directory;
         private final Path outputRoot;
         private final Path bootConfig;
         private final Path readyRecord;
+        private final Path processMetadata;
+        private final CompletableFuture<RuntimeResourceHandle> handleReady =
+                new CompletableFuture<>();
         private final CompletableFuture<RuntimeLease> ready =
                 new CompletableFuture<>();
         private CompletableFuture<Void> stop;
         private OwnedRuntimeProcess process;
+        private Instant processStartedAt;
         private boolean draining;
         private boolean stopping;
 
-        Generation(RuntimeProvisionRequest request, long epoch) {
+        Generation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+                boolean durable) {
             this.request = request;
-            this.epoch = epoch;
-            this.directory = stateDirectory.resolve("generation-"
-                    + runtimeInstanceId);
+            this.seed = seed;
+            this.durable = durable;
+            this.epoch = seed.getEpoch();
+            this.runtimeInstanceId = seed.getProvisionalRuntimeId();
+            this.leaseId = seed.getLeaseId();
+            this.token = seed.getToken();
+            this.directory = generationDirectory(seed);
             this.outputRoot = directory.resolve("output");
             this.bootConfig = directory.resolve("boot.json");
             this.readyRecord = directory.resolve("ready.json");
+            this.processMetadata = directory.resolve("process.json");
+        }
+
+        RuntimeResourceHandle handle() {
+            if (process == null || processStartedAt == null) {
+                throw failure("runtime_broker_resource_unknown",
+                        "Managed Runtime process identity is unavailable.",
+                        true, null);
+            }
+            long pid = process.pid();
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("schemaVersion", 1);
+            value.put("kind", kind());
+            value.put("generationDirectory", directory.toString());
+            value.put("pid", pid);
+            value.put("processStartedAt", processStartedAt.toString());
+            return new RuntimeResourceHandle(kind(), 1, value);
         }
 
         synchronized void markDraining() {
@@ -698,8 +1150,20 @@ public final class LocalProcessRuntimeProvisioner
         synchronized CompletionStage<Void> stop() {
             if (stop == null) {
                 stopping = true;
-                stop = CompletableFuture.runAsync(() -> stopNow(this),
-                        executor);
+                stop = new CompletableFuture<>();
+                Runnable operation = () -> {
+                    try {
+                        stopNow(this);
+                        stop.complete(null);
+                    } catch (Throwable error) {
+                        stop.completeExceptionally(error);
+                    }
+                };
+                try {
+                    executor.execute(operation);
+                } catch (RejectedExecutionException rejected) {
+                    operation.run();
+                }
             }
             return stop;
         }
@@ -713,42 +1177,6 @@ public final class LocalProcessRuntimeProvisioner
         synchronized void addLiveProcessId(Set<Long> result) {
             if (process != null) {
                 result.addAll(process.liveProcessIds());
-            }
-        }
-    }
-
-    private String token() {
-        byte[] bytes = new byte[32];
-        random.nextBytes(bytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-    }
-
-    private static final class StreamTail implements Runnable {
-        private static final int MAXIMUM_CHARACTERS = 16 * 1024;
-        private final InputStream input;
-        private final StringBuilder tail = new StringBuilder();
-
-        StreamTail(InputStream input) {
-            this.input = input;
-        }
-
-        @Override
-        public void run() {
-            byte[] buffer = new byte[1024];
-            try (InputStream stream = input) {
-                int read;
-                while ((read = stream.read(buffer)) >= 0) {
-                    append(new String(buffer, 0, read,
-                            java.nio.charset.StandardCharsets.UTF_8));
-                }
-            } catch (IOException ignored) {
-            }
-        }
-
-        private synchronized void append(String value) {
-            tail.append(value);
-            if (tail.length() > MAXIMUM_CHARACTERS) {
-                tail.delete(0, tail.length() - MAXIMUM_CHARACTERS);
             }
         }
     }

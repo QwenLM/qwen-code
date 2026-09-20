@@ -30,6 +30,57 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        RuntimeScope scope = request.getScope();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 2);
+        body.put("provisionRequestId", seed.getProvisionRequestId());
+        body.put("tenantId", scope.getTenantId());
+        body.put("workspaceId", scope.getWorkspaceId());
+        body.put("workspaceGeneration", scope.getWorkspaceGeneration());
+        body.put("workspaceCwd", scope.getCanonicalCwd());
+        body.put("capabilityDigest", scope.getCapabilityDigest());
+        body.put("isolationClass", scope.getIsolationClass());
+        return post(lease, "/internal/managed-runtime/v2/attest", body,
+                true).thenApply(response -> {
+                    try {
+                        requireProtocol(response, 2);
+                        RuntimeScope attestedScope = new RuntimeScope(
+                                JsonCodec.requiredString(response, "tenantId",
+                                        "attestation"),
+                                JsonCodec.requiredString(response,
+                                        "workspaceId", "attestation"),
+                                JsonCodec.requiredString(response,
+                                        "workspaceGeneration",
+                                        "attestation"),
+                                JsonCodec.requiredString(response,
+                                        "workspaceCwd", "attestation"),
+                                JsonCodec.requiredString(response,
+                                        "capabilityDigest", "attestation"),
+                                JsonCodec.requiredString(response,
+                                        "isolationClass", "attestation"));
+                        return new RuntimeAttestation(
+                                JsonCodec.requiredString(response,
+                                        "runtimeInstanceId", "attestation"),
+                                JsonCodec.requiredString(response,
+                                        "runtimeIncarnation",
+                                        "attestation"),
+                                JsonCodec.requiredString(response, "leaseId",
+                                        "attestation"),
+                                requiredPositiveLong(response, "epoch"),
+                                attestedScope, JsonCodec.requiredString(
+                                        response, "provisionRequestId",
+                                        "attestation"));
+                    } catch (RuntimeException exception) {
+                        throw attestationConflict(
+                                "Managed Runtime attestation is invalid.",
+                                exception);
+                    }
+                });
+    }
+
+    @Override
     public CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session) {
         return post(lease, "/internal/managed-runtime/v1/prepare",
@@ -109,6 +160,12 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private CompletionStage<Map<String, Object>> post(RuntimeLease lease,
             String path, Map<String, Object> body) {
+        return post(lease, path, body, false);
+    }
+
+    private CompletionStage<Map<String, Object>> post(RuntimeLease lease,
+            String path, Map<String, Object> body,
+            boolean attestation) {
         URI target = lease.getEndpoint().resolve(path);
         HttpRequest request = HttpRequest.newBuilder(target)
                 .timeout(REQUEST_TIMEOUT)
@@ -132,23 +189,43 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     }
                     byte[] bytes = response.body();
                     if (bytes.length > MAXIMUM_RESPONSE_BYTES) {
-                        result.completeExceptionally(unavailable(
-                                "Managed Runtime response exceeded its limit."));
+                        result.completeExceptionally(attestation
+                                ? attestationConflict(
+                                        "Managed Runtime attestation response exceeded its limit.",
+                                        null)
+                                : unavailable(
+                                        "Managed Runtime response exceeded its limit."));
                         return;
                     }
                     if (response.statusCode() < 200
                             || response.statusCode() >= 300) {
-                        result.completeExceptionally(unavailable(
-                                "Managed Runtime returned HTTP "
-                                        + response.statusCode() + "."));
+                        boolean retryable = response.statusCode() == 408
+                                || response.statusCode() == 425
+                                || response.statusCode() == 429
+                                || response.statusCode() >= 500;
+                        result.completeExceptionally(attestation
+                                && !retryable
+                                        ? attestationConflict(
+                                                "Managed Runtime attestation returned HTTP "
+                                                        + response.statusCode()
+                                                        + ".",
+                                                null)
+                                        : unavailable(
+                                                "Managed Runtime returned HTTP "
+                                                        + response.statusCode()
+                                                        + "."));
                         return;
                     }
                     try {
                         result.complete(JsonCodec.parseObject(bytes,
                                 "Managed Runtime response"));
                     } catch (RuntimeException exception) {
-                        result.completeExceptionally(unavailable(
-                                "Managed Runtime returned invalid JSON."));
+                        result.completeExceptionally(attestation
+                                ? attestationConflict(
+                                        "Managed Runtime attestation returned invalid JSON.",
+                                        exception)
+                                : unavailable(
+                                        "Managed Runtime returned invalid JSON."));
                     }
                 });
         return result;
@@ -182,15 +259,43 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private static void requireProtocol(Map<String, Object> response,
             int expected) {
-        if (!(response.get("protocolVersion") instanceof Number)
-                || ((Number) response.get("protocolVersion")).intValue()
-                        != expected) {
+        Object raw = response.get("protocolVersion");
+        if (!(raw instanceof Number)) {
             throw unavailable("Managed Runtime protocol version changed.");
         }
+        Number number = (Number) raw;
+        if (number.longValue() != expected
+                || number.doubleValue() != expected) {
+            throw unavailable("Managed Runtime protocol version changed.");
+        }
+    }
+
+    private static long requiredPositiveLong(Map<String, Object> response,
+            String field) {
+        Object value = response.get(field);
+        if (!(value instanceof Number)) {
+            throw unavailable("Managed Runtime attestation is invalid.");
+        }
+        Number number = (Number) value;
+        long parsed = number.longValue();
+        if (number.doubleValue() != parsed || parsed <= 0) {
+            throw unavailable("Managed Runtime attestation is invalid.");
+        }
+        return parsed;
     }
 
     private static RuntimeBrokerException unavailable(String message) {
         return new RuntimeBrokerException(503, "managed_runtime_unavailable",
                 message, true);
+    }
+
+    private static RuntimeBrokerException attestationConflict(String message,
+            Throwable cause) {
+        RuntimeBrokerException failure = new RuntimeBrokerException(409,
+                "runtime_broker_attestation_conflict", message, false);
+        if (cause != null) {
+            failure.initCause(cause);
+        }
+        return failure;
     }
 }

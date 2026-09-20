@@ -11,6 +11,7 @@ import {
   MANAGED_LEASE_EPOCH_HEADER,
   type ManagedWorkerBoot,
 } from '../managed-runtime-activator.js';
+import type { ManagedWorkerFileBoot } from '../managed-runtime-worker-bootstrap.js';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type { ManagedRuntimeProvider } from '../managed-runtime-provider.js';
 import { ManagedRuntimeProviderError } from '../managed-runtime-provider.js';
@@ -25,7 +26,7 @@ import {
 
 export interface RegisterManagedRuntimeWorkerRoutesDeps {
   readonly provider: ManagedRuntimeProvider;
-  readonly owned?: ManagedWorkerBoot;
+  readonly owned?: ManagedWorkerBoot | ManagedWorkerFileBoot;
   readonly authorize: RequestHandler;
 }
 
@@ -105,6 +106,51 @@ export function registerManagedRuntimeWorkerRoutes(
       }
       next();
     });
+  if (deps.owned && 'runtimeInstanceId' in deps.owned) {
+    const owned = deps.owned;
+    app.post('/internal/managed-runtime/v2/attest', authorize, (req, res) => {
+      const body: unknown = req.body;
+      if (
+        !body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        (body as Record<string, unknown>)['protocolVersion'] !== 2
+      ) {
+        sendError(res, new ManagedRuntimeProtocolError());
+        return;
+      }
+      const value = body as Record<string, unknown>;
+      if (
+        value['provisionRequestId'] !== owned.provisionRequestId ||
+        value['tenantId'] !== owned.tenantId ||
+        value['workspaceId'] !== owned.workspaceId ||
+        value['workspaceGeneration'] !== owned.workspaceGeneration ||
+        value['workspaceCwd'] !== owned.workspaceCwd ||
+        value['capabilityDigest'] !== owned.capabilityDigest ||
+        value['isolationClass'] !== owned.isolationClass
+      ) {
+        res.status(409).json({
+          code: 'managed_runtime_identity_conflict',
+          error: 'Managed Runtime immutable identity conflicts.',
+        });
+        return;
+      }
+      res.status(200).json({
+        protocolVersion: 2,
+        runtimeInstanceId: owned.runtimeInstanceId,
+        runtimeIncarnation: owned.gatewayIncarnation,
+        leaseId: owned.leaseId,
+        epoch: owned.epoch,
+        provisionRequestId: owned.provisionRequestId,
+        tenantId: owned.tenantId,
+        workspaceId: owned.workspaceId,
+        workspaceGeneration: owned.workspaceGeneration,
+        workspaceCwd: owned.workspaceCwd,
+        capabilityDigest: owned.capabilityDigest,
+        isolationClass: owned.isolationClass,
+      });
+    });
+  }
   if (deps.owned && deps.provider.getToolV2Client) {
     app.post(
       '/internal/managed-runtime/v2/release',

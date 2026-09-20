@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ManagedToolV2Client } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ManagedToolFileHistoryState } from '@qwen-code/qwen-code-core';
 import type { ManagedWorkerBoot } from './managed-runtime-activator.js';
+import type { ManagedWorkerFileBoot } from './managed-runtime-worker-bootstrap.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import {
   LocalManagedRuntimeProvider,
@@ -112,7 +113,7 @@ function fakeRuntime(): {
 
 function workerApp(
   provider: LocalManagedRuntimeProvider,
-  owned?: ManagedWorkerBoot,
+  owned?: ManagedWorkerBoot | ManagedWorkerFileBoot,
   beforeRoutes?: RequestHandler,
 ) {
   const app = express();
@@ -195,6 +196,17 @@ describe('Managed Runtime providers', () => {
     };
   }
 
+  function fileOwnedBoot(): ManagedWorkerFileBoot {
+    return {
+      ...ownedBoot(),
+      runtimeInstanceId: 'runtime-instance',
+      provisionRequestId: 'provision-request',
+      workspaceGeneration: 'workspace-generation',
+      capabilityDigest: 'capability-digest',
+      isolationClass: 'workspace',
+    };
+  }
+
   function deferred<T>() {
     let resolve!: (value: T) => void;
     const promise = new Promise<T>((done) => {
@@ -202,6 +214,53 @@ describe('Managed Runtime providers', () => {
     });
     return { promise, resolve };
   }
+
+  it('attests the exact durable worker identity before private use', async () => {
+    const runtime = fakeRuntime();
+    const local = new LocalManagedRuntimeProvider(runtime.registry);
+    const owned = fileOwnedBoot();
+    const app = workerApp(local, owned);
+    const body = {
+      protocolVersion: 2,
+      provisionRequestId: owned.provisionRequestId,
+      tenantId: owned.tenantId,
+      workspaceId: owned.workspaceId,
+      workspaceGeneration: owned.workspaceGeneration,
+      workspaceCwd: owned.workspaceCwd,
+      capabilityDigest: owned.capabilityDigest,
+      isolationClass: owned.isolationClass,
+    };
+    const attest = (value: Record<string, unknown>) =>
+      request(app)
+        .post('/internal/managed-runtime/v2/attest')
+        .set('Authorization', `Bearer ${token}`)
+        .set('X-Qwen-Managed-Lease-Id', owned.leaseId)
+        .set('X-Qwen-Managed-Lease-Epoch', String(owned.epoch))
+        .send(value);
+
+    await request(app)
+      .post('/internal/managed-runtime/v2/attest')
+      .send(body)
+      .expect(401);
+    await attest({ ...body, provisionRequestId: 'another' }).expect(409);
+    const response = await attest(body).expect(200);
+    expect(response.body).toEqual({
+      protocolVersion: 2,
+      runtimeInstanceId: owned.runtimeInstanceId,
+      runtimeIncarnation: owned.gatewayIncarnation,
+      leaseId: owned.leaseId,
+      epoch: owned.epoch,
+      provisionRequestId: owned.provisionRequestId,
+      tenantId: owned.tenantId,
+      workspaceId: owned.workspaceId,
+      workspaceGeneration: owned.workspaceGeneration,
+      workspaceCwd: owned.workspaceCwd,
+      capabilityDigest: owned.capabilityDigest,
+      isolationClass: owned.isolationClass,
+    });
+    expect(runtime.bridge.spawnOrAttach).not.toHaveBeenCalled();
+    local.dispose();
+  });
 
   it('fences a parsed first v2 request that arrives after release is acknowledged', async () => {
     const runtime = fakeRuntime();

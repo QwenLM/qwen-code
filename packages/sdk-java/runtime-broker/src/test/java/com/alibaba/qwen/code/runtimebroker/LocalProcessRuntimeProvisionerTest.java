@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -111,6 +112,17 @@ class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
+    void rejectsTheFilesystemRootAsStateDirectory() throws Exception {
+        Path cliEntry = temporary.resolve("cli.js").toAbsolutePath();
+        Files.writeString(cliEntry, "fixture");
+
+        assertThrows(IllegalArgumentException.class, () ->
+                new LocalProcessRuntimeProvisioner(
+                        Path.of("/").toAbsolutePath(), javaExecutable(),
+                        javaExecutable(), cliEntry, Map.of()));
+    }
+
+    @Test
     void retriesTransientHealthFailureWithinStartupDeadline()
             throws Exception {
         provisioner = provisioner(1, List.of("--close-first-health"));
@@ -202,6 +214,126 @@ class LocalProcessRuntimeProvisionerTest {
                 Duration.ofSeconds(5));
     }
 
+    @Test
+    void adoptsTheSameDurableProcessAfterProviderRestart()
+            throws Exception {
+        LocalProcessRuntimeProvisioner first = provisioner(1);
+        provisioner = first;
+        RuntimeScope scope = new RuntimeScope("tenant", "workspace",
+                "generation", workspace().toString(), "capability",
+                "workspace");
+        RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
+                null, first.kind(), first.placementDomain(),
+                first.runtimeTemplateDigest());
+        RuntimeProvisionSeed seed = RuntimeProvisionSeed.create("binding", 1);
+        RuntimeResourceHandle handle = first.ensureResource(request, seed,
+                null).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        RuntimeObservation initial = readyObservation(first, request, seed,
+                handle);
+        long processId = ((Number) handle.getValue().get("pid")).longValue();
+
+        first.close();
+        provisioner = null;
+        assertTrue(ProcessHandle.of(processId).map(ProcessHandle::isAlive)
+                .orElse(false));
+
+        LocalProcessRuntimeProvisioner restored = provisioner(1);
+        provisioner = restored;
+        RuntimeResourceHandle adopted = restored.ensureResource(request, seed,
+                handle).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        RuntimeObservation recovered = readyObservation(restored, request,
+                seed, adopted);
+
+        assertEquals(handle, adopted);
+        assertEquals(initial.getEndpoint(), recovered.getEndpoint());
+        assertEquals(0, restored.getPhysicalStartCount());
+
+        RuntimeLease lease = new RuntimeLease(recovered.getRuntimeInstanceId(),
+                recovered.getEndpoint(), seed.getToken(),
+                recovered.getLeaseId(), recovered.getEpoch());
+        restored.release(new RuntimeResourceContext(request, seed, adopted,
+                lease)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        await(() -> ProcessHandle.of(processId)
+                .map(process -> !process.isAlive()).orElse(true),
+                Duration.ofSeconds(5));
+    }
+
+    @Test
+    void adoptsTheSameDurableProcessAfterTheOwnerJvmExits()
+            throws Exception {
+        Path workspace = workspace();
+        Path cliEntry = temporary.resolve("cli.js");
+        Files.writeString(cliEntry, "fixture");
+        Path state = temporary.resolve("state").toAbsolutePath();
+        String classpath = System.getProperty("java.class.path");
+        Process child = new ProcessBuilder(javaExecutable().toString(), "-cp",
+                classpath, LocalProcessProvisionerFixtureMain.class.getName(),
+                state.toString(), workspace.toString(),
+                cliEntry.toAbsolutePath().toString()).redirectErrorStream(true)
+                        .start();
+        assertTrue(child.waitFor(15, TimeUnit.SECONDS));
+        String output = new String(child.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8);
+        assertEquals(0, child.exitValue(), output);
+        String marker = "P3_LOCAL_RUNTIME_PID=";
+        int markerIndex = output.indexOf(marker);
+        assertTrue(markerIndex >= 0, output);
+        long processId = Long.parseLong(output.substring(
+                markerIndex + marker.length()).trim());
+        try {
+            provisioner = provisioner(1);
+            RuntimeProvisionRequest request =
+                    LocalProcessProvisionerFixtureMain.request(provisioner,
+                            workspace);
+            RuntimeProvisionSeed seed =
+                    LocalProcessProvisionerFixtureMain.seed();
+            RuntimeResourceHandle adopted = provisioner.ensureResource(request,
+                    seed, null).toCompletableFuture()
+                    .get(5, TimeUnit.SECONDS);
+            RuntimeObservation observation = readyObservation(provisioner,
+                    request, seed, adopted);
+
+            assertEquals(processId,
+                    ((Number) adopted.getValue().get("pid")).longValue());
+            assertEquals(RuntimeObservation.Outcome.READY,
+                    observation.getOutcome());
+            assertEquals(0, provisioner.getPhysicalStartCount());
+
+            RuntimeLease lease = new RuntimeLease(
+                    observation.getRuntimeInstanceId(),
+                    observation.getEndpoint(), seed.getToken(),
+                    observation.getLeaseId(), observation.getEpoch());
+            provisioner.release(new RuntimeResourceContext(request, seed,
+                    adopted, lease)).toCompletableFuture()
+                    .get(5, TimeUnit.SECONDS);
+        } finally {
+            ProcessHandle.of(processId).filter(ProcessHandle::isAlive)
+                    .ifPresent(ProcessHandle::destroyForcibly);
+        }
+    }
+
+    @Test
+    void templateDigestIncludesEnvironmentIndependentOfMapOrder()
+            throws Exception {
+        LocalProcessRuntimeProvisioner first = provisioner(1,
+                Map.of("ALPHA", "one", "BETA", "two"));
+        LocalProcessRuntimeProvisioner reordered = provisioner(1,
+                new java.util.LinkedHashMap<>(Map.of("BETA", "two",
+                        "ALPHA", "one")));
+        LocalProcessRuntimeProvisioner changed = provisioner(1,
+                Map.of("ALPHA", "one", "BETA", "changed"));
+        try {
+            assertEquals(first.runtimeTemplateDigest(),
+                    reordered.runtimeTemplateDigest());
+            assertNotEquals(first.runtimeTemplateDigest(),
+                    changed.runtimeTemplateDigest());
+        } finally {
+            first.close();
+            reordered.close();
+            changed.close();
+        }
+    }
+
     private LocalProcessRuntimeProvisioner provisioner(int maximumRuntimes)
             throws Exception {
         return provisioner(maximumRuntimes, List.of());
@@ -216,6 +348,19 @@ class LocalProcessRuntimeProvisionerTest {
     private LocalProcessRuntimeProvisioner provisioner(int maximumRuntimes,
             List<String> workerArguments, Duration startupTimeout)
             throws Exception {
+        return provisioner(maximumRuntimes, workerArguments, startupTimeout,
+                Map.of());
+    }
+
+    private LocalProcessRuntimeProvisioner provisioner(int maximumRuntimes,
+            Map<String, String> environment) throws Exception {
+        return provisioner(maximumRuntimes, List.of(), Duration.ofSeconds(5),
+                environment);
+    }
+
+    private LocalProcessRuntimeProvisioner provisioner(int maximumRuntimes,
+            List<String> workerArguments, Duration startupTimeout,
+            Map<String, String> environment) throws Exception {
         Path cliEntry = temporary.resolve("cli.js");
         Files.writeString(cliEntry, "fixture");
         ExecutorService executor = Executors.newCachedThreadPool(runnable -> {
@@ -230,7 +375,7 @@ class LocalProcessRuntimeProvisionerTest {
         command.addAll(workerArguments);
         return new LocalProcessRuntimeProvisioner(
                 temporary.resolve("state").toAbsolutePath(), command,
-                cliEntry.toAbsolutePath(), Map.of(), maximumRuntimes,
+                cliEntry.toAbsolutePath(), environment, maximumRuntimes,
                 startupTimeout, Duration.ofSeconds(1),
                 Duration.ofSeconds(1), Duration.ofSeconds(1),
                 HttpClient.newBuilder()
@@ -250,6 +395,25 @@ class LocalProcessRuntimeProvisionerTest {
             Thread.sleep(25);
         }
         assertTrue(condition.evaluate(), "condition did not become true");
+    }
+
+    private static RuntimeObservation readyObservation(
+            LocalProcessRuntimeProvisioner target,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        RuntimeObservation observation;
+        do {
+            observation = target.reconcile(request, seed, handle, null)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS);
+            if (observation.getOutcome()
+                    == RuntimeObservation.Outcome.READY) {
+                return observation;
+            }
+            Thread.sleep(25);
+        } while (System.nanoTime() < deadline);
+        throw new AssertionError("Runtime did not become ready: "
+                + observation.getOutcome());
     }
 
     private void assertNoGenerationDirectories() throws Exception {

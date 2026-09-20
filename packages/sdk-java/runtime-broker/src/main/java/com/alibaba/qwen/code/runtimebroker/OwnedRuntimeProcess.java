@@ -21,6 +21,14 @@ final class OwnedRuntimeProcess {
         this.root = process.toHandle();
     }
 
+    OwnedRuntimeProcess(ProcessHandle processHandle) {
+        if (processHandle == null) {
+            throw new IllegalArgumentException("processHandle is required");
+        }
+        this.process = null;
+        this.root = processHandle;
+    }
+
     synchronized void stop(Duration gracefulTimeout,
             Duration forceTimeout) {
         collectDescendants();
@@ -57,6 +65,10 @@ final class OwnedRuntimeProcess {
             }
         }
         return Set.copyOf(result);
+    }
+
+    long pid() {
+        return root.pid();
     }
 
     private boolean waitForExit(Duration timeout) {
@@ -102,10 +114,12 @@ final class OwnedRuntimeProcess {
             terminate(descendants.get(index), force);
         }
         if (root.isAlive()) {
-            if (force) {
+            if (process != null && force) {
                 process.destroyForcibly();
-            } else {
+            } else if (process != null) {
                 process.destroy();
+            } else {
+                terminate(root, force);
             }
         }
     }

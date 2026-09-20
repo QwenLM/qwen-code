@@ -19,9 +19,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Process fixture that implements the file boot and health handshake. */
 public final class FakeRuntimeWorkerMain {
     private static final Set<String> BOOT_FIELDS = Set.of("type", "version",
-            "runtimeInstanceId", "gatewayIncarnation", "leaseId", "epoch",
-            "tenantId", "workspaceId", "workspaceCwd", "token",
-            "outputRoot", "cliEntry");
+            "runtimeInstanceId", "provisionRequestId",
+            "gatewayIncarnation", "leaseId", "epoch", "tenantId",
+            "workspaceId", "workspaceGeneration", "workspaceCwd",
+            "capabilityDigest", "isolationClass", "token", "outputRoot",
+            "cliEntry");
 
     private FakeRuntimeWorkerMain() {
     }
