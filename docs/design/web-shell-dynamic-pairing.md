@@ -22,9 +22,9 @@ their original expiration, allowing an in-progress scan to complete.
 The response carries `expiresInMs`; the browser starts its countdown on receipt
 so different daemon and browser clocks cannot postpone refresh. The daemon
 always enforces expiration using its own clock.
-The page's QR character block uses `lang="en"` locally: CJK font fallback can otherwise
-give block glyphs and spaces different widths and destroy the QR grid. Nearby
-labels continue to use the selected UI language.
+The page's QR character block uses `lang="en"` locally: CJK font fallback can
+otherwise give block glyphs and spaces different widths and destroy the QR
+grid. Nearby labels continue to use the selected UI language.
 
 The URL carries `#pairing=`, never the daemon bearer. Standalone startup removes
 the fragment and exchanges the invitation only with the page's own origin,
@@ -42,12 +42,27 @@ the Authorization header, before the ordinary bearer gate. It accepts only
 the origin for which the invitation was issued and only on the primary
 listener. An invitation never authorizes API requests or WebSockets.
 Responses containing credentials use `Cache-Control: no-store`.
+When `--rate-limit` is enabled, both routes use the existing mutation-tier
+limiter. Issuance checks a valid primary-listener bearer first. Exchange attempts,
+including invalid invitations, use a separate socket-IP bucket before validation so
+untrusted client IDs cannot bypass throttling. A 429 response does not consume
+the invitation.
 
-The existing Host and Origin checks remain in force. Same-origin exchange
-requests receive only a narrow exception from the runtime-bearer Origin check;
-the exchange handler verifies its own credential. Device bearers use the same
-credential store as REST and WebSockets. No new pre-auth cold-start exception
-is needed: an invitation can only exist in an initialized runtime.
+Primary HTTP Host validation is unchanged. On authenticated non-loopback
+primary listeners, WebSocket upgrades now accept an Origin matching the actual
+socket scheme and Host. They skip the loopback-socket Host allowlist in that
+case, matching REST's existing non-loopback policy, and still require a valid
+bearer. This applies to all primary WebSocket features, including ACP,
+terminal, and voice, for runtime and device credentials alike. Loopback and
+Local Control listeners keep their existing gates. Proxies that terminate TLS
+or rewrite Host still need `--allow-origin` for the browser's origin.
+
+Same-origin exchange requests receive only a narrow exception from the
+runtime-bearer Origin check; the exchange handler verifies its own credential
+and rejects foreign origins even when they are explicitly allowlisted for
+other API requests. Device bearers use the same credential store as REST and
+WebSockets. No new pre-auth cold-start exception is needed: an invitation can
+only exist in an initialized runtime.
 
 Use the daemon address through which the browser connected. For a wildcard
 listener reached over loopback, offer the existing eligible LAN interfaces
@@ -57,8 +72,8 @@ At most 64 live invitations are retained; issuing more discards the oldest.
 
 ## Affected components
 
-- CLI credential store, primary same-origin authentication, daemon route wiring,
-  and new pairing route/service tests.
+- CLI credential store, primary same-origin authentication, startup guidance,
+  daemon route wiring, and new pairing route/service tests.
 - Web Shell mobile-access popover, standalone token bootstrap, bilingual copy,
   and focused client tests.
 - Existing Local Control routes remain the fallback for loopback daemons.
@@ -70,6 +85,8 @@ Verify default availability on non-loopback, automatic QR rotation, countdown,
 single-use and expiry rejection, no runtime bearer in the QR, independent
 device access after rotation, primary/Local Control isolation, same-origin and
 cross-origin checks, wildcard address selection, and unchanged loopback flow.
+Also cover allowlisted foreign origins and configured throttling of issuance
+and invalid exchanges, including a successful retry of a throttled invitation.
 Build, typecheck, run focused tests, inspect the full diff twice, and review.
 See `.qwen/e2e-tests/web-shell-dynamic-pairing.md` for results.
 

@@ -8,12 +8,17 @@ import express from 'express';
 import { createServer } from 'node:http';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bearerAuth, denyBrowserOriginCors } from '../auth.js';
+import {
+  allowOriginCors,
+  bearerAuth,
+  parseAllowOriginPatterns,
+} from '../auth.js';
 import { CredentialStore } from '../local-control/credentials.js';
 import { installRemoteSelfOriginMiddleware } from '../server/self-origin.js';
 import { registerWebShellPairingRoutes } from './web-shell-pairing.js';
 import { listLanCandidates } from '../local-control/lan-interfaces.js';
 import { tagListener } from '../local-control/listener-identity.js';
+import { createRateLimiter, type RateLimiterInstance } from '../rate-limit.js';
 
 vi.mock('../local-control/lan-interfaces.js', () => ({
   listLanCandidates: vi.fn(() => []),
@@ -21,10 +26,12 @@ vi.mock('../local-control/lan-interfaces.js', () => ({
 
 const authority = 'qwen.test:4170';
 const origin = `http://${authority}`;
+const limiters: RateLimiterInstance[] = [];
 
 function setup(
   hostname = '0.0.0.0',
   token: string | undefined = 'runtime-secret',
+  options: { allowOrigins?: string[]; rateLimit?: boolean } = {},
 ) {
   const app = express();
   const credentials = new CredentialStore(token);
@@ -33,9 +40,23 @@ function setup(
     hostname,
     token ? credentials : undefined,
   );
-  app.use(denyBrowserOriginCors);
-  registerWebShellPairingRoutes(app, credentials, hostname);
+  app.use(
+    allowOriginCors(parseAllowOriginPatterns(options.allowOrigins ?? [])),
+  );
+  const limiter = options.rateLimit
+    ? createRateLimiter({
+        hostname,
+        tiers: {
+          prompt: { windowMs: 60_000, max: 2 },
+          mutation: { windowMs: 60_000, max: 2 },
+          read: { windowMs: 60_000, max: 2 },
+        },
+      })
+    : undefined;
+  if (limiter) limiters.push(limiter);
+  registerWebShellPairingRoutes(app, credentials, hostname, limiter);
   app.use(bearerAuth(credentials));
+  if (limiter) app.use(limiter.middleware);
   app.post('/probe', (_req, res) => res.sendStatus(204));
   const issue = () =>
     request(app)
@@ -59,11 +80,69 @@ function codeOf(response: { body: { url: string } }): string {
 }
 
 afterEach(() => {
+  for (const limiter of limiters.splice(0)) limiter.dispose();
   vi.restoreAllMocks();
   vi.mocked(listLanCandidates).mockReturnValue([]);
 });
 
 describe('Web Shell pairing', () => {
+  it('rejects an allowlisted foreign Origin without consuming the invitation', async () => {
+    const allowedOrigin = 'http://allowed.test';
+    const { issue, exchange } = setup('0.0.0.0', 'runtime-secret', {
+      allowOrigins: [allowedOrigin],
+    });
+    const code = codeOf(await issue());
+    const rejected = await exchange(code).set('Origin', allowedOrigin);
+    expect(rejected.headers['access-control-allow-origin']).toBe(allowedOrigin);
+    expect(rejected.status).toBe(401);
+    expect(
+      (await exchange(code).set('Origin', 'http://evil.test')).status,
+    ).toBe(403);
+    expect((await exchange(code)).status).toBe(200);
+  });
+
+  it('rate-limits issuance after bearer authentication', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const { issue } = setup('0.0.0.0', 'runtime-secret', { rateLimit: true });
+    expect(
+      (await issue().unset('Origin').set('Authorization', 'Bearer wrong'))
+        .status,
+    ).toBe(401);
+    expect((await issue()).status).toBe(200);
+    expect((await issue()).status).toBe(200);
+    const rejected = await issue();
+    expect(rejected.status).toBe(429);
+    expect(rejected.body).toMatchObject({
+      code: 'rate_limit_exceeded',
+      tier: 'mutation',
+    });
+    expect(rejected.headers['retry-after']).toBe('30');
+  });
+
+  it('rate-limits invalid exchanges without consuming a throttled invitation', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const { credentials, issue, exchange } = setup(
+      '0.0.0.0',
+      'runtime-secret',
+      { rateLimit: true },
+    );
+    const code = codeOf(await issue());
+    for (const clientId of ['untrusted-1', 'untrusted-2']) {
+      expect(
+        (await exchange('invalid').set('X-Qwen-Client-Id', clientId)).status,
+      ).toBe(401);
+    }
+    expect(
+      (await exchange(code).set('X-Qwen-Client-Id', 'untrusted-3')).status,
+    ).toBe(429);
+    now.mockReturnValue(31_000);
+    const paired = await exchange(code).set('X-Qwen-Client-Id', 'untrusted-4');
+    expect(paired.status).toBe(200);
+    expect(credentials.verify(paired.body.token, { kind: 'primary' })).toBe(
+      true,
+    );
+  });
+
   it('issues by default and exchanges once for an independent primary credential', async () => {
     const { app, credentials, issue, exchange } = setup();
     const issued = await issue();

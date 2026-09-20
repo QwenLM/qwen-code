@@ -94,13 +94,16 @@ async function flush(): Promise<void> {
   });
 }
 
-function mount(onOpenSettings: () => void = vi.fn()): void {
+function mount(
+  onOpenSettings: () => void = vi.fn(),
+  language: 'en' | 'zh-CN' = 'en',
+): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <LocalControlQrButton onOpenSettings={onOpenSettings} />
       </I18nProvider>,
     );
@@ -108,9 +111,9 @@ function mount(onOpenSettings: () => void = vi.fn()): void {
   mounted.push({ root, container });
 }
 
-async function openPopover(): Promise<void> {
+async function openPopover(label = 'Mobile access'): Promise<void> {
   const trigger = container.querySelector<HTMLButtonElement>(
-    'button[aria-label="Mobile access"]',
+    `button[aria-label="${label}"]`,
   );
   if (!trigger) throw new Error('trigger button not found');
   act(() => {
@@ -134,6 +137,22 @@ afterEach(() => {
 });
 
 describe('LocalControlQrButton', () => {
+  it('preserves the QR glyph language within Chinese UI', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=one-time',
+        qrText: 'QR-TEXT',
+        expiresInMs: 60_000,
+      }),
+    );
+    mount(vi.fn(), 'zh-CN');
+    container.lang = 'zh-CN';
+    await openPopover('手机访问');
+    expect(container.textContent).toContain('一次性二维码');
+    expect(container.querySelector('pre')?.lang).toBe('en');
+  });
+
   it.each([-120_000, 120_000])(
     'rotates with a %i ms browser clock offset and stops requesting on close',
     async (offset) => {

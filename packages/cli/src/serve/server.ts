@@ -2197,12 +2197,12 @@ export function createServeApp(
   // runtime token, and the primary listener does the reverse. With no Local
   // Control session this behaves exactly as `bearerAuth(opts.token)` did.
   if (webShellDir) {
-    registerWebShellPairingRoutes(app, credentials, opts.hostname);
+    registerWebShellPairingRoutes(app, credentials, opts.hostname, rateLimiter);
   }
   app.use(authenticate);
 
   // Rate limiter: after auth (only count authenticated requests), except
-  // webhook routes which use their own shared-secret auth before bearerAuth.
+  // webhook and pairing routes which mount their limiter before returning.
   if (rateLimiter) {
     app.use(rateLimiter.middleware);
   }

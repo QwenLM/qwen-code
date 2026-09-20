@@ -12,6 +12,7 @@ import { listLanCandidates } from '../local-control/lan-interfaces.js';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import { ACCESS_LOG_REJECT_LOCAL } from '../server/access-log.js';
+import type { RateLimiterInstance } from '../rate-limit.js';
 
 const PAIRING_TTL_MS = 60_000;
 const WILDCARD_HOSTS = ['0.0.0.0', '::', '[::]'];
@@ -28,6 +29,7 @@ export function registerWebShellPairingRoutes(
   app: Application,
   credentials: CredentialStore,
   hostname: string,
+  rateLimiter?: Pick<RateLimiterInstance, 'middleware' | 'checkRate'>,
 ): void {
   const invitations = new Map<string, { origin: string; expiresAt: number }>();
   const available = (req: Request) =>
@@ -35,40 +37,61 @@ export function registerWebShellPairingRoutes(
     listenerIdentityOf(req).kind === 'primary' &&
     !credentials.isOpen({ kind: 'primary' });
 
-  app.post('/web-shell/pairing/exchange', (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    const secret =
-      req.headers.authorization?.match(/^Bearer ([\w-]{43})$/i)?.[1];
-    const key = secret ? digest(secret) : '';
-    const invitation = invitations.get(key);
-    if (
-      !available(req) ||
-      !invitation ||
-      invitation.expiresAt <= Date.now() ||
-      invitation.origin !== requestUrl(req).origin ||
-      (req.headers.origin && req.headers.origin !== invitation.origin)
-    ) {
-      res.locals[ACCESS_LOG_REJECT_LOCAL] = true;
-      res.status(401).json({
-        error: 'Pairing code expired or already used. Scan a fresh QR code.',
-      });
-      return;
-    }
-    const token = randomBytes(32).toString('base64url');
-    if (!credentials.addWebShellToken(token)) {
-      res.status(409).json({
-        error:
-          'Paired device limit reached. Restart the daemon to reset pairing.',
-      });
-      return;
-    }
-    invitations.delete(key);
-    res.json({ token });
-  });
+  app.post(
+    '/web-shell/pairing/exchange',
+    (req, res, next) => {
+      if (
+        rateLimiter &&
+        !rateLimiter.checkRate(
+          `pairing:preauth:${req.socket.remoteAddress ?? 'unknown'}`,
+          'mutation',
+        )
+      ) {
+        res.status(429).json({
+          error: 'Rate limit exceeded',
+          code: 'rate_limit_exceeded',
+          tier: 'mutation',
+        });
+        return;
+      }
+      next();
+    },
+    (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const secret =
+        req.headers.authorization?.match(/^Bearer ([\w-]{43})$/i)?.[1];
+      const key = secret ? digest(secret) : '';
+      const invitation = invitations.get(key);
+      if (
+        !available(req) ||
+        !invitation ||
+        invitation.expiresAt <= Date.now() ||
+        invitation.origin !== requestUrl(req).origin ||
+        (req.headers.origin && req.headers.origin !== invitation.origin)
+      ) {
+        res.locals[ACCESS_LOG_REJECT_LOCAL] = true;
+        res.status(401).json({
+          error: 'Pairing code expired or already used. Scan a fresh QR code.',
+        });
+        return;
+      }
+      const token = randomBytes(32).toString('base64url');
+      if (!credentials.addWebShellToken(token)) {
+        res.status(409).json({
+          error:
+            'Paired device limit reached. Restart the daemon to reset pairing.',
+        });
+        return;
+      }
+      invitations.delete(key);
+      res.json({ token });
+    },
+  );
 
   app.post(
     '/web-shell/pairing',
     bearerAuth(credentials),
+    ...(rateLimiter ? [rateLimiter.middleware] : []),
     express.json({ limit: '1kb' }),
     async (req, res, next) => {
       res.setHeader('Cache-Control', 'no-store');

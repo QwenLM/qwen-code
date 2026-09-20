@@ -34,11 +34,21 @@ URL 使用 `#pairing=`，不包含 daemon bearer。独立页面启动时移除�
 Authorization header 传入的配对码。它只接受签发时的 origin，且只在主监听
 上生效。配对码永远不能直接授权 API 请求或 WebSocket。
 包含凭证的响应设置 `Cache-Control: no-store`。
+启用 `--rate-limit` 时，两个路由都使用现有的 mutation 档限流器。
+签发先验证主监听的有效 bearer。兑换请求在校验前按 socket IP 单独计数，包括无效
+配对码，避免未认证请求通过更换 client ID 绕过限流。返回 429 不会消耗配对码。
 
-保留现有 Host 和 Origin 检查。同源兑换请求仅获得针对 runtime bearer
-Origin 检查的窄例外，仍由兑换处理器验证自身凭证。设备 bearer 使用 REST 与
-WebSocket 共用的凭证仓库。不新增预认证冷启动例外：配对码只能存在于已经
-初始化的 runtime 中。
+主监听 HTTP 的 Host 校验不变。已认证的非 loopback 主监听现在允许 Origin 与
+实际 socket 的协议及 Host 匹配的 WebSocket 升级请求。该场景跳过基于 loopback
+socket 的 Host 白名单，与 REST 现有的非 loopback 策略一致，仍要求有效 bearer。
+这适用于主监听上的全部 WebSocket 功能，包括 ACP、终端和语音，runtime 凭证与
+设备凭证均可使用。loopback 与 Local Control 监听保留原有校验。
+终止 TLS 或改写 Host 的代理仍需为浏览器的 origin 配置 `--allow-origin`。
+
+同源兑换请求仅获得针对 runtime bearer Origin 检查的窄例外，仍由兑换处理器
+验证自身凭证；即使其它 API 请求显式允许某个外部 origin，兑换处理器也会拒绝它。
+设备 bearer 使用 REST 与 WebSocket 共用的凭证仓库。不新增预认证冷启动例外：
+配对码只能存在于已经初始化的 runtime 中。
 
 使用浏览器连接 daemon 时的地址。若 wildcard 监听经 loopback 访问，提供
 现有符合条件的局域网接口，多个接口时由用户选择。保留 HTTP 或 HTTPS，
@@ -47,7 +57,7 @@ WebSocket 共用的凭证仓库。不新增预认证冷启动例外：配对码�
 
 ## 受影响组件
 
-- CLI 凭证仓库、主监听同源认证、daemon 路由接入及新增配对路由/服务测试。
+- CLI 凭证仓库、主监听同源认证、启动提示、daemon 路由接入及新增配对路由/服务测试。
 - Web Shell 手机访问弹层、独立页面 token 启动流程、双语文案和针对性测试。
 - 现有 Local Control 路由继续作为 loopback daemon 的回退流程。
 
@@ -57,6 +67,8 @@ WebSocket 共用的凭证仓库。不新增预认证冷启动例外：配对码�
 覆盖非 loopback 默认可用、二维码自动轮换、倒计时、一次性与过期拒绝、
 二维码不含 runtime bearer、轮换后设备仍可访问、主监听与 Local Control
 隔离、同源和跨域检查、wildcard 地址选择及 loopback 原流程不变。
+同时覆盖 allowlist 中的外部 origin，以及配置限流后的签发、无效兑换拒绝和
+被限流配对码的成功重试。
 完成构建、类型检查、针对性测试、两次全量 diff 自审及代码审查。
 结果记录在 `.qwen/e2e-tests/web-shell-dynamic-pairing.md`。
 
