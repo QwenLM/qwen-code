@@ -653,6 +653,36 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     >();
   });
 
+  it('parses every kind of background turn a daemon emits', () => {
+    // A consumer built against an older SDK would reject a kind it has
+    // never seen and lose the turn, so every kind the daemon can emit has
+    // to be listed here as well as in the type.
+    for (const kind of [
+      'agent',
+      'monitor',
+      'shell',
+      'workflow',
+      'peer',
+    ] as const) {
+      expect(
+        Public.parseDaemonBackgroundTurn({
+          turnId: 't1',
+          taskId: 'k1',
+          kind,
+          startedAt: 1,
+        }),
+      ).toMatchObject({ kind });
+    }
+    expect(
+      Public.parseDaemonBackgroundTurn({
+        turnId: 't1',
+        taskId: 'k1',
+        kind: 'something-else',
+        startedAt: 1,
+      }),
+    ).toBeUndefined();
+  });
+
   it('exposes the workspace session live-state surface at the public entry', () => {
     expect(typeof Public.parseDaemonBackgroundTurn).toBe('function');
     // The prototype checks execute under vitest (type-only imports are
