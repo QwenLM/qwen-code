@@ -297,7 +297,47 @@ export class PlaywrightSession {
         'STALE_TAB',
         'The Chrome tab changed after discovery; list open tabs again',
       );
+    // A tab this session already controls must never be released by a probe
+    // that its own open dialog leaves unanswered.
+    const controlled = [...this.tabs.values()].some(
+      (tab) => tab.providerTabId === current.providerTabId && !tab.stale,
+    );
+    if (!controlled) await this.assertClaimableRenderer(current.providerTabId);
     return await this.registerTab(current, 'claimed', true);
+  }
+
+  /**
+   * CDP cannot answer a dialog that opened while no Browser Use debugger was
+   * attached, and its blocked renderer would only time registration out.
+   * Probe first and hand the tab back with an actionable error instead.
+   */
+  private async assertClaimableRenderer(providerTabId: number): Promise<void> {
+    // Attaching stays outside the budget, which times only the renderer.
+    await this.bridge.request('tabs.attach', { tabId: providerTabId });
+    try {
+      await withTimeout(
+        this.bridge.request('cdp.send', {
+          tabId: providerTabId,
+          method: 'Runtime.evaluate',
+          params: { expression: '0', returnByValue: true },
+        }),
+        ATTACH_PROBE_TIMEOUT_MS,
+      );
+      return;
+    } catch (error) {
+      await this.bridge
+        .request('tabs.release', { tabId: providerTabId })
+        .catch(() => undefined);
+      if (
+        !(error instanceof BrowserRuntimeError) ||
+        error.code !== 'OPERATION_TIMEOUT'
+      )
+        throw error;
+    }
+    throw new BrowserRuntimeError(
+      'DIALOG_OPEN',
+      'The tab is not responding, most likely because it shows a JavaScript dialog that only the user can close. Ask the user to close the dialog in Chrome, then list open tabs and claim the tab again.',
+    );
   }
 
   private async registerTab(

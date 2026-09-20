@@ -870,6 +870,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_runtime_removal',
   'native_directory_picker',
   'workspace_runtime',
+  'workspace_runtime_stop',
   'workspace_local_open',
   'workspace_local_terminal',
   'workspace_qualified_rest_core',
@@ -3765,6 +3766,27 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_runtime_stop') {
+          expect(predicate({ workspaceRuntimeStopAvailable: true })).toBe(true);
+          expect(predicate({ workspaceRuntimeStopAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeStopAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceRuntimeStopAvailable: false,
+            }),
+          ).not.toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'native_directory_picker') {
           expect(predicate({ nativeDirectoryPickerAvailable: true })).toBe(
             true,
@@ -4210,7 +4232,7 @@ describe('createServeApp', () => {
         'evil.example',
       );
       expect(bracketed.headers['content-security-policy']).toContain(
-        "connect-src 'self';",
+        "connect-src 'self' https://unpkg.com/@qwen-code/;",
       );
 
       // The mixed shape is the one that broke functionally, not just by
