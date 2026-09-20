@@ -905,19 +905,28 @@ describe('splitCompoundCommandSegments', () => {
   });
 
   it('reports the terminator across a quote the two readings disagree on', async () => {
-    // shell-semantics reads `&` as backgrounded, so the `cd` must not move the
-    // cwd the write is attributed to — `&&` must, and the merge loop is what
-    // decides which operator a boundary carries.
+    // Only the bash reading finds these operators, so they are reported with
+    // `terminatorAmbiguous` and shell-semantics keeps both cwds rather than
+    // reading `&` as backgrounded on their word alone.
     expect(
       splitCompoundCommandSegments("cd 'a\\' & echo {} > settings.json"),
     ).toEqual([
-      { command: "cd 'a\\'", terminator: '&' },
+      { command: "cd 'a\\'", terminator: '&', terminatorAmbiguous: true },
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
     expect(
       splitCompoundCommandSegments("cd 'a\\' && echo {} > settings.json"),
     ).toEqual([
-      { command: "cd 'a\\'", terminator: '&&' },
+      { command: "cd 'a\\'", terminator: '&&', terminatorAmbiguous: true },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+  });
+
+  it('leaves a terminator both readings find unambiguous', async () => {
+    expect(
+      splitCompoundCommandSegments("cd 'a' & echo {} > settings.json"),
+    ).toEqual([
+      { command: "cd 'a'", terminator: '&' },
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });

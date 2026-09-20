@@ -965,6 +965,12 @@ export interface CompoundCommandSegment {
    * shell runs in a subshell (`&`).
    */
   terminator: string;
+  /**
+   * Set when only one of the two backslash readings found this operator, so
+   * bash may not run it at all. Such a terminator must not decide on its own
+   * what the shell did — notably whether a `cd` ran in a subshell (#12246).
+   */
+  terminatorAmbiguous?: boolean;
 }
 
 /**
@@ -983,15 +989,15 @@ export function splitCompoundCommandSegments(
 ): CompoundCommandSegment[] {
   // The two readings differ only at a backslash, so one scan is enough without.
   const boundaries = command.includes('\\')
-    ? [
-        ...findOperatorBoundaries(command, 'bash'),
-        ...findOperatorBoundaries(command, 'escape-everywhere'),
-      ].sort((a, b) => a.start - b.start)
+    ? mergeOperatorBoundaries(
+        findOperatorBoundaries(command, 'bash'),
+        findOperatorBoundaries(command, 'escape-everywhere'),
+      )
     : findOperatorBoundaries(command, 'bash');
 
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
-  for (const { start, end, operator } of boundaries) {
+  for (const { start, end, operator, ambiguous } of boundaries) {
     if (start < lastSplit) {
       continue;
     }
@@ -1005,7 +1011,11 @@ export function splitCompoundCommandSegments(
       dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
     );
     if (segment) {
-      segments.push({ command: segment, terminator: operator });
+      segments.push({
+        command: segment,
+        terminator: operator,
+        ...(ambiguous ? { terminatorAmbiguous: true } : {}),
+      });
     }
     lastSplit = end;
   }
@@ -1023,6 +1033,31 @@ interface OperatorBoundary {
   start: number;
   end: number;
   operator: string;
+  /** Only one of the two backslash readings found this operator. */
+  ambiguous?: boolean;
+}
+
+/**
+ * Order the boundaries of both readings and flag the ones only one of them
+ * found. A boundary both readings agree on is one bash certainly runs; the
+ * rest are split on all the same (a missed boundary hides a command), but
+ * their operator is not evidence of what the shell did.
+ */
+function mergeOperatorBoundaries(
+  bash: OperatorBoundary[],
+  escapeEverywhere: OperatorBoundary[],
+): OperatorBoundary[] {
+  const key = (b: OperatorBoundary) => `${b.start}:${b.operator}`;
+  const bashKeys = new Set(bash.map(key));
+  const escapeKeys = new Set(escapeEverywhere.map(key));
+  return [...bash, ...escapeEverywhere]
+    .sort((a, b) => a.start - b.start)
+    .map((b) => ({
+      ...b,
+      ...(bashKeys.has(key(b)) && escapeKeys.has(key(b))
+        ? {}
+        : { ambiguous: true }),
+    }));
 }
 
 type BackslashReading = 'bash' | 'escape-everywhere';

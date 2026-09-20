@@ -2257,6 +2257,47 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+/**
+ * A directory the segments after a `cd` may run in. The walk carries more than
+ * one when a `cd`'s effect on the cwd is not decided: the operator that ended
+ * it was seen by only one backslash reading, so bash either ran it in the
+ * foreground or in a subshell, and the rules must hold under both (#12246).
+ */
+interface CwdCandidate {
+  cwd: string;
+  cwdUnknown: boolean;
+}
+
+/**
+ * Candidates double at every undecided `cd`, so cap the walk. Past the cap the
+ * remaining paths are reported as cwd-unknown instead of branching further.
+ */
+const MAX_CWD_CANDIDATES = 8;
+
+function dedupeCwdCandidates(candidates: CwdCandidate[]): CwdCandidate[] {
+  const seen = new Set<string>();
+  const unique = candidates.filter((candidate) => {
+    const key = `${candidate.cwd}\u0000${candidate.cwdUnknown}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (unique.length <= MAX_CWD_CANDIDATES) return unique;
+  return unique
+    .slice(0, MAX_CWD_CANDIDATES)
+    .map((candidate) => ({ ...candidate, cwdUnknown: true }));
+}
+
+function dedupeOps(ops: ShellOperation[]): ShellOperation[] {
+  const seen = new Set<string>();
+  return ops.filter((op) => {
+    const key = JSON.stringify(op);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
@@ -2266,10 +2307,10 @@ function walkCompoundCommand(
   const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
   const ops: ShellOperation[] = [];
-  let effectiveCwd = cwd;
-  let cwdUnknown = initialCwdUnknown;
+  let candidates: CwdCandidate[] = [{ cwd, cwdUnknown: initialCwdUnknown }];
+  let branched = false;
 
-  for (const { command: sub, terminator } of subCommands) {
+  for (const { command: sub, terminator, terminatorAmbiguous } of subCommands) {
     // `cd x & …` runs the `cd` in a background subshell, so it does not move
     // the cwd the following segments run in. Treating it as a foreground `cd`
     // would attribute their relative writes to the wrong directory — for
@@ -2277,51 +2318,55 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
-    if (cdTarget.kind === 'static') {
-      if (!backgrounded) {
-        effectiveCwd = cdTarget.cwd;
-        cwdUnknown = cdTarget.cwdUnknown;
+    // `cd`-ness does not depend on the cwd, only the target it resolves to.
+    const resolved = candidates.map((candidate) =>
+      resolveCdTargetCwd(sub, candidate.cwd, candidate.cwdUnknown),
+    );
+    if (resolved[0]!.kind !== 'not-cd') {
+      if (backgrounded && !terminatorAmbiguous) {
+        continue;
       }
-      continue;
-    }
-    if (cdTarget.kind === 'dynamic') {
-      if (!backgrounded) {
-        cwdUnknown = true;
-      }
+      const moved = resolved.map((target, i) =>
+        target.kind === 'static'
+          ? { cwd: target.cwd, cwdUnknown: target.cwdUnknown }
+          : { cwd: candidates[i]!.cwd, cwdUnknown: true },
+      );
+      // An operator only one reading sees cannot decide whether this `cd` ran
+      // in the foreground, so both outcomes stay open.
+      branched ||= Boolean(terminatorAmbiguous);
+      candidates = dedupeCwdCandidates(
+        terminatorAmbiguous ? [...candidates, ...moved] : moved,
+      );
       continue;
     }
 
     // Unwrap per segment, after the outer split, so wrapper suffixes like
     // `bash -lc 'safe' && echo > file` are not discarded.
-    if (depth < MAX_SHELL_UNWRAP_DEPTH) {
-      const subUnwrapped = stripShellWrapper(sub);
-      if (subUnwrapped !== sub) {
-        ops.push(
-          ...walkCompoundCommand(
-            subUnwrapped,
-            effectiveCwd,
-            depth + 1,
-            cwdUnknown,
-          ),
-        );
-        continue;
-      }
-    } else if (stripShellWrapper(sub) !== sub) {
+    const unwrappable = depth < MAX_SHELL_UNWRAP_DEPTH;
+    const subUnwrapped = stripShellWrapper(sub);
+    if (!unwrappable && subUnwrapped !== sub) {
       shellSemanticsDebugLogger.warn(
         `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
       );
     }
 
-    const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
-    } else {
-      ops.push(...subOps);
+    for (const { cwd: segmentCwd, cwdUnknown } of candidates) {
+      if (unwrappable && subUnwrapped !== sub) {
+        ops.push(
+          ...walkCompoundCommand(subUnwrapped, segmentCwd, depth + 1, cwdUnknown),
+        );
+        continue;
+      }
+      const subOps = extractShellOperations(sub, segmentCwd);
+      if (cwdUnknown) {
+        ops.push(...markCwdUnknownOps(subOps, sub, segmentCwd));
+      } else {
+        ops.push(...subOps);
+      }
     }
   }
 
-  return ops;
+  return branched ? dedupeOps(ops) : ops;
 }
 
 function hasAbsolutePathTokenForOperation(
