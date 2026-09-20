@@ -34,13 +34,13 @@ Standalone 创建属于解析后的 Conversations runtime。直接 child/side-ta
 
 回滚/隔离期间在内存保留最初异常链，包括原始 dispatch wrapper。绑定重试需要隔离时保留第一次失败。清理错误不能替换已观测到的创建失败。不虚构新 prompt ID；诊断不含 prompt、结果、工具参数、source ID、完整路径、原始 RPC 或凭据，复用既有 logger trace/run 上下文。
 
-HTTP 序列化继续显式投影字段。通用 expected-error warning 缺少 ID 时先使用创建诊断的目标 ID，再使用 service error 的 ID。它向 telemetry 传递新建的无 cause Error，避免暴露内存中的 cause 链。专用服务诊断同样只记录固定消息和白名单基本类型字段。直接调用方得到相同的安全服务消息和内存 cause 链。
+HTTP 序列化继续显式投影字段。通用 expected-error warning 缺少 ID 时先使用创建诊断的目标 ID，再使用 service error 的 ID。仅对携带创建诊断的错误，向 telemetry 传递无 cause 的 Error 投射，并保留原始安全的 `name`、`code`、`stack`。其他 standalone 错误（包括删除和目录恢复）保留原错误对象。已安装的 OpenTelemetry recorder 读取类型、消息和栈，不遍历 cause；此窄范围投射为新增的创建 cause 提供纵深防护，同时保留抛出点归因。专用服务诊断同样只记录固定消息和白名单基本类型字段。直接调用方得到相同的安全服务消息和内存 cause 链。
 
 ## 私有来源确认
 
 仅失败的 `qwen/control/session/source` 响应增加 `reason: recording_unavailable | write_not_confirmed`。Recording API 保持 boolean，不从 false 推断具体文件系统原因。成功响应不变。
 
-Bridge 仍返回 boolean，不向 session 结果或 SDK 类型增加字段。每次未成功的来源操作输出有界 `source_persistence_failed` 行，包含实际在线 session ID 和下列分类之一：
+Bridge 仍返回 boolean，不向 session 结果或 SDK 类型增加字段。经 `persistSessionSource` 处理的失败操作（新建、冷恢复和在线来源补全）输出有界 `source_persistence_failed` 行，包含实际在线 session ID 和下列分类之一：
 
 - 已识别的私有原因：`recording_unavailable` 或 `write_not_confirmed`。
 - 旧 child 返回 `{ persisted:false }`：`negative_ack`。
@@ -48,7 +48,7 @@ Bridge 仍返回 boolean，不向 session 结果或 SDK 类型增加字段。每
 - 负确认携带未知 reason：`unknown`。
 - 本地类型化 transport error：`rpc_timeout` 或 `transport_closed`；其他 RPC 拒绝：`rpc_rejected`。
 
-不匹配错误消息，不序列化原始异常。远端异常经过 JSON-RPC 序列化后属于拒绝，不能作为本地观测超时的证据。既有 diagnostic callback 和 stderr 输出为 best-effort。成功来源确认不输出失败记录。
+不匹配错误消息，不序列化原始异常。远端异常经过 JSON-RPC 序列化后属于拒绝，不能作为本地观测超时的证据。既有 diagnostic callback 和 stderr 输出为 best-effort。成功来源确认不输出失败记录。分支会话来源写入和 `ensureDefaultSessionPersisted` 不经过此 helper，不属于本 PR，保持既有诊断行为。
 
 ## 实现与消费者
 

@@ -1877,6 +1877,16 @@ describe('StandaloneSessionService', () => {
       sessionId: childSessionId,
     });
 
+    expect(harness.warn).toHaveBeenCalledExactlyOnceWith(
+      'Standalone session creation failed.',
+      expect.objectContaining({
+        sessionId: childSessionId,
+        relatedSessionId: sessionId,
+        phase: 'model_selection',
+        dispatchState: 'dispatched',
+        cleanupOutcome: 'rolled_back',
+      }),
+    );
     expect(harness.bridge.killSession).toHaveBeenCalledWith(childSessionId, {
       requireZeroAttaches: true,
     });
@@ -3932,6 +3942,55 @@ describe('StandaloneSessionService', () => {
 });
 
 describe('creation failure diagnostics', () => {
+  it('attributes runtime acquisition failure before dispatch', async () => {
+    const h = createHarness();
+    const original = new ConversationRuntimeOwnershipError(
+      'conversation_runtime_unavailable',
+      true,
+    );
+    h.ensureRuntime.mockRejectedValueOnce(original);
+    await expect(h.service.create({ sessionId })).rejects.toBe(original);
+    expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+      'Standalone session creation failed.',
+      {
+        sessionId,
+        phase: 'runtime',
+        reason: 'runtime_changed',
+        dispatchState: 'not_dispatched',
+        cleanupOutcome: 'not_needed',
+      },
+    );
+    expect(h.bridge.spawnStandaloneSession).not.toHaveBeenCalled();
+    expect(h.quarantineRuntime).not.toHaveBeenCalled();
+  });
+
+  it('attributes failed durable validation after confirmed source persistence', async () => {
+    mockDurableStandalone();
+    const original = new Error('SECRET_DURABLE');
+    vi.mocked(
+      SessionService.prototype.readCreationMetadataIfReadable,
+    ).mockRejectedValueOnce(original);
+    const h = createHarness();
+    await expect(h.service.create({ sessionId })).rejects.toMatchObject({
+      code: 'standalone_creation_outcome_unknown',
+      cause: original,
+    });
+    expect(h.warn).toHaveBeenCalledExactlyOnceWith(
+      'Standalone session creation failed.',
+      {
+        sessionId,
+        workspaceId: 'conversations',
+        phase: 'durable_validation',
+        reason: 'unknown',
+        dispatchState: 'dispatched',
+        cleanupOutcome: 'quarantined',
+      },
+    );
+    expect(h.bridge.commitManagedConversationBinding).not.toHaveBeenCalled();
+    expect(h.bridge.sendPrompt).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.warn.mock.calls)).not.toContain('SECRET_DURABLE');
+  });
+
   it.each(['pre-dispatch', 'source-persistence'] as const)(
     'preserves the HTTP contract and safely diagnoses %s through the real route',
     async (mode) => {

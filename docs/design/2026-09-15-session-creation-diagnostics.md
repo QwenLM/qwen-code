@@ -34,13 +34,13 @@ The source boolean alone cannot distinguish a storage rejection from an RPC fail
 
 Keep the initiating exception chain in memory through rollback/quarantine, including the original dispatch wrapper. Binding retries preserve the first failed attempt if containment is needed. Cleanup errors cannot replace an already observed creation failure. No new prompt ID is invented; the diagnostic contains no prompt, result, tool argument, source ID, full path, raw RPC payload or credential. Existing logger trace/run context is reused.
 
-HTTP serialization remains an explicit field projection. Its generic expected-error warning falls back to the creation diagnostic's target ID, then the service error's ID. It passes a fresh cause-free Error to telemetry instead of exposing the retained cause chain. The dedicated service diagnostic also records only a fixed message and allowlisted primitive fields. Direct callers receive the same safe service message and in-memory cause chain.
+HTTP serialization remains an explicit field projection. Its generic expected-error warning falls back to the creation diagnostic's target ID, then the service error's ID. For errors carrying a creation diagnostic, it passes a cause-free Error projection to telemetry, preserving the original safe `name`, `code` and `stack`. Other standalone errors, including deletion and directory recovery, retain their original error object. The installed OpenTelemetry recorder reads type/message/stack and does not traverse causes; the narrow projection is defence in depth for the newly retained creation causes, without sacrificing throw-site attribution. The dedicated service diagnostic also records only a fixed message and allowlisted primitive fields. Direct callers receive the same safe service message and in-memory cause chain.
 
 ## Private source acknowledgement
 
 Only a failed `qwen/control/session/source` response adds `reason: recording_unavailable | write_not_confirmed`. The recording API stays boolean, and false is never interpreted as a particular filesystem cause. Successful responses remain unchanged.
 
-The bridge still returns a boolean and adds no field to session results or SDK types. Every unsuccessful source operation emits a bounded `source_persistence_failed` line with the live session ID and one of:
+The bridge still returns a boolean and adds no field to session results or SDK types. Unsuccessful operations routed through `persistSessionSource` (fresh creation, cold restore and live source backfill) emit a bounded `source_persistence_failed` line with the live session ID and one of:
 
 - `recording_unavailable` or `write_not_confirmed` from the recognized private reason.
 - `negative_ack` for an old child returning `{ persisted:false }`.
@@ -48,7 +48,7 @@ The bridge still returns a boolean and adds no field to session results or SDK t
 - `unknown` for an unrecognized reason on a negative acknowledgement.
 - `rpc_timeout` or `transport_closed` from local typed transport errors; other RPC rejection is `rpc_rejected`.
 
-No message matching or raw exception serialization is used. A remote exception serialized across JSON-RPC is a rejection, not evidence of a locally observed timeout. The existing diagnostic callback and stderr surfaces are best-effort. Successful source confirmation emits no failure record.
+No message matching or raw exception serialization is used. A remote exception serialized across JSON-RPC is a rejection, not evidence of a locally observed timeout. The existing diagnostic callback and stderr surfaces are best-effort. Successful source confirmation emits no failure record. Branched-session source writes and `ensureDefaultSessionPersisted` bypass this helper and are outside this PR; their existing diagnostic behavior is unchanged.
 
 ## Implementation and consumers
 

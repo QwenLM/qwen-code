@@ -412,8 +412,13 @@ export function sendBridgeError(
             ? 500
             : 409;
     if (status === 500) {
-      const safeError = new Error(err.message);
-      safeError.name = err.name;
+      const safeError = err.creationDiagnostic
+        ? Object.assign(new Error(err.message), {
+            name: err.name,
+            code: err.code,
+            stack: err.stack,
+          })
+        : err;
       recordExpectedBridgeError(
         safeError,
         {
