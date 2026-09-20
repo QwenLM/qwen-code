@@ -27,6 +27,36 @@ import { resolveProxy } from './channel/proxy.js';
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const SETTLED = new Set(['completed', 'failed', 'expired', 'cancelled']);
 
+// Provider ceilings for one batch input file, checked locally so an
+// out-of-range file is refused before it is uploaded rather than after — the
+// upload is the slow, billable half of the mistake. These are the numbers the
+// user doc states (docs/users/features/batch.md); if the provider raises them,
+// both move together.
+const MAX_REQUESTS_PER_FILE = 50_000;
+const MAX_FILE_BYTES = 500 * 1024 * 1024;
+const MAX_LINE_BYTES = 6 * 1024 * 1024;
+// `completion_window` bounds, in hours: the provider offers 24h to 14d.
+const MIN_WINDOW_HOURS = 24;
+const MAX_WINDOW_HOURS = 14 * 24;
+
+/**
+ * Reject a completion window the provider does not offer, before anything is
+ * uploaded. Forwarding it verbatim costs a full upload to learn that `12h` is
+ * not a window — a limit this PR's own docs state.
+ */
+export function assertValidWindow(window: string): void {
+  const match = /^(\d+)([hd])$/.exec(window);
+  if (!match) {
+    throw new Error(
+      `--window must be a number followed by h or d, e.g. 24h or 7d; got "${window}".`,
+    );
+  }
+  const hours = Number(match[1]) * (match[2] === 'd' ? 24 : 1);
+  if (hours < MIN_WINDOW_HOURS || hours > MAX_WINDOW_HOURS) {
+    throw new Error(`--window must be between 24h and 14d; got "${window}".`);
+  }
+}
+
 export interface BatchEndpoint {
   apiKey: string;
   baseUrl: string;
@@ -258,6 +288,7 @@ export async function submitBatch(
   file: string,
   window: string,
 ): Promise<BatchJob> {
+  assertValidWindow(window);
   // Stream the input line by line instead of readFileSync+split+map+join:
   // the provider ceiling is 500 MB / 50 000 lines and this command path
   // never reaches the CLI's larger-heap relaunch, so four live copies of the
@@ -268,6 +299,8 @@ export async function submitBatch(
   });
   let jsonl = '';
   let lineNo = 0;
+  let requests = 0;
+  let bytes = 0;
   const lineOfId = new Map<string, number>();
   try {
     for await (const raw of rl) {
@@ -319,7 +352,26 @@ export async function submitBatch(
         );
       }
       lineOfId.set(id, lineNo);
-      jsonl += JSON.stringify(requestLine) + '\n';
+      const encoded = JSON.stringify(requestLine) + '\n';
+      const encodedBytes = Buffer.byteLength(encoded);
+      if (encodedBytes > MAX_LINE_BYTES) {
+        throw new Error(
+          `${file}:${lineNo}: request is ${encodedBytes} bytes, over the ${MAX_LINE_BYTES}-byte per-line limit.`,
+        );
+      }
+      requests += 1;
+      if (requests > MAX_REQUESTS_PER_FILE) {
+        throw new Error(
+          `${file}: more than ${MAX_REQUESTS_PER_FILE} requests; split the file and submit the parts as separate jobs.`,
+        );
+      }
+      bytes += encodedBytes;
+      if (bytes > MAX_FILE_BYTES) {
+        throw new Error(
+          `${file}: over the ${MAX_FILE_BYTES}-byte per-file limit at line ${lineNo}; split the file and submit the parts as separate jobs.`,
+        );
+      }
+      jsonl += encoded;
     }
   } finally {
     rl.close();

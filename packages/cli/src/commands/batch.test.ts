@@ -281,6 +281,57 @@ describe('submitBatch / fetchBatch', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('refuses a window the provider does not offer, before uploading anything', async () => {
+    // Forwarding it verbatim costs a full upload to learn that 12h is not a
+    // window — and the upload is the billable half of the mistake.
+    const file = path.join(dir, 'in.jsonl');
+    fs.writeFileSync(file, '{"messages":[{"role":"user","content":"hi"}]}\n');
+
+    await expect(submitBatch(ep, file, '12h')).rejects.toThrow(
+      '--window must be between 24h and 14d',
+    );
+    await expect(submitBatch(ep, file, '15d')).rejects.toThrow(
+      '--window must be between 24h and 14d',
+    );
+    await expect(submitBatch(ep, file, 'soon')).rejects.toThrow(
+      '--window must be a number followed by h or d',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The boundaries themselves are accepted.
+    fetchMock
+      .mockResolvedValueOnce(jsonRes({ id: 'file-1' }))
+      .mockResolvedValueOnce(jsonRes({ id: 'batch-1', status: 'validating' }));
+    await expect(submitBatch(ep, file, '14d')).resolves.toMatchObject({
+      id: 'batch-1',
+    });
+  });
+
+  it('refuses a file over the request-count ceiling without uploading it', async () => {
+    const file = path.join(dir, 'huge.jsonl');
+    const line = '{"messages":[{"role":"user","content":"hi"}]}\n';
+    fs.writeFileSync(file, line.repeat(50_001));
+
+    await expect(submitBatch(ep, file, '24h')).rejects.toThrow(
+      'more than 50000 requests',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a single request over the per-line ceiling', async () => {
+    const file = path.join(dir, 'fat-line.jsonl');
+    const content = 'x'.repeat(6 * 1024 * 1024 + 1);
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ messages: [{ role: 'user', content }] }) + '\n',
+    );
+
+    await expect(submitBatch(ep, file, '24h')).rejects.toThrow(
+      'over the 6291456-byte per-line limit',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('uploads normalized JSONL then creates the batch', async () => {
     const file = path.join(dir, 'in.jsonl');
     fs.writeFileSync(file, '{"messages":[{"role":"user","content":"hi"}]}\n\n');

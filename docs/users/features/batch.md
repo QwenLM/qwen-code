@@ -22,17 +22,49 @@ two price models equal (realtime `1 − 0.8h` against batch `0.5`, for a
 cache-hit rate `h`) breaks even at `h = 0.625`, and an agent loop routinely
 sits above that, because every turn resends the same conversation prefix.
 
-The measurements, not just the model:
+| shape                      | cache-hit rate             | batch / realtime   | source                             |
+| -------------------------- | -------------------------- | ------------------ | ---------------------------------- |
+| agent loop (shared prefix) | 0.647 realtime, 0 in batch | **1.03** — 3% more | measured against the live API      |
+| fan-out, nothing shared    | 0                          | **0.50** — half    | derived: `h = 0` defines the shape |
 
-| shape                      | cache-hit rate             | batch / realtime   |
-| -------------------------- | -------------------------- | ------------------ |
-| agent loop (shared prefix) | 0.647 realtime, 0 in batch | **1.03** — 3% more |
-| fan-out (no shared prefix) | 0                          | **0.50** — half    |
+Only the first row was measured. The second follows from the two facts above —
+batch is half price, batch never caches — plus the definition of the shape, so
+it needs no probe of its own. But read "nothing shared" literally, because most
+real fan-out does not qualify.
 
-So the shape batch is genuinely good for is **fan-out**: many independent
-single-turn requests that share no prefix, where the 50% is real and the
-realtime quota is left alone. Classifying a thousand files, generating a
-thousand summaries, re-labelling a dataset. That is what `qwen batch` serves.
+### Fan-out is not automatically half price
+
+A thousand requests that each carry the same 2 KB system prompt do share a
+prefix, and the realtime side caches it. What decides the bill is the **share
+of one request's input that is the common prefix**:
+
+| common prefix as a share of one request's input | who wins                           |
+| ----------------------------------------------- | ---------------------------------- |
+| below 62.5%                                     | batch, and by more the lower it is |
+| around 62.5%                                    | a wash                             |
+| above 62.5%                                     | realtime + cache                   |
+
+Two jobs with the same request count land on opposite sides:
+
+- 500-token instruction, 2,000-token document per request → prefix is 20% of
+  the input → **batch saves about 40%**
+- 5,000-token instruction with few-shot examples, 500-token item per request →
+  prefix is 90% → **batch costs more than realtime**
+
+Few-shot classification and long-rulebook labelling are the second shape, and
+they are common. To check your own job before committing to it, send one
+request realtime and read `usage.prompt_tokens_details.cached_tokens` against
+`usage.prompt_tokens` — that ratio is `h`, and anything under 0.625 means batch
+is the cheaper route.
+
+Output tokens are the part that always favours batch: they are half price there
+and carry no cache discount realtime, so a job with long outputs tolerates a
+higher prefix share before it flips.
+
+So the shape batch is genuinely good for is fan-out **with little shared
+context**: many independent single-turn requests, each dominated by its own
+content. Summarizing a thousand different files, re-labelling a dataset where
+the item text dwarfs the instruction. That is what `qwen batch` serves.
 
 Latency is the other half of the story. Measured from `in_progress` to
 `completed`: 596 s for a 3-line job, 1720 s for 24 lines, 3718 s for 1000 —
