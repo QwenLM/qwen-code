@@ -552,6 +552,156 @@ describe('EventBus', () => {
     abort.abort();
   });
 
+  it('degrades queued App HTML without disconnecting or changing healthy delivery and replay', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const slow = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    const fast = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      const pending = bus.publish({
+        type: 'session_update',
+        data: {
+          update: { sessionUpdate: 'tool_call_update', status: 'in_progress' },
+        },
+      });
+      await fast.next();
+      const fastDelivery = fast.next();
+      const html = 'x'.repeat(3 * 1024 * 1024);
+      const completed = bus.publish({
+        type: 'session_update',
+        data: {
+          sessionId: 'app-session',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'app-call',
+            status: 'completed',
+            rawOutput: {
+              type: 'mcp_app',
+              html,
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'Dashboard ready' }],
+              },
+            },
+          },
+        },
+      });
+      expect((await fastDelivery).value).toBe(completed);
+      expect((await slow.next()).value).toBe(pending);
+      const fallback = (await slow.next()).value;
+      expect(fallback).toMatchObject({
+        id: completed?.id,
+        type: 'session_update',
+        data: {
+          sessionId: 'app-session',
+          update: {
+            toolCallId: 'app-call',
+            status: 'completed',
+            rawOutput: {
+              type: 'mcp_app',
+              html: '',
+              fallbackText: 'Dashboard ready',
+              toolResult: {
+                content: [{ type: 'text', text: 'Dashboard ready' }],
+              },
+            },
+          },
+        },
+      });
+      expect(completed).toHaveProperty('data.update.rawOutput.html', html);
+      expect(bus.subscriberCount).toBe(2);
+      const resumed = bus
+        .subscribe({ lastEventId: pending?.id, signal: abort.signal })
+        [Symbol.asyncIterator]();
+      expect((await resumed.next()).value).toBe(completed);
+      const following = bus.publish({
+        type: 'session_update',
+        data: { text: 'Done' },
+      });
+      expect((await slow.next()).value).toBe(following);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it('degrades an App before it fills an empty queue and disconnects on the next frame', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus
+      .subscribe({ signal: abort.signal })
+      [Symbol.asyncIterator]();
+    try {
+      const app = bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(3 * 1024 * 1024),
+              fallbackText: 'Dashboard ready',
+            },
+          },
+        },
+      });
+      const following = bus.publish({
+        type: 'session_update',
+        data: { text: 'Done' },
+      });
+      const delivered = (await iter.next()).value;
+      expect(delivered).toMatchObject({ id: app?.id, type: 'session_update' });
+      expect(delivered).toHaveProperty('data.update.rawOutput.html', '');
+      expect(delivered).toHaveProperty(
+        'data.update.rawOutput.fallbackText',
+        'Dashboard ready',
+      );
+      expect((await iter.next()).value).toBe(following);
+      expect(bus.subscriberCount).toBe(1);
+    } finally {
+      abort.abort();
+      bus.close();
+    }
+  });
+
+  it.each([false, true])(
+    'still evicts when the App fallback exceeds the queue budget (pending: %s)',
+    async (pending) => {
+      const bus = new EventBus(100, undefined, undefined, {
+        maxQueuedBytes: 1200,
+      });
+      const abort = new AbortController();
+      const iter = bus.subscribe({ signal: abort.signal });
+      if (pending) bus.publish({ type: 'session_update', data: 'pending' });
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            rawOutput: {
+              type: 'mcp_app',
+              html: 'x'.repeat(2000),
+              fallbackText: 'y'.repeat(2000),
+            },
+          },
+        },
+      });
+      const events: BridgeEvent[] = [];
+      for await (const event of iter) events.push(event);
+      expect(events.at(-1)).toMatchObject({
+        type: 'client_evicted',
+        data: { reason: 'queue_bytes_overflow' },
+      });
+      expect(bus.subscriberCount).toBe(0);
+      abort.abort();
+      bus.close();
+    },
+  );
+
   it('evicts a slow subscriber when live queued bytes overflow', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 1200,

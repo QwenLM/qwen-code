@@ -261,6 +261,36 @@ export function serializedBridgeEventByteLength(
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function mcpAppTextFallback(event: BridgeEvent): BridgeEvent | undefined {
+  if (event.type !== 'session_update' || !isRecord(event.data))
+    return undefined;
+  const update = event.data['update'];
+  if (!isRecord(update) || update['sessionUpdate'] !== 'tool_call_update') {
+    return undefined;
+  }
+  const output = update['rawOutput'];
+  if (
+    !isRecord(output) ||
+    output['type'] !== 'mcp_app' ||
+    typeof output['html'] !== 'string' ||
+    !output['html'] ||
+    typeof output['fallbackText'] !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    ...event,
+    data: {
+      ...event.data,
+      update: { ...update, rawOutput: { ...output, html: '' } },
+    },
+  };
+}
+
 export function logEventSizingFailed(type: string): void {
   try {
     process.stderr.write(
@@ -586,7 +616,15 @@ export class EventBus {
     // Set we're iterating.
     for (const sub of Array.from(this.subs)) {
       if (sub.evicted) continue;
-      const pushResult = sub.queue.push(event, getEventBytes);
+      const pushResult = sub.queue.push(event, getEventBytes, () => {
+        // Only queued subscribers lose optional HTML; direct delivery and
+        // the replay ring retain the original App. Keep both queue caps.
+        const fallback = mcpAppTextFallback(event);
+        const bytes = fallback && serializedBridgeEventByteLength(fallback);
+        return fallback && bytes !== undefined
+          ? { value: fallback, bytes }
+          : undefined;
+      });
       if (!pushResult.ok) {
         sub.evicted = true;
         // Synthetic terminal frame: NO `id` field. Otherwise it would
@@ -1134,7 +1172,11 @@ class BoundedAsyncQueue<T> {
     return this.liveBytes;
   }
 
-  push(value: T, getBytes: () => number): PushResult {
+  push(
+    value: T,
+    getBytes: () => number,
+    fallback?: () => { value: T; bytes: number } | undefined,
+  ): PushResult {
     if (this.closed) {
       return {
         ok: false,
@@ -1161,8 +1203,17 @@ class BoundedAsyncQueue<T> {
         liveBytes: this.liveBytes,
       };
     }
-    const bytes = getBytes();
-    if (this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes) {
+    let bytes = getBytes();
+    const reduced =
+      this.liveBytes + bytes > this.maxBytes ? fallback?.() : undefined;
+    if (reduced) {
+      value = reduced.value;
+      bytes = reduced.bytes;
+    }
+    if (
+      (this.liveCount > 0 || reduced) &&
+      this.liveBytes + bytes > this.maxBytes
+    ) {
       return {
         ok: false,
         reason: 'queue_bytes_overflow',

@@ -117,6 +117,12 @@ to degrade fails closed. Larger accepted documents increase transcript and
 replay payloads. Streaming transfer limits and App-initiated tool calls remain
 outside this change.
 
+For live delivery, an MCP App that would overflow a subscriber's byte queue is
+retried for that subscriber with whole HTML removed and its text result intact.
+Healthy subscribers and the replay ring retain the original App. If the text
+fallback also exceeds the queue budget, normal eviction still applies; frame
+count limits and forced replay delivery remain unchanged.
+
 The daemon serves a static sandbox proxy before bearer authentication. It
 contains no session data or credentials. WebShell loads that proxy in an
 outer iframe that omits `allow-same-origin`, so even a same-URL `localhost`
