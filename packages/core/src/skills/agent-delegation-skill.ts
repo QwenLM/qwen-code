@@ -27,7 +27,7 @@ import { ToolDisplayNames } from '../tools/tool-names.js';
 import {
   readBundledReference,
   resolveBundledReferenceSurface,
-  toolSearchRevealSentence,
+  toolSearchBridgeSentence,
   type BundledReference,
   type BundledReferenceSurface,
 } from './bundled-reference.js';
@@ -74,7 +74,7 @@ export function buildAgentDelegationSection(
     case 'pointer':
       return POINTER;
     case 'pointer-via-tool-search':
-      return `${POINTER} ${toolSearchRevealSentence(ToolDisplayNames.SKILL)}`;
+      return `${POINTER} ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
     case 'inline':
       return reference
         ? `${INLINE_NOTE}\n\n---\n\n${reference.body.trim()}`

@@ -15,11 +15,11 @@
  *
  * - The model can load the skill. Point at it.
  * - The Skill tool's schema can be withheld by a `tools.eager` allowlist, so
- *   the model may have to reveal it with ToolSearch first. Point at it and say
- *   so.
+ *   the model reaches it through the tool_search + tool_call bridge. Point at
+ *   it and say so.
  * - The model has no route to any skill (skills are off, the Skill tool is
- *   denied, or it is deferred with no ToolSearch to reveal it). Inline the
- *   reference, or the guidance reaches nobody.
+ *   denied, or it is deferred with no tool_search + tool_call bridge to reach
+ *   it). Inline the reference, or the guidance reaches nobody.
  * - The user turned this reference off, by name or by disabling the whole
  *   bundled level. Carry neither: inlining would put back, at a higher
  *   per-turn price, exactly the text they asked to remove.
@@ -96,9 +96,10 @@ export function readBundledReference(
  *
  * - `skill` — the Skill tool is in the request; the model can load it.
  * - `skill-via-tool-search` — the Skill tool is registered but its schema can
- *   be withheld by a `tools.eager` allowlist; the model may have to reveal it
- *   with ToolSearch first. Whether it is revealed right now is not asked: this
- *   is recorded for the session, and `/clear` drops reveals.
+ *   be withheld by a `tools.eager` allowlist; the model reaches it through the
+ *   tool_search + tool_call bridge. Whether it is declared right now is not
+ *   asked: this is recorded for the session, and a resumed-history
+ *   re-declaration lasts only until `/clear`.
  * - `inline` — no route to any skill; the reference has to travel in the
  *   tool's own description.
  * - `withheld` — the user turned this reference off; carry nothing.
@@ -142,7 +143,14 @@ export function resolveBundledReferenceRoute(
     if (!Array.isArray(toolNames)) return 'skill';
     if (!toolNames.includes(ToolNames.SKILL)) return 'inline';
     if (isToolDeferredBehindToolSearch(config, ToolNames.SKILL)) {
-      return toolNames.includes(ToolNames.TOOL_SEARCH)
+      // A withheld schema is only reachable through the tool_search +
+      // tool_call bridge. Without BOTH halves the Skill tool is registered
+      // but invisible, which is no route at all — with tool_search alone the
+      // schema can be reviewed but never invoked. Whether it is declared
+      // right now is not asked: this is recorded for the session, and a
+      // resumed-history re-declaration lasts only until `/clear`.
+      return toolNames.includes(ToolNames.TOOL_SEARCH) &&
+        toolNames.includes(ToolNames.TOOL_CALL)
         ? 'skill-via-tool-search'
         : 'inline';
     }
@@ -158,8 +166,8 @@ export function resolveBundledReferenceRoute(
  * plus whether the file can actually be read.
  *
  * - `pointer` — names the skill.
- * - `pointer-via-tool-search` — names the skill and says to reveal the Skill
- *   tool with ToolSearch first.
+ * - `pointer-via-tool-search` — names the skill and says to reach it through
+ *   the tool_search + tool_call bridge.
  * - `inline` — carries the reference in full.
  * - `withheld` — says nothing about it.
  */
@@ -223,15 +231,17 @@ export function isToolHiddenBehindToolSearch(
 }
 
 /**
- * The one wording for "fetch this tool's schema first", shared by every tool
- * description, failure hint and reminder that needs it so they never phrase it
- * differently.
+ * The one wording for reaching a hidden deferred tool through the
+ * tool_search + tool_call bridge, shared by every tool description, failure
+ * hint and reminder that needs it so they never phrase it differently.
+ * tool_search only REVIEWS the schema — invoking still goes through tool_call,
+ * so the sentence must name both halves or it sends the model down a dead end.
  *
  * Conditional on purpose: a description is built once, and a tool can be
- * revealed later in the session (a ToolSearch call, or a resumed history that
- * references it) and dropped again by `/clear`, so neither a flat "it is
- * deferred" nor leaving the sentence out stays true for the whole session.
+ * re-declared later in the session (a resumed history that references it) and
+ * dropped again by `/clear`, so neither a flat "it is deferred" nor leaving
+ * the sentence out stays true for the whole session.
  */
-export function toolSearchRevealSentence(toolDisplayName: string): string {
-  return `If the ${toolDisplayName} tool is not in your tool list, reveal it with ToolSearch first.`;
+export function toolSearchBridgeSentence(toolDisplayName: string): string {
+  return `If the ${toolDisplayName} tool is not in your tool list, review its schema with \`tool_search\` and then invoke it with \`tool_call\`.`;
 }
