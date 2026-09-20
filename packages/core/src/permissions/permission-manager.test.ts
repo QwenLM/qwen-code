@@ -804,6 +804,39 @@ describe('splitCompoundCommandSegments', () => {
       { command: 'npm test', terminator: '&' },
     ]);
   });
+
+  it('bash reading reads a backslash as literal inside plain single quotes (#R1-7)', () => {
+    const payload = `cd 'x\\'';echo ' & echo {} > settings.json`;
+    // default (escape-everywhere): the `\'` escapes the closing quote, the
+    // phantom `;` splits early
+    expect(splitCompoundCommandSegments(payload)).toEqual([
+      { command: "cd 'x\\''", terminator: ';' },
+      { command: "echo ' & echo {} > settings.json", terminator: '' },
+    ]);
+    // bash reading: `'x\''` closes, `';echo '` is a second span, the only
+    // boundary is the real ` & `
+    expect(
+      splitCompoundCommandSegments(payload, {
+        backslashLiteralInSingleQuotes: true,
+      }),
+    ).toEqual([
+      { command: `cd 'x\\'';echo '`, terminator: '&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+  });
+
+  it("bash reading still processes escapes inside ANSI-C $'...' spans (#R1-7)", () => {
+    // $'a\' ; rm...' is one ANSI-C string to bash (the \' is an escaped
+    // quote), so the bash reading must not split at that `;` either.
+    const payload = `printf $'a\\' ; rm -rf src/keepme'`;
+    expect(
+      splitCompoundCommandSegments(payload, {
+        backslashLiteralInSingleQuotes: true,
+      }),
+    ).toEqual([
+      { command: `printf $'a\\' ; rm -rf src/keepme'`, terminator: '' },
+    ]);
+  });
 });
 
 // ─── resolvePathPattern ──────────────────────────────────────────────────────

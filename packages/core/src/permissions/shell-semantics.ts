@@ -2055,7 +2055,11 @@ type CdResolution =
   | { kind: 'static'; cwd: string; cwdUnknown: boolean };
 
 function isDynamicShellPath(word: string): boolean {
-  return word.includes('$') || word.includes('`');
+  // A `cd` target carrying shell metacharacters can only be a quoting
+  // artifact of the segment split — no real directory argument arrives
+  // with them — so it must escalate like a `$`/backtick target instead of
+  // becoming a concrete cwd writes get attributed to (#12246 variant).
+  return word.includes('$') || word.includes('`') || /[;|&><]/.test(word);
 }
 
 function resolveCdTargetCwd(
@@ -2121,7 +2125,13 @@ function resolveCdTargetCwd(
  *   - Shell wrappers are unwrapped after the outer command is split, so
  *     wrapper suffixes remain visible while inner compound operators
  *     (`&&`, `;`, `|`) are still recursively discovered.
- *   - Operation order is preserved across segments.
+ *   - Operation order is preserved across segments within one quote reading.
+ *     Commands containing a backslash are also walked under bash's
+ *     literal-backslash-in-single-quotes reading and the two operation sets
+ *     are merged (deduped), so a boundary only one reading sees cannot hide
+ *     a write behind a `cd` attribution mismatch (#12246); merged results
+ *     may append the second reading's extra ops at the tail rather than in
+ *     command order.
  *
  * Single source of truth for compound shell analysis: both the
  * PermissionManager (matching `Edit/Write` rules against shell writes) and

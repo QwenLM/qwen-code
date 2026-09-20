@@ -1118,3 +1118,75 @@ describe('extractShellOperationsAcrossCommand', () => {
     ).not.toThrow();
   });
 });
+
+describe('dual quote readings for backslash payloads (#12246 review)', () => {
+  it("pins the ANSI-C escape regime: $'…' spans process escapes (#R1-2)", () => {
+    // bash reads $'a\' ; rm -rf src/keepme' as ONE printf argument (the \'
+    // is an escaped quote in ANSI-C); the bash-accurate reading must not
+    // split at that `;`. Neither reading may publish the phantom rm op.
+    expect(
+      extractShellOperationsAcrossCommand(
+        `printf $'a\\' ; rm -rf src/keepme'`,
+        '/repo',
+      ),
+    ).toEqual([]);
+  });
+
+  it('escalates quoting-artifact cd targets to cwdUnknown instead of a phantom cwd (#R1-3)', () => {
+    // The bash reading re-segments correctly but the cd target `x\;cd /etc`
+    // is a quoting artifact no real directory has; it must not become a
+    // concrete cwd writes are attributed to.
+    const ops = extractShellOperationsAcrossCommand(
+      `cd 'x\\'';cd /etc' ; echo hi > .qwen/settings.json`,
+      '/repo',
+    );
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      virtualTool: 'write_file',
+      filePath: '/repo/.qwen/settings.json',
+      cwdUnknown: true,
+      pathMayDependOnCwd: true,
+    });
+  });
+
+  it('threads the reading through a bash -lc wrapper (#R1-5)', () => {
+    const unwrapped = extractShellOperationsAcrossCommand(
+      `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+      '/repo',
+    );
+    const wrapped = extractShellOperationsAcrossCommand(
+      `bash -lc "cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json'"`,
+      '/repo',
+    );
+    expect(wrapped).toEqual(unwrapped);
+  });
+
+  it.each([
+    [`echo 'a\\' # trailing && touch /tmp/x`],
+    [`echo 'a\\' # trailing | touch /tmp/x`],
+  ])('pins the union op set for the comment-shape row %s (#R1-6)', (cmd) => {
+    // bash runs only the echo (the `#` opens a comment); neither quote
+    // reading models comments, so the bash-accurate split sees the `&&`/`|`
+    // unquoted and the union now emits a phantom touch op. Pinning the trade
+    // explicitly: verdicts stay allow only where no Write deny covers /tmp,
+    // and comment modeling belongs to the #11882 umbrella.
+    expect(extractShellOperationsAcrossCommand(cmd, '/repo')).toEqual([
+      { virtualTool: 'write_file', filePath: '/tmp/x' },
+    ]);
+  });
+
+  it('keeps a hard deny for a command that is unbalanced under the bash reading (#R1-11)', () => {
+    // bash rejects `cd '.qwen\'; echo x > settings.json'` with an
+    // unterminated quote — nothing executes — but the escape-everywhere
+    // reading still sees the write, so the union reports it and the
+    // conservative deny stands (a verdict change introduced by the dual
+    // reading, pinned deliberately).
+    const ops = extractShellOperationsAcrossCommand(
+      `cd '.qwen\\'; echo x > settings.json'`,
+      '/repo',
+    );
+    expect(ops).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+});

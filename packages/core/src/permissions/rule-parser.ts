@@ -984,6 +984,10 @@ export function splitCompoundCommandSegments(
   let inDouble = false;
   let escaped = false;
   let lastSplit = 0;
+  // Whether the current single-quoted span was opened as ANSI-C `$'…'` —
+  // bash processes escapes there, so the literal-backslash rule applies
+  // only to plain `'…'` spans.
+  let singleIsAnsiC = false;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
@@ -995,11 +999,24 @@ export function splitCompoundCommandSegments(
       escaped = false;
       continue;
     }
-    if (ch === '\\' && !(inSingle && options?.backslashLiteralInSingleQuotes)) {
+    if (
+      ch === '\\' &&
+      !(inSingle && !singleIsAnsiC && options?.backslashLiteralInSingleQuotes)
+    ) {
       escaped = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
+      if (!inSingle) {
+        // `$'…'` opens ANSI-C quoting (an unescaped `$` immediately before);
+        // a `'…'` span opened any other way treats backslashes as literal.
+        singleIsAnsiC =
+          i > 0 &&
+          command[i - 1] === '$' &&
+          precedingBackslashCount(command, i - 1) % 2 === 0;
+      } else {
+        singleIsAnsiC = false;
+      }
       inSingle = !inSingle;
       continue;
     }
