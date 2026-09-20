@@ -322,6 +322,47 @@ describe('useLiveBrowserHost', () => {
     expect(ws.audio()).toHaveLength(1);
   });
 
+  it('reports the microphone level, and zero whenever nothing is sent', async () => {
+    await render();
+    const ws = await connected();
+
+    // Before the call can take audio there is nothing to show.
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current).toBe(0);
+
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current).toBeCloseTo(0.5, 3);
+
+    // Muting must drop the meter, not freeze it at the last level.
+    await act(async () => {
+      ws.receive({
+        type: 'host.state',
+        epoch: 1,
+        status: status('listening', { inputMuted: true }),
+      });
+    });
+    speak([0.5, -0.5]);
+    expect(host!.inputLevel.current).toBe(0);
+  });
+
+  it('leaves no level behind after the microphone is released', async () => {
+    await render();
+    const ws = await connected();
+    await act(async () => {
+      ws.receive({ type: 'host.state', epoch: 1, status: status('listening') });
+    });
+    speak([1, -1]);
+    expect(host!.inputLevel.current).toBeGreaterThan(0);
+
+    await act(async () => {
+      host!.disconnect();
+    });
+    expect(host!.inputLevel.current).toBe(0);
+  });
+
   it('drops microphone frames rather than queue them behind a stalled socket', async () => {
     await render();
     const ws = await connected();

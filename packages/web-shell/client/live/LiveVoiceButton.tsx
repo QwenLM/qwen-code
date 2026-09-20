@@ -20,6 +20,7 @@ import {
   DialogTrigger,
 } from '../components/ui/dialog';
 import { useI18n } from '../i18n';
+import { LiveLevelMeter } from './LiveLevelMeter';
 import type { LiveBrowserHostCloseReason } from './useLiveBrowserHost';
 import { useLiveVoice } from './useLiveVoice';
 import styles from './LiveVoiceButton.module.css';
@@ -234,6 +235,17 @@ export function LiveVoiceButton(): React.JSX.Element | null {
           <div className={styles.liveState} data-state={status.state}>
             <span className={styles.liveStateOrb} />
             <span>{liveStateLabel(status, t)}</span>
+            {mode === 'self' ? (
+              <LiveLevelMeter
+                level={browserHost.inputLevel}
+                muted={status.inputMuted === true}
+                label={t(
+                  status.inputMuted === true
+                    ? 'live.browser.levelMuted'
+                    : 'live.browser.level',
+                )}
+              />
+            ) : null}
           </div>
         )}
 

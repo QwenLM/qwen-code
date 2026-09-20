@@ -170,3 +170,26 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+
+.levelMeter {
+  --live-input-level: 0;
+  flex: 1 1 auto;
+  min-width: 48px;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--foreground) 12%, transparent);
+}
+
+.levelMeterFill {
+  height: 100%;
+  width: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transform: scaleX(var(--live-input-level));
+  transform-origin: left center;
+}
+
+.levelMeter[data-muted='true'] .levelMeterFill {
+  background: color-mix(in srgb, var(--foreground) 35%, transparent);
+}

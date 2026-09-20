@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import type { DaemonLiveStatus } from '@qwen-code/sdk';
 import {
   describeMicError,
@@ -70,6 +76,13 @@ export interface UseLiveBrowserHostResult {
   phase: LiveBrowserHostPhase;
   closeReason: LiveBrowserHostCloseReason | undefined;
   errorMessage: string | undefined;
+  /**
+   * Most recent microphone RMS, 0..1, for a meter. A ref rather than state:
+   * at 64 ms frames this changes ~16 times a second, and re-rendering the
+   * dialog that often would steal the main thread from the very
+   * ScriptProcessor callback that produces the audio.
+   */
+  inputLevel: RefObject<number>;
   /** Must run inside a user gesture: it asks for the microphone. */
   connect: (options?: { takeover?: boolean }) => void;
   disconnect: () => void;
@@ -118,6 +131,7 @@ export function useLiveBrowserHost({
   const resourcesRef = useRef<HostResources>({});
   const statusRef = useRef<DaemonLiveStatus | undefined>(undefined);
   const epochRef = useRef(0);
+  const inputLevelRef = useRef(0);
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
 
@@ -148,6 +162,7 @@ export function useLiveBrowserHost({
       }
     }
     statusRef.current = undefined;
+    inputLevelRef.current = 0;
   }, []);
 
   const end = useCallback(
@@ -348,9 +363,15 @@ export function useLiveBrowserHost({
             !STREAMING_STATES.has(status.state) ||
             ws.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES
           ) {
+            // Nothing is reaching the daemon, so the meter reads zero rather
+            // than freezing at the last level before the mute.
+            inputLevelRef.current = 0;
             return;
           }
-          const { pcm } = floatToPcm16(event.inputBuffer.getChannelData(0));
+          const { pcm, level } = floatToPcm16(
+            event.inputBuffer.getChannelData(0),
+          );
+          inputLevelRef.current = level;
           const frame = new Uint8Array(INPUT_EPOCH_BYTES + pcm.byteLength);
           new DataView(frame.buffer).setBigUint64(0, BigInt(epochRef.current));
           frame.set(new Uint8Array(pcm), INPUT_EPOCH_BYTES);
@@ -374,5 +395,12 @@ export function useLiveBrowserHost({
     };
   }, [end, release]);
 
-  return { phase, closeReason, errorMessage, connect, disconnect };
+  return {
+    phase,
+    closeReason,
+    errorMessage,
+    inputLevel: inputLevelRef,
+    connect,
+    disconnect,
+  };
 }

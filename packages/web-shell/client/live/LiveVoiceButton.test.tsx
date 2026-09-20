@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
       phase: 'idle' as const,
       closeReason: undefined,
       errorMessage: undefined,
+      inputLevel: { current: 0 },
       connect: vi.fn(),
       disconnect: vi.fn(),
     },
@@ -220,6 +221,7 @@ describe('LiveVoiceButton as a browser Host', () => {
       phase: 'idle',
       closeReason: undefined,
       errorMessage: undefined,
+      inputLevel: { current: 0 },
       connect: vi.fn(),
       disconnect: vi.fn(),
     };
@@ -276,6 +278,54 @@ describe('LiveVoiceButton as a browser Host', () => {
 
     click(buttonNamed('live.browser.disconnect'));
     expect(mocks.result.browserHost.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('shows the microphone level only while this tab is the endpoint', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+    expect(document.querySelector('[data-live-level-meter]')).not.toBeNull();
+    expect(
+      document
+        .querySelector('[data-live-level-meter]')
+        ?.getAttribute('data-muted'),
+    ).toBe('false');
+  });
+
+  it('marks the meter muted when input is muted', () => {
+    mocks.result.browserHost.phase = 'connected';
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      inputMuted: true,
+      host: { kind: 'browser' },
+    };
+    openDialog();
+    expect(
+      document
+        .querySelector('[data-live-level-meter]')
+        ?.getAttribute('data-muted'),
+    ).toBe('true');
+  });
+
+  it('shows no meter for a call another endpoint is carrying', () => {
+    mocks.result.status = {
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      host: { kind: 'browser' },
+    };
+    openDialog();
+    expect(document.querySelector('[data-live-level-meter]')).toBeNull();
   });
 
   it('keeps the microphone while a call is running', () => {
