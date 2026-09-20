@@ -38,6 +38,21 @@ const entryPoints = Object.values(pkg.exports).flatMap((entry) =>
   typeof entry === 'string' ? [entry] : Object.values(entry),
 );
 for (const entry of new Set(entryPoints)) {
+  // A subpath pattern (`"./*": "./dist/*"`) names a family of files, not a
+  // path: statting it literally would report a false `missing`. Hold the
+  // family against the packed list instead — at least one packed file must
+  // match, or the manifest advertises subpaths the tarball does not ship.
+  if (entry.includes('*')) {
+    if (packed) {
+      const pattern = packPath(join(root, entry))
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replaceAll('*', '.*');
+      if (![...packed].some((file) => new RegExp(`^${pattern}$`).test(file))) {
+        problems.push(`${entry} matches no file in the npm package`);
+      }
+    }
+    continue;
+  }
   const target = join(root, entry);
   if (!existsSync(target)) {
     problems.push(`missing ${entry}`);

@@ -126,6 +126,34 @@ describe('web-shell publish artifact verifier', () => {
     expect(result.stderr).toContain('missing ./dist/absent.js');
   });
 
+  it('accepts a wildcard export pattern whose targets are packed', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, {
+        '.': { import: './dist/index.js' },
+        './*': './dist/*',
+      });
+      write(fixture, 'dist/index.js', 'export default 1;\n');
+      write(fixture, 'dist/daemon-react-sdk.js', 'export default 2;\n');
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('still fails closed on a wildcard pattern that matches nothing packed', () => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, {
+        '.': { import: './dist/index.js' },
+        './*': './dist/absent/*',
+      });
+      write(fixture, 'dist/index.js', 'export default 1;\n');
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('./dist/absent/*');
+    expect(result.stderr).toContain('matches no file in the npm package');
+  });
+
   it('accepts the shape the published package actually ships', () => {
     const result = runVerifier((fixture) => {
       declarePackage(fixture, {
