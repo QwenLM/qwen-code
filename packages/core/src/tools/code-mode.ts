@@ -100,15 +100,21 @@ export function planCodeModeBindings(
   const bindings: CodeModeToolBinding[] = [];
   const collisions: CodeModeBindingPlan['collisions'] = [];
   const claimed = new Map<string, string>();
-  const sorted = [...tools].sort((a, b) =>
-    a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-  );
+  const sorted = tools
+    .filter(
+      (tool) =>
+        getToolExposure(tool.name) === 'code-mode-callable' &&
+        (!allowedNames || allowedNames.has(tool.name)),
+    )
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const canonicalNames = new Set(sorted.map((tool) => tool.name));
 
   for (const tool of sorted) {
-    if (getToolExposure(tool.name) !== 'code-mode-callable') continue;
-    if (allowedNames && !allowedNames.has(tool.name)) continue;
     const jsName = normalizeCodeModeToolName(tool.name);
-    const kept = claimed.get(jsName);
+    // An exact name owns its binding even if a rewritten name sorts first.
+    const kept =
+      claimed.get(jsName) ??
+      (tool.name !== jsName && canonicalNames.has(jsName) ? jsName : undefined);
     if (kept) {
       collisions.push({ jsName, kept, omitted: tool.name });
       continue;
@@ -270,7 +276,7 @@ export function buildExecDescription(
 
   return `Execute JavaScript in a fresh isolated runtime and wait for it to finish.
 
-Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Prefer batching independent calls with Promise.all. A denied or failed call aborts the whole program, so keep a call that may be refused out of a batch you would then have to repeat. Await every tool promise; unawaited calls are cancelled when the script finishes. Pass values you need to inspect or return to text(); assigning a result does not include it in the exec output. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
+Use async/await and call registered tools through tools.<name>(args). Calls use the same validation, permissions, approvals, hooks, telemetry, cancellation, concurrency, and output limits as direct tool calls. Prefer batching independent calls with Promise.all. A denied or failed nested call rejects its promise; an uncaught rejection aborts the program. Catch expected failures if execution should continue, and keep a call that may be refused out of a batch you would then have to repeat. Await every tool promise; unawaited calls are cancelled when the script finishes. Pass values you need to inspect or return to text(); assigning a result does not include it in the exec output. The exec tool, direct control tools, tool_search, and tool_call are not callable through tools.
 
 Results from skill, update_goal, and capture_screen_context are automatically retained in the exec response; text() is not required to preserve their context. Read loaded skill instructions before taking dependent actions in a later exec call. A terminal update_goal result ends the script and prevents further tool calls. When Omni is enabled, uploaded media and its resource metadata are also automatically retained; a result without content needs no image() call.
 

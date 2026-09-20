@@ -11038,6 +11038,12 @@ export class Config {
           'Container execution cannot be combined with tools.mode = "code_mode_only".',
         );
       }
+      if (this.getToolMode() === ToolMode.CodeMode) {
+        // eslint-disable-next-line no-console -- the fallback must be visible without debug logging
+        console.warn(
+          'Container execution does not support exec; continuing with direct tools for tools.mode = "code_mode".',
+        );
+      }
       const [{ createExecutionTools }, { wrapExecutionTool }] =
         await Promise.all([
           import('../services/local-execution-environment.js'),

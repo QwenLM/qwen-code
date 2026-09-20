@@ -218,6 +218,26 @@ describe('execution environment ownership', () => {
     expect(parent.getExecutionEnvironment()).toBeUndefined();
   });
 
+  it('warns when a hybrid container registry falls back to direct tools', async () => {
+    const parent = new Config({ ...params, toolMode: ToolMode.CodeMode });
+    const child = deriveConfig(parent, {
+      getExecutionEnvironment: () => ({}) as ExecutionEnvironment,
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const registry = await child.createToolRegistry(undefined, {
+        skipDiscovery: true,
+      });
+      expect(registry.getAllToolNames()).toContain(ToolNames.READ_FILE);
+      expect(registry.getAllToolNames()).not.toContain(ToolNames.EXEC);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('continuing with direct tools'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it.each(['ready', 'starting'])(
     'waits for %s environments during session shutdown',
     async (state) => {

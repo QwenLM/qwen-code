@@ -2732,7 +2732,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: ToolMode.Direct,
         description:
-          'Choose how tools are exposed to the model. Direct uses ordinary tool calls; Code Mode also exposes the isolated exec JavaScript tool; Code Mode Only exposes ordinary tools only through exec. Safe and bare modes always use Direct.',
+          'Choose how tools are exposed to the model. Direct uses ordinary tool calls; Code Mode also exposes the isolated exec JavaScript tool; Code Mode Only exposes ordinary tools only through exec. Safe and bare modes always use Direct. Container execution warns and uses direct tools for Code Mode, and rejects Code Mode Only. Code Mode Only ignores eager/visible schema deferral: callable tools retain full nested schemas and tool_search is hidden.',
         showInDialog: true,
         options: [
           { value: ToolMode.Direct, label: 'Default' },
@@ -3024,7 +3024,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.',
+          'Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session. Code Mode Only already includes full nested schemas in exec and does not expose tool_search.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -3035,7 +3035,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string[] | undefined,
         description:
-          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas cannot be revealed directly. In Code Mode, exec-capable tools stay available through exec; otherwise withheld tools are unreachable. A warning also names each group. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
+          'Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas cannot be revealed directly. In Code Mode, tools with actual exec bindings stay available through exec; otherwise withheld tools are unreachable. A warning also names each group. Exception: Code Mode Only always includes full nested schemas for callable tools, hides tool_search, and skips deferred reminders and this warning, so eager/visible do not save schema tokens there. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.',
         showInDialog: false,
       },
       approvalMode: {

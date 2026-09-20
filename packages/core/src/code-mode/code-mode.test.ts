@@ -423,17 +423,17 @@ describe('code mode exposure', () => {
     expect(anthropic[1]?.description).toContain('tools.read_file');
   });
 
-  it('builds stable declarations and resolves normalized-name collisions first-wins', () => {
+  it('builds stable declarations and prefers exact names over rewritten collisions', () => {
     const tools = [
+      new MockTool({ name: 'z-tool' }),
       new MockTool({
-        name: 'z-tool',
+        name: 'z_tool',
         params: {
           type: 'object',
           properties: { count: { type: 'integer' } },
           required: ['count'],
         },
       }),
-      new MockTool({ name: 'z_tool' }),
       new MockTool({
         name: 'a-tool',
         shouldDefer: true,
@@ -453,10 +453,10 @@ describe('code mode exposure', () => {
     expect(first).toEqual(second);
     expect(first.bindings.map((item) => item.name)).toEqual([
       'a-tool',
-      'z-tool',
+      'z_tool',
     ]);
     expect(first.collisions).toEqual([
-      { jsName: 'z_tool', kept: 'z-tool', omitted: 'z_tool' },
+      { jsName: 'z_tool', kept: 'z_tool', omitted: 'z-tool' },
     ]);
     expect(buildExecDescription(first)).toContain(
       'tools.z_tool(args: { "count": number })',
@@ -473,7 +473,7 @@ describe('code mode exposure', () => {
       'Pending timeouts do not keep exec alive by themselves',
     );
     expect(buildExecDescription(first, false)).toContain(
-      'A denied or failed call aborts the whole program',
+      'an uncaught rejection aborts the program',
     );
     expect(buildExecDescription(first)).toContain(
       'clearTimeout(timeoutId?: number)',
@@ -501,18 +501,56 @@ describe('code mode exposure', () => {
       (item) => item.name === 'exec',
     )?.description;
     const keptDescription = declarations.find(
-      (item) => item.name === 'read-file',
+      (item) => item.name === 'read_file',
     )?.description;
     const omittedDescription = declarations.find(
-      (item) => item.name === 'read_file',
+      (item) => item.name === 'read-file',
     )?.description;
 
     expect(execDescription).toContain(
-      '- read_file is omitted because it collides with read-file as tools.read_file.',
+      '- read-file is omitted because it collides with read_file as tools.read_file.',
     );
     expect(keptDescription).toContain('declare const tools: { read_file(args:');
     expect(omittedDescription).not.toContain('declare const tools:');
   });
+
+  it('does not reserve an exact name excluded from the nested allowlist', () => {
+    const bindings = planCodeModeBindings(
+      [new MockTool({ name: 'get-data' }), new MockTool({ name: 'get_data' })],
+      () => false,
+      new Set(['get-data']),
+    );
+    expect(
+      bindings.bindings.map(({ name, jsName }) => ({ name, jsName })),
+    ).toEqual([{ name: 'get-data', jsName: 'get_data' }]);
+    expect(bindings.collisions).toEqual([]);
+  });
+
+  it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+    'dispatches the exact canonical MCP name under a collision in %s',
+    async (toolMode) => {
+      const registry = new ToolRegistry(makeFakeConfig({ toolMode }));
+      for (const name of [
+        'exec',
+        'mcp__my-server__fetch',
+        'mcp__my_server__fetch',
+      ]) {
+        registry.registerTool(new MockTool({ name }));
+      }
+      const dispatched: string[] = [];
+      const result = await executeCodeMode(
+        'text((await tools.mcp__my_server__fetch({})).name)',
+        registry.getCodeModeBindingPlan(),
+        runtime(async (name) => {
+          dispatched.push(name);
+          return { callId: name, name, status: 'success', output: name };
+        }),
+        new AbortController().signal,
+      );
+      expect(dispatched).toEqual(['mcp__my_server__fetch']);
+      expect(result.output).toBe('mcp__my_server__fetch');
+    },
+  );
 
   it('expands deferred tool schemas because nothing can reveal them later', () => {
     const deferredPlan = planCodeModeBindings(

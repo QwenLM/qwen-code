@@ -109,7 +109,8 @@ import {
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { ToolMode } from '../tools/code-mode.js';
+import { planCodeModeBindings, ToolMode } from '../tools/code-mode.js';
+import { MockTool } from '../test-utils/mock-tool.js';
 import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
@@ -567,6 +568,9 @@ describe('Gemini Client (client.ts)', () => {
     // that depends on a fully-formed Config object, we need to mock the
     // entire implementation of Config for these tests.
     const mockToolRegistry = {
+      getCodeModeBindingPlan: vi
+        .fn()
+        .mockReturnValue({ bindings: [], collisions: [] }),
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
@@ -2520,6 +2524,7 @@ describe('Gemini Client (client.ts)', () => {
   describe('setTools — progressive MCP reminders', () => {
     function getRegistryMock() {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getCodeModeBindingPlan: ReturnType<typeof vi.fn>;
         getFunctionDeclarations: ReturnType<typeof vi.fn>;
         getDeferredToolSummary: ReturnType<typeof vi.fn>;
         getMcpServerInstructions: ReturnType<typeof vi.fn>;
@@ -3331,6 +3336,15 @@ describe('Gemini Client (client.ts)', () => {
 
     it('reports only code-mode-callable withheld tools as reachable through exec', async () => {
       const reg = getRegistryMock();
+      reg.getCodeModeBindingPlan.mockReturnValue(
+        planCodeModeBindings(
+          [
+            new MockTool({ name: 'write_file' }),
+            new MockTool({ name: 'send_message' }),
+          ],
+          () => true,
+        ),
+      );
       reg.getTool.mockImplementation((name: string) =>
         name === ToolNames.EXEC ? ({} as never) : null,
       );
@@ -3354,6 +3368,42 @@ describe('Gemini Client (client.ts)', () => {
         ),
       );
       warnSpy.mockRestore();
+    });
+
+    it('does not advertise an omitted collision binding as reachable through exec', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((name: string) =>
+        name === ToolNames.EXEC ? ({} as never) : null,
+      );
+      reg.getCodeModeBindingPlan.mockReturnValue(
+        planCodeModeBindings(
+          [
+            new MockTool({ name: 'get--data' }),
+            new MockTool({ name: 'get-_data' }),
+          ],
+          () => true,
+        ),
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'get-_data', description: 'omitted target' },
+      ]);
+      reg.isPermissionDeferred.mockReturnValue(true);
+      mockConfig.getToolMode = vi.fn().mockReturnValue(ToolMode.CodeMode);
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await client.setTools();
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'These tools are unreachable until restart: get-_data',
+          ),
+        );
+        expect(warn).not.toHaveBeenCalledWith(
+          expect.stringContaining('remain callable through exec'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('does not call a history-revealed eager tool unreachable', async () => {

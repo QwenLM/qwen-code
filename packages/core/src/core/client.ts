@@ -92,7 +92,7 @@ import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
-import { getToolExposure, ToolMode } from '../tools/code-mode.js';
+import { ToolMode } from '../tools/code-mode.js';
 
 // Telemetry
 import {
@@ -1883,12 +1883,15 @@ export class LlmClient {
           this.warnedAboutUnreachableEagerTools = true;
           const hybridCodeMode =
             this.config.getToolMode?.() === ToolMode.CodeMode;
-          const nestedReachable = new Set(
+          const boundNames = new Set(
             hybridCodeMode && toolRegistry.getTool(ToolNames.EXEC)
-              ? withheld.filter(
-                  (name) => getToolExposure(name) === 'code-mode-callable',
-                )
+              ? toolRegistry
+                  .getCodeModeBindingPlan()
+                  .bindings.map((binding) => binding.name)
               : [],
+          );
+          const nestedReachable = new Set(
+            withheld.filter((name) => boundNames.has(name)),
           );
           const unreachable = withheld.filter(
             (name) => !nestedReachable.has(name),

@@ -12,6 +12,7 @@ import {
   getBuiltInOutputStyle,
   getCoreSystemPrompt,
   resolveInteractionMode,
+  estimateContextTextTokens,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import {
@@ -151,6 +152,65 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.builtinTools).toHaveLength(1);
     expect(data.builtinTools[0]?.name).toBe('exec');
     expect(data.builtinTools[0]?.tokens).toBeGreaterThan(100);
+  });
+
+  it('counts only emitted declarations when ordinary tools are nested in exec', async () => {
+    const decoratedExec = {
+      name: 'exec',
+      description: 'tools.read_file and tools.skill '.repeat(100),
+    };
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () =>
+          ['exec', 'read_file', 'skill'].map((name) => ({
+            name,
+            schema: { name, description: 'raw schema '.repeat(20) },
+          })),
+        getFunctionDeclarations: () => [decoratedExec],
+        isDeferredAndHidden: () => false,
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools.map((tool) => tool.name)).toEqual(['exec']);
+    expect(data.breakdown.skills).toBe(0);
+    expect(data.breakdown.builtinTools).toBe(
+      estimateContextTextTokens(JSON.stringify([decoratedExec])),
+    );
+  });
+
+  it('charges the decorated Skill declaration once and leaves the residual in built-ins', async () => {
+    const decoratedExec = { name: 'exec', description: 'exec '.repeat(100) };
+    const decoratedSkill = {
+      name: 'skill',
+      description: 'skill plus its nested declaration '.repeat(100),
+    };
+    const declarations = [decoratedExec, decoratedSkill];
+    const config = {
+      ...mockConfig,
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: () =>
+          ['exec', 'skill'].map((name) => ({
+            name,
+            schema: { name, description: 'raw' },
+          })),
+        getFunctionDeclarations: () => declarations,
+        isDeferredAndHidden: () => false,
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const skillTokens = estimateContextTextTokens(
+      JSON.stringify(decoratedSkill),
+    );
+
+    expect(data.breakdown.skills).toBe(skillTokens);
+    expect(data.breakdown.builtinTools).toBe(
+      estimateContextTextTokens(JSON.stringify(declarations)) - skillTokens,
+    );
+    expect(data.builtinTools.map((tool) => tool.name)).toEqual(['exec']);
   });
 
   it('reads the per-session chat token count, not the process-global singleton (#5763)', async () => {

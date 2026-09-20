@@ -16,8 +16,9 @@ CodeModeOnly.
 
 ## Goal
 
-Add a hybrid `CodeMode` option without changing the existing default or
-`CodeModeOnly` behavior.
+Add a hybrid `CodeMode` option while preserving the direct default and the
+strict `CodeModeOnly` exposure policy. Both code modes share the corrected
+`exec` failure guidance and exact-name collision precedence described below.
 
 ## Configuration
 
@@ -38,7 +39,8 @@ The effective modes are:
 | `code_mode_only`   | `code_mode_only` |
 
 This follows Codex's `ToolMode` serialized values. Safe mode and bare mode
-force `direct`.
+force `direct`. Container execution exposes direct tools only: selecting
+`code_mode` emits a warning and provides no `exec`; `code_mode_only` is rejected.
 
 ## Exposure policy
 
@@ -55,7 +57,15 @@ for that tool. The `exec` description keeps the complete `ALL_TOOLS` metadata
 but does not duplicate every schema. Deferred tools gain their declaration when
 their normal top-level declaration is revealed. In `code_mode_only`, the
 existing behavior remains: all nested declarations live in the `exec`
-description because no later top-level reveal is possible.
+description because no later top-level reveal is possible. `tools.eager` and
+`tools.visible` do not reduce those nested schemas in CodeModeOnly: `tool_search`
+is hidden, deferred reminders and the no-ToolSearch warning are skipped, and
+surviving callable tools remain available through `exec`.
+
+Nested bindings prefer an exact canonical JavaScript name over names rewritten
+to that property. Other collisions retain canonical-name ordering; omitted
+bindings remain absent from nested signatures and are never advertised as
+reachable through `exec`.
 
 Filtered subagent declarations preserve the same mode. The agent's `tools`
 list narrows its direct surface. Explicit ordinary-tool execution entries
@@ -70,8 +80,9 @@ all surviving code-mode-callable bindings.
   telemetry.
 - Duplicating every schema in hybrid mode would increase prompt size, so only
   the per-tool nested declaration is appended there.
-- A denied or failed nested call aborts the whole `exec` program, so a call
-  that may be refused should stay out of a batch that would need to be repeated.
+- A denied or failed nested call rejects its promise. An uncaught rejection
+  aborts `exec`; catching an expected rejection lets the program continue. Keep
+  calls that may be refused out of a batch that would need to be repeated.
 
 ## Validation
 
@@ -87,3 +98,7 @@ all surviving code-mode-callable bindings.
 - Ordinary visible tools advertise their nested JavaScript signature.
 - `tools.mode: "code_mode_only"` selects the stricter behavior.
 - The default, safe-mode, and bare-mode surfaces remain direct-only.
+- Both code modes dispatch an exact canonical name to that tool under a
+  normalization collision and describe caught versus uncaught failures accurately.
+- Context accounting charges only emitted declarations; container fallback and
+  withheld-tool warnings describe the actual available bindings.

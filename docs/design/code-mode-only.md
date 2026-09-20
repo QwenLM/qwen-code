@@ -77,7 +77,8 @@ Before each provider tool sync, the `exec` description is generated from the
 current registry. Tools are sorted by canonical name. A name is normalized to
 a JavaScript property by replacing invalid identifier characters and prefixing
 names that begin with a digit. If two canonical names normalize to the same
-property, the lexicographically first name wins and one warning names the
+property, an exact canonical match wins over rewritten names. If neither is an
+exact match, the lexicographically first name wins. The description names the
 omitted collision.
 
 The description defines:
@@ -89,8 +90,7 @@ The description defines:
   `setTimeout(callback, delayMs)`, `clearTimeout(timeoutId)`, and `exit()`;
 - TypeScript-like signatures generated deterministically from JSON Schema;
 - the absence of Node.js, `process`, `require`, filesystem, network, imports,
-  `console`, `WebAssembly`, `Atomics`, `SharedArrayBuffer`, and persistent
-  state. Pending timers do not keep `exec` alive by themselves.
+  `console`, `WebAssembly`, `Atomics`, and persistent state. Pending timers do not keep `exec` alive by themselves.
 
 The nested call returns a JSON-safe object containing the real call id, tool
 name, status, output, and structured content. Failed and cancelled calls reject

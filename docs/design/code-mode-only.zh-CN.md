@@ -67,8 +67,9 @@ CodeModeOnly 会隐藏 `tool_search`，嵌套调用也不会以 `functionCall` �
 
 每次向 provider 同步工具前，都会从当前 registry 生成 `exec` 描述。工具按规范
 名称排序。名称会通过替换无效标识符字符来规范化为 JavaScript 属性；如果名称以
-数字开头，还会添加前缀。如果两个规范名称映射到同一个属性，则字典序靠前的名称
-胜出，并用一条 warning 指出被省略的冲突项。
+数字开头，还会添加前缀。如果两个规范名称映射到同一个属性，优先保留与属性精确
+一致的规范名称；若都不是精确匹配，则字典序靠前的名称胜出。描述会指出被省略的
+冲突项。
 
 描述会定义：
 
@@ -79,7 +80,7 @@ CodeModeOnly 会隐藏 `tool_search`，嵌套调用也不会以 `functionCall` �
   `setTimeout(callback, delayMs)`、`clearTimeout(timeoutId)` 和 `exit()`；
 - 从 JSON Schema 确定性生成的类 TypeScript 签名；
 - 不提供 Node.js、`process`、`require`、文件系统、网络、import、`console`、
-  `WebAssembly`、`Atomics`、`SharedArrayBuffer` 和持久状态。待处理的 timer
+  `WebAssembly`、`Atomics` 和持久状态。待处理的 timer
   本身不会让 `exec` 保持运行。
 
 嵌套调用返回一个 JSON-safe 对象，其中包含真实 call id、工具名、状态、输出和

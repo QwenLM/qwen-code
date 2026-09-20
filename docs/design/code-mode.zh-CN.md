@@ -15,7 +15,8 @@ CodeModeOnly。
 
 ## 目标
 
-新增混合 `CodeMode`，同时保持现有默认模式和 `CodeModeOnly` 行为不变。
+新增混合 `CodeMode`，同时保持直接调用默认模式和 `CodeModeOnly` 的严格暴露策略。
+两种代码模式共享下述修正后的 `exec` 失败说明和精确名称碰撞优先级。
 
 ## 配置
 
@@ -36,7 +37,8 @@ CodeModeOnly。
 | `code_mode_only` | `code_mode_only` |
 
 这些值与 Codex 的 `ToolMode` 序列化值一致。安全模式和 bare 模式会强制使用
-`direct`。
+`direct`。容器执行仅支持直接工具：选择 `code_mode` 会显示警告且不提供 `exec`；
+选择 `code_mode_only` 则会报错。
 
 ## 暴露策略
 
@@ -51,7 +53,13 @@ CodeModeOnly。
 在 `code_mode` 中，普通可见工具的描述会附加该工具的 `exec` 调用声明。
 `exec` 描述保留完整的 `ALL_TOOLS` 元数据，但不重复所有 schema。延迟工具在
 按正常流程暴露顶层声明时获得对应声明。在 `code_mode_only` 中保持现有行为：
-由于后续无法暴露顶层声明，所有嵌套声明都集中在 `exec` 描述中。
+由于后续无法暴露顶层声明，所有嵌套声明都集中在 `exec` 描述中。CodeModeOnly 中
+`tools.eager` 和 `tools.visible` 不会减少这些嵌套 schema：`tool_search` 被隐藏，
+延迟提醒和缺少 ToolSearch 的警告被跳过，仍可调用的工具继续通过 `exec` 使用。
+
+嵌套绑定优先保留与 JavaScript 属性精确一致的规范名称，再考虑改写为该属性的
+名称。其他碰撞沿用规范名称字典序；被省略的绑定不出现在嵌套签名中，
+也不会被警告描述为可通过 `exec` 调用。
 
 经过过滤的子智能体声明沿用相同模式。智能体的 `tools` 列表会收窄直接调用面。
 显式列出的普通工具执行项（`executionAllowedTools`）会收窄嵌套集合；继承或显式
@@ -64,8 +72,9 @@ CodeModeOnly。
   取消和遥测。
 - 混合模式若重复全部 schema 会增大提示词，因此只在各顶层工具描述中附加对应的
   嵌套声明。
-- 被拒绝或失败的嵌套调用会中止整个 `exec` 程序，因此可能被拒绝的调用不应加入
-  一个随后必须整体重试的批次。
+- 被拒绝或失败的嵌套调用会使 promise reject。未捕获的 rejection 会中止 `exec`；
+  捕获预期 rejection 后可以继续执行。可能被拒绝的调用不应加入随后必须整体重试
+  的批次。
 
 ## 验证
 
@@ -80,3 +89,6 @@ CodeModeOnly。
 - 普通可见工具会声明其嵌套 JavaScript 调用签名。
 - `tools.mode: "code_mode_only"` 选择严格模式。
 - 默认模式、安全模式和 bare 模式仍然只使用直接调用。
+- 两种代码模式在规范化碰撞时都将精确规范名称分派给该工具，并准确区分已捕获与
+  未捕获失败的行为。
+- 上下文计数仅计入实际发送的声明；容器回退和工具延迟警告与实际可用绑定一致。
