@@ -2592,7 +2592,7 @@ describe('a gate for a process hosting several sessions', () => {
   });
 
   /** A host of several sessions whose repeat window is actually on. */
-  function metered() {
+  function metered(policy?: InboundPolicy) {
     const delivered: PeerUserFrame[] = [];
     const gate = new InboundGate({
       admission: new PeerAdmission({
@@ -2605,7 +2605,7 @@ describe('a gate for a process hosting several sessions', () => {
         },
       }),
       getApprovalMode: () => ApprovalMode.YOLO,
-      getPolicySetting: () => undefined,
+      getPolicySetting: () => policy,
       resolveSessionId: (id) => id,
       deliver: (candidate) => delivered.push(candidate),
     });
@@ -2652,6 +2652,19 @@ describe('a gate for a process hosting several sessions', () => {
     // Session a has still heard that line.
     expect(host.gate.admit(host.line('session-a', 'm2'))).toBe('dropped');
     expect(host.delivered).toHaveLength(1);
+  });
+
+  it('lets a refused sender say the same thing again', () => {
+    // The rollback has to find the record admission left, which means
+    // looking under the addressee it was recorded for. A sender told its
+    // message was refused must keep hearing that, not have its next
+    // verbatim attempt folded into a `duplicate` — which would replace
+    // "stop" with "someone over there already has it".
+    const host = metered('refuse');
+
+    expect(host.gate.admit(host.line('session-a', 'm1'))).toBe('refused');
+    expect(host.gate.admit(host.line('session-a', 'm2'))).toBe('refused');
+    expect(host.delivered).toEqual([]);
   });
 
   it('keeps a session as its own repeat baseline across an interleaving', () => {
