@@ -40,6 +40,8 @@ export type DeferredToolCallResolution =
   | {
       error: Error;
       errorType: ToolErrorType;
+      /** Validated target identity for per-tool parameter-error accounting. */
+      targetName?: string;
     };
 
 export interface DeferredToolCallOptions {
@@ -114,6 +116,7 @@ export async function resolveDeferredToolCall(
     return {
       error: new Error(`tool_call cannot invoke bridge tool "${targetName}".`),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      targetName,
     };
   }
 
@@ -193,6 +196,7 @@ export async function resolveDeferredToolCall(
         `Tool "${target.name}" is already visible to the model or is not deferred. Call it directly instead of using tool_call.`,
       ),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      targetName: target.name,
     };
   }
   // The registry's capability gate (isToolDeclared — e.g. propose_goal is

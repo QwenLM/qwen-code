@@ -430,6 +430,10 @@ export interface QueryOptions {
    * direct call to a still-hidden demoted tool, which any tool-set
    * refresh (resume, MCP discovery, the first plan-mode entry in a
    * session, a subagent definition change) re-declares.
+   * These bridge and warning rules describe direct tool mode. CodeModeOnly
+   * hides both bridge tools, includes callable deferred tools' full schemas
+   * in exec, and skips deferred reminders and this warning; tools.eager does
+   * not make those nested tools unreachable or reduce their schema tokens.
    * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -496,7 +500,11 @@ export interface QueryOptions {
    *   which are declared upfront, and sessions whose live history
    *   contains a direct call to a still-hidden demoted tool, which any
    *   tool-set refresh (resume, MCP discovery, the first plan-mode
-   *   entry in a session, a subagent definition change) re-declares (#9827)
+   *   entry in a session, a subagent definition change) re-declares (#9827).
+   *   These bridge and warning rules describe direct tool mode. CodeModeOnly
+   *   hides both bridge tools, includes callable deferred tools' full schemas
+   *   in exec, and skips deferred reminders and this warning; tools.eager does
+   *   not make those nested tools unreachable or reduce their schema tokens.
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`

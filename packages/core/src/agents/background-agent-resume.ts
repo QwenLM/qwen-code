@@ -46,10 +46,7 @@ import {
   formatStopHookBlockingCapWarning,
 } from '../hooks/stopHookCap.js';
 import { toModelVisibleSubagentResult } from './subagent-result.js';
-import {
-  getCurrentAgentConfiguredToolAllowlist,
-  runWithAgentContext,
-} from './runtime/agent-context.js';
+import { runWithAgentContext } from './runtime/agent-context.js';
 import {
   createApprovalModeOverride,
   stampBackgroundPromptPolicy,
@@ -1754,7 +1751,9 @@ export class BackgroundAgentResumeService {
         executionToolNames: buildInheritedForkExecutionToolNames(
           toolNames,
           toolRegistry.getAllToolNames(),
-          getCurrentAgentConfiguredToolAllowlist(),
+          // Forks launch only from the main session; the wake-up caller's
+          // ambient allowlist is unrelated to the persisted fork policy.
+          undefined,
         ),
       };
     } catch (error) {

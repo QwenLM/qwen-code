@@ -25,7 +25,10 @@ import { ToolNames } from '../tools/tool-names.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { SubagentError, SubagentErrorCode } from '../subagents/types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
-import { getCurrentAgentDepth } from './runtime/agent-context.js';
+import {
+  getCurrentAgentDepth,
+  runWithAgentConfiguredToolAllowlist,
+} from './runtime/agent-context.js';
 import { AgentHeadless } from './runtime/agent-headless.js';
 import {
   getInvocationContext,
@@ -2704,7 +2707,9 @@ describe('BackgroundAgentResumeService', () => {
         name: 'Edit',
         build: deniedBuild,
       });
-      const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+      const resumed = await runWithAgentConfiguredToolAllowlist(['Read'], () =>
+        service.resumeBackgroundAgent(agentId, 'continue'),
+      );
 
       expect(resumed).toBeDefined();
       expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();

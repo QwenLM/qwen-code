@@ -17464,6 +17464,97 @@ describe('Session', () => {
         });
       });
 
+      it.each([
+        {
+          label: 'distinct targets',
+          names: ['run_shell_command', 'todo_write', 'read_file'],
+          expectLoop: false,
+          malformed: false,
+        },
+        {
+          label: 'same target',
+          names: ['read_file', 'read_file', 'read_file'],
+          expectLoop: true,
+          malformed: false,
+        },
+        {
+          label: 'mixed nesting denials',
+          names: ['tool_search', 'tool_call', 'read_file'],
+          expectLoop: false,
+          malformed: false,
+        },
+        {
+          label: 'malformed envelopes',
+          names: ['run_shell_command', 'todo_write', 'read_file'],
+          expectLoop: true,
+          malformed: true,
+        },
+      ])(
+        'accounts for bridge parameter errors by target: $label',
+        async ({ names, expectLoop, malformed }) => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          const { ToolCallTool } = await import(
+            '@qwen-code/qwen-code-core/tools/tool-call.js'
+          );
+          const bridge = new ToolCallTool();
+          const targets = names.map((name) => ({
+            name,
+            kind: core.Kind.Other,
+            displayName: name,
+            description: name,
+            build: vi.fn(),
+          }));
+          const findTool = (name: string) =>
+            [bridge, ...targets].find((tool) => tool.name === name);
+          mockToolRegistry.getTool.mockImplementation(findTool);
+          mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+            findTool(name),
+          );
+          mockToolRegistry.isDeferredAndHidden.mockReturnValue(false);
+          const toolLoopState = {
+            totalToolCalls: 0,
+            invalidToolParamErrors: new Map<string, number>(),
+            toolCallKeyCounts: new Map<string, number>(),
+            maxToolCallKeyRepeat: 0,
+            loopDetected: false,
+          };
+          const result = await (
+            session as unknown as {
+              runToolCalls: (
+                signal: AbortSignal,
+                promptId: string,
+                calls: FunctionCall[],
+                state: typeof toolLoopState,
+              ) => Promise<{ parts: Part[]; loopDetected?: boolean }>;
+            }
+          ).runToolCalls(
+            new AbortController().signal,
+            'bridge-parameter-errors',
+            names.map((name, index) => ({
+              id: `bridge-${index}`,
+              name: core.ToolNames.TOOL_CALL,
+              args: { name, arguments: malformed ? [] : { index } },
+            })),
+            toolLoopState,
+          );
+
+          expect(toolLoopState.loopDetected).toBe(expectLoop);
+          expect(result.parts).toHaveLength(3);
+          expect([...toolLoopState.invalidToolParamErrors]).toEqual(
+            malformed
+              ? [[core.ToolNames.TOOL_CALL, 3]]
+              : [...new Set(names)].map((name) => [
+                  name,
+                  names.filter((target) => target === name).length,
+                ]),
+          );
+          for (const target of targets)
+            expect(target.build).not.toHaveBeenCalled();
+        },
+      );
+
       it('routes tool_call through a hidden deferred tool in ACP', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         const execute = vi.fn().mockResolvedValue({

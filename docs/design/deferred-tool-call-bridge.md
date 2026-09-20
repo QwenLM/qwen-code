@@ -1,5 +1,7 @@
 # Deferred Tool Call Bridge
 
+[English](deferred-tool-call-bridge.md) | [简体中文](deferred-tool-call-bridge.zh-CN.md)
+
 ## Problem
 
 `tool_search` previously revealed each matched deferred tool and refreshed the
@@ -53,11 +55,25 @@ so always-defer is affordable and the extra `tool_search` round trip is the
 only remaining cost. See
 [ToolSearch preload threshold](toolsearch-preload-threshold.md).
 
-Disabling `tools.toolSearch` also disables `tool_call`; the existing fallback
-continues to declare ordinary deferred schemas eagerly — tools demoted by
-`tools.eager` stay hidden in that mode and are reported as unreachable
-(per-session warning). Permission allowlists keep both bridge tools registered
-unless an explicit deny rule removes them.
+In direct tool mode, disabling `tools.toolSearch` also disables `tool_call`;
+the existing fallback declares ordinary deferred schemas eagerly. Tools demoted
+by `tools.eager` stay hidden unless separately revealed, and a per-session
+warning explains that the bridge is unavailable; a direct call by name still
+undergoes normal validation and permission checks. CodeModeOnly instead hides
+both bridge tools, keeps full nested schemas for callable deferred tools in
+`exec`, and skips deferred reminders and this warning. Permission allowlists
+keep both bridge tools registered unless an explicit deny rule removes them.
+
+An explicit subagent `tools` list does not implicitly add the bridge tools.
+Naming an ordinary deferred target declares it directly, but `tools.eager`
+demotion still applies. Using discovery and bridge invocation together needs the target and both bridge
+tools in the allowed surface; existing subagent exclusions and deny rules still win.
+A resumed fork reconstructs the launching main session's live surface and
+reapplies its persisted fork policy, independent of the wake-up caller's
+ambient allowlist. Post-compaction file restoration unwraps successful bridge
+calls only after matching their outer response IDs. ACP parameter-error loop
+accounting uses a validated bridge target name; malformed envelopes retain
+the wrapper bucket.
 
 ## Known limitations
 

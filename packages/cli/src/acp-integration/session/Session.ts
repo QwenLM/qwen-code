@@ -13030,6 +13030,7 @@ export class Session implements SessionContext {
         errorType: ToolErrorType | undefined;
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
+        invalidToolParamsName?: string;
         stopAfterPermissionCancel?: boolean;
         skipPersistence?: boolean;
         settledMetadata?: {
@@ -13122,7 +13123,7 @@ export class Session implements SessionContext {
           this.config,
           promptId,
           toolLoopState,
-          toolName,
+          opts.invalidToolParamsName ?? toolName,
           error,
         );
       return {
@@ -13237,6 +13238,7 @@ export class Session implements SessionContext {
           executionStatus: 'not_started',
           recordInvalidToolParams:
             resolution.errorType === ToolErrorType.INVALID_TOOL_PARAMS,
+          invalidToolParamsName: resolution.targetName,
         });
       }
       toolName = resolution.tool.name;
