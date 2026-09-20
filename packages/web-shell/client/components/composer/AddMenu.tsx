@@ -681,7 +681,7 @@ export function AddMenu({
                       className={mobileRowClass}
                       onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
                     >
-                      {t('live.open')}
+                      {t('composerMobile.liveVoice')}
                     </Button>
                   )}
                   {plan && (
