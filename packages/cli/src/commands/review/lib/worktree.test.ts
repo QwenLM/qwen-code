@@ -32,6 +32,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { shellQuotePath } from './shell-quote.js';
 import {
   adminEntryOf,
   isolateHostGitConfig,
@@ -241,11 +242,14 @@ describe('worktreeResidue', () => {
   });
 
   it('blanks a globally exempt filter during the residue measurement', () => {
-    const marker = join(repo, 'PWNED-global-included');
+    const marker = join(repo, "PWNED global 'included'");
     const globalConfig = join(gitIsolation.home, '.gitconfig');
-    writeFileSync(
+    gitRepo(
+      'config',
+      '--file',
       globalConfig,
-      `[filter "evil"]\n\tclean = touch ${marker} && cat\n`,
+      'filter.evil.clean',
+      `touch ${shellQuotePath(marker.replaceAll('\\', '/'))} && cat`,
     );
     gitRepo('config', 'include.path', globalConfig);
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
@@ -253,6 +257,12 @@ describe('worktreeResidue', () => {
       join(repo, '.git', 'info', 'attributes'),
       'a.ts filter=evil\n',
     );
+    execFileSync('git', ['hash-object', '--path=a.ts', '--stdin'], {
+      cwd: repo,
+      input: 'export const x = 1;\n',
+    });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
     const stale = new Date(Date.now() + 60_000);
     utimesSync(join(tree, 'a.ts'), stale, stale);
 
@@ -2136,7 +2146,10 @@ describe('filterCommandsIn — the include walk', () => {
       '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n' +
         '[include]\n\tpath = /missing/user-owned.cfg\n',
     );
-    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${globalConfig}\n`);
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(globalConfig)}\n`,
+    );
     const exact = filterCommandsIn(dir, dir);
     expect(exact.filters).toEqual([]);
     expect(exact.exempt).toEqual(['filter.lfs.clean']);
@@ -2148,7 +2161,10 @@ describe('filterCommandsIn — the include walk', () => {
     // the user's own config graph is the user's contract.
     const alias = join(dir, 'global-alias.cfg');
     symlinkSync(globalConfig, alias);
-    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${alias}\n`);
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(alias)}\n`,
+    );
     expect(filterCommandsIn(dir, dir).filters).toEqual(['filter.lfs.clean']);
   });
 
@@ -2176,9 +2192,19 @@ describe('filterCommandsIn — the include walk', () => {
     const xdgConfig = join(gitIsolation.home, '.config', 'git', 'config');
     mkdirSync(dirname(xdgConfig), { recursive: true });
     writeFileSync(xdgConfig, '[filter "xdg"]\n\tsmudge = xdg-filter\n');
-    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${xdgConfig}\n`);
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(xdgConfig)}\n`,
+    );
 
-    expect(filterCommandsIn(dir, dir).filters).toEqual([]);
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: [],
+      exempt: ['filter.xdg.smudge'],
+      reachedExempt: ['filter.xdg.smudge'],
+      attribution: [],
+      unread: [],
+      dangling: [],
+    });
   });
 
   it('follows includes in the active global graph before exempting an origin', () => {
@@ -2186,11 +2212,21 @@ describe('filterCommandsIn — the include walk', () => {
     writeFileSync(included, '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n');
     writeFileSync(
       join(gitIsolation.home, '.gitconfig'),
-      `[include]\n\tpath = ${included}\n`,
+      `[include]\n\tpath = ${JSON.stringify(included)}\n`,
     );
-    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${included}\n`);
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(included)}\n`,
+    );
 
-    expect(filterCommandsIn(dir, dir).filters).toEqual([]);
+    expect(filterCommandsIn(dir, dir)).toEqual({
+      filters: [],
+      exempt: ['filter.lfs.clean'],
+      reachedExempt: ['filter.lfs.clean'],
+      attribution: [],
+      unread: [],
+      dangling: [],
+    });
   });
 
   it('does not trust a source behind an inactive global includeIf', () => {
@@ -2198,9 +2234,12 @@ describe('filterCommandsIn — the include walk', () => {
     writeFileSync(payload, '[filter "conditional"]\n\tclean = cat\n');
     writeFileSync(
       join(gitIsolation.home, '.gitconfig'),
-      `[includeIf "gitdir:/does-not-match/"]\n\tpath = ${payload}\n`,
+      `[includeIf "gitdir:/does-not-match/"]\n\tpath = ${JSON.stringify(payload)}\n`,
     );
-    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${payload}\n`);
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(payload)}\n`,
+    );
 
     expect(filterCommandsIn(dir, dir).filters).toEqual([
       'filter.conditional.clean',
@@ -2572,7 +2611,7 @@ describe('filterCommandsIn — the include walk', () => {
       writeFileSync(globalConfig, '[filter "lfs"]\n\tclean = cat\n');
       writeFileSync(
         join(dir, 'config'),
-        `[include]\n\tpath = ${globalConfig}\n`,
+        `[include]\n\tpath = ${JSON.stringify(globalConfig)}\n`,
       );
       const realGit = execFileSync('which', ['git'], {
         encoding: 'utf8',
@@ -2644,7 +2683,10 @@ describe('filterCommandsIn — the include walk', () => {
       globalConfig,
       '[core]\n\ttrustctime\n[filter "lfs"]\n\tclean = git-lfs clean\n',
     );
-    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${globalConfig}\n`);
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(globalConfig)}\n`,
+    );
 
     expect(filterCommandsIn(dir, dir)).toEqual({
       filters: [],
@@ -2661,7 +2703,10 @@ describe('filterCommandsIn — the include walk', () => {
     const xdgConfig = join(xdg, 'git', 'config');
     mkdirSync(dirname(xdgConfig), { recursive: true });
     writeFileSync(xdgConfig, '[filter "xdg"]\n\tclean = cat\n');
-    writeFileSync(join(dir, 'config'), `[include]\n\tpath = ${xdgConfig}\n`);
+    writeFileSync(
+      join(dir, 'config'),
+      `[include]\n\tpath = ${JSON.stringify(xdgConfig)}\n`,
+    );
     const saved = process.env['XDG_CONFIG_HOME'];
     try {
       process.env['XDG_CONFIG_HOME'] = xdg;

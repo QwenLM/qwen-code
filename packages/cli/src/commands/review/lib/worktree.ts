@@ -1153,10 +1153,11 @@ export interface FilterScreen {
  * live. The local config files are read with `--file` rather than merged
  * config because the probe's planting surface is the repo-local files. An
  * included filter from the exact origin Git reaches through active global or
- * system config (git-lfs is the common one) is the user's own contract only
- * when Git does not identify that source as tracked content of this
- * repository, so it is exempted from checkout refusal by origin and scope
- * below.
+ * system config (git-lfs is the common one) is the user's own contract when
+ * Git does not identify that included source as tracked repository content.
+ * Native global/system slots also retain that contract when tracked by a
+ * different worktree, provided the screened checkout cannot rewrite them.
+ * These sources are exempted from checkout refusal by origin and scope below.
  * Every other included source remains repository-delivered. The state cannot
  * be safely wiped, so what the caller does with a hit is the caller's:
  * scratch-tree checkouts refuse, while the residue measurement blanks both
@@ -1311,71 +1312,105 @@ export function filterCommandsIn(
   };
   const samePath = (left: string, right: string): boolean =>
     originKey(pathIdentity(left)) === originKey(pathIdentity(right));
-  const gitOutput = (cwd: string, args: string[]): string | null => {
+  const gitOutput = (
+    cwd: string,
+    args: string[],
+    absentStatus: 1 | 128,
+  ): { value: string } | { absent: boolean } => {
     const result = spawnSync('git', args, {
       cwd,
       encoding: 'utf8',
-      env: sanitizedGitEnv(),
+      maxBuffer: 64 * 1024 * 1024,
+      env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
     });
     if (
       result.error ||
       result.status !== 0 ||
       typeof result.stdout !== 'string'
     ) {
-      return null;
+      return {
+        absent:
+          !result.error &&
+          result.status === absentStatus &&
+          (absentStatus === 1 ||
+            /^fatal: not a git repository \(or any (?:of the parent directories|parent up to mount point [^\n]*)\)/.test(
+              result.stderr ?? '',
+            )),
+      };
     }
-    return result.stdout.endsWith('\n')
-      ? result.stdout.slice(0, -1)
-      : result.stdout;
+    return {
+      value: result.stdout.endsWith('\n')
+        ? result.stdout.slice(0, -1)
+        : result.stdout,
+    };
   };
-  const configuredWorktreeValue = gitOutput(commonDir, [
-    'config',
-    '--file',
-    join(commonDir, 'config'),
-    '--includes',
-    '--path',
-    '--get',
-    'core.worktree',
-  ]);
-  const configuredWorktree = configuredWorktreeValue
-    ? resolve(commonDir, configuredWorktreeValue)
-    : null;
+  const configuredWorktreeRead = gitOutput(
+    commonDir,
+    [
+      'config',
+      '--file',
+      join(commonDir, 'config'),
+      '--includes',
+      '--path',
+      '--get',
+      'core.worktree',
+    ],
+    1,
+  );
+  const configuredWorktree =
+    'value' in configuredWorktreeRead && configuredWorktreeRead.value
+      ? resolve(commonDir, configuredWorktreeRead.value)
+      : null;
   const trackedAt = (
     root: string,
     file: string,
     explicitGitDir = false,
   ): boolean | null => {
-    const absoluteRoot = resolve(root);
-    const absoluteFile = resolve(file);
+    let absoluteRoot: string;
+    let absoluteFile: string;
+    try {
+      absoluteRoot = realpathSync.native(root);
+      // Resolve prefixes and filesystem casing, but ask the index about a
+      // leaf symlink itself, not the user-owned file it may currently target.
+      const entry = lstatSync(file);
+      if (entry.isSymbolicLink()) {
+        const parent = realpathSync.native(dirname(file));
+        const names = readdirSync(parent);
+        const name = names.includes(basename(file))
+          ? basename(file)
+          : names.find((candidate) => {
+              const identity = lstatSync(join(parent, candidate));
+              return identity.dev === entry.dev && identity.ino === entry.ino;
+            });
+        if (name === undefined) return null;
+        absoluteFile = join(parent, name);
+      } else {
+        absoluteFile = realpathSync.native(file);
+      }
+    } catch {
+      return null;
+    }
     if (!isSubpath(absoluteRoot, absoluteFile)) return false;
     const pathspec = relative(absoluteRoot, absoluteFile);
     if (!pathspec) return false;
-    const args = explicitGitDir
-      ? [
-          '--literal-pathspecs',
-          '-c',
-          'core.fsmonitor=',
-          `--git-dir=${resolve(commonDir)}`,
-          `--work-tree=${absoluteRoot}`,
-          'ls-files',
-          '--error-unmatch',
-          '--',
-          pathspec,
-        ]
-      : [
-          '--literal-pathspecs',
-          '-c',
-          'core.fsmonitor=',
-          '-C',
-          absoluteRoot,
-          'ls-files',
-          '--error-unmatch',
-          '--',
-          pathspec,
-        ];
+    const args = [
+      '--literal-pathspecs',
+      '-c',
+      'core.fsmonitor=',
+      '-C',
+      absoluteRoot,
+      ...(explicitGitDir
+        ? [`--git-dir=${resolve(commonDir)}`, `--work-tree=${absoluteRoot}`]
+        : []),
+      'ls-files',
+      '--error-unmatch',
+      '--',
+      pathspec,
+    ];
     const result = spawnSync('git', args, {
       cwd: commonDir,
       encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
       env: sanitizedGitEnv(),
     });
     if (result.error || (result.status !== 0 && result.status !== 1)) {
@@ -1403,24 +1438,31 @@ export function filterCommandsIn(
     ) {
       verdict = 'controlled';
     } else {
-      const discoveredCommon = gitOutput(dirname(file), [
-        'rev-parse',
-        '--path-format=absolute',
-        '--git-common-dir',
-      ]);
-      const discoveredTop = gitOutput(dirname(file), [
-        'rev-parse',
-        '--path-format=absolute',
-        '--show-toplevel',
-      ]);
+      const discoveredCommon = gitOutput(
+        dirname(file),
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        128,
+      );
       if (
-        discoveredCommon !== null &&
-        discoveredTop !== null &&
-        samePath(discoveredCommon, commonDir)
+        'value' in discoveredCommon &&
+        samePath(discoveredCommon.value, commonDir)
       ) {
-        const tracked = trackedAt(discoveredTop, file);
+        const discoveredTop = gitOutput(
+          dirname(file),
+          ['rev-parse', '--path-format=absolute', '--show-toplevel'],
+          128,
+        );
+        const tracked =
+          'value' in discoveredTop
+            ? trackedAt(discoveredTop.value, file)
+            : null;
         verdict =
           tracked === null ? 'unknown' : tracked ? 'controlled' : 'outside';
+      } else if (
+        ('absent' in discoveredCommon && !discoveredCommon.absent) ||
+        ('absent' in configuredWorktreeRead && !configuredWorktreeRead.absent)
+      ) {
+        verdict = 'unknown';
       } else if (configuredWorktree !== null) {
         const tracked = trackedAt(configuredWorktree, file, true);
         verdict =
@@ -1488,7 +1530,33 @@ export function filterCommandsIn(
     '--includes',
     '--list',
   ]);
+  const nativeSlotRecords = trustedRead([
+    'config',
+    '--null',
+    '--show-origin',
+    '--show-scope',
+    '--no-includes',
+    '--list',
+  ]);
   if (trustedFilterRecords !== null && trustedOriginRecords !== null) {
+    // Git's native global/system slots remain user-owned when another
+    // worktree tracks them; the screened checkout must not be able to rewrite
+    // the slot, and repository admin files never gain this exception.
+    for (const { file } of nativeSlotRecords ?? []) {
+      const spelled = resolve(file);
+      const real = pathIdentity(file);
+      const slot = join(pathIdentity(dirname(file)), basename(file));
+      if (
+        !isSubpath(pathIdentity(screenedTree), slot) &&
+        !isSubpath(pathIdentity(screenedTree), real) &&
+        !adminRoots.some((root) => isSubpath(root, spelled)) &&
+        !adminRealpaths.some(
+          (root) => isSubpath(root, slot) || isSubpath(root, real),
+        )
+      ) {
+        trustedOrigins.add(originKey(file));
+      }
+    }
     for (const { file } of trustedOriginRecords) {
       if (repositoryControl(file) === 'outside') {
         trustedOrigins.add(originKey(file));
@@ -1501,7 +1569,7 @@ export function filterCommandsIn(
         const keys = trustedFiltersByOrigin.get(origin) ?? new Set<string>();
         keys.add(key);
         trustedFiltersByOrigin.set(origin, keys);
-      } else if (repositoryControl(file) === 'controlled') {
+      } else {
         filters.add(key);
       }
     }
