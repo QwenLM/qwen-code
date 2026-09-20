@@ -49,19 +49,28 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // compile before the transcript renders. The CSS is a separate, parallel,
 // year-cached asset and is logged rather than budgeted.
 //
-// Last measured at 1,933,733 bytes of JS by the Lint & Static lane, up from
-// 1,833,894 when #11485 split the CSS out. The bundle pulls web-shell's built
-// transcript entry, which carries the whole i18n table, so every string the
-// Web Shell adds anywhere lands here: #12154 alone measured +5,396 bytes for
-// eleven user-facing sentences in two locales. Note a local build reports a
-// different figure (≈1,999,616 on a worktree whose node_modules predate the
-// lockfile); the lane's number is the one these constants track.
+// Last measured at 1,931,934 bytes of JS with 2,332,167 bytes of CSS moved
+// out, by the Lint & Static lane on main at cc9bb98847 — #12199 and #12050
+// grew only transcript-reachable first-party code (the third-party input mix
+// is unchanged) past the old 1,930,000 cap (#12295), so the budget follows
+// the measurement. Before the split that lane measured the combined bundle at
+// 4,133,282 bytes on main at c3023b3e6d — the measurement #11372 raised these
+// two constants for, and which the CSS extraction superseded because the CSS
+// it counted is no longer in the JS.
+//
+// The bundle pulls web-shell's built transcript entry, which carries the
+// whole i18n table, so every string the Web Shell adds anywhere lands here:
+// #12154 measured +5,396 bytes for eleven user-facing sentences in two
+// locales, which the cap above already has room for. Note a local build
+// reports a different figure (a worktree whose node_modules predate the
+// lockfile measures higher); the lane's number is the one these constants
+// track.
 //
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_950_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 1_980_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

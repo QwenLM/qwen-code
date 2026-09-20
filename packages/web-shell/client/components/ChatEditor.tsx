@@ -57,6 +57,8 @@ import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
 import { AddMenu } from './composer/AddMenu';
 import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
 import { cssUrlVar } from '../utils/cssUrlVar';
+import { getShadowAwareActiveElement } from '../utils/dom';
+import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
   getComposerTagIconUrl,
   isBuiltinComposerTagIconUrl,
@@ -2277,6 +2279,38 @@ export const ChatEditor = memo(
     const showPlanChip = showPlanInAddMenu && planMode;
     const showPlanSwitch = showPlanAction && !showPlanInAddMenu;
     const showPlanToolbarControl = showPlanChip || showPlanSwitch;
+    // The chip is the one Plan control that unmounts when Plan turns off, and
+    // it can do so while it holds keyboard focus: its own click cannot move
+    // focus into an input that is disabled, and Plan can also end with no
+    // click at all, when the host reports the mode changed. Focus would then
+    // fall to the body and the next Tab would restart at the top of the page,
+    // so it is handed on: to the input, or past a disabled one to a toolbar
+    // control beside where the chip was.
+    const planChipHadFocusRef = useRef(false);
+    useLayoutEffect(() => {
+      if (showPlanChip || !planChipHadFocusRef.current) return;
+      planChipHadFocusRef.current = false;
+      const toolbar = toolbarLeadingRef.current;
+      // Focus that is anywhere but lost is somewhere the user put it.
+      const doc = toolbar?.ownerDocument;
+      const active = getShadowAwareActiveElement(toolbar);
+      if (active && active !== doc?.body) return;
+      // Not the input on a coarse pointer: a focus outside a gesture claims
+      // the active element there without opening the keyboard, and later taps
+      // may then raise no keyboard at all, which is why the Composer gates its
+      // own focus restoration the same way. A button has neither problem.
+      if (!disabled && !isCoarsePointerDevice()) {
+        focusComposer();
+        return;
+      }
+      // The permission control is disabled for as long as a mode change is in
+      // flight, which can outlast the chip; the model control never is.
+      toolbar
+        ?.querySelector<HTMLElement>(
+          '[data-web-shell-mode-button]:not(:disabled), [data-web-shell-model-button]',
+        )
+        ?.focus();
+    }, [showPlanChip, disabled, focusComposer]);
     const showModelAction = showToolbarAction('model');
     const showCommandAction = showToolbarAction('commands');
     const commandNames = useMemo(
@@ -3403,9 +3437,6 @@ export const ChatEditor = memo(
                           ? {
                               checked: planMode,
                               disabled: modeControlsDisabled,
-                              disabledReason: t('composerAdd.plan.busy'),
-                              label: t('composerAdd.plan.label'),
-                              description: t('composerAdd.plan.description'),
                               onToggle: handlePlanMenuToggle,
                             }
                           : undefined
@@ -3555,8 +3586,22 @@ export const ChatEditor = memo(
                             aria-pressed={planMode}
                             aria-label={planLabel}
                             aria-describedby={planDescriptionId}
-                            disabled={modeControlsDisabled}
+                            // Not the native attribute: both hosts go busy
+                            // inside the chip's own click, and a focused button
+                            // that becomes disabled loses focus to the body
+                            // there and then.
+                            aria-disabled={modeControlsDisabled || undefined}
+                            onFocus={() => {
+                              planChipHadFocusRef.current = true;
+                            }}
+                            onBlur={() => {
+                              planChipHadFocusRef.current = false;
+                            }}
                             onClick={() => {
+                              // Inert while busy; the click still reaches the
+                              // composer surface, as one on a bare part of the
+                              // toolbar would.
+                              if (modeControlsDisabled) return;
                               onTogglePlan?.();
                               // The chip unmounts once Plan is off, so it
                               // hands focus on rather than dropping it to the

@@ -62,11 +62,8 @@ export interface AddMenuProps {
 
 export interface AddMenuPlanControl {
   checked: boolean;
+  /** Mode controls are busy; the row says so, as no row is disabled silently. */
   disabled?: boolean;
-  /** Shown while disabled: a row is never disabled without a reason. */
-  disabledReason: string;
-  label: string;
-  description: string;
   onToggle: () => void;
 }
 
@@ -614,14 +611,16 @@ export function AddMenu({
                   <ModeIcon mode="plan" />
                 </span>
                 <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate">{plan.label}</span>
+                  <span className="truncate">
+                    {t('composerAdd.plan.label')}
+                  </span>
                   <span className="hidden truncate text-xs text-muted-foreground sm:block">
-                    {plan.description}
+                    {t('composerAdd.plan.description')}
                   </span>
                 </span>
                 {plan.disabled ? (
                   <span className="text-xs text-muted-foreground">
-                    {plan.disabledReason}
+                    {t('composerAdd.plan.busy')}
                   </span>
                 ) : null}
               </DropdownMenuCheckboxItem>

@@ -4235,7 +4235,7 @@ describe('createServeApp', () => {
         'evil.example',
       );
       expect(bracketed.headers['content-security-policy']).toContain(
-        "connect-src 'self';",
+        "connect-src 'self' https://unpkg.com/@qwen-code/;",
       );
 
       // The mixed shape is the one that broke functionally, not just by
