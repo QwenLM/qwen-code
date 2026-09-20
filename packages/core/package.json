@@ -91,6 +91,7 @@
     }
   },
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').accessSync('../browser-use/dist/index.js')\" || npm --prefix ../browser-use run build",
     "build": "node ../../scripts/build_package.js",
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
