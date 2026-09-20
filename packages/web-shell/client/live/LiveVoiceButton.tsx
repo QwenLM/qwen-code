@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import type {
   DaemonLiveRequirementState,
   DaemonLiveStatus,
@@ -21,6 +21,7 @@ import {
   DialogTrigger,
 } from '../components/ui/dialog';
 import { useI18n } from '../i18n';
+import { LiveLevelMeter } from './LiveLevelMeter';
 import type { LiveBrowserHostCloseReason } from './useLiveBrowserHost';
 import { useLiveVoice } from './useLiveVoice';
 import styles from './LiveVoiceButton.module.css';
@@ -145,6 +146,9 @@ export function LiveVoiceButton({
     stop,
     setMute,
   } = useLiveVoice();
+  // Flips a couple of times a second at most (the hook holds it), so state is
+  // fine here; the level itself never goes through React.
+  const [inputDropping, setInputDropping] = useState(false);
   useEffect(() => {
     onSupportedChange?.(supported);
   }, [onSupportedChange, supported]);
@@ -263,9 +267,38 @@ export function LiveVoiceButton({
             })}
           </ul>
         ) : (
-          <div className={styles.liveState} data-state={status.state}>
-            <span className={styles.liveStateOrb} />
-            <span>{liveStateLabel(status, t)}</span>
+          <div className={styles.liveStateGroup}>
+            <div className={styles.liveState} data-state={status.state}>
+              <span className={styles.liveStateOrb} />
+              <span>{liveStateLabel(status, t)}</span>
+              {mode === 'self' ? (
+                <LiveLevelMeter
+                  level={browserHost.inputLevel}
+                  muted={status.inputMuted === true}
+                  label={t(
+                    status.inputMuted === true
+                      ? 'live.browser.levelMuted'
+                      : 'live.browser.level',
+                  )}
+                  droppingLabel={t('live.browser.levelDropping')}
+                  onDroppingChange={setInputDropping}
+                />
+              ) : null}
+            </div>
+            {/* Always mounted while this tab is the endpoint: a live region
+                has to exist before its text changes for the change to be
+                announced. The bar says the same thing in colour, which
+                reaches neither a screen reader nor a touch or colour-blind
+                user. */}
+            {mode === 'self' ? (
+              <p
+                role="status"
+                className={styles.droppingStatus}
+                data-live-input-dropping={inputDropping}
+              >
+                {inputDropping ? t('live.browser.levelDropping') : ''}
+              </p>
+            ) : null}
           </div>
         )}
 
