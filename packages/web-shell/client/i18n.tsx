@@ -5,7 +5,7 @@ import {
   type PropsWithChildren,
 } from 'react';
 
-import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages';
+import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 
 export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 
